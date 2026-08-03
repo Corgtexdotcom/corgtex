@@ -92,13 +92,13 @@ describe("Finance import review", () => {
     await expect(reviewFinanceReportImport(peer, { ...input, candidateVersions: [{ id: update.id, expectedVersion: 2 }] })).rejects.toMatchObject({ code: "FINANCE_REPORT_REVIEW_CONFLICT" });
   });
   it("keeps only unapplied rows editable and reviewable after a partial application", async () => {
-    const applied = candidate("applied", { reviewState: "APPLIED" }); const clean = candidate("clean", { periodStart: new Date("2026-07-01Z"), periodEnd: new Date("2026-07-31Z") });
+    const applied = candidate("applied", { reviewState: "APPLIED", periodStart: new Date("2026-07-01Z"), periodEnd: new Date("2026-07-31Z") }); const clean = candidate("clean", { periodStart: new Date("2026-07-01Z"), periodEnd: new Date("2026-07-31Z") });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, clean], { stage: "PARTIALLY_APPLIED" }));
     await expect(editFinanceReportImportCandidate(actor, { workspaceId: "workspace-1", batchId: "batch-1", candidateId: applied.id,
       expectedVersion: 4, expectedCandidateVersion: 1, amountCents: 200 })).rejects.toMatchObject({ code: "FINANCE_REPORT_REVIEW_BLOCKED" });
     await expect(editFinanceReportImportCandidate(actor, { workspaceId: "workspace-1", batchId: "batch-1", candidateId: clean.id,
       expectedVersion: 4, expectedCandidateVersion: 1, amountCents: 200 })).resolves.toMatchObject({ version: 5 });
-    expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ addCount: 2 }) }));
+    expect(mocks.prisma.financeImportCandidate.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: expect.objectContaining({ OR: [{ id: clean.id, version: 1 }] }), data: expect.objectContaining({ action: "CONFLICT" }) }));
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, clean], { stage: "PARTIALLY_APPLIED" }));
     await expect(reviewFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1", expectedVersion: 4, mode: "APPROVE_ALL",
       candidateVersions: versions([clean]), acceptWarnings: true })).resolves.toMatchObject({ reviewedCount: 1, complete: true });
@@ -113,5 +113,6 @@ describe("Finance import review", () => {
     const rejected = candidate("reject", { reviewState: "REJECTED" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([rejected]));
     await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE", candidateVersions: versions([rejected]) })).rejects.toMatchObject({ code: "FINANCE_REPORT_REVIEW_BLOCKED" });
     await expect(reviewFinanceReportImport(actor, { ...input, mode: "APPROVE_ALL", candidateVersions: versions([rejected]) })).resolves.toMatchObject({ reviewedCount: 0, complete: true });
+    const applied = candidate("applied", { reviewState: "APPLIED" }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, row], { stage: "PARTIALLY_APPLIED" })); await reviewFinanceReportImport(actor, { ...input, mode: "REJECT", candidateVersions: versions([row]) }); expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED" }) }));
   });
 });

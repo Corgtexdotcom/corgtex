@@ -17,7 +17,7 @@ const candidate = (id: string, change: Record<string, unknown> = {}) => { const 
     : row.action === "SKIP" ? null : buildFinanceReportFactSemanticKey({ workspaceId: "workspace-1", reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL",
       currency: "EUR", accountPath: row.proposedAccountPath, periodStart: row.periodStart, periodEnd: row.periodEnd, dimensions: row.dimensions }) }; };
 const batch = (candidates = [candidate("add")], change = {}) => ({ id: "batch-1", workspaceId: "workspace-1", stage: "READY_FOR_REVIEW",
-  uploadedByUserId: "uploader-1",
+  uploadedByUserId: "uploader-1", originalFilename: "synthetic.csv",
   reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", resolvedCurrency: "EUR", periodStart: new Date("2026-01-01Z"),
   periodEnd: new Date("2026-01-31Z"), asOfDate: new Date("2026-01-31Z"), title: "Synthetic P&L", version: 4, appliedCount: 0,
   report: null, candidates, ...change });
@@ -46,7 +46,7 @@ describe("Finance report application", () => {
   it("creates only Reported Actuals and immutable created/skipped receipts with provenance", async () => {
     const add = candidate("add"); const duplicate = candidate("duplicate", { action: "DUPLICATE", proposedAccountPath: add.proposedAccountPath, semanticKey: add.semanticKey });
     const skip = candidate("skip", { action: "SKIP", factKind: "DERIVED", semanticKey: null }); const rows = [add, duplicate, skip];
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch(rows)); const created = fact("fact-new", { id: "fact-new", semanticKey: add.semanticKey,
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch(rows, { title: null })); const created = fact("fact-new", { id: "fact-new", semanticKey: add.semanticKey,
       reportId: "report-1", sourceBatchId: "batch-1", sourceCandidateId: "add", appliedByUserId: "writer-1", version: 1 });
     mocks.prisma.financeReportFact.create.mockResolvedValue(created); mocks.prisma.financeReportFact.findUnique
       .mockResolvedValueOnce(null).mockResolvedValueOnce(created); mocks.prisma.financeImportApplication.count.mockResolvedValue(3);
@@ -55,7 +55,7 @@ describe("Finance report application", () => {
     expect(result.receipts.map(({ outcome }) => outcome)).toEqual(["CREATED", "SKIPPED", "SKIPPED"]);
     expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ reportId: "report-1",
       sourceBatchId: "batch-1", sourceCandidateId: "add", appliedByUserId: "writer-1" }) }));
-    expect(mocks.prisma.financeImportApplication.create).toHaveBeenCalledTimes(3); expect(mocks.prisma.financeTransaction.create).not.toHaveBeenCalled();
+    expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ title: "synthetic.csv" }) })); expect(mocks.prisma.financeImportApplication.create).toHaveBeenCalledTimes(3); expect(mocks.prisma.financeTransaction.create).not.toHaveBeenCalled();
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED", appliedCount: 3, appliedByUserId: "writer-1" }) }));
   });
   it("restates with optimistic versions and records unchanged before/after receipts", async () => {
@@ -87,6 +87,8 @@ describe("Finance report application", () => {
     expect(mocks.prisma.financeImportApplication.create).not.toHaveBeenCalled(); expect(mocks.prisma.financeImportCandidate.updateMany).not.toHaveBeenCalled();
   });
   it("revalidates version-safe historical peer approval and the canonical semantic identity", async () => {
+    const staleWarning = candidate("add", { periodStart: new Date("2025-07-01Z"), periodEnd: new Date("2025-07-31Z"), approvedAt: new Date("2025-08-01Z") }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([staleWarning]));
+    await expect(applyFinanceReportImport(actor, input([staleWarning]))).rejects.toMatchObject({ code: "FINANCE_REPORT_APPLICATION_BLOCKED" });
     const stalePeer = candidate("update", { action: "UPDATE", currentFactId: "fact-u", currentAmountCents: 50,
       periodStart: new Date("2024-01-01Z"), periodEnd: new Date("2024-01-31Z"),
       editedByUserId: "writer-1", editedAt: new Date("2026-02-02Z"), approvedByUserId: "reviewer-1", approvedAt: new Date("2026-02-01Z") });

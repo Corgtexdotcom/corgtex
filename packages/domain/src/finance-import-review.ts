@@ -30,8 +30,10 @@ function reportWarnings(value: Prisma.JsonValue | null) { return value ? parseFi
 function candidateState(decision: FinanceImportReconciliationDecision, now: Date): FinanceImportCandidateReviewState {
   return decision.reviewState === "BLOCKED" ? "BLOCKED" : ["ADD", "UPDATE"].includes(decision.action) && historical(decision.candidate.periodEnd, now) ? "WARNING" : decision.reviewState;
 }
-function withAppliedCounts(counts: ReturnType<typeof reconcileFinanceImportCandidates>["counts"], candidates: Array<Pick<FinanceImportCandidate, "action" | "reviewState">>) {
-  const total = { ...counts }; for (const candidate of candidates) if (candidate.reviewState === "APPLIED") total[COUNT_KEY[candidate.action]] += 1; return total;
+function withAppliedCounts(result: ReturnType<typeof reconcileFinanceImportCandidates>, candidates: Array<Pick<FinanceImportCandidate, "id" | "action" | "reviewState">>) {
+  const states = new Map(candidates.map(({ id, reviewState }) => [id, reviewState])); const total = { ...result.counts };
+  for (const decision of result.decisions) if (states.get(decision.candidate.id!) === "APPLIED") total[COUNT_KEY[decision.action]] -= 1;
+  for (const candidate of candidates) if (candidate.reviewState === "APPLIED") total[COUNT_KEY[candidate.action]] += 1; return total;
 }
 async function reconcile(tx: Prisma.TransactionClient, identity: Omit<Parameters<typeof reconcileFinanceImportCandidates>[0], "candidates" | "currentFacts">,
   rows: Parameters<typeof reconcileFinanceImportCandidates>[0]["candidates"]) {
@@ -101,13 +103,13 @@ export async function editFinanceReportImportCandidate(actor: AppActor, params: 
       periodEnd: params.periodEnd === undefined ? target.periodEnd : parseFinanceImportDate(params.periodEnd, "Period end") };
     invariant(edited.periodStart <= edited.periodEnd, 400, "INVALID_INPUT", "Period start must not be after period end.");
     invariant(batch.reportType && batch.basis && batch.resolvedCurrency, 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Resolve report classification and currency before review.");
-    const rows = batch.candidates.filter(({ reviewState }) => !["REJECTED", "APPLIED"].includes(reviewState)).map((candidate) => candidate.id === edited.id ? edited : candidate);
+    const rows = batch.candidates.filter(({ reviewState }) => reviewState !== "REJECTED").map((candidate) => candidate.id === edited.id ? edited : candidate);
     const identity = { workspaceId: batch.workspaceId, reportType: batch.reportType, basis: batch.basis, currency: batch.resolvedCurrency };
     const result = await reconcile(tx, identity, rows);
-    const counts = withAppliedCounts(result.counts, batch.candidates);
+    const counts = withAppliedCounts(result, batch.candidates);
     const now = new Date(); const rejectedCount = batch.candidates.filter(({ reviewState }) => reviewState === "REJECTED").length;
     const editedDecision = result.decisions.find(({ candidate }) => candidate.id === edited.id)!; const affectedKeys = new Set([target.semanticKey, editedDecision.semanticKey]);
-    const affected = result.decisions.filter((decision) => decision.candidate.id === edited.id || (decision.semanticKey && affectedKeys.has(decision.semanticKey)));
+    const affected = result.decisions.filter((decision) => batch.candidates.find(({ id }) => id === decision.candidate.id)?.reviewState !== "APPLIED" && (decision.candidate.id === edited.id || (decision.semanticKey && affectedKeys.has(decision.semanticKey))));
     const signature = (decision: FinanceImportReconciliationDecision) => JSON.stringify([decision.candidate.id === edited.id ? edited.id : null, decision.semanticKey, decision.action, candidateState(decision, now), decision.currentFactId, decision.currentAmountCents, decision.explanationMd]);
     for (const key of new Set(affected.map(signature))) {
       const decisions = affected.filter((decision) => signature(decision) === key); const decision = decisions[0]!; const state = candidateState(decision, now);
@@ -175,9 +177,9 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
       invariant(batch.reportType && batch.basis && batch.resolvedCurrency, 409, "FINANCE_REPORT_REVIEW_BLOCKED", "Resolve report classification and currency before review.");
       batch.candidates.forEach(({ version }) => validVersion(version));
       const active = batch.candidates.filter(({ id, reviewState }) => !targetIds.has(id) && reviewState !== "REJECTED"); if (active.length) { const dates = active.flatMap(({ periodStart, periodEnd }) => [periodStart.valueOf(), periodEnd.valueOf()]); reportingWindow = { periodStart: new Date(Math.min(...dates)), periodEnd: new Date(Math.max(...dates)) }; }
-      const survivors = active.filter(({ reviewState }) => reviewState !== "APPLIED");
+      const survivors = active;
       reconciled = await reconcile(tx, { workspaceId: batch.workspaceId, reportType: batch.reportType, basis: batch.basis, currency: batch.resolvedCurrency }, survivors);
-      const affected = targets[0]!.semanticKey ? reconciled.decisions.filter(({ semanticKey }) => semanticKey === targets[0]!.semanticKey) : [];
+      const affected = targets[0]!.semanticKey ? reconciled.decisions.filter((decision) => decision.semanticKey === targets[0]!.semanticKey && batch.candidates.find(({ id }) => id === decision.candidate.id)?.reviewState !== "APPLIED") : [];
       for (const action of new Set(affected.map(({ action }) => action))) {
         const decisions = affected.filter((decision) => decision.action === action); const decision = decisions[0]!; const state = candidateState(decision, now);
         const priors = decisions.map(({ candidate }) => batch.candidates.find(({ id }) => id === candidate.id)!);
@@ -193,12 +195,13 @@ export async function reviewFinanceReportImport(actor: AppActor, params: { works
     const states = batch.candidates.map((candidate) => targetIds.has(candidate.id) ? (params.mode === "REJECT" ? "REJECTED" : "APPROVED")
       : reconciledStates.get(candidate.id) ?? candidate.reviewState);
     const blockerCount = reconciled?.counts.conflictCount ?? batch.blockerCount;
-    const reconciledCounts = reconciled ? withAppliedCounts(reconciled.counts, batch.candidates) : null;
+    const reconciledCounts = reconciled ? withAppliedCounts(reconciled, batch.candidates) : null;
     const complete = states.every((state) => ["APPROVED", "REJECTED", "VERIFIED", "APPLIED"].includes(state)) && blockerCount === 0 && !batch.candidates.some((candidate) => !targetIds.has(candidate.id) && candidate.reviewState === "APPROVED" && warning(candidate, now) && ((candidate.action === "UPDATE" && (!candidate.approvedByUserId || candidate.approvedByUserId === (candidate.editedByUserId ?? batch.uploadedByUserId))) || ((!candidate.approvedAt || !historical(candidate.periodEnd, candidate.approvedAt)) && (params.mode === "APPROVE_VERIFIED" || params.acceptWarnings !== true))))
       && (warningCount === 0 || (params.mode !== "APPROVE_VERIFIED" && params.acceptWarnings === true));
     const rejectedCount = states.filter((state) => state === "REJECTED").length;
     const updated = await tx.financeImportBatch.updateMany({ where: { id: batch.id, workspaceId: batch.workspaceId, version: batch.version }, data: {
       ...(reconciledCounts ? { ...reconciledCounts, warningCount: reportWarnings(batch.interpretationJson).length, blockerCount, ...reportingWindow } : {}), rejectedCount,
+      ...(states.every((state) => ["APPLIED", "REJECTED"].includes(state)) ? { stage: "APPLIED" as const, appliedByUserId: actor.user.id, appliedAt: now } : {}),
       approvedByUserId: complete ? actor.user.id : null, approvedAt: complete ? now : null, version: { increment: 1 } } });
     invariant(updated.count === 1, 409, "FINANCE_REPORT_REVIEW_CONFLICT", "The Finance report import changed. Refresh and try again.");
     await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: `finance-report-import.review.${params.mode.toLowerCase()}`,

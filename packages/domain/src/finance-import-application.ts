@@ -66,7 +66,7 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
     return await retrySerializableConflict(() => prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`finance-report-review:${params.workspaceId}:${params.batchId}`}, 0))`;
       const batch = await tx.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } },
-        select: { id: true, workspaceId: true, uploadedByUserId: true, stage: true, reportType: true, basis: true, cadence: true, resolvedCurrency: true, periodStart: true,
+        select: { id: true, workspaceId: true, uploadedByUserId: true, originalFilename: true, stage: true, reportType: true, basis: true, cadence: true, resolvedCurrency: true, periodStart: true,
           periodEnd: true, asOfDate: true, title: true, version: true, appliedCount: true, report: { select: { id: true } }, candidates: { orderBy: { sourceKey: "asc" },
             select: { id: true, sourceKey: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true,
               dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, editedByUserId: true,
@@ -98,12 +98,15 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
         invariant(candidate.action !== "CONFLICT" && (candidate.factKind === "LEAF" || candidate.action === "SKIP"),
           409, "FINANCE_REPORT_APPLICATION_BLOCKED", "Only approved Reported Actuals facts or validation-only skips can be applied.");
       }
-      invariant(batch.reportType && batch.basis && batch.cadence && batch.resolvedCurrency && batch.periodStart && batch.periodEnd && batch.title?.trim(),
-        409, "FINANCE_REPORT_APPLICATION_BLOCKED", "Resolve the report identity, currency, dates, and title before applying.");
+      invariant(batch.reportType && batch.basis && batch.cadence && batch.resolvedCurrency && batch.periodStart && batch.periodEnd,
+        409, "FINANCE_REPORT_APPLICATION_BLOCKED", "Resolve the report identity, currency, and dates before applying.");
+      const title = (batch.title?.trim() || batch.originalFilename.trim()).slice(0, 200); invariant(title, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "Resolve the report title before applying.");
       const currency = normalizeFinanceImportIsoCurrency(batch.resolvedCurrency); const now = new Date();
       invariant(batch.periodStart <= batch.periodEnd, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The report period is invalid.");
       for (const candidate of outstanding) {
         invariant(candidate.approvedByUserId && candidate.approvedAt, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "Every applied candidate needs a human approval receipt.");
+        if (["ADD", "UPDATE"].includes(candidate.action) && historical(candidate.periodEnd, now)) invariant(historical(candidate.periodEnd, candidate.approvedAt),
+          409, "FINANCE_REPORT_APPLICATION_BLOCKED", "A Finance writer must explicitly accept the current historical warning.");
         if (candidate.action === "UPDATE" && historical(candidate.periodEnd, now)) invariant(candidate.approvedByUserId !== (candidate.editedByUserId ?? batch.uploadedByUserId)
           && (!candidate.editedAt || candidate.approvedAt >= candidate.editedAt),
           409, "FINANCE_REPORT_APPLICATION_BLOCKED", "A different Finance writer must confirm the historical update.");
@@ -113,9 +116,9 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       }
       const report = await tx.financeReport.upsert({ where: { sourceBatchId: batch.id }, update: { reportType: batch.reportType, basis: batch.basis,
         cadence: batch.cadence, currency, periodStart: batch.periodStart, periodEnd: batch.periodEnd, asOfDate: batch.asOfDate,
-        title: batch.title!, status: "ACTIVE", version: { increment: 1 } }, create: { workspaceId: batch.workspaceId, sourceBatchId: batch.id,
+        title, status: "ACTIVE", version: { increment: 1 } }, create: { workspaceId: batch.workspaceId, sourceBatchId: batch.id,
         reportType: batch.reportType, basis: batch.basis, cadence: batch.cadence, currency, periodStart: batch.periodStart,
-        periodEnd: batch.periodEnd, asOfDate: batch.asOfDate, title: batch.title! }, select: { id: true } });
+        periodEnd: batch.periodEnd, asOfDate: batch.asOfDate, title }, select: { id: true } });
       const receipts = [];
       for (const candidate of outstanding) {
         let before: Prisma.InputJsonObject | null = null; let after: Prisma.InputJsonObject | null = null;

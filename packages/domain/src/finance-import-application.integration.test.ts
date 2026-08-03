@@ -19,7 +19,7 @@ describe("Finance report application database contract", () => {
     const batch = await prisma.financeImportBatch.create({ data: { workspaceId: workspace.id, uploadedByUserId: user.id,
       fileHash: "a".repeat(64), mimeType: "text/csv", originalFilename: "synthetic.csv", fileSizeBytes: 100, stage: "READY_FOR_REVIEW",
       reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", currencyState: "RESOLVED", resolvedCurrency: "EUR",
-      periodStart, periodEnd, asOfDate: periodEnd, title: "Synthetic P&L", addCount: 1 } });
+      periodStart, periodEnd, asOfDate: periodEnd, addCount: 1 } });
     const candidate = await prisma.financeImportCandidate.create({ data: { workspaceId: workspace.id, batchId: batch.id, sourceKey: "b".repeat(64),
       sourceLocation: { row: 1 }, sourceLabel: "Revenue", sourcePath: ["Revenue"], proposedAccountPath: ["Revenue"], factKind: "LEAF",
       periodStart, periodEnd, amountCents: 12_345, extractionJson: { value: "123.45" }, proposalJson: { value: 12_345 }, action: "ADD",
