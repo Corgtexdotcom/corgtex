@@ -97,8 +97,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
   }));
   const blockers = preflight.filter((item) => item.blockers.length > 0);
-  const planTargets = preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers }));
-  const deprecations = [...targetSelectionDeprecations(targetSelection), ...targets.flatMap((target) => target.deprecations ?? [])];
+  const planTargets = preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers })); const deprecations = [...targetSelectionDeprecations(targetSelection), ...targets.flatMap((target) => target.deprecations ?? [])];
   const plan = formatReleasePlan({ manifest, targets: planTargets, dryRun, concurrency, deprecations: [...new Set(deprecations)] });
   console.log(JSON.stringify({ stage: "plan", plan, blockers: blockers.map(publicBlocker) }, null, 2));
   if (dryRun) {
@@ -112,12 +111,13 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const results = [];
+  const retainedTargets = new WeakSet();
   try {
     for (const ring of groupTargetsByRing(targets)) {
       console.log(JSON.stringify({ stage: "ring-started", ring: ring.ring, targetCount: ring.targets.length }));
       const ringResults = await runWithConcurrency(ring.targets, concurrency, async (target) => {
         try {
-          const currentTarget = env.FLEET_RELEASE_TARGETS_FILE ? await revalidateSnapshotTarget(target, deps, true) : target; const result = await deployTarget(currentTarget, manifest, reason, deps);
+          const currentTarget = env.FLEET_RELEASE_TARGETS_FILE ? await revalidateSnapshotTarget(target, deps, true) : target; retainedTargets.add(target); const result = await deployTarget(currentTarget, manifest, reason, deps);
           return { target: currentTarget, status: "succeeded", result };
         } catch (error) {
           return { target, status: "failed", error: error instanceof Error ? error.message : String(error) };
@@ -153,7 +153,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw error;
   }
 
-  if (env.FLEET_RELEASE_TARGETS_FILE) emitTargetInventory(results.filter((result) => result.status === "succeeded").map((result) => result.target), env, deps);
+  if (env.FLEET_RELEASE_TARGETS_FILE) emitTargetInventory(results.filter((result) => result.status === "succeeded" || retainedTargets.has(result.target)).map((result) => result.target), env, deps);
   return { manifest, results };
 }
 
