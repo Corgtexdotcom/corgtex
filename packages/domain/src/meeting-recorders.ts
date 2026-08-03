@@ -3423,7 +3423,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${r.workspaceId}:${r.meetingId}:${provider}:transcript`}, 0))`;
       return tx.meetingRecorderProviderEvent.upsert({
         where: { dedupeKey },
-        update: { createdAt: new Date() },
+        update: { receivedAt: new Date() },
         create: {
           workspaceId: r.workspaceId,
           recordingId: r.id,
@@ -4049,7 +4049,7 @@ async function terminalizeRecordingWithLock(
         recordingId: recording.id,
         eventType: "transcript.done",
         processedAt: null,
-        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        receivedAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
       },
       select: { id: true },
     });

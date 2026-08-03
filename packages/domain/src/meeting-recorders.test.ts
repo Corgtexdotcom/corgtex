@@ -4434,6 +4434,9 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecorderProviderEvent.findFirst.mockImplementation(async () => freshWebhook ? { id: "webhook-fresh" } : null);
 
     await reconcileMeetingRecorders("workspace-1");
+    expect(prismaMock.meetingRecorderProviderEvent.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ receivedAt: expect.objectContaining({ gte: expect.any(Date) }) })
+    }));
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
     
     freshWebhook = false;
