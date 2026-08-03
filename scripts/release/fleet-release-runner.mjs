@@ -85,19 +85,15 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const allTargets = await discoverTargets(deps);
-  const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase())
-    || [normalizeTargets("default"), normalizeTargets("all")]
-      .some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
+  const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase()) || [normalizeTargets("default"), normalizeTargets("all")].some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
   const targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection });
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
 
-  const providers = new Set(targets.map((target) => target.provider));
-  emitGithubOutput("uses_azure", providers.has("azure"), deps);
+  const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps);
   emitGithubOutput("uses_railway", providers.has("railway"), deps);
   emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets));
-
   const preflight = targets.map((target) => ({
     target,
     blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
@@ -244,13 +240,8 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim()
-      && env.CONTROL_PLANE_AGENT_API_KEY?.trim()
-      ? await discoverTargets({ ...deps, env })
-      : configuredTargets(env).map(normalizeTarget);
-    const selectedProviders = new Set(providerInventory
-      .filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0)
-      .map((target) => target.provider));
+    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget);
+    const selectedProviders = new Set(providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0).map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
     const includesAzureTarget = selectedProviders.has("azure");
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
@@ -384,11 +375,11 @@ async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
   const snapshot = env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE);
   const configured = parseTargetJson(snapshot ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
-  if (snapshot) return dedupeTargets((await Promise.all(configured.map(async (target) => {
-    if (!target.deploymentId) return target;
-    const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps);
-    return { ...target, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible };
-  }))).map(normalizeTarget));
+  if (snapshot) {
+    const revalidated = [];
+    for (let index = 0; index < configured.length; index += 8) revalidated.push(...await Promise.all(configured.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps))));
+    return dedupeTargets(revalidated.map(normalizeTarget));
+  }
   const discovered = configured.length > 0 ? [] : await discoverControlPlaneTargets(deps);
   const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
   return dedupeTargets([...configured, ...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
@@ -409,8 +400,11 @@ async function discoverControlPlaneTargets(deps) {
   if (!Array.isArray(rows)) {
     throw new Error("Control-plane list_customers did not return an array.");
   }
-  return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production").map(targetFromControlPlaneRow);
+  return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production" && row.deploymentKind !== "SHARED_WORKSPACE").map(targetFromControlPlaneRow);
 }
+
+async function revalidateSnapshotTarget(target, deps) { if (!target.deploymentId) return target; const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${target.label} authoritative provider or resource identity changed after preflight`); return { ...target, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible }; }
+function mutationIdentity(target) { const resource = target.provider === "azure" ? [target.azure?.resourceGroup, target.azure?.webAppName, target.azure?.workerAppName] : [target.railway?.projectId, target.railway?.environmentId, target.railway?.webServiceId, target.railway?.workerServiceId]; return JSON.stringify([target.provider, ...resource]); }
 
 function normalizeTarget(target) {
   const hasDeploymentId = Object.prototype.hasOwnProperty.call(target, "deploymentId");

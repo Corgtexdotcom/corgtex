@@ -225,6 +225,7 @@ jobs:
 
       - name: Promote release through rings
         if: ${{ !inputs.dry_run }}
+        id: promotion
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
@@ -246,7 +247,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
-          TARGETS_INPUT: ${{ steps.preflight.outputs.observation_targets }}
+          TARGETS_INPUT: ${{ steps.promotion.outputs.observation_targets }}
           AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
           AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
           POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
@@ -255,7 +256,7 @@ jobs:
           OBSERVATION_REQUIRE_SOURCE: "true"
           OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
           OBSERVATION_SINCE: ${{ steps.observation-window.outputs.since }}
-          USES_AZURE: ${{ steps.preflight.outputs.uses_azure }}
+          USES_AZURE: ${{ steps.promotion.outputs.uses_azure }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate
           if [[ "$USES_AZURE" != "true" ]]; then
