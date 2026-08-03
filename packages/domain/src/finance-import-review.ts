@@ -63,9 +63,10 @@ export async function getFinanceReportImport(actor: AppActor, params: { workspac
       approvedAt: true, safeErrorCode: true, safeErrorMessage: true, version: true, createdAt: true, updatedAt: true, interpretationJson: true,
       candidates: { orderBy: { sourceKey: "asc" }, select: { id: true, sourceKey: true, sourceLabel: true, sourcePath: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, confidenceBps: true, evidenceMd: true, explanationMd: true, editedByUserId: true, editedAt: true, approvedByUserId: true, approvedAt: true, version: true } } } });
   invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
-  const { interpretationJson, candidates, ...detail } = batch; const interpretation = parseFinanceImportInterpretationV1(interpretationJson);
-  const warnings = interpretation.exceptions.filter(({ severity, code }) => severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(code));
-  const numericFormat = interpretation.numericFormat.status === "RESOLVED"
+  const { interpretationJson, candidates, ...detail } = batch;
+  const interpretation = interpretationJson ? parseFinanceImportInterpretationV1(interpretationJson) : null;
+  const warnings = interpretation?.exceptions.filter(({ severity, code }) => severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(code)) ?? [];
+  const numericFormat = interpretation?.numericFormat.status === "RESOLVED"
     ? { status: "RESOLVED" as const, decimalSeparator: interpretation.numericFormat.decimalSeparator,
         groupingSeparator: interpretation.numericFormat.groupingSeparator, amountScale: interpretation.numericFormat.amountScale }
     : { status: "UNRESOLVED" as const, decimalSeparator: null, groupingSeparator: null, amountScale: null };

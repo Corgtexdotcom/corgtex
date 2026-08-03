@@ -54,6 +54,10 @@ describe("Finance import review", () => {
         exceptions: [{ code: "NUMERIC_FORMAT_UNRESOLVED", severity: "BLOCKER", message: "Choose format.", evidenceClaimIds: [] }] } }));
     await expect(getFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1" }))
       .resolves.toMatchObject({ clarification: { canConfirm: false, numericFormat: { status: "UNRESOLVED", amountScale: null } } });
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([], { stage: "EXTRACTING", interpretationJson: null }));
+    await expect(getFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1" }))
+      .resolves.toMatchObject({ stage: "EXTRACTING", warnings: [], clarification: { canConfirm: false,
+        numericFormat: { status: "UNRESOLVED", decimalSeparator: null, groupingSeparator: null, amountScale: null } } });
   });
   it("edits and rereconciles exact versions while clearing approvals and creating no canonical records", async () => {
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate("candidate-1", { approvedByUserId: "writer-2", approvedAt: new Date() }),
