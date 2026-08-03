@@ -17,7 +17,7 @@ const TARGET_GROUP_ALIASES = Object.freeze({
 });
 
 const SUPPORTED_PROVIDERS = new Set(["azure", "railway"]);
-const INELIGIBLE_STATUSES = new Set(["RETIRED", "SUSPENDED"]);
+const INELIGIBLE_STATUSES = new Set(["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "RETIRED", "SUSPENDED"]);
 
 export const TERMINAL_RAILWAY_FAILURES = new Set([
   "CRASHED",
@@ -105,9 +105,7 @@ export function normalizeTargetGroup(value) {
 
 export function targetSelectionDeprecations(value) {
   const selected = String(value ?? "").split(",").map((part) => part.trim()).filter(Boolean);
-  return selected
-    .filter((group) => TARGET_GROUP_ALIASES[group])
-    .map((group) => `${group} is deprecated; use ${TARGET_GROUP_ALIASES[group]} and declare provider per target`);
+  return selected.filter((group) => TARGET_GROUP_ALIASES[group]).map((group) => `${group} is deprecated; use ${TARGET_GROUP_ALIASES[group]} and declare provider per target`);
 }
 
 export function buildReleaseManifest({
@@ -304,12 +302,7 @@ export function targetEligibilityErrors(target) {
 
 function providerResourceTarget(target) {
   if (target.provider === "azure") {
-    return {
-      resourceGroup: target.azure?.resourceGroup ?? null,
-      acrName: target.azure?.acrName ?? null,
-      webAppName: target.azure?.webAppName ?? null,
-      workerAppName: target.azure?.workerAppName ?? null,
-    };
+    return { resourceGroup: target.azure?.resourceGroup ?? null, acrName: target.azure?.acrName ?? null, webAppName: target.azure?.webAppName ?? null, workerAppName: target.azure?.workerAppName ?? null };
   }
   if (target.provider === "railway") {
     return {

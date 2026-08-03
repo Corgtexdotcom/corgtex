@@ -132,6 +132,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
         run: |
@@ -227,7 +228,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
-          FLEET_RELEASE_TARGETS_JSON: ${{ steps.preflight.outputs.selected_targets_json }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}

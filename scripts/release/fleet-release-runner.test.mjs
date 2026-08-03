@@ -636,7 +636,7 @@ describe("fleet release runner", () => {
   });
 
   it("defaults dry-run plans to primary targets and excludes backup app", async () => {
-    const outputs = {};
+    const outputs = {}, targetFile = join(mkdtempSync(join(tmpdir(), "fleet-snapshot-")), "targets.json");
     const result = await runFleetRelease([
       "deploy",
       "--release",
@@ -660,6 +660,7 @@ describe("fleet release runner", () => {
             workerServiceId: "worker-customer",
           },
         }]),
+        FLEET_RELEASE_TARGETS_FILE: targetFile,
         FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
         FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", label: "Backup App", group: "backup-app", url: "https://app.corgtex.com" }),
         FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
@@ -683,7 +684,7 @@ describe("fleet release runner", () => {
       "selfserve",
     ]);
     expect(result.targets.some((target) => target.group === "backup-app")).toBe(false);
-    expect({ ...outputs, selected_targets: JSON.parse(outputs.selected_targets_json) }).toMatchObject({ observation_targets: "railway-customers,azure-selfserve,ops", selected_targets: JSON.parse(JSON.stringify(result.targets)) });
+    expect({ ...outputs, selected_targets: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })) }).toMatchObject({ observation_targets: "railway-customers,azure-selfserve,ops", selected_targets: JSON.parse(JSON.stringify(result.targets)) });
   });
 
   it("fails preflight before mutation when provider credentials are missing", async () => {

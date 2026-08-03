@@ -117,10 +117,10 @@ describe("fleet release core", () => {
 
   it("excludes ineligible targets only for broad selections", () => {
     const active = { id: "active", group: "managed-customers", provider: "railway" };
-    const retired = { id: "retired", group: "managed-customers", provider: "railway", deploymentStatus: "RETIRED" };
+    const retired = { id: "retired", group: "managed-customers", provider: "railway", deploymentStatus: "RETIRED" }, draft = { id: "draft", group: "managed-customers", provider: "railway", deploymentStatus: "DRAFT" };
     const optedOut = { id: "opted-out", group: "managed-customers", provider: "azure", releaseEligible: false };
-    expect(filterTargetsByGroups([active, retired, optedOut], ["managed-customers"], { excludeIneligible: true })).toEqual([active]);
-    expect(filterTargetsByGroups([active, retired], ["managed-customers"])).toEqual([active, retired]);
+    expect(filterTargetsByGroups([active, retired, draft, optedOut], ["managed-customers"], { excludeIneligible: true })).toEqual([active]);
+    expect(filterTargetsByGroups([active, retired, draft], ["managed-customers"])).toEqual([active, retired, draft]);
     expect(targetEligibilityErrors(optedOut)).toEqual(["Target explicitly sets releaseEligible=false"]);
   });
 });

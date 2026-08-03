@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
@@ -96,7 +96,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const providers = new Set(targets.map((target) => target.provider));
   emitGithubOutput("uses_azure", providers.has("azure"), deps);
   emitGithubOutput("uses_railway", providers.has("railway"), deps);
-  emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); emitGithubOutput("selected_targets_json", JSON.stringify(targets), deps);
+  emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets));
 
   const preflight = targets.map((target) => ({
     target,
@@ -280,10 +280,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   };
 }
 
-function observationTargetsFor(targets) {
-  const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean));
-  return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target));
-}
+function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); }
 
 function validateConfiguredTargetJson(name, raw, invalid) {
   if (!raw?.trim()) return;
@@ -388,20 +385,18 @@ async function resolveLatestStableSha(deps) {
 
 async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
-  const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON);
-  const discovered = configured.length > 0 ? configured : await discoverControlPlaneTargets(deps);
+  const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE) ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
+  const discovered = configured.length > 0 ? [] : await discoverControlPlaneTargets(deps);
   const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
-  return dedupeTargets([...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
+  return dedupeTargets([...configured, ...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
 }
 
-function configuredTargets(env) {
-  return [
+function configuredTargets(env) { return [
     ...parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON),
     ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })),
     ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })),
     ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" })),
-  ];
-}
+  ]; }
 
 function parseTargetJson(raw) {
   if (!raw?.trim()) return [];
