@@ -189,6 +189,7 @@ describe("/api/control-plane/mcp", () => {
       releaseVersion: "main-2026-06-01",
       customerAccountId: "customer-1",
       primaryDeploymentId: "deployment-1",
+      deploymentKind: "REMOTE_MANAGED",
       deploymentStatus: "ACTIVE",
       environment: "production",
       managedWorkspaceId: "ws-1",
@@ -213,6 +214,7 @@ describe("/api/control-plane/mcp", () => {
       id: "deployment-1",
       label: "Acme Production",
       customerSlug: "acme",
+      deploymentKind: "REMOTE_MANAGED",
       supportOperations: [],
     })]);
     expect(mocks.listControlPlaneCustomerSummaries).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), {
