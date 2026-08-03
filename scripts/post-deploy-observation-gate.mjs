@@ -859,7 +859,7 @@ function railwayTargetsFromEnv(env, targets) {
   }
 
   if (targetList.includes("railway-selfserve")) {
-    for (const target of parseJsonArray(env.FLEET_RELEASE_AZURE_TARGET_JSON)) {
+    for (const target of parseJsonArrayOrSingleObject(env.FLEET_RELEASE_AZURE_TARGET_JSON)) {
       if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
         entries.push({
           id: safeText(target.id ?? target.deploymentId ?? target.label),
@@ -1006,6 +1006,11 @@ function railwayLogLimit(env) {
 function parseJsonArray(value) {
   const parsed = parseJsonValue(value);
   return Array.isArray(parsed) ? parsed : [];
+}
+
+function parseJsonArrayOrSingleObject(value) {
+  const parsed = parseJsonValue(value);
+  return Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? [parsed] : [];
 }
 
 function parseJsonObjectOrSingleItemArray(value) {

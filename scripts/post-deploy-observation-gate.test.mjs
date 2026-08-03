@@ -737,7 +737,7 @@ describe("post-deploy observation gate", () => {
       env: {
         RAILWAY_API_TOKEN: "railway-token",
         OBSERVATION_REQUIRE_SOURCE: "true",
-        FLEET_RELEASE_AZURE_TARGET_JSON: JSON.stringify([{ id: "selfserve", provider: "railway", railway: { environmentId: "environment-selfserve", webServiceId: "web-selfserve" } }]),
+        FLEET_RELEASE_AZURE_TARGET_JSON: JSON.stringify({ id: "selfserve", provider: "railway", railway: { environmentId: "environment-selfserve", webServiceId: "web-selfserve" } }),
       },
       deps: { fetchImpl, onSourceNote: vi.fn() },
     });
