@@ -3415,21 +3415,50 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   }
 
   let recording = await findRecordingForWebhook(provider, event);
-  const providerEvent = await prisma.meetingRecorderProviderEvent.upsert({
-    where: { dedupeKey },
-    update: {},
-    create: {
-      workspaceId: recording?.workspaceId ?? event.workspaceId,
-      recordingId: recording?.id ?? event.recordingId,
-      provider,
-      externalEventId: event.eventId,
-      externalBotId: event.externalBotId,
-      eventType: event.eventType,
-      dedupeKey,
-      payload: redactProviderArtifactUrls(payload),
-      redactedAt: new Date(),
-    },
-  });
+
+  let providerEvent: { id: string };
+  if (provider === "RECALL_AI" && event.eventType === "transcript.done" && recording) {
+    const r = recording;
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${r.workspaceId}:${r.meetingId}:${provider}:transcript`}, 0))`;
+      const upserted = await tx.meetingRecorderProviderEvent.upsert({
+        where: { dedupeKey },
+        update: { receivedAt: new Date() },
+        create: {
+          workspaceId: r.workspaceId,
+          recordingId: r.id,
+          provider,
+          externalEventId: event.eventId,
+          externalBotId: event.externalBotId,
+          eventType: event.eventType,
+          dedupeKey,
+          payload: redactProviderArtifactUrls(payload),
+          redactedAt: new Date(),
+        },
+      });
+      recording = await tx.meetingRecording.findUnique({ where: { id: r.id } }) ?? r;
+      recording = await applyWebhookState(recording, event, tx);
+      return { providerEvent: upserted, recording };
+    }, { timeout: 120_000 });
+    providerEvent = result.providerEvent;
+    recording = result.recording;
+  } else {
+    providerEvent = await prisma.meetingRecorderProviderEvent.upsert({
+      where: { dedupeKey },
+      update: {},
+      create: {
+        workspaceId: recording?.workspaceId ?? event.workspaceId,
+        recordingId: recording?.id ?? event.recordingId,
+        provider,
+        externalEventId: event.eventId,
+        externalBotId: event.externalBotId,
+        eventType: event.eventType,
+        dedupeKey,
+        payload: redactProviderArtifactUrls(payload),
+        redactedAt: new Date(),
+      },
+    });
+  }
 
   if (!recording) {
     await prisma.meetingRecorderProviderEvent.update({
@@ -3450,7 +3479,9 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
     return { processed: false, duplicate: false };
   }
 
-  recording = await applyWebhookState(recording, event);
+  if (!(provider === "RECALL_AI" && event.eventType === "transcript.done")) {
+    recording = await applyWebhookState(recording, event);
+  }
 
   if (provider === "RECALL_AI" && event.eventType === "recording.done" && event.recordingIdForTranscript) {
     await createRecallAsyncTranscript(event.recordingIdForTranscript);
@@ -3498,22 +3529,36 @@ async function findRecordingForWebhook(provider: MeetingRecorderProvider, event:
   return null;
 }
 
-async function applyWebhookState(recording: MeetingRecording, event: ProviderWebhookEvent) {
+async function applyWebhookState(
+  recording: MeetingRecording,
+  event: ProviderWebhookEvent,
+  client: Pick<Prisma.TransactionClient, "meetingRecording"> = prisma,
+) {
   if (recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return recording;
   }
 
+  const isLocalTerminalState = (recording.transcriptProcessedAt !== null &&
+    (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
+    recording.failureCode === "STALE_RECORDER";
+
   const data: Prisma.MeetingRecordingUpdateInput = {};
   if (event.externalBotId && !recording.externalBotId) data.externalBotId = event.externalBotId;
-  if (event.status) data.status = event.status;
+
+  if (event.status) {
+    if (!isLocalTerminalState) {
+      data.status = event.status;
+    }
+  }
+
   if (event.status && !ACTIVE_RECORDING_STATUSES.includes(event.status)) data.activeDedupeKey = null;
   if (event.startedAt) data.startedAt = event.startedAt;
   if (event.endedAt) data.endedAt = event.endedAt;
   if (event.durationSeconds !== null) data.durationSeconds = Math.max(0, Math.round(event.durationSeconds));
-  if (event.failureCode) data.failureCode = event.failureCode;
-  if (event.failureMessage) data.failureMessage = event.failureMessage;
+  if (event.failureCode && !isLocalTerminalState) data.failureCode = event.failureCode;
+  if (event.failureMessage && !isLocalTerminalState) data.failureMessage = event.failureMessage;
   if (Object.keys(data).length === 0) return recording;
-  return prisma.meetingRecording.update({
+  return client.meetingRecording.update({
     where: { id: recording.id },
     data,
   });
@@ -3599,15 +3644,20 @@ async function completeRecordingWithTranscriptArtifact(
         provider: true,
         joinAt: true,
         failureCode: true,
+        failureMessage: true,
         transcriptProcessedAt: true,
         meeting: {
           select: {
             workspaceId: true,
+            transcript: true,
           },
         },
       },
     });
-    if (!current || current.transcriptProcessedAt) {
+    const isLateRecoveryOverride = (current?.transcriptProcessedAt !== null
+      && (current?.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || current?.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
+      current?.failureCode === "STALE_RECORDER";
+    if (!current || (current.transcriptProcessedAt && !isLateRecoveryOverride)) {
       return false;
     }
     if (current.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
@@ -3665,19 +3715,34 @@ async function completeRecordingWithTranscriptArtifact(
     }
 
     if (transcript.trim().length === 0) {
+      if (isLateRecoveryOverride) {
+        await tx.meetingRecording.update({
+          where: { id: recording.id },
+          data: {
+            status: "FAILED",
+            failureCode: current.failureCode,
+            failureMessage: current.failureMessage,
+          },
+        });
+        return false;
+      }
       await markRecordingTranscriptEmpty(provider, recording, artifact, tx);
       return false;
     }
 
     const actor = systemRecorderActor(recording.workspaceId);
-    await intakeMeetingTranscript(actor, {
-      workspaceId: recording.workspaceId,
-      meetingId: recording.meetingId,
-      source: `recorder:${provider.toLowerCase()}`,
-      recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
-      transcript,
-      allowTranscriptAppend: true,
-    });
+    const normalizedTranscript = transcript.trim().replace(/\s+/g, " ");
+    const intakeAlreadyCommitted = (current.meeting?.transcript ?? "").trim().replace(/\s+/g, " ").includes(normalizedTranscript);
+    if (!intakeAlreadyCommitted) {
+      await intakeMeetingTranscript(actor, {
+        workspaceId: recording.workspaceId,
+        meetingId: recording.meetingId,
+        source: `recorder:${provider.toLowerCase()}`,
+        recordedAt: recording.startedAt ?? recording.joinAt ?? recording.createdAt,
+        transcript,
+        allowTranscriptAppend: true,
+      });
+    }
 
     await tx.meetingRecording.update({
       where: { id: recording.id },
@@ -3693,11 +3758,12 @@ async function completeRecordingWithTranscriptArtifact(
     await tx.meetingRecorderSmokeRun.updateMany({
       where: {
         recordingId: recording.id,
-        status: { in: ["PENDING", "SCHEDULED"] },
+        status: { in: isLateRecoveryOverride ? ["PENDING", "SCHEDULED", "FAILED"] : ["PENDING", "SCHEDULED"] },
       },
       data: {
         status: "COMPLETED",
         completedAt: new Date(),
+        failureMessage: null,
       },
     });
     return true;
@@ -3715,7 +3781,10 @@ async function completeRecordingWithTranscriptArtifact(
 }
 
 async function ingestProviderTranscript(provider: MeetingRecorderProvider, recording: MeetingRecording, event: ProviderWebhookEvent) {
-  if (recording.transcriptProcessedAt || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
+  const isLateRecoveryOverride = (recording.transcriptProcessedAt !== null
+    && (recording.failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" || recording.failureCode === "RECORDER_TRANSCRIPT_FETCH_FAILED")) ||
+    recording.failureCode === "STALE_RECORDER";
+  if ((recording.transcriptProcessedAt !== null && !isLateRecoveryOverride) || recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return;
   }
   const artifact = provider === "RECALL_AI"
@@ -4000,9 +4069,109 @@ function transcriptRecoveryIsPending(error: unknown) {
     return error.code === "RECORDER_TRANSCRIPT_NOT_READY";
   }
   if (error instanceof ProviderRequestError) {
-    return error.status === 404 || error.status === 409 || error.status === 425;
+    return error.status === 404 || RETRYABLE_VENDOR_STATUSES.has(error.status);
   }
   return false;
+}
+
+async function terminalizeRecordingWithLock(
+  recording: { id: string; workspaceId: string; meetingId: string; provider: string },
+  failureCode: string,
+  failureMessage: string,
+) {
+  return await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${recording.provider}:transcript`}, 0))`;
+    const current = await tx.meetingRecording.findUnique({
+      where: { id: recording.id },
+      select: { transcriptProcessedAt: true, status: true, failureCode: true },
+    });
+    if (!current || current.transcriptProcessedAt) {
+      return false;
+    }
+
+    const inFlightWebhook = failureCode === "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" ? null : await tx.meetingRecorderProviderEvent.findFirst({
+      where: {
+        recordingId: recording.id,
+        eventType: "transcript.done",
+        processedAt: null,
+        receivedAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+      },
+      select: { id: true },
+    });
+    if (inFlightWebhook) {
+      return false;
+    }
+
+    const isRecoverableStatus = (RECOVERABLE_RECALL_RECORDING_STATUSES as string[]).includes(current.status);
+    const isStaleFailed = current.status === "FAILED" && current.failureCode === "STALE_RECORDER";
+
+    if (!isRecoverableStatus && !isStaleFailed) {
+      return false;
+    }
+
+    await tx.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode,
+        failureMessage,
+        transcriptProcessedAt: new Date(),
+      },
+    });
+
+    await tx.meetingRecorderSmokeRun.updateMany({
+      where: {
+        recordingId: recording.id,
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: {
+        status: "FAILED",
+        failureMessage,
+        completedAt: new Date(),
+      },
+    });
+    return true;
+  }, { timeout: 120000 });
+}
+
+async function terminalizeStaleRecordingWithLock(
+  recording: { id: string; workspaceId: string; meetingId: string; provider: string; status: string }
+) {
+  return await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${recording.workspaceId}:${recording.meetingId}:${recording.provider}:transcript`}, 0))`;
+    const current = await tx.meetingRecording.findUnique({
+      where: { id: recording.id },
+      select: { transcriptProcessedAt: true, status: true },
+    });
+    if (!current || current.transcriptProcessedAt || !ACTIVE_RECORDING_STATUSES.includes(current.status as any)) {
+      return false;
+    }
+
+    await tx.meetingRecording.update({
+      where: { id: recording.id },
+      data: {
+        status: "FAILED",
+        activeDedupeKey: null,
+        failureCode: "STALE_RECORDER",
+        failureMessage: "Recorder did not complete before the reconciliation timeout.",
+        endedAt: new Date(),
+      },
+    });
+
+    await tx.meetingRecorderSmokeRun.updateMany({
+      where: {
+        recordingId: recording.id,
+        status: { in: ["PENDING", "SCHEDULED"] },
+      },
+      data: {
+        status: "FAILED",
+        failureMessage: "Recorder did not complete before the reconciliation timeout.",
+        completedAt: new Date(),
+      },
+    });
+    return true;
+  }, { timeout: 120000 });
 }
 
 async function recoverRecallTranscripts(workspaceId: string) {
@@ -4039,6 +4208,24 @@ async function recoverRecallTranscripts(workspaceId: string) {
         continue;
       }
 
+      const expectedEnd = recordingExpectedEnd(recording);
+      if (now.getTime() - expectedEnd.getTime() >= 24 * 60 * 60 * 1000) {
+        const terminalized = await terminalizeRecordingWithLock(
+          recording,
+          "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
+          "Transcript recovery expired after 24 hours.",
+        );
+        if (terminalized) {
+          recorderLog("warn", "reconcile_recall_transcript_expired", {
+            workspaceId,
+            meetingId: recording.meetingId,
+            recordingId: recording.id,
+            provider: recording.provider,
+          });
+        }
+        continue;
+      }
+
       try {
         const current = await findRecoverableRecallRecording(recording.id);
         if (!current || current.transcriptProcessedAt || !current.externalBotId) {
@@ -4051,14 +4238,17 @@ async function recoverRecallTranscripts(workspaceId: string) {
             continue;
           }
         } catch (error) {
-          recorderLog("warn", "recall_bot_status_fetch_failed", {
-            workspaceId,
-            meetingId: recording.meetingId,
-            recordingId: recording.id,
-            provider: recording.provider,
-            failureCode: providerFailureCode(error),
-          });
-          continue;
+          if (transcriptRecoveryIsPending(error)) {
+            recorderLog("warn", "recall_bot_status_fetch_failed", {
+              workspaceId,
+              meetingId: recording.meetingId,
+              recordingId: recording.id,
+              provider: recording.provider,
+              failureCode: providerFailureCode(error),
+            });
+            continue;
+          }
+          throw error;
         }
         const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
         const latest = await findRecoverableRecallRecording(recording.id);
@@ -4088,6 +4278,23 @@ async function recoverRecallTranscripts(workspaceId: string) {
             provider: recording.provider,
             failureCode: providerFailureCode(error),
           });
+          continue;
+        }
+        if (error instanceof ProviderRequestError) {
+          const terminalized = await terminalizeRecordingWithLock(
+            recording,
+            "RECORDER_TRANSCRIPT_FETCH_FAILED",
+            "Non-retryable transcript fetch error.",
+          );
+          if (terminalized) {
+            recorderLog("warn", "reconcile_recall_transcript_failed", {
+              workspaceId,
+              meetingId: recording.meetingId,
+              recordingId: recording.id,
+              provider: recording.provider,
+              failureCode: providerFailureCode(error),
+            });
+          }
           continue;
         }
         recorderLog("warn", "reconcile_recall_transcript_failed", {
@@ -4190,28 +4397,20 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
           provider: recording.provider,
           failureCode: providerFailureCode(error),
         });
-        continue;
       }
     }
-    await prisma.meetingRecording.update({
-      where: { id: recording.id },
-      data: {
-        status: "FAILED",
-        activeDedupeKey: null,
-        failureCode: "STALE_RECORDER",
-        failureMessage: "Recorder did not complete before the reconciliation timeout.",
-        endedAt: new Date(),
-      },
-    });
-    staleFailed += 1;
-    recorderLog("warn", "reconcile_stale_failed", {
-      workspaceId,
-      meetingId: recording.meetingId,
-      recordingId: recording.id,
-      provider: recording.provider,
-      previousStatus: recording.status,
-      failureCode: "stale_recorder",
-    });
+    const success = await terminalizeStaleRecordingWithLock(recording);
+    if (success) {
+      staleFailed += 1;
+      recorderLog("warn", "reconcile_stale_failed", {
+        workspaceId,
+        meetingId: recording.meetingId,
+        recordingId: recording.id,
+        provider: recording.provider,
+        previousStatus: recording.status,
+        failureCode: "stale_recorder",
+      });
+    }
   }
   const coverage = await ensureUpcomingScheduledMeetingRecorderCoverage(workspaceId);
   await prisma.meetingRecorderProviderEvent.updateMany({
