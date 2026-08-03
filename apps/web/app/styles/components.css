@@ -6112,8 +6112,7 @@ a.meeting-agenda-item:hover {
 .finance-import-dropzone span,
 .finance-import-notice span,
 .finance-import-upload-row small,
-.finance-import-batch small,
-.finance-import-processing small {
+.finance-import-batch small {
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.4;
@@ -6172,109 +6171,6 @@ a.meeting-agenda-item:hover {
   border-color: var(--accent);
 }
 
-.finance-import-processing {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-alt);
-}
-
-.finance-import-processing > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 54px;
-  padding: 12px 14px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.finance-import-processing > summary::-webkit-details-marker {
-  display: none;
-}
-
-.finance-import-processing > summary strong,
-.finance-import-processing > summary small {
-  display: block;
-}
-
-.finance-import-processing[open] > summary {
-  border-bottom: 1px solid var(--line);
-}
-
-.finance-import-toggle {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font-size: 0.82rem;
-  font-weight: 700;
-}
-
-.finance-import-processing[open] .finance-import-toggle {
-  font-size: 0;
-}
-
-.finance-import-processing[open] .finance-import-toggle::after {
-  content: "Hide stages";
-  font-size: 0.82rem;
-}
-
-.finance-import-processing ol {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 14px;
-  list-style: none;
-}
-
-.finance-import-processing li {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  gap: 8px;
-  min-height: 54px;
-  padding: 9px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface);
-}
-
-.finance-import-processing li > span {
-  width: 14px;
-  height: 14px;
-  margin-top: 2px;
-  border: 2px solid var(--line);
-  border-radius: 999px;
-}
-
-.finance-import-processing li strong,
-.finance-import-processing li small {
-  display: block;
-}
-
-.finance-import-processing li.complete > span {
-  border-color: var(--success);
-  background: var(--success);
-  box-shadow: inset 0 0 0 3px var(--surface);
-}
-
-.finance-import-processing li.active {
-  border-color: var(--accent);
-}
-
-.finance-import-processing li.active > span {
-  border-color: var(--accent);
-  background: var(--accent);
-}
-
-.finance-import-processing li.failed {
-  border-color: var(--warning);
-}
-
-.finance-import-processing li.failed > span {
-  border-color: var(--warning);
-  background: var(--warning);
-}
-
 .finance-import-safe-error,
 .finance-import-error {
   margin: 0;
@@ -6282,7 +6178,7 @@ a.meeting-agenda-item:hover {
 }
 
 .finance-import-safe-error {
-  padding: 0 14px 14px;
+  margin-top: 14px;
 }
 
 .finance-import-notice,
@@ -6328,17 +6224,12 @@ a.meeting-agenda-item:hover {
   .finance-import-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-
-  .finance-import-processing ol {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 540px) {
   .finance-import-heading,
   .finance-import-detail-heading,
-  .finance-import-batch,
-  .finance-import-processing > summary {
+  .finance-import-batch {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -6347,9 +6238,5 @@ a.meeting-agenda-item:hover {
   .finance-import-dropzone > button,
   .finance-import-clarification button {
     width: 100%;
-  }
-
-  .finance-import-processing ol {
-    grid-template-columns: minmax(0, 1fr);
   }
 }

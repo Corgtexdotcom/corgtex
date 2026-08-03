@@ -52,10 +52,16 @@ function failureIndex(code: string | null) {
   return 3;
 }
 
+function needsInputIndex(code: string | null) {
+  if (code === "CURRENCY_UNRESOLVED") return 4;
+  if (code === "FINANCE_REPORT_AGENT_UNAVAILABLE") return 2;
+  return 3;
+}
+
 export function buildFinanceImportView(batch: Pick<FinanceImportBatchSummary, "stage" | "safeErrorCode" | "addCount" | "updateCount" | "blockerCount">) {
   const stageIndex = PROCESSING_STAGES.indexOf(batch.stage as typeof PROCESSING_STAGES[number]);
   const failedIndex = batch.stage === "FAILED" ? failureIndex(batch.safeErrorCode) : -1;
-  const activeIndex = batch.stage === "NEEDS_INPUT" ? 4 : batch.stage === "PARTIALLY_APPLIED" ? 5 : stageIndex;
+  const activeIndex = batch.stage === "NEEDS_INPUT" ? needsInputIndex(batch.safeErrorCode) : batch.stage === "PARTIALLY_APPLIED" ? 5 : stageIndex;
   const complete = ["READY_FOR_REVIEW", "APPLYING", "APPLIED", "PARTIALLY_APPLIED"].includes(batch.stage);
   const steps = PROCESSING_STAGES.map((stage, index) => ({
     stage,

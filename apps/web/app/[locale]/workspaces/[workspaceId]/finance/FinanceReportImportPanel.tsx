@@ -47,6 +47,7 @@ async function requestFinanceImportSummary(workspaceId: string, batchId: string)
 export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceId: string; canWrite: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadAttemptRef = useRef(0);
+  const listRequestRef = useRef(0);
   const detailRequestRef = useRef(new Map<string, number>());
   const summaryRequestRef = useRef(new Map<string, number>());
   const pinnedBatchesRef = useRef(new Map<string, FinanceImportBatchSummary | null>());
@@ -66,10 +67,12 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   const selectedIdRef = useRef(selectedId); selectedIdRef.current = selectedId;
 
   const loadBatches = useCallback(async () => {
+    const requestId = ++listRequestRef.current;
     try {
       const response = await fetch(`/api/workspaces/${workspaceId}/finance/imports`, { cache: "no-store" });
       if (!response.ok) throw new Error(await responseMessage(response, "Import history could not be loaded."));
       const body = await response.json() as { batches: FinanceImportBatchSummary[] };
+      if (requestId !== listRequestRef.current) return;
       body.batches.forEach(({ id }) => pinnedBatchesRef.current.delete(id));
       const pinned = [...pinnedBatchesRef.current.values()].filter((batch): batch is FinanceImportBatchSummary => batch !== null);
       const merged = [...pinned, ...body.batches];
@@ -78,9 +81,10 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
         ? current : merged[0]?.id ?? null);
       setListError(null);
     } catch (error) {
+      if (requestId !== listRequestRef.current) return;
       setListError(error instanceof Error ? error.message : "Import history could not be loaded.");
     } finally {
-      setLoading(false);
+      if (requestId === listRequestRef.current) setLoading(false);
     }
   }, [workspaceId]);
 
@@ -148,6 +152,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
         const body = await response.json() as { batch: { id: string }; reused: boolean };
         setUploads((current) => current.map((row) => row.id === item.id ? { ...row, status: "uploaded",
           message: body.reused ? "Existing exact-file import resumed or reopened." : "Queued as an independent report." } : row));
+        listRequestRef.current += 1;
         pinnedBatchesRef.current.set(body.batch.id, null);
         selectedIdRef.current = body.batch.id; setSelectedId(body.batch.id);
         try {
@@ -239,13 +244,24 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
           {selected && processingView && <>
             <div className="finance-import-detail-heading"><div><h3 className="nr-upload-title">{selected.originalFilename}</h3><p className="nr-upload-desc">{[displayEnum(selected.reportType), displayEnum(selected.basis), displayEnum(selected.cadence)].filter(Boolean).join(" · ") || "Agent classification pending"}</p></div>
               <span className={`status-chip ${processingView.className === "failed" || processingView.className === "needs-input" ? "warning" : ""}`}>{processingView.title}</span></div>
-            <details className={`finance-import-processing ${processingView.className}`} open={processingView.defaultExpanded ? true : undefined}>
-              <summary><span><strong>{processingView.title}</strong><small>{processingView.summary}</small></span><span className="finance-import-toggle">Show stages</span></summary>
-              <ol>{processingView.steps.map((step) => <li className={step.status} key={step.stage}><span aria-hidden="true" /><div><strong>{step.label}</strong><small>{displayEnum(step.status)}</small></div></li>)}</ol>
-              {(selectedDetail?.safeErrorMessage ?? selected.safeErrorMessage) && <p className="finance-import-safe-error" role="status">{selectedDetail?.safeErrorMessage ?? selected.safeErrorMessage}</p>}
-              {selected.stage === "FAILED" && <p className="muted">{financeImportCanRetryExactFile(selected.safeErrorCode)
-                ? "Choose the exact file above again. Its immutable hash is reused, and only supported storage or extraction stages resume."
-                : "Correct the source issue described above, then upload the corrected report as a new file."}</p>}
+            <details className={`meeting-processing-stepper ${processingView.className === "needs-input" ? "failed" : processingView.className}`} open={processingView.defaultExpanded ? true : undefined}>
+              <summary className="meeting-processing-stepper-summary">
+                <span className="meeting-processing-status-label"><span className="meeting-processing-status-dot" aria-hidden="true" />{processingView.title}</span>
+                <span className="meeting-processing-summary-separator" aria-hidden="true">·</span>
+                <span className="meeting-processing-summary-text">{processingView.summary}</span>
+                <span className="meeting-processing-summary-actions">
+                  <span className="meeting-processing-toggle-action meeting-processing-toggle-show">Show stages</span>
+                  <span className="meeting-processing-toggle-action meeting-processing-toggle-hide">Hide stages</span>
+                </span>
+              </summary>
+              <div className="meeting-processing-stepper-detail">
+                <ol className="meeting-processing-steps">{processingView.steps.map((step) => <li className={`meeting-processing-step ${step.status}`} key={step.stage}>
+                  <span className="meeting-processing-step-marker" aria-hidden="true" /><div><strong>{step.label}</strong><span>{displayEnum(step.status)}</span></div></li>)}</ol>
+                {(selectedDetail?.safeErrorMessage ?? selected.safeErrorMessage) && <p className="finance-import-safe-error" role="status">{selectedDetail?.safeErrorMessage ?? selected.safeErrorMessage}</p>}
+                {selected.stage === "FAILED" && <p className="muted">{financeImportCanRetryExactFile(selected.safeErrorCode)
+                  ? "Choose the exact file above again. Its immutable hash is reused, and only supported storage or extraction stages resume."
+                  : "Correct the source issue described above, then upload the corrected report as a new file."}</p>}
+              </div>
             </details>
             {detailError && <p className="finance-import-error" role="alert">{detailError}</p>}
             {selected.stage === "NEEDS_INPUT" && selectedDetail?.clarification.canConfirm && canWrite && <form className="finance-import-clarification" onSubmit={confirmClarification}>

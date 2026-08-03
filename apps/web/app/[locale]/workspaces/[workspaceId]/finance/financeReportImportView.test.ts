@@ -29,9 +29,11 @@ describe("Finance report import view", () => {
   });
 
   it("keeps input and safe failure states visible without implying an override", () => {
-    const input = buildFinanceImportView(summary("NEEDS_INPUT", { blockerCount: 1 }));
+    const input = buildFinanceImportView(summary("NEEDS_INPUT", { blockerCount: 1, safeErrorCode: "CURRENCY_UNRESOLVED" }));
     expect(input).toMatchObject({ title: "Input needed", defaultExpanded: true, polling: false });
     expect(input.steps.at(-2)?.status).toBe("failed");
+    expect(buildFinanceImportView(summary("NEEDS_INPUT", { safeErrorCode: "FINANCE_REPORT_AGENT_UNAVAILABLE" })).steps[2]?.status).toBe("failed");
+    expect(buildFinanceImportView(summary("NEEDS_INPUT", { safeErrorCode: "NUMERIC_FORMAT_UNRESOLVED" })).steps[3]?.status).toBe("failed");
     expect(buildFinanceImportView(summary("PARTIALLY_APPLIED", { blockerCount: 0 })))
       .toMatchObject({ title: "Exceptions remain", summary: "Some proposed changes still need review." });
 
