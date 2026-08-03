@@ -1,9 +1,10 @@
 "use client";
 
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Dialog } from "@/lib/components/Dialog";
 import {
   financeImportCandidateVersions,
+  financeImportHasVerifiedCandidates,
   financeImportReviewAmounts,
   financeImportVisibleCandidates,
   formatFinanceAccountPathInput,
@@ -106,8 +107,13 @@ export function FinanceReportReviewPanel({ workspaceId, canWrite, detail, onChan
   const visible = useMemo(() => financeImportVisibleCandidates(detail.candidates, showAll), [detail.candidates, showAll]);
   const approvedCount = detail.candidates.filter(({ reviewState }) => reviewState === "APPROVED").length;
   const reviewVersions = financeImportCandidateVersions(detail.candidates, "review");
+  const hasVerifiedCandidates = financeImportHasVerifiedCandidates(detail.candidates);
   const blockers = detail.blockerCount > 0 || detail.candidates.some(({ reviewState }) => reviewState === "BLOCKED");
   const warnings = detail.warningCount > 0 || detail.warnings.length > 0 || detail.candidates.some(({ historicalWarning }) => historicalWarning);
+
+  useEffect(() => {
+    setAcceptWarnings(false);
+  }, [detail.id, detail.version]);
 
   async function request(method: "PATCH" | "POST", body: object, fallback: string) {
     setBusy(true); setError(null);
@@ -165,7 +171,7 @@ export function FinanceReportReviewPanel({ workspaceId, canWrite, detail, onChan
       canWrite={canWrite} busy={busy} onPatch={patch} />)}</div>
     {visible.length === 0 && <p className="muted">No proposed changes need review.</p>}
     {canWrite && detail.stage !== "APPLIED" ? <div className="finance-import-bulk-actions">
-      <button type="button" className="primary" disabled={busy || reviewVersions.length === 0} onClick={() => { void applyVerified(); }}>Apply verified changes; review exceptions</button>
+      <button type="button" className="primary" disabled={busy || !hasVerifiedCandidates} onClick={() => { void applyVerified(); }}>Apply verified changes; review exceptions</button>
       <button type="button" className="secondary" disabled={busy || blockers || reviewVersions.length === 0} onClick={() => setConfirmAll(true)}>Approve everything as proposed</button>
       {approvedCount > 0 && <button type="button" className="ghost" disabled={busy} onClick={() => { void applyApproved(); }}>Apply approved versions ({approvedCount})</button>}
     </div> : <div className="finance-import-notice"><strong>{detail.stage === "APPLIED" ? "Application complete" : "Read-only review"}</strong><span>{detail.stage === "APPLIED" ? "Receipts remain available with each row." : "Finance write access is required to edit, approve, or apply proposals."}</span></div>}

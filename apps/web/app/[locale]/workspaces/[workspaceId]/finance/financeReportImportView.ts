@@ -145,6 +145,11 @@ export function financeImportCandidateVersions(candidates: FinanceImportCandidat
     .map(({ id, version }) => ({ id, expectedVersion: version }));
 }
 
+export function financeImportHasVerifiedCandidates(candidates: FinanceImportCandidateDetail[]) {
+  return candidates.some(({ historicalWarning, reviewState }) => !historicalWarning
+    && !["WARNING", "BLOCKED", "APPROVED", "REJECTED", "APPLIED"].includes(reviewState));
+}
+
 export function financeImportCanWrite(canWrite: boolean, demoReadOnly: boolean) {
   return canWrite && !demoReadOnly;
 }
@@ -198,7 +203,7 @@ export function financeDerivedTotal(candidate: FinanceImportCandidateDetail, can
     && candidate.proposedAccountPath.every((part, index) => row.proposedAccountPath[index] === part));
   if (descendants.length === 0) return null;
   const total = descendants.reduce((sum, row) => sum + BigInt(row.amountCents), 0n);
-  return total >= -2_147_483_648n && total <= 2_147_483_647n ? Number(total) : null;
+  return Number(total);
 }
 
 export function financeImportReviewAmounts(candidate: FinanceImportCandidateDetail, candidates: FinanceImportCandidateDetail[]) {

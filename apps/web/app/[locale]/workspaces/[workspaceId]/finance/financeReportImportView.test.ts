@@ -6,6 +6,7 @@ import {
   financeImportCanRetryExactFile,
   financeImportCanWrite,
   financeImportCandidateVersions,
+  financeImportHasVerifiedCandidates,
   financeImportNeedsFullDetail,
   financeImportNeedsPolling,
   financeImportReviewAmounts,
@@ -88,6 +89,19 @@ describe("Finance report import view", () => {
     expect(financeImportVisibleCandidates(rows, true)).toHaveLength(4);
   });
 
+  it("enables verified bulk review only when a clean candidate is eligible", () => {
+    expect(financeImportHasVerifiedCandidates([row("clean")])).toBe(true);
+    expect(financeImportHasVerifiedCandidates([row("unchanged", { reviewState: "VERIFIED", action: "UNCHANGED" })])).toBe(true);
+    expect(financeImportHasVerifiedCandidates([
+      row("warning", { reviewState: "WARNING" }),
+      row("historical", { historicalWarning: true }),
+      row("blocked", { reviewState: "BLOCKED" }),
+      row("approved", { reviewState: "APPROVED" }),
+      row("rejected", { reviewState: "REJECTED" }),
+      row("applied", { reviewState: "APPLIED" }),
+    ])).toBe(false);
+  });
+
   it("parses exact cents and account paths without floating point coercion", () => {
     expect(parseFinanceAmountInput("-1234.5")).toBe(-123450);
     expect(parseFinanceAmountInput("12.345")).toBeNull();
@@ -112,6 +126,9 @@ describe("Finance report import view", () => {
     expect(financeDerivedTotal(derived, rows)).toBe(175_000);
     expect(financeDerivedTotal(rows[1]!, rows)).toBeNull();
     expect(financeImportReviewAmounts(derived, rows)).toMatchObject({ current: 100, proposed: 175_000, difference: 174_900, derived: true });
+    const largeRows = [derived, row("large-a", { amountCents: 1_500_000_000, proposedAccountPath: ["Gross contribution", "A"] }),
+      row("large-b", { amountCents: 1_500_000_000, proposedAccountPath: ["Gross contribution", "B"] })];
+    expect(financeImportReviewAmounts(derived, largeRows)).toMatchObject({ current: 100, proposed: 3_000_000_000, difference: 2_999_999_900 });
     expect(financeImportReviewAmounts(row("new", { action: "ADD", amountCents: 250, currentAmountCents: null }), []))
       .toMatchObject({ current: null, proposed: 250, difference: 250, derived: false });
   });
