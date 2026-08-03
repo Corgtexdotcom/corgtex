@@ -90,8 +90,7 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
         appliedCount: batch.appliedCount, appliedNow: 0, noOp: true, receipts: existing.map(({ id, application }) => ({ candidateId: id, ...application! })) };
       invariant(batch.version === params.expectedVersion && ["READY_FOR_REVIEW", "PARTIALLY_APPLIED"].includes(batch.stage),
         409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The Finance report import changed. Refresh and try again.");
-      const approved = candidates.filter(({ reviewState, application }) => reviewState === "APPROVED" && !application);
-      invariant(outstanding.length > 0 && approved.length === outstanding.length && approved.every(({ id }) => supplied.has(id)),
+      invariant(outstanding.length > 0 && outstanding.every(({ reviewState }) => reviewState === "APPROVED"),
         409, "FINANCE_REPORT_APPLICATION_BLOCKED", "Apply exactly the currently approved Finance report candidates.");
       for (const candidate of outstanding) {
         invariant(candidate.version === supplied.get(candidate.id), 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "A Finance report candidate changed. Refresh and try again.");
@@ -138,12 +137,11 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
           invariant(current && current.semanticKey === candidate.semanticKey && current.amountCents === candidate.currentAmountCents,
             409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The current Reported Actuals fact changed. Refresh and reconcile again.");
           targetFactId = current.id; before = factSnapshot(current);
-          if (candidate.action === "UPDATE") {
-            const updated = await tx.financeReportFact.updateMany({ where: { id: current.id, workspaceId: batch.workspaceId, version: current.version,
-              semanticKey: current.semanticKey, amountCents: current.amountCents }, data: { ...desired, version: { increment: 1 } } });
-            invariant(updated.count === 1, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The current Reported Actuals fact changed. Refresh and reconcile again.");
-            after = factSnapshot({ ...current, ...desired, dimensions: candidate.dimensions, version: current.version + 1 }); outcome = "UPDATED";
-          } else { invariant(current.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The unchanged fact no longer matches."); after = before; outcome = "UNCHANGED"; }
+          if (candidate.action === "UNCHANGED") invariant(current.amountCents === candidate.amountCents, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The unchanged fact no longer matches.");
+          const updated = await tx.financeReportFact.updateMany({ where: { id: current.id, workspaceId: batch.workspaceId, version: current.version,
+            semanticKey: current.semanticKey, amountCents: current.amountCents }, data: { ...desired, version: { increment: 1 } } });
+          invariant(updated.count === 1, 409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The current Reported Actuals fact changed. Refresh and reconcile again.");
+          after = factSnapshot({ ...current, ...desired, dimensions: candidate.dimensions, version: current.version + 1 }); outcome = candidate.action === "UPDATE" ? "UPDATED" : "UNCHANGED";
         } else if (candidate.action === "DUPLICATE") {
           invariant(candidate.semanticKey, 409, "FINANCE_REPORT_APPLICATION_BLOCKED", "The approved duplicate identity is invalid.");
           const target = await tx.financeReportFact.findUnique({ where: { workspaceId_semanticKey: { workspaceId: batch.workspaceId,
@@ -172,7 +170,7 @@ export async function applyFinanceReportImport(actor: AppActor, params: { worksp
       await tx.auditLog.create({ data: { workspaceId: batch.workspaceId, actorUserId: actor.user.id, action: "finance-report-import.applied",
         entityType: "FinanceImportBatch", entityId: batch.id, meta: { version: batch.version + 1, stage, appliedNow: receipts.length, appliedCount } } });
       return { batchId: batch.id, version: batch.version + 1, stage, appliedCount, appliedNow: receipts.length, noOp: false, receipts };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10_000, timeout: 120_000 }));
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2034"].includes(error.code)) {
       throw new AppError(409, "FINANCE_REPORT_APPLICATION_CONFLICT", "The Finance report application changed. Refresh and try again.");

@@ -55,7 +55,7 @@ describe("Finance report application", () => {
     expect(result.receipts.map(({ outcome }) => outcome)).toEqual(["CREATED", "SKIPPED", "SKIPPED"]);
     expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ reportId: "report-1",
       sourceBatchId: "batch-1", sourceCandidateId: "add", appliedByUserId: "writer-1" }) }));
-    expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ title: "synthetic.csv" }) })); expect(mocks.prisma.financeImportApplication.create).toHaveBeenCalledTimes(3); expect(mocks.prisma.financeTransaction.create).not.toHaveBeenCalled();
+    expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ title: "synthetic.csv" }) })); expect(mocks.prisma.financeImportApplication.create).toHaveBeenCalledTimes(3); expect(mocks.prisma.financeTransaction.create).not.toHaveBeenCalled(); expect(mocks.prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ timeout: 120_000 }));
     expect(mocks.prisma.financeImportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ stage: "APPLIED", appliedCount: 3, appliedByUserId: "writer-1" }) }));
   });
   it("restates with optimistic versions and records unchanged before/after receipts", async () => {
@@ -68,14 +68,15 @@ describe("Finance report application", () => {
     expect(result.receipts.map(({ outcome }) => outcome)).toEqual(["UPDATED", "UNCHANGED"]);
     expect(mocks.prisma.financeReportFact.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "fact-u", version: 3,
       amountCents: 50 }), data: expect.objectContaining({ reportId: "report-1", amountCents: 100, sourceBatchId: "batch-1", sourceCandidateId: "update", version: { increment: 1 } }) }));
+    expect(mocks.prisma.financeReportFact.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ reportId: "report-1", sourceCandidateId: "same", version: { increment: 1 } }) }));
     const receiptData = mocks.prisma.financeImportApplication.create.mock.calls.map(([{ data }]) => data); expect(receiptData.every(({ beforeValueHash, afterValueHash }) => beforeValueHash && afterValueHash)).toBe(true);
   });
   it("partially applies approved rows, resumes without replay, and exact retries are no-ops", async () => {
-    const add = candidate("add"); const warning = candidate("warning", { reviewState: "WARNING" });
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([add, warning])); const first = await applyFinanceReportImport(actor, input([add]));
+    const add = candidate("add"); const pending = candidate("pending");
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([add, pending])); const first = await applyFinanceReportImport(actor, input([add]));
     expect(first).toMatchObject({ stage: "PARTIALLY_APPLIED", appliedNow: 1 }); const receipt = first.receipts[0]!;
     const applied = candidate("add", { reviewState: "APPLIED", version: 3, application: { id: receipt.id, idempotencyKey: receipt.idempotencyKey,
-      outcome: receipt.outcome, targetFactId: receipt.targetFactId } }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, warning], { stage: "PARTIALLY_APPLIED", version: 5, appliedCount: 1 }));
+      outcome: receipt.outcome, targetFactId: receipt.targetFactId } }); mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([applied, pending], { stage: "PARTIALLY_APPLIED", version: 5, appliedCount: 1 }));
     await expect(applyFinanceReportImport(actor, input([add]))).resolves.toMatchObject({ noOp: true, appliedNow: 0, appliedCount: 1 });
     expect(mocks.prisma.financeReport.upsert).toHaveBeenCalledTimes(1); expect(mocks.prisma.financeReportFact.create).toHaveBeenCalledTimes(1);
   });
