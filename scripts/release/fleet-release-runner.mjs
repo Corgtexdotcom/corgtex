@@ -96,7 +96,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const providers = new Set(targets.map((target) => target.provider));
   emitGithubOutput("uses_azure", providers.has("azure"), deps);
   emitGithubOutput("uses_railway", providers.has("railway"), deps);
-  emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps);
+  emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); emitGithubOutput("selected_targets_json", JSON.stringify(targets), deps);
 
   const preflight = targets.map((target) => ({
     target,
@@ -281,12 +281,8 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 }
 
 function observationTargetsFor(targets) {
-  const selected = new Set(targets.map((target) => target.provider === "azure"
-    ? "azure-selfserve"
-    : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null)
-    .filter(Boolean));
-  return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"]
-    .filter((target) => selected.has(target));
+  const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean));
+  return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target));
 }
 
 function validateConfiguredTargetJson(name, raw, invalid) {
@@ -394,7 +390,8 @@ async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
   const configured = parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON);
   const discovered = configured.length > 0 ? configured : await discoverControlPlaneTargets(deps);
-  return dedupeTargets([...configuredTargets(env), ...discovered].map(normalizeTarget));
+  const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
+  return dedupeTargets([...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
 }
 
 function configuredTargets(env) {
@@ -415,11 +412,11 @@ function parseTargetJson(raw) {
 async function discoverControlPlaneTargets(deps) {
   const env = deps.env ?? process.env;
   if (!env.CONTROL_PLANE_AGENT_API_KEY) return [];
-  const rows = await callControlPlaneTool("list_customers", { includeAllDeployments: true }, deps);
+  const rows = await callControlPlaneTool("list_customers", { includeAllDeployments: true, uncapped: true }, deps);
   if (!Array.isArray(rows)) {
     throw new Error("Control-plane list_customers did not return an array.");
   }
-  return rows.map(targetFromControlPlaneRow);
+  return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production").map(targetFromControlPlaneRow);
 }
 
 function normalizeTarget(target) {
