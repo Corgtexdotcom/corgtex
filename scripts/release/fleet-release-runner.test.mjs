@@ -41,7 +41,7 @@ function azureTargetJson(overrides = {}) {
     deploymentId: "dep-azure",
     label: "Azure Self-Serve",
     url: "https://selfserve.corgtex.com",
-    group: "azure-selfserve",
+    group: "selfserve",
     provider: "azure",
     azure: {
       resourceGroup: "rg-1",
@@ -604,6 +604,7 @@ describe("fleet release runner", () => {
   });
 
   it("prints a dry-run plan without mutating providers", async () => {
+    const outputs = {};
     const runCommand = vi.fn();
     const fetchImpl = vi.fn();
 
@@ -624,15 +625,18 @@ describe("fleet release runner", () => {
       runCommand,
       fetchImpl,
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.dryRun).toBe(true);
     expect(runCommand).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(result.targets).toHaveLength(1);
+    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "ops" });
   });
 
   it("defaults dry-run plans to primary targets and excludes backup app", async () => {
+    const outputs = {}, targetFile = join(mkdtempSync(join(tmpdir(), "fleet-snapshot-")), "targets.json");
     const result = await runFleetRelease([
       "deploy",
       "--release",
@@ -656,6 +660,7 @@ describe("fleet release runner", () => {
             workerServiceId: "worker-customer",
           },
         }]),
+        FLEET_RELEASE_TARGETS_FILE: targetFile,
         FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
         FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup", label: "Backup App", group: "backup-app", url: "https://app.corgtex.com" }),
         FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(),
@@ -668,16 +673,29 @@ describe("fleet release runner", () => {
         AZURE_SUBSCRIPTION_ID: "azure-subscription",
       },
       runCommand: vi.fn(),
-      fetchImpl: vi.fn(),
+      fetchImpl: vi.fn(async () => controlPlaneResult({ cloudProvider: "AZURE", providerResourceGroup: "rg-1", providerWebServiceId: "web-app", providerWorkerServiceId: "worker-app", deploymentStatus: "ACTIVE" })),
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.targets.map((target) => target.group)).toEqual([
-      "railway-customers",
+      "managed-customers",
       "ops",
-      "azure-selfserve",
+      "selfserve",
     ]);
     expect(result.targets.some((target) => target.group === "backup-app")).toBe(false);
+    expect({ ...outputs, selected_targets: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })) }).toMatchObject({ observation_targets: "railway-customers,azure-selfserve,ops", selected_targets: JSON.parse(JSON.stringify(result.targets)) });
+  });
+
+  it("revalidates frozen targets with bounded concurrency before mutation", async () => { const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-snapshot-")), "targets.json"), runCommand = vi.fn(), outputs = {}, snapshots = Array.from({ length: 9 }, (_, index) => JSON.parse(targetJson({ id: `target-${index}`, deploymentId: `dep-${index}`, label: `Target ${index}`, group: "managed-customers", url: `https://target-${index}.corgtex.com` }))[0]);
+    let active = 0, peak = 0; writeFileSync(targetFile, JSON.stringify(snapshots)); const broad = await runFleetRelease(["deploy", "--release", SHA, "--dry-run", "--reason", "Revalidate fleet."], {
+      env: { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "control-plane-key" }, runCommand, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; },
+      fetchImpl: vi.fn(async (_url, init) => { active += 1; peak = Math.max(peak, active); await new Promise((resolve) => setTimeout(resolve, 2)); active -= 1; const deploymentId = JSON.parse(init.body).params.arguments.deploymentId; return controlPlaneResult({ cloudProvider: "RAILWAY", railwayProjectId: "project-1", railwayEnvironmentId: "env-1", railwayWebServiceId: "web-1", railwayWorkerServiceId: "worker-1", deploymentStatus: deploymentId === "dep-0" ? "RETIRED" : "ACTIVE" }); }),
+    }); expect({ peak, ids: broad.targets.map((target) => target.id), ...outputs }).toMatchObject({ peak: 8, ids: snapshots.slice(1).map((target) => target.id), uses_azure: false, observation_targets: "railway-customers" });
+    const currentAzure = { cloudProvider: "AZURE", providerResourceGroup: "rg-1", providerWebServiceId: "web-app", providerWorkerServiceId: "worker-app", provisioningStatus: "active" }, env = { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", AZURE_CLIENT_ID: "azure-client", AZURE_TENANT_ID: "azure-tenant", AZURE_SUBSCRIPTION_ID: "azure-subscription", GITHUB_TOKEN: "github-token", ...azureObservabilityEnv }, lifecycleFetch = vi.fn().mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "ACTIVE" })).mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "RETIRED" })), classificationFetch = vi.fn().mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, environment: "production", deploymentKind: "SHARED_WORKSPACE", deploymentStatus: "ACTIVE" })).mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, environment: "production", deploymentKind: "INTERNAL", deploymentStatus: "ACTIVE" }));
+    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject identity drift."], { env, runCommand, fetchImpl: vi.fn(async () => controlPlaneResult({ ...currentAzure, providerWebServiceId: "replacement-web" })), sleep: vi.fn() })).rejects.toThrow("provider or resource identity changed");
+    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); const forced = await runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--force-after-failure", "true", "--reason", "Reject workload drift."], { env, runCommand, fetchImpl: classificationFetch, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; } }); expect({ result: forced.results[0], snapshot: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })), ...outputs }).toMatchObject({ result: { status: "failed", error: expect.stringContaining("workload or environment changed") }, snapshot: [], uses_azure: false, observation_targets: "" }); const providerFetch = vi.fn().mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "ACTIVE" })).mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "ACTIVE" })), providerCommand = vi.fn(() => { throw new Error("provider failed"); }); writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); const postBoundary = await runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--force-after-failure", "true", "--reason", "Observe provider failure."], { env, runCommand: providerCommand, fetchImpl: providerFetch, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; } }); expect({ result: postBoundary.results[0], snapshot: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })), ...outputs }).toMatchObject({ result: { status: "failed", error: "provider failed" }, snapshot: [{ id: "azure" }], uses_azure: true, observation_targets: "azure-selfserve" });
+    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject lifecycle drift."], { env, runCommand, fetchImpl: lifecycleFetch, sleep: vi.fn() })).rejects.toThrow("Ring 2 failed"); expect(lifecycleFetch).toHaveBeenCalledTimes(2); expect(runCommand).not.toHaveBeenCalled();
   });
 
   it("fails preflight before mutation when provider credentials are missing", async () => {
@@ -897,23 +915,31 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("GHCR import token is missing for Railway image pull");
   });
 
-  it("blocks mismatched provider and URL combinations before mutation", async () => {
-    await expect(runFleetRelease([
+  it("does not infer provider from workload or URL", async () => {
+    const outputs = {}, toolCalls = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      if (String(url).includes("backboard.railway.com")) return successfulRailwayResponse(JSON.parse(options.body));
+      if (String(url).includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body); toolCalls.push(body.params.name);
+        if (body.params.name === "record_verified_release") return controlPlaneResult({ recorded: true });
+        if (body.params.name === "list_self_serve_customers") return controlPlaneResult(selfServeRegistry());
+      }
+      return healthResponse();
+    });
+    const result = await runFleetRelease([
       "deploy",
       "--release",
       SHA,
       "--targets",
       "azure-selfserve",
-      "--dry-run",
-      "--fail-on-blockers",
       "--reason",
       "Validate provider boundary.",
     ], {
       env: {
         FLEET_RELEASE_TARGETS_JSON: targetJson({
-          id: "bad-azure",
+          id: "railway-selfserve",
           deploymentId: "dep-azure",
-          label: "Bad Azure",
+          label: "Railway Self-Serve",
           group: "azure-selfserve",
           provider: "railway",
           url: "https://selfserve.corgtex.com",
@@ -922,18 +948,20 @@ describe("fleet release runner", () => {
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
         GITHUB_TOKEN: "github-token",
-        AZURE_CLIENT_ID: "azure-client",
-        AZURE_TENANT_ID: "azure-tenant",
-        AZURE_SUBSCRIPTION_ID: "azure-subscription",
-        ...azureObservabilityEnv,
+        ...railwayObservabilityEnv,
       },
       runCommand: vi.fn(),
-      fetchImpl: vi.fn(),
+      fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("requires provider azure");
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
+    });
+
+    expect(result.results[0].status).toBe("succeeded"); expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "railway-selfserve" });
+    expect(toolCalls).toEqual(["record_verified_release", "list_self_serve_customers"]); expect(result.results[0].result.providerReadiness).toMatchObject({ status: "ok", provider: "railway" });
   });
 
   it("preflights Azure self-serve without Railway credentials", async () => {
+    const outputs = {};
     const result = await runFleetRelease([
       "deploy",
       "--release",
@@ -958,11 +986,47 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl: vi.fn(),
       sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
     });
 
     expect(result.blockers).toEqual([]);
     expect(result.targets).toHaveLength(1);
-    expect(result.targets[0]).toMatchObject({ group: "azure-selfserve", provider: "azure" });
+    expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "azure" }); expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false, observation_targets: "azure-selfserve" });
+  });
+
+  it.each([
+    ["Railway", [{ id: "railway", environment: "production", cloudProvider: "RAILWAY" }], /RAILWAY_API_TOKEN/],
+    ["Azure", [{ id: "azure", environment: "production", cloudProvider: "AZURE" }], /AZURE_CLIENT_ID/],
+    ["mixed", [{ id: "railway", environment: "production", cloudProvider: "RAILWAY" }, { id: "azure", environment: "production", cloudProvider: "AZURE" }], /RAILWAY_API_TOKEN.*AZURE_CLIENT_ID/],
+  ])("validates credentials for discovered %s inventory", async (_label, rows, expected) => {
+    await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false"], {
+      env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "posthog-token", APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review" },
+      fetchImpl: vi.fn(async (_url, init) => { expect(JSON.parse(init.body).params.arguments).toEqual({ includeAllDeployments: true, uncapped: true }); return controlPlaneResult(rows); }),
+    })).rejects.toThrow(expected);
+  });
+
+  it("keeps managed Azure targets non-mutable until PR3", async () => {
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate managed Azure."], {
+      env: { FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ group: "managed-customers", label: "Managed Azure" }), CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", AZURE_CLIENT_ID: "azure-client", AZURE_TENANT_ID: "azure-tenant", AZURE_SUBSCRIPTION_ID: "azure-subscription" },
+      runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn(),
+    })).rejects.toThrow("non-mutable until the generic Azure executor is implemented in PR3");
+  });
+
+  it("discovers active replacements, deduplicates self-serve, and blocks retired mutation", async () => {
+    const rows = [{ id: "retired", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "RETIRED" }, { id: "active", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "backup", environment: "production", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "shared", environment: "production", deploymentKind: "SHARED_WORKSPACE", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }, { id: "self-hosted", environment: "production", cloudProvider: "SELF_HOSTED", deploymentStatus: "ACTIVE" }, { id: "dep-azure", environment: "production", cloudProvider: "AZURE", deploymentStatus: "SUSPENDED" }, { id: "staging", environment: "staging", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE" }];
+    const env = { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(), FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "github-token", ...railwayObservabilityEnv };
+    const deps = { env, runCommand: vi.fn(), fetchImpl: vi.fn(async () => controlPlaneResult(rows)), sleep: vi.fn() };
+    const broad = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--dry-run", "--reason", "Validate broad selection."], deps);
+    expect(broad.targets.map((target) => [target.id, target.group])).toEqual([["ops", "ops"], ["active", "managed-customers"]]);
+
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate explicit selection."], deps))
+      .rejects.toThrow("Target lifecycle status RETIRED is not release-eligible");
+  });
+
+  it("rejects transition inventory that omits provider", async () => {
+    await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "selfserve", "--dry-run"], {
+      env: { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ provider: undefined }) }, runCommand: vi.fn(),
+    })).rejects.toThrow("must explicitly declare provider");
   });
 
   it("can make dry-run preflight blockers fatal before image build", async () => {
@@ -1386,7 +1450,7 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("Ring 1 failed");
+    })).rejects.toThrow("Ring 3 failed");
 
     expect(toolCalls).toEqual(["run_post_deploy_probe"]);
     expect(slackPayloads[0].text).toContain("Customer A");
@@ -1445,7 +1509,7 @@ describe("fleet release runner", () => {
       runCommand: vi.fn(),
       fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("Ring 1 failed");
+    })).rejects.toThrow("Ring 3 failed");
 
     const createRequest = githubRequests.find((request) => request.method === "POST");
     expect(createRequest.body.title).toContain("P1 fleet-release");
@@ -1560,6 +1624,7 @@ describe("fleet release runner", () => {
       expect(args).toContain("posthog-token=posthog-project-token");
     }
     expect(updateCalls).toHaveLength(2);
+    expect(updateCalls.map(([, args]) => args[args.indexOf("--image") + 1])).toEqual([`acr1.azurecr.io/corgtex/web:sha-${SHA}`, `acr1.azurecr.io/corgtex/worker:sha-${SHA}`]);
     for (const [, args] of updateCalls) {
       expect(args).toContain("CORGTEX_STARTUP_MODE=migrate-and-web");
       expect(args).toContain("CORGTEX_AUTO_SEED_JNJ_DEMO=false");

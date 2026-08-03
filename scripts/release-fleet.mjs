@@ -17,7 +17,7 @@ export function buildWorkflowInputs(argv = process.argv.slice(2)) {
   const targets = normalizeTargets(args.targets).join(",");
   const reason = args.reason ?? "";
   if (!reason.trim()) {
-    throw new Error("Usage: npm run release:fleet -- --reason \"...\" [--release latest-stable|<full-sha>] [--targets default|all|railway-customers|azure-selfserve|ops|backup-app] [--dry-run] [--concurrency 2]");
+    throw new Error("Usage: npm run release:fleet -- --reason \"...\" [--release latest-stable|<full-sha>] [--targets default|all|managed-customers|selfserve|ops|backup-app] [--dry-run] [--concurrency 2]");
   }
   return {
     release,

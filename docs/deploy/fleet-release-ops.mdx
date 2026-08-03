@@ -16,18 +16,18 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | Name | Kind | Purpose |
 |---|---|---|
 | `CONTROL_PLANE_AGENT_API_KEY` | Secret | Lets GitHub Actions call the Ops control-plane MCP endpoint for discovery and verified inventory recording. |
-| `RAILWAY_API_TOKEN` | Secret | Lets GitHub Actions promote Railway web and worker services. |
-| `AZURE_CLIENT_ID` | Secret | Azure workload identity client used by `azure/login`. |
+| `RAILWAY_API_TOKEN` | Secret | Required only when the selected inventory contains a Railway target. |
+| `AZURE_CLIENT_ID` | Secret | Azure workload identity client used when the selected inventory contains an Azure target. |
 | `AZURE_TENANT_ID` | Secret | Azure tenant used by `azure/login`. |
 | `AZURE_SUBSCRIPTION_ID` | Secret | Azure subscription used by `azure/login`. |
 | `GHCR_IMPORT_TOKEN` | Secret, optional | Long-lived GHCR pull token for Railway private-image pulls and Azure imports. When unset, Railway promotions use the workflow `GITHUB_TOKEN` for the immediate pull. |
 | `CONTROL_PLANE_URL` | Variable | Ops control-plane origin. Defaults to `https://ops.corgtex.com` when unset. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Variable, optional | Railway GraphQL endpoint override. Leave unset unless Railway support directs otherwise. |
 | `FLEET_RELEASE_STABLE_GIT_SHA` | Variable | Latest stable 40-character git SHA. Update only after canary proof. |
-| `FLEET_RELEASE_TARGETS_JSON` | Variable | Railway customer targets, or leave unset only if control-plane discovery is intentionally used. |
+| `FLEET_RELEASE_TARGETS_JSON` | Variable | Transition inventory for managed customer targets, or leave unset when control-plane discovery is authoritative. |
 | `FLEET_RELEASE_OPS_TARGET_JSON` | Variable | Dedicated Ops target. |
 | `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
-| `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Azure self-serve target. |
+| `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Legacy-named selfserve target inventory; each target still declares its provider. |
 | `FLEET_RELEASE_ACR_SERVER` | Variable, optional | Azure Container Registry server. Defaults to the production self-serve registry. |
 | `FLEET_RELEASE_PREFLIGHT_MAX_SECONDS` | Variable, optional | Dry-run preflight timing gate. Defaults to `30`. |
 | `GHCR_IMPORT_USERNAME` | Variable, optional | GHCR username for Azure imports. Defaults to the GitHub Actions actor. |
@@ -36,33 +36,39 @@ Configure these values on the `fleet-release-production` environment. Store secr
 
 Each target variable may contain one target object or an array of target objects. Keep target inventory operational and sanitized: IDs, URLs, provider IDs, and release metadata are acceptable; raw customer content, credentials, private uploads, and bearer tokens are not.
 
+Every target must include `provider: "azure"` or `provider: "railway"`; provider is never derived from its group, hostname, or URL. Workload selectors are `managed-customers`, `selfserve`, `ops`, and `backup-app`. The legacy `railway-customers` and `azure-selfserve` selectors remain read-compatible and emit deprecation information.
+
 Railway targets must include:
 
 - `id`
 - `label`
 - `url`
-- `group`, one of `railway-customers`, `ops`, or `backup-app`
+- `group`, one of `managed-customers`, `selfserve`, `ops`, or `backup-app`
 - `provider: "railway"`
 - `railway.projectId`
 - `railway.environmentId`
 - `railway.webServiceId`
 - `railway.workerServiceId`
 
-Azure self-serve targets must include:
+Azure targets must include:
 
 - `id`
 - `label`
 - `url`
-- `group: "azure-selfserve"`
+- an explicit workload `group`
 - `provider: "azure"`
 - `azure.resourceGroup`
 - `azure.acrName`
 - `azure.webAppName`
 - `azure.workerAppName`
 
+Only `selfserve` Azure targets are mutable in PR1. Azure managed-customer, core, backup, and Ops targets are shown with blockers and remain non-mutable until the generic Azure executor lands in PR3; they never inherit selfserve resource defaults.
+
+Set `deploymentStatus` or `provisioningStatus` to `RETIRED` or `SUSPENDED`, or set `releaseEligible: false`, as soon as a target cannot receive releases. Default and `all` selections exclude those targets. A specific workload selection reports them as blockers and a real run fails before provider mutation.
+
 ## Operator Checklist
 
-1. Confirm `fleet-release-production` has the required secrets and variables for the selected target groups.
+1. Confirm `fleet-release-production` has the required inventory and credentials for the providers on the selected targets. Azure-only releases do not require `RAILWAY_API_TOKEN`; Railway-only releases do not require Azure credentials.
 2. Confirm `FLEET_RELEASE_STABLE_GIT_SHA` points to the canary-proven stable release, not an arbitrary `main` commit. Do not advance it while any blocking customer-read probe, support-connector readiness check, or required recorder smoke is pending.
 3. Confirm the `Release Images` workflow has published both canonical GHCR images for `sha-<FLEET_RELEASE_STABLE_GIT_SHA>`.
 4. Confirm Railway targets can pull private GHCR images. Prefer setting `GHCR_IMPORT_TOKEN`; otherwise the workflow will pass its short-lived `GITHUB_TOKEN` as Railway registry credentials for the current promotion.
@@ -74,7 +80,7 @@ npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
 
 Dry-runs use the lightweight preflight workflow by default. That path validates configuration, resolves `latest-stable`, and plans rings without `npm ci`, Prisma generation, Docker build, Azure login, or provider mutation.
 
-6. Confirm the dry-run dispatches `fleet-release-preflight.yml`, prints the manifest, selected targets, rings, blockers, and elapsed seconds before any provider mutation.
+6. Confirm the dry-run dispatches `fleet-release-preflight.yml` and prints each target's workload, provider, ring, criticality, resource identifiers, deprecations, and blockers before any provider mutation. Ops must be in the final ring.
 7. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
 8. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
 9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, passing customer-read probes, and `supportConnectorReadiness.status=ready`.

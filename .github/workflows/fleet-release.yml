@@ -9,10 +9,10 @@ on:
         type: string
         default: latest-stable
       targets:
-        description: "default, all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
+        description: "default, all, managed-customers, selfserve, ops, backup-app, or legacy aliases. Default excludes backup-app."
         required: true
         type: string
-        default: railway-customers,azure-selfserve,ops
+        default: managed-customers,selfserve,ops
       reason:
         description: "Audited reason for the release."
         required: true
@@ -128,9 +128,11 @@ jobs:
 
       - name: Preflight fleet release
         if: ${{ !inputs.dry_run }}
+        id: preflight
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
         run: |
@@ -208,7 +210,7 @@ jobs:
             --manifest-json "$MANIFEST_JSON"
 
       - name: Log in to Azure
-        if: ${{ !inputs.dry_run && (inputs.targets == 'all' || contains(inputs.targets, 'azure-selfserve')) }}
+        if: ${{ !inputs.dry_run && steps.preflight.outputs.uses_azure == 'true' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -223,9 +225,11 @@ jobs:
 
       - name: Promote release through rings
         if: ${{ !inputs.dry_run }}
+        id: promotion
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
@@ -240,10 +244,11 @@ jobs:
             --force-after-failure "$FORCE_AFTER_FAILURE_INPUT"
 
       - name: Run post-deploy observation gate
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.promotion.outputs.observation_targets != '' }}
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
-          TARGETS_INPUT: ${{ inputs.targets }}
+          TARGETS_INPUT: ${{ steps.promotion.outputs.observation_targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
           AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
           POSTHOG_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
@@ -252,9 +257,10 @@ jobs:
           OBSERVATION_REQUIRE_SOURCE: "true"
           OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
           OBSERVATION_SINCE: ${{ steps.observation-window.outputs.since }}
+          USES_AZURE: ${{ steps.promotion.outputs.uses_azure }}
         run: |
           mkdir -p .artifacts/post-deploy-observation-gate
-          if [[ "$TARGETS_INPUT" != "all" && "$TARGETS_INPUT" != *"azure-selfserve"* ]]; then
+          if [[ "$USES_AZURE" != "true" ]]; then
             unset AZURE_APPLICATIONINSIGHTS_APP_NAME
             unset AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP
           fi

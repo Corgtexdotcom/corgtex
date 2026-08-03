@@ -9,10 +9,10 @@ on:
         type: string
         default: latest-stable
       targets:
-        description: "default, all, railway-customers, azure-selfserve, ops, backup-app, or a comma-separated subset. Default excludes backup-app."
+        description: "default, all, managed-customers, selfserve, ops, backup-app, or legacy aliases. Default excludes backup-app."
         required: true
         type: string
-        default: railway-customers,azure-selfserve,ops
+        default: managed-customers,selfserve,ops
       reason:
         description: "Audited reason for the release preflight."
         required: true
