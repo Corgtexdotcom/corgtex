@@ -4278,7 +4278,7 @@ describe("meeting recorder domain", () => {
 
   it("does not retry terminalized recordings in subsequent reconciliations using a stateful two-pass mock", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
-    
+
     let mockDb = [
       { id: "recording-stale", workspaceId: "workspace-1", meetingId: "meeting-stale", provider: "MEETING_BAAS", externalBotId: "bot-stale", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } },
       { id: "recording-expired", workspaceId: "workspace-1", meetingId: "meeting-expired", provider: "RECALL_AI", externalBotId: "bot-expired", status: "COMPLETED", activeDedupeKey: null, createdAt: new Date(Date.now() - 93600000), joinAt: new Date(Date.now() - 93600000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 93600000), scheduledEndAt: new Date(Date.now() - 90000000) } },
@@ -4309,7 +4309,7 @@ describe("meeting recorder domain", () => {
 
     // Pass 1: should terminalize all three
     await reconcileMeetingRecorders("workspace-1");
-    
+
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-stale" }, data: expect.objectContaining({ status: "FAILED", failureCode: "STALE_RECORDER" }) }));
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-expired" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "recording-permanent" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_FETCH_FAILED" }) }));
@@ -4367,9 +4367,9 @@ describe("meeting recorder domain", () => {
     let mockDb = [{ id: "timeout-stale", workspaceId: "workspace-1", meetingId: "meeting-timeout", provider: "MEETING_BAAS", externalBotId: "bot-timeout", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(1), joinAt: new Date(1), transcriptProcessedAt: null, meeting: { recordedAt: new Date(1), scheduledEndAt: new Date(1) } }];
     prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
-    
+
     await reconcileMeetingRecorders("workspace-1");
-    
+
     // Verify timeout parameter passed to transaction
     expect(prismaMock.$transaction).toHaveBeenCalledWith(
       expect.any(Function),
@@ -4392,7 +4392,7 @@ describe("meeting recorder domain", () => {
     let mockDb = [{ id: "claim-race", workspaceId: "workspace-1", meetingId: "meeting-claim", provider: "RECALL_AI", externalBotId: "bot-claim", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(1), joinAt: new Date(1), transcriptProcessedAt: null, meeting: { recordedAt: new Date(1), scheduledEndAt: new Date(1) } }];
     prismaMock.meetingRecording.findMany.mockImplementation(async (q: any) => q.where?.provider === "RECALL_AI" ? mockDb : []);
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
-    
+
     let freshWebhook = true;
     prismaMock.meetingRecorderProviderEvent.findFirst.mockImplementation(async () => freshWebhook ? { id: "webhook-fresh" } : null);
 
@@ -4401,7 +4401,7 @@ describe("meeting recorder domain", () => {
       where: expect.objectContaining({ receivedAt: expect.objectContaining({ gte: expect.any(Date) }) })
     }));
     expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
-    
+
     freshWebhook = false;
     await reconcileMeetingRecorders("workspace-1");
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "claim-race" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
@@ -4416,7 +4416,7 @@ describe("meeting recorder domain", () => {
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
     prismaMock.meetingRecorderProviderEvent.findFirst.mockResolvedValue(null);
     prismaMock.meetingRecorderSmokeRun.updateMany.mockResolvedValue({ count: 1 });
-    
+
     // Reconciliation wins lock and terminalizes
     await reconcileMeetingRecorders("workspace-1");
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED" }) }));
@@ -4436,4 +4436,3 @@ describe("meeting recorder domain", () => {
     expect(prismaMock.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "rec-late" }, data: expect.objectContaining({ status: "FAILED", failureCode: "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED", failureMessage: "expired" }) }));
   });
 });
-
