@@ -45,7 +45,8 @@ export async function listFinanceReportImports(actor: AppActor, workspaceId: str
   await requireFinanceReportImportReadAccess(actor, workspaceId);
   const batches = await prisma.financeImportBatch.findMany({ where: { workspaceId }, orderBy: { createdAt: "desc" }, take: 100, select: { id: true,
     originalFilename: true, stage: true, reportType: true, basis: true, cadence: true, periodStart: true, periodEnd: true,
-    resolvedCurrency: true, addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
+    currencyState: true, resolvedCurrency: true, safeErrorCode: true, safeErrorMessage: true,
+    addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
     warningCount: true, blockerCount: true, rejectedCount: true, appliedCount: true, version: true, createdAt: true, updatedAt: true,
     candidates: { select: { action: true, periodEnd: true, reviewState: true } } } });
   const reportCounts = batches.length ? await prisma.$queryRaw<Array<{ id: string; count: number }>>(Prisma.sql`SELECT batch.id, count(*)::int AS count FROM "FinanceImportBatch" batch CROSS JOIN LATERAL jsonb_array_elements(COALESCE(batch."interpretationJson"->'exceptions', '[]'::jsonb)) exception WHERE batch."workspaceId" = ${workspaceId} AND batch.id IN (${Prisma.join(batches.map(({ id }) => id))}) AND exception->>'severity' = 'WARNING' AND exception->>'code' NOT IN ('HISTORICAL_ADDITION', 'HISTORICAL_UPDATE') GROUP BY batch.id`) : [];
@@ -59,10 +60,18 @@ export async function getFinanceReportImport(actor: AppActor, params: { workspac
       basis: true, cadence: true, periodStart: true, periodEnd: true, asOfDate: true, title: true, currencyState: true, resolvedCurrency: true,
       currencyResolutionSource: true, addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
       skippedCount: true, warningCount: true, blockerCount: true, rejectedCount: true, appliedCount: true, approvedByUserId: true,
-      approvedAt: true, version: true, createdAt: true, updatedAt: true, interpretationJson: true, candidates: { orderBy: { sourceKey: "asc" }, select: { id: true, sourceKey: true, sourceLabel: true, sourcePath: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, confidenceBps: true, evidenceMd: true, explanationMd: true, editedByUserId: true, editedAt: true, approvedByUserId: true, approvedAt: true, version: true } } } });
+      approvedAt: true, safeErrorCode: true, safeErrorMessage: true, version: true, createdAt: true, updatedAt: true, interpretationJson: true,
+      candidates: { orderBy: { sourceKey: "asc" }, select: { id: true, sourceKey: true, sourceLabel: true, sourcePath: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, confidenceBps: true, evidenceMd: true, explanationMd: true, editedByUserId: true, editedAt: true, approvedByUserId: true, approvedAt: true, version: true } } } });
   invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
-  const { interpretationJson, candidates, ...detail } = batch; const warnings = reportWarnings(interpretationJson).filter(({ code }) => !HISTORICAL_POLICY_CODES.has(code));
-  return { ...detail, warningCount: warnings.length + candidates.filter((candidate) => warning(candidate, now)).length, warnings, candidates: candidates.map((candidate) => present(candidate, now)) };
+  const { interpretationJson, candidates, ...detail } = batch; const interpretation = parseFinanceImportInterpretationV1(interpretationJson);
+  const warnings = interpretation.exceptions.filter(({ severity, code }) => severity === "WARNING" && !HISTORICAL_POLICY_CODES.has(code));
+  const numericFormat = interpretation.numericFormat.status === "RESOLVED"
+    ? { status: "RESOLVED" as const, decimalSeparator: interpretation.numericFormat.decimalSeparator,
+        groupingSeparator: interpretation.numericFormat.groupingSeparator, amountScale: interpretation.numericFormat.amountScale }
+    : { status: "UNRESOLVED" as const, decimalSeparator: null, groupingSeparator: null, amountScale: null };
+  return { ...detail, warningCount: warnings.length + candidates.filter((candidate) => warning(candidate, now)).length, warnings,
+    clarification: { canConfirm: detail.stage === "NEEDS_INPUT" && detail.safeErrorCode === "CURRENCY_UNRESOLVED"
+      && numericFormat.status === "RESOLVED" && candidates.length > 0, numericFormat }, candidates: candidates.map((candidate) => present(candidate, now)) };
 }
 function reviewable(batch: { stage: string; version: number }, expectedVersion: number) {
   validVersion(expectedVersion);

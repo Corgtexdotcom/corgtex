@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { AppError, applyFinanceReportImport, editFinanceReportImportCandidate, getFinanceReportImport, reviewFinanceReportImport } from "@corgtex/domain";
+import { AppError, applyFinanceReportImport, editFinanceReportImportCandidate, getFinanceReportImport, rerunFinanceReportImportReconciliation, reviewFinanceReportImport } from "@corgtex/domain";
 import { z } from "zod";
 import { resolveRequestActor } from "@/lib/auth";
 import { checkApiDemoGuard } from "@/lib/demo-guard";
@@ -12,6 +12,11 @@ const edit = z.strictObject({ operation: z.literal("EDIT"), candidateId: z.strin
   periodStart: z.string().optional(), periodEnd: z.string().optional() });
 const review = z.strictObject({ operation: z.enum(["APPROVE", "REJECT", "APPROVE_VERIFIED", "APPROVE_ALL"]), candidateId: z.string().min(1).max(100).optional(),
   expectedVersion: version, candidateVersions: z.array(candidateVersion).min(1).max(1_000), acceptWarnings: z.boolean().optional() });
+const clarification = z.strictObject({ operation: z.literal("CLARIFY"), expectedVersion: version,
+  candidateVersions: z.array(z.strictObject({ id: z.string().trim().min(1).max(100), expectedVersion: version })).min(1).max(1_000),
+  confirmedCurrency: z.string().trim().length(3), confirmedAmountScale: z.union([z.literal(1), z.literal(100), z.literal(1_000), z.literal(1_000_000), z.literal(1_000_000_000)]) })
+  .refine(({ candidateVersions }) => new Set(candidateVersions.map(({ id }) => id)).size === candidateVersions.length,
+    { path: ["candidateVersions"], message: "Candidate IDs must be unique." });
 const application = z.strictObject({ expectedVersion: version, candidateVersions: z.array(z.strictObject({
   id: z.string().trim().min(1).max(100), expectedVersion: version })).min(1).max(1_000) })
   .refine(({ candidateVersions }) => new Set(candidateVersions.map(({ id }) => id)).size === candidateVersions.length,
@@ -35,11 +40,14 @@ export async function PATCH(request: NextRequest, { params }: Context) {
   let workspaceId: string | undefined;
   try {
     const actor = await resolveRequestActor(request); const route = await params; workspaceId = route.workspaceId; await checkApiDemoGuard(workspaceId);
-    const body = await validateBody(request, z.union([edit, review]));
+    const body = await validateBody(request, z.union([edit, review, clarification]));
     const result = body.operation === "EDIT"
       ? await editFinanceReportImportCandidate(actor, { ...route, ...body })
+      : body.operation === "CLARIFY"
+        ? await rerunFinanceReportImportReconciliation(actor, { ...route, expectedVersion: body.expectedVersion,
+            candidateVersions: body.candidateVersions, confirmedCurrency: body.confirmedCurrency, confirmedAmountScale: body.confirmedAmountScale })
       : await reviewFinanceReportImport(actor, { ...route, ...body, mode: body.operation });
-    return NextResponse.json({ review: result });
+    return NextResponse.json(body.operation === "CLARIFY" ? { clarification: result } : { review: result });
   } catch (error) {
     const safe = error instanceof z.ZodError ? new AppError(400, "VALIDATION_ERROR", "Review input is invalid.") : error;
     return handleRouteError(safe, { request, surface: "finance_report_import_review", workspaceId });

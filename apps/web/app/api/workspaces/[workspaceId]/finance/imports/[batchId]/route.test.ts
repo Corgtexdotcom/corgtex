@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZodType } from "zod";
-const mocks = vi.hoisted(() => ({ detail: vi.fn(), edit: vi.fn(), review: vi.fn(), apply: vi.fn(), actor: vi.fn(), demo: vi.fn(), error: vi.fn((value) => NextResponse.json({ error: value.code }, { status: value.status ?? 500 })) }));
+const mocks = vi.hoisted(() => ({ detail: vi.fn(), edit: vi.fn(), review: vi.fn(), clarify: vi.fn(), apply: vi.fn(), actor: vi.fn(), demo: vi.fn(), error: vi.fn((value) => NextResponse.json({ error: value.code }, { status: value.status ?? 500 })) }));
 class MockAppError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
-vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, applyFinanceReportImport: mocks.apply, getFinanceReportImport: mocks.detail, editFinanceReportImportCandidate: mocks.edit, reviewFinanceReportImport: mocks.review }));
+vi.mock("@corgtex/domain", () => ({ AppError: MockAppError, applyFinanceReportImport: mocks.apply, getFinanceReportImport: mocks.detail,
+  editFinanceReportImportCandidate: mocks.edit, rerunFinanceReportImportReconciliation: mocks.clarify, reviewFinanceReportImport: mocks.review }));
 vi.mock("@/lib/auth", () => ({ resolveRequestActor: mocks.actor }));
 vi.mock("@/lib/demo-guard", () => ({ checkApiDemoGuard: mocks.demo }));
 vi.mock("@/lib/http", () => ({ handleRouteError: mocks.error, validateBody: async (request: NextRequest, schema: ZodType) => {
@@ -15,6 +16,7 @@ const context = { params: Promise.resolve({ workspaceId: "workspace-1", batchId:
 const request = (body: unknown, method = "PATCH") => new NextRequest("http://localhost/api/workspaces/workspace-1/finance/imports/batch-1", { method, body: JSON.stringify(body) });
 describe("Finance import detail route", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.actor.mockResolvedValue(actor); mocks.detail.mockResolvedValue({ id: "batch-1" }); mocks.edit.mockResolvedValue({ version: 2 }); mocks.review.mockResolvedValue({ version: 3 });
+    mocks.clarify.mockResolvedValue({ batchId: "batch-1", version: 4, stage: "READY_FOR_REVIEW" });
     mocks.apply.mockResolvedValue({ batchId: "batch-1", version: 4, stage: "APPLIED", appliedCount: 1, appliedNow: 1, noOp: false,
       receipts: [{ candidateId: "candidate-1", id: "receipt-1", outcome: "CREATED", targetFactId: "fact-1", idempotencyKey: "key-1" }] }); });
   it("returns the reader-authorized batch detail", async () => {
@@ -33,6 +35,17 @@ describe("Finance import detail route", () => {
   it("maps malformed review bodies to a sanitized validation error", async () => {
     const { PATCH } = await import("./route"); const response = await PATCH(request({ operation: "APPROVE_ALL", expectedVersion: 0 }), context);
     expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "VALIDATION_ERROR" }); expect(mocks.review).not.toHaveBeenCalled();
+  });
+  it("confirms only bounded currency and resolved scale at route-owned exact versions", async () => {
+    const { PATCH } = await import("./route"); const body = { operation: "CLARIFY", expectedVersion: 3,
+      candidateVersions: [{ id: " candidate-1 ", expectedVersion: 2 }], confirmedCurrency: " eur ", confirmedAmountScale: 1_000 };
+    const response = await PATCH(request({ ...body, workspaceId: "other", extra: true }), context);
+    expect(response.status).toBe(400); expect(mocks.clarify).not.toHaveBeenCalled();
+    const accepted = await PATCH(request(body), context); expect(await accepted.json()).toEqual({ clarification: { batchId: "batch-1", version: 4, stage: "READY_FOR_REVIEW" } });
+    expect(mocks.clarify).toHaveBeenCalledWith(actor, { workspaceId: "workspace-1", batchId: "batch-1",
+      expectedVersion: 3, candidateVersions: [{ id: "candidate-1", expectedVersion: 2 }], confirmedCurrency: "eur", confirmedAmountScale: 1_000 });
+    const duplicate = { ...body, candidateVersions: [{ id: "candidate-1", expectedVersion: 2 }, { id: " candidate-1 ", expectedVersion: 2 }] };
+    expect((await PATCH(request(duplicate), context)).status).toBe(400); expect(mocks.clarify).toHaveBeenCalledTimes(1);
   });
   it("applies exact route-owned candidate versions and returns canonical receipts", async () => {
     const { POST } = await import("./route"); const body = { expectedVersion: 3, candidateVersions: [{ id: " candidate-1 ", expectedVersion: 2 }] };
