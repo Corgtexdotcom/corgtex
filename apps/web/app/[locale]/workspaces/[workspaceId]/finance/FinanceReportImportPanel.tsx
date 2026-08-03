@@ -62,7 +62,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   const [clarifyingBatchId, setClarifyingBatchId] = useState<string | null>(null);
   const selected = useMemo(() => batches.find(({ id }) => id === selectedId) ?? null, [batches, selectedId]);
   const selectedVersion = selected?.version;
-  const needsClarificationDetail = selected?.stage === "NEEDS_INPUT" && selected.safeErrorCode === "CURRENCY_UNRESOLVED"
+  const needsClarificationDetail = canWrite && selected?.stage === "NEEDS_INPUT" && selected.safeErrorCode === "CURRENCY_UNRESOLVED"
     && selected.currencyState === "UNRESOLVED";
   const selectedIdRef = useRef(selectedId); selectedIdRef.current = selectedId;
 
@@ -133,6 +133,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   }, [batches, loadBatches, loadPinnedSummary]);
 
   const selectedDetail = detail?.id === selectedId ? detail : null;
+  const clarificationLoading = needsClarificationDetail && selectedDetail === null && detailError === null;
   const processingView = selected ? buildFinanceImportView(selected) : null;
   const agentUnavailable = selected?.safeErrorCode === "FINANCE_REPORT_AGENT_UNAVAILABLE";
 
@@ -161,7 +162,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
           pinnedBatchesRef.current.set(uploadedSummary.id, uploadedSummary);
           setBatches((current) => [uploadedSummary, ...current.filter(({ id }) => id !== uploadedSummary.id)]);
         } catch (error) {
-          setDetailError(error instanceof Error ? error.message : "Import status could not be loaded.");
+          setListError(error instanceof Error ? error.message : "Import status could not be loaded.");
         }
       } catch (error) {
         setUploads((current) => current.map((row) => row.id === item.id ? { ...row, status: "failed",
@@ -270,7 +271,8 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
               <div className="finance-import-format"><span>Detected numeric format</span><strong>{numericFormatLabel(selectedDetail.clarification.numericFormat)}</strong></div>
               <button type="submit" className="primary" disabled={clarifyingBatchId === selectedDetail.id}>{clarifyingBatchId === selectedDetail.id ? "Confirming…" : "Confirm and reconcile"}</button>
             </form>}
-            {selected.stage === "NEEDS_INPUT" && (!selectedDetail?.clarification.canConfirm || !canWrite) && <div className="finance-import-notice warning"><strong>{!canWrite ? "Finance write access required" : agentUnavailable ? "Import agent unavailable" : "Structural blocker"}</strong>
+            {selected.stage === "NEEDS_INPUT" && clarificationLoading && <div className="finance-import-notice"><strong>Loading report settings</strong><span>Checking the resolved numeric format and scale before currency confirmation.</span></div>}
+            {selected.stage === "NEEDS_INPUT" && !clarificationLoading && !detailError && (!selectedDetail?.clarification.canConfirm || !canWrite) && <div className="finance-import-notice warning"><strong>{!canWrite ? "Finance write access required" : agentUnavailable ? "Import agent unavailable" : "Structural blocker"}</strong>
               <span>{!canWrite ? "A Finance writer must resolve this report." : agentUnavailable
                 ? selected.safeErrorMessage ?? "Ask a workspace administrator to enable the Finance report import agent."
                 : "The numeric format, scale, or source structure could not be proven. This cannot be overridden; upload a corrected report."}</span></div>}
