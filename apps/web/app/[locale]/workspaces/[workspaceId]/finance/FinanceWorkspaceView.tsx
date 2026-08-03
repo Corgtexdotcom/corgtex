@@ -4,6 +4,7 @@ import {
   type FinanceSectionKey,
 } from "@corgtex/domain";
 import { WorkspaceEmptyState, WorkspacePageHeader, WorkspaceSubnav } from "@/lib/components/ControlPrimitives";
+import { FinanceReportImportPanel } from "./FinanceReportImportPanel";
 
 type FinanceReadiness = Awaited<ReturnType<typeof getFinanceReadiness>>;
 
@@ -54,6 +55,7 @@ export function FinanceWorkspaceView({
   const activeReadiness = readinessByKey.get(activeSection.key);
   const enabled = Boolean(activeReadiness?.enabled);
   const count = sectionCount(readiness, activeSection.key);
+  const showReportImports = activeSection.key === "reports" && enabled && readiness.capabilities.reportImports;
 
   return (
     <div className="stack">
@@ -64,6 +66,7 @@ export function FinanceWorkspaceView({
           <>
             <span className="status-chip">{readiness.access.canWrite ? "Write access" : "Read access"}</span>
             {readiness.access.financeAllMemberWrite && <span className="status-chip">All-member write</span>}
+            {showReportImports && <span className="status-chip">Report imports enabled</span>}
             <span className="status-chip">{readiness.retiredPracticeLedger.retired ? "Standalone ledger retired" : "Ledger review needed"}</span>
           </>
         )}
@@ -99,13 +102,17 @@ export function FinanceWorkspaceView({
         </div>
       </div>
 
-      <WorkspaceEmptyState
-        className="finance-empty-state"
-        title={enabled ? `${activeSection.label} records are ready` : `${activeSection.label} is not enabled`}
-        description={count === null
-          ? sectionDescription(activeSection.key, enabled)
-          : `${sectionDescription(activeSection.key, enabled)} Current records: ${count}.`}
-      />
+      {showReportImports ? (
+        <FinanceReportImportPanel workspaceId={workspaceId} canWrite={readiness.access.canWrite} />
+      ) : (
+        <WorkspaceEmptyState
+          className="finance-empty-state"
+          title={enabled ? `${activeSection.label} records are ready` : `${activeSection.label} is not enabled`}
+          description={count === null
+            ? sectionDescription(activeSection.key, enabled)
+            : `${sectionDescription(activeSection.key, enabled)} Current records: ${count}.`}
+        />
+      )}
     </div>
   );
 }
