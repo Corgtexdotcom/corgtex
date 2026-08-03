@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { MCP_CONNECTOR_DEFAULT_SCOPES } from "./fleet-release-core.mjs";
 import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-release-alerts.mjs";
 import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
 
@@ -134,17 +135,11 @@ function azurePublicUrlEntries(origin = "https://selfserve.corgtex.com", overrid
   }).map(([name, value]) => ({ name, value, secretRef: null }));
 }
 
-function publicJsonResponse(value) {
-  return { ok: true, status: 200, json: async () => value };
-}
+function publicJsonResponse(value) { return { ok: true, status: 200, json: async () => value }; }
 
 function oauthChallengeResponse(origin = "https://selfserve.corgtex.com") {
-  const scopes = "workspace:read proposals:write actions:write";
-  return {
-    ok: false,
-    status: 401,
-    headers: { get: () => `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${scopes}"` },
-  };
+  const scopes = MCP_CONNECTOR_DEFAULT_SCOPES.join(" ");
+  return { ok: false, status: 401, headers: { get: () => `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${scopes}"` } };
 }
 
 function azureReleaseEnv() {
@@ -166,19 +161,14 @@ function azureReleaseEnv() {
 function successfulAzurePublicResponse(url) {
   const path = new URL(String(url)).pathname;
   const origin = "https://selfserve.corgtex.com";
-  const scopes = ["workspace:read", "proposals:write", "actions:write"];
+  const scopes = [...MCP_CONNECTOR_DEFAULT_SCOPES];
   if (path === "/api/health") return healthResponse();
   if (path === "/.well-known/oauth-protected-resource") {
     return publicJsonResponse({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: scopes });
   }
   if (path === "/.well-known/oauth-authorization-server") {
-    return publicJsonResponse({
-      issuer: origin,
-      authorization_endpoint: `${origin}/api/oauth/authorize`,
-      token_endpoint: `${origin}/api/oauth/token`,
-      registration_endpoint: `${origin}/api/oauth/register`,
-      scopes_supported: scopes,
-    });
+    return publicJsonResponse({ issuer: origin, authorization_endpoint: `${origin}/api/oauth/authorize`, token_endpoint: `${origin}/api/oauth/token`,
+      registration_endpoint: `${origin}/api/oauth/register`, revocation_endpoint: `${origin}/api/oauth/revoke`, scopes_supported: scopes });
   }
   if (path === "/mcp" || path === "/api/mcp") return oauthChallengeResponse(origin);
   throw new Error(`Unexpected Azure public URL: ${url}`);
@@ -1658,7 +1648,7 @@ describe("fleet release runner", () => {
         return publicJsonResponse({
           resource: "https://selfserve.corgtex.com",
           authorization_servers: ["https://selfserve.corgtex.com"],
-          scopes_supported: ["workspace:read", "proposals:write", "actions:write"],
+          scopes_supported: [...MCP_CONNECTOR_DEFAULT_SCOPES],
         });
       }
       return successfulAzurePublicResponse(url);
@@ -1679,6 +1669,7 @@ describe("fleet release runner", () => {
   it("sets migrate-and-web startup variables during Azure deploys", async () => {
     const toolCalls = [];
     let releaseRecorded = false;
+    const abortSignalForTimeout = vi.fn(() => new AbortController().signal);
     const runCommand = vi.fn((command, args) => {
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         if (args[args.indexOf("--query") + 1].includes(".env")) {
@@ -1737,10 +1728,12 @@ describe("fleet release runner", () => {
       },
       runCommand,
       fetchImpl,
+      abortSignalForTimeout,
       sleep: vi.fn(),
     });
 
     expect(result.results).toHaveLength(1);
+    expect(abortSignalForTimeout).toHaveBeenCalledTimes(4);
     const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
       command === "az" && args[0] === "containerapp" && args[1] === "update"
     ));

@@ -912,11 +912,13 @@ function assertAzureRuntimeContract(target, deps, stage) {
 async function verifyAzurePublicContracts(target, deps) {
   assertAzureRuntimeContract(target, deps, "postflight");
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const protectedResource = await fetchPublicJson(new URL("/.well-known/oauth-protected-resource", target.url), fetchImpl);
-  const authorizationServer = await fetchPublicJson(new URL("/.well-known/oauth-authorization-server", target.url), fetchImpl);
+  const timeoutMs = parsePositiveInteger((deps.env ?? process.env).FLEET_RELEASE_PUBLIC_POSTFLIGHT_TIMEOUT_MS, 30_000);
+  const request = (url, options = {}) => fetchImpl(url, { ...options, signal: (deps.abortSignalForTimeout ?? ((ms) => AbortSignal.timeout(ms)))(timeoutMs) });
+  const protectedResource = await fetchPublicJson(new URL("/.well-known/oauth-protected-resource", target.url), request);
+  const authorizationServer = await fetchPublicJson(new URL("/.well-known/oauth-authorization-server", target.url), request);
   const challenges = [];
   for (const path of ["/mcp", "/api/mcp"]) {
-    const response = await fetchImpl(new URL(path, target.url), {
+    const response = await request(new URL(path, target.url), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
