@@ -4020,6 +4020,18 @@ async function terminalizeRecordingWithLock(
       return false;
     }
 
+    const inFlightWebhook = await tx.meetingRecorderProviderEvent.findFirst({
+      where: {
+        recordingId: recording.id,
+        eventType: "transcript.done",
+        processedAt: null,
+      },
+      select: { id: true },
+    });
+    if (inFlightWebhook) {
+      return false;
+    }
+
     const isRecoverableStatus = (RECOVERABLE_RECALL_RECORDING_STATUSES as string[]).includes(current.status);
     const isStaleFailed = current.status === "FAILED" && current.failureCode === "STALE_RECORDER";
 
@@ -4128,6 +4140,20 @@ async function recoverRecallTranscripts(workspaceId: string) {
 
       const expectedEnd = recordingExpectedEnd(recording);
       if (now.getTime() - expectedEnd.getTime() >= 24 * 60 * 60 * 1000) {
+        if (ACTIVE_RECORDING_STATUSES.includes(recording.status as any) && recording.externalBotId) {
+          try {
+            await cancelRecallBot(recording.externalBotId, { status: recording.status as any });
+          } catch (error) {
+            recorderLog("warn", "recall_bot_cancellation_failed", {
+              workspaceId,
+              meetingId: recording.meetingId,
+              recordingId: recording.id,
+              provider: recording.provider,
+              failureCode: providerFailureCode(error),
+            });
+          }
+        }
+        
         const terminalized = await terminalizeRecordingWithLock(
           recording,
           "RECORDER_TRANSCRIPT_RECOVERY_EXPIRED",
