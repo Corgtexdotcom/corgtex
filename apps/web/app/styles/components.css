@@ -6220,9 +6220,259 @@ a.meeting-agenda-item:hover {
   justify-self: start;
 }
 
+.finance-import-review,
+.finance-import-review-list {
+  display: grid;
+  gap: 12px;
+}
+
+.finance-import-review {
+  margin-top: 6px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.finance-import-review-heading,
+.finance-import-source-links,
+.finance-import-bulk-actions,
+.finance-import-row-actions,
+.finance-import-confirm-all > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.finance-import-review-heading {
+  justify-content: space-between;
+}
+
+.finance-import-review-heading h4,
+.finance-import-review-heading p,
+.finance-import-account span,
+.finance-import-account small,
+.finance-import-review-main small,
+.finance-import-evidence-grid p,
+.finance-import-confirm-all p,
+.finance-import-history p {
+  margin: 0;
+}
+
+.finance-import-summary-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.finance-import-summary-cards > div {
+  display: grid;
+  gap: 2px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-alt);
+}
+
+.finance-import-summary-cards strong {
+  font-size: 1.25rem;
+}
+
+.finance-import-summary-cards span,
+.finance-import-source-links > span,
+.finance-import-review-main small,
+.finance-import-account span,
+.finance-import-evidence-grid small,
+.finance-import-row-actions small,
+.finance-import-history {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.finance-import-summary-cards .attention,
+.finance-import-review-row.warning,
+.finance-import-review-row.blocked {
+  border-color: var(--warning);
+}
+
+.finance-import-source-links > span {
+  flex: 1 1 240px;
+  text-align: right;
+}
+
+.finance-import-review-row {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.finance-import-review-main {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) repeat(3, minmax(64px, 0.7fr)) minmax(76px, 0.7fr);
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+}
+
+.finance-import-review-main > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.finance-import-account strong,
+.finance-import-account span,
+.finance-import-account small {
+  overflow-wrap: anywhere;
+}
+
+.finance-import-depth-1 { padding-inline-start: 14px; }
+.finance-import-depth-2 { padding-inline-start: 28px; }
+.finance-import-depth-3 { padding-inline-start: 42px; }
+.finance-import-depth-4 { padding-inline-start: 56px; }
+.finance-import-depth-5 { padding-inline-start: 70px; }
+.finance-import-depth-6 { padding-inline-start: 84px; }
+
+.finance-import-derived-mismatch strong {
+  color: var(--warning);
+}
+
+.finance-import-row-status {
+  justify-items: end;
+}
+
+.finance-import-evidence {
+  border-top: 1px solid var(--line);
+}
+
+.finance-import-evidence summary,
+.finance-import-history summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.finance-import-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.finance-import-evidence-grid > div {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 7px;
+  background: var(--bg-alt);
+}
+
+.finance-import-evidence-grid p {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.finance-import-receipt {
+  grid-column: 1 / -1;
+}
+
+.finance-import-inline-edit {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(110px, 0.55fr)) auto;
+  gap: 8px;
+  align-items: end;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-alt);
+}
+
+.finance-import-inline-edit label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.finance-import-inline-edit input {
+  width: 100%;
+  min-width: 0;
+}
+
+.finance-import-inline-edit label small {
+  font-weight: 500;
+}
+
+.finance-import-row-actions {
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.finance-import-row-actions small {
+  flex: 1 1 240px;
+}
+
+.finance-import-bulk-actions {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.finance-import-history {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-alt);
+}
+
+.finance-import-confirm-all,
+.finance-import-report-warnings {
+  display: grid;
+  gap: 10px;
+}
+
+.finance-import-report-warnings {
+  padding: 12px;
+  border: 1px solid var(--warning);
+  border-radius: 9px;
+  background: var(--bg-alt);
+}
+
+.finance-import-report-warnings ul,
+.finance-import-confirm-all ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-inline-start: 20px;
+}
+
+.finance-import-report-warnings li small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.finance-import-confirm-all label {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
 @media (max-width: 800px) {
   .finance-import-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .finance-import-review-main,
+  .finance-import-inline-edit {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .finance-import-account,
+  .finance-import-inline-edit label:first-child {
+    grid-column: 1 / -1;
   }
 }
 
@@ -6238,5 +6488,34 @@ a.meeting-agenda-item:hover {
   .finance-import-dropzone > button,
   .finance-import-clarification button {
     width: 100%;
+  }
+
+  .finance-import-summary-cards,
+  .finance-import-review-main,
+  .finance-import-evidence-grid,
+  .finance-import-inline-edit {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .finance-import-review-heading,
+  .finance-import-source-links,
+  .finance-import-bulk-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .finance-import-source-links > span {
+    flex-basis: auto;
+    text-align: left;
+  }
+
+  .finance-import-account,
+  .finance-import-inline-edit label:first-child,
+  .finance-import-receipt {
+    grid-column: auto;
+  }
+
+  .finance-import-row-status {
+    justify-items: start;
   }
 }

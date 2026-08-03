@@ -21,7 +21,7 @@ const candidate = (id = "candidate-1", change = {}) => ({ id, workspaceId: "work
   sourceLocation: {}, sourceLabel: "Revenue", sourcePath: ["Revenue"], proposedAccountPath: ["Revenue"], factKind: "LEAF", periodStart: new Date("2024-01-01Z"),
   periodEnd: new Date("2024-01-31Z"), amountCents: 100, dimensions: null, extractionJson: {}, proposalJson: {}, action: "ADD", reviewState: "PROPOSED",
   semanticKey: "b".repeat(64), currentFactId: null, currentAmountCents: null, confidenceBps: 9900, evidenceMd: "R1C1", explanationMd: null,
-  editedByUserId: null, editedAt: null, approvedByUserId: null, approvedAt: null, version: 1, createdAt: new Date(), updatedAt: new Date(), ...change });
+  editedByUserId: null, editedAt: null, approvedByUserId: null, approvedAt: null, application: null, version: 1, createdAt: new Date(), updatedAt: new Date(), ...change });
 const batch = (candidates = [candidate()], change = {}) => ({ id: "batch-1", workspaceId: "workspace-1", uploadedByUserId: "writer-1", version: 4,
   stage: "READY_FOR_REVIEW", reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", resolvedCurrency: "EUR", interpretationJson: interpretation,
   currencyState: "RESOLVED", safeErrorCode: null, safeErrorMessage: null, warningCount: 0, blockerCount: 0,
@@ -42,12 +42,16 @@ describe("Finance import review", () => {
     await expect(getFinanceReportImportSummary(actor, { workspaceId: "workspace-1", batchId: "batch-1" }, new Date("2026-08-02Z")))
       .resolves.toEqual(expect.objectContaining({ id: "batch-1", warningCount: 2 }));
     expect(mocks.prisma.financeImportBatch.findUnique.mock.calls.at(-1)?.[0].select).not.toHaveProperty("candidates");
-    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate(), candidate("rejected", { action: "UPDATE", reviewState: "REJECTED" })], { interpretationJson: { ...interpretation, exceptions: [reportWarning] } }));
+    const receipt = { id: "receipt-1", outcome: "CREATED", targetFactId: "fact-1", appliedByUserId: "writer-2", appliedAt: new Date("2026-08-02Z") };
+    mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate("candidate-1", { application: receipt }), candidate("rejected", { action: "UPDATE", reviewState: "REJECTED" })], { interpretationJson: { ...interpretation, exceptions: [reportWarning] }, workflowJobId: "job-1", agentRunId: "run-1", appliedByUserId: "writer-2", appliedAt: new Date("2026-08-02Z") }));
     const detail = await getFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1" }, new Date("2026-08-02Z"));
     expect(detail).toMatchObject({ warningCount: 2, warnings: [reportWarning], safeErrorCode: null,
       clarification: { canConfirm: false, numericFormat: { status: "RESOLVED", decimalSeparator: "DOT", groupingSeparator: "NONE", amountScale: 1 } },
-      candidates: [{ historicalWarning: true, peerConfirmationRequired: false }, { historicalWarning: false, peerConfirmationRequired: false }] });
-    expect(detail).not.toHaveProperty("interpretationJson"); expect(mocks.prisma.financeImportBatch.findUnique.mock.calls.at(-1)?.[0].select.candidates.select).not.toHaveProperty("extractionJson"); expect(mocks.prisma.financeImportBatch.findUnique.mock.calls.at(-1)?.[0].select.candidates.select).not.toHaveProperty("proposalJson");
+      workflowJobId: "job-1", agentRunId: "run-1", appliedByUserId: "writer-2",
+      candidates: [{ historicalWarning: true, peerConfirmationRequired: false, application: receipt }, { historicalWarning: false, peerConfirmationRequired: false }] });
+    expect(detail).not.toHaveProperty("interpretationJson"); const detailSelect = mocks.prisma.financeImportBatch.findUnique.mock.calls.at(-1)?.[0].select;
+    expect(detailSelect.candidates.select).not.toHaveProperty("extractionJson"); expect(detailSelect.candidates.select).not.toHaveProperty("proposalJson");
+    expect(detailSelect.candidates.select.application.select).toEqual({ id: true, outcome: true, targetFactId: true, appliedByUserId: true, appliedAt: true });
     mocks.prisma.financeImportBatch.findUnique.mockResolvedValue(batch([candidate()], { stage: "NEEDS_INPUT", currencyState: "UNRESOLVED",
       resolvedCurrency: null, safeErrorCode: "CURRENCY_UNRESOLVED", safeErrorMessage: "Choose currency." }));
     await expect(getFinanceReportImport(actor, { workspaceId: "workspace-1", batchId: "batch-1" }))

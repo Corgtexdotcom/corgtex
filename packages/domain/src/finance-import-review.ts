@@ -79,12 +79,13 @@ export async function getFinanceReportImportSummary(actor: AppActor, params: { w
 export async function getFinanceReportImport(actor: AppActor, params: { workspaceId: string; batchId: string }, now = new Date()) {
   await requireFinanceReportImportReadAccess(actor, params.workspaceId);
   const batch = await prisma.financeImportBatch.findUnique({ where: { id_workspaceId: { id: params.batchId, workspaceId: params.workspaceId } },
-    select: { id: true, uploadedByUserId: true, documentId: true, brainSourceId: true, originalFilename: true, stage: true, reportType: true,
+    select: { id: true, uploadedByUserId: true, documentId: true, brainSourceId: true, workflowJobId: true, agentRunId: true, originalFilename: true, stage: true, reportType: true,
       basis: true, cadence: true, periodStart: true, periodEnd: true, asOfDate: true, title: true, currencyState: true, resolvedCurrency: true,
-      currencyResolutionSource: true, addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
+      currencyResolutionSource: true, currencyConfirmedByUserId: true, currencyConfirmedAt: true, addCount: true, updateCount: true, unchangedCount: true, duplicateCount: true, conflictCount: true,
       skippedCount: true, warningCount: true, blockerCount: true, rejectedCount: true, appliedCount: true, approvedByUserId: true,
-      approvedAt: true, safeErrorCode: true, safeErrorMessage: true, version: true, createdAt: true, updatedAt: true, interpretationJson: true,
-      candidates: { orderBy: { sourceKey: "asc" }, select: { id: true, sourceKey: true, sourceLabel: true, sourcePath: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, confidenceBps: true, evidenceMd: true, explanationMd: true, editedByUserId: true, editedAt: true, approvedByUserId: true, approvedAt: true, version: true } } } });
+      approvedAt: true, appliedByUserId: true, appliedAt: true, safeErrorCode: true, safeErrorMessage: true, version: true, createdAt: true, updatedAt: true, interpretationJson: true,
+      candidates: { orderBy: { sourceKey: "asc" }, select: { id: true, sourceKey: true, sourceLabel: true, sourcePath: true, proposedAccountPath: true, factKind: true, periodStart: true, periodEnd: true, amountCents: true, dimensions: true, action: true, reviewState: true, semanticKey: true, currentFactId: true, currentAmountCents: true, confidenceBps: true, evidenceMd: true, explanationMd: true, editedByUserId: true, editedAt: true, approvedByUserId: true, approvedAt: true, version: true,
+        application: { select: { id: true, outcome: true, targetFactId: true, appliedByUserId: true, appliedAt: true } } } } } });
   invariant(batch, 404, "FINANCE_REPORT_IMPORT_NOT_FOUND", "The Finance report import was not found.");
   const { interpretationJson, candidates, ...detail } = batch;
   const interpretation = interpretationJson ? parseFinanceImportInterpretationV1(interpretationJson) : null;

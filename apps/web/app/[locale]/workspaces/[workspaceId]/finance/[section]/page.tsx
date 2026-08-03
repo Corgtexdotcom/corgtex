@@ -1,4 +1,5 @@
 import { FINANCE_SECTIONS, getFinanceReadiness, type FinanceSectionKey } from "@corgtex/domain";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { notFound } from "next/navigation";
 import { requirePageActor } from "@/lib/auth";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
@@ -27,7 +28,10 @@ export default async function FinanceSectionPage({
   const actor = await requirePageActor();
 
   await requireWorkspaceFeature(workspaceId, "FINANCE");
-  const readiness = await getFinanceReadiness(actor, workspaceId);
+  const [readiness, workspace] = await Promise.all([
+    getFinanceReadiness(actor, workspaceId),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } }),
+  ]);
 
-  return <FinanceWorkspaceView workspaceId={workspaceId} sectionKey={sectionKey} readiness={readiness} />;
+  return <FinanceWorkspaceView workspaceId={workspaceId} sectionKey={sectionKey} readiness={readiness} demoReadOnly={workspace ? workspaceBranding(workspace).isDemo : false} />;
 }
