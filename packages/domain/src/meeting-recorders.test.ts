@@ -4425,14 +4425,39 @@ describe("meeting recorder domain", () => {
   it("atomic rollback/retry behavior: failing second write aborts transaction", async () => {
     const { reconcileMeetingRecorders } = await import("./meeting-recorders");
     let mockDb = [{ id: "atomic-stale", workspaceId: "workspace-1", meetingId: "meeting-atomic", provider: "MEETING_BAAS", externalBotId: "bot-atomic", status: "RECORDING", activeDedupeKey: "dedupe-1", createdAt: new Date(Date.now() - 36000000), joinAt: new Date(Date.now() - 36000000), transcriptProcessedAt: null, meeting: { recordedAt: new Date(Date.now() - 36000000), scheduledEndAt: new Date(Date.now() - 32400000) } }];
+    let smokeRunsTerminalized = 0;
     prismaMock.meetingRecording.findMany.mockImplementation(async () => mockDb);
     prismaMock.meetingRecording.findUnique.mockImplementation(async () => mockDb[0]);
-    prismaMock.$transaction.mockImplementation(async (callback) => {
-      prismaMock.meetingRecorderSmokeRun.updateMany.mockRejectedValueOnce(new Error("Atomic failure"));
-      await expect(callback(prismaMock as any)).rejects.toThrow("Atomic failure");
+    prismaMock.meetingRecording.update.mockImplementation(async ({ where, data }) => {
+      if (where.id === "atomic-stale") mockDb[0] = { ...mockDb[0], ...data } as any;
+      return mockDb[0];
     });
+    let failSmokeUpdate = true;
+    prismaMock.meetingRecorderSmokeRun.updateMany.mockImplementation(async () => {
+      if (failSmokeUpdate) throw new Error("Atomic failure");
+      smokeRunsTerminalized++;
+      return { count: 1 };
+    });
+    prismaMock.$transaction.mockImplementation(async (callback) => {
+      const snapDb = [...mockDb];
+      const snapSmoke = smokeRunsTerminalized;
+      try {
+        return await callback(prismaMock as any);
+      } catch (err) {
+        mockDb = [...snapDb];
+        smokeRunsTerminalized = snapSmoke;
+        throw err;
+      }
+    });
+    await expect(reconcileMeetingRecorders("workspace-1")).rejects.toThrow("Atomic failure");
+    expect(mockDb[0].status).toBe("RECORDING");
+    expect(smokeRunsTerminalized).toBe(0);
+    failSmokeUpdate = false;
     await reconcileMeetingRecorders("workspace-1");
-    expect(prismaMock.$transaction).toHaveBeenCalled();
+    expect(mockDb[0].status).toBe("FAILED");
+    expect(smokeRunsTerminalized).toBe(1);
+    expect(prismaMock.meetingRecording.update).toHaveBeenCalledTimes(2);
+    expect(prismaMock.meetingRecorderSmokeRun.updateMany).toHaveBeenCalledTimes(2);
   });
 
   it("lock-wait timeout: transaction uses 120-second timeout", async () => {
