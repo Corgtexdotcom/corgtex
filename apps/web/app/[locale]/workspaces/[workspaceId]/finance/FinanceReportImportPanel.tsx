@@ -4,12 +4,14 @@ import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffec
 import {
   buildFinanceImportView,
   financeImportCanRetryExactFile,
+  financeImportNeedsFullDetail,
   financeImportNeedsPolling,
   numericFormatLabel,
   supportsFinanceReportFile,
   type FinanceImportBatchSummary,
   type FinanceImportDetail,
 } from "./financeReportImportView";
+import { FinanceReportReviewPanel } from "./FinanceReportReviewPanel";
 
 type UploadItem = { id: string; name: string; status: "queued" | "uploading" | "uploaded" | "failed"; message: string | null };
 
@@ -64,6 +66,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
   const selectedVersion = selected?.version;
   const needsClarificationDetail = canWrite && selected?.stage === "NEEDS_INPUT" && selected.safeErrorCode === "CURRENCY_UNRESOLVED"
     && selected.currencyState === "UNRESOLVED";
+  const needsSelectedDetail = needsClarificationDetail || (selected ? financeImportNeedsFullDetail(selected.stage) : false);
   const selectedIdRef = useRef(selectedId); selectedIdRef.current = selectedId;
 
   const loadBatches = useCallback(async () => {
@@ -92,15 +95,16 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
     const requestId = (detailRequestRef.current.get(batchId) ?? 0) + 1; detailRequestRef.current.set(batchId, requestId);
     try {
       const batch = await requestFinanceImportDetail(workspaceId, batchId);
-      if (requestId !== detailRequestRef.current.get(batchId)) return;
-      if (selectedIdRef.current !== batchId) return;
+      if (requestId !== detailRequestRef.current.get(batchId) || selectedIdRef.current !== batchId) return null;
       setDetail(batch);
       setCurrency(batch.resolvedCurrency ?? "");
       setDetailError(null);
+      return batch;
     } catch (error) {
-      if (requestId !== detailRequestRef.current.get(batchId) || selectedIdRef.current !== batchId) return;
+      if (requestId !== detailRequestRef.current.get(batchId) || selectedIdRef.current !== batchId) return null;
       setDetail(null);
       setDetailError(error instanceof Error ? error.message : "Import details could not be loaded.");
+      return null;
     }
   }, [workspaceId]);
 
@@ -118,10 +122,10 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
 
   useEffect(() => { void loadBatches(); }, [loadBatches]);
   useEffect(() => {
-    if (!selectedId || !needsClarificationDetail) { setDetail(null); setDetailError(null); return; }
+    if (!selectedId || !needsSelectedDetail) { setDetail(null); setDetailError(null); return; }
     setDetail(null); setDetailError(null);
     void loadDetail(selectedId);
-  }, [loadDetail, needsClarificationDetail, selectedId, selectedVersion]);
+  }, [loadDetail, needsSelectedDetail, selectedId, selectedVersion]);
   useEffect(() => {
     const pinnedNeedsPolling = [...pinnedBatchesRef.current.entries()].some(([, batch]) => batch === null || financeImportNeedsPolling([batch]));
     if (!financeImportNeedsPolling(batches) && !pinnedNeedsPolling) return;
@@ -134,6 +138,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
 
   const selectedDetail = detail?.id === selectedId ? detail : null;
   const clarificationLoading = needsClarificationDetail && selectedDetail === null && detailError === null;
+  const reviewLoading = selected ? financeImportNeedsFullDetail(selected.stage) && selectedDetail === null && detailError === null : false;
   const processingView = selected ? buildFinanceImportView(selected) : null;
   const agentUnavailable = selected?.safeErrorCode === "FINANCE_REPORT_AGENT_UNAVAILABLE";
 
@@ -209,7 +214,7 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
       <div className="finance-import-heading">
         <div><p className="nr-page-eyebrow">Reported Actuals</p><h2 className="nr-upload-title" id="finance-import-title">Import financial reports</h2>
           <p className="nr-upload-desc muted">Upload source reports. The agent proposes report facts; only Finance writers can confirm or apply them.</p></div>
-        <button type="button" className="secondary small" onClick={() => { void loadBatches(); if (selectedId && needsClarificationDetail) void loadDetail(selectedId); }} disabled={loading}>Refresh</button>
+        <button type="button" className="secondary small" onClick={() => { void loadBatches(); if (selectedId && needsSelectedDetail) void loadDetail(selectedId); }} disabled={loading}>Refresh</button>
       </div>
 
       {canWrite ? (
@@ -276,7 +281,9 @@ export function FinanceReportImportPanel({ workspaceId, canWrite }: { workspaceI
               <span>{!canWrite ? "A Finance writer must resolve this report." : agentUnavailable
                 ? selected.safeErrorMessage ?? "Ask a workspace administrator to enable the Finance report import agent."
                 : "The numeric format, scale, or source structure could not be proven. This cannot be overridden; upload a corrected report."}</span></div>}
-            {selected.stage === "READY_FOR_REVIEW" && <div className="finance-import-notice"><strong>Proposal ready</strong><span>Review and application stay separate from processing. The changes-first review surface is delivered in R9.</span></div>}
+            {reviewLoading && <div className="finance-import-notice"><strong>Loading review proposal</strong><span>Fetching exact proposal versions, evidence, and application receipts.</span></div>}
+            {selectedDetail && financeImportNeedsFullDetail(selected.stage) && <FinanceReportReviewPanel workspaceId={workspaceId} canWrite={canWrite}
+              detail={selectedDetail} onChanged={async () => { await loadBatches(); return loadDetail(selectedDetail.id); }} />}
           </>}
         </div>
       </div>

@@ -2,11 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   amountScaleLabel,
   buildFinanceImportView,
+  financeDerivedTotal,
   financeImportCanRetryExactFile,
+  financeImportCandidateVersions,
+  financeImportNeedsFullDetail,
   financeImportNeedsPolling,
+  financeImportVisibleCandidates,
   numericFormatLabel,
+  parseFinanceAccountPath,
+  parseFinanceAmountInput,
   supportsFinanceReportFile,
   type FinanceImportBatchSummary,
+  type FinanceImportCandidateDetail,
 } from "./financeReportImportView";
 
 const summary = (stage: FinanceImportBatchSummary["stage"], change: Partial<FinanceImportBatchSummary> = {}): FinanceImportBatchSummary => ({
@@ -62,4 +69,44 @@ describe("Finance report import view", () => {
     expect(financeImportNeedsPolling([summary("READY_FOR_REVIEW"), summary("FAILED")])).toBe(false);
     expect(financeImportNeedsPolling([summary("READY_FOR_REVIEW"), summary("RECONCILING")])).toBe(true);
   });
+
+  it("loads full detail only for review and receipt stages", () => {
+    expect((["READY_FOR_REVIEW", "PARTIALLY_APPLIED", "APPLIED"] as FinanceImportBatchSummary["stage"][])
+      .every(financeImportNeedsFullDetail)).toBe(true);
+    expect(financeImportNeedsFullDetail("RECONCILING")).toBe(false);
+  });
+
+  it("builds exact review/apply versions and defaults to changes-first ordering", () => {
+    const rows = [row("unchanged", { action: "UNCHANGED" }), row("approved", { reviewState: "APPROVED", proposedAccountPath: ["B"] }),
+      row("add", { action: "ADD", proposedAccountPath: ["A"] }), row("applied", { reviewState: "APPLIED" })];
+    expect(financeImportCandidateVersions(rows, "review")).toEqual(rows.slice(0, 3).map(({ id, version }) => ({ id, expectedVersion: version })));
+    expect(financeImportCandidateVersions(rows, "apply")).toEqual([{ id: "approved", expectedVersion: 1 }]);
+    expect(financeImportVisibleCandidates(rows, false).map(({ id }) => id)).toEqual(["add", "applied", "approved"]);
+    expect(financeImportVisibleCandidates(rows, true)).toHaveLength(4);
+  });
+
+  it("parses exact cents and account paths without floating point coercion", () => {
+    expect(parseFinanceAmountInput("-1234.5")).toBe(-123450);
+    expect(parseFinanceAmountInput("12.345")).toBeNull();
+    expect(parseFinanceAmountInput("21474836.48")).toBeNull();
+    expect(parseFinanceAccountPath(" Gross contribution / Product revenue ")).toEqual(["Gross contribution", "Product revenue"]);
+    expect(parseFinanceAccountPath(" / ")).toBeNull();
+  });
+
+  it("recalculates derived totals from non-rejected descendant leaves", () => {
+    const derived = row("total", { factKind: "DERIVED", action: "SKIP", proposedAccountPath: ["Gross contribution"] });
+    const rows = [derived, row("revenue", { amountCents: 260_000, proposedAccountPath: ["Gross contribution", "Revenue"] }),
+      row("cost", { amountCents: -85_000, proposedAccountPath: ["Gross contribution", "Costs"] }),
+      row("rejected", { amountCents: 999, reviewState: "REJECTED", proposedAccountPath: ["Gross contribution", "Other"] })];
+    expect(financeDerivedTotal(derived, rows)).toBe(175_000);
+    expect(financeDerivedTotal(rows[1]!, rows)).toBeNull();
+  });
 });
+
+function row(id: string, change: Partial<FinanceImportCandidateDetail> = {}): FinanceImportCandidateDetail {
+  return { id, sourceKey: id, sourceLabel: id, sourcePath: [id], proposedAccountPath: [id], factKind: "LEAF",
+    periodStart: "2026-06-01T00:00:00.000Z", periodEnd: "2026-06-30T00:00:00.000Z", amountCents: 100,
+    action: "UPDATE", reviewState: "PROPOSED", currentAmountCents: 50, confidenceBps: 9900, evidenceMd: "Synthetic evidence",
+    explanationMd: null, editedByUserId: null, editedAt: null, approvedByUserId: null, approvedAt: null,
+    historicalWarning: false, peerConfirmationRequired: false, version: 1, application: null, ...change };
+}

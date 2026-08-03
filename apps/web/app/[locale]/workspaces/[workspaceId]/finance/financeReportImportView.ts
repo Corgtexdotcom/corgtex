@@ -29,13 +29,55 @@ export type FinanceImportBatchSummary = {
 };
 
 export type FinanceImportDetail = FinanceImportBatchSummary & {
-  candidates: Array<{ id: string; version: number }>;
+  uploadedByUserId: string;
+  documentId: string | null;
+  brainSourceId: string | null;
+  workflowJobId: string | null;
+  agentRunId: string | null;
+  title: string | null;
+  asOfDate: string | null;
+  currencyResolutionSource: string | null;
+  currencyConfirmedByUserId: string | null;
+  currencyConfirmedAt: string | null;
+  skippedCount: number;
+  approvedByUserId: string | null;
+  approvedAt: string | null;
+  appliedByUserId: string | null;
+  appliedAt: string | null;
+  warnings: Array<{ code: string; severity: "WARNING"; message: string; evidenceClaimIds: string[] }>;
+  candidates: FinanceImportCandidateDetail[];
   clarification: {
     canConfirm: boolean;
     numericFormat: { status: "RESOLVED"; decimalSeparator: string; groupingSeparator: string;
       amountScale: 1 | 100 | 1_000 | 1_000_000 | 1_000_000_000 }
       | { status: "UNRESOLVED"; decimalSeparator: null; groupingSeparator: null; amountScale: null };
   };
+};
+
+export type FinanceImportCandidateDetail = {
+  id: string;
+  sourceKey: string;
+  sourceLabel: string;
+  sourcePath: string[];
+  proposedAccountPath: string[];
+  factKind: "LEAF" | "DERIVED";
+  periodStart: string;
+  periodEnd: string;
+  amountCents: number;
+  action: "ADD" | "UPDATE" | "UNCHANGED" | "DUPLICATE" | "CONFLICT" | "SKIP";
+  reviewState: "PROPOSED" | "VERIFIED" | "WARNING" | "BLOCKED" | "APPROVED" | "REJECTED" | "APPLIED";
+  currentAmountCents: number | null;
+  confidenceBps: number;
+  evidenceMd: string;
+  explanationMd: string | null;
+  editedByUserId: string | null;
+  editedAt: string | null;
+  approvedByUserId: string | null;
+  approvedAt: string | null;
+  historicalWarning: boolean;
+  peerConfirmationRequired: boolean;
+  version: number;
+  application: { id: string; outcome: string; targetFactId: string | null; appliedByUserId: string; appliedAt: string } | null;
 };
 
 const PROCESSING_STAGES = ["UPLOADED", "EXTRACTING", "CLASSIFYING", "MAPPING", "RECONCILING", "READY_FOR_REVIEW"] as const;
@@ -92,6 +134,46 @@ export function financeImportNeedsPolling(batches: FinanceImportBatchSummary[]) 
 
 export function financeImportCanRetryExactFile(code: string | null) {
   return code !== null && EXACT_FILE_RETRY_CODES.has(code);
+}
+
+export function financeImportNeedsFullDetail(stage: FinanceImportStage) {
+  return ["READY_FOR_REVIEW", "PARTIALLY_APPLIED", "APPLIED"].includes(stage);
+}
+
+export function financeImportCandidateVersions(candidates: FinanceImportCandidateDetail[], scope: "review" | "apply") {
+  return candidates.filter(({ reviewState }) => scope === "review" ? reviewState !== "APPLIED" : reviewState === "APPROVED")
+    .map(({ id, version }) => ({ id, expectedVersion: version }));
+}
+
+export function financeImportVisibleCandidates(candidates: FinanceImportCandidateDetail[], showAll: boolean) {
+  return [...candidates].filter((candidate) => showAll || candidate.factKind === "DERIVED"
+    || ["ADD", "UPDATE", "CONFLICT"].includes(candidate.action) || ["WARNING", "BLOCKED", "APPROVED"].includes(candidate.reviewState))
+    .sort((left, right) => left.proposedAccountPath.join("\0").localeCompare(right.proposedAccountPath.join("\0"))
+      || left.periodStart.localeCompare(right.periodStart) || left.sourceKey.localeCompare(right.sourceKey));
+}
+
+export function parseFinanceAmountInput(value: string) {
+  const match = value.trim().match(/^(-?)(\d+)(?:\.(\d{1,2}))?$/);
+  if (!match) return null;
+  const cents = BigInt(match[2]!) * 100n + BigInt((match[3] ?? "").padEnd(2, "0") || "0");
+  const signed = match[1] ? -cents : cents;
+  return signed >= -2_147_483_648n && signed <= 2_147_483_647n ? Number(signed) : null;
+}
+
+export function parseFinanceAccountPath(value: string) {
+  const path = value.split("/").map((part) => part.trim()).filter(Boolean);
+  return path.length > 0 && path.length <= 100 && path.every((part) => part.length <= 500) ? path : null;
+}
+
+export function financeDerivedTotal(candidate: FinanceImportCandidateDetail, candidates: FinanceImportCandidateDetail[]) {
+  if (candidate.factKind !== "DERIVED") return null;
+  const descendants = candidates.filter((row) => row.factKind === "LEAF" && row.reviewState !== "REJECTED"
+    && row.periodStart === candidate.periodStart && row.periodEnd === candidate.periodEnd
+    && row.proposedAccountPath.length > candidate.proposedAccountPath.length
+    && candidate.proposedAccountPath.every((part, index) => row.proposedAccountPath[index] === part));
+  if (descendants.length === 0) return null;
+  const total = descendants.reduce((sum, row) => sum + BigInt(row.amountCents), 0n);
+  return total >= -2_147_483_648n && total <= 2_147_483_647n ? Number(total) : null;
 }
 
 export function amountScaleLabel(scale: FinanceImportDetail["clarification"]["numericFormat"]["amountScale"]) {

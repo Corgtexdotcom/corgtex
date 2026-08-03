@@ -888,6 +888,51 @@ async function enableWorkspaceFeature(wsId, flag) {
   });
 }
 
+async function seedFinanceReportReviewDemo(wsId, uploaderUserId) {
+  const existingFlag = await prisma.workspaceFeatureFlag.findUnique({ where: { workspaceId_flag: { workspaceId: wsId, flag: "FINANCE" } } });
+  const currentConfig = existingFlag?.config && typeof existingFlag.config === "object" && !Array.isArray(existingFlag.config) ? existingFlag.config : {};
+  const currentCapabilities = currentConfig.financeCapabilities && typeof currentConfig.financeCapabilities === "object"
+    && !Array.isArray(currentConfig.financeCapabilities) ? currentConfig.financeCapabilities : {};
+  const config = { ...currentConfig, financeCapabilities: { ...currentCapabilities, reports: true, reportImports: true } };
+  await prisma.workspaceFeatureFlag.upsert({ where: { workspaceId_flag: { workspaceId: wsId, flag: "FINANCE" } },
+    update: { enabled: true, config }, create: { workspaceId: wsId, flag: "FINANCE", enabled: true, config } });
+
+  const sourceId = `${wsId}-finance-report-review-source`;
+  await prisma.brainSource.upsert({ where: { id: sourceId }, update: { accessDomain: "FINANCE", sourceType: "FILE_UPLOAD", tier: 2,
+    title: "Synthetic monthly operating statement", channel: "demo_seed", content: "Synthetic Finance report prepared only to demonstrate governed proposal review. No customer data." },
+  create: { id: sourceId, workspaceId: wsId, accessDomain: "FINANCE", sourceType: "FILE_UPLOAD", tier: 2,
+    title: "Synthetic monthly operating statement", channel: "demo_seed", content: "Synthetic Finance report prepared only to demonstrate governed proposal review. No customer data." } });
+
+  const batchId = `${wsId}-finance-report-review-batch`, periodStart = new Date("2026-06-01T00:00:00.000Z"), periodEnd = new Date("2026-06-30T00:00:00.000Z");
+  await prisma.financeImportBatch.upsert({ where: { id: batchId }, update: { brainSourceId: sourceId, uploadedByUserId: uploaderUserId,
+    stage: "READY_FOR_REVIEW", reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", periodStart, periodEnd,
+    title: "Synthetic June operating statement", currencyState: "RESOLVED", resolvedCurrency: "USD", currencyResolutionSource: "DOCUMENT",
+    addCount: 2, updateCount: 0, unchangedCount: 0, duplicateCount: 0, skippedCount: 1, conflictCount: 1, warningCount: 1, blockerCount: 1,
+    rejectedCount: 0, appliedCount: 0, safeErrorCode: null, safeErrorMessage: null }, create: { id: batchId, workspaceId: wsId,
+    uploadedByUserId: uploaderUserId, brainSourceId: sourceId, fileHash: "9".repeat(64), mimeType: "text/csv", originalFilename: "synthetic-monthly-operating-statement.csv",
+    fileSizeBytes: 512, stage: "READY_FOR_REVIEW", reportType: "PROFIT_AND_LOSS", basis: "ACCRUAL", cadence: "MONTHLY", periodStart, periodEnd,
+    title: "Synthetic June operating statement", currencyState: "RESOLVED", resolvedCurrency: "USD", currencyResolutionSource: "DOCUMENT",
+    addCount: 2, updateCount: 0, unchangedCount: 0, duplicateCount: 0, skippedCount: 1, conflictCount: 1, warningCount: 1, blockerCount: 1 } });
+
+  const rows = [
+    { id: "revenue", sourceLabel: "Product revenue", sourcePath: ["Revenue", "Product"], proposedAccountPath: ["Gross contribution", "Product revenue"], factKind: "LEAF", amountCents: 2600000, action: "ADD", reviewState: "PROPOSED", confidenceBps: 9900, evidenceMd: "Synthetic CSV · Revenue section · Product row", explanationMd: "New Reported Actual proposed from an explicit synthetic source row." },
+    { id: "costs", sourceLabel: "Delivery costs", sourcePath: ["Costs", "Delivery"], proposedAccountPath: ["Gross contribution", "Delivery costs"], factKind: "LEAF", amountCents: -850000, action: "ADD", reviewState: "WARNING", confidenceBps: 9400, evidenceMd: "Synthetic CSV · Costs section · Delivery row", explanationMd: "Verify the negative-sign convention before approval." },
+    { id: "derived", sourceLabel: "Gross contribution", sourcePath: ["Gross contribution"], proposedAccountPath: ["Gross contribution"], factKind: "DERIVED", amountCents: 1750000, action: "SKIP", reviewState: "VERIFIED", confidenceBps: 10000, evidenceMd: "Synthetic arithmetic check: product revenue plus delivery costs", explanationMd: "Read-only derived total; no canonical fact is created." },
+    { id: "rebate", sourceLabel: "Unmapped rebate", sourcePath: ["Adjustments", "Rebate"], proposedAccountPath: ["Unmapped rebate"], factKind: "LEAF", amountCents: -125000, action: "CONFLICT", reviewState: "BLOCKED", confidenceBps: 6200, evidenceMd: "Synthetic CSV · Adjustments section · Rebate row", explanationMd: "Structural mapping is ambiguous and cannot be bulk-approved." },
+  ];
+  for (const [index, row] of rows.entries()) {
+    const id = `${batchId}-${row.id}`, sourceKey = String(index + 1).padStart(64, "0"), data = { workspaceId: wsId, batchId, sourceKey,
+      sourceLocation: { kind: "CELL", sheet: "Synthetic statement", row: index + 2, column: 2 }, sourceLabel: row.sourceLabel, sourcePath: row.sourcePath,
+      proposedAccountPath: row.proposedAccountPath, factKind: row.factKind, periodStart, periodEnd, amountCents: row.amountCents, dimensions: null,
+      extractionJson: { synthetic: true }, proposalJson: { synthetic: true }, action: row.action, reviewState: row.reviewState,
+      semanticKey: row.reviewState === "BLOCKED" ? null : String(index + 5).padStart(64, "0"), currentFactId: null, currentAmountCents: null,
+      confidenceBps: row.confidenceBps, evidenceMd: row.evidenceMd, explanationMd: row.explanationMd, editedByUserId: null, editedAt: null,
+      approvedByUserId: null, approvedAt: null };
+    await prisma.financeImportCandidate.upsert({ where: { id }, update: data, create: { id, ...data } });
+  }
+  console.log("✅ Synthetic Finance report review refreshed");
+}
+
 async function seedCrmRelationships(wsId, memberMappings) {
   for (const accountSpec of CRM_ACCOUNTS) {
     const account = await prisma.crmAccount.upsert({
@@ -2819,7 +2864,7 @@ async function main() {
 
   // 14. Safe showcase data for current customer-visible feature surfaces.
   await enableWorkspaceFeature(wsId, "AI_WORKSPACES");
-  await enableWorkspaceFeature(wsId, "FINANCE");
+  await seedFinanceReportReviewDemo(wsId, memberMappings["demo"].userId);
   await enableWorkspaceFeature(wsId, "RELATIONSHIPS");
   await seedShowcaseData({ wsId, memberMappings });
   await seedCrmRelationships(wsId, memberMappings);
