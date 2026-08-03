@@ -3419,7 +3419,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   let providerEvent: { id: string };
   if (provider === "RECALL_AI" && event.eventType === "transcript.done" && recording) {
     const r = recording;
-    providerEvent = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${r.workspaceId}:${r.meetingId}:${provider}:transcript`}, 0))`;
       const upserted = await tx.meetingRecorderProviderEvent.upsert({
         where: { dedupeKey },
@@ -3436,10 +3436,12 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
           redactedAt: new Date(),
         },
       });
-      const refreshed = await tx.meetingRecording.findUnique({ where: { id: r.id } });
-      if (refreshed) recording = refreshed;
-      return upserted;
+      recording = await tx.meetingRecording.findUnique({ where: { id: r.id } }) ?? r;
+      recording = await applyWebhookState(recording, event, tx);
+      return { providerEvent: upserted, recording };
     }, { timeout: 120_000 });
+    providerEvent = result.providerEvent;
+    recording = result.recording;
   } else {
     providerEvent = await prisma.meetingRecorderProviderEvent.upsert({
       where: { dedupeKey },
@@ -3477,7 +3479,9 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
     return { processed: false, duplicate: false };
   }
 
-  recording = await applyWebhookState(recording, event);
+  if (!(provider === "RECALL_AI" && event.eventType === "transcript.done")) {
+    recording = await applyWebhookState(recording, event);
+  }
 
   if (provider === "RECALL_AI" && event.eventType === "recording.done" && event.recordingIdForTranscript) {
     await createRecallAsyncTranscript(event.recordingIdForTranscript);
@@ -3525,7 +3529,11 @@ async function findRecordingForWebhook(provider: MeetingRecorderProvider, event:
   return null;
 }
 
-async function applyWebhookState(recording: MeetingRecording, event: ProviderWebhookEvent) {
+async function applyWebhookState(
+  recording: MeetingRecording,
+  event: ProviderWebhookEvent,
+  client: Pick<Prisma.TransactionClient, "meetingRecording"> = prisma,
+) {
   if (recording.failureCode === DUPLICATE_RECORDER_FAILURE_CODE) {
     return recording;
   }
@@ -3550,7 +3558,7 @@ async function applyWebhookState(recording: MeetingRecording, event: ProviderWeb
   if (event.failureCode && !isLocalTerminalState) data.failureCode = event.failureCode;
   if (event.failureMessage && !isLocalTerminalState) data.failureMessage = event.failureMessage;
   if (Object.keys(data).length === 0) return recording;
-  return prisma.meetingRecording.update({
+  return client.meetingRecording.update({
     where: { id: recording.id },
     data,
   });
