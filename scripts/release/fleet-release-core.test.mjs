@@ -129,8 +129,10 @@ describe("fleet release core", () => {
         resource: origin,
         scopes_supported: ["workspace:read"],
       },
+      challenges: oauthProof(origin).challenges.map((challenge) => ({ ...challenge, header: challenge.header.replace("Bearer", "Basic") })),
     }))).toEqual(expect.arrayContaining([
       `resource=${origin}; expected ${origin}/mcp`,
+      "/mcp challenge must use Bearer authentication",
       "protected-resource and authorization-server scopes do not agree",
       "protected-resource scope actions:write is missing",
       "protected-resource scope proposals:write is missing",

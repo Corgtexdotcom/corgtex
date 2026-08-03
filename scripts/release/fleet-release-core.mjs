@@ -258,6 +258,7 @@ export function mcpOAuthProofErrors(targetUrl, proof) {
     const label = challenge.path ?? "MCP endpoint";
     const header = String(challenge.header ?? "");
     if (challenge.status !== 401) errors.push(`${label} unauthenticated status=${challenge.status ?? "missing"}; expected 401`);
+    if (!/^Bearer(?:\s|$)/i.test(header.trim())) errors.push(`${label} challenge must use Bearer authentication`);
     if (challengeParameter(header, "resource_metadata") !== `${origin}/.well-known/oauth-protected-resource`) {
       errors.push(`${label} resource_metadata challenge does not match the target origin`);
     }
