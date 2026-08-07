@@ -43,6 +43,9 @@ CREATE TABLE "ProviderCutover" (
 CREATE UNIQUE INDEX "ProviderCutover_activeTransitionKey_key" ON "ProviderCutover"("activeTransitionKey");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "ProviderCutover_non_terminal_tuple_key" ON "ProviderCutover"("sourceDeploymentId", "sourceProvider", "destinationProvider") WHERE status IN ('PLANNED', 'SHADOW', 'CUTOVER', 'OBSERVING', 'ARCHIVE_ONLY', 'DELETE_ELIGIBLE');
+
+-- CreateIndex
 CREATE UNIQUE INDEX "CustomerDeployment_id_customerAccountId_key" ON "CustomerDeployment"("id", "customerAccountId");
 
 -- AddForeignKey
