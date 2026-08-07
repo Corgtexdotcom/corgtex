@@ -66,13 +66,13 @@ export type RuntimeRollbackAssessment = {
 
 const ALLOWED_PROVIDERS = new Set(["RAILWAY", "AZURE", "SELF_HOSTED"]);
 const ALLOWED_STATUSES = new Set([
-  "PENDING",
-  "PROVISIONING",
+  "PLANNED",
   "SHADOW",
   "CUTOVER",
   "OBSERVING",
-  "COMPLETED",
-  "FAILED",
+  "ARCHIVE_ONLY",
+  "DELETE_ELIGIBLE",
+  "DELETED",
   "ROLLED_BACK",
 ]);
 
@@ -148,6 +148,10 @@ export function assessRuntimeRollback(
 
   if (status !== "SHADOW" && status !== "CUTOVER" && status !== "OBSERVING") {
     blockers.push("STATUS_NOT_ROLLBACK_ELIGIBLE");
+    return {
+      rollbackReady: false,
+      summary: { status, sourceProvider: src, destinationProvider: dst, rollbackReady: false, blockerCodes: blockers },
+    };
   }
 
   const ev = record.evidence || {};

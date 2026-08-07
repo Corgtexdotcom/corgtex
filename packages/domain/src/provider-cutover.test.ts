@@ -45,15 +45,17 @@ describe("assessRuntimeRollback", () => {
   });
 
   const statuses = [
-    { st: "PENDING", ok: false }, { st: "PROVISIONING", ok: false },
-    { st: "SHADOW", ok: true }, { st: "CUTOVER", ok: true },
-    { st: "OBSERVING", ok: true }, { st: "COMPLETED", ok: false },
-    { st: "FAILED", ok: false }, { st: "ROLLED_BACK", ok: false },
+    { st: "PLANNED", ok: false }, { st: "SHADOW", ok: true },
+    { st: "CUTOVER", ok: true }, { st: "OBSERVING", ok: true },
+    { st: "ARCHIVE_ONLY", ok: false }, { st: "DELETE_ELIGIBLE", ok: false },
+    { st: "DELETED", ok: false }, { st: "ROLLED_BACK", ok: false },
+    { st: "UNKNOWN", ok: false },
   ];
   it.each(statuses)("status $st", ({ st, ok }) => {
     const res = assessRuntimeRollback({ ...baseRec, status: st }, ctx);
     expect(res.rollbackReady).toBe(ok);
     if (!ok) expect(res.summary.blockerCodes).toContain("STATUS_NOT_ROLLBACK_ELIGIBLE");
+    if (st === "UNKNOWN") expect(res.summary.status).toBeNull();
   });
 
   const provs = [
