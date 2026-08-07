@@ -592,6 +592,7 @@ export async function handleContextGraphSync(
   if (payload.sourceType === "DOCUMENT") {
     const document = await prisma.document.findFirst({ where: { id: payload.sourceId, workspaceId } });
     if (!document) return;
+    if (document.accessDomain !== "WORKSPACE") return;
     await upsertContextGraphObject(actor, {
       workspaceId,
       objectType: "Document",
