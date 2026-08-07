@@ -66,43 +66,31 @@ export type RuntimeRollbackAssessment = {
 
 const ALLOWED_PROVIDERS = new Set(["RAILWAY", "AZURE", "SELF_HOSTED"]);
 const ALLOWED_STATUSES = new Set([
-  "PLANNED",
-  "SHADOW",
-  "CUTOVER",
-  "OBSERVING",
-  "ARCHIVE_ONLY",
-  "DELETE_ELIGIBLE",
-  "DELETED",
-  "ROLLED_BACK",
+  "PLANNED", "SHADOW", "CUTOVER", "OBSERVING",
+  "ARCHIVE_ONLY", "DELETE_ELIGIBLE", "DELETED", "ROLLED_BACK"
 ]);
 
-const RFC3339_REGEX = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-]\d{2}):(\d{2}))$/i;
+const RFC3339_REGEX = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|([+-]\d{2}):(\d{2}))$/i;
 
-function parseRFC3339(dateStr: unknown): Date | null {
+function parseRFC3339(dateStr: unknown): number | null {
   if (typeof dateStr !== "string") return null;
-  const match = dateStr.match(RFC3339_REGEX);
-  if (!match) return null;
+  const m = dateStr.match(RFC3339_REGEX);
+  if (!m) return null;
 
-  const year = parseInt(match[1], 10);
-  const month = parseInt(match[2], 10);
-  const day = parseInt(match[3], 10);
-  const hour = parseInt(match[4], 10);
-  const min = parseInt(match[5], 10);
-  const sec = parseInt(match[6], 10);
+  const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+  const h = parseInt(m[4], 10), min = parseInt(m[5], 10), s = parseInt(m[6], 10);
 
-  if (month < 1 || month > 12) return null;
-  const daysInMonth = new Date(year, month, 0).getDate();
-  if (day < 1 || day > daysInMonth) return null;
-  if (hour > 23 || min > 59 || sec > 59) return null;
+  if (mo < 1 || mo > 12 || h > 23 || min > 59 || s > 59) return null;
+  const isLeap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [0, 31, isLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (d < 1 || d > days[mo]) return null;
 
-  if (match[7]) {
-    const offHour = parseInt(match[7], 10);
-    const offMin = parseInt(match[8], 10);
-    if (Math.abs(offHour) > 23 || offMin > 59) return null;
-  }
+  if (m[8] && (Math.abs(parseInt(m[8], 10)) > 23 || parseInt(m[9], 10) > 59)) return null;
 
-  const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? null : d;
+  const time = new Date(dateStr).getTime();
+  if (isNaN(time)) return null;
+  const frac = m[7] && m[7].length > 3 && parseInt(m[7].substring(3), 10) > 0 ? 0.001 : 0;
+  return time + frac;
 }
 
 function isValidDate(d: unknown): d is Date {
@@ -127,11 +115,14 @@ export function assessRuntimeRollback(
   if (!ALLOWED_PROVIDERS.has(src) || !ALLOWED_PROVIDERS.has(dst) || src === dst) {
     src = null;
     dst = null;
-    blockers.push("INVALID_IDENTITY");
   }
 
   const status = ALLOWED_STATUSES.has(record.status) ? record.status : null;
-  if (status === null && !blockers.includes("INVALID_IDENTITY")) {
+  if (
+    src === null ||
+    status === null ||
+    ((status === "CUTOVER" || status === "OBSERVING") && !record.destinationDeploymentId)
+  ) {
     blockers.push("INVALID_IDENTITY");
   }
 
@@ -161,12 +152,12 @@ export function assessRuntimeRollback(
     blockers.push("SOURCE_RUNTIME_UNHEALTHY");
   }
 
-  const obs = parseRFC3339(ev.sourceRuntimeObservedAt);
-  if (!obs) {
+  const obsTime = parseRFC3339(ev.sourceRuntimeObservedAt);
+  if (obsTime === null) {
     blockers.push("SOURCE_RUNTIME_OBSERVATION_INVALID");
-  } else if (obs.getTime() > context.assessedAt.getTime()) {
+  } else if (obsTime > context.assessedAt.getTime()) {
     blockers.push("SOURCE_RUNTIME_OBSERVATION_FUTURE");
-  } else if (obs.getTime() < context.requiredSourceRuntimeObservedAt.getTime()) {
+  } else if (obsTime < context.requiredSourceRuntimeObservedAt.getTime()) {
     blockers.push("SOURCE_RUNTIME_OBSERVATION_STALE");
   }
 
@@ -184,16 +175,19 @@ export function assessRuntimeRollback(
     blockers.push("SOURCE_FRESHNESS_STALE");
   }
 
-  if (status === "CUTOVER" || status === "OBSERVING") {
-    if (!record.destinationWriteStartedAt) {
-      blockers.push("DESTINATION_WRITE_START_MISSING");
-    } else if (!isValidDate(record.destinationWriteStartedAt)) {
+  if (record.destinationWriteStartedAt !== null) {
+    if (!isValidDate(record.destinationWriteStartedAt)) {
       blockers.push("DESTINATION_WRITE_START_INVALID");
     } else if (record.destinationWriteStartedAt.getTime() > context.assessedAt.getTime()) {
       blockers.push("DESTINATION_WRITE_START_FUTURE");
-    } else if (context.requiredSourceFreshThroughAt.getTime() < record.destinationWriteStartedAt.getTime()) {
+    } else if (
+      (status === "CUTOVER" || status === "OBSERVING") &&
+      context.requiredSourceFreshThroughAt.getTime() < record.destinationWriteStartedAt.getTime()
+    ) {
       blockers.push("HORIZON_BEFORE_DESTINATION_WRITES");
     }
+  } else if (status === "CUTOVER" || status === "OBSERVING") {
+    blockers.push("DESTINATION_WRITE_START_MISSING");
   }
 
   const rollbackReady = blockers.length === 0;

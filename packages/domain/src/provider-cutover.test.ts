@@ -58,8 +58,7 @@ describe("assessRuntimeRollback", () => {
     expect(Object.keys(res.summary).sort()).toEqual([
       "blockerCodes", "destinationProvider", "rollbackReady", "sourceProvider", "status"
     ]);
-    const serialized = JSON.stringify(res.summary);
-    expect(serialized).not.toContain("HOSTILE");
+    expect(JSON.stringify(res.summary)).not.toContain("HOSTILE");
   });
 
   it("returns STATUS_NOT_ROLLBACK_ELIGIBLE with INVALID_CONTEXT and skips runtime evidence", () => {
@@ -135,6 +134,7 @@ describe("assessRuntimeRollback", () => {
     { n: "invalid offset", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02T12:00:00+25:00" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "stale", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-07-30T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_STALE"] },
     { n: "future", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-08T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_FUTURE"] },
+    { n: "fractional future", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-07T12:00:00.0009Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_FUTURE"] },
     { n: "boundary", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-01T12:00:00Z" }, b: [] },
   ];
   it.each(obs)("observation $n", ({ ev, b }) => {
@@ -157,15 +157,22 @@ describe("assessRuntimeRollback", () => {
   });
 
   const dst = [
-    { st: "CUTOVER", ds: null, b: ["DESTINATION_WRITE_START_MISSING"] },
-    { st: "OBSERVING", ds: new Date("invalid"), b: ["DESTINATION_WRITE_START_INVALID"] },
-    { st: "CUTOVER", ds: new Date("2026-08-08T12:00:00Z"), b: ["DESTINATION_WRITE_START_FUTURE"] },
-    { st: "OBSERVING", ds: new Date("2026-08-02T12:00:00Z"), b: ["HORIZON_BEFORE_DESTINATION_WRITES"] },
-    { st: "CUTOVER", ds: new Date("2026-08-01T12:00:00Z"), b: [] },
-    { st: "SHADOW", ds: null, b: [] },
+    { st: "CUTOVER", dstDep: null, ds: new Date("2026-08-01T12:00:00Z"), b: ["INVALID_IDENTITY"] },
+    { st: "OBSERVING", dstDep: null, ds: new Date("2026-08-01T12:00:00Z"), b: ["INVALID_IDENTITY"] },
+    { st: "CUTOVER", dstDep: "dep2", ds: null, b: ["DESTINATION_WRITE_START_MISSING"] },
+    { st: "OBSERVING", dstDep: "dep2", ds: new Date("invalid"), b: ["DESTINATION_WRITE_START_INVALID"] },
+    { st: "CUTOVER", dstDep: "dep2", ds: new Date("2026-08-08T12:00:00Z"), b: ["DESTINATION_WRITE_START_FUTURE"] },
+    { st: "OBSERVING", dstDep: "dep2", ds: new Date("2026-08-02T12:00:00Z"), b: ["HORIZON_BEFORE_DESTINATION_WRITES"] },
+    { st: "CUTOVER", dstDep: "dep2", ds: new Date("2026-08-01T12:00:00Z"), b: [] },
+    { st: "SHADOW", dstDep: null, ds: null, b: [] },
+    { st: "SHADOW", dstDep: "dep2", ds: new Date("invalid"), b: ["DESTINATION_WRITE_START_INVALID"] },
+    { st: "SHADOW", dstDep: "dep2", ds: new Date("2026-08-08T12:00:00Z"), b: ["DESTINATION_WRITE_START_FUTURE"] },
   ];
-  it.each(dst)("dest state $st", ({ st, ds, b }) => {
-    const res = assessRuntimeRollback({ ...baseRec, status: st, destinationWriteStartedAt: ds }, ctx);
+  it.each(dst)("dest state $st", ({ st, dstDep, ds, b }) => {
+    const res = assessRuntimeRollback(
+      { ...baseRec, status: st, destinationDeploymentId: dstDep, destinationWriteStartedAt: ds },
+      ctx
+    );
     expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
   });
 
