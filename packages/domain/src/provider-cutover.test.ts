@@ -22,7 +22,7 @@ const baseRec: ProviderCutoverRecord = {
   sourceProvider: "RAILWAY",
   destinationProvider: "AZURE",
   status: "SHADOW",
-  sourceWriteStoppedAt: null,
+  sourceWriteStoppedAt: new Date("2026-08-01T13:00:00Z"),
   destinationWriteStartedAt: new Date("2026-08-01T12:00:00Z"),
   sourceDataFreshThroughAt: new Date("2026-08-02T12:00:00Z"),
   evidence: { ...baseEv },
@@ -132,6 +132,7 @@ describe("assessRuntimeRollback", () => {
     { n: "invalid day", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-02-30T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "invalid hour", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02T25:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "invalid offset", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02T12:00:00+25:00" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
+    { n: "unknown offset", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02T12:00:00-00:00" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "stale", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-07-30T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_STALE"] },
     { n: "future", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-08T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_FUTURE"] },
     { n: "fractional future", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-07T12:00:00.0009Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_FUTURE"] },
@@ -139,7 +140,8 @@ describe("assessRuntimeRollback", () => {
   ];
   it.each(obs)("observation $n", ({ ev, b }) => {
     const res = assessRuntimeRollback({ ...baseRec, evidence: ev }, ctx);
-    expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
+    if (b.length === 0) expect(res.rollbackReady).toBe(true);
+    else expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
   });
 
   const fresh = [
@@ -153,7 +155,8 @@ describe("assessRuntimeRollback", () => {
   ];
   it.each(fresh)("freshness $n", ({ ev, fd, b }) => {
     const res = assessRuntimeRollback({ ...baseRec, evidence: ev, sourceDataFreshThroughAt: fd }, ctx);
-    expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
+    if (b.length === 0) expect(res.rollbackReady).toBe(true);
+    else expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
   });
 
   const dst = [
@@ -165,6 +168,8 @@ describe("assessRuntimeRollback", () => {
     { st: "OBSERVING", dstDep: "dep2", ds: new Date("2026-08-02T12:00:00Z"), b: ["HORIZON_BEFORE_DESTINATION_WRITES"] },
     { st: "CUTOVER", dstDep: "dep2", ds: new Date("2026-08-01T12:00:00Z"), b: [] },
     { st: "SHADOW", dstDep: null, ds: null, b: [] },
+    { st: "SHADOW", dstDep: "dep1", ds: new Date("2026-08-01T12:00:00Z"), b: ["INVALID_IDENTITY"] },
+    { st: "SHADOW", dstDep: null, ds: new Date("2026-08-01T12:00:00Z"), b: ["INVALID_IDENTITY"] },
     { st: "SHADOW", dstDep: "dep2", ds: new Date("invalid"), b: ["DESTINATION_WRITE_START_INVALID"] },
     { st: "SHADOW", dstDep: "dep2", ds: new Date("2026-08-08T12:00:00Z"), b: ["DESTINATION_WRITE_START_FUTURE"] },
   ];
@@ -175,14 +180,6 @@ describe("assessRuntimeRollback", () => {
     );
     if (b.length === 0) expect(res.rollbackReady).toBe(true);
     else expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
-  });
-
-  it("allows start before stop ordering", () => {
-    const res = assessRuntimeRollback(
-      { ...baseRec, status: "CUTOVER", sourceWriteStoppedAt: new Date("2026-08-01T13:00:00Z"), destinationWriteStartedAt: new Date("2026-08-01T10:00:00Z") },
-      { ...ctx, requiredSourceFreshThroughAt: new Date("2026-08-01T10:00:00Z") }
-    );
-    expect(res.rollbackReady).toBe(true);
   });
 
   it("rejects year 9999 observation with same millisecond sub-ms fraction as future", () => {

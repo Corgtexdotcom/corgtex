@@ -89,6 +89,7 @@ function parseRFC3339(dateStr: unknown): [number, boolean] | null {
   const days = [0, 31, isLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   if (d < 1 || d > days[mo]) return null;
 
+  if (m[8] === "-00" && m[9] === "00") return null;
   if (m[8] && (Math.abs(parseInt(m[8], 10)) > 23 || parseInt(m[9], 10) > 59)) return null;
 
   const time = new Date(dateStr).getTime();
@@ -125,6 +126,8 @@ export function assessRuntimeRollback(
   if (
     src === null ||
     status === null ||
+    record.destinationDeploymentId === record.sourceDeploymentId ||
+    (status === "SHADOW" && !record.destinationDeploymentId && record.destinationWriteStartedAt !== null) ||
     ((status === "CUTOVER" || status === "OBSERVING") && !record.destinationDeploymentId)
   ) {
     blockers.push("INVALID_IDENTITY");
