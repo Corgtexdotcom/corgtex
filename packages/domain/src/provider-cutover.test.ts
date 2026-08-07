@@ -43,6 +43,10 @@ describe("assessCutoverReadiness", () => {
 
     it("rejects non-rollback statuses", () => {
       expect(assessCutoverReadiness(buildRecord({ ...validRollback, status: "PLANNED" }), baseCtx).readiness.rollbackReady).toBe(false);
+      expect(assessCutoverReadiness(buildRecord({ ...validRollback, status: "ARCHIVE_ONLY" }), baseCtx).readiness.rollbackReady).toBe(false);
+      expect(assessCutoverReadiness(buildRecord({ ...validRollback, status: "DELETE_ELIGIBLE" }), baseCtx).readiness.rollbackReady).toBe(false);
+      expect(assessCutoverReadiness(buildRecord({ ...validRollback, status: "DELETED" }), baseCtx).readiness.rollbackReady).toBe(false);
+      expect(assessCutoverReadiness(buildRecord({ ...validRollback, status: "ROLLED_BACK" }), baseCtx).readiness.rollbackReady).toBe(false);
     });
 
     it("rejects when source runtime is down or unobserved", () => {
@@ -82,6 +86,14 @@ describe("assessCutoverReadiness", () => {
       expect(assessCutoverReadiness(buildRecord({ ...validArchive, sourceWriteStoppedAt: assessedAt, finalSnapshotAt: past }), baseCtx).summary.blockerCodes).toContain("SNAPSHOT_BEFORE_STOP");
       expect(assessCutoverReadiness(buildRecord({ ...validArchive, finalSnapshotAt: assessedAt, archiveRestoreTestedAt: past }), baseCtx).summary.blockerCodes).toContain("RESTORE_BEFORE_SNAPSHOT");
     });
+    
+    it("source runtime down while archive remains available", () => {
+      const rec = buildRecord({ ...validArchive, status: "SHADOW", evidence: { sourceRuntimeHealthy: false } });
+      const res = assessCutoverReadiness(rec, baseCtx);
+      expect(res.readiness.rollbackReady).toBe(false);
+      expect(res.summary.blockerCodes).toContain("SOURCE_RUNTIME_DOWN");
+      expect(res.readiness.archiveAvailable).toBe(true);
+    });
   });
 
   describe("Delete Eligibility", () => {
@@ -101,6 +113,10 @@ describe("assessCutoverReadiness", () => {
       const incomplete = assessCutoverReadiness(buildRecord({ ...validDelete, retentionWaiverApprovedAt: past, retentionWaiverApprovedBy: null }), baseCtx);
       expect(incomplete.summary.blockerCodes).toContain("WAIVER_INCOMPLETE");
       expect(incomplete.readiness.deleteEligible).toBe(false);
+      
+      const blankStr = assessCutoverReadiness(buildRecord({ ...validDelete, retentionWaiverApprovedAt: past, retentionWaiverApprovedBy: "  ", retentionWaiverReason: "" }), baseCtx);
+      expect(blankStr.summary.blockerCodes).toContain("WAIVER_INCOMPLETE");
+      expect(blankStr.readiness.deleteEligible).toBe(false);
 
       const futWaiver = assessCutoverReadiness(buildRecord({ ...validDelete, retentionWaiverApprovedAt: future, retentionWaiverApprovedBy: "u1", retentionWaiverReason: "reason" }), baseCtx);
       expect(futWaiver.summary.blockerCodes).toContain("WAIVER_FUTURE");
@@ -111,6 +127,15 @@ describe("assessCutoverReadiness", () => {
       expect(assessCutoverReadiness(buildRecord({ ...validDelete, observationCompletedAt: null }), baseCtx).summary.blockerCodes).toContain("MISSING_OBSERVATION");
       expect(assessCutoverReadiness(buildRecord({ ...validDelete, observationCompletedAt: past, destinationWriteStartedAt: assessedAt }), baseCtx).summary.blockerCodes).toContain("OBSERVATION_BEFORE_DESTINATION_WRITES");
     });
+    
+    it("accepts valid dual-write ordering (destination started before source stopped)", () => {
+        const dualWriteDelete = buildRecord({
+            ...validDelete,
+            destinationWriteStartedAt: new Date(past.getTime() - 2000),
+            sourceWriteStoppedAt: past
+        });
+        expect(assessCutoverReadiness(dualWriteDelete, baseCtx).readiness.deleteEligible).toBe(true);
+    });
 
     it("rejects chronological contradictions in retention deadline", () => {
       expect(assessCutoverReadiness(buildRecord({ ...validDelete, archiveRetentionDeadline: new Date(past.getTime() - 10000) }), baseCtx).summary.blockerCodes).toContain("DEADLINE_BEFORE_SNAPSHOT");
@@ -119,13 +144,67 @@ describe("assessCutoverReadiness", () => {
 
     it("handles DELETED status correctly", () => {
       expect(assessCutoverReadiness(buildRecord({ status: "DELETED", sourceDeletedAt: null }), baseCtx).summary.blockerCodes).toContain("MISSING_DELETION_EVIDENCE");
+      expect(assessCutoverReadiness(buildRecord({ status: "DELETED", sourceDeletedAt: null }), baseCtx).readiness.deleteEligible).toBe(false);
       expect(assessCutoverReadiness(buildRecord({ ...validDelete, status: "DELETED", sourceDeletedAt: assessedAt }), baseCtx).readiness.deleteEligible).toBe(false);
     });
 
     it("rejects contradictory deletion dates", () => {
       expect(assessCutoverReadiness(buildRecord({ ...validDelete, status: "SHADOW", sourceDeletedAt: assessedAt }), baseCtx).summary.blockerCodes).toContain("CONTRADICTORY_DELETION");
       expect(assessCutoverReadiness(buildRecord({ ...validDelete, status: "DELETED", sourceDeletedAt: new Date(past.getTime() - 10000) }), baseCtx).summary.blockerCodes).toContain("CONTRADICTORY_DELETION");
+      expect(assessCutoverReadiness(buildRecord({ ...validDelete, status: "DELETED", sourceDeletedAt: new Date(past.getTime() - 1000), archiveRestoreTestedAt: past }), baseCtx).summary.blockerCodes).toContain("CONTRADICTORY_DELETION");
     });
+  });
+  
+  describe("Future Evidence Rejection (P1 Deletion Safety)", () => {
+      it("rejects direct counterexample: operational evidence after assessedAt fails archive and deletion", () => {
+          const t1 = new Date(assessedAt.getTime() + 1000);
+          const t2 = new Date(assessedAt.getTime() + 2000);
+          const t3 = new Date(assessedAt.getTime() + 3000);
+          const t4 = new Date(assessedAt.getTime() + 4000);
+          const badRecord = buildRecord({
+             status: "DELETE_ELIGIBLE",
+             sourceWriteStoppedAt: t1,
+             finalSnapshotAt: t2,
+             finalSnapshotChecksum: validChecksum,
+             archiveRestoreTestedAt: t3,
+             observationCompletedAt: t4,
+             destinationWriteStartedAt: past,
+             retentionWaiverApprovedAt: past,
+             retentionWaiverApprovedBy: "u1",
+             retentionWaiverReason: "valid"
+          });
+          
+          const res = assessCutoverReadiness(badRecord, baseCtx);
+          expect(res.summary.blockerCodes).toContain("FUTURE_EVIDENCE");
+          expect(res.readiness.archiveAvailable).toBe(false);
+          expect(res.readiness.deleteEligible).toBe(false);
+      });
+      
+      it("rejects single piece of future evidence", () => {
+         const baseArchive = buildRecord({
+             sourceWriteStoppedAt: past, finalSnapshotAt: past, finalSnapshotChecksum: validChecksum, archiveRestoreTestedAt: past 
+         });
+         
+         const futStop = assessCutoverReadiness(buildRecord({...baseArchive, sourceWriteStoppedAt: future}), baseCtx);
+         expect(futStop.summary.blockerCodes).toContain("FUTURE_EVIDENCE");
+         expect(futStop.readiness.archiveAvailable).toBe(false);
+         
+         const futSnap = assessCutoverReadiness(buildRecord({...baseArchive, finalSnapshotAt: future}), baseCtx);
+         expect(futSnap.summary.blockerCodes).toContain("FUTURE_EVIDENCE");
+         expect(futSnap.readiness.archiveAvailable).toBe(false);
+         
+         const futRest = assessCutoverReadiness(buildRecord({...baseArchive, archiveRestoreTestedAt: future}), baseCtx);
+         expect(futRest.summary.blockerCodes).toContain("FUTURE_EVIDENCE");
+         expect(futRest.readiness.archiveAvailable).toBe(false);
+         
+         const futObs = assessCutoverReadiness(buildRecord({...baseArchive, status: "DELETE_ELIGIBLE", observationCompletedAt: future, destinationWriteStartedAt: past, retentionWaiverApprovedAt: past, retentionWaiverApprovedBy: "u", retentionWaiverReason: "r"}), baseCtx);
+         expect(futObs.summary.blockerCodes).toContain("FUTURE_EVIDENCE");
+         expect(futObs.readiness.deleteEligible).toBe(false);
+         
+         const futDel = assessCutoverReadiness(buildRecord({...baseArchive, status: "DELETED", sourceDeletedAt: future}), baseCtx);
+         expect(futDel.summary.blockerCodes).toContain("FUTURE_EVIDENCE");
+         expect(futDel.readiness.deleteEligible).toBe(false); // DELETED is never eligible anyway, but just checking it gets blocker
+      });
   });
 
   describe("Sanitized Summary", () => {
@@ -137,6 +216,18 @@ describe("assessCutoverReadiness", () => {
       expect(jsonStr).not.toContain("secret-value");
       expect(jsonStr).not.toContain("reason-string");
       expect(jsonStr).not.toContain("waiver-text");
+    });
+    
+    it("redacts boolean false values correctly without asserting output contains no 'f'", () => {
+       const res = assessCutoverReadiness(buildRecord({ status: "PLANNED" }), baseCtx);
+       const jsonStr = JSON.stringify(res.summary);
+       expect(res.summary.rollbackReady).toBe(false);
+       expect(res.summary.archiveAvailable).toBe(false);
+       expect(res.summary.deleteEligible).toBe(false);
+       // We DO NOT assert that jsonStr.indexOf("f") === -1 because false has 'f' in it
+       // Ensure redaction of sensitive info instead
+       expect(jsonStr).not.toContain("reason");
+       expect(jsonStr).not.toContain("evidence");
     });
   });
 });
