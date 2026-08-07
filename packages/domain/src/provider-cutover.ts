@@ -72,13 +72,17 @@ const ALLOWED_STATUSES = new Set([
 
 const RFC3339_REGEX = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|([+-]\d{2}):(\d{2}))$/i;
 
-function parseRFC3339(dateStr: unknown): number | null {
+function parseRFC3339(dateStr: unknown): [number, boolean] | null {
   if (typeof dateStr !== "string") return null;
   const m = dateStr.match(RFC3339_REGEX);
   if (!m) return null;
 
-  const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
-  const h = parseInt(m[4], 10), min = parseInt(m[5], 10), s = parseInt(m[6], 10);
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const d = parseInt(m[3], 10);
+  const h = parseInt(m[4], 10);
+  const min = parseInt(m[5], 10);
+  const s = parseInt(m[6], 10);
 
   if (mo < 1 || mo > 12 || h > 23 || min > 59 || s > 59) return null;
   const isLeap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
@@ -89,8 +93,8 @@ function parseRFC3339(dateStr: unknown): number | null {
 
   const time = new Date(dateStr).getTime();
   if (isNaN(time)) return null;
-  const frac = m[7] && m[7].length > 3 && parseInt(m[7].substring(3), 10) > 0 ? 0.001 : 0;
-  return time + frac;
+  const subMs = Boolean(m[7] && m[7].length > 3 && parseInt(m[7].substring(3), 10) > 0);
+  return [time, subMs];
 }
 
 function isValidDate(d: unknown): d is Date {
@@ -152,12 +156,12 @@ export function assessRuntimeRollback(
     blockers.push("SOURCE_RUNTIME_UNHEALTHY");
   }
 
-  const obsTime = parseRFC3339(ev.sourceRuntimeObservedAt);
-  if (obsTime === null) {
+  const obs = parseRFC3339(ev.sourceRuntimeObservedAt);
+  if (obs === null) {
     blockers.push("SOURCE_RUNTIME_OBSERVATION_INVALID");
-  } else if (obsTime > context.assessedAt.getTime()) {
+  } else if (obs[0] > context.assessedAt.getTime() || (obs[0] === context.assessedAt.getTime() && obs[1])) {
     blockers.push("SOURCE_RUNTIME_OBSERVATION_FUTURE");
-  } else if (obsTime < context.requiredSourceRuntimeObservedAt.getTime()) {
+  } else if (obs[0] < context.requiredSourceRuntimeObservedAt.getTime()) {
     blockers.push("SOURCE_RUNTIME_OBSERVATION_STALE");
   }
 

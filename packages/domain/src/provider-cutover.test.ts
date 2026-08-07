@@ -183,4 +183,12 @@ describe("assessRuntimeRollback", () => {
     );
     expect(res.rollbackReady).toBe(true);
   });
+
+  it("rejects year 9999 observation with same millisecond sub-ms fraction as future", () => {
+    const res = assessRuntimeRollback(
+      { ...baseRec, evidence: { ...baseEv, sourceRuntimeObservedAt: "9999-12-31T23:59:59.0009Z" } },
+      { ...ctx, assessedAt: new Date("9999-12-31T23:59:59.000Z") }
+    );
+    expect(res.summary.blockerCodes).toContain("SOURCE_RUNTIME_OBSERVATION_FUTURE");
+  });
 });
