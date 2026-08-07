@@ -173,7 +173,8 @@ describe("assessRuntimeRollback", () => {
       { ...baseRec, status: st, destinationDeploymentId: dstDep, destinationWriteStartedAt: ds },
       ctx
     );
-    expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
+    if (b.length === 0) expect(res.rollbackReady).toBe(true);
+    else expect(res.summary.blockerCodes).toEqual(expect.arrayContaining(b));
   });
 
   it("allows start before stop ordering", () => {
