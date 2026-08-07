@@ -4,6 +4,7 @@ const { prismaMock, syncContextGraphForMeetingMock, upsertContextGraphObjectMock
   prismaMock: {
     action: { findFirst: vi.fn() },
     brainArticle: { findFirst: vi.fn() },
+    document: { findFirst: vi.fn() },
     member: { findFirst: vi.fn() },
     goal: { findFirst: vi.fn() },
     agentIdentity: { findFirst: vi.fn() },
@@ -484,5 +485,50 @@ describe("handleContextGraphSync", () => {
       sourceEntityId: "goal-child",
     }));
     expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+  });
+
+  it("syncs graph objects for WORKSPACE documents", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.document.findFirst.mockResolvedValueOnce({
+      id: "doc-1",
+      workspaceId: "ws-1",
+      title: "Quarterly review",
+      textContent: "It was a good quarter.",
+      accessDomain: "WORKSPACE",
+      mimeType: "text/plain",
+      source: "UPLOAD",
+      createdAt: new Date("2026-05-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-05-21T10:00:00.000Z"),
+    });
+    upsertContextGraphObjectMock.mockResolvedValueOnce({ id: "doc-object-1" });
+
+    await handleContextGraphSync("job-1", { sourceType: "DOCUMENT", sourceId: "doc-1" }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      objectType: "Document",
+      title: "Quarterly review",
+      summary: "It was a good quarter.",
+      sourceEntityType: "Document",
+      sourceEntityId: "doc-1",
+    }));
+  });
+
+  it("does not sync graph objects for FINANCE documents", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.document.findFirst.mockResolvedValueOnce({
+      id: "doc-finance",
+      workspaceId: "ws-1",
+      title: "Finance Report 2026",
+      textContent: "Confidential financial data.",
+      accessDomain: "FINANCE",
+      mimeType: "application/pdf",
+      source: "UPLOAD",
+      createdAt: new Date("2026-05-20T10:00:00.000Z"),
+      updatedAt: new Date("2026-05-21T10:00:00.000Z"),
+    });
+
+    await handleContextGraphSync("job-1", { sourceType: "DOCUMENT", sourceId: "doc-finance" }, "ws-1");
+
+    expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
   });
 });

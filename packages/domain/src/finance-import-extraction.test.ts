@@ -138,6 +138,10 @@ describe("Finance report import extraction lifecycle", () => {
     expect(prismaMock.event.create).toHaveBeenCalledWith({ data: { workspaceId: "workspace-1",
       type: "finance-report-import.extracted", aggregateType: "FinanceImportBatch", aggregateId: "batch-1",
       payload: { batchId: "batch-1", expectedVersion: 3 } } });
+    expect(prismaMock.event.create).toHaveBeenCalledWith({ data: { workspaceId: "workspace-1",
+      type: "document.updated", aggregateType: "Document", aggregateId: "document-1",
+      payload: { documentId: "document-1" } } });
+    expect(prismaMock.event.create).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(prismaMock.event.create.mock.calls)).not.toMatch(/synthetic|aaaa|Account|Revenue/);
     vi.clearAllMocks();
     prismaMock.$transaction.mockImplementation((callback) => callback(prismaMock));
@@ -161,6 +165,7 @@ describe("Finance report import extraction lifecycle", () => {
     })).resolves.toEqual({ skipped: true, batchId: "batch-1", version: 3 });
     expect(prismaMock.financeImportBatch.updateMany).not.toHaveBeenCalled();
     expect(prismaMock.document.update).not.toHaveBeenCalled();
+    expect(prismaMock.event.create).not.toHaveBeenCalled();
   });
   it("rejects stale versions and changed file identity before artifact writes", async () => {
     const active = { ...uploaded, stage: "EXTRACTING", workflowJobId: "job-1", version: 2 };

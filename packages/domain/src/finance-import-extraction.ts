@@ -217,6 +217,10 @@ export async function completeFinanceReportImportExtraction(params: {
       workspaceId: batch.workspaceId, type: "finance-report-import.extracted", aggregateType: "FinanceImportBatch",
       aggregateId: batch.id, payload: { batchId: batch.id, expectedVersion: batch.version + 1 },
     } });
+    await tx.event.create({ data: {
+      workspaceId: batch.workspaceId, type: "document.updated", aggregateType: "Document",
+      aggregateId: batch.document!.id, payload: { documentId: batch.document!.id },
+    } });
     await tx.auditLog.create({ data: {
       workspaceId: batch.workspaceId,
       action: "finance-report-import.extracted",
