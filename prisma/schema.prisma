@@ -632,6 +632,17 @@ enum CustomerDeploymentCloudProvider {
   UNKNOWN
 }
 
+enum ProviderCutoverStatus {
+  PLANNED
+  SHADOW
+  CUTOVER
+  OBSERVING
+  ARCHIVE_ONLY
+  DELETE_ELIGIBLE
+  DELETED
+  ROLLED_BACK
+}
+
 enum FleetSnapshotKind {
   HEALTH
   RELEASE
@@ -5580,6 +5591,7 @@ model CustomerAccount {
   entitlements      CustomerEntitlement[]
   releaseTargets    CustomerReleaseTarget[]
   clientMigrations  ClientMigrationRun[]
+  providerCutovers  ProviderCutover[]
 
   @@index([status])
   @@index([managementAuthority])
@@ -5663,7 +5675,10 @@ model CustomerDeployment {
   appRuntimes                   AppRuntime[]
   clientMigrationsAsSource      ClientMigrationRun[]       @relation("ClientMigrationSourceDeployment")
   clientMigrationsAsDestination ClientMigrationRun[]       @relation("ClientMigrationDestinationDeployment")
+  sourceProviderCutovers        ProviderCutover[]          @relation("SourceDeployment")
+  destinationProviderCutovers   ProviderCutover[]          @relation("DestinationDeployment")
 
+  @@unique([id, customerAccountId])
   @@index([customerAccountId])
   @@index([customerSlug])
   @@index([deploymentKind])
@@ -6034,4 +6049,41 @@ model ProcurementIdempotencyKey {
   @@index([scope, createdAt])
   @@index([workspaceId])
   @@index([setupSessionId])
+}
+
+model ProviderCutover {
+  id                        String                          @id @default(uuid())
+  customerAccountId         String
+  sourceDeploymentId        String
+  destinationDeploymentId   String?
+  sourceProvider            CustomerDeploymentCloudProvider
+  destinationProvider       CustomerDeploymentCloudProvider
+  status                    ProviderCutoverStatus           @default(PLANNED)
+  sourceWriteStoppedAt      DateTime?
+  destinationWriteStartedAt DateTime?
+  finalSnapshotAt           DateTime?
+  finalSnapshotChecksum     String?
+  sourceDataFreshThroughAt  DateTime?
+  observationCompletedAt    DateTime?
+  archiveRestoreTestedAt    DateTime?
+  archiveRetentionDeadline  DateTime?
+  retentionWaiverApprovedAt DateTime?
+  retentionWaiverApprovedBy String?
+  retentionWaiverReason     String?
+  sourceDeletedAt           DateTime?
+  evidence                  Json?
+  reason                    String
+  recordedByUserId          String?
+  transitionKey             String
+  activeTransitionKey       String?                         @unique
+  createdAt                 DateTime                        @default(now())
+  updatedAt                 DateTime                        @updatedAt
+
+  account               CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  sourceDeployment      CustomerDeployment  @relation("SourceDeployment", fields: [sourceDeploymentId, customerAccountId], references: [id, customerAccountId], onDelete: Restrict, onUpdate: Restrict)
+  destinationDeployment CustomerDeployment? @relation("DestinationDeployment", fields: [destinationDeploymentId, customerAccountId], references: [id, customerAccountId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([customerAccountId])
+  @@index([sourceDeploymentId, customerAccountId])
+  @@index([destinationDeploymentId, customerAccountId])
 }
