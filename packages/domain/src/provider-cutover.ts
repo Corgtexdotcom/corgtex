@@ -143,14 +143,13 @@ export function assessRuntimeRollback(
     context.requiredSourceRuntimeObservedAt.getTime() > context.assessedAt.getTime()
   ) {
     blockers.push("INVALID_CONTEXT");
-    return {
-      rollbackReady: false,
-      summary: { status, sourceProvider: src, destinationProvider: dst, rollbackReady: false, blockerCodes: blockers },
-    };
   }
 
   if (status !== null && status !== "SHADOW" && status !== "CUTOVER" && status !== "OBSERVING") {
     blockers.push("STATUS_NOT_ROLLBACK_ELIGIBLE");
+  }
+
+  if (blockers.length > 0) {
     return {
       rollbackReady: false,
       summary: { status, sourceProvider: src, destinationProvider: dst, rollbackReady: false, blockerCodes: blockers },

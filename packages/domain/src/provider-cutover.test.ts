@@ -30,7 +30,23 @@ const baseRec: ProviderCutoverRecord = {
 
 describe("assessRuntimeRollback", () => {
   it("redacts hostile input and exposes exact summary keys", () => {
-    const res = assessRuntimeRollback(baseRec, ctx);
+    const hostileRec: ProviderCutoverRecord = {
+      ...baseRec,
+      id: "HOSTILE_ID",
+      customerAccountId: "HOSTILE_ACCOUNT",
+      sourceDeploymentId: "HOSTILE_SRC_DEP",
+      destinationDeploymentId: "HOSTILE_DST_DEP",
+      evidence: {
+        ...baseEv,
+        secretKey: "HOSTILE_CREDENTIAL",
+        url: "https://HOSTILE.URL",
+        reason: "HOSTILE_REASON",
+        objectName: "HOSTILE_OBJECT",
+        customerContent: "HOSTILE_CONTENT",
+        someTimestamp: "2026-08-01T12:34:56Z_HOSTILE",
+      },
+    };
+    const res = assessRuntimeRollback(hostileRec, ctx);
     expect(res.rollbackReady).toBe(true);
     expect(res.summary).toEqual({
       status: "SHADOW",
@@ -42,6 +58,21 @@ describe("assessRuntimeRollback", () => {
     expect(Object.keys(res.summary).sort()).toEqual([
       "blockerCodes", "destinationProvider", "rollbackReady", "sourceProvider", "status"
     ]);
+    const serialized = JSON.stringify(res.summary);
+    expect(serialized).not.toContain("HOSTILE");
+  });
+
+  it("returns STATUS_NOT_ROLLBACK_ELIGIBLE with INVALID_CONTEXT and skips runtime evidence", () => {
+    const res = assessRuntimeRollback(
+      { ...baseRec, status: "PLANNED", evidence: {} },
+      { ...ctx, assessedAt: new Date("invalid") }
+    );
+    expect(res.rollbackReady).toBe(false);
+    expect(res.summary.blockerCodes).toContain("STATUS_NOT_ROLLBACK_ELIGIBLE");
+    expect(res.summary.blockerCodes).toContain("INVALID_CONTEXT");
+    expect(res.summary.blockerCodes).not.toContain("SOURCE_RUNTIME_UNHEALTHY");
+    expect(res.summary.blockerCodes).not.toContain("SOURCE_RUNTIME_OBSERVATION_INVALID");
+    expect(res.summary.blockerCodes).not.toContain("DESTINATION_WRITES_INCOMPATIBLE");
   });
 
   const statuses = [
