@@ -69,7 +69,7 @@ ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_deletion_consisten
 );
 
 ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_destination_required_check" CHECK (
-  status IN ('PLANNED', 'SHADOW') OR "destinationDeploymentId" IS NOT NULL
+  status IN ('PLANNED', 'SHADOW', 'ROLLED_BACK') OR "destinationDeploymentId" IS NOT NULL
 );
 
 ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_checksum_format_check" CHECK (
