@@ -6079,7 +6079,11 @@ model ProviderCutover {
   createdAt                 DateTime                        @default(now())
   updatedAt                 DateTime                        @updatedAt
 
-  account               CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Restrict)
-  sourceDeployment      CustomerDeployment  @relation("SourceDeployment", fields: [sourceDeploymentId, customerAccountId], references: [id, customerAccountId], onDelete: Restrict)
-  destinationDeployment CustomerDeployment? @relation("DestinationDeployment", fields: [destinationDeploymentId, customerAccountId], references: [id, customerAccountId], onDelete: Restrict)
+  account               CustomerAccount     @relation(fields: [customerAccountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  sourceDeployment      CustomerDeployment  @relation("SourceDeployment", fields: [sourceDeploymentId, customerAccountId], references: [id, customerAccountId], onDelete: Restrict, onUpdate: Restrict)
+  destinationDeployment CustomerDeployment? @relation("DestinationDeployment", fields: [destinationDeploymentId, customerAccountId], references: [id, customerAccountId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([customerAccountId])
+  @@index([sourceDeploymentId, customerAccountId])
+  @@index([destinationDeploymentId, customerAccountId])
 }

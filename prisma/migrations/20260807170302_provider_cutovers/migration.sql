@@ -49,13 +49,22 @@ CREATE UNIQUE INDEX "ProviderCutover_non_terminal_tuple_key" ON "ProviderCutover
 CREATE UNIQUE INDEX "CustomerDeployment_id_customerAccountId_key" ON "CustomerDeployment"("id", "customerAccountId");
 
 -- AddForeignKey
-ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_customerAccountId_fkey" FOREIGN KEY ("customerAccountId") REFERENCES "CustomerAccount"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_customerAccountId_fkey" FOREIGN KEY ("customerAccountId") REFERENCES "CustomerAccount"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_sourceDeploymentId_customerAccountId_fkey" FOREIGN KEY ("sourceDeploymentId", "customerAccountId") REFERENCES "CustomerDeployment"("id", "customerAccountId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_sourceDeploymentId_customerAccountId_fkey" FOREIGN KEY ("sourceDeploymentId", "customerAccountId") REFERENCES "CustomerDeployment"("id", "customerAccountId") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_destinationDeploymentId_customerAccountId_fkey" FOREIGN KEY ("destinationDeploymentId", "customerAccountId") REFERENCES "CustomerDeployment"("id", "customerAccountId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_destinationDeploymentId_customerAccountId_fkey" FOREIGN KEY ("destinationDeploymentId", "customerAccountId") REFERENCES "CustomerDeployment"("id", "customerAccountId") ON DELETE RESTRICT ON UPDATE RESTRICT;
+
+-- CreateIndex
+CREATE INDEX "ProviderCutover_customerAccountId_idx" ON "ProviderCutover"("customerAccountId");
+
+-- CreateIndex
+CREATE INDEX "ProviderCutover_sourceDeploymentId_customerAccountId_idx" ON "ProviderCutover"("sourceDeploymentId", "customerAccountId");
+
+-- CreateIndex
+CREATE INDEX "ProviderCutover_destinationDeploymentId_customerAccountId_idx" ON "ProviderCutover"("destinationDeploymentId", "customerAccountId");
 
 ALTER TABLE "ProviderCutover" ADD CONSTRAINT "ProviderCutover_active_mirror_check" CHECK (
   CASE WHEN status IN ('DELETED', 'ROLLED_BACK') THEN "activeTransitionKey" IS NULL
