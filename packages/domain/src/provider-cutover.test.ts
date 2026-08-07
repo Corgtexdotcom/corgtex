@@ -54,13 +54,21 @@ describe("assessRuntimeRollback", () => {
   it.each(statuses)("status $st", ({ st, ok }) => {
     const res = assessRuntimeRollback({ ...baseRec, status: st }, ctx);
     expect(res.rollbackReady).toBe(ok);
-    if (!ok) expect(res.summary.blockerCodes).toContain("STATUS_NOT_ROLLBACK_ELIGIBLE");
-    if (st === "UNKNOWN") expect(res.summary.status).toBeNull();
+    if (!ok && st !== "UNKNOWN") expect(res.summary.blockerCodes).toContain("STATUS_NOT_ROLLBACK_ELIGIBLE");
+    if (st === "UNKNOWN") {
+      expect(res.summary.status).toBeNull();
+      expect(res.summary.blockerCodes).toContain("INVALID_IDENTITY");
+      expect(res.summary.blockerCodes).not.toContain("STATUS_NOT_ROLLBACK_ELIGIBLE");
+    }
   });
 
   const provs = [
     { src: "RAILWAY", dst: "AZURE", ok: true },
+    { src: "RAILWAY", dst: "SELF_HOSTED", ok: true },
+    { src: "AZURE", dst: "RAILWAY", ok: true },
     { src: "AZURE", dst: "SELF_HOSTED", ok: true },
+    { src: "SELF_HOSTED", dst: "RAILWAY", ok: true },
+    { src: "SELF_HOSTED", dst: "AZURE", ok: true },
     { src: "UNKNOWN", dst: "AZURE", ok: false },
     { src: "RAILWAY", dst: "ARBITRARY", ok: false },
     { src: "AZURE", dst: "AZURE", ok: false },
@@ -75,6 +83,8 @@ describe("assessRuntimeRollback", () => {
     { n: "future fresh", m: { requiredSourceFreshThroughAt: new Date("2026-08-08T12:00:00Z") } },
     { n: "future obs", m: { requiredSourceRuntimeObservedAt: new Date("2026-08-08T12:00:00Z") } },
     { n: "invalid date", m: { assessedAt: new Date("invalid") } },
+    { n: "invalid req fresh", m: { requiredSourceFreshThroughAt: new Date("invalid") } },
+    { n: "invalid req obs", m: { requiredSourceRuntimeObservedAt: new Date("invalid") } },
   ];
   it.each(ctxs)("context $n", ({ m }) => {
     const res = assessRuntimeRollback(baseRec, { ...ctx, ...m });
@@ -88,7 +98,9 @@ describe("assessRuntimeRollback", () => {
     { n: "missing date", ev: { sourceRuntimeHealthy: true, destinationWritesCompatible: true }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "non-string", ev: { ...baseEv, sourceRuntimeObservedAt: 123 }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "date-only", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
+    { n: "locale", ev: { ...baseEv, sourceRuntimeObservedAt: "8/2/2026, 12:00:00 PM" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "invalid day", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-02-30T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
+    { n: "invalid hour", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02T25:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "invalid offset", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-02T12:00:00+25:00" }, b: ["SOURCE_RUNTIME_OBSERVATION_INVALID"] },
     { n: "stale", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-07-30T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_STALE"] },
     { n: "future", ev: { ...baseEv, sourceRuntimeObservedAt: "2026-08-08T12:00:00Z" }, b: ["SOURCE_RUNTIME_OBSERVATION_FUTURE"] },
@@ -101,6 +113,7 @@ describe("assessRuntimeRollback", () => {
 
   const fresh = [
     { n: "miss compat", ev: { sourceRuntimeHealthy: true, sourceRuntimeObservedAt: "2026-08-02T12:00:00Z" }, fd: new Date("2026-08-02T12:00:00Z"), b: ["DESTINATION_WRITES_INCOMPATIBLE"] },
+    { n: "false compat", ev: { sourceRuntimeHealthy: true, sourceRuntimeObservedAt: "2026-08-02T12:00:00Z", destinationWritesCompatible: false }, fd: new Date("2026-08-02T12:00:00Z"), b: ["DESTINATION_WRITES_INCOMPATIBLE"] },
     { n: "miss fresh", ev: baseEv, fd: null, b: ["SOURCE_FRESHNESS_MISSING"] },
     { n: "inv fresh", ev: baseEv, fd: new Date("invalid"), b: ["SOURCE_FRESHNESS_INVALID"] },
     { n: "stale fresh", ev: baseEv, fd: new Date("2026-07-30T12:00:00Z"), b: ["SOURCE_FRESHNESS_STALE"] },

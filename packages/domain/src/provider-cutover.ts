@@ -131,6 +131,9 @@ export function assessRuntimeRollback(
   }
 
   const status = ALLOWED_STATUSES.has(record.status) ? record.status : null;
+  if (status === null && !blockers.includes("INVALID_IDENTITY")) {
+    blockers.push("INVALID_IDENTITY");
+  }
 
   if (
     !isValidDate(context.assessedAt) ||
@@ -146,7 +149,7 @@ export function assessRuntimeRollback(
     };
   }
 
-  if (status !== "SHADOW" && status !== "CUTOVER" && status !== "OBSERVING") {
+  if (status !== null && status !== "SHADOW" && status !== "CUTOVER" && status !== "OBSERVING") {
     blockers.push("STATUS_NOT_ROLLBACK_ELIGIBLE");
     return {
       rollbackReady: false,
