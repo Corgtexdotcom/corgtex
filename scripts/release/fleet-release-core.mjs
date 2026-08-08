@@ -26,6 +26,11 @@ export const TERMINAL_RAILWAY_FAILURES = new Set([
   "SKIPPED",
 ]);
 
+export const AZURE_PUBLIC_URL_VARIABLES = Object.freeze(["APP_URL", "NEXT_PUBLIC_APP_URL", "MEETING_RECORDER_PUBLIC_BASE_URL", "MCP_PUBLIC_URL"]);
+
+// Keep aligned with packages/domain/src/mcp-connector.ts.
+export const MCP_CONNECTOR_DEFAULT_SCOPES = Object.freeze("workspace:read brain:read governance:read context-graph:read proposals:read proposals:write actions:read actions:write tensions:read goals:read members:read meetings:read circles:read tools:read conversations:write".split(" "));
+
 export function parseBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   const normalized = String(value).trim().toLowerCase();
@@ -178,6 +183,101 @@ export function assertHealthProof(health, manifest, label = "deployment") {
     throw new Error(`${label} health proof failed: ${errors.join("; ")}`);
   }
   return true;
+}
+
+export function azurePublicUrlContract(targetUrl) {
+  const url = new URL(targetUrl);
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new Error(`Azure target URL must be a public HTTPS origin: ${targetUrl}`);
+  }
+  const origin = url.origin;
+  return { APP_URL: origin, NEXT_PUBLIC_APP_URL: origin, MEETING_RECORDER_PUBLIC_BASE_URL: origin, MCP_PUBLIC_URL: `${origin}/mcp` };
+}
+
+export function azureRuntimeContractErrors(targetUrl, entries) {
+  const expected = azurePublicUrlContract(targetUrl);
+  const rows = new Map((Array.isArray(entries) ? entries : []).map((entry) => [entry?.name, entry]));
+  const errors = [];
+  for (const name of AZURE_PUBLIC_URL_VARIABLES) {
+    const entry = rows.get(name);
+    if (!entry) {
+      errors.push(`${name} is missing`);
+      continue;
+    }
+    if (entry.secretRef || String(entry.value ?? "").startsWith("secretref:")) {
+      errors.push(`${name} must not be secret-backed`);
+      continue;
+    }
+    const actual = String(entry.value ?? "").trim();
+    if (!actual) {
+      errors.push(`${name} has no public value`);
+    } else if (actual !== expected[name]) {
+      errors.push(`${name}=${actual}; expected ${expected[name]}`);
+    }
+  }
+  return errors;
+}
+
+export function mcpOAuthProofErrors(targetUrl, proof) {
+  const contract = azurePublicUrlContract(targetUrl);
+  const origin = contract.APP_URL;
+  const resource = contract.MCP_PUBLIC_URL;
+  const protectedResource = proof?.protectedResource ?? {};
+  const authorizationServer = proof?.authorizationServer ?? {};
+  const errors = [];
+
+  if (protectedResource.resource !== resource) errors.push(`resource=${protectedResource.resource ?? "missing"}; expected ${resource}`);
+  if (!sameValues(protectedResource.authorization_servers, [origin])) errors.push("authorization_servers do not match the target origin");
+  if (authorizationServer.issuer !== origin) errors.push(`issuer=${authorizationServer.issuer ?? "missing"}; expected ${origin}`);
+  for (const [name, path] of Object.entries({
+    authorization_endpoint: "/api/oauth/authorize",
+    token_endpoint: "/api/oauth/token",
+    registration_endpoint: "/api/oauth/register",
+    revocation_endpoint: "/api/oauth/revoke",
+  })) {
+    const expected = `${origin}${path}`;
+    if (authorizationServer[name] !== expected) errors.push(`${name}=${authorizationServer[name] ?? "missing"}; expected ${expected}`);
+  }
+
+  const resourceScopes = protectedResource.scopes_supported;
+  const serverScopes = authorizationServer.scopes_supported;
+  if (!sameValues(resourceScopes, serverScopes)) errors.push("protected-resource and authorization-server scopes do not agree");
+  if (!sameValues(resourceScopes, MCP_CONNECTOR_DEFAULT_SCOPES)) errors.push("protected-resource scopes do not match canonical MCP defaults");
+
+  for (const challenge of proof?.challenges ?? []) {
+    const label = challenge.path ?? "MCP endpoint";
+    const header = String(challenge.header ?? "");
+    const bearer = bearerChallengeParameters(header);
+    if (challenge.status !== 401) errors.push(`${label} unauthenticated status=${challenge.status ?? "missing"}; expected 401`);
+    if (bearer === null) errors.push(`${label} challenge must use Bearer authentication`);
+    if (challengeParameter(bearer, "resource_metadata") !== `${origin}/.well-known/oauth-protected-resource`) {
+      errors.push(`${label} resource_metadata challenge does not match the target origin`);
+    }
+    const challengeScopes = challengeParameter(bearer, "scope")?.split(/\s+/).filter(Boolean) ?? [];
+    if (!sameValues(challengeScopes, resourceScopes)) errors.push(`${label} challenge scopes do not agree with protected-resource metadata`);
+  }
+  return errors;
+}
+
+function sameValues(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  return [...new Set(left)].sort().join("\n") === [...new Set(right)].sort().join("\n");
+}
+
+function challengeParameter(header, name) {
+  return String(header ?? "").match(new RegExp(`(?:^|[,\\s])${name}="([^"]*)"`, "i"))?.[1] ?? null;
+}
+
+function bearerChallengeParameters(header) {
+  const segments = String(header).match(/(?:[^,"]|"(?:\\.|[^"\\])*")+/g)?.map((part) => part.trim()).filter(Boolean) ?? [];
+  let bearer = null;
+  let active = false;
+  for (const segment of segments) {
+    const start = segment.match(/^([!#$%&'*+\-.^_`|~\w]+)(?:\s+|$)(.*)$/);
+    if (start) [active, bearer] = [start[1].toLowerCase() === "bearer", start[1].toLowerCase() === "bearer" ? start[2] : bearer];
+    else if (active) bearer += `,${segment}`;
+  }
+  return bearer;
 }
 
 export function targetRing(target) {
