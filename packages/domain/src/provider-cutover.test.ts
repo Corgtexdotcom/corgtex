@@ -433,6 +433,11 @@ describe("assessDeletionEligibility", () => {
       "RETENTION_WAIVER_APPROVAL_INVALID", "RETENTION_WAIVER_ACTOR_INVALID", "RETENTION_WAIVER_REASON_INVALID"]);
   });
 
+  it("does not let a valid waiver suppress an invalid supplied deadline", () => {
+    expect(deletionCodes({ archiveRetentionDeadline: "bad", retentionWaiverApprovedAt: archiveAt(13),
+      retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" })).toEqual(["RETENTION_DEADLINE_INVALID"]);
+  });
+
   it("state-gates deletion history and uses the earliest valid retention milestone", () => {
     for (const status of lifecycle.filter((value) => value !== "DELETED")) for (const sourceDeletedAt of [archiveAt(13), "bad", new Date("invalid"), archiveAt(15)]) {
       const history = deletionCodes({ status, sourceDeletedAt }).filter((code) => code.startsWith("SOURCE_DELETION"));
@@ -483,14 +488,16 @@ describe("assessDeletionEligibility", () => {
 
   it("returns exact sanitized keys and stable blocker order", () => {
     const result = deletionAssessment({ id: "HOSTILE_ID", customerAccountId: "HOSTILE_CUSTOMER",
-      retentionWaiverApprovedBy: " ", retentionWaiverReason: "HOSTILE_REASON",
-      archiveRetentionDeadline: archiveAt(15), retentionWaiverApprovedAt: "bad", evidence: { runtimeRollbackClaimed: true },
+      finalSnapshotChecksum: "HOSTILE_CHECKSUM", retentionWaiverApprovedBy: "HOSTILE_WAIVER_ACTOR",
+      retentionWaiverReason: "HOSTILE_WAIVER_REASON", archiveRetentionDeadline: archiveAt(15),
+      retentionWaiverApprovedAt: "bad", evidence: { runtimeRollbackClaimed: true,
+        credential: "HOSTILE_EVIDENCE_CREDENTIAL", url: "HOSTILE_EVIDENCE_URL", raw: "HOSTILE_EVIDENCE_RAW" },
       destinationWriteStartedAt: archiveAt(15), observationCompletedAt: archiveAt(13), sourceDeletedAt: "HOSTILE_DELETION",
       credential: "HOSTILE_CREDENTIAL", url: "HOSTILE_URL", objectName: "HOSTILE_OBJECT",
       timestamp: "HOSTILE_TIMESTAMP", customerContent: "HOSTILE_CONTENT" });
-    expect(result.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_FUTURE", "OBSERVATION_BEFORE_DESTINATION_WRITE_START",
+    expect(result.summary.blockerCodes).toEqual(["FINAL_SNAPSHOT_CHECKSUM_INVALID", "DESTINATION_WRITE_START_FUTURE", "OBSERVATION_BEFORE_DESTINATION_WRITE_START",
       "RUNTIME_ROLLBACK_CLAIMED", "RETENTION_DEADLINE_NOT_REACHED", "RETENTION_WAIVER_APPROVAL_INVALID",
-      "RETENTION_WAIVER_ACTOR_INVALID", "SOURCE_DELETION_STATUS_CONTRADICTION"]);
+      "SOURCE_DELETION_STATUS_CONTRADICTION"]);
     expect(Object.keys(result)).toEqual(["deleteEligible", "summary"]);
     expect(Object.keys(result.summary).sort()).toEqual(["blockerCodes", "deleteEligible", "destinationProvider", "sourceProvider", "status"]);
     expect(JSON.stringify(result)).not.toContain("HOSTILE");
