@@ -596,7 +596,7 @@ describe("/api/control-plane/mcp", () => {
   });
 
   it("rejects feature flag mutations without an explicit boolean enabled value", async () => {
-    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
+    mocks.resolveControlPlaneRequestActor.mockResolvedValue({
       kind: "agent",
       authProvider: "control-plane",
       label: "control-plane-agent",
@@ -622,6 +622,39 @@ describe("/api/control-plane/mcp", () => {
       error: { code: -32602, message: "enabled must be a boolean." },
     });
     expect(vi.mocked(domain.setControlPlaneFeatureFlag)).not.toHaveBeenCalled();
+
+    for (const argumentsValue of [
+      { deploymentId: "inst-1", flag: "FINANCE", enabled: true, config: {}, reason: "Missing identity." },
+      { deploymentId: "inst-1", flag: "FINANCE", enabled: true, reportImportsEnabled: true, expectedConfigIdentity: null, reason: "Mixed modes." },
+    ]) {
+      const invalid = await POST(request({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "set_customer_feature_flag", arguments: argumentsValue } }) as never);
+      expect(invalid.status).toBe(200);
+      expect((await invalid.json()).error.code).toBe(-32602);
+    }
+    expect(vi.mocked(domain.setControlPlaneFeatureFlag)).not.toHaveBeenCalled();
+  });
+
+  it("forwards guarded Finance report-import updates and preserves HTTP conflicts", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValue({
+      kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read", "control-plane:features:write"],
+    });
+    const domain = await import("@corgtex/domain");
+    const setFlag = vi.mocked(domain.setControlPlaneFeatureFlag);
+    setFlag.mockResolvedValueOnce({ status: "updated", configIdentity: "b".repeat(64) } as never);
+    const { POST } = await import("./route");
+    const argumentsValue = {
+      deploymentId: "inst-1", flag: "FINANCE", reportImportsEnabled: true,
+      expectedConfigIdentity: "a".repeat(64), reason: "Enable the approved pilot.",
+    };
+
+    expect((await POST(request({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "set_customer_feature_flag", arguments: argumentsValue } }) as never)).status).toBe(200);
+    expect(setFlag).toHaveBeenCalledWith(expect.any(Object), argumentsValue);
+
+    const conflict = Object.assign(new Error(`Customer Finance configuration changed. Current identity: ${"c".repeat(64)}.`), { status: 409, code: "FEATURE_CONFIG_CONFLICT" });
+    setFlag.mockRejectedValueOnce(conflict);
+    const response = await POST(request({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "set_customer_feature_flag", arguments: argumentsValue } }) as never);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "FEATURE_CONFIG_CONFLICT", message: expect.stringContaining("c".repeat(64)) } });
   });
 
   it("passes feature flag config through control-plane MCP mutations", async () => {
