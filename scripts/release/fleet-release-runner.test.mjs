@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { MCP_CONNECTOR_DEFAULT_SCOPES } from "./fleet-release-core.mjs";
 import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-release-alerts.mjs";
 import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
 
@@ -122,6 +123,55 @@ function healthResponse() {
       },
     }),
   };
+}
+
+function azurePublicUrlEntries(origin = "https://selfserve.corgtex.com", overrides = {}) {
+  return Object.entries({
+    APP_URL: origin,
+    NEXT_PUBLIC_APP_URL: origin,
+    MEETING_RECORDER_PUBLIC_BASE_URL: origin,
+    MCP_PUBLIC_URL: `${origin}/mcp`,
+    ...overrides,
+  }).map(([name, value]) => ({ name, value, secretRef: null }));
+}
+
+function publicJsonResponse(value) { return { ok: true, status: 200, json: async () => value }; }
+
+function oauthChallengeResponse(origin = "https://selfserve.corgtex.com") {
+  const scopes = MCP_CONNECTOR_DEFAULT_SCOPES.join(" ");
+  return { ok: false, status: 401, headers: { get: () => `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${scopes}"` } };
+}
+
+function azureReleaseEnv() {
+  return {
+    FLEET_RELEASE_TARGETS_JSON: azureTargetJson(),
+    AZURE_CLIENT_ID: "azure-client",
+    AZURE_TENANT_ID: "azure-tenant",
+    AZURE_SUBSCRIPTION_ID: "azure-subscription",
+    GITHUB_ACTOR: "github-user",
+    GITHUB_TOKEN: "github-token",
+    CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+    APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+    POSTHOG_ENABLED: "true",
+    POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+    POSTHOG_INSTANCE_ID: "azure-selfserve-production",
+  };
+}
+
+function successfulAzurePublicResponse(url) {
+  const path = new URL(String(url)).pathname;
+  const origin = "https://selfserve.corgtex.com";
+  const scopes = [...MCP_CONNECTOR_DEFAULT_SCOPES];
+  if (path === "/api/health") return healthResponse();
+  if (path === "/.well-known/oauth-protected-resource") {
+    return publicJsonResponse({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: scopes });
+  }
+  if (path === "/.well-known/oauth-authorization-server") {
+    return publicJsonResponse({ issuer: origin, authorization_endpoint: `${origin}/api/oauth/authorize`, token_endpoint: `${origin}/api/oauth/token`,
+      registration_endpoint: `${origin}/api/oauth/register`, revocation_endpoint: `${origin}/api/oauth/revoke`, scopes_supported: scopes });
+  }
+  if (path === "/mcp" || path === "/api/mcp") return oauthChallengeResponse(origin);
+  throw new Error(`Unexpected Azure public URL: ${url}`);
 }
 
 function controlPlaneResult(value) {
@@ -1550,12 +1600,82 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("AZURE_CLIENT_ID is missing");
   });
 
+  it("performs no Azure mutation or release recording when the runtime URL preflight fails", async () => {
+    const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
+        return {
+          stdout: JSON.stringify(azurePublicUrlEntries("https://selfserve.corgtex.com", {
+            MCP_PUBLIC_URL: "https://selfserve.corgtex.com",
+          })),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const fetchImpl = vi.fn();
+
+    await expect(runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "azure-selfserve", "--reason", "Deploy release.",
+    ], {
+      env: azureReleaseEnv(),
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+    })).rejects.toThrow("Ring 2 failed");
+
+    expect(runCommand.mock.calls.filter(([command, args]) => (
+      command === "az" && (args[0] === "acr" || (args[0] === "containerapp" && ["update", "secret"].includes(args[1])))
+    ))).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not record a verified Azure release when public OAuth metadata is incorrect", async () => {
+    const controlPlaneTools = [];
+    const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
+        if (args[args.indexOf("--query") + 1].includes(".env")) return { stdout: JSON.stringify(azurePublicUrlEntries()), stderr: "" };
+        return { stdout: JSON.stringify({ latest: `${args[3]}-revision`, ready: `${args[3]}-revision` }), stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      if (String(url).includes("/api/control-plane/mcp")) {
+        const body = JSON.parse(options.body);
+        controlPlaneTools.push(body.params.name);
+        return controlPlaneResult({ recorded: true });
+      }
+      if (new URL(String(url)).pathname === "/.well-known/oauth-protected-resource") {
+        return publicJsonResponse({
+          resource: "https://selfserve.corgtex.com",
+          authorization_servers: ["https://selfserve.corgtex.com"],
+          scopes_supported: [...MCP_CONNECTOR_DEFAULT_SCOPES],
+        });
+      }
+      return successfulAzurePublicResponse(url);
+    });
+
+    await expect(runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "azure-selfserve", "--reason", "Deploy release.",
+    ], {
+      env: azureReleaseEnv(),
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+    })).rejects.toThrow("Ring 2 failed");
+
+    expect(controlPlaneTools).not.toContain("record_verified_release");
+  });
+
   it("sets migrate-and-web startup variables during Azure deploys", async () => {
     const toolCalls = [];
     let releaseRecorded = false;
+    const abortSignalForTimeout = vi.fn(() => new AbortController().signal);
     const runCommand = vi.fn((command, args) => {
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
-        return { stdout: `${args[3]}-revision\n`, stderr: "" };
+        if (args[args.indexOf("--query") + 1].includes(".env")) {
+          return { stdout: JSON.stringify(azurePublicUrlEntries()), stderr: "" };
+        }
+        return { stdout: JSON.stringify({ latest: `${args[3]}-revision`, ready: `${args[3]}-revision` }), stderr: "" };
       }
       return { stdout: "", stderr: "" };
     });
@@ -1581,7 +1701,7 @@ describe("fleet release runner", () => {
           });
         }
       }
-      return healthResponse();
+      return successfulAzurePublicResponse(url);
     });
 
     const result = await runFleetRelease([
@@ -1608,10 +1728,12 @@ describe("fleet release runner", () => {
       },
       runCommand,
       fetchImpl,
+      abortSignalForTimeout,
       sleep: vi.fn(),
     });
 
     expect(result.results).toHaveLength(1);
+    expect(abortSignalForTimeout).toHaveBeenCalledTimes(4);
     const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
       command === "az" && args[0] === "containerapp" && args[1] === "update"
     ));
@@ -1644,6 +1766,11 @@ describe("fleet release runner", () => {
       "list_self_serve_customers",
     ]);
     expect(result.results[0].result.verifiedRelease).toMatchObject({ recorded: true });
+    expect(result.results[0].result.oauthProof).toMatchObject({
+      status: "ok",
+      resource: "https://selfserve.corgtex.com/mcp",
+      challenges: [{ path: "/mcp", status: 401 }, { path: "/api/mcp", status: 401 }],
+    });
     expect(result.results[0].result.providerReadiness).toMatchObject({
       status: "ok",
       provider: "azure",
@@ -1664,6 +1791,9 @@ describe("fleet release runner", () => {
       "  exit 1",
       "fi",
       "if [ \"$1\" = \"containerapp\" ] && [ \"$2\" = \"show\" ]; then",
+      "  case \" $* \" in",
+      "    *\" -o json \"*) printf '%s\\n' '[{\"name\":\"APP_URL\",\"value\":\"https://selfserve.corgtex.com\"},{\"name\":\"NEXT_PUBLIC_APP_URL\",\"value\":\"https://selfserve.corgtex.com\"},{\"name\":\"MEETING_RECORDER_PUBLIC_BASE_URL\",\"value\":\"https://selfserve.corgtex.com\"},{\"name\":\"MCP_PUBLIC_URL\",\"value\":\"https://selfserve.corgtex.com/mcp\"}]'; exit 0 ;;",
+      "  esac",
       "  printf 'fake-revision\\n'",
       "  exit 0",
       "fi",
