@@ -64,6 +64,47 @@ export type RuntimeRollbackAssessment = {
   summary: RuntimeRollbackSummary;
 };
 
+/** Persisted cutover data required to prove source-archive availability. */
+export type ArchiveAvailabilityRecord = ProviderCutoverRecord & {
+  finalSnapshotAt: Date | null;
+  finalSnapshotChecksum: string | null;
+  archiveRestoreTestedAt: Date | null;
+};
+
+/** Explicit assessment time for archive-availability comparisons. */
+export type ArchiveAvailabilityContext = {
+  assessedAt: Date;
+};
+
+/** Fixed, sanitized reasons why an archive is unavailable. */
+export type ArchiveAvailabilityBlockerCode =
+  | "INVALID_IDENTITY"
+  | "INVALID_CONTEXT"
+  | "SOURCE_WRITE_STOP_INVALID"
+  | "SOURCE_WRITE_STOP_FUTURE"
+  | "FINAL_SNAPSHOT_INVALID"
+  | "FINAL_SNAPSHOT_FUTURE"
+  | "FINAL_SNAPSHOT_BEFORE_WRITE_STOP"
+  | "FINAL_SNAPSHOT_CHECKSUM_INVALID"
+  | "ARCHIVE_RESTORE_TEST_INVALID"
+  | "ARCHIVE_RESTORE_TEST_FUTURE"
+  | "ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT";
+
+/** Fixed-shape archive result safe for logs and API projections. */
+export type ArchiveAvailabilitySummary = {
+  status: string | null;
+  sourceProvider: string | null;
+  destinationProvider: string | null;
+  archiveAvailable: boolean;
+  blockerCodes: ArchiveAvailabilityBlockerCode[];
+};
+
+/** Full result of a pure source-archive availability assessment. */
+export type ArchiveAvailabilityAssessment = {
+  archiveAvailable: boolean;
+  summary: ArchiveAvailabilitySummary;
+};
+
 const ALLOWED_PROVIDERS = new Set(["RAILWAY", "AZURE", "SELF_HOSTED"]);
 const ALLOWED_STATUSES = new Set([
   "PLANNED", "SHADOW", "CUTOVER", "OBSERVING",
@@ -100,6 +141,86 @@ function parseRFC3339(dateStr: unknown): [number, boolean] | null {
 
 function isValidDate(d: unknown): d is Date {
   return d instanceof Date && !isNaN(d.getTime());
+}
+
+const DESTINATION_REQUIRED_STATUSES = new Set([
+  "CUTOVER", "OBSERVING", "ARCHIVE_ONLY", "DELETE_ELIGIBLE", "DELETED"
+]);
+
+function archiveResult(
+  status: string | null,
+  sourceProvider: string | null,
+  destinationProvider: string | null,
+  blockerCodes: ArchiveAvailabilityBlockerCode[]
+): ArchiveAvailabilityAssessment {
+  const archiveAvailable = blockerCodes.length === 0;
+  return {
+    archiveAvailable,
+    summary: { status, sourceProvider, destinationProvider, archiveAvailable, blockerCodes },
+  };
+}
+
+/**
+ * Proves source-archive availability from persisted evidence and an explicit time.
+ */
+export function assessArchiveAvailability(
+  record: ArchiveAvailabilityRecord,
+  context: ArchiveAvailabilityContext
+): ArchiveAvailabilityAssessment {
+  const blockers: ArchiveAvailabilityBlockerCode[] = [];
+  const status = ALLOWED_STATUSES.has(record.status) ? record.status : null;
+  let sourceProvider: string | null = record.sourceProvider;
+  let destinationProvider: string | null = record.destinationProvider;
+  if (!ALLOWED_PROVIDERS.has(sourceProvider) ||
+    !ALLOWED_PROVIDERS.has(destinationProvider) || sourceProvider === destinationProvider) {
+    sourceProvider = null;
+    destinationProvider = null;
+  }
+
+  const destinationRequired = status !== null && DESTINATION_REQUIRED_STATUSES.has(status);
+  if (status === null || sourceProvider === null ||
+    record.destinationDeploymentId === record.sourceDeploymentId ||
+    (destinationRequired && !record.destinationDeploymentId)) {
+    blockers.push("INVALID_IDENTITY");
+  }
+  const assessedAt = isValidDate(context.assessedAt) ? context.assessedAt.getTime() : null;
+  if (assessedAt === null) blockers.push("INVALID_CONTEXT");
+  if (blockers.length > 0 || assessedAt === null) {
+    return archiveResult(status, sourceProvider, destinationProvider, blockers);
+  }
+
+  let writeStop: number | null = null;
+  if (!isValidDate(record.sourceWriteStoppedAt)) blockers.push("SOURCE_WRITE_STOP_INVALID");
+  else {
+    writeStop = record.sourceWriteStoppedAt.getTime();
+    if (writeStop > assessedAt) blockers.push("SOURCE_WRITE_STOP_FUTURE");
+  }
+
+  let snapshot: number | null = null;
+  if (!isValidDate(record.finalSnapshotAt)) blockers.push("FINAL_SNAPSHOT_INVALID");
+  else {
+    snapshot = record.finalSnapshotAt.getTime();
+    if (snapshot > assessedAt) blockers.push("FINAL_SNAPSHOT_FUTURE");
+  }
+  if (writeStop !== null && snapshot !== null && snapshot < writeStop) {
+    blockers.push("FINAL_SNAPSHOT_BEFORE_WRITE_STOP");
+  }
+  if (typeof record.finalSnapshotChecksum !== "string" ||
+    !/^[0-9a-f]{64}$/.test(record.finalSnapshotChecksum)) {
+    blockers.push("FINAL_SNAPSHOT_CHECKSUM_INVALID");
+  }
+
+  let restore: number | null = null;
+  if (!isValidDate(record.archiveRestoreTestedAt)) blockers.push("ARCHIVE_RESTORE_TEST_INVALID");
+  else {
+    restore = record.archiveRestoreTestedAt.getTime();
+    if (restore > assessedAt) blockers.push("ARCHIVE_RESTORE_TEST_FUTURE");
+  }
+  if (snapshot !== null && restore !== null && restore < snapshot) {
+    blockers.push("ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT");
+  }
+
+  return archiveResult(status, sourceProvider, destinationProvider, blockers);
 }
 
 /**
