@@ -3607,11 +3607,12 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       const hasReportImports = Object.prototype.hasOwnProperty.call(input, "reportImportsEnabled");
       const hasExpectedIdentity = Object.prototype.hasOwnProperty.call(input, "expectedConfigIdentity");
       if (hasConfig && hasReportImports) throw new AppError(400, "INVALID_INPUT", "Report imports cannot be combined with full feature config.");
+      if (hasReportImports && typeof enabled === "boolean") throw new AppError(400, "INVALID_INPUT", "Report imports cannot be combined with top-level enabled.");
       if (hasReportImports && flag !== FINANCE_PARENT_FLAG) throw new AppError(400, "INVALID_INPUT", "Report imports belong to the FINANCE feature flag.");
       if (!hasReportImports && typeof enabled !== "boolean") throw new AppError(400, "INVALID_INPUT", "enabled must be a boolean.");
       if (input.expectedConfigIdentity != null && !/^[0-9a-f]{64}$/.test(input.expectedConfigIdentity)) throw new AppError(400, "INVALID_INPUT", "expectedConfigIdentity must be a SHA-256 hex digest or null.");
-      const guardedFinanceConfig = flag === FINANCE_PARENT_FLAG && (hasConfig || hasReportImports);
-      if (guardedFinanceConfig && !hasExpectedIdentity) throw new AppError(400, "INVALID_INPUT", "Finance config writes require expectedConfigIdentity.");
+      const guardedFinanceConfig = flag === FINANCE_PARENT_FLAG && (hasReportImports || (hasConfig && hasExpectedIdentity));
+      if (hasReportImports && !hasExpectedIdentity) throw new AppError(400, "INVALID_INPUT", "Finance report-import writes require expectedConfigIdentity.");
       if (guardedFinanceConfig) {
         const result = await compareAndSetFinanceConfig(hasReportImports
           ? { workspaceId, expectedConfigIdentity: input.expectedConfigIdentity ?? null, reportImportsEnabled: input.reportImportsEnabled! }

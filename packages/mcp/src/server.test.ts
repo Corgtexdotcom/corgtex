@@ -1809,6 +1809,7 @@ describe("createCorgtexMcpServer", () => {
 
   it("returns versioned Finance report-import updates and conflicts", async () => {
     const { createCorgtexMcpServer } = await import("./server");
+    const { prisma } = await import("@corgtex/shared");
     compareAndSetFinanceConfigMock
       .mockResolvedValueOnce({
         status: "updated",
@@ -1896,27 +1897,20 @@ describe("createCorgtexMcpServer", () => {
       reason: "CONFIG_NOT_OBJECT",
     });
 
-    await expect((server as any)._registeredTools.set_feature_flag.handler({
-      flag: "FINANCE",
-      enabled: true,
-      config: { financeCapabilities: { reports: true } },
-    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
-    await expect((server as any)._registeredTools.set_feature_flag.handler({
-      flag: "GOALS",
-      reportImportsEnabled: true,
-      expectedConfigIdentity: null,
-    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
-    await expect((server as any)._registeredTools.set_feature_flag.handler({
-      flag: "FINANCE",
-      reportImportsEnabled: true,
-      config: {},
-      expectedConfigIdentity: null,
-    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
-    await expect((server as any)._registeredTools.set_feature_flag.handler({
-      flag: "FINANCE",
-      reportImportsEnabled: true,
-      expectedConfigIdentity: "not-a-valid-identity",
-    })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    vi.mocked(prisma.workspaceFeatureFlag.upsert).mockResolvedValueOnce({
+      flag: "FINANCE", enabled: true, config: { financeCapabilities: { reports: true } },
+    } as never);
+    const legacy = await (server as any)._registeredTools.set_feature_flag.handler({
+      flag: "FINANCE", enabled: true, config: { financeCapabilities: { reports: true } },
+    });
+    expect(JSON.parse(legacy.content[0].text)).toMatchObject({ flag: "FINANCE", enabled: true });
+
+    for (const input of [
+      { flag: "GOALS", reportImportsEnabled: true, expectedConfigIdentity: null },
+      { flag: "FINANCE", enabled: true, reportImportsEnabled: true, expectedConfigIdentity: null },
+      { flag: "FINANCE", reportImportsEnabled: true, config: {}, expectedConfigIdentity: null },
+      { flag: "FINANCE", reportImportsEnabled: true, expectedConfigIdentity: "not-a-valid-identity" },
+    ]) await expect((server as any)._registeredTools.set_feature_flag.handler(input)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
   });
 
   it("annotates read-only and destructive tools for connector approval reviews", async () => {
