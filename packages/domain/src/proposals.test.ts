@@ -828,6 +828,37 @@ describe("proposal owner updates", () => {
     expect(prisma.proposal.update).not.toHaveBeenCalled();
     expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
   });
+
+  it("serializes concurrent AI-summary updates under lock so only winning update calls gateway and loser receives VERSION_CONFLICT before extract", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({ id: "mem-author", workspaceId: "ws-1", userId: "u-author", role: "MEMBER", isActive: true } as any);
+    vi.mocked(defaultModelGateway.extract).mockResolvedValue({ output: { summary: "Generated AI Summary" } } as any);
+
+    let current: any = { id: "p-concurrent-ai", workspaceId: "ws-1", authorUserId: "u-author", title: "Concurrent AI Proposal", summary: null, bodyMd: "Initial body", priority: 0, circleId: null, status: "OPEN", archivedAt: null, version: 1, isPrivate: false };
+    let lockCount = 0;
+    let releaseWinnerLock!: () => void;
+    const winnerUpdated = new Promise<void>((resolve) => { releaseWinnerLock = resolve; });
+
+    vi.mocked((prisma as any).$executeRaw).mockImplementation(async () => { if (++lockCount === 2) await winnerUpdated; });
+    vi.mocked((prisma.proposal as any).findUnique).mockImplementation(async () => current);
+    vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => { current = { ...current, ...data, version: 2 }; releaseWinnerLock(); return current; });
+
+    const params = { workspaceId: "ws-1", proposalId: "p-concurrent-ai", bodyMd: words(130), includeAiSummary: true, expectedVersion: 1 };
+    const [res1, res2] = await Promise.allSettled([updateProposal(actor, params), updateProposal(actor, params)]);
+
+    expect(res1.status).toBe("fulfilled");
+    expect(res2.status).toBe("rejected");
+    if (res2.status === "rejected") expect(res2.reason).toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+    expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+    expect(prisma.proposal.update).toHaveBeenCalledTimes(1);
+    expect((prisma as any).workItemVersion.create).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("listProposals", () => {

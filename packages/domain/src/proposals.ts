@@ -20,6 +20,7 @@ import {
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import {
+  acquireWorkItemAdvisoryLock,
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -857,6 +858,10 @@ export async function updateProposal(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    if (params.includeAiSummary === true) {
+      await acquireWorkItemAdvisoryLock(tx, "Proposal", params.proposalId);
+    }
+
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
     });
