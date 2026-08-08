@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
@@ -82,7 +83,17 @@ export function financeReportImportsEnabledFromConfig(config: unknown): boolean 
   return isRecord(rawCapabilities) && rawCapabilities[FINANCE_REPORT_IMPORT_CAPABILITY_KEY] === true;
 }
 
-type FinanceConfigCasParams = { workspaceId: string; expectedConfigUpdatedAt: Date | null } & (
+function canonicalFinanceConfig(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalFinanceConfig);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalFinanceConfig(value[key])]));
+}
+
+export function financeConfigIdentity(enabled: boolean, config: unknown): string {
+  return createHash("sha256").update(JSON.stringify({ enabled, config: canonicalFinanceConfig(config ?? null) })).digest("hex");
+}
+
+type FinanceConfigCasParams = { workspaceId: string; expectedConfigIdentity: string | null } & (
   | { reportImportsEnabled: boolean; config?: never; enabled?: never }
   | { config: unknown; enabled: boolean; reportImportsEnabled?: never }
 );
@@ -92,26 +103,27 @@ export type FinanceConfigCasResult = {
   enabled: boolean;
   config: unknown;
   updatedAt: Date;
+  configIdentity: string;
   reportImportsEnabled: boolean;
 } | {
   status: "conflict";
   code: "FEATURE_CONFIG_CONFLICT";
-  currentUpdatedAt: Date | null;
+  currentConfigIdentity: string | null;
 } | {
   status: "invalid";
   code: "FINANCE_CONFIG_INVALID";
   reason: "CONFIG_NOT_OBJECT" | "CAPABILITIES_NOT_OBJECT";
-  currentUpdatedAt: Date;
+  currentConfigIdentity: string;
 };
 
-const financeConfigConflict = (currentUpdatedAt: Date | null): FinanceConfigCasResult => (
-  { status: "conflict", code: "FEATURE_CONFIG_CONFLICT", currentUpdatedAt }
+const financeConfigConflict = (currentConfigIdentity: string | null): FinanceConfigCasResult => (
+  { status: "conflict", code: "FEATURE_CONFIG_CONFLICT", currentConfigIdentity }
 );
 
 const invalidFinanceConfig = (
-  currentUpdatedAt: Date,
+  currentConfigIdentity: string,
   reason: "CONFIG_NOT_OBJECT" | "CAPABILITIES_NOT_OBJECT",
-): FinanceConfigCasResult => ({ status: "invalid", code: "FINANCE_CONFIG_INVALID", reason, currentUpdatedAt });
+): FinanceConfigCasResult => ({ status: "invalid", code: "FINANCE_CONFIG_INVALID", reason, currentConfigIdentity });
 
 function updatedFinanceConfig(row: { enabled: boolean; config: unknown; updatedAt: Date }): FinanceConfigCasResult {
   return {
@@ -119,6 +131,7 @@ function updatedFinanceConfig(row: { enabled: boolean; config: unknown; updatedA
     enabled: row.enabled,
     config: row.config,
     updatedAt: row.updatedAt,
+    configIdentity: financeConfigIdentity(row.enabled, row.config),
     reportImportsEnabled: financeReportImportsEnabledFromConfig(row.config),
   };
 }
@@ -128,18 +141,17 @@ export async function compareAndSetFinanceConfig(params: FinanceConfigCasParams)
     where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: FINANCE_PARENT_FLAG } },
   });
   if (current) {
-    if (!params.expectedConfigUpdatedAt || current.updatedAt.getTime() !== params.expectedConfigUpdatedAt.getTime()) {
-      return financeConfigConflict(current.updatedAt);
-    }
+    const currentIdentity = financeConfigIdentity(current.enabled, current.config);
+    if (currentIdentity !== params.expectedConfigIdentity) return financeConfigConflict(currentIdentity);
     let nextConfig = params.config;
     if ("reportImportsEnabled" in params) {
       if (current.config != null && !isRecord(current.config)) {
-        return invalidFinanceConfig(current.updatedAt, "CONFIG_NOT_OBJECT");
+        return invalidFinanceConfig(currentIdentity, "CONFIG_NOT_OBJECT");
       }
       const currentConfig = current.config ?? {};
       const currentCapabilities = currentConfig[FINANCE_CAPABILITIES_CONFIG_KEY];
       if (currentCapabilities != null && !isRecord(currentCapabilities)) {
-        return invalidFinanceConfig(current.updatedAt, "CAPABILITIES_NOT_OBJECT");
+        return invalidFinanceConfig(currentIdentity, "CAPABILITIES_NOT_OBJECT");
       }
       nextConfig = {
         ...currentConfig,
@@ -153,7 +165,6 @@ export async function compareAndSetFinanceConfig(params: FinanceConfigCasParams)
       const updated = await prisma.workspaceFeatureFlag.update({
         where: {
           id: current.id,
-          updatedAt: params.expectedConfigUpdatedAt,
           enabled: current.enabled,
           config: { equals: current.config == null ? Prisma.AnyNull : current.config },
         },
@@ -168,10 +179,10 @@ export async function compareAndSetFinanceConfig(params: FinanceConfigCasParams)
       const winner = await prisma.workspaceFeatureFlag.findUnique({
         where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: FINANCE_PARENT_FLAG } },
       });
-      return financeConfigConflict(winner?.updatedAt ?? null);
+      return financeConfigConflict(winner ? financeConfigIdentity(winner.enabled, winner.config) : null);
     }
   }
-  if (params.expectedConfigUpdatedAt !== null) return financeConfigConflict(null);
+  if (params.expectedConfigIdentity !== null) return financeConfigConflict(null);
   const config = "reportImportsEnabled" in params
     ? { [FINANCE_CAPABILITIES_CONFIG_KEY]: { [FINANCE_REPORT_IMPORT_CAPABILITY_KEY]: params.reportImportsEnabled } }
     : params.config;
@@ -189,7 +200,7 @@ export async function compareAndSetFinanceConfig(params: FinanceConfigCasParams)
     const winner = await prisma.workspaceFeatureFlag.findUnique({
       where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: FINANCE_PARENT_FLAG } },
     });
-    return financeConfigConflict(winner?.updatedAt ?? null);
+    return financeConfigConflict(winner ? financeConfigIdentity(winner.enabled, winner.config) : null);
   }
 }
 

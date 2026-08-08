@@ -65,6 +65,7 @@ const failCommunicationSuggestionMock = vi.fn();
 const createConversationMessageMock = vi.fn();
 const getFinanceReadinessMock = vi.fn();
 const compareAndSetFinanceConfigMock = vi.fn();
+const financeConfigIdentityMock = vi.fn();
 const listWorkItemVersionsMock = vi.fn();
 const getWorkItemVersionMock = vi.fn();
 const upsertRecorderCalendarSourceMock = vi.fn();
@@ -118,6 +119,7 @@ vi.mock("@corgtex/domain", async () => {
   ],
   FINANCE_PARENT_FLAG: "FINANCE",
   compareAndSetFinanceConfig: compareAndSetFinanceConfigMock,
+  financeConfigIdentity: financeConfigIdentityMock,
   classifyMemberIdentity: vi.fn((member: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null }) => {
     if (member.kind === "SYSTEM") return "SYSTEM";
     const email = member.user?.email?.toLowerCase() ?? "";
@@ -300,6 +302,7 @@ describe("createCorgtexMcpServer", () => {
     vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
     vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
     compareAndSetFinanceConfigMock.mockReset();
+    financeConfigIdentityMock.mockReset().mockReturnValue("d".repeat(64));
     createActionMock.mockReset().mockResolvedValue({
       id: "action-1",
       title: "Follow up",
@@ -1779,6 +1782,7 @@ describe("createCorgtexMcpServer", () => {
     expect(JSON.parse(listResponse.content[0].text).flags.find((flag: { flag: string }) => flag.flag === "FINANCE")).toMatchObject({
       enabled: true,
       config: { channelId: "C123" },
+      configIdentity: "d".repeat(64),
     });
 
     const setResponse = await (server as any)._registeredTools.set_feature_flag.handler({
@@ -1812,11 +1816,12 @@ describe("createCorgtexMcpServer", () => {
         config: { financeAllMemberWrite: true, financeCapabilities: { reports: true, reportImports: true } },
         reportImportsEnabled: true,
         updatedAt: new Date("2026-08-08T01:00:01.000Z"),
+        configIdentity: "a".repeat(64),
       })
       .mockResolvedValueOnce({
         status: "conflict",
         code: "FEATURE_CONFIG_CONFLICT",
-        currentUpdatedAt: new Date("2026-08-08T01:00:02.000Z"),
+        currentConfigIdentity: "b".repeat(64),
       })
       .mockResolvedValueOnce({
         status: "updated",
@@ -1824,12 +1829,13 @@ describe("createCorgtexMcpServer", () => {
         config: { financeCapabilities: { reports: true } },
         reportImportsEnabled: false,
         updatedAt: new Date("2026-08-08T01:00:03.000Z"),
+        configIdentity: "c".repeat(64),
       })
       .mockResolvedValueOnce({
         status: "invalid",
         code: "FINANCE_CONFIG_INVALID",
         reason: "CONFIG_NOT_OBJECT",
-        currentUpdatedAt: new Date("2026-08-08T01:00:03.000Z"),
+        currentConfigIdentity: "c".repeat(64),
       });
     const server = createCorgtexMcpServer({
       actor: { kind: "agent", authProvider: "bootstrap" } as any,
@@ -1840,48 +1846,49 @@ describe("createCorgtexMcpServer", () => {
     const updated = await (server as any)._registeredTools.set_feature_flag.handler({
       flag: "FINANCE",
       reportImportsEnabled: true,
-      expectedConfigUpdatedAt: null,
+      expectedConfigIdentity: null,
     });
     expect(compareAndSetFinanceConfigMock).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
       reportImportsEnabled: true,
-      expectedConfigUpdatedAt: null,
+      expectedConfigIdentity: null,
     });
     expect(updated.structuredContent).toMatchObject({
       status: "updated",
       enabled: true,
       reportImportsEnabled: true,
       updatedAt: "2026-08-08T01:00:01.000Z",
+      configIdentity: "a".repeat(64),
     });
 
     const conflict = await (server as any)._registeredTools.set_feature_flag.handler({
       flag: "FINANCE",
       reportImportsEnabled: false,
-      expectedConfigUpdatedAt: "2026-08-08T01:00:01.000Z",
+      expectedConfigIdentity: "a".repeat(64),
     });
     expect(conflict.structuredContent).toEqual({
       status: "conflict",
       code: "FEATURE_CONFIG_CONFLICT",
-      currentUpdatedAt: "2026-08-08T01:00:02.000Z",
+      currentConfigIdentity: "b".repeat(64),
     });
 
     await (server as any)._registeredTools.set_feature_flag.handler({
       flag: "FINANCE",
       enabled: true,
       config: { financeCapabilities: { reports: true } },
-      expectedConfigUpdatedAt: "2026-08-08T01:00:02.000Z",
+      expectedConfigIdentity: "b".repeat(64),
     });
     expect(compareAndSetFinanceConfigMock).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
       enabled: true,
       config: { financeCapabilities: { reports: true } },
-      expectedConfigUpdatedAt: new Date("2026-08-08T01:00:02.000Z"),
+      expectedConfigIdentity: "b".repeat(64),
     });
 
     const invalid = await (server as any)._registeredTools.set_feature_flag.handler({
       flag: "FINANCE",
       reportImportsEnabled: true,
-      expectedConfigUpdatedAt: "2026-08-08T01:00:03.000Z",
+      expectedConfigIdentity: "c".repeat(64),
     });
     expect(invalid.structuredContent).toMatchObject({
       status: "invalid",
@@ -1897,18 +1904,18 @@ describe("createCorgtexMcpServer", () => {
     await expect((server as any)._registeredTools.set_feature_flag.handler({
       flag: "GOALS",
       reportImportsEnabled: true,
-      expectedConfigUpdatedAt: null,
+      expectedConfigIdentity: null,
     })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
     await expect((server as any)._registeredTools.set_feature_flag.handler({
       flag: "FINANCE",
       reportImportsEnabled: true,
       config: {},
-      expectedConfigUpdatedAt: null,
+      expectedConfigIdentity: null,
     })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
     await expect((server as any)._registeredTools.set_feature_flag.handler({
       flag: "FINANCE",
       reportImportsEnabled: true,
-      expectedConfigUpdatedAt: "2026-08-08 01:00:00Z",
+      expectedConfigIdentity: "not-a-valid-identity",
     })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
   });
 

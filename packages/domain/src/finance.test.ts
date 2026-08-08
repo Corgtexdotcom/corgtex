@@ -176,43 +176,40 @@ describe("Finance V2 access policy", () => {
   });
 
   it("atomically changes only report imports while preserving Finance siblings", async () => {
-    const { compareAndSetFinanceConfig } = await import("./finance");
+    const { compareAndSetFinanceConfig, financeConfigIdentity } = await import("./finance");
     const expected = new Date("2026-08-08T01:00:00.000Z");
     const current = {
-      id: "flag-1",
-      workspaceId: "workspace-1",
-      flag: "FINANCE",
-      enabled: true,
+      id: "flag-1", workspaceId: "workspace-1", flag: "FINANCE", enabled: true,
       config: { financeAllMemberWrite: true, financeCapabilities: { reports: false } },
       updatedAt: expected,
     };
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce(current);
     prismaMock.workspaceFeatureFlag.update.mockResolvedValueOnce({
-      ...current,
+      ...current, updatedAt: new Date("2026-08-08T01:00:01.000Z"),
       config: { financeAllMemberWrite: true, financeCapabilities: { reports: false, reportImports: true } },
-      updatedAt: new Date("2026-08-08T01:00:01.000Z"),
     });
 
-    await expect(compareAndSetFinanceConfig({
-      workspaceId: "workspace-1",
-      expectedConfigUpdatedAt: expected,
-      reportImportsEnabled: true,
-    })).resolves.toMatchObject({ status: "updated", enabled: true, reportImportsEnabled: true });
+    await expect(compareAndSetFinanceConfig({ workspaceId: "workspace-1",
+      expectedConfigIdentity: financeConfigIdentity(current.enabled, current.config),
+      reportImportsEnabled: true })).resolves.toMatchObject({ status: "updated", enabled: true, reportImportsEnabled: true });
     expect(prismaMock.workspaceFeatureFlag.update).toHaveBeenCalledWith({
-      where: {
-        id: "flag-1",
-        updatedAt: expected,
-        enabled: true,
+      where: { id: "flag-1", enabled: true,
         config: { equals: { financeAllMemberWrite: true, financeCapabilities: { reports: false } } },
       },
-      data: {
-        config: { financeAllMemberWrite: true, financeCapabilities: { reports: false, reportImports: true } },
-      },
+      data: { config: { financeAllMemberWrite: true, financeCapabilities: { reports: false, reportImports: true } } },
     });
   });
 
+  it("derives stable, collision-resistant identities from exact Finance state", async () => {
+    const { financeConfigIdentity } = await import("./finance");
+    const baseline = financeConfigIdentity(true, { a: 1, b: 2 });
+    expect(baseline).toHaveLength(64);
+    expect(financeConfigIdentity(true, { b: 2, a: 1 })).toBe(baseline);
+    expect(financeConfigIdentity(true, { a: 2, b: 2 })).not.toBe(baseline);
+  });
+
   it("matches either persisted null representation after a full-config write", async () => {
-    const { compareAndSetFinanceConfig } = await import("./finance");
+    const { compareAndSetFinanceConfig, financeConfigIdentity } = await import("./finance");
     const first = new Date("2026-08-08T01:00:00.000Z");
     const second = new Date("2026-08-08T01:00:01.000Z");
     prismaMock.workspaceFeatureFlag.findUnique
@@ -222,8 +219,8 @@ describe("Finance V2 access policy", () => {
       .mockResolvedValueOnce({ enabled: true, config: null, updatedAt: second })
       .mockResolvedValueOnce({ enabled: true, config: { financeCapabilities: { reportImports: true } }, updatedAt: new Date("2026-08-08T01:00:02.000Z") });
 
-    await compareAndSetFinanceConfig({ workspaceId: "workspace-1", expectedConfigUpdatedAt: first, enabled: true, config: null });
-    await compareAndSetFinanceConfig({ workspaceId: "workspace-1", expectedConfigUpdatedAt: second, reportImportsEnabled: true });
+    await compareAndSetFinanceConfig({ workspaceId: "workspace-1", expectedConfigIdentity: financeConfigIdentity(true, {}), enabled: true, config: null });
+    await compareAndSetFinanceConfig({ workspaceId: "workspace-1", expectedConfigIdentity: financeConfigIdentity(true, null), reportImportsEnabled: true });
 
     expect(prismaMock.workspaceFeatureFlag.update).toHaveBeenNthCalledWith(2, expect.objectContaining({
       where: expect.objectContaining({ config: { equals: Prisma.AnyNull } }),
@@ -235,53 +232,40 @@ describe("Finance V2 access policy", () => {
     ["CONFIG_NOT_OBJECT", []],
     ["CAPABILITIES_NOT_OBJECT", { financeCapabilities: [] }],
   ])("rejects malformed Finance config without overwriting it (%s)", async (reason, config) => {
-    const { compareAndSetFinanceConfig } = await import("./finance");
+    const { compareAndSetFinanceConfig, financeConfigIdentity } = await import("./finance");
     const expected = new Date("2026-08-08T01:00:00.000Z");
     prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce({ id: "flag-1", enabled: true, config, updatedAt: expected });
 
-    await expect(compareAndSetFinanceConfig({
-      workspaceId: "workspace-1",
-      expectedConfigUpdatedAt: expected,
-      reportImportsEnabled: true,
-    })).resolves.toMatchObject({ status: "invalid", code: "FINANCE_CONFIG_INVALID", reason });
+    await expect(compareAndSetFinanceConfig({ workspaceId: "workspace-1",
+      expectedConfigIdentity: financeConfigIdentity(true, config),
+      reportImportsEnabled: true })).resolves.toMatchObject({ status: "invalid", code: "FINANCE_CONFIG_INVALID", reason });
     expect(prismaMock.workspaceFeatureFlag.update).not.toHaveBeenCalled();
   });
 
   it("returns a conflict instead of overwriting a stale Finance config", async () => {
-    const { compareAndSetFinanceConfig } = await import("./finance");
+    const { compareAndSetFinanceConfig, financeConfigIdentity } = await import("./finance");
     const expected = new Date("2026-08-08T01:00:00.000Z");
     prismaMock.workspaceFeatureFlag.findUnique
       .mockResolvedValueOnce({ id: "flag-1", enabled: true, config: {}, updatedAt: expected })
-      .mockResolvedValueOnce({ updatedAt: new Date("2026-08-08T01:00:01.000Z") });
+      .mockResolvedValueOnce({ enabled: true, config: { financeCapabilities: { reports: true } }, updatedAt: new Date("2026-08-08T01:00:01.000Z") });
     prismaMock.workspaceFeatureFlag.update.mockRejectedValueOnce({ code: "P2025" });
 
-    await expect(compareAndSetFinanceConfig({
-      workspaceId: "workspace-1",
-      expectedConfigUpdatedAt: expected,
-      reportImportsEnabled: true,
-    })).resolves.toMatchObject({ status: "conflict", code: "FEATURE_CONFIG_CONFLICT" });
+    await expect(compareAndSetFinanceConfig({ workspaceId: "workspace-1",
+      expectedConfigIdentity: financeConfigIdentity(true, {}),
+      reportImportsEnabled: true })).resolves.toMatchObject({ status: "conflict", code: "FEATURE_CONFIG_CONFLICT" });
   });
 
   it("maps a concurrent absent-row create to a Finance config conflict", async () => {
     const { compareAndSetFinanceConfig } = await import("./finance");
     prismaMock.workspaceFeatureFlag.findUnique
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ updatedAt: new Date("2026-08-08T01:00:01.000Z") });
-    prismaMock.workspaceFeatureFlag.create.mockRejectedValueOnce({
-      code: "P2002",
-      meta: { target: ["workspaceId", "flag"] },
-    });
+      .mockResolvedValueOnce({ enabled: true, config: {}, updatedAt: new Date("2026-08-08T01:00:01.000Z") });
+    prismaMock.workspaceFeatureFlag.create.mockRejectedValueOnce({ code: "P2002", meta: { target: ["workspaceId", "flag"] } });
 
-    await expect(compareAndSetFinanceConfig({
-      workspaceId: "workspace-1",
-      expectedConfigUpdatedAt: null,
-      reportImportsEnabled: true,
-    })).resolves.toMatchObject({ status: "conflict", code: "FEATURE_CONFIG_CONFLICT" });
-    await expect(compareAndSetFinanceConfig({
-      workspaceId: "workspace-1",
-      expectedConfigUpdatedAt: new Date("2026-08-08T01:00:00.000Z"),
-      reportImportsEnabled: true,
-    })).resolves.toMatchObject({ status: "conflict", currentUpdatedAt: null });
+    await expect(compareAndSetFinanceConfig({ workspaceId: "workspace-1", expectedConfigIdentity: null,
+      reportImportsEnabled: true })).resolves.toMatchObject({ status: "conflict", code: "FEATURE_CONFIG_CONFLICT" });
+    await expect(compareAndSetFinanceConfig({ workspaceId: "workspace-1", expectedConfigIdentity: "a".repeat(64),
+      reportImportsEnabled: true })).resolves.toMatchObject({ status: "conflict", currentConfigIdentity: null });
     expect(prismaMock.workspaceFeatureFlag.create).toHaveBeenCalledTimes(1);
   });
 
