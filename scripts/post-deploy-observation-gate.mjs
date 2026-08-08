@@ -1150,7 +1150,7 @@ async function main() {
   });
 
   console.log(JSON.stringify(summary, null, 2));
-  if (summary.blockingFailures.length > 0) {
+  if (summary.status !== "passed") {
     process.exitCode = 1;
   }
 }
