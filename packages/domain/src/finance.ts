@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireAgentScope } from "./agent-auth";
@@ -79,6 +81,127 @@ export function financeReportImportsEnabledFromConfig(config: unknown): boolean 
   if (!isRecord(config)) return false;
   const rawCapabilities = config[FINANCE_CAPABILITIES_CONFIG_KEY];
   return isRecord(rawCapabilities) && rawCapabilities[FINANCE_REPORT_IMPORT_CAPABILITY_KEY] === true;
+}
+
+function canonicalFinanceConfig(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalFinanceConfig);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalFinanceConfig(value[key])]));
+}
+
+export function financeConfigIdentity(enabled: boolean, config: unknown): string {
+  return createHash("sha256").update(JSON.stringify({ enabled, config: canonicalFinanceConfig(config ?? null) })).digest("hex");
+}
+
+type FinanceConfigCasParams = { workspaceId: string; expectedConfigIdentity: string | null } & (
+  | { reportImportsEnabled: boolean; config?: never; enabled?: never }
+  | { config: unknown; enabled: boolean; reportImportsEnabled?: never }
+);
+
+export type FinanceConfigCasResult = {
+  status: "updated";
+  enabled: boolean;
+  config: unknown;
+  updatedAt: Date;
+  configIdentity: string;
+  reportImportsEnabled: boolean;
+} | {
+  status: "conflict";
+  code: "FEATURE_CONFIG_CONFLICT";
+  currentConfigIdentity: string | null;
+} | {
+  status: "invalid";
+  code: "FINANCE_CONFIG_INVALID";
+  reason: "CONFIG_NOT_OBJECT" | "CAPABILITIES_NOT_OBJECT";
+  currentConfigIdentity: string;
+};
+
+const financeConfigConflict = (currentConfigIdentity: string | null): FinanceConfigCasResult => (
+  { status: "conflict", code: "FEATURE_CONFIG_CONFLICT", currentConfigIdentity }
+);
+
+const invalidFinanceConfig = (
+  currentConfigIdentity: string,
+  reason: "CONFIG_NOT_OBJECT" | "CAPABILITIES_NOT_OBJECT",
+): FinanceConfigCasResult => ({ status: "invalid", code: "FINANCE_CONFIG_INVALID", reason, currentConfigIdentity });
+
+function updatedFinanceConfig(row: { enabled: boolean; config: unknown; updatedAt: Date }): FinanceConfigCasResult {
+  return {
+    status: "updated",
+    enabled: row.enabled,
+    config: row.config,
+    updatedAt: row.updatedAt,
+    configIdentity: financeConfigIdentity(row.enabled, row.config),
+    reportImportsEnabled: financeReportImportsEnabledFromConfig(row.config),
+  };
+}
+
+export async function compareAndSetFinanceConfig(params: FinanceConfigCasParams): Promise<FinanceConfigCasResult> {
+  const current = await prisma.workspaceFeatureFlag.findUnique({
+    where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: FINANCE_PARENT_FLAG } },
+  });
+  if (current) {
+    const currentIdentity = financeConfigIdentity(current.enabled, current.config);
+    if (currentIdentity !== params.expectedConfigIdentity) return financeConfigConflict(currentIdentity);
+    let nextConfig = params.config;
+    if ("reportImportsEnabled" in params) {
+      if (current.config != null && !isRecord(current.config)) {
+        return invalidFinanceConfig(currentIdentity, "CONFIG_NOT_OBJECT");
+      }
+      const currentConfig = current.config ?? {};
+      const currentCapabilities = currentConfig[FINANCE_CAPABILITIES_CONFIG_KEY];
+      if (currentCapabilities != null && !isRecord(currentCapabilities)) {
+        return invalidFinanceConfig(currentIdentity, "CAPABILITIES_NOT_OBJECT");
+      }
+      nextConfig = {
+        ...currentConfig,
+        [FINANCE_CAPABILITIES_CONFIG_KEY]: {
+          ...(currentCapabilities ?? {}),
+          [FINANCE_REPORT_IMPORT_CAPABILITY_KEY]: params.reportImportsEnabled,
+        },
+      };
+    }
+    try {
+      const updated = await prisma.workspaceFeatureFlag.update({
+        where: {
+          id: current.id,
+          enabled: current.enabled,
+          config: { equals: current.config == null ? Prisma.AnyNull : current.config },
+        },
+        data: {
+          config: nextConfig == null ? Prisma.JsonNull : nextConfig as Prisma.InputJsonObject,
+          ...("enabled" in params ? { enabled: params.enabled } : {}),
+        },
+      });
+      return updatedFinanceConfig(updated);
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "P2025") throw error;
+      const winner = await prisma.workspaceFeatureFlag.findUnique({
+        where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: FINANCE_PARENT_FLAG } },
+      });
+      return financeConfigConflict(winner ? financeConfigIdentity(winner.enabled, winner.config) : null);
+    }
+  }
+  if (params.expectedConfigIdentity !== null) return financeConfigConflict(null);
+  const config = "reportImportsEnabled" in params
+    ? { [FINANCE_CAPABILITIES_CONFIG_KEY]: { [FINANCE_REPORT_IMPORT_CAPABILITY_KEY]: params.reportImportsEnabled } }
+    : params.config;
+  try {
+    return updatedFinanceConfig(await prisma.workspaceFeatureFlag.create({
+      data: {
+        workspaceId: params.workspaceId,
+        flag: FINANCE_PARENT_FLAG,
+        enabled: "enabled" in params ? params.enabled : Boolean(defaultWorkspaceFeatureFlags()[FINANCE_PARENT_FLAG]),
+        config: config == null ? Prisma.JsonNull : config as Prisma.InputJsonObject,
+      },
+    }));
+  } catch (error) {
+    if (!isPrismaUniqueConstraintError(error, ["workspaceId", "flag"])) throw error;
+    const winner = await prisma.workspaceFeatureFlag.findUnique({
+      where: { workspaceId_flag: { workspaceId: params.workspaceId, flag: FINANCE_PARENT_FLAG } },
+    });
+    return financeConfigConflict(winner ? financeConfigIdentity(winner.enabled, winner.config) : null);
+  }
 }
 
 function resolveFinanceSectionCapabilities(flags: Record<string, boolean>, config: unknown): Record<FinanceSectionKey, boolean> {

@@ -143,6 +143,9 @@ import {
   failCommunicationSuggestion,
   createConversationMessage,
   getFinanceReadiness,
+  compareAndSetFinanceConfig,
+  financeConfigIdentity,
+  FINANCE_PARENT_FLAG,
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
@@ -3579,6 +3582,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             config: record?.config ?? null,
             source: record ? "workspace_override" : "default",
             updatedAt: record?.updatedAt ?? null,
+            ...(definition.flag === FINANCE_PARENT_FLAG ? { configIdentity: record ? financeConfigIdentity(record.enabled, record.config) : null } : {}),
           };
         }),
       });
@@ -3587,17 +3591,53 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "set_feature_flag",
-    "Enable or disable one known workspace feature flag. Admin-only. Optionally set public-safe JSON config for flags that require rollout settings.",
+    "Enable or disable one known workspace feature flag. Admin-only. Finance report imports use a versioned specialized mutation.",
     {
       flag: z.enum(CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) as [string, ...string[]]),
-      enabled: z.boolean(),
+      enabled: z.boolean().optional(),
       config: z.unknown().optional(),
+      reportImportsEnabled: z.boolean().optional(),
+      expectedConfigIdentity: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional(),
     },
-    async (input: { flag: string; enabled: boolean; config?: unknown }) => {
+    async (input: { flag: string; enabled?: boolean; config?: unknown; reportImportsEnabled?: boolean; expectedConfigIdentity?: string | null }) => {
       const { flag, enabled, config } = input;
       requireScope(sessionCtx, "workspace:write");
       await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
       const hasConfig = Object.prototype.hasOwnProperty.call(input, "config");
+      const hasReportImports = Object.prototype.hasOwnProperty.call(input, "reportImportsEnabled");
+      const hasExpectedIdentity = Object.prototype.hasOwnProperty.call(input, "expectedConfigIdentity");
+      if (hasConfig && hasReportImports) throw new AppError(400, "INVALID_INPUT", "Report imports cannot be combined with full feature config.");
+      if (hasReportImports && typeof enabled === "boolean") throw new AppError(400, "INVALID_INPUT", "Report imports cannot be combined with top-level enabled.");
+      if (hasReportImports && flag !== FINANCE_PARENT_FLAG) throw new AppError(400, "INVALID_INPUT", "Report imports belong to the FINANCE feature flag.");
+      if (!hasReportImports && typeof enabled !== "boolean") throw new AppError(400, "INVALID_INPUT", "enabled must be a boolean.");
+      if (input.expectedConfigIdentity != null && !/^[0-9a-f]{64}$/.test(input.expectedConfigIdentity)) throw new AppError(400, "INVALID_INPUT", "expectedConfigIdentity must be a SHA-256 hex digest or null.");
+      const financeConfigMutation = flag === FINANCE_PARENT_FLAG && (hasReportImports || hasConfig);
+      if (hasExpectedIdentity && !financeConfigMutation) throw new AppError(400, "INVALID_INPUT", "expectedConfigIdentity is supported only for Finance config writes.");
+      const guardedFinanceConfig = financeConfigMutation && hasExpectedIdentity;
+      if (hasReportImports && !hasExpectedIdentity) throw new AppError(400, "INVALID_INPUT", "Finance report-import writes require expectedConfigIdentity.");
+      if (guardedFinanceConfig) {
+        const result = await compareAndSetFinanceConfig(hasReportImports
+          ? { workspaceId, expectedConfigIdentity: input.expectedConfigIdentity ?? null, reportImportsEnabled: input.reportImportsEnabled! }
+          : { workspaceId, expectedConfigIdentity: input.expectedConfigIdentity ?? null, enabled: enabled!, config: config == null ? null : toInputJson(config) });
+        if (result.status !== "updated") {
+          return structuredJsonResult({
+            status: result.status,
+            code: result.code,
+            currentConfigIdentity: result.currentConfigIdentity,
+            ...(result.status === "invalid" ? { reason: result.reason } : {}),
+          });
+        }
+        return structuredJsonResult({
+          status: result.status,
+          flag,
+          enabled: result.enabled,
+          config: result.config ?? null,
+          reportImportsEnabled: result.reportImportsEnabled,
+          updatedAt: result.updatedAt.toISOString(),
+          configIdentity: result.configIdentity,
+          webUrl: webUrl(workspaceId, "/settings"),
+        });
+      }
       const configData = hasConfig ? { config: config == null ? null : toInputJson(config) } : {};
       const record = await prisma.workspaceFeatureFlag.upsert({
         where: {
@@ -3606,8 +3646,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             flag,
           },
         },
-        update: { enabled, ...configData },
-        create: { workspaceId, flag, enabled, ...configData },
+        update: { enabled: enabled!, ...configData },
+        create: { workspaceId, flag, enabled: enabled!, ...configData },
       });
       return jsonResult({
         flag: record.flag,
