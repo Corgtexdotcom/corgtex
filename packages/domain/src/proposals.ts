@@ -870,6 +870,11 @@ export async function updateProposal(actor: AppActor, params: {
       requireProposalContentEditor(actor, membership, proposal);
     }
 
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      invariant(params.expectedVersion === proposal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+    }
+
     const data: Record<string, unknown> = {};
     if (params.title !== undefined) {
       const title = params.title.trim();
@@ -896,11 +901,6 @@ export async function updateProposal(actor: AppActor, params: {
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.ownerMemberId !== undefined) {
       data.ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
-    }
-
-    if (params.expectedVersion !== undefined) {
-      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
-      invariant(params.expectedVersion === proposal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
     }
 
     const contentFields = ["title", "summary", "bodyMd", "priority", "circleId", "ownerMemberId"];

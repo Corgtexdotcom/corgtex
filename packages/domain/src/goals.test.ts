@@ -933,10 +933,13 @@ describe("Goals Domain", () => {
       } as any);
       vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
 
+      const { recordAudit } = await import("./audit-trail");
+      const { appendEvents } = await import("./events");
+
       await expect(updateGoal(actor, {
         workspaceId: "ws-1",
         goalId: "goal-1",
-        title: "Updated after stale read",
+        progressPercent: 75,
         expectedVersion: 1,
       })).rejects.toMatchObject({
         status: 409,
@@ -953,8 +956,13 @@ describe("Goals Domain", () => {
           isPrivate: false,
           version: 1,
         },
-        data: expect.any(Object),
+        data: expect.objectContaining({
+          progressPercent: 75,
+          version: 2,
+        }),
       });
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
     });
 
     it("honors expectedVersion and succeeds if it matches current version", async () => {
@@ -965,11 +973,13 @@ describe("Goals Domain", () => {
         authorUserId: "user-1",
         isPrivate: false,
         status: "ACTIVE",
+        progressPercent: 20,
         version: 1,
         parentGoalId: null,
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
+        progressPercent: 50,
         version: 2,
       } as any);
 
@@ -979,7 +989,7 @@ describe("Goals Domain", () => {
       await expect(updateGoal(actor, {
         workspaceId: "ws-1",
         goalId: "goal-1",
-        title: "Updated with version",
+        progressPercent: 50,
         expectedVersion: 1,
       })).resolves.toMatchObject({
         id: "goal-1",
@@ -995,10 +1005,21 @@ describe("Goals Domain", () => {
           version: 1,
         },
         data: expect.objectContaining({
+          progressPercent: 50,
           version: 2,
         }),
       });
-      expect(prisma.workItemVersion.create).toHaveBeenCalledTimes(1);
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          entityType: "Goal",
+          entityId: "goal-1",
+          version: 1,
+          changedFields: ["progressPercent"],
+          previousState: expect.objectContaining({
+            progressPercent: 20,
+          }),
+        }),
+      }));
       expect(recordAudit).toHaveBeenCalledTimes(1);
       expect(appendEvents).toHaveBeenCalledTimes(1);
     });

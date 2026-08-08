@@ -739,6 +739,7 @@ describe("proposal owner updates", () => {
   it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
+    const { defaultModelGateway } = await import("@corgtex/models");
     const actor = { kind: "user", user: { id: "u-author" } } as any;
 
     vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
@@ -767,6 +768,8 @@ describe("proposal owner updates", () => {
       workspaceId: "ws-1",
       proposalId: "p-open-author",
       title: "Versioned edit",
+      bodyMd: "A detailed new proposal body that would trigger AI summary extraction if not guarded early.",
+      includeAiSummary: true,
       expectedVersion: 2,
     })).rejects.toMatchObject({
       status: 409,
@@ -774,6 +777,7 @@ describe("proposal owner updates", () => {
       message: "The record changed before this update could be applied. Please refresh and try again.",
     });
 
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
     expect(prisma.proposal.update).not.toHaveBeenCalled();
     expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
@@ -782,6 +786,7 @@ describe("proposal owner updates", () => {
   it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
+    const { defaultModelGateway } = await import("@corgtex/models");
     const actor = { kind: "user", user: { id: "u-author" } } as any;
 
     vi.mocked(requireWorkspaceMembership).mockResolvedValue({
@@ -810,6 +815,8 @@ describe("proposal owner updates", () => {
       await expect(updateProposal(actor, {
         workspaceId: "ws-1",
         proposalId: "p-open-author",
+        bodyMd: "A detailed body that should not trigger summary extraction on invalid expectedVersion.",
+        includeAiSummary: true,
         expectedVersion: invalidVersion,
       })).rejects.toMatchObject({
         status: 400,
@@ -817,6 +824,7 @@ describe("proposal owner updates", () => {
       });
     }
 
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
     expect(prisma.proposal.update).not.toHaveBeenCalled();
     expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
   });

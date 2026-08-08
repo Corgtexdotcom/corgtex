@@ -682,7 +682,7 @@ export async function updateGoal(
       invariant(params.expectedVersion === goal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
     }
 
-    const contentFields = ["title", "descriptionMd", "level", "cadence", "targetDate", "startDate", "parentGoalId", "circleId", "ownerMemberId"];
+    const contentFields = ["title", "descriptionMd", "level", "cadence", "progressPercent", "targetDate", "startDate", "parentGoalId", "circleId", "ownerMemberId"];
     const changedFields = changedDataFields(goal as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
     if (changedFields.length > 0) {
@@ -699,6 +699,7 @@ export async function updateGoal(
           "descriptionMd",
           "level",
           "cadence",
+          "progressPercent",
           "targetDate",
           "startDate",
           "parentGoalId",

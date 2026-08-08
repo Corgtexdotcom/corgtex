@@ -847,7 +847,7 @@ describe("action domain lifecycle", () => {
       publishedAt: new Date("2026-06-01T00:00:00.000Z"),
       archivedAt: null,
     });
-    prismaMock.action.update.mockRejectedValueOnce({ code: "P2025" });
+    prismaMock.workItemVersion.findUnique.mockResolvedValueOnce({ id: "v1-exists" } as any);
 
     const { updateAction } = await import("./actions");
     await expect(updateAction({
@@ -869,17 +869,7 @@ describe("action domain lifecycle", () => {
       message: "The record changed before this update could be applied. Please refresh and try again.",
     });
 
-    expect(prismaMock.action.update).toHaveBeenCalledWith({
-      where: {
-        id: "action-1",
-        workspaceId: "workspace-1",
-        archivedAt: null,
-        status: "OPEN",
-        isPrivate: false,
-        version: 1,
-      },
-      data: { title: "Stale edit", version: 2 },
-    });
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
     expect(appendEvents).not.toHaveBeenCalled();
   });
