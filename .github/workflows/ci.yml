@@ -492,6 +492,10 @@ jobs:
       OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
       OBSERVATION_SINCE: ${{ needs.smoke-prod.outputs.observation_since }}
       SMOKE_SKIP_RELEASE_MATCH: ${{ needs.smoke-prod.outputs.skip_release_match }}
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+      FLEET_RELEASE_TARGETS_JSON: ${{ vars.FLEET_RELEASE_TARGETS_JSON }}
+      FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
+      FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
     steps:
       - uses: actions/checkout@v5
 
