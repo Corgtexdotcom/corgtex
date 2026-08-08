@@ -143,6 +143,8 @@ import {
   failCommunicationSuggestion,
   createConversationMessage,
   getFinanceReadiness,
+  compareAndSetFinanceConfig,
+  FINANCE_PARENT_FLAG,
   listWorkItemVersions,
   getWorkItemVersion,
   AppError,
@@ -3587,17 +3589,53 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "set_feature_flag",
-    "Enable or disable one known workspace feature flag. Admin-only. Optionally set public-safe JSON config for flags that require rollout settings.",
+    "Enable or disable one known workspace feature flag. Admin-only. Finance report imports use a versioned specialized mutation.",
     {
       flag: z.enum(CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.map((definition) => definition.flag) as [string, ...string[]]),
-      enabled: z.boolean(),
+      enabled: z.boolean().optional(),
       config: z.unknown().optional(),
+      reportImportsEnabled: z.boolean().optional(),
+      expectedConfigUpdatedAt: z.string().nullable().optional(),
     },
-    async (input: { flag: string; enabled: boolean; config?: unknown }) => {
+    async (input: { flag: string; enabled?: boolean; config?: unknown; reportImportsEnabled?: boolean; expectedConfigUpdatedAt?: string | null }) => {
       const { flag, enabled, config } = input;
       requireScope(sessionCtx, "workspace:write");
       await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
       const hasConfig = Object.prototype.hasOwnProperty.call(input, "config");
+      const hasReportImports = Object.prototype.hasOwnProperty.call(input, "reportImportsEnabled");
+      const hasExpectedVersion = Object.prototype.hasOwnProperty.call(input, "expectedConfigUpdatedAt");
+      if (hasConfig && hasReportImports) throw new AppError(400, "INVALID_INPUT", "Report imports cannot be combined with full feature config.");
+      if (hasReportImports && flag !== FINANCE_PARENT_FLAG) throw new AppError(400, "INVALID_INPUT", "Report imports belong to the FINANCE feature flag.");
+      if (!hasReportImports && typeof enabled !== "boolean") throw new AppError(400, "INVALID_INPUT", "enabled must be a boolean.");
+      const guardedFinanceConfig = flag === FINANCE_PARENT_FLAG && (hasConfig || hasReportImports);
+      if (guardedFinanceConfig && !hasExpectedVersion) throw new AppError(400, "INVALID_INPUT", "Finance config writes require expectedConfigUpdatedAt.");
+      const expectedConfigUpdatedAt = input.expectedConfigUpdatedAt == null ? null : new Date(input.expectedConfigUpdatedAt);
+      if (expectedConfigUpdatedAt && (Number.isNaN(expectedConfigUpdatedAt.getTime())
+        || expectedConfigUpdatedAt.toISOString() !== input.expectedConfigUpdatedAt)) {
+        throw new AppError(400, "INVALID_INPUT", "expectedConfigUpdatedAt must be an ISO timestamp or null.");
+      }
+      if (guardedFinanceConfig) {
+        const result = await compareAndSetFinanceConfig(hasReportImports
+          ? { workspaceId, expectedConfigUpdatedAt, reportImportsEnabled: input.reportImportsEnabled! }
+          : { workspaceId, expectedConfigUpdatedAt, enabled: enabled!, config: config == null ? null : toInputJson(config) });
+        if (result.status !== "updated") {
+          return structuredJsonResult({
+            status: result.status,
+            code: result.code,
+            currentUpdatedAt: result.currentUpdatedAt?.toISOString() ?? null,
+            ...(result.status === "invalid" ? { reason: result.reason } : {}),
+          });
+        }
+        return structuredJsonResult({
+          status: result.status,
+          flag,
+          enabled: result.enabled,
+          config: result.config ?? null,
+          reportImportsEnabled: result.reportImportsEnabled,
+          updatedAt: result.updatedAt.toISOString(),
+          webUrl: webUrl(workspaceId, "/settings"),
+        });
+      }
       const configData = hasConfig ? { config: config == null ? null : toInputJson(config) } : {};
       const record = await prisma.workspaceFeatureFlag.upsert({
         where: {
@@ -3606,8 +3644,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
             flag,
           },
         },
-        update: { enabled, ...configData },
-        create: { workspaceId, flag, enabled, ...configData },
+        update: { enabled: enabled!, ...configData },
+        create: { workspaceId, flag, enabled: enabled!, ...configData },
       });
       return jsonResult({
         flag: record.flag,
