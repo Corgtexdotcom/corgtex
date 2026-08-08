@@ -1899,21 +1899,15 @@ describe("createCorgtexMcpServer", () => {
       reason: "CONFIG_NOT_OBJECT",
     });
 
-    vi.mocked(prisma.workspaceFeatureFlag.upsert).mockResolvedValueOnce({
-      flag: "FINANCE", enabled: true, config: { financeCapabilities: { reports: true } },
-    } as never);
-    const legacy = await (server as any)._registeredTools.set_feature_flag.handler({
-      flag: "FINANCE", enabled: true, config: { financeCapabilities: { reports: true } },
-    });
-    expect(JSON.parse(legacy.content[0].text)).toMatchObject({ flag: "FINANCE", enabled: true });
-
     for (const input of [
       { flag: "GOALS", reportImportsEnabled: true, expectedConfigIdentity: null },
       { flag: "FINANCE", enabled: true, reportImportsEnabled: true, expectedConfigIdentity: null },
       { flag: "FINANCE", reportImportsEnabled: true, config: {}, expectedConfigIdentity: null },
       { flag: "FINANCE", reportImportsEnabled: true, expectedConfigIdentity: "not-a-valid-identity" },
+      { flag: "FINANCE", reportImportsEnabled: true, expectedConfigIdentity: undefined },
       { flag: "GOALS", enabled: true, config: {}, expectedConfigIdentity: "a".repeat(64) },
       { flag: "FINANCE", enabled: true, expectedConfigIdentity: "a".repeat(64) },
+      { flag: "FINANCE", enabled: true, config: { financeCapabilities: { reports: true } } },
     ]) await expect((server as any)._registeredTools.set_feature_flag.handler(input)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
   });
 

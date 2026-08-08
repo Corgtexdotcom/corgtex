@@ -37,6 +37,7 @@ import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadin
 import { registerCustomerDeployment } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { isKnownScope, type AgentScope } from "./agent-auth";
+import { compareAndSetFinanceConfig, financeConfigIdentity, FINANCE_PARENT_FLAG } from "./finance";
 import { getModuleManifests, listModuleFlagKeys, listWorkspaceFeatureFlagDefinitions } from "./modules";
 import type { FeatureFlagDefinition, WorkspaceFeatureFlagKey } from "./modules";
 import {
@@ -5371,6 +5372,32 @@ function featureFlagDefinition(flag: string) {
   return CONTROL_PLANE_WORKSPACE_FEATURE_FLAGS.find((definition) => definition.flag === flag);
 }
 
+const FINANCE_CONFIG_IDENTITY_PATTERN = /^[0-9a-f]{64}$/;
+
+function remoteFinanceConfigIdentity(value: unknown, allowNull = false) {
+  invariant((allowNull && value === null) || (typeof value === "string" && FINANCE_CONFIG_IDENTITY_PATTERN.test(value)), 502, "REMOTE_SUPPORT_ERROR", "Remote Finance config identity was malformed.");
+  return value as string | null;
+}
+
+function normalizeFinanceConfigMutationResult(value: unknown, expected: { enabled?: boolean; reportImportsEnabled?: boolean } = {}) {
+  const result = jsonRecord(value);
+  if (result?.status === "conflict" && result.code === "FEATURE_CONFIG_CONFLICT") {
+    return { status: "conflict" as const, code: "FEATURE_CONFIG_CONFLICT" as const, currentConfigIdentity: remoteFinanceConfigIdentity(result.currentConfigIdentity, true) };
+  }
+  if (result?.status === "invalid" && result.code === "FINANCE_CONFIG_INVALID") {
+    invariant(result.reason === "CONFIG_NOT_OBJECT" || result.reason === "CAPABILITIES_NOT_OBJECT", 502, "REMOTE_SUPPORT_ERROR", "Remote Finance config result was malformed.");
+    return { status: "invalid" as const, code: "FINANCE_CONFIG_INVALID" as const, reason: result.reason, currentConfigIdentity: remoteFinanceConfigIdentity(result.currentConfigIdentity) };
+  }
+  invariant(result?.status === "updated" && result.flag === FINANCE_PARENT_FLAG && typeof result.enabled === "boolean" && typeof result.reportImportsEnabled === "boolean" && typeof result.updatedAt === "string", 502, "REMOTE_SUPPORT_ERROR", "Remote Finance config result was malformed.");
+  invariant(expected.enabled === undefined || result.enabled === expected.enabled, 502, "REMOTE_SUPPORT_ERROR", "Remote Finance config result did not match the requested state.");
+  invariant(expected.reportImportsEnabled === undefined || result.reportImportsEnabled === expected.reportImportsEnabled, 502, "REMOTE_SUPPORT_ERROR", "Remote Finance config result did not match the requested state.");
+  return { status: "updated" as const, flag: FINANCE_PARENT_FLAG, enabled: result.enabled, reportImportsEnabled: result.reportImportsEnabled, updatedAt: result.updatedAt, configIdentity: remoteFinanceConfigIdentity(result.configIdentity) as string };
+}
+
+function isGuardedFinanceConfigArguments(action: SupportAction, args: JsonRecord) {
+  return action === "feature_flags.set" && args.flag === FINANCE_PARENT_FLAG && Object.prototype.hasOwnProperty.call(args, "expectedConfigIdentity");
+}
+
 function normalizeRemoteFeatureFlags(summary: unknown) {
   const value = summary && typeof summary === "object" && "flags" in summary
     ? (summary as { flags?: unknown }).flags
@@ -5381,6 +5408,7 @@ function normalizeRemoteFeatureFlags(summary: unknown) {
     .map((entry) => {
       const flag = typeof entry.flag === "string" ? entry.flag : "";
       const definition = featureFlagDefinition(flag);
+      const source = typeof entry.source === "string" ? entry.source : "support_connector";
       return {
         flag,
         label: typeof entry.label === "string" ? entry.label : definition?.label ?? flag,
@@ -5388,10 +5416,11 @@ function normalizeRemoteFeatureFlags(summary: unknown) {
         enabled: Boolean(entry.enabled),
         defaultEnabled: Boolean(entry.defaultEnabled ?? definition?.defaultEnabled),
         config: "config" in entry ? entry.config : null,
-        source: typeof entry.source === "string" ? entry.source : "support_connector",
+        source,
         updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : null,
         lastChangedAt: typeof entry.lastChangedAt === "string" ? entry.lastChangedAt : null,
         lastChangedBy: typeof entry.lastChangedBy === "string" ? entry.lastChangedBy : null,
+        ...(flag === FINANCE_PARENT_FLAG ? { configIdentity: source === "default" ? (invariant(entry.configIdentity === null, 502, "REMOTE_SUPPORT_ERROR", "Remote default Finance config identity was malformed."), null) : remoteFinanceConfigIdentity(entry.configIdentity) } : {}),
       };
     });
 }
@@ -5454,6 +5483,7 @@ export async function listControlPlaneFeatureFlags(actor: AppActor, deploymentId
           updatedAt: record?.updatedAt ?? null,
           lastChangedAt: event?.createdAt ?? null,
           lastChangedBy: event?.actorUserId ?? null,
+          ...(definition.flag === FINANCE_PARENT_FLAG ? { configIdentity: record ? financeConfigIdentity(record.enabled, record.config) : null } : {}),
         };
       }),
     };
@@ -5479,8 +5509,10 @@ export async function listControlPlaneFeatureFlags(actor: AppActor, deploymentId
 export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   deploymentId: string;
   flag: string;
-  enabled: boolean;
+  enabled?: boolean;
   config?: unknown;
+  reportImportsEnabled?: boolean;
+  expectedConfigIdentity?: string | null;
   reason?: string | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:features:write");
@@ -5489,10 +5521,37 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
   const adapter = createControlPlaneAdapter(deployment);
+  const hasEnabled = Object.prototype.hasOwnProperty.call(params, "enabled");
   const hasConfig = Object.prototype.hasOwnProperty.call(params, "config");
+  const hasReportImports = Object.prototype.hasOwnProperty.call(params, "reportImportsEnabled");
+  const hasExpectedIdentity = Object.prototype.hasOwnProperty.call(params, "expectedConfigIdentity");
+  invariant(!(hasConfig && hasReportImports), 400, "INVALID_INPUT", "Report imports cannot be combined with full feature config.");
+  invariant(!(hasReportImports && hasEnabled), 400, "INVALID_INPUT", "Report imports cannot be combined with top-level enabled.");
+  invariant(!hasReportImports || typeof params.reportImportsEnabled === "boolean", 400, "INVALID_INPUT", "reportImportsEnabled must be a boolean.");
+  invariant(!hasReportImports || flag === FINANCE_PARENT_FLAG, 400, "INVALID_INPUT", "Report imports belong to the FINANCE feature flag.");
+  invariant(hasReportImports || typeof params.enabled === "boolean", 400, "INVALID_INPUT", "enabled must be a boolean.");
+  invariant(!hasExpectedIdentity || params.expectedConfigIdentity === null || (typeof params.expectedConfigIdentity === "string" && FINANCE_CONFIG_IDENTITY_PATTERN.test(params.expectedConfigIdentity)), 400, "INVALID_INPUT", "expectedConfigIdentity must be a SHA-256 hex digest or null.");
+  const financeConfigMutation = flag === FINANCE_PARENT_FLAG && (hasConfig || hasReportImports);
+  invariant(!hasExpectedIdentity || financeConfigMutation, 400, "INVALID_INPUT", "expectedConfigIdentity is supported only for Finance config writes.");
+  invariant(!financeConfigMutation || hasExpectedIdentity, 400, "INVALID_INPUT", "Finance config writes require expectedConfigIdentity.");
   const configData = hasConfig ? { config: params.config == null ? null : toInputJson(params.config) } : {};
 
   if (deployment.managedWorkspaceId) {
+    if (financeConfigMutation) {
+      const result = await compareAndSetFinanceConfig(hasReportImports
+        ? { workspaceId: deployment.managedWorkspaceId, expectedConfigIdentity: params.expectedConfigIdentity ?? null, reportImportsEnabled: params.reportImportsEnabled! }
+        : { workspaceId: deployment.managedWorkspaceId, expectedConfigIdentity: params.expectedConfigIdentity ?? null, enabled: params.enabled!, config: params.config == null ? null : toInputJson(params.config) });
+      if (result.status !== "updated") {
+        await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.update_rejected", {
+          reason, source: "managed_workspace", flag, code: result.code, expectedConfigIdentity: params.expectedConfigIdentity ?? null, currentConfigIdentity: result.currentConfigIdentity,
+        });
+        throw new AppError(409, result.code, result.status === "conflict" ? `Customer Finance configuration changed. Current identity: ${result.currentConfigIdentity ?? "null"}. Refresh and retry.` : "Customer Finance configuration is invalid and was not changed.");
+      }
+      await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.updated", {
+        reason, source: "managed_workspace", flag, reportImportsEnabled: result.reportImportsEnabled, expectedConfigIdentity: params.expectedConfigIdentity ?? null, configIdentity: result.configIdentity,
+      });
+      return { deploymentId: params.deploymentId, accessMode: adapter.kind, source: "managed_workspace" as const, flag, status: result.status, enabled: result.enabled, reportImportsEnabled: result.reportImportsEnabled, configIdentity: result.configIdentity, updatedAt: result.updatedAt };
+    }
     const record = await prisma.workspaceFeatureFlag.upsert({
       where: {
         workspaceId_flag: {
@@ -5501,13 +5560,13 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
         },
       },
       update: {
-        enabled: params.enabled,
+        enabled: params.enabled!,
         ...configData,
       },
       create: {
         workspaceId: deployment.managedWorkspaceId,
         flag,
-        enabled: params.enabled,
+        enabled: params.enabled!,
         ...configData,
       },
     });
@@ -5515,7 +5574,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
       reason,
       source: "managed_workspace",
       flag,
-      enabled: params.enabled,
+      enabled: params.enabled!,
       configProvided: hasConfig,
     });
     return {
@@ -5528,23 +5587,37 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
   }
 
   invariant(adapter.canUseSupportConnector && deployment.hasSupportCredential, 400, "SUPPORT_CONNECTOR_REQUIRED", "Support connector is required to change remote feature flags.");
-	  const operation = await runCustomerSupportOperation(actor, {
-	    deploymentId: params.deploymentId,
-	    action: "feature_flags.set",
-	    scopeOverride: "control-plane:features:write",
-	    reason,
-    arguments: {
+  const operation = await runCustomerSupportOperation(actor, {
+    deploymentId: params.deploymentId,
+    action: "feature_flags.set",
+    scopeOverride: "control-plane:features:write",
+    reason,
+    arguments: financeConfigMutation ? {
       flag,
-      enabled: params.enabled,
-      ...(hasConfig ? { config: params.config ?? null } : {}),
-    },
+      ...(hasReportImports ? { reportImportsEnabled: params.reportImportsEnabled } : { enabled: params.enabled, config: params.config ?? null }),
+      expectedConfigIdentity: params.expectedConfigIdentity ?? null,
+    } : { flag, enabled: params.enabled, ...(hasConfig ? { config: params.config ?? null } : {}) },
     remoteWorkspaceId: deployment.remoteWorkspaceId,
   });
+  if (financeConfigMutation) {
+    const expected = hasReportImports ? { reportImportsEnabled: params.reportImportsEnabled } : { enabled: params.enabled };
+    const result = normalizeFinanceConfigMutationResult(operation.resultSummary, expected);
+    if (result.status !== "updated") {
+      await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.update_rejected", {
+        reason, source: "support_connector", flag, code: result.code, expectedConfigIdentity: params.expectedConfigIdentity ?? null, currentConfigIdentity: result.currentConfigIdentity, operationId: operation.id,
+      });
+      throw new AppError(409, result.code, result.status === "conflict" ? `Customer Finance configuration changed. Current identity: ${result.currentConfigIdentity ?? "null"}. Refresh and retry.` : "Customer Finance configuration is invalid and was not changed.");
+    }
+    await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.updated", {
+      reason, source: "support_connector", flag, reportImportsEnabled: result.reportImportsEnabled, expectedConfigIdentity: params.expectedConfigIdentity ?? null, configIdentity: result.configIdentity, operationId: operation.id,
+    });
+    return { deploymentId: params.deploymentId, accessMode: adapter.kind, source: "support_connector" as const, ...result, operationId: operation.id };
+  }
   await recordCustomerDeploymentEvent(actor, params.deploymentId, "control_plane.feature_flag.updated", {
     reason,
     source: "support_connector",
     flag,
-    enabled: params.enabled,
+    enabled: params.enabled!,
     configProvided: hasConfig,
     operationId: operation.id,
   });
@@ -5553,7 +5626,7 @@ export async function setControlPlaneFeatureFlag(actor: AppActor, params: {
     accessMode: adapter.kind,
     source: "support_connector" as const,
     flag,
-    enabled: params.enabled,
+    enabled: params.enabled!,
     operation,
   };
 }
@@ -10555,7 +10628,12 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   const args = params.action === "proposals.reopen_resolved" && typeof providedArgs.reason !== "string"
     ? { ...providedArgs, reason }
     : providedArgs;
-  const inputSummary = redactObject(args);
+  const guardedFinanceConfig = isGuardedFinanceConfigArguments(params.action, args);
+  const inputSummary = guardedFinanceConfig ? {
+    flag: FINANCE_PARENT_FLAG,
+    ...(typeof args.enabled === "boolean" ? { enabled: args.enabled, configProvided: true } : { reportImportsEnabled: args.reportImportsEnabled }),
+    expectedConfigIdentity: args.expectedConfigIdentity,
+  } : redactObject(args);
   const connector = await loadSupportConnector(params.deploymentId);
 
   const operation = await prisma.supportOperation.create({
@@ -10596,9 +10674,9 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     if (remoteError) {
       throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", remoteError);
     }
-    const resultSummary = summarized && typeof summarized === "object"
-      ? redactObject(summarized as JsonRecord)
-      : { result: summarized };
+    const resultSummary = guardedFinanceConfig
+      ? normalizeFinanceConfigMutationResult(summarized, typeof args.reportImportsEnabled === "boolean" ? { reportImportsEnabled: args.reportImportsEnabled } : { enabled: args.enabled as boolean })
+      : summarized && typeof summarized === "object" ? redactObject(summarized as JsonRecord) : { result: summarized };
 
     if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
       await recordRemoteSupportAudit({

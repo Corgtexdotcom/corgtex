@@ -103,9 +103,11 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     },
     workspaceFeatureFlag: {
       count: vi.fn(),
+      create: vi.fn(),
       findUnique: vi.fn(),
       findMany: vi.fn(),
       upsert: vi.fn(),
+      update: vi.fn(),
     },
     workspaceMeetingRecorderConfig: {
       findMany: vi.fn(),
@@ -4560,6 +4562,7 @@ describe("control plane domain", () => {
 
   it("lists and toggles managed workspace feature flags with audit evidence", async () => {
     const { listControlPlaneFeatureFlags, setControlPlaneFeatureFlag } = await import("./control-plane");
+    const { financeConfigIdentity } = await import("./finance");
     const deployment = {
       id: "inst-1",
       label: "Acme",
@@ -4588,11 +4591,13 @@ describe("control plane domain", () => {
       enabled: false,
       source: "workspace_override",
       lastChangedBy: "operator-1",
+      configIdentity: financeConfigIdentity(false, null),
     });
     expect(contextMapAi).toMatchObject({
       enabled: false,
       source: "default",
     });
+    expect(contextMapAi).not.toHaveProperty("configIdentity");
 
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
     prismaMock.workspaceFeatureFlag.upsert.mockResolvedValueOnce({
@@ -4679,6 +4684,56 @@ describe("control plane domain", () => {
     }));
   });
 
+  it("guards managed Finance report-import updates and audits stale attempts as rejected", async () => {
+    const { setControlPlaneFeatureFlag } = await import("./control-plane");
+    const { financeConfigIdentity } = await import("./finance");
+    const deployment = {
+      id: "inst-1", label: "Acme", deploymentKind: "HOSTED", managedWorkspaceId: "ws-1",
+      supportCredentialEnc: null, managedWorkspace: { id: "ws-1", slug: "acme", name: "Acme", _count: {} },
+    };
+    const current = {
+      id: "flag-1", workspaceId: "ws-1", flag: "FINANCE", enabled: true,
+      config: { financeAllMemberWrite: true, financeCapabilities: { reports: true } },
+      updatedAt: new Date("2026-08-08T01:00:00.000Z"),
+    };
+    const afterReportImport = {
+      ...current, config: { financeAllMemberWrite: true, financeCapabilities: { reports: true, reportImports: true } },
+      updatedAt: new Date("2026-08-08T01:00:01.000Z"),
+    };
+    const expectedConfigIdentity = financeConfigIdentity(current.enabled, current.config);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment).mockResolvedValueOnce(deployment).mockResolvedValueOnce(deployment);
+    prismaMock.workspaceFeatureFlag.findUnique.mockResolvedValueOnce(current).mockResolvedValueOnce(afterReportImport).mockResolvedValueOnce(afterReportImport);
+    prismaMock.workspaceFeatureFlag.update.mockResolvedValueOnce(afterReportImport).mockResolvedValueOnce({ ...afterReportImport, enabled: false, config: { financeCapabilities: { reports: true, reportImports: true } } });
+
+    const updated = await setControlPlaneFeatureFlag(operatorActor, {
+      deploymentId: "inst-1", flag: "FINANCE", reportImportsEnabled: true,
+      expectedConfigIdentity, reason: "Enable the approved report-import pilot.",
+    });
+
+    expect(updated).toMatchObject({ status: "updated", reportImportsEnabled: true, configIdentity: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(prismaMock.workspaceFeatureFlag.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { config: { financeAllMemberWrite: true, financeCapabilities: { reports: true, reportImports: true } } },
+    }));
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "control_plane.feature_flag.updated", meta: expect.objectContaining({ expectedConfigIdentity, reportImportsEnabled: true }) }),
+    }));
+
+    await expect(setControlPlaneFeatureFlag(operatorActor, {
+      deploymentId: "inst-1", flag: "FINANCE", enabled: false,
+      config: { financeCapabilities: { reports: true, reportImports: true } },
+      expectedConfigIdentity: financeConfigIdentity(afterReportImport.enabled, afterReportImport.config), reason: "Apply a guarded full Finance config.",
+    })).resolves.toMatchObject({ status: "updated", enabled: false });
+
+    await expect(setControlPlaneFeatureFlag(operatorActor, {
+      deploymentId: "inst-1", flag: "FINANCE", reportImportsEnabled: false,
+      expectedConfigIdentity: "b".repeat(64), reason: "Retry from a stale view.",
+    })).rejects.toMatchObject({ status: 409, code: "FEATURE_CONFIG_CONFLICT" });
+    expect(prismaMock.workspaceFeatureFlag.update).toHaveBeenCalledTimes(2);
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "control_plane.feature_flag.update_rejected" }),
+    }));
+  });
+
   it("lists remote feature flags with a read-scoped control-plane agent", async () => {
     const { listControlPlaneFeatureFlags } = await import("./control-plane");
     const readAgent: AppActor = {
@@ -4709,6 +4764,7 @@ describe("control plane domain", () => {
             flag: "FINANCE",
             enabled: true,
             config: { channelId: "C123" },
+            configIdentity: "a".repeat(64),
             source: "remote_override",
           },
         ],
@@ -4729,13 +4785,22 @@ describe("control plane domain", () => {
           flag: "FINANCE",
           enabled: true,
           config: { channelId: "C123" },
+          configIdentity: "a".repeat(64),
           source: "remote_override",
         },
       ],
     });
+    for (const [configIdentity, source] of [[null, "default"], ["malformed", "workspace_override"]] as const) {
+      prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment).mockResolvedValueOnce(deployment);
+      prismaMock.supportOperation.create.mockResolvedValueOnce({ id: `op-${source}`, action: "feature_flags.list" });
+      prismaMock.supportOperation.update.mockResolvedValueOnce({ id: `op-${source}`, status: "COMPLETED", resultSummary: { flags: [{ flag: "FINANCE", enabled: false, source, configIdentity }] } });
+      const read = listControlPlaneFeatureFlags(readAgent, "inst-1");
+      if (source === "default") await expect(read).resolves.toMatchObject({ flags: [expect.objectContaining({ configIdentity: null })] });
+      else await expect(read).rejects.toMatchObject({ status: 502, code: "REMOTE_SUPPORT_ERROR" });
+    }
   });
 
-  it("allows feature-write agents to set remote feature flags through the support connector", async () => {
+  it("forwards and sanitizes guarded remote Finance report-import updates", async () => {
     const { setControlPlaneFeatureFlag } = await import("./control-plane");
     const featureAgent: AppActor = {
       kind: "agent",
@@ -4756,13 +4821,20 @@ describe("control plane domain", () => {
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
     prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-flag-set", action: "feature_flags.set" });
-    prismaMock.supportOperation.update.mockResolvedValueOnce({ id: "op-flag-set", status: "COMPLETED" });
+    prismaMock.supportOperation.update.mockImplementationOnce(async ({ data }: any) => ({ id: "op-flag-set", ...data }));
+    global.fetch = vi.fn(async (_input, init) => {
+      const call = JSON.parse(String(init?.body));
+      return mcpToolResult(call.params.name === "set_feature_flag" ? {
+        status: "updated", flag: "FINANCE", enabled: true, reportImportsEnabled: true,
+        config: { privateSentinel: "must-not-persist" }, updatedAt: "2026-08-08T01:00:01.000Z", configIdentity: "b".repeat(64),
+      } : { ok: true });
+    }) as any;
 
     const result = await setControlPlaneFeatureFlag(featureAgent, {
       deploymentId: "inst-1",
       flag: "FINANCE",
-      enabled: true,
-      config: { channelId: "C123" },
+      reportImportsEnabled: true,
+      expectedConfigIdentity: "a".repeat(64),
       reason: "Enable finance for pilot.",
     });
 
@@ -4770,17 +4842,59 @@ describe("control plane domain", () => {
       data: expect.objectContaining({
         inputSummary: expect.objectContaining({
           flag: "FINANCE",
-          enabled: true,
-          config: { channelId: "C123" },
+          reportImportsEnabled: true,
+          expectedConfigIdentity: "a".repeat(64),
         }),
       }),
+    }));
+    const featureCall = vi.mocked(global.fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)))
+      .find((call) => call.params.name === "set_feature_flag");
+    expect(featureCall.params.arguments).toEqual({ flag: "FINANCE", reportImportsEnabled: true, expectedConfigIdentity: "a".repeat(64) });
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ resultSummary: expect.not.objectContaining({ config: expect.anything() }) }),
     }));
     expect(result).toMatchObject({
       source: "support_connector",
       flag: "FINANCE",
       enabled: true,
-      operation: { id: "op-flag-set", status: "COMPLETED" },
+      status: "updated",
+      reportImportsEnabled: true,
+      configIdentity: "b".repeat(64),
     });
+  });
+
+  it("surfaces remote Finance config conflicts without a false updated audit", async () => {
+    const { setControlPlaneFeatureFlag } = await import("./control-plane");
+    const featureAgent: AppActor = { kind: "agent", authProvider: "control-plane", label: "control-plane-agent", scopes: ["control-plane:read", "control-plane:features:write"] };
+    const deployment = {
+      id: "inst-1", label: "Acme", deploymentKind: "REMOTE_MANAGED", managedWorkspaceId: null, managedWorkspace: null,
+      remoteWorkspaceId: "remote-ws-1", supportMcpUrl: "https://customer.test/api/mcp", supportCredentialEnc: "encrypted-token",
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment).mockResolvedValueOnce(deployment);
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-conflict", action: "feature_flags.set" });
+    prismaMock.supportOperation.update.mockImplementationOnce(async ({ data }: any) => ({ id: "op-conflict", ...data }));
+    global.fetch = vi.fn(async (_input, init) => {
+      const call = JSON.parse(String(init?.body));
+      return mcpToolResult(call.params.name === "set_feature_flag"
+        ? { status: "conflict", code: "FEATURE_CONFIG_CONFLICT", currentConfigIdentity: "c".repeat(64) }
+        : { ok: true });
+    }) as any;
+
+    await expect(setControlPlaneFeatureFlag(featureAgent, {
+      deploymentId: "inst-1", flag: "FINANCE", reportImportsEnabled: true,
+      expectedConfigIdentity: "a".repeat(64), reason: "Guard against stale state.",
+    })).rejects.toMatchObject({ status: 409, code: "FEATURE_CONFIG_CONFLICT", message: expect.stringContaining("c".repeat(64)) });
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.customerDeploymentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "control_plane.feature_flag.update_rejected", meta: expect.objectContaining({ currentConfigIdentity: "c".repeat(64) }) }),
+    }));
+    for (const payload of [{ status: "updated", flag: "FINANCE", enabled: true, reportImportsEnabled: false, updatedAt: "2026-08-08T01:00:01.000Z", configIdentity: "d".repeat(64) }, { status: "conflict", code: "FEATURE_CONFIG_CONFLICT", currentConfigIdentity: "malformed" }]) {
+      prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment).mockResolvedValueOnce(deployment);
+      prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-malformed", action: "feature_flags.set" });
+      prismaMock.supportOperation.update.mockImplementationOnce(async ({ data }: any) => ({ id: "op-malformed", ...data }));
+      global.fetch = vi.fn(async (_input, init) => mcpToolResult(JSON.parse(String(init?.body)).params.name === "set_feature_flag" ? payload : { ok: true })) as any;
+      await expect(setControlPlaneFeatureFlag(featureAgent, { deploymentId: "inst-1", flag: "FINANCE", reportImportsEnabled: true, expectedConfigIdentity: "a".repeat(64), reason: "Reject malformed results." })).rejects.toMatchObject({ status: 502, code: "REMOTE_SUPPORT_ERROR" });
+    }
   });
 
   it("keeps audit identifiers while redacting credential material", async () => {
