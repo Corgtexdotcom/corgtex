@@ -416,7 +416,7 @@ const tools = [
   },
   {
     name: "set_customer_feature_flag",
-    description: "Enable or disable a customer workspace feature flag.",
+    description: "Enable or disable a customer workspace feature flag. Finance config writes require an exact-state identity.",
     inputSchema: {
       type: "object",
       properties: {
@@ -424,9 +424,11 @@ const tools = [
         flag: { type: "string" },
         enabled: { type: "boolean" },
         config: { type: "object" },
+        reportImportsEnabled: { type: "boolean" },
+        expectedConfigIdentity: { anyOf: [{ type: "string", pattern: "^[0-9a-f]{64}$" }, { type: "null" }] },
         reason: { type: "string" },
       },
-      required: ["deploymentId", "flag", "enabled", "reason"],
+      required: ["deploymentId", "flag", "reason"],
     },
   },
   {
@@ -1084,14 +1086,31 @@ export async function POST(request: NextRequest) {
       return rpcResult(id, textContent(await listControlPlaneFeatureFlags(actor, argString(args, "deploymentId"))));
     }
     if (name === "set_customer_feature_flag") {
-      if (typeof args.enabled !== "boolean") {
+      const flag = argString(args, "flag");
+      const hasEnabled = Object.prototype.hasOwnProperty.call(args, "enabled");
+      const hasConfig = Object.prototype.hasOwnProperty.call(args, "config");
+      const hasReportImports = Object.prototype.hasOwnProperty.call(args, "reportImportsEnabled");
+      const hasExpectedIdentity = Object.prototype.hasOwnProperty.call(args, "expectedConfigIdentity");
+      if (hasReportImports && typeof args.reportImportsEnabled !== "boolean") {
+        return rpcError(id, -32602, "reportImportsEnabled must be a boolean.");
+      }
+      if ((!hasReportImports && typeof args.enabled !== "boolean") || (hasReportImports && (hasEnabled || hasConfig || flag !== "FINANCE"))) {
         return rpcError(id, -32602, "enabled must be a boolean.");
+      }
+      const financeConfigMutation = flag === "FINANCE" && (hasConfig || hasReportImports);
+      if ((financeConfigMutation && !hasExpectedIdentity) || (hasExpectedIdentity && !financeConfigMutation)) {
+        return rpcError(id, -32602, "Finance config writes require expectedConfigIdentity.");
+      }
+      if (args.expectedConfigIdentity != null && (typeof args.expectedConfigIdentity !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedConfigIdentity))) {
+        return rpcError(id, -32602, "expectedConfigIdentity must be a SHA-256 hex digest or null.");
       }
       return rpcResult(id, textContent(await setControlPlaneFeatureFlag(actor, {
         deploymentId: argString(args, "deploymentId"),
-        flag: argString(args, "flag"),
-        enabled: args.enabled,
+        flag,
+        ...(hasEnabled ? { enabled: args.enabled as boolean } : {}),
         ...(Object.prototype.hasOwnProperty.call(args, "config") ? { config: args.config } : {}),
+        ...(hasReportImports ? { reportImportsEnabled: args.reportImportsEnabled as boolean } : {}),
+        ...(hasExpectedIdentity ? { expectedConfigIdentity: args.expectedConfigIdentity as string | null } : {}),
         reason: argString(args, "reason"),
       })));
     }
