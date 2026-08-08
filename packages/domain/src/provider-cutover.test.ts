@@ -1001,4 +1001,154 @@ describe("assessProviderCutoverTransition", () => {
     const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE", destinationWriteStartedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: archiveAt(14) }, transCtx);
     expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING"]);
   });
+
+  // Successor hardening: 28 locked literal cases (8+1+3+2+4+4+3+3).
+  // Group 1 (8): non-runtime horizon isolation; malformed/future horizon fields stay irrelevant.
+  it("horizon isolation: PLANNED -> SHADOW", () => {
+    expect(assessProviderCutoverTransition({ record: baseTransRec, toStatus: "SHADOW", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: new Date("invalid"), requiredSourceRuntimeObservedAt: archiveAt(15) })).toEqual({ transitionAllowed: true, summary: { fromStatus: "PLANNED", toStatus: "SHADOW", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: SHADOW -> CUTOVER", () => {
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW" } as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: archiveAt(15), requiredSourceRuntimeObservedAt: new Date("invalid") })).toEqual({ transitionAllowed: true, summary: { fromStatus: "SHADOW", toStatus: "CUTOVER", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: CUTOVER -> OBSERVING", () => {
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: new Date("invalid"), requiredSourceRuntimeObservedAt: archiveAt(15) })).toEqual({ transitionAllowed: true, summary: { fromStatus: "CUTOVER", toStatus: "OBSERVING", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: OBSERVING -> ARCHIVE_ONLY", () => {
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING" } as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: archiveAt(15), requiredSourceRuntimeObservedAt: new Date("invalid") })).toEqual({ transitionAllowed: true, summary: { fromStatus: "OBSERVING", toStatus: "ARCHIVE_ONLY", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: ARCHIVE_ONLY -> DELETE_ELIGIBLE", () => {
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "ARCHIVE_ONLY" } as DeletionEligibilityRecord, toStatus: "DELETE_ELIGIBLE", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: new Date("invalid"), requiredSourceRuntimeObservedAt: archiveAt(15) })).toEqual({ transitionAllowed: true, summary: { fromStatus: "ARCHIVE_ONLY", toStatus: "DELETE_ELIGIBLE", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: DELETE_ELIGIBLE -> DELETED", () => {
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: archiveAt(14) }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: archiveAt(15), requiredSourceRuntimeObservedAt: new Date("invalid") })).toEqual({ transitionAllowed: true, summary: { fromStatus: "DELETE_ELIGIBLE", toStatus: "DELETED", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: PLANNED -> ROLLED_BACK", () => {
+    expect(assessProviderCutoverTransition({ record: baseTransRec, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: new Date("invalid"), requiredSourceRuntimeObservedAt: archiveAt(15) })).toEqual({ transitionAllowed: true, summary: { fromStatus: "PLANNED", toStatus: "ROLLED_BACK", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+  it("horizon isolation: SHADOW -> ROLLED_BACK", () => {
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW" } as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: archiveAt(15), requiredSourceRuntimeObservedAt: new Date("invalid") })).toEqual({ transitionAllowed: true, summary: { fromStatus: "SHADOW", toStatus: "ROLLED_BACK", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+
+  // Group 2 (1): null-prototype own exact-false surrender.
+  it("surrender: null-prototype own exact-false", () => {
+    const ev = Object.create(null); ev.runtimeRollbackClaimed = false;
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", evidence: ev } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx)).toEqual({ transitionAllowed: true, summary: { fromStatus: "OBSERVING", toStatus: "ARCHIVE_ONLY", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
+
+  // Group 3 (3): remaining runtime propagation.
+  it("runtime: invalid observation, missing freshness, missing write start", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", sourceDataFreshThroughAt: null, destinationWriteStartedAt: null, evidence: { sourceRuntimeHealthy: true, sourceRuntimeObservedAt: "bad", destinationWritesCompatible: true } } as unknown as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_RUNTIME_OBSERVATION_INVALID", "SOURCE_FRESHNESS_MISSING", "DESTINATION_WRITE_START_MISSING"]);
+  });
+  it("runtime: stale observation, invalid freshness, invalid write start", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", sourceDataFreshThroughAt: new Date("invalid"), destinationWriteStartedAt: new Date("invalid"), evidence: { sourceRuntimeHealthy: true, sourceRuntimeObservedAt: archiveAt(11).toISOString(), destinationWritesCompatible: true } } as unknown as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_RUNTIME_OBSERVATION_STALE", "SOURCE_FRESHNESS_INVALID", "DESTINATION_WRITE_START_INVALID"]);
+  });
+  it("runtime: stale freshness before a valid non-future write start", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", sourceDataFreshThroughAt: archiveAt(10), destinationWriteStartedAt: archiveAt(13) } as unknown as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_FRESHNESS_STALE", "HORIZON_BEFORE_DESTINATION_WRITES"]);
+  });
+
+  // Group 4 (2): remaining delete-eligible composition.
+  it("delete-eligible: invalid deadline with incomplete invalid waiver", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "ARCHIVE_ONLY", archiveRetentionDeadline: new Date("invalid"), retentionWaiverApprovedAt: new Date("invalid"), retentionWaiverApprovedBy: null, retentionWaiverReason: "" } as unknown as DeletionEligibilityRecord, toStatus: "DELETE_ELIGIBLE", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["RETENTION_DEADLINE_INVALID", "RETENTION_WAIVER_INCOMPLETE", "RETENTION_WAIVER_APPROVAL_INVALID", "RETENTION_WAIVER_REASON_INVALID"]);
+  });
+  it("delete-eligible: future snapshot before deadline with future approval and blank actor", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "ARCHIVE_ONLY", finalSnapshotAt: archiveAt(16), archiveRestoreTestedAt: archiveAt(16), archiveRetentionDeadline: archiveAt(15), retentionWaiverApprovedAt: archiveAt(16), retentionWaiverApprovedBy: "", retentionWaiverReason: "ok" } as unknown as DeletionEligibilityRecord, toStatus: "DELETE_ELIGIBLE", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["FINAL_SNAPSHOT_FUTURE", "ARCHIVE_RESTORE_TEST_FUTURE", "RETENTION_DEADLINE_BEFORE_FINAL_SNAPSHOT", "RETENTION_DEADLINE_NOT_REACHED", "RETENTION_WAIVER_APPROVAL_FUTURE", "RETENTION_WAIVER_ACTOR_INVALID"]);
+  });
+
+  // Group 5 (4): deleted-observation failures.
+  it("deleted observation: missing", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_INVALID"]);
+  });
+  it("deleted observation: malformed", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: "bad" as any }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_INVALID"]);
+  });
+  it("deleted observation: future", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: archiveAt(15) }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_FUTURE"]);
+  });
+  it("deleted observation: causally early", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: archiveAt(11) }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_BEFORE_OBSERVATION", "SOURCE_DELETION_BEFORE_ARCHIVE_RESTORE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]);
+  });
+
+  // Group 6 (4): irrelevant-evidence isolation, whole-summary literal equality before and after.
+  it("irrelevant evidence: runtime fields on PLANNED -> SHADOW", () => {
+    const expected = { transitionAllowed: true, summary: { fromStatus: "PLANNED", toStatus: "SHADOW", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } };
+    expect(assessProviderCutoverTransition({ record: baseTransRec, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, sourceDataFreshThroughAt: null, evidence: { sourceRuntimeHealthy: false, sourceRuntimeObservedAt: "bad", destinationWritesCompatible: false } } as unknown as DeletionEligibilityRecord, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+  });
+  it("irrelevant evidence: archive/retention/deletion fields on PLANNED -> ROLLED_BACK", () => {
+    const expected = { transitionAllowed: true, summary: { fromStatus: "PLANNED", toStatus: "ROLLED_BACK", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } };
+    expect(assessProviderCutoverTransition({ record: baseTransRec, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, sourceWriteStoppedAt: null, finalSnapshotAt: null, finalSnapshotChecksum: "bad", archiveRestoreTestedAt: null, archiveRetentionDeadline: null } as unknown as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+  });
+  it("irrelevant evidence: observation fields on SHADOW -> CUTOVER", () => {
+    const expected = { transitionAllowed: true, summary: { fromStatus: "SHADOW", toStatus: "CUTOVER", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } };
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW" } as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW", observationCompletedAt: new Date("invalid") } as unknown as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+  });
+  it("irrelevant evidence: observedSourceDeletedAt on CUTOVER -> OBSERVING", () => {
+    const expected = { transitionAllowed: true, summary: { fromStatus: "CUTOVER", toStatus: "OBSERVING", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } };
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx)).toEqual(expected);
+    expect(assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: archiveAt(10) }, transCtx)).toEqual(expected);
+  });
+
+  // Group 7 (3): sanitization and phase order.
+  it("sanitization: hostile sentinels never serialize", () => {
+    const hostile = { ...baseTransRec, id: "HOSTILE_ID", customerAccountId: "HOSTILE_ACCOUNT", sourceDeploymentId: "HOSTILE_SOURCE_DEPLOYMENT", destinationDeploymentId: "HOSTILE_DESTINATION_DEPLOYMENT", sourceWriteStoppedAt: "HOSTILE_SOURCE_WRITE_STOP", destinationWriteStartedAt: "HOSTILE_DESTINATION_WRITE_START", sourceDataFreshThroughAt: "HOSTILE_SOURCE_FRESHNESS", finalSnapshotAt: "HOSTILE_FINAL_SNAPSHOT", finalSnapshotChecksum: "HOSTILE_CHECKSUM", archiveRestoreTestedAt: "HOSTILE_ARCHIVE_RESTORE", observationCompletedAt: "HOSTILE_OBSERVATION", archiveRetentionDeadline: "HOSTILE_RETENTION_DEADLINE", retentionWaiverApprovedAt: "HOSTILE_WAIVER_APPROVAL", retentionWaiverApprovedBy: "HOSTILE_WAIVER_ACTOR", retentionWaiverReason: "HOSTILE_WAIVER_REASON", sourceDeletedAt: "HOSTILE_SOURCE_DELETION", evidence: { sourceRuntimeHealthy: "HOSTILE_RUNTIME_HEALTH", sourceRuntimeObservedAt: "HOSTILE_RUNTIME_OBSERVATION", destinationWritesCompatible: "HOSTILE_WRITE_COMPATIBILITY", runtimeRollbackClaimed: "HOSTILE_RUNTIME_CLAIM", secretKey: "HOSTILE_CREDENTIAL", url: "https://HOSTILE.URL", customerContent: "HOSTILE_CONTENT" } } as unknown as DeletionEligibilityRecord;
+    const res = assessProviderCutoverTransition({ record: hostile, toStatus: "SHADOW", observedSourceDeletedAt: "HOSTILE_OBSERVED_SOURCE_DELETION" as any }, { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: "HOSTILE_FRESHNESS_HORIZON", requiredSourceRuntimeObservedAt: "HOSTILE_RUNTIME_HORIZON" } as any);
+    expect(res).toEqual({ transitionAllowed: false, summary: { fromStatus: "PLANNED", toStatus: "SHADOW", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: false, blockerCodes: ["SOURCE_DELETION_STATUS_CONTRADICTION"] } });
+    expect(JSON.stringify(res)).not.toContain("HOSTILE");
+  });
+  it("sanitization: exact result and summary keys", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx);
+    expect(Object.keys(res)).toEqual(["transitionAllowed", "summary"]);
+    expect(Object.keys(res.summary)).toEqual(["fromStatus", "toStatus", "sourceProvider", "destinationProvider", "transitionAllowed", "blockerCodes"]);
+  });
+  it("phase order: direct and composed blockers deduplicated at first occurrence", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE", destinationWriteStartedAt: null, sourceWriteStoppedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING", "SOURCE_WRITE_STOP_INVALID", "SOURCE_DELETION_INVALID"]);
+  });
+
+  // Group 8 (3): purity and side effects.
+  it("purity: deep-frozen record, evidence, and context are not mutated", () => {
+    const record = { ...baseTransRec, status: "OBSERVING", evidence: { ...baseEv, runtimeRollbackClaimed: false } } as unknown as DeletionEligibilityRecord;
+    const context = { ...transCtx };
+    Object.freeze(record); Object.freeze(record.evidence); Object.freeze(context);
+    const snap = JSON.stringify({ record, context });
+    const res = assessProviderCutoverTransition({ record, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, context);
+    expect(res.summary.blockerCodes).toEqual([]);
+    expect(JSON.stringify({ record, context })).toBe(snap);
+  });
+  it("purity: inputs unchanged and repeated calls return fresh objects", () => {
+    const record = { ...baseTransRec, status: "OBSERVING" } as DeletionEligibilityRecord;
+    const snap = JSON.stringify({ record, transCtx });
+    const res1 = assessProviderCutoverTransition({ record, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    const res2 = assessProviderCutoverTransition({ record, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(JSON.stringify({ record, transCtx })).toBe(snap);
+    expect(res1).toEqual(res2);
+    expect(res1).not.toBe(res2); expect(res1.summary).not.toBe(res2.summary); expect(res1.summary.blockerCodes).not.toBe(res2.summary.blockerCodes);
+  });
+  it("purity: no wall-clock or I/O side effects", () => {
+    const originalNow = Date.now;
+    const originalOut = process.stdout.write; const originalErr = process.stderr.write;
+    let trapped = false;
+    Date.now = () => { trapped = true; throw new Error("no clock"); };
+    process.stdout.write = (() => { trapped = true; throw new Error("no io"); }) as any;
+    process.stderr.write = (() => { trapped = true; throw new Error("no io"); }) as any;
+    let res!: ReturnType<typeof assessProviderCutoverTransition>;
+    try {
+      res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING" } as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    } finally {
+      Date.now = originalNow; process.stdout.write = originalOut; process.stderr.write = originalErr;
+    }
+    expect(trapped).toBe(false);
+    expect(res).toEqual({ transitionAllowed: true, summary: { fromStatus: "OBSERVING", toStatus: "ARCHIVE_ONLY", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] } });
+  });
 });
