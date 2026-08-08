@@ -244,14 +244,14 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string): boolean {
-  return /\b(do not|don't|no|not|never)\s+(create|add|make|assign|turn into)\b/i.test(text)
+  return /\b(do not|don['’]t|no|not|never)\b(?:\s+[a-z]+){0,5}\s+(create|add|make|assign|turn into)\b/i.test(text)
     || /\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
     || /\bno\s+(action|task|work item)\b/i.test(text);
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  return /\b(routing\s*test|test\s*routing|fyi|for your information|ack|acknowledg?ement|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
-    || /^(?:test|testing)[\s/:-]/i.test(text.trim());
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|ack|acknowledg?ement|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
+    || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
 function isDeterministicExplicitActionRequest(text: string): boolean {
@@ -265,7 +265,7 @@ function isDeterministicExplicitActionRequest(text: string): boolean {
 function normalizeText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -280,8 +280,8 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
 
 function normalizeProactiveExtraction(output: Record<string, unknown>) {
   const confidence = typeof output.confidence === "number" ? output.confidence : Number(output.confidence);
-  const rawResolutionState = asString(output.resolutionState);
-  const rawWorkDisposition = asString(output.workDisposition);
+  const rawResolutionState = asString(output.resolutionState) || "unknown";
+  const rawWorkDisposition = asString(output.workDisposition) || "unknown";
 
   const validResolutionStates = new Set(["answered", "open", "unknown"]);
   const validWorkDispositions = new Set(["action", "awareness", "information", "test", "ignore"]);
@@ -295,7 +295,7 @@ function normalizeProactiveExtraction(output: Record<string, unknown>) {
     explicitActionRequest: output.explicitActionRequest === true,
     hasExplicitNegativeCategoryFalse: output.negativeCategory === false,
     negativeCategory: output.negativeCategory === true,
-    hasValidCouldNotArray: Array.isArray(output.couldNot),
+    hasValidCouldNotArray: Array.isArray(output.couldNot) && output.couldNot.every(v => typeof v === "string"),
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
     title: asString(output.title),
     bodyMd: asString(output.bodyMd) || asString(output.body),
@@ -645,18 +645,6 @@ export async function runSlackProactiveScan(params: {
     if (actions >= MAX_PROACTIVE_ACTIONS) break;
     const candidate = nudge.message as SlackCandidateMessage | null;
     if (!candidate || !candidate.text || !channelIds.includes(candidate.externalChannelId)) continue;
-    if (!looksWorkLike(candidate.text) || isBotMentioned(candidate.text, installation.botUserId)) {
-      await recordProactiveMarker({
-        installationId: params.installationId,
-        workspaceId: params.workspaceId,
-        messageId: candidate.id,
-        externalUserId: candidate.externalUserId,
-        entityType: "CommunicationMessage",
-        entityId: candidate.id,
-        action: "proactive_unanswered_resolved",
-      });
-      continue;
-    }
     const linkedAction = await prisma.communicationEntityLink.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -677,6 +665,19 @@ export async function runSlackProactiveScan(params: {
       select: { id: true },
     });
     if (terminalMarker) continue;
+
+    if (!looksWorkLike(candidate.text) || isBotMentioned(candidate.text, installation.botUserId)) {
+      await recordProactiveMarker({
+        installationId: params.installationId,
+        workspaceId: params.workspaceId,
+        messageId: candidate.id,
+        externalUserId: candidate.externalUserId,
+        entityType: "CommunicationMessage",
+        entityId: candidate.id,
+        action: "proactive_unanswered_resolved",
+      });
+      continue;
+    }
 
     const threadMessages = await fetchHumanThreadMessages({
       workspaceId: params.workspaceId,
