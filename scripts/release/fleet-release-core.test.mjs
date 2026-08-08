@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertHealthProof,
+  azureRuntimeContractErrors,
   buildReleaseManifest,
   filterTargetsByGroups,
   formatReleasePlan,
   healthProofErrors,
   imageTagForSha,
+  MCP_CONNECTOR_DEFAULT_SCOPES,
+  mcpOAuthProofErrors,
   normalizeReleaseInput,
   normalizeTargets,
   providerBoundaryErrors,
@@ -16,6 +19,41 @@ import {
 } from "./fleet-release-core.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
+
+function publicUrlEntries(origin, overrides = {}) {
+  return Object.entries({
+    APP_URL: origin,
+    NEXT_PUBLIC_APP_URL: origin,
+    MEETING_RECORDER_PUBLIC_BASE_URL: origin,
+    MCP_PUBLIC_URL: `${origin}/mcp`,
+    ...overrides,
+  }).map(([name, value]) => ({ name, value, secretRef: null }));
+}
+
+function oauthProof(origin, overrides = {}) {
+  const scopes = [...MCP_CONNECTOR_DEFAULT_SCOPES];
+  return {
+    protectedResource: {
+      resource: `${origin}/mcp`,
+      authorization_servers: [origin],
+      scopes_supported: scopes,
+    },
+    authorizationServer: {
+      issuer: origin,
+      authorization_endpoint: `${origin}/api/oauth/authorize`,
+      token_endpoint: `${origin}/api/oauth/token`,
+      registration_endpoint: `${origin}/api/oauth/register`,
+      revocation_endpoint: `${origin}/api/oauth/revoke`,
+      scopes_supported: scopes,
+    },
+    challenges: ["/mcp", "/api/mcp"].map((path) => ({
+      path,
+      status: 401,
+      header: `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${scopes.join(" ")}"`,
+    })),
+    ...overrides,
+  };
+}
 
 describe("fleet release core", () => {
   it("normalizes release input without treating latest as raw main", () => {
@@ -60,6 +98,52 @@ describe("fleet release core", () => {
       ...healthy,
       release: { imageTag: "old", gitSha: manifest.gitSha },
     }, manifest)).toEqual(["release.imageTag=old"]);
+  });
+
+  it.each(["https://customer-a.example.test", "https://selfserve.corgtex.com"])("accepts canonical Azure public URLs for %s", (origin) => {
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin))).toEqual([]);
+  });
+
+  it("rejects origin-only, missing, cross-customer, and secret-backed Azure public URLs", () => {
+    const origin = "https://customer-a.example.test";
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { MCP_PUBLIC_URL: origin }))).toContain(
+      `MCP_PUBLIC_URL=${origin}; expected ${origin}/mcp`,
+    );
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin).filter(({ name }) => name !== "APP_URL"))).toContain("APP_URL is missing");
+    expect(azureRuntimeContractErrors(origin, publicUrlEntries(origin, { NEXT_PUBLIC_APP_URL: "https://customer-b.example.test" }))).toContain(
+      "NEXT_PUBLIC_APP_URL=https://customer-b.example.test; expected https://customer-a.example.test",
+    );
+    const secretBacked = publicUrlEntries(origin).map((entry) => (
+      entry.name === "MEETING_RECORDER_PUBLIC_BASE_URL" ? { ...entry, value: null, secretRef: "public-url" } : entry
+    ));
+    expect(azureRuntimeContractErrors(origin, secretBacked)).toContain("MEETING_RECORDER_PUBLIC_BASE_URL must not be secret-backed");
+  });
+
+  it("requires public MCP OAuth metadata and challenges to agree", () => {
+    const origin = "https://customer-a.example.test";
+    expect(mcpOAuthProofErrors(origin, oauthProof(origin))).toEqual([]);
+    expect(mcpOAuthProofErrors(origin, oauthProof(origin, {
+      protectedResource: {
+        ...oauthProof(origin).protectedResource,
+        resource: origin,
+        scopes_supported: ["workspace:read"],
+      },
+      challenges: oauthProof(origin).challenges.map((challenge) => ({ ...challenge, header: challenge.header.replace("Bearer", "Basic") })),
+    }))).toEqual(expect.arrayContaining([
+      `resource=${origin}; expected ${origin}/mcp`,
+      "/mcp challenge must use Bearer authentication",
+      "protected-resource and authorization-server scopes do not agree",
+      "protected-resource scopes do not match canonical MCP defaults",
+      "/mcp challenge scopes do not agree with protected-resource metadata",
+    ]));
+    const mixed = oauthProof(origin);
+    mixed.challenges[0].header = `Bearer realm="mcp", Basic resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${MCP_CONNECTOR_DEFAULT_SCOPES.join(" ")}"`;
+    expect(mcpOAuthProofErrors(origin, mixed)).toEqual(expect.arrayContaining([
+      "/mcp resource_metadata challenge does not match the target origin", "/mcp challenge scopes do not agree with protected-resource metadata",
+    ]));
+    const wrongRevoke = oauthProof(origin);
+    wrongRevoke.authorizationServer.revocation_endpoint = origin;
+    expect(mcpOAuthProofErrors(origin, wrongRevoke)).toContain(`revocation_endpoint=${origin}; expected ${origin}/api/oauth/revoke`);
   });
 
   it("expands and validates target groups", () => {
