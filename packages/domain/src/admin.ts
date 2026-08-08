@@ -312,13 +312,16 @@ function buildCustomerDeploymentApplicationInsightsVariables(): Record<string, s
   };
 }
 
+type CustomerDeploymentEventClient = Pick<Prisma.TransactionClient, "customerDeploymentEvent">;
+
 async function recordCustomerDeploymentEvent(
   actor: AppActor,
   deploymentId: string | null,
   action: string,
   meta: Record<string, unknown> = {},
+  client: CustomerDeploymentEventClient = prisma,
 ) {
-  await prisma.customerDeploymentEvent.create({
+  await client.customerDeploymentEvent.create({
     data: {
       deploymentId,
       actorUserId: actorUserId(actor),
@@ -752,11 +755,37 @@ export async function registerCustomerDeploymentRecord(actor: AppActor, params: 
   return deployment;
 }
 
+function customerDeploymentCutoverConflict() {
+  return new AppError(
+    409,
+    "CUSTOMER_DEPLOYMENT_CUTOVER_CONFLICT",
+    "Customer deployment is referenced by a provider cutover and cannot be removed."
+  );
+}
+
+function isRestrictForeignKeyViolation(error: unknown) {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "P2003";
+}
+
 export async function removeCustomerDeployment(actor: AppActor, id: string) {
   requireGlobalOperator(actor);
-  await recordCustomerDeploymentEvent(actor, id, "customer_deployment.removed");
-  await prisma.customerDeployment.delete({
-    where: { id }
+  await prisma.$transaction(async (tx) => {
+    const cutoverReference = await tx.providerCutover.findFirst({
+      where: { OR: [{ sourceDeploymentId: id }, { destinationDeploymentId: id }] },
+      select: { id: true },
+    });
+    if (cutoverReference) {
+      throw customerDeploymentCutoverConflict();
+    }
+    await recordCustomerDeploymentEvent(actor, id, "customer_deployment.removed", {}, tx);
+    try {
+      await tx.customerDeployment.delete({ where: { id } });
+    } catch (error) {
+      if (isRestrictForeignKeyViolation(error)) {
+        throw customerDeploymentCutoverConflict();
+      }
+      throw error;
+    }
   });
 }
 
