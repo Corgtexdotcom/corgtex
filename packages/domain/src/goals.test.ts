@@ -937,10 +937,128 @@ describe("Goals Domain", () => {
         workspaceId: "ws-1",
         goalId: "goal-1",
         title: "Updated after stale read",
+        expectedVersion: 1,
       })).rejects.toMatchObject({
         status: 409,
-        code: "CONFLICT",
+        code: "VERSION_CONFLICT",
+        message: "The record changed before this update could be applied. Please refresh and try again.",
       });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith({
+        where: {
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          status: "ACTIVE",
+          isPrivate: false,
+          version: 1,
+        },
+        data: expect.any(Object),
+      });
+    });
+
+    it("honors expectedVersion and succeeds if it matches current version", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+        version: 1,
+        parentGoalId: null,
+      } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({
+        id: "goal-1",
+        version: 2,
+      } as any);
+
+      const { updateGoal } = await import("./goals");
+      const { recordAudit } = await import("./audit-trail");
+      const { appendEvents } = await import("./events");
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        title: "Updated with version",
+        expectedVersion: 1,
+      })).resolves.toMatchObject({
+        id: "goal-1",
+      });
+
+      expect(prisma.goal.update).toHaveBeenCalledWith({
+        where: {
+          id: "goal-1",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          status: "ACTIVE",
+          isPrivate: false,
+          version: 1,
+        },
+        data: expect.objectContaining({
+          version: 2,
+        }),
+      });
+      expect(prisma.workItemVersion.create).toHaveBeenCalledTimes(1);
+      expect(recordAudit).toHaveBeenCalledTimes(1);
+      expect(appendEvents).toHaveBeenCalledTimes(1);
+    });
+
+    it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+        version: 3,
+        parentGoalId: null,
+      } as any);
+
+      const { recordAudit } = await import("./audit-trail");
+      const { appendEvents } = await import("./events");
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-1",
+        title: "Versioned edit",
+        expectedVersion: 2,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+        message: "The record changed before this update could be applied. Please refresh and try again.",
+      });
+
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+        version: 1,
+        parentGoalId: null,
+      } as any);
+
+      for (const invalidVersion of [0, -1, 1.5]) {
+        await expect(updateGoal(actor, {
+          workspaceId: "ws-1",
+          goalId: "goal-1",
+          expectedVersion: invalidVersion,
+        })).rejects.toMatchObject({
+          status: 400,
+          code: "INVALID_INPUT",
+        });
+      }
+
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+      expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
     });
 
     it("allows active members to post progress updates to public active goals", async () => {

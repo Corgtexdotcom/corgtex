@@ -59,6 +59,10 @@ function normalizeIds(ids?: string[] | null) {
   return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
 }
 
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
 function proposalSourceIds(params: { sourceTensionId?: string | null; relatedActionIds?: string[] | null }) {
   return [
     ...normalizeIds(params.sourceTensionId ? [params.sourceTensionId] : []),
@@ -845,6 +849,7 @@ export async function updateProposal(actor: AppActor, params: {
   priority?: number;
   circleId?: string | null;
   ownerMemberId?: string | null;
+  expectedVersion?: number;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -893,6 +898,11 @@ export async function updateProposal(actor: AppActor, params: {
       data.ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
     }
 
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      invariant(params.expectedVersion === proposal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+    }
+
     const contentFields = ["title", "summary", "bodyMd", "priority", "circleId", "ownerMemberId"];
     const changedFields = changedDataFields(proposal as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
@@ -920,10 +930,27 @@ export async function updateProposal(actor: AppActor, params: {
     const changedUpdateFields = changedDataFields(proposal as unknown as Record<string, unknown>, data);
     if (changedUpdateFields.length === 0) return proposal;
 
-    const updated = await tx.proposal.update({
-      where: { id: params.proposalId },
-      data,
-    });
+    const updateWhere: Record<string, unknown> = {
+      id: params.proposalId,
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      status: proposal.status,
+    };
+    if (proposal.isPrivate !== undefined) updateWhere.isPrivate = proposal.isPrivate ?? false;
+    updateWhere.version = params.expectedVersion ?? proposal.version;
+
+    let updated;
+    try {
+      updated = await tx.proposal.update({
+        where: updateWhere as Prisma.ProposalWhereUniqueInput,
+        data,
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+      }
+      throw error;
+    }
 
     await tx.auditLog.create({
       data: {

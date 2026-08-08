@@ -598,6 +598,7 @@ export async function updateGoal(
     parentGoalId?: string | null;
     circleId?: string | null;
     ownerMemberId?: string | null;
+    expectedVersion?: number;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -676,6 +677,11 @@ export async function updateGoal(
     if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.ownerMemberId !== undefined) data.ownerMemberId = params.ownerMemberId || null;
 
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      invariant(params.expectedVersion === goal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+    }
+
     const contentFields = ["title", "descriptionMd", "level", "cadence", "targetDate", "startDate", "parentGoalId", "circleId", "ownerMemberId"];
     const changedFields = changedDataFields(goal as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
@@ -718,13 +724,13 @@ export async function updateGoal(
           archivedAt: null,
           status: goal.status,
           isPrivate: goal.isPrivate,
-          version: goal.version,
+          version: params.expectedVersion ?? goal.version,
         },
         data,
       });
     } catch (error) {
       if (isPrismaNotFoundError(error)) {
-        invariant(false, 409, "CONFLICT", "Goal changed while editing. Refresh and try again.");
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
       }
       throw error;
     }

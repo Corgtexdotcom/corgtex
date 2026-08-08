@@ -236,7 +236,7 @@ describe("proposal AI summaries", () => {
     });
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "p-edit" },
+      where: expect.objectContaining({ id: "p-edit" }),
       data: expect.objectContaining({
         bodyMd: words(130),
         summary: "Updated AI summary.",
@@ -572,7 +572,7 @@ describe("proposal owner updates", () => {
     });
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "p-owner-change" },
+      where: expect.objectContaining({ id: "p-owner-change" }),
       data: expect.objectContaining({
         ownerMemberId: "mem-owner",
         version: 2,
@@ -628,6 +628,197 @@ describe("proposal owner updates", () => {
     });
 
     expect(prisma.proposal.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale collaborative proposal edits when the proposal changes before write", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+      isPrivate: false,
+    } as any);
+    vi.mocked(prisma.proposal.update).mockRejectedValueOnce({ code: "P2025" });
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-author",
+      title: "Stale edit",
+      expectedVersion: 1,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "VERSION_CONFLICT",
+      message: "The record changed before this update could be applied. Please refresh and try again.",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith({
+      where: {
+        id: "p-open-author",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      },
+      data: expect.any(Object),
+    });
+  });
+
+  it("honors expectedVersion and succeeds if it matches current version", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+      isPrivate: false,
+    } as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ id: "p-open-author", version: 2 } as any);
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-author",
+      title: "Versioned edit",
+      expectedVersion: 1,
+    })).resolves.toMatchObject({
+      id: "p-open-author",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith({
+      where: {
+        id: "p-open-author",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      },
+      data: expect.objectContaining({
+        version: 2,
+      }),
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prisma.workItemVersion.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 3,
+      isPrivate: false,
+    } as any);
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-author",
+      title: "Versioned edit",
+      expectedVersion: 2,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "VERSION_CONFLICT",
+      message: "The record changed before this update could be applied. Please refresh and try again.",
+    });
+
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValue({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+      isPrivate: false,
+    } as any);
+
+    for (const invalidVersion of [0, -1, 1.5]) {
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-open-author",
+        expectedVersion: invalidVersion,
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+    }
+
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
   });
 });
 
@@ -1276,12 +1467,12 @@ describe("createProposalFromTension", () => {
       where: { id: "t-1" },
       data: { proposalId: "p-existing" },
     });
-    expect(prisma.proposal.update).toHaveBeenCalledWith({
-      where: { id: "p-existing" },
+    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "p-existing" }),
       data: expect.objectContaining({
         priority: 2,
       }),
-    });
+    }));
     expect(prisma.action.updateMany).toHaveBeenCalledWith({
       where: expect.objectContaining({
         id: { in: ["a-1", "a-2"] },
