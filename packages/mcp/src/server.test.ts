@@ -1779,11 +1779,13 @@ describe("createCorgtexMcpServer", () => {
     });
 
     const listResponse = await (server as any)._registeredTools.list_feature_flags.handler({});
-    expect(JSON.parse(listResponse.content[0].text).flags.find((flag: { flag: string }) => flag.flag === "FINANCE")).toMatchObject({
+    const listedFlags = JSON.parse(listResponse.content[0].text).flags;
+    expect(listedFlags.find((flag: { flag: string }) => flag.flag === "FINANCE")).toMatchObject({
       enabled: true,
       config: { channelId: "C123" },
       configIdentity: "d".repeat(64),
     });
+    expect(listedFlags.find((flag: { flag: string }) => flag.flag === "GOALS")).not.toHaveProperty("configIdentity");
 
     const setResponse = await (server as any)._registeredTools.set_feature_flag.handler({
       flag: "GOALS",
@@ -1910,6 +1912,8 @@ describe("createCorgtexMcpServer", () => {
       { flag: "FINANCE", enabled: true, reportImportsEnabled: true, expectedConfigIdentity: null },
       { flag: "FINANCE", reportImportsEnabled: true, config: {}, expectedConfigIdentity: null },
       { flag: "FINANCE", reportImportsEnabled: true, expectedConfigIdentity: "not-a-valid-identity" },
+      { flag: "GOALS", enabled: true, config: {}, expectedConfigIdentity: "a".repeat(64) },
+      { flag: "FINANCE", enabled: true, expectedConfigIdentity: "a".repeat(64) },
     ]) await expect((server as any)._registeredTools.set_feature_flag.handler(input)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
   });
 
