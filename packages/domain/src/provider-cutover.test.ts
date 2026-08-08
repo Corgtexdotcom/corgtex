@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { assessArchiveAvailability, assessRuntimeRollback } from "./provider-cutover";
-import type { ArchiveAvailabilityBlockerCode, ArchiveAvailabilityRecord, ProviderCutoverRecord, RuntimeRollbackContext } from "./provider-cutover";
+import { assessArchiveAvailability, assessDeletionEligibility, assessRuntimeRollback } from "./provider-cutover";
+import type { ArchiveAvailabilityBlockerCode, ArchiveAvailabilityRecord, DeletionEligibilityBlockerCode,
+  DeletionEligibilityRecord, ProviderCutoverRecord, RuntimeRollbackContext } from "./provider-cutover";
 
 const ctx: RuntimeRollbackContext = {
   assessedAt: new Date("2026-08-07T12:00:00Z"),
@@ -337,5 +338,168 @@ describe("assessArchiveAvailability", () => {
       "archiveAvailable", "blockerCodes", "destinationProvider", "sourceProvider", "status",
     ]);
     expect(JSON.stringify(hostile)).not.toContain("HOSTILE");
+  });
+});
+
+const deletionBase: DeletionEligibilityRecord = {
+  ...archiveBase, evidence: { ...baseEv, runtimeRollbackClaimed: false },
+  observationCompletedAt: archiveAt(13), archiveRetentionDeadline: archiveAt(14),
+  retentionWaiverApprovedAt: null, retentionWaiverApprovedBy: null,
+  retentionWaiverReason: null, sourceDeletedAt: null,
+};
+const deletionAssessment = (patch: Record<string, unknown> = {}, context = archiveContext) =>
+  assessDeletionEligibility({ ...deletionBase, ...patch } as DeletionEligibilityRecord, context);
+const deletionCodes = (patch: Record<string, unknown> = {}, context = archiveContext) =>
+  deletionAssessment(patch, context).summary.blockerCodes;
+
+describe("assessDeletionEligibility", () => {
+  const lifecycle = ["PLANNED", "SHADOW", "CUTOVER", "OBSERVING", "ARCHIVE_ONLY",
+    "DELETE_ELIGIBLE", "DELETED", "ROLLED_BACK"];
+  it.each(lifecycle)("gates complete proof in %s", (status) => {
+    const result = deletionAssessment({ status, sourceDeletedAt: status === "DELETED" ? archiveAt(14) : null });
+    expect(result.deleteEligible).toBe(status === "DELETE_ELIGIBLE");
+    expect(result.summary.blockerCodes).toEqual(status === "DELETE_ELIGIBLE" ? [] : ["STATUS_NOT_DELETE_ELIGIBLE"]);
+  });
+
+  it("propagates every archive blocker once across deletion evidence and short-circuits unsafe inputs", () => {
+    const archiveCases: [Record<string, unknown>, ArchiveAvailabilityBlockerCode][] = [
+      [{ sourceWriteStoppedAt: null }, "SOURCE_WRITE_STOP_INVALID"], [{ sourceWriteStoppedAt: archiveAt(15) }, "SOURCE_WRITE_STOP_FUTURE"],
+      [{ finalSnapshotAt: null }, "FINAL_SNAPSHOT_INVALID"], [{ finalSnapshotAt: archiveAt(15) }, "FINAL_SNAPSHOT_FUTURE"],
+      [{ finalSnapshotAt: archiveAt(9) }, "FINAL_SNAPSHOT_BEFORE_WRITE_STOP"], [{ finalSnapshotChecksum: "bad" }, "FINAL_SNAPSHOT_CHECKSUM_INVALID"],
+      [{ archiveRestoreTestedAt: null }, "ARCHIVE_RESTORE_TEST_INVALID"], [{ archiveRestoreTestedAt: archiveAt(15) }, "ARCHIVE_RESTORE_TEST_FUTURE"],
+      [{ archiveRestoreTestedAt: archiveAt(10) }, "ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT"],
+    ];
+    for (const [patch, blocker] of archiveCases) for (const runtimeRollbackClaimed of [false, true]) {
+      const record = { ...deletionBase, ...patch, evidence: { runtimeRollbackClaimed } } as DeletionEligibilityRecord;
+      const archiveBlockers = assessArchiveAvailability(record, archiveContext).summary.blockerCodes;
+      const observed = deletionCodes({ ...patch, evidence: { runtimeRollbackClaimed } });
+      expect(observed.slice(0, archiveBlockers.length)).toEqual(archiveBlockers);
+      expect(observed.filter((code) => code === blocker)).toHaveLength(1);
+    }
+    expect(deletionCodes({ status: "UNKNOWN", observationCompletedAt: null })).toEqual(["INVALID_IDENTITY"]);
+    expect(deletionAssessment({ status: "UNKNOWN" }, { assessedAt: new Date("invalid") }).summary).toMatchObject({
+      status: null, sourceProvider: "RAILWAY", destinationProvider: "AZURE", blockerCodes: ["INVALID_IDENTITY", "INVALID_CONTEXT"],
+    });
+  });
+
+  it.each([
+    ["destination missing", { destinationWriteStartedAt: null }, ["DESTINATION_WRITE_START_MISSING"]],
+    ["destination invalid", { destinationWriteStartedAt: "bad" }, ["DESTINATION_WRITE_START_INVALID"]],
+    ["destination invalid date", { destinationWriteStartedAt: new Date("invalid") }, ["DESTINATION_WRITE_START_INVALID"]],
+    ["future destination stays causal", { destinationWriteStartedAt: archiveAt(15), observationCompletedAt: archiveAt(13) }, ["DESTINATION_WRITE_START_FUTURE", "OBSERVATION_BEFORE_DESTINATION_WRITE_START"]],
+    ["observation missing", { observationCompletedAt: null }, ["OBSERVATION_COMPLETION_INVALID"]],
+    ["observation non-date", { observationCompletedAt: "bad" }, ["OBSERVATION_COMPLETION_INVALID"]],
+    ["observation invalid", { observationCompletedAt: new Date("invalid") }, ["OBSERVATION_COMPLETION_INVALID"]],
+    ["future observation", { observationCompletedAt: archiveAt(15) }, ["OBSERVATION_COMPLETION_FUTURE"]],
+    ["observation before both", { observationCompletedAt: archiveAt(8) }, ["OBSERVATION_BEFORE_SOURCE_WRITE_STOP", "OBSERVATION_BEFORE_DESTINATION_WRITE_START"]],
+  ])("validates destination/observation: %s", (_name, patch, expected) => {
+    expect(deletionCodes(patch as Record<string, unknown>)).toEqual(expect.arrayContaining(expected as DeletionEligibilityBlockerCode[]));
+  });
+  it("accepts destination, observation, and assessed-at equality boundaries", () => {
+    expect(deletionCodes({ destinationWriteStartedAt: archiveAt(10), observationCompletedAt: archiveAt(10) })).toEqual([]);
+    expect(deletionCodes({ observationCompletedAt: archiveAt(14) })).toEqual([]);
+  });
+
+  it("requires an own exact false runtime claim", () => {
+    for (const evidence of [null, {}, Object.create({ runtimeRollbackClaimed: false }), { unrelated: false }])
+      expect(deletionCodes({ evidence })).toContain("RUNTIME_ROLLBACK_CLAIM_MISSING");
+    for (const value of [undefined, null, "false", 0])
+      expect(deletionCodes({ evidence: { runtimeRollbackClaimed: value } })).toContain("RUNTIME_ROLLBACK_CLAIM_INVALID");
+    expect(deletionCodes({ evidence: { runtimeRollbackClaimed: true } })).toContain("RUNTIME_ROLLBACK_CLAIMED");
+    const nullPrototype = Object.assign(Object.create(null), { runtimeRollbackClaimed: false });
+    expect(deletionCodes({ evidence: nullPrototype })).toEqual([]);
+  });
+
+  it("implements exact deadline and waiver OR precedence", () => {
+    expect(deletionCodes({ archiveRetentionDeadline: null })).toEqual(["RETENTION_EVIDENCE_MISSING"]);
+    expect(deletionCodes({ archiveRetentionDeadline: "bad" })).toContain("RETENTION_DEADLINE_INVALID");
+    expect(deletionCodes({ archiveRetentionDeadline: new Date("invalid") })).toContain("RETENTION_DEADLINE_INVALID");
+    expect(deletionCodes({ archiveRetentionDeadline: archiveAt(10) })).toContain("RETENTION_DEADLINE_BEFORE_FINAL_SNAPSHOT");
+    expect(deletionCodes({ archiveRetentionDeadline: archiveAt(15) })).toContain("RETENTION_DEADLINE_NOT_REACHED");
+    expect(deletionCodes({ archiveRetentionDeadline: archiveAt(11) })).toEqual([]);
+    const partialWaivers = [
+      [archiveAt(13), null, null], [null, "actor", null], [null, null, "reason"],
+      [archiveAt(13), "actor", null], [archiveAt(13), null, "reason"], [null, "actor", "reason"],
+    ];
+    for (const [retentionWaiverApprovedAt, retentionWaiverApprovedBy, retentionWaiverReason] of partialWaivers)
+      expect(deletionCodes({ archiveRetentionDeadline: null, retentionWaiverApprovedAt,
+        retentionWaiverApprovedBy, retentionWaiverReason })).toEqual(["RETENTION_WAIVER_INCOMPLETE"]);
+    const waiver = { retentionWaiverApprovedAt: archiveAt(13), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" };
+    expect(deletionCodes({ ...waiver, archiveRetentionDeadline: null })).toEqual([]);
+    expect(deletionCodes({ ...waiver, archiveRetentionDeadline: archiveAt(15) })).toEqual([]);
+    expect(deletionCodes({ ...waiver, archiveRetentionDeadline: archiveAt(10) })).toEqual(["RETENTION_DEADLINE_BEFORE_FINAL_SNAPSHOT"]);
+    expect(deletionCodes({ archiveRetentionDeadline: archiveAt(15), retentionWaiverApprovedAt: "bad",
+      retentionWaiverApprovedBy: " ", retentionWaiverReason: "" })).toEqual(["RETENTION_DEADLINE_NOT_REACHED",
+      "RETENTION_WAIVER_APPROVAL_INVALID", "RETENTION_WAIVER_ACTOR_INVALID", "RETENTION_WAIVER_REASON_INVALID"]);
+  });
+
+  it("does not let a valid waiver suppress an invalid supplied deadline", () => {
+    expect(deletionCodes({ archiveRetentionDeadline: "bad", retentionWaiverApprovedAt: archiveAt(13),
+      retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" })).toEqual(["RETENTION_DEADLINE_INVALID"]);
+  });
+
+  it("state-gates deletion history and uses the earliest valid retention milestone", () => {
+    for (const status of lifecycle.filter((value) => value !== "DELETED")) for (const sourceDeletedAt of [archiveAt(13), "bad", new Date("invalid"), archiveAt(15)]) {
+      const history = deletionCodes({ status, sourceDeletedAt }).filter((code) => code.startsWith("SOURCE_DELETION"));
+      expect(history).toEqual(["SOURCE_DELETION_STATUS_CONTRADICTION"]);
+    }
+    for (const sourceDeletedAt of [null, "bad", new Date("invalid")]) expect(deletionCodes({ status: "DELETED", sourceDeletedAt })
+      .filter((code) => code.startsWith("SOURCE_DELETION"))).toEqual(["SOURCE_DELETION_INVALID"]);
+    expect(deletionCodes({ status: "DELETED", sourceDeletedAt: archiveAt(11) })).toEqual(["STATUS_NOT_DELETE_ELIGIBLE",
+      "SOURCE_DELETION_BEFORE_OBSERVATION", "SOURCE_DELETION_BEFORE_ARCHIVE_RESTORE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]);
+    expect(deletionCodes({ status: "DELETED", sourceDeletedAt: archiveAt(15) })).toEqual(["STATUS_NOT_DELETE_ELIGIBLE", "SOURCE_DELETION_FUTURE"]);
+    expect(deletionCodes({ status: "DELETED", sourceDeletedAt: archiveAt(13), archiveRetentionDeadline: archiveAt(13),
+      retentionWaiverApprovedAt: archiveAt(14), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" }))
+      .toEqual(["STATUS_NOT_DELETE_ELIGIBLE"]);
+  });
+
+  it.each([
+    ["future observation remains causal for deletion", { status: "DELETED", observationCompletedAt: archiveAt(15), sourceDeletedAt: archiveAt(14) },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "OBSERVATION_COMPLETION_FUTURE", "SOURCE_DELETION_BEFORE_OBSERVATION"]],
+    ["future restore propagates and remains causal", { status: "DELETED", archiveRestoreTestedAt: archiveAt(15), sourceDeletedAt: archiveAt(14) },
+      ["ARCHIVE_RESTORE_TEST_FUTURE", "STATUS_NOT_DELETE_ELIGIBLE", "SOURCE_DELETION_BEFORE_ARCHIVE_RESTORE"]],
+    ["deleted with absent retention", { status: "DELETED", sourceDeletedAt: archiveAt(14), archiveRetentionDeadline: null },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_EVIDENCE_MISSING", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["deleted with partial waiver", { status: "DELETED", sourceDeletedAt: archiveAt(14), archiveRetentionDeadline: null, retentionWaiverApprovedAt: archiveAt(13) },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_WAIVER_INCOMPLETE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["deleted with invalid retention", { status: "DELETED", sourceDeletedAt: archiveAt(14), archiveRetentionDeadline: "bad", retentionWaiverApprovedAt: "bad", retentionWaiverApprovedBy: 7, retentionWaiverReason: {} },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_DEADLINE_INVALID", "RETENTION_WAIVER_APPROVAL_INVALID", "RETENTION_WAIVER_ACTOR_INVALID", "RETENTION_WAIVER_REASON_INVALID", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["future deadline is no milestone", { status: "DELETED", sourceDeletedAt: archiveAt(15), archiveRetentionDeadline: archiveAt(16) },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_DEADLINE_NOT_REACHED", "SOURCE_DELETION_FUTURE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["future waiver is no milestone", { status: "DELETED", sourceDeletedAt: archiveAt(15), archiveRetentionDeadline: null, retentionWaiverApprovedAt: archiveAt(16), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_WAIVER_APPROVAL_FUTURE", "SOURCE_DELETION_FUTURE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["reached deadline wins over future waiver", { status: "DELETED", sourceDeletedAt: archiveAt(13), archiveRetentionDeadline: archiveAt(13), retentionWaiverApprovedAt: archiveAt(15), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_WAIVER_APPROVAL_FUTURE"]],
+    ["deletion before reached deadline still fails", { status: "DELETED", sourceDeletedAt: archiveAt(12), observationCompletedAt: archiveAt(12), archiveRetentionDeadline: archiveAt(13), retentionWaiverApprovedAt: archiveAt(15), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "RETENTION_WAIVER_APPROVAL_FUTURE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["waiver suppresses future deadline before approval", { status: "DELETED", sourceDeletedAt: archiveAt(12), observationCompletedAt: archiveAt(12), archiveRetentionDeadline: archiveAt(15), retentionWaiverApprovedAt: archiveAt(13), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED"]],
+    ["waiver suppresses future deadline at approval", { status: "DELETED", sourceDeletedAt: archiveAt(13), archiveRetentionDeadline: archiveAt(15), retentionWaiverApprovedAt: archiveAt(13), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" }, ["STATUS_NOT_DELETE_ELIGIBLE"]],
+    ["waiver-only and restore equality", { status: "DELETED", sourceDeletedAt: archiveAt(12), observationCompletedAt: archiveAt(12), archiveRetentionDeadline: null, retentionWaiverApprovedAt: archiveAt(12), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" }, ["STATUS_NOT_DELETE_ELIGIBLE"]],
+    ["future observation compares to future prerequisites", { sourceWriteStoppedAt: archiveAt(17), destinationWriteStartedAt: archiveAt(16), finalSnapshotAt: archiveAt(17), archiveRestoreTestedAt: archiveAt(17), observationCompletedAt: archiveAt(15), archiveRetentionDeadline: null, retentionWaiverApprovedAt: archiveAt(14), retentionWaiverApprovedBy: "actor", retentionWaiverReason: "reason" },
+      ["SOURCE_WRITE_STOP_FUTURE", "FINAL_SNAPSHOT_FUTURE", "ARCHIVE_RESTORE_TEST_FUTURE", "DESTINATION_WRITE_START_FUTURE", "OBSERVATION_COMPLETION_FUTURE", "OBSERVATION_BEFORE_SOURCE_WRITE_STOP", "OBSERVATION_BEFORE_DESTINATION_WRITE_START"]],
+    ["noneligible status does not short-circuit", { status: "ARCHIVE_ONLY", destinationWriteStartedAt: archiveAt(15), observationCompletedAt: archiveAt(8), evidence: { runtimeRollbackClaimed: true }, archiveRetentionDeadline: archiveAt(15), sourceDeletedAt: "bad" },
+      ["STATUS_NOT_DELETE_ELIGIBLE", "DESTINATION_WRITE_START_FUTURE", "OBSERVATION_BEFORE_SOURCE_WRITE_STOP", "OBSERVATION_BEFORE_DESTINATION_WRITE_START", "RUNTIME_ROLLBACK_CLAIMED", "RETENTION_DEADLINE_NOT_REACHED", "SOURCE_DELETION_STATUS_CONTRADICTION"]],
+    ["stable order spans archive and deletion blockers", { status: "ARCHIVE_ONLY", sourceWriteStoppedAt: archiveAt(15), finalSnapshotAt: archiveAt(14), archiveRestoreTestedAt: archiveAt(15), destinationWriteStartedAt: archiveAt(16), observationCompletedAt: archiveAt(13), evidence: { runtimeRollbackClaimed: true }, archiveRetentionDeadline: archiveAt(10), retentionWaiverApprovedAt: archiveAt(15), retentionWaiverApprovedBy: " ", retentionWaiverReason: "", sourceDeletedAt: "bad" },
+      ["SOURCE_WRITE_STOP_FUTURE", "FINAL_SNAPSHOT_BEFORE_WRITE_STOP", "ARCHIVE_RESTORE_TEST_FUTURE", "STATUS_NOT_DELETE_ELIGIBLE", "DESTINATION_WRITE_START_FUTURE", "OBSERVATION_BEFORE_SOURCE_WRITE_STOP", "OBSERVATION_BEFORE_DESTINATION_WRITE_START", "RUNTIME_ROLLBACK_CLAIMED", "RETENTION_DEADLINE_BEFORE_FINAL_SNAPSHOT", "RETENTION_WAIVER_APPROVAL_FUTURE", "RETENTION_WAIVER_ACTOR_INVALID", "RETENTION_WAIVER_REASON_INVALID", "SOURCE_DELETION_STATUS_CONTRADICTION"]],
+  ] as [string, Record<string, unknown>, DeletionEligibilityBlockerCode[]][]) ("covers mandatory cross-product: %s", (_name, patch, expected) => {
+    expect(deletionCodes(patch)).toEqual(expected);
+  });
+
+  it("returns exact sanitized keys and stable blocker order", () => {
+    const result = deletionAssessment({ id: "HOSTILE_ID", customerAccountId: "HOSTILE_CUSTOMER",
+      finalSnapshotChecksum: "HOSTILE_CHECKSUM", retentionWaiverApprovedBy: "HOSTILE_WAIVER_ACTOR",
+      retentionWaiverReason: "HOSTILE_WAIVER_REASON", archiveRetentionDeadline: archiveAt(15),
+      retentionWaiverApprovedAt: "bad", evidence: { runtimeRollbackClaimed: true,
+        credential: "HOSTILE_EVIDENCE_CREDENTIAL", url: "HOSTILE_EVIDENCE_URL", raw: "HOSTILE_EVIDENCE_RAW" },
+      destinationWriteStartedAt: archiveAt(15), observationCompletedAt: archiveAt(13), sourceDeletedAt: "HOSTILE_DELETION",
+      credential: "HOSTILE_CREDENTIAL", url: "HOSTILE_URL", objectName: "HOSTILE_OBJECT",
+      timestamp: "HOSTILE_TIMESTAMP", customerContent: "HOSTILE_CONTENT" });
+    expect(result.summary.blockerCodes).toEqual(["FINAL_SNAPSHOT_CHECKSUM_INVALID", "DESTINATION_WRITE_START_FUTURE", "OBSERVATION_BEFORE_DESTINATION_WRITE_START",
+      "RUNTIME_ROLLBACK_CLAIMED", "RETENTION_DEADLINE_NOT_REACHED", "RETENTION_WAIVER_APPROVAL_INVALID",
+      "SOURCE_DELETION_STATUS_CONTRADICTION"]);
+    expect(Object.keys(result)).toEqual(["deleteEligible", "summary"]);
+    expect(Object.keys(result.summary).sort()).toEqual(["blockerCodes", "deleteEligible", "destinationProvider", "sourceProvider", "status"]);
+    expect(JSON.stringify(result)).not.toContain("HOSTILE");
   });
 });
