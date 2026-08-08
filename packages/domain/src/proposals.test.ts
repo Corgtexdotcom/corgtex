@@ -768,7 +768,7 @@ describe("proposal owner updates", () => {
       workspaceId: "ws-1",
       proposalId: "p-open-author",
       title: "Versioned edit",
-      bodyMd: "A detailed new proposal body that would trigger AI summary extraction if not guarded early.",
+      bodyMd: words(130),
       includeAiSummary: true,
       expectedVersion: 2,
     })).rejects.toMatchObject({
@@ -815,7 +815,7 @@ describe("proposal owner updates", () => {
       await expect(updateProposal(actor, {
         workspaceId: "ws-1",
         proposalId: "p-open-author",
-        bodyMd: "A detailed body that should not trigger summary extraction on invalid expectedVersion.",
+        bodyMd: words(130),
         includeAiSummary: true,
         expectedVersion: invalidVersion,
       })).rejects.toMatchObject({
