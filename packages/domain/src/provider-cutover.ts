@@ -191,13 +191,17 @@ export function assessArchiveAvailability(
 
   let writeStop: number | null = null;
   if (!isValidDate(record.sourceWriteStoppedAt)) blockers.push("SOURCE_WRITE_STOP_INVALID");
-  else if (record.sourceWriteStoppedAt.getTime() > assessedAt) blockers.push("SOURCE_WRITE_STOP_FUTURE");
-  else writeStop = record.sourceWriteStoppedAt.getTime();
+  else {
+    writeStop = record.sourceWriteStoppedAt.getTime();
+    if (writeStop > assessedAt) blockers.push("SOURCE_WRITE_STOP_FUTURE");
+  }
 
   let snapshot: number | null = null;
   if (!isValidDate(record.finalSnapshotAt)) blockers.push("FINAL_SNAPSHOT_INVALID");
-  else if (record.finalSnapshotAt.getTime() > assessedAt) blockers.push("FINAL_SNAPSHOT_FUTURE");
-  else snapshot = record.finalSnapshotAt.getTime();
+  else {
+    snapshot = record.finalSnapshotAt.getTime();
+    if (snapshot > assessedAt) blockers.push("FINAL_SNAPSHOT_FUTURE");
+  }
   if (writeStop !== null && snapshot !== null && snapshot < writeStop) {
     blockers.push("FINAL_SNAPSHOT_BEFORE_WRITE_STOP");
   }
@@ -208,8 +212,10 @@ export function assessArchiveAvailability(
 
   let restore: number | null = null;
   if (!isValidDate(record.archiveRestoreTestedAt)) blockers.push("ARCHIVE_RESTORE_TEST_INVALID");
-  else if (record.archiveRestoreTestedAt.getTime() > assessedAt) blockers.push("ARCHIVE_RESTORE_TEST_FUTURE");
-  else restore = record.archiveRestoreTestedAt.getTime();
+  else {
+    restore = record.archiveRestoreTestedAt.getTime();
+    if (restore > assessedAt) blockers.push("ARCHIVE_RESTORE_TEST_FUTURE");
+  }
   if (snapshot !== null && restore !== null && restore < snapshot) {
     blockers.push("ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT");
   }

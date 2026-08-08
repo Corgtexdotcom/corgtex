@@ -277,6 +277,19 @@ describe("assessArchiveAvailability", () => {
   });
 
   it.each([
+    ["future stop after snapshot", { sourceWriteStoppedAt: archiveAt(15), finalSnapshotAt: archiveAt(13), archiveRestoreTestedAt: archiveAt(13) },
+      ["SOURCE_WRITE_STOP_FUTURE", "FINAL_SNAPSHOT_BEFORE_WRITE_STOP"]],
+    ["future stop after future snapshot", { sourceWriteStoppedAt: archiveAt(16), finalSnapshotAt: archiveAt(15), archiveRestoreTestedAt: archiveAt(17) },
+      ["SOURCE_WRITE_STOP_FUTURE", "FINAL_SNAPSHOT_FUTURE", "FINAL_SNAPSHOT_BEFORE_WRITE_STOP", "ARCHIVE_RESTORE_TEST_FUTURE"]],
+    ["future snapshot after restore", { finalSnapshotAt: archiveAt(15), archiveRestoreTestedAt: archiveAt(13) },
+      ["FINAL_SNAPSHOT_FUTURE", "ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT"]],
+    ["future snapshot after future restore", { finalSnapshotAt: archiveAt(16), archiveRestoreTestedAt: archiveAt(15) },
+      ["FINAL_SNAPSHOT_FUTURE", "ARCHIVE_RESTORE_TEST_FUTURE", "ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT"]],
+  ] as [string, Partial<ArchiveAvailabilityRecord>, ArchiveAvailabilityBlockerCode[]][])("reports future and causal blockers: %s", (_name, patch, blockers) => {
+    expect(archiveAssessment(patch).summary.blockerCodes).toEqual(blockers);
+  });
+
+  it.each([
     "A".repeat(64), "a".repeat(63), "a".repeat(65), `0x${"a".repeat(64)}`,
     ` ${"a".repeat(64)}`, `${"a".repeat(64)} `, "", null, 64,
   ])("rejects malformed checksum %#", (finalSnapshotChecksum) => {
