@@ -130,11 +130,12 @@ describe("Slack context jobs", () => {
   });
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     prismaMock.workspaceAgentConfig.findUnique.mockResolvedValue(null);
     prismaMock.communicationInstallation.findFirst.mockResolvedValue({
       id: "install-1",
       settings: {},
+      botUserId: "bot-1",
     });
     prismaMock.communicationInstallation.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
@@ -155,7 +156,8 @@ describe("Slack context jobs", () => {
     });
     extractMock.mockResolvedValue({
       output: {
-        intent: "ignore",
+        resolutionState: "open",
+        workDisposition: "ignore",
         confidence: 0,
       },
     });
@@ -262,7 +264,7 @@ describe("Slack context jobs", () => {
       threadTs: "1714320000.000100",
       text: "This looks unanswered.",
     }, expect.any(Array));
-    expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("I'll wait 24 hours");
+    expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("bringing it back into awareness");
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "proactive_unanswered_nudge",
@@ -372,7 +374,10 @@ describe("Slack context jobs", () => {
       .mockResolvedValueOnce([]);
     extractMock.mockResolvedValueOnce({
       output: {
-        intent: "create_action",
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "some step",
+        ownerEvidence: "someone",
         confidence: 0.89,
         title: "Follow up",
         bodyMd: "Jan should follow up by tomorrow.",
@@ -391,7 +396,7 @@ describe("Slack context jobs", () => {
 
   it("creates published actions after the post-nudge wait when unresolved", async () => {
     const source = candidate({
-      text: "Please confirm availability for the June 23 call.",
+      text: "Jan needs to confirm availability for the June 23 call.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     prismaMock.communicationMessage.findMany
@@ -402,10 +407,15 @@ describe("Slack context jobs", () => {
       .mockResolvedValueOnce([]);
     extractMock.mockResolvedValueOnce({
       output: {
-        intent: "create_action",
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "confirm availability for the June 23 call",
+        ownerEvidence: "Jan",
         confidence: 0.93,
         title: "Confirm availability",
-        bodyMd: "Confirm availability for the June 23 call.",
+        bodyMd: "Jan needs to confirm availability for the June 23 call.",
+        negativeCategory: false,
+        couldNot: [],
       },
     });
 
@@ -452,9 +462,11 @@ describe("Slack context jobs", () => {
       .mockResolvedValueOnce([]);
     extractMock.mockResolvedValueOnce({
       output: {
-        intent: "ignore",
+        resolutionState: "open",
+        workDisposition: "ignore",
         confidence: 0.99,
         couldNot: ["unsafe request"],
+        negativeCategory: false,
       },
     });
 
@@ -498,10 +510,13 @@ describe("Slack context jobs", () => {
       .mockResolvedValueOnce(null);
     extractMock.mockResolvedValueOnce({
       output: {
-        intent: "wait_existing_action",
+        resolutionState: "open",
+        workDisposition: "action",
         confidence: 0.96,
         updateMd: "Daniel said no more action is needed yet; the team is waiting on the owner to confirm a June 23 time slot.",
         followupDelayMultiplier: 2,
+        negativeCategory: false,
+        couldNot: [],
       },
     });
 
@@ -641,5 +656,414 @@ describe("Slack context jobs", () => {
       }),
     }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("excludes direct installed-bot mentions at candidate nudge gate AND pending-review defense-in-depth", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+      candidate({ id: "msg-bot-1", text: "<@bot-1> can you check this status?", messageTs: new Date("2026-04-28T15:30:00.000Z") }),
+      candidate({ id: "msg-bot-2", text: "Hey <@bot-1|Corgtex> please follow up", messageTs: new Date("2026-04-28T15:30:00.000Z") }),
+    ]);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(extractMock).not.toHaveBeenCalled();
+
+    // Defense-in-depth check: pending nudges containing <@bot-1> AND <@bot-1|Corgtex> terminalize without model call
+    const botMentionSource1 = candidate({ id: "msg-bot-3", text: "Hey <@bot-1> please update docs", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const botMentionSource2 = candidate({ id: "msg-bot-4", text: "Hey <@bot-1|Corgtex> please update docs", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: botMentionSource1 }), nudgeLink({ message: botMentionSource2 })])
+      .mockResolvedValueOnce([]);
+
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-3" }),
+    });
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-4" }),
+    });
+  });
+
+  it("allows non-bot mentions <@U999|Alice> to be nudged and evaluated", async () => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
+      candidate({ id: "msg-other-user", text: "<@U999|Alice> can someone help with the report?", messageTs: new Date("2026-04-28T15:30:00.000Z") }),
+    ]);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 1, actions: 0, followups: 0, drafts: 0 });
+
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for auto-publication when botUserId is missing without broadly excluding mentions", async () => {
+    prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
+      id: "install-1",
+      settings: {},
+      botUserId: null,
+    });
+    const source = candidate({ text: "Jan will send the proposal by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "send proposal",
+        ownerEvidence: "Jan",
+        confidence: 0.99,
+        negativeCategory: false,
+        couldNot: [],
+        title: "Send proposal",
+        bodyMd: "Jan will send the proposal by Friday.",
+      },
+    });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "proactive_unanswered_resolved",
+        entityType: "CommunicationMessage",
+        entityId: "message-1",
+      }),
+    });
+  });
+
+  it.each([
+    { label: "routing test", text: "Please run this routing test for slack context", concreteNextStep: "run this routing test" },
+    { label: "generic test message", text: "Please ignore, this is a test message for slack context", concreteNextStep: "test message" },
+    { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
+    { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
+    { label: "already-completed", text: "I already sent the report by tomorrow.", concreteNextStep: "send the report" },
+    { label: "info-only", text: "Information only: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
+  ])("vetoes action creation for $label source text despite high-confidence action model output", async ({ text, concreteNextStep }) => {
+    const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep,
+        ownerEvidence: "Jan",
+        confidence: 0.99,
+        negativeCategory: false,
+        couldNot: [],
+        title: "Test title",
+      },
+    });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(extractMock).toHaveBeenCalledTimes(1);
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
+    });
+  });
+
+  it("processes real awareness-only model outcome on generic open question", async () => {
+    const source = candidate({ text: "Does anyone know if the staging environment is up?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "awareness",
+        confidence: 0.95,
+        negativeCategory: false,
+        couldNot: [],
+      },
+    });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
+    });
+  });
+
+  it("terminalizes without action for hallucinated owner substring trap", async () => {
+    const source = candidate({ text: "Please confirm when waiting is finished for the report.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        ownerEvidence: "IT",
+        concreteNextStep: "confirm when waiting is finished",
+        confidence: 0.99,
+        negativeCategory: false,
+        couldNot: [],
+        title: "Confirm waiting",
+      },
+    });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
+    });
+  });
+
+  it.each([
+    { label: "invalid resolutionState", output: { resolutionState: "invalid_state", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [] } },
+    { label: "missing negativeCategory", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, couldNot: [] } },
+    { label: "missing couldNot", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false } },
+    { label: "wrong-typed couldNot string", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: "none" } },
+    { label: "non-empty couldNot reasons", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: ["unsafe"] } },
+  ])("fails closed on $label, records terminal marker, and later scan does not re-evaluate", async ({ output }) => {
+    const source = candidate({ text: "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({ output });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "message-1" }),
+    });
+
+    // Re-evaluate idempotency check: terminal marker prevents second scan model evaluation
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    prismaMock.communicationEntityLink.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "terminal-1" });
+
+    expect(extractMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates exactly one source-linked Action for named-owner concrete deliverable and no duplicate on later scan", async () => {
+    const source = candidate({ text: "Jan needs to send the signed agreement by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "send the signed agreement",
+        ownerEvidence: "Jan",
+        confidence: 0.95,
+        title: "Send signed agreement",
+        bodyMd: "Jan needs to send the signed agreement by tomorrow.",
+        negativeCategory: false,
+        couldNot: [],
+      },
+    });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
+
+    expect(createWorkItemMock).toHaveBeenCalledTimes(1);
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      title: "Send signed agreement",
+      sourceMessageId: "message-1",
+    }));
+
+    // Later scan idempotency check: existing linkedAction suppresses duplicate creation
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    prismaMock.communicationEntityLink.findFirst
+      .mockResolvedValueOnce({ id: "action-link-1", entityId: "action-1" });
+
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(createWorkItemMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows explicit-create exception only when source text deterministically requests it, and fails for negated source text", async () => {
+    const validSource = candidate({ text: "Corgtex please create an action item to update the deployment guide.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([validSource]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: validSource })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "update the deployment guide",
+        ownerEvidence: "",
+        explicitActionRequest: true,
+        confidence: 0.95,
+        negativeCategory: false,
+        couldNot: [],
+        title: "Update deployment guide",
+        bodyMd: "Update deployment guide.",
+      },
+    });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
+
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      title: "Update deployment guide",
+    }));
+
+    // Negated source text check: model outputs explicitActionRequest true, but source text says "Do NOT create an action item"
+    const negatedSource = candidate({ id: "msg-negated", text: "Do NOT create an action item for this issue.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([negatedSource]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: negatedSource })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "investigate issue",
+        ownerEvidence: "",
+        explicitActionRequest: true,
+        confidence: 0.95,
+        negativeCategory: false,
+        couldNot: [],
+        title: "Investigate issue",
+      },
+    });
+
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-negated" }),
+    }));
+  });
+
+  it("preserves retryability on model or network exception without recording a terminal marker, and succeeds on later retry", async () => {
+    const source = candidate({ text: "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })]);
+    extractMock.mockRejectedValueOnce(new Error("Transient model gateway timeout"));
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).rejects.toThrow("Transient model gateway timeout");
+
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
+    }));
+
+    // Second scan: model succeeds and action is evaluated/created
+    prismaMock.communicationMessage.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([source]);
+    prismaMock.communicationEntityLink.findMany
+      .mockResolvedValueOnce([nudgeLink({ message: source })])
+      .mockResolvedValueOnce([]);
+    extractMock.mockResolvedValueOnce({
+      output: {
+        resolutionState: "open",
+        workDisposition: "action",
+        concreteNextStep: "send the report",
+        ownerEvidence: "Jan",
+        confidence: 0.95,
+        negativeCategory: false,
+        couldNot: [],
+        title: "Send report",
+        bodyMd: "Jan needs to send the report by tomorrow.",
+      },
+    });
+
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
   });
 });

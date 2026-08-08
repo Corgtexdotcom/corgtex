@@ -236,20 +236,104 @@ function looksWorkLike(text: string) {
   return /\b(should|todo|to do|follow up|need to|needs to|please|can you|owner|by tomorrow|proposal|tension|action item)\b/i.test(text);
 }
 
+function isBotMentioned(text: string, botUserId: string | null) {
+  if (!botUserId) return false;
+  const escapedId = botUserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`<@${escapedId}(?:\\|[^>]+)?>`);
+  return regex.test(text);
+}
+
+function isNegatedActionRequest(text: string): boolean {
+  return /\b(do not|don't|no|not|never)\s+(create|add|make|assign|turn into)\b/i.test(text)
+    || /\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
+    || /\bno\s+(action|task|work item)\b/i.test(text);
+}
+
+function isDeterministicNegativeCategory(text: string): boolean {
+  return /\b(routing\s*test|test\s*routing|fyi|for your information|ack|acknowledg?ement|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
+    || /^(?:test|testing)[\s/:-]/i.test(text.trim());
+}
+
+function isDeterministicExplicitActionRequest(text: string): boolean {
+  if (isNegatedActionRequest(text)) return false;
+  if (isDeterministicNegativeCategory(text)) return false;
+  return /\b(create|add|make|assign)\b[\s\w]*\b(action item|action|task|work item)\b/i.test(text)
+    || /\b(action item|task|work item)\b[\s\w]*\b(create|add|make|assign)\b/i.test(text)
+    || /\b(corgtex|please)\b[\s\w]*\b(create|add|make|assign)\b[\s\w]*\b(action|task|item)\b/i.test(text);
+}
+
+function normalizeText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isGroundedInCorpus(value: string, corpus: string): boolean {
+  const normValue = normalizeText(value);
+  if (!normValue) return false;
+  const paddedValue = ` ${normValue} `;
+  const paddedCorpus = ` ${normalizeText(corpus)} `;
+  return paddedCorpus.includes(paddedValue);
+}
+
 function normalizeProactiveExtraction(output: Record<string, unknown>) {
-  const intent = asString(output.intent);
   const confidence = typeof output.confidence === "number" ? output.confidence : Number(output.confidence);
+  const rawResolutionState = asString(output.resolutionState);
+  const rawWorkDisposition = asString(output.workDisposition);
+
+  const validResolutionStates = new Set(["answered", "open", "unknown"]);
+  const validWorkDispositions = new Set(["action", "awareness", "information", "test", "ignore"]);
+
   return {
-    intent,
+    resolutionState: validResolutionStates.has(rawResolutionState) ? rawResolutionState : "unknown",
+    workDisposition: validWorkDispositions.has(rawWorkDisposition) ? rawWorkDisposition : "unknown",
+    concreteNextStep: asString(output.concreteNextStep),
+    ownerEvidence: asString(output.ownerEvidence),
+    timingEvidence: asString(output.timingEvidence),
+    explicitActionRequest: output.explicitActionRequest === true,
+    hasExplicitNegativeCategoryFalse: output.negativeCategory === false,
+    negativeCategory: output.negativeCategory === true,
+    hasValidCouldNotArray: Array.isArray(output.couldNot),
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
     title: asString(output.title),
     bodyMd: asString(output.bodyMd) || asString(output.body),
     updateMd: asString(output.updateMd),
     couldNot: Array.isArray(output.couldNot) ? output.couldNot.map((entry) => asString(entry)).filter(Boolean) : [],
+    reason: asString(output.reason),
     followupDelayMultiplier: typeof output.followupDelayMultiplier === "number"
       ? Math.max(1, Math.min(4, Math.floor(output.followupDelayMultiplier)))
       : 1,
   };
+}
+
+function meetsActionPublicationPredicate(
+  parsed: ReturnType<typeof normalizeProactiveExtraction>,
+  botUserId: string | null,
+  confidenceThreshold: number,
+  sourceText: string,
+  threadCorpus: string
+): boolean {
+  if (!botUserId) return false;
+  if (parsed.resolutionState !== "open") return false;
+  if (parsed.workDisposition !== "action") return false;
+  if (!parsed.concreteNextStep) return false;
+  if (!isGroundedInCorpus(parsed.concreteNextStep, threadCorpus)) return false;
+  if (!parsed.hasExplicitNegativeCategoryFalse) return false;
+  if (parsed.negativeCategory) return false;
+  if (!parsed.hasValidCouldNotArray) return false;
+  if (parsed.couldNot.length > 0) return false;
+  if (parsed.confidence < confidenceThreshold) return false;
+  if (isDeterministicNegativeCategory(sourceText)) return false;
+  if (isNegatedActionRequest(sourceText)) return false;
+
+  const hasGroundedOwner = Boolean(parsed.ownerEvidence) && isGroundedInCorpus(parsed.ownerEvidence, threadCorpus);
+  const isExplicitRequest = parsed.explicitActionRequest === true && isDeterministicExplicitActionRequest(sourceText);
+
+  if (!hasGroundedOwner && !isExplicitRequest) return false;
+
+  return true;
 }
 
 function threadTsForMessage(message: SlackCandidateMessage) {
@@ -306,16 +390,16 @@ async function reviewThreadForAction(params: {
     workflowJobId: params.workflowJobId,
     instruction: [
       "Review this public Slack thread after Corgtex already asked whether someone should take it.",
-      "Return JSON only with intent, confidence, title, bodyMd, updateMd, followupDelayMultiplier, and couldNot.",
-      "Allowed intents: create_action, update_existing_action, wait_existing_action, ignore.",
-      "Use create_action only when there is no linked action and the thread still looks unresolved enough to need a concrete Corgtex action.",
-      "Use update_existing_action when a linked action exists and a human reply gives a meaningful status, ownership, timing, or decision update for that action.",
-      "Use wait_existing_action when a linked action exists and a human reply says no more action is needed yet, someone is waiting on another party, or action was taken but more time is needed.",
-      "Use ignore when someone answered and no Corgtex record update is useful, the request is unsafe, or the next step is unclear.",
-      "For update_existing_action or wait_existing_action, write updateMd as a concise deliberation note grounded only in the thread.",
-      "For wait_existing_action, set followupDelayMultiplier to 2 unless the thread gives a shorter or longer explicit follow-up window.",
+      "Extract normalized fields. resolutionState: answered | open | unknown. workDisposition: action | awareness | information | test | ignore.",
+      "If there is no linked action, you may use workDisposition 'action' only if there is a concrete future deliverable and no negative category.",
+      "If a linked action exists and a human reply gives a meaningful status, ownership, timing, or decision update, use workDisposition 'action' and provide updateMd.",
+      "If they are waiting on another party or more time is needed, set followupDelayMultiplier to 2.",
+      "Set explicitActionRequest to true if the text deterministically requests Corgtex to create/assign an action.",
+      "Set negativeCategory to true for tests, FYIs, acknowledgements, information requests, already-completed tasks, or bot-directed messages.",
+      "Populate concreteNextStep, ownerEvidence, and timingEvidence with grounded facts or leave empty.",
+      "Use ignore when no Corgtex record update is useful or the next step is unclear.",
     ].join(" "),
-    schemaHint: "{ intent: string, confidence: number, title: string, bodyMd: string, updateMd: string, followupDelayMultiplier: number, couldNot: string[] }",
+    schemaHint: "{ resolutionState: string, workDisposition: string, concreteNextStep: string, ownerEvidence: string, timingEvidence: string, explicitActionRequest: boolean, negativeCategory: boolean, confidence: number, reason: string, title: string, bodyMd: string, updateMd: string, followupDelayMultiplier: number, couldNot: string[] }",
     input: JSON.stringify({
       sourceMessage: {
         text: params.source.text,
@@ -404,7 +488,7 @@ export async function runSlackProactiveScan(params: {
       provider: "SLACK",
       status: "ACTIVE",
     },
-    select: { id: true, settings: true },
+    select: { id: true, settings: true, botUserId: true },
   });
   if (!installation) return { skipped: true, reason: "slack_installation_missing" };
 
@@ -463,7 +547,7 @@ export async function runSlackProactiveScan(params: {
   });
 
   let nudges = 0;
-  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "")).slice(0, 10)) {
+  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isBotMentioned(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
     const alreadyNudged = await prisma.communicationEntityLink.findFirst({
       where: {
@@ -500,7 +584,7 @@ export async function runSlackProactiveScan(params: {
         text: "This looks unanswered.",
       }, [{
         type: "section",
-        text: { type: "mrkdwn", text: "This looks unanswered. Should someone take it? I'll wait 24 hours before creating a Corgtex action if it still looks unresolved." },
+        text: { type: "mrkdwn", text: "This looks unanswered. I'm bringing it back into awareness." },
       }]);
     } catch (error) {
       if (await markSlackInstallationReauthRequired({ ...params, error })) {
@@ -560,7 +644,19 @@ export async function runSlackProactiveScan(params: {
   for (const nudge of pendingNudges) {
     if (actions >= MAX_PROACTIVE_ACTIONS) break;
     const candidate = nudge.message as SlackCandidateMessage | null;
-    if (!candidate || !candidate.text || !channelIds.includes(candidate.externalChannelId) || !looksWorkLike(candidate.text)) continue;
+    if (!candidate || !candidate.text || !channelIds.includes(candidate.externalChannelId)) continue;
+    if (!looksWorkLike(candidate.text) || isBotMentioned(candidate.text, installation.botUserId)) {
+      await recordProactiveMarker({
+        installationId: params.installationId,
+        workspaceId: params.workspaceId,
+        messageId: candidate.id,
+        externalUserId: candidate.externalUserId,
+        entityType: "CommunicationMessage",
+        entityId: candidate.id,
+        action: "proactive_unanswered_resolved",
+      });
+      continue;
+    }
     const linkedAction = await prisma.communicationEntityLink.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -616,7 +712,7 @@ export async function runSlackProactiveScan(params: {
 
     if (linkedAction) {
       const updateMd = parsed.updateMd || parsed.bodyMd;
-      const shouldPostUpdate = parsed.intent === "update_existing_action" || parsed.intent === "wait_existing_action";
+      const shouldPostUpdate = parsed.workDisposition === "action";
       if (shouldPostUpdate && parsed.confidence >= config.proactiveConfidenceThreshold && updateMd) {
         await postDeliberationEntry(agentActor, {
           workspaceId: params.workspaceId,
@@ -633,7 +729,7 @@ export async function runSlackProactiveScan(params: {
           externalUserId: latestThreadMessage.externalUserId,
           entityType: "Action",
           entityId: linkedAction.entityId,
-          action: parsed.intent === "wait_existing_action" || parsed.followupDelayMultiplier > 1
+          action: parsed.followupDelayMultiplier > 1
             ? PROACTIVE_ACTION_WAITING_UPDATE
             : PROACTIVE_EXISTING_ACTION_UPDATE,
         });
@@ -641,7 +737,47 @@ export async function runSlackProactiveScan(params: {
       continue;
     }
 
-    if (parsed.intent === "ignore" || parsed.couldNot.length > 0) {
+    const threadCorpus = transcriptForMessages(threadMessages);
+    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus) && parsed.title) {
+      const item = await createWorkItemFromCommunicationSource(agentActor, {
+        workspaceId: params.workspaceId,
+        provider: "SLACK",
+        installationId: params.installationId,
+        kind: "ACTION",
+        title: parsed.title,
+        bodyMd: parsed.bodyMd || candidate.text,
+        sourceMessageId: candidate.id,
+        externalUserId: candidate.externalUserId,
+        open: true,
+      });
+
+      await recordProactiveMarker({
+        installationId: params.installationId,
+        workspaceId: params.workspaceId,
+        messageId: candidate.id,
+        externalUserId: candidate.externalUserId,
+        entityType: item.entityType,
+        entityId: item.entityId,
+        action: "proactive_unanswered_action_created",
+      });
+
+      try {
+        await sendSlackMessage(params.installationId, {
+          channel: candidate.externalChannelId,
+          threadTs: threadTsForMessage(candidate),
+          text: `Created Corgtex action: ${parsed.title}`,
+        }, [{
+          type: "section",
+          text: { type: "mrkdwn", text: `I created a Corgtex action because this still looked unresolved after 24 hours: <${item.webUrl}|${parsed.title}>.` },
+        }]);
+      } catch (error) {
+        if (await markSlackInstallationReauthRequired({ ...params, error })) {
+          return { skipped: true, reason: "slack_reauth_required" };
+        }
+        throw error;
+      }
+      actions += 1;
+    } else {
       await recordProactiveMarker({
         installationId: params.installationId,
         workspaceId: params.workspaceId,
@@ -651,48 +787,7 @@ export async function runSlackProactiveScan(params: {
         entityId: candidate.id,
         action: "proactive_unanswered_resolved",
       });
-      continue;
     }
-    if (parsed.intent !== "create_action" || parsed.confidence < config.proactiveConfidenceThreshold || !parsed.title) continue;
-
-    const item = await createWorkItemFromCommunicationSource(agentActor, {
-      workspaceId: params.workspaceId,
-      provider: "SLACK",
-      installationId: params.installationId,
-      kind: "ACTION",
-      title: parsed.title,
-      bodyMd: parsed.bodyMd || candidate.text,
-      sourceMessageId: candidate.id,
-      externalUserId: candidate.externalUserId,
-      open: true,
-    });
-
-    await recordProactiveMarker({
-      installationId: params.installationId,
-      workspaceId: params.workspaceId,
-      messageId: candidate.id,
-      externalUserId: candidate.externalUserId,
-      entityType: item.entityType,
-      entityId: item.entityId,
-      action: "proactive_unanswered_action_created",
-    });
-
-    try {
-      await sendSlackMessage(params.installationId, {
-        channel: candidate.externalChannelId,
-        threadTs: threadTsForMessage(candidate),
-        text: `Created Corgtex action: ${parsed.title}`,
-      }, [{
-        type: "section",
-        text: { type: "mrkdwn", text: `I created a Corgtex action because this still looked unresolved after 24 hours: <${item.webUrl}|${parsed.title}>.` },
-      }]);
-    } catch (error) {
-      if (await markSlackInstallationReauthRequired({ ...params, error })) {
-        return { skipped: true, reason: "slack_reauth_required" };
-      }
-      throw error;
-    }
-    actions += 1;
   }
 
   let followups = 0;
