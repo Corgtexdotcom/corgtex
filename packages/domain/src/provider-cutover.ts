@@ -556,3 +556,147 @@ export function classifyProviderCutoverPair(
     },
   };
 }
+
+export type ProviderCutoverTransitionInput = {
+  record: DeletionEligibilityRecord;
+  toStatus: string;
+  observedSourceDeletedAt: Date | null;
+};
+
+export type ProviderCutoverTransitionContext = {
+  assessedAt: Date;
+  requiredSourceFreshThroughAt: Date;
+  requiredSourceRuntimeObservedAt: Date;
+};
+
+type NonTautologicalDeletionBlockerCode = Exclude<
+  DeletionEligibilityBlockerCode,
+  "STATUS_NOT_DELETE_ELIGIBLE"
+>;
+
+export type ProviderCutoverTransitionBlockerCode =
+  | ProviderCutoverPairBlockerCode
+  | RuntimeRollbackBlockerCode
+  | ArchiveAvailabilityBlockerCode
+  | NonTautologicalDeletionBlockerCode
+  | "DESTINATION_REQUIRED_FOR_TARGET";
+
+export type ProviderCutoverTransitionSummary = {
+  fromStatus: string | null;
+  toStatus: string | null;
+  sourceProvider: string | null;
+  destinationProvider: string | null;
+  transitionAllowed: boolean;
+  blockerCodes: ProviderCutoverTransitionBlockerCode[];
+};
+
+export type ProviderCutoverTransitionAssessment = {
+  transitionAllowed: boolean;
+  summary: ProviderCutoverTransitionSummary;
+};
+
+/**
+ * Performs pure, deterministic, evidence-backed stored-contract validation.
+ * This is not permission to persist, deploy, change DNS, mutate either provider,
+ * or delete a resource.
+ */
+export function assessProviderCutoverTransition(
+  input: ProviderCutoverTransitionInput,
+  context: ProviderCutoverTransitionContext
+): ProviderCutoverTransitionAssessment {
+  const { record, toStatus } = input;
+  const pairResult = classifyProviderCutoverPair(record, toStatus);
+  const { fromStatus, sourceProvider, destinationProvider } = pairResult.summary;
+  const target = pairResult.summary.toStatus;
+  const blockers: ProviderCutoverTransitionBlockerCode[] = [];
+  const pairBlockers = pairResult.summary.blockerCodes as ProviderCutoverTransitionBlockerCode[];
+  const hasInvalidIdentity = pairBlockers.includes("INVALID_IDENTITY") || (!record.destinationDeploymentId && record.destinationWriteStartedAt !== null);
+  if (hasInvalidIdentity) blockers.push("INVALID_IDENTITY");
+  const knownStatus = ALLOWED_STATUSES.has(record.status);
+  let statusContradiction = false;
+  let deletionInvalid = false;
+  if (knownStatus && record.status !== "DELETED" && record.sourceDeletedAt !== null) statusContradiction = true;
+  else if (record.status === "DELETED" && !isValidDate(record.sourceDeletedAt)) deletionInvalid = true;
+  if (statusContradiction) blockers.push("SOURCE_DELETION_STATUS_CONTRADICTION");
+  if (deletionInvalid) blockers.push("SOURCE_DELETION_INVALID");
+  for (const b of pairBlockers) if (b !== "INVALID_IDENTITY") blockers.push(b);
+  const finish = (b: ProviderCutoverTransitionBlockerCode[]) => {
+    const deduped = [...new Set(b)];
+    const allowed = deduped.length === 0;
+    return {
+      transitionAllowed: allowed,
+      summary: {
+        fromStatus,
+        toStatus: target,
+        sourceProvider,
+        destinationProvider,
+        transitionAllowed: allowed,
+        blockerCodes: deduped
+      }
+    };
+  };
+  if (!pairResult.pairAllowed || hasInvalidIdentity) return finish(blockers);
+  const assessedAt = isValidDate(context?.assessedAt) ? context.assessedAt.getTime() : null;
+  if (assessedAt === null) {
+    blockers.push("INVALID_CONTEXT");
+    return finish(blockers);
+  }
+  const reqDestTargets = new Set(["CUTOVER", "OBSERVING", "ARCHIVE_ONLY", "DELETE_ELIGIBLE", "DELETED"]);
+  if (target !== null && reqDestTargets.has(target) && !record.destinationDeploymentId) {
+    blockers.push("DESTINATION_REQUIRED_FOR_TARGET");
+    return finish(blockers);
+  }
+  if (target === "CUTOVER" || target === "OBSERVING" || target === "ARCHIVE_ONLY" || target === "DELETE_ELIGIBLE" || target === "DELETED") {
+    if (record.destinationWriteStartedAt === null) blockers.push("DESTINATION_WRITE_START_MISSING");
+    else if (!isValidDate(record.destinationWriteStartedAt)) blockers.push("DESTINATION_WRITE_START_INVALID");
+    else if (record.destinationWriteStartedAt.getTime() > assessedAt) blockers.push("DESTINATION_WRITE_START_FUTURE");
+  }
+  if (target === "ARCHIVE_ONLY" && fromStatus === "OBSERVING") {
+    const obs = record.observationCompletedAt;
+    if (obs === null || !isValidDate(obs)) blockers.push("OBSERVATION_COMPLETION_INVALID");
+    else {
+      const obsTime = obs.getTime();
+      if (obsTime > assessedAt) blockers.push("OBSERVATION_COMPLETION_FUTURE");
+      const sws = record.sourceWriteStoppedAt;
+      if (isValidDate(sws) && obsTime < sws.getTime()) blockers.push("OBSERVATION_BEFORE_SOURCE_WRITE_STOP");
+      const dws = record.destinationWriteStartedAt;
+      if (isValidDate(dws) && obsTime < dws.getTime()) blockers.push("OBSERVATION_BEFORE_DESTINATION_WRITE_START");
+    }
+    const ev = record.evidence;
+    const hasOwn = ev !== null && typeof ev === "object" && Object.prototype.hasOwnProperty.call(ev, "runtimeRollbackClaimed");
+    if (!hasOwn) blockers.push("RUNTIME_ROLLBACK_CLAIM_MISSING");
+    else {
+      const claim = (ev as any).runtimeRollbackClaimed;
+      if (claim === true) blockers.push("RUNTIME_ROLLBACK_CLAIMED");
+      else if (claim !== false) blockers.push("RUNTIME_ROLLBACK_CLAIM_INVALID");
+    }
+  }
+  if (target === "CUTOVER" && fromStatus === "SHADOW") {
+    const childRec = { ...record, status: "CUTOVER" } as ArchiveAvailabilityRecord;
+    const childRes = assessArchiveAvailability(childRec, { assessedAt: context.assessedAt });
+    blockers.push(...(childRes.summary.blockerCodes as ProviderCutoverTransitionBlockerCode[]));
+  } else if (target === "ARCHIVE_ONLY" && fromStatus === "OBSERVING") {
+    const childRec = { ...record, status: "ARCHIVE_ONLY" } as ArchiveAvailabilityRecord;
+    const childRes = assessArchiveAvailability(childRec, { assessedAt: context.assessedAt });
+    blockers.push(...(childRes.summary.blockerCodes as ProviderCutoverTransitionBlockerCode[]));
+  } else if (target === "DELETE_ELIGIBLE" && fromStatus === "ARCHIVE_ONLY") {
+    const childRec = { ...record, status: "ARCHIVE_ONLY" } as DeletionEligibilityRecord;
+    const childRes = assessDeletionEligibility(childRec, { assessedAt: context.assessedAt });
+    const filtered = childRes.summary.blockerCodes.filter(c => c !== "STATUS_NOT_DELETE_ELIGIBLE") as ProviderCutoverTransitionBlockerCode[];
+    blockers.push(...filtered);
+    if (filtered.length === 0) {
+      const arrival = { ...record, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord;
+      if (arrival.sourceDeletedAt !== null) blockers.push("SOURCE_DELETION_STATUS_CONTRADICTION");
+    }
+  } else if (target === "DELETED" && fromStatus === "DELETE_ELIGIBLE") {
+    const childRec = { ...record, status: "DELETED", sourceDeletedAt: input.observedSourceDeletedAt } as DeletionEligibilityRecord;
+    const childRes = assessDeletionEligibility(childRec, { assessedAt: context.assessedAt });
+    const filtered = childRes.summary.blockerCodes.filter(c => c !== "STATUS_NOT_DELETE_ELIGIBLE") as ProviderCutoverTransitionBlockerCode[];
+    blockers.push(...filtered);
+  } else if (target === "ROLLED_BACK" && (fromStatus === "CUTOVER" || fromStatus === "OBSERVING")) {
+    const childRes = assessRuntimeRollback(record, context);
+    blockers.push(...(childRes.summary.blockerCodes as ProviderCutoverTransitionBlockerCode[]));
+  }
+
+  return finish(blockers);
+}

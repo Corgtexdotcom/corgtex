@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assessArchiveAvailability, assessDeletionEligibility, assessRuntimeRollback, classifyProviderCutoverPair } from "./provider-cutover";
+import { assessArchiveAvailability, assessDeletionEligibility, assessRuntimeRollback, classifyProviderCutoverPair, assessProviderCutoverTransition } from "./provider-cutover";
 import type { ArchiveAvailabilityBlockerCode, ArchiveAvailabilityRecord, DeletionEligibilityBlockerCode,
   DeletionEligibilityRecord, ProviderCutoverRecord, RuntimeRollbackContext, ProviderCutoverPairBlockerCode } from "./provider-cutover";
 
@@ -747,5 +747,258 @@ describe("classifyProviderCutoverPair", () => {
         }
       }
     }
+  });
+});
+
+const transCtx = { assessedAt: archiveAt(14), requiredSourceFreshThroughAt: archiveAt(12), requiredSourceRuntimeObservedAt: archiveAt(12) };
+const baseTransRec = {
+  ...deletionBase,
+  status: "PLANNED",
+  destinationDeploymentId: "dep2",
+  sourceDataFreshThroughAt: archiveAt(14),
+  evidence: {
+    ...baseEv,
+    runtimeRollbackClaimed: false,
+    sourceRuntimeObservedAt: archiveAt(14).toISOString(),
+  }
+} as unknown as DeletionEligibilityRecord;
+
+describe("assessProviderCutoverTransition", () => {
+  it("allows PLANNED -> SHADOW", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx);
+    expect(res).toEqual({ transitionAllowed: true,
+      summary: { fromStatus: "PLANNED", toStatus: "SHADOW", sourceProvider: "RAILWAY", destinationProvider: "AZURE", transitionAllowed: true, blockerCodes: [] }
+    });
+  });
+  it("allows SHADOW -> CUTOVER", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW" } as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows CUTOVER -> OBSERVING", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows OBSERVING -> ARCHIVE_ONLY", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING" } as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows ARCHIVE_ONLY -> DELETE_ELIGIBLE without mutating its predecessor", () => {
+    const record = { ...baseTransRec, status: "ARCHIVE_ONLY" } as DeletionEligibilityRecord;
+    const res = assessProviderCutoverTransition({ record, toStatus: "DELETE_ELIGIBLE", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+    expect(record.status).toBe("ARCHIVE_ONLY");
+  });
+  it("allows DELETE_ELIGIBLE -> DELETED", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE" } as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: archiveAt(14) }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows PLANNED -> ROLLED_BACK", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows SHADOW -> ROLLED_BACK", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW" } as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows CUTOVER -> ROLLED_BACK", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("allows OBSERVING -> ROLLED_BACK", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING" } as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+
+  it("propagates pair: identity", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, destinationDeploymentId: null } as unknown as DeletionEligibilityRecord, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["INVALID_IDENTITY"]);
+  });
+  it("propagates pair: unknown target", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "UNKNOWN", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["UNKNOWN_TO_STATUS"]);
+  });
+  it("propagates pair: same state", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "PLANNED", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SAME_STATE_TRANSITION"]);
+  });
+  it("propagates pair: terminal source", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETED", sourceDeletedAt: archiveAt(14) } as unknown as DeletionEligibilityRecord, toStatus: "PLANNED", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_STATE_TERMINAL"]);
+  });
+  it("propagates pair: other illegal pair", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["TRANSITION_NOT_ALLOWED"]);
+  });
+
+  it("coherence: contradiction", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "PLANNED", sourceDeletedAt: archiveAt(14) } as unknown as DeletionEligibilityRecord, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_STATUS_CONTRADICTION"]);
+  });
+  it("coherence: DELETED missing time", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETED", sourceDeletedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "PLANNED", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_INVALID", "SOURCE_STATE_TERMINAL"]);
+  });
+  it("coherence: malformed deleted time", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETED", sourceDeletedAt: "bad" as any } as unknown as DeletionEligibilityRecord, toStatus: "PLANNED", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_INVALID", "SOURCE_STATE_TERMINAL"]);
+  });
+  it("coherence: equal deployments", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, destinationDeploymentId: "dep1" } as unknown as DeletionEligibilityRecord, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["INVALID_IDENTITY"]);
+  });
+  it("coherence: absent destination with write evidence", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, destinationDeploymentId: null, destinationWriteStartedAt: archiveAt(9) } as unknown as DeletionEligibilityRecord, toStatus: "SHADOW", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["INVALID_IDENTITY"]);
+  });
+  it("coherence: before non-identity pair failure", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, sourceDeletedAt: archiveAt(14) } as unknown as DeletionEligibilityRecord, toStatus: "UNKNOWN", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["SOURCE_DELETION_STATUS_CONTRADICTION", "UNKNOWN_TO_STATUS"]);
+  });
+
+  it("time: undefined/non-Date assessedAt", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "SHADOW", observedSourceDeletedAt: null }, { ...transCtx, assessedAt: "bad" as any });
+    expect(res.summary.blockerCodes).toEqual(["INVALID_CONTEXT"]);
+  });
+  it("time: invalid assessedAt", () => {
+    const res = assessProviderCutoverTransition({ record: baseTransRec, toStatus: "SHADOW", observedSourceDeletedAt: null }, { ...transCtx, assessedAt: new Date("invalid") });
+    expect(res.summary.blockerCodes).toEqual(["INVALID_CONTEXT"]);
+  });
+  it("runtime horizon: invalid", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as unknown as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, { ...transCtx, requiredSourceFreshThroughAt: new Date("invalid"), requiredSourceRuntimeObservedAt: new Date("invalid") });
+    expect(res.summary.blockerCodes).toEqual(["INVALID_CONTEXT"]);
+  });
+  it("runtime horizon: future", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER" } as unknown as DeletionEligibilityRecord, toStatus: "ROLLED_BACK", observedSourceDeletedAt: null }, { ...transCtx, requiredSourceFreshThroughAt: archiveAt(15), requiredSourceRuntimeObservedAt: archiveAt(15) });
+    expect(res.summary.blockerCodes).toEqual(["INVALID_CONTEXT"]);
+  });
+
+  it("destination: missing target destination", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW", destinationDeploymentId: null, destinationWriteStartedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_REQUIRED_FOR_TARGET"]);
+  });
+  it("write-start: evidence without target destination", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW", destinationDeploymentId: null, destinationWriteStartedAt: archiveAt(9) } as unknown as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["INVALID_IDENTITY"]);
+  });
+  it("write-start: CUTOVER -> OBSERVING missing", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", destinationWriteStartedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING"]);
+  });
+  it("write-start: forward non-Date", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", destinationWriteStartedAt: "bad" as any } as unknown as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_INVALID"]);
+  });
+  it("write-start: forward invalid Date", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", destinationWriteStartedAt: new Date("invalid") } as unknown as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_INVALID"]);
+  });
+  it("write-start: forward future", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", destinationWriteStartedAt: archiveAt(15) } as unknown as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_FUTURE"]);
+  });
+  it("write-start: assessedAt equality", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "CUTOVER", destinationWriteStartedAt: archiveAt(14) } as unknown as DeletionEligibilityRecord, toStatus: "OBSERVING", observedSourceDeletedAt: null }, transCtx);
+    expect(res.transitionAllowed).toBe(true);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+
+  it("observation: missing", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", observationCompletedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_COMPLETION_INVALID"]);
+  });
+  it("observation: non-Date", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", observationCompletedAt: "bad" as any } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_COMPLETION_INVALID"]);
+  });
+  it("observation: invalid Date", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", observationCompletedAt: new Date("invalid") } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_COMPLETION_INVALID"]);
+  });
+  it("observation: future", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", observationCompletedAt: archiveAt(15) } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_COMPLETION_FUTURE"]);
+  });
+  it("observation: before source only", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", sourceWriteStoppedAt: archiveAt(14), finalSnapshotAt: archiveAt(14), archiveRestoreTestedAt: archiveAt(14), observationCompletedAt: archiveAt(13) } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_BEFORE_SOURCE_WRITE_STOP"]);
+  });
+  it("observation: before destination only", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", destinationWriteStartedAt: archiveAt(14), observationCompletedAt: archiveAt(13) } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_BEFORE_DESTINATION_WRITE_START"]);
+  });
+  it("observation: before both", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", sourceWriteStoppedAt: archiveAt(14), finalSnapshotAt: archiveAt(14), archiveRestoreTestedAt: archiveAt(14), destinationWriteStartedAt: archiveAt(14), observationCompletedAt: archiveAt(13) } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["OBSERVATION_BEFORE_SOURCE_WRITE_STOP", "OBSERVATION_BEFORE_DESTINATION_WRITE_START"]);
+  });
+  it("observation: equality", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", sourceWriteStoppedAt: archiveAt(13), finalSnapshotAt: archiveAt(13), archiveRestoreTestedAt: archiveAt(13), destinationWriteStartedAt: archiveAt(13), observationCompletedAt: archiveAt(13) } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+
+  it("surrender: own false overriding inherited true", () => {
+    const Parent = function() {};
+    Parent.prototype.runtimeRollbackClaimed = true;
+    const ev = new (Parent as any)();
+    ev.runtimeRollbackClaimed = false;
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", evidence: ev } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual([]);
+  });
+  it("surrender: inherited-only false", () => {
+    const Parent = function() {};
+    Parent.prototype.runtimeRollbackClaimed = false;
+    const ev = new (Parent as any)();
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", evidence: ev } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["RUNTIME_ROLLBACK_CLAIM_MISSING"]);
+  });
+  it("surrender: own true", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", evidence: { runtimeRollbackClaimed: true } } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["RUNTIME_ROLLBACK_CLAIMED"]);
+  });
+  it("surrender: malformed", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", evidence: { runtimeRollbackClaimed: "false" } } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["RUNTIME_ROLLBACK_CLAIM_INVALID"]);
+  });
+
+  it("runtime composition", () => {
+    const res = assessProviderCutoverTransition({
+      record: {
+        ...baseTransRec, status: "CUTOVER",
+        sourceDataFreshThroughAt: archiveAt(15),
+        destinationWriteStartedAt: archiveAt(15),
+        evidence: { sourceRuntimeHealthy: false, sourceRuntimeObservedAt: "2026-08-07T15:00:00Z", destinationWritesCompatible: false }
+      } as unknown as DeletionEligibilityRecord,
+      toStatus: "ROLLED_BACK", observedSourceDeletedAt: null
+    }, transCtx);
+    expect(res.summary.blockerCodes).toEqual([
+      "SOURCE_RUNTIME_UNHEALTHY", "SOURCE_RUNTIME_OBSERVATION_FUTURE", "DESTINATION_WRITES_INCOMPATIBLE", "SOURCE_FRESHNESS_FUTURE", "DESTINATION_WRITE_START_FUTURE"
+    ]);
+  });
+
+  it("archive composition: SHADOW -> CUTOVER", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "SHADOW", destinationWriteStartedAt: null, sourceWriteStoppedAt: null, finalSnapshotAt: null, finalSnapshotChecksum: "bad", archiveRestoreTestedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "CUTOVER", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING", "SOURCE_WRITE_STOP_INVALID", "FINAL_SNAPSHOT_INVALID", "FINAL_SNAPSHOT_CHECKSUM_INVALID", "ARCHIVE_RESTORE_TEST_INVALID"]);
+  });
+  it("archive composition: OBSERVING -> ARCHIVE_ONLY", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "OBSERVING", destinationWriteStartedAt: null, observationCompletedAt: archiveAt(13), sourceWriteStoppedAt: archiveAt(17), finalSnapshotAt: archiveAt(16), archiveRestoreTestedAt: archiveAt(15) } as unknown as DeletionEligibilityRecord, toStatus: "ARCHIVE_ONLY", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING", "OBSERVATION_BEFORE_SOURCE_WRITE_STOP", "SOURCE_WRITE_STOP_FUTURE", "FINAL_SNAPSHOT_FUTURE", "FINAL_SNAPSHOT_BEFORE_WRITE_STOP", "ARCHIVE_RESTORE_TEST_FUTURE", "ARCHIVE_RESTORE_TEST_BEFORE_SNAPSHOT"]);
+  });
+
+  it("delete-eligible composition: missing-write/retention", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "ARCHIVE_ONLY", destinationWriteStartedAt: null, archiveRetentionDeadline: null } as unknown as DeletionEligibilityRecord, toStatus: "DELETE_ELIGIBLE", observedSourceDeletedAt: null }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING", "RETENTION_EVIDENCE_MISSING"]);
+  });
+
+  it("deleted candidate: missing-write", () => {
+    const res = assessProviderCutoverTransition({ record: { ...baseTransRec, status: "DELETE_ELIGIBLE", destinationWriteStartedAt: null } as unknown as DeletionEligibilityRecord, toStatus: "DELETED", observedSourceDeletedAt: archiveAt(14) }, transCtx);
+    expect(res.summary.blockerCodes).toEqual(["DESTINATION_WRITE_START_MISSING"]);
   });
 });
