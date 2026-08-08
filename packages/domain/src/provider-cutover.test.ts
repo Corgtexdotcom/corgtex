@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { assessArchiveAvailability, assessDeletionEligibility, assessRuntimeRollback } from "./provider-cutover";
+import { assessArchiveAvailability, assessDeletionEligibility, assessRuntimeRollback, classifyProviderCutoverPair } from "./provider-cutover";
 import type { ArchiveAvailabilityBlockerCode, ArchiveAvailabilityRecord, DeletionEligibilityBlockerCode,
-  DeletionEligibilityRecord, ProviderCutoverRecord, RuntimeRollbackContext } from "./provider-cutover";
+  DeletionEligibilityRecord, ProviderCutoverRecord, RuntimeRollbackContext, ProviderCutoverPairBlockerCode } from "./provider-cutover";
 
 const ctx: RuntimeRollbackContext = {
   assessedAt: new Date("2026-08-07T12:00:00Z"),
@@ -501,5 +501,251 @@ describe("assessDeletionEligibility", () => {
     expect(Object.keys(result)).toEqual(["deleteEligible", "summary"]);
     expect(Object.keys(result.summary).sort()).toEqual(["blockerCodes", "deleteEligible", "destinationProvider", "sourceProvider", "status"]);
     expect(JSON.stringify(result)).not.toContain("HOSTILE");
+  });
+});
+
+describe("classifyProviderCutoverPair", () => {
+  const lifecycle = [
+    "PLANNED", "SHADOW", "CUTOVER", "OBSERVING",
+    "ARCHIVE_ONLY", "DELETE_ELIGIBLE", "DELETED", "ROLLED_BACK"
+  ];
+  const literal64: Array<[string, string, boolean, ProviderCutoverPairBlockerCode[]]> = [
+    // PLANNED row
+    ["PLANNED", "PLANNED", false, ["SAME_STATE_TRANSITION"]],
+    ["PLANNED", "SHADOW", true, []],
+    ["PLANNED", "CUTOVER", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["PLANNED", "OBSERVING", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["PLANNED", "ARCHIVE_ONLY", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["PLANNED", "DELETE_ELIGIBLE", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["PLANNED", "DELETED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["PLANNED", "ROLLED_BACK", true, []],
+    // SHADOW row
+    ["SHADOW", "PLANNED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["SHADOW", "SHADOW", false, ["SAME_STATE_TRANSITION"]],
+    ["SHADOW", "CUTOVER", true, []],
+    ["SHADOW", "OBSERVING", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["SHADOW", "ARCHIVE_ONLY", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["SHADOW", "DELETE_ELIGIBLE", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["SHADOW", "DELETED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["SHADOW", "ROLLED_BACK", true, []],
+    // CUTOVER row
+    ["CUTOVER", "PLANNED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["CUTOVER", "SHADOW", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["CUTOVER", "CUTOVER", false, ["SAME_STATE_TRANSITION"]],
+    ["CUTOVER", "OBSERVING", true, []],
+    ["CUTOVER", "ARCHIVE_ONLY", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["CUTOVER", "DELETE_ELIGIBLE", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["CUTOVER", "DELETED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["CUTOVER", "ROLLED_BACK", true, []],
+    // OBSERVING row
+    ["OBSERVING", "PLANNED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["OBSERVING", "SHADOW", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["OBSERVING", "CUTOVER", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["OBSERVING", "OBSERVING", false, ["SAME_STATE_TRANSITION"]],
+    ["OBSERVING", "ARCHIVE_ONLY", true, []],
+    ["OBSERVING", "DELETE_ELIGIBLE", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["OBSERVING", "DELETED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["OBSERVING", "ROLLED_BACK", true, []],
+    // ARCHIVE_ONLY row
+    ["ARCHIVE_ONLY", "PLANNED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["ARCHIVE_ONLY", "SHADOW", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["ARCHIVE_ONLY", "CUTOVER", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["ARCHIVE_ONLY", "OBSERVING", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["ARCHIVE_ONLY", "ARCHIVE_ONLY", false, ["SAME_STATE_TRANSITION"]],
+    ["ARCHIVE_ONLY", "DELETE_ELIGIBLE", true, []],
+    ["ARCHIVE_ONLY", "DELETED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["ARCHIVE_ONLY", "ROLLED_BACK", false, ["TRANSITION_NOT_ALLOWED"]],
+    // DELETE_ELIGIBLE row
+    ["DELETE_ELIGIBLE", "PLANNED", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["DELETE_ELIGIBLE", "SHADOW", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["DELETE_ELIGIBLE", "CUTOVER", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["DELETE_ELIGIBLE", "OBSERVING", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["DELETE_ELIGIBLE", "ARCHIVE_ONLY", false, ["TRANSITION_NOT_ALLOWED"]],
+    ["DELETE_ELIGIBLE", "DELETE_ELIGIBLE", false, ["SAME_STATE_TRANSITION"]],
+    ["DELETE_ELIGIBLE", "DELETED", true, []],
+    ["DELETE_ELIGIBLE", "ROLLED_BACK", false, ["TRANSITION_NOT_ALLOWED"]],
+    // DELETED row
+    ["DELETED", "PLANNED", false, ["SOURCE_STATE_TERMINAL"]],
+    ["DELETED", "SHADOW", false, ["SOURCE_STATE_TERMINAL"]],
+    ["DELETED", "CUTOVER", false, ["SOURCE_STATE_TERMINAL"]],
+    ["DELETED", "OBSERVING", false, ["SOURCE_STATE_TERMINAL"]],
+    ["DELETED", "ARCHIVE_ONLY", false, ["SOURCE_STATE_TERMINAL"]],
+    ["DELETED", "DELETE_ELIGIBLE", false, ["SOURCE_STATE_TERMINAL"]],
+    ["DELETED", "DELETED", false, ["SAME_STATE_TRANSITION"]],
+    ["DELETED", "ROLLED_BACK", false, ["SOURCE_STATE_TERMINAL"]],
+    // ROLLED_BACK row
+    ["ROLLED_BACK", "PLANNED", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "SHADOW", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "CUTOVER", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "OBSERVING", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "ARCHIVE_ONLY", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "DELETE_ELIGIBLE", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "DELETED", false, ["SOURCE_STATE_TERMINAL"]],
+    ["ROLLED_BACK", "ROLLED_BACK", false, ["SAME_STATE_TRANSITION"]],
+  ];
+
+  it.each(literal64)("Full matrix: %s -> %s", (from, to, ok, exp) => {
+    const destDep = ["CUTOVER", "OBSERVING", "ARCHIVE_ONLY", "DELETE_ELIGIBLE", "DELETED"].includes(from) ? "dep2" : null;
+    const rec = { ...baseRec, status: from, destinationDeploymentId: destDep };
+    const res = classifyProviderCutoverPair(rec, to);
+    expect(res.pairAllowed).toBe(ok);
+    expect(res.summary.blockerCodes).toEqual(exp);
+    expect(res.summary.blockerCodes.length).toBeLessThanOrEqual(1);
+  });
+
+  it.each([
+    ["unknown stored status", { status: "UNKNOWN", destinationDeploymentId: "dep2" }, "UNKNOWN"],
+    ["equal deployment IDs", { status: "PLANNED", destinationDeploymentId: "dep1" }, "PLANNED"],
+    ["missing dest (CUTOVER)", { status: "CUTOVER", destinationDeploymentId: null }, "CUTOVER"],
+    ["missing dest (OBSERVING)", { status: "OBSERVING", destinationDeploymentId: null }, "OBSERVING"],
+    ["missing dest (ARCHIVE_ONLY)", { status: "ARCHIVE_ONLY", destinationDeploymentId: null }, "ARCHIVE_ONLY"],
+    ["missing dest (DELETE_ELIGIBLE)", { status: "DELETE_ELIGIBLE", destinationDeploymentId: null }, "DELETE_ELIGIBLE"],
+    ["missing dest (DELETED)", { status: "DELETED", destinationDeploymentId: null }, "DELETED"],
+  ])("Identity: %s", (_name, patch, fromSt) => {
+    const rec = { ...baseRec, ...patch } as ProviderCutoverRecord;
+    const res = classifyProviderCutoverPair(rec, "SHADOW");
+    expect(res.pairAllowed).toBe(false);
+    expect(res.summary.blockerCodes).toEqual(["INVALID_IDENTITY"]);
+    expect(res.summary.fromStatus).toBe(fromSt === "UNKNOWN" ? null : fromSt);
+  });
+
+  it.each([
+    ["RAILWAY", "AZURE", true, "RAILWAY", "AZURE"],
+    ["RAILWAY", "SELF_HOSTED", true, "RAILWAY", "SELF_HOSTED"],
+    ["AZURE", "RAILWAY", true, "AZURE", "RAILWAY"],
+    ["AZURE", "SELF_HOSTED", true, "AZURE", "SELF_HOSTED"],
+    ["SELF_HOSTED", "RAILWAY", true, "SELF_HOSTED", "RAILWAY"],
+    ["SELF_HOSTED", "AZURE", true, "SELF_HOSTED", "AZURE"],
+    ["RAILWAY", "RAILWAY", false, null, null],
+    ["UNKNOWN", "AZURE", false, null, null],
+    ["RAILWAY", "UNKNOWN", false, null, null],
+    ["BAD", "WORSE", false, null, null],
+  ])("Provider normalization: %s -> %s", (src, dst, ok, eSrc, eDst) => {
+    const rec = { ...baseRec, sourceProvider: src, destinationProvider: dst };
+    const res = classifyProviderCutoverPair(rec, "SHADOW");
+    expect(res.summary.sourceProvider).toBe(eSrc);
+    expect(res.summary.destinationProvider).toBe(eDst);
+    if (!ok) {
+      expect(res.summary.blockerCodes).toContain("INVALID_IDENTITY");
+    }
+  });
+
+  it.each(["UNKNOWN", "", "planned", " PLANNED"])("UNKNOWN_TO_STATUS: %s", (target) => {
+    const rec = { ...baseRec, status: "PLANNED" };
+    const res = classifyProviderCutoverPair(rec, target);
+    expect(res.pairAllowed).toBe(false);
+    expect(res.summary.blockerCodes).toEqual(["UNKNOWN_TO_STATUS"]);
+  });
+
+  it.each([
+    ["P1>P2", { destinationDeploymentId: "dep1" }, "UNKNOWN", ["INVALID_IDENTITY"]],
+    ["P2>pair-classification", { status: "CUTOVER", destinationDeploymentId: "dep2" }, "UNKNOWN", ["UNKNOWN_TO_STATUS"]],
+    ["P3>P4", { status: "DELETED", destinationDeploymentId: "dep2" }, "DELETED", ["SAME_STATE_TRANSITION"]],
+    ["P4>P5", { status: "DELETED", destinationDeploymentId: "dep2" }, "PLANNED", ["SOURCE_STATE_TERMINAL"]],
+  ])("Precedence: %s", (_name, patch, target, exp) => {
+    const rec = { ...baseRec, ...patch } as ProviderCutoverRecord;
+    const res = classifyProviderCutoverPair(rec, target);
+    expect(res.summary.blockerCodes).toEqual(exp);
+  });
+
+  it("Hostile redaction and exact keys (1)", () => {
+    const hostileRec = {
+      ...baseRec,
+      id: "HOSTILE_ID",
+      customerAccountId: "HOSTILE_ACCOUNT",
+      sourceDeploymentId: "HOSTILE_SRC",
+      destinationDeploymentId: "HOSTILE_DST",
+      finalSnapshotChecksum: "HOSTILE_CHECKSUM",
+      retentionWaiverReason: "HOSTILE_WAIVER",
+      retentionWaiverApprovedBy: "HOSTILE_ACTOR",
+      evidence: {
+        ...baseEv,
+        secretKey: "HOSTILE_CREDENTIAL",
+        url: "https://HOSTILE.URL",
+        reason: "HOSTILE_REASON",
+        objectName: "HOSTILE_OBJECT",
+        customerContent: "HOSTILE_CONTENT",
+      },
+    } as unknown as ProviderCutoverRecord;
+    const res = classifyProviderCutoverPair(hostileRec, "SHADOW");
+    expect(JSON.stringify(res)).not.toContain("HOSTILE");
+    expect(Object.keys(res).sort()).toEqual(["pairAllowed", "summary"]);
+    expect(Object.keys(res.summary).sort()).toEqual([
+      "blockerCodes", "destinationProvider", "fromStatus", "pairAllowed", "sourceProvider", "toStatus"
+    ]);
+  });
+
+  it("Hostile redaction and exact keys (2)", () => {
+    const hostileRec: ProviderCutoverRecord = {
+      ...baseRec, status: "UNKNOWN",
+      sourceProvider: "HOSTILE_SRC_PROV", destinationProvider: "HOSTILE_DST_PROV",
+    };
+    const res = classifyProviderCutoverPair(hostileRec, "HOSTILE_TARGET");
+    expect(JSON.stringify(res)).not.toContain("HOSTILE");
+  });
+
+  it("Immutability and no side effects - deep freeze", () => {
+    const rec = { ...baseRec, evidence: { ...baseEv } };
+    Object.freeze(rec);
+    Object.freeze(rec.evidence);
+    const snap = JSON.stringify(rec);
+    const OriginalDate = Date;
+    let clockRead = false;
+    global.Date = function() { clockRead = true; throw new Error("no clock"); } as any;
+    global.Date.now = () => { clockRead = true; throw new Error("no clock"); };
+    try {
+      classifyProviderCutoverPair(rec, "SHADOW");
+    } finally {
+      global.Date = OriginalDate;
+    }
+    expect(clockRead).toBe(false);
+    expect(JSON.stringify(rec)).toBe(snap);
+  });
+
+  it("Immutability and no side effects - returns new objects", () => {
+    const rec = { ...baseRec };
+    const res1 = classifyProviderCutoverPair(rec, "SHADOW");
+    const res2 = classifyProviderCutoverPair(rec, "SHADOW");
+    expect(res1).not.toBe(res2);
+    expect(res1.summary).not.toBe(res2.summary);
+    expect(res1.summary.blockerCodes).not.toBe(res2.summary.blockerCodes);
+  });
+
+  it("Immutability and no side effects - snapshot unchanged on error", () => {
+    const rec = { ...baseRec, status: "UNKNOWN" };
+    Object.freeze(rec);
+    const snap = JSON.stringify(rec);
+    classifyProviderCutoverPair(rec, "SHADOW");
+    expect(JSON.stringify(rec)).toBe(snap);
+  });
+
+  it.each([
+    ["null timestamps", { sourceWriteStoppedAt: null, destinationWriteStartedAt: null, sourceDataFreshThroughAt: null }],
+    ["future timestamps", { sourceWriteStoppedAt: new Date("3000-01-01T00:00:00Z"), destinationWriteStartedAt: new Date("3000-01-01T00:00:00Z"), sourceDataFreshThroughAt: new Date("3000-01-01T00:00:00Z") }],
+    ["invalid timestamps", { sourceWriteStoppedAt: new Date("invalid"), destinationWriteStartedAt: new Date("invalid"), sourceDataFreshThroughAt: new Date("invalid") }],
+    ["null evidence", { evidence: null }],
+    ["mutated evidence", { evidence: { completelyDifferent: true } }],
+  ])("Timestamps and evidence ignored entirely: %s", (_name, patch) => {
+    const baseRes = classifyProviderCutoverPair(baseRec, "SHADOW");
+    const testRec = { ...baseRec, ...patch } as ProviderCutoverRecord;
+    const testRes = classifyProviderCutoverPair(testRec, "SHADOW");
+    expect(testRes.summary).toEqual(baseRes.summary);
+  });
+
+  it("Single-blocker invariant aggregate", () => {
+    const allLifecycle = [...lifecycle, "UNKNOWN", ""];
+    for (const from of allLifecycle) {
+      for (const to of allLifecycle) {
+        for (const src of ["RAILWAY", "UNKNOWN"]) {
+          for (const dst of ["AZURE", "UNKNOWN", src]) {
+            for (const dstDep of ["dep2", "dep1", null]) {
+              const rec = { ...baseRec, status: from, sourceProvider: src, destinationProvider: dst, destinationDeploymentId: dstDep };
+              const res = classifyProviderCutoverPair(rec, to);
+              expect(res.summary.blockerCodes.length).toBeLessThanOrEqual(1);
+            }
+          }
+        }
+      }
+    }
   });
 });

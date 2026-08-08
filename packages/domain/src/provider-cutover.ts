@@ -461,3 +461,98 @@ export function assessRuntimeRollback(
     summary: { status, sourceProvider: src, destinationProvider: dst, rollbackReady, blockerCodes: blockers },
   };
 }
+
+export type ProviderCutoverPairBlockerCode =
+  | "INVALID_IDENTITY"
+  | "UNKNOWN_TO_STATUS"
+  | "SAME_STATE_TRANSITION"
+  | "SOURCE_STATE_TERMINAL"
+  | "TRANSITION_NOT_ALLOWED";
+
+export type ProviderCutoverPairSummary = {
+  fromStatus: string | null;
+  toStatus: string | null;
+  sourceProvider: string | null;
+  destinationProvider: string | null;
+  pairAllowed: boolean;
+  blockerCodes: ProviderCutoverPairBlockerCode[];
+};
+
+export type ProviderCutoverPairClassification = {
+  pairAllowed: boolean;
+  summary: ProviderCutoverPairSummary;
+};
+
+/**
+ * Classifies whether an ordered provider-cutover lifecycle status pair is one of
+ * the ten edges the lifecycle permits at all. This is lifecycle **pair legality
+ * only**. It evaluates no evidence, reads no timestamp, and takes no assessment
+ * time. `pairAllowed: true` means the pair is *potentially* legal and nothing
+ * more — it is never operational authorization, never permission to mutate a
+ * provider, change DNS, delete a resource, or persist a status. The
+ * evidence-backed decision is `assessProviderCutoverTransition` (PR 2b2-b).
+ */
+export function classifyProviderCutoverPair(
+  record: ProviderCutoverRecord,
+  toStatus: string
+): ProviderCutoverPairClassification {
+  const blockers: ProviderCutoverPairBlockerCode[] = [];
+
+  const rawSrc = record.sourceProvider;
+  const rawDst = record.destinationProvider;
+
+  let sourceProvider: string | null = rawSrc;
+  let destinationProvider: string | null = rawDst;
+
+  const srcValid = typeof rawSrc === "string" && ALLOWED_PROVIDERS.has(rawSrc);
+  const dstValid = typeof rawDst === "string" && ALLOWED_PROVIDERS.has(rawDst);
+  if (!srcValid || !dstValid || rawSrc === rawDst) {
+    sourceProvider = null;
+    destinationProvider = null;
+  }
+
+  const status = ALLOWED_STATUSES.has(record.status) ? record.status : null;
+  const target = ALLOWED_STATUSES.has(toStatus) ? toStatus : null;
+
+  const destReq = status !== null && DESTINATION_REQUIRED_STATUSES.has(status);
+
+  if (
+    status === null ||
+    sourceProvider === null ||
+    record.destinationDeploymentId === record.sourceDeploymentId ||
+    (destReq && !record.destinationDeploymentId)
+  ) {
+    blockers.push("INVALID_IDENTITY");
+  } else if (target === null) {
+    blockers.push("UNKNOWN_TO_STATUS");
+  } else if (status === target) {
+    blockers.push("SAME_STATE_TRANSITION");
+  } else if (status === "DELETED" || status === "ROLLED_BACK") {
+    blockers.push("SOURCE_STATE_TERMINAL");
+  } else {
+    let valid = false;
+    if (status === "PLANNED" && (target === "SHADOW" || target === "ROLLED_BACK")) valid = true;
+    else if (status === "SHADOW" && (target === "CUTOVER" || target === "ROLLED_BACK")) valid = true;
+    else if (status === "CUTOVER" && (target === "OBSERVING" || target === "ROLLED_BACK")) valid = true;
+    else if (status === "OBSERVING" && (target === "ARCHIVE_ONLY" || target === "ROLLED_BACK")) valid = true;
+    else if (status === "ARCHIVE_ONLY" && target === "DELETE_ELIGIBLE") valid = true;
+    else if (status === "DELETE_ELIGIBLE" && target === "DELETED") valid = true;
+
+    if (!valid) {
+      blockers.push("TRANSITION_NOT_ALLOWED");
+    }
+  }
+
+  const pairAllowed = blockers.length === 0;
+  return {
+    pairAllowed,
+    summary: {
+      fromStatus: status,
+      toStatus: target,
+      sourceProvider,
+      destinationProvider,
+      pairAllowed,
+      blockerCodes: blockers,
+    },
+  };
+}
