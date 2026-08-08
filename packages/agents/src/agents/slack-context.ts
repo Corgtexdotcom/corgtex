@@ -250,16 +250,14 @@ function isNegatedActionRequest(text: string): boolean {
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|ack|acknowledg?ement|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|ack|acknowledg(?:e)?ment|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
 function isDeterministicExplicitActionRequest(text: string): boolean {
   if (isNegatedActionRequest(text)) return false;
   if (isDeterministicNegativeCategory(text)) return false;
-  return /\b(create|add|make|assign)\b[\s\w]*\b(action item|action|task|work item)\b/i.test(text)
-    || /\b(action item|task|work item)\b[\s\w]*\b(create|add|make|assign)\b/i.test(text)
-    || /\b(corgtex|please)\b[\s\w]*\b(create|add|make|assign)\b[\s\w]*\b(action|task|item)\b/i.test(text);
+  return /\bcorgtex\b(?:[\s.,:;!]+(?:please|kindly|can you|could you|will you|would you|just)?)*\s*(create|add|make|assign|turn into)\b(?:\s+[a-z]+){0,3}\s+(action(?: item)?|task|work item)\b/i.test(text);
 }
 
 function normalizeText(text: string): string {
@@ -272,7 +270,7 @@ function normalizeText(text: string): string {
 
 function isGroundedInCorpus(value: string, corpus: string): boolean {
   const normValue = normalizeText(value);
-  if (!normValue) return false;
+  if (!normValue || normValue === "unknown") return false;
   const paddedValue = ` ${normValue} `;
   const paddedCorpus = ` ${normalizeText(corpus)} `;
   return paddedCorpus.includes(paddedValue);
@@ -666,7 +664,7 @@ export async function runSlackProactiveScan(params: {
     });
     if (terminalMarker) continue;
 
-    if (!looksWorkLike(candidate.text) || isBotMentioned(candidate.text, installation.botUserId)) {
+    if (!(looksWorkLike(candidate.text) || isDeterministicExplicitActionRequest(candidate.text)) || isBotMentioned(candidate.text, installation.botUserId)) {
       await recordProactiveMarker({
         installationId: params.installationId,
         workspaceId: params.workspaceId,
@@ -684,6 +682,7 @@ export async function runSlackProactiveScan(params: {
       installationId: params.installationId,
       source: candidate,
     });
+
     const latestThreadMessage = threadMessages[threadMessages.length - 1] ?? candidate;
     if (linkedAction) {
       const existingUpdate = await prisma.communicationEntityLink.findFirst({
@@ -699,6 +698,19 @@ export async function runSlackProactiveScan(params: {
         select: { id: true },
       });
       if (existingUpdate) continue;
+    } else {
+      if (threadMessages.some(m => isBotMentioned(m.text || "", installation.botUserId))) {
+        await recordProactiveMarker({
+          installationId: params.installationId,
+          workspaceId: params.workspaceId,
+          messageId: candidate.id,
+          externalUserId: candidate.externalUserId,
+          entityType: "CommunicationMessage",
+          entityId: candidate.id,
+          action: "proactive_unanswered_resolved",
+        });
+        continue;
+      }
     }
 
     const parsed = await reviewThreadForAction({

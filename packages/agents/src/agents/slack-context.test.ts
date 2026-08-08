@@ -690,6 +690,28 @@ describe("Slack context jobs", () => {
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-4" }),
     });
+
+    // Thread-level check: candidate doesn't mention bot, but a thread reply does
+    const normalSource = candidate({ id: "msg-normal-1", text: "Can you update the docs?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    setupPendingNudge(normalSource);
+    prismaMock.communicationMessage.findMany
+      .mockReset()
+      .mockResolvedValueOnce([]) // for drafts check
+      .mockResolvedValueOnce([
+        normalSource,
+        candidate({ id: "reply-1", text: "Yes, I will tell <@bot-1> to do it.", messageTs: new Date("2026-04-28T15:35:00.000Z") })
+      ]);
+
+    await expect(runSlackProactiveScan({
+      workspaceId: "workspace-1",
+      installationId: "install-1",
+      workflowJobId: "job-1",
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-normal-1" }),
+    });
   });
 
   it("allows non-bot mentions <@U999|Alice> to be nudged and evaluated", async () => {
@@ -752,6 +774,7 @@ describe("Slack context jobs", () => {
     { label: "generic test message", text: "Please ignore, this is a test message for slack context", concreteNextStep: "test message" },
     { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
+    { label: "American acknowledgment", text: "Acknowledgment: Jan needs to send the report.", concreteNextStep: "send the report" },
     { label: "already-completed", text: "I already sent the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "info-only", text: "Information only: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
   ])("vetoes action creation for $label source text despite high-confidence action model output", async ({ text, concreteNextStep }) => {
@@ -794,7 +817,10 @@ describe("Slack context jobs", () => {
     { label: "awareness-only model outcome on generic open question", output: { resolutionState: "open", workDisposition: "awareness", confidence: 0.95, negativeCategory: false, couldNot: [] }, text: "Can you let me know if the staging environment is up?" },
     { label: "hallucinated owner substring trap", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "IT", concreteNextStep: "confirm when waiting is finished", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Confirm waiting" }, text: "Please confirm when waiting is finished for the report." },
     { label: "typographic-apostrophe negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t create an action item to update the guide.", id: "msg-typo-neg" },
-    { label: "typographic-apostrophe negation with intervening words", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t ever create an action item to update the guide.", id: "msg-typo-neg-intervening" }
+    { label: "typographic-apostrophe negation with intervening words", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t ever create an action item to update the guide.", id: "msg-typo-neg-intervening" },
+    { label: "synthetic unknown owner", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "unknown", confidence: 0.99, negativeCategory: false, couldNot: [] }, text: "unknown needs to send the report.", id: "msg-unknown-owner" },
+    { label: "generic ownerless request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Can someone please create an action item to update the guide?", id: "msg-generic-explicit" },
+    { label: "non-adjacent explicit request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Corgtex status is red; can someone please create an action item to update the guide?", id: "msg-non-adjacent-explicit" }
   ])("fails closed on $label, records terminal marker, and later scan does not re-evaluate", async ({ output, text, id }) => {
     const source = candidate({ id: id || "message-1", text: text || "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(source);
@@ -857,20 +883,20 @@ describe("Slack context jobs", () => {
   });
 
   it("allows explicit-create exception only when source text deterministically requests it, and fails for negated source text", async () => {
-    const validSource = candidate({ text: "Corgtex please create an action item to update the deployment guide.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const validSource = candidate({ text: "Corgtex, create a task to fix the logo.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(validSource);
     extractMock.mockResolvedValueOnce({
       output: {
         resolutionState: "open",
         workDisposition: "action",
-        concreteNextStep: "update the deployment guide",
+        concreteNextStep: "fix the logo",
         ownerEvidence: "",
         explicitActionRequest: true,
         confidence: 0.95,
         negativeCategory: false,
         couldNot: [],
-        title: "Update deployment guide",
-        bodyMd: "Update deployment guide.",
+        title: "Fix the logo",
+        bodyMd: "Fix the logo.",
       },
     });
 
@@ -882,7 +908,7 @@ describe("Slack context jobs", () => {
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
 
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      title: "Update deployment guide",
+      title: "Fix the logo",
     }));
 
     // Negated source text check: model outputs explicitActionRequest true, but source text says "Do NOT create an action item"
