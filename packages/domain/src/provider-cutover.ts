@@ -105,6 +105,47 @@ export type ArchiveAvailabilityAssessment = {
   summary: ArchiveAvailabilitySummary;
 };
 
+/** Persisted evidence required to assess source-deletion eligibility. */
+export type DeletionEligibilityRecord = ArchiveAvailabilityRecord & {
+  observationCompletedAt: Date | null;
+  archiveRetentionDeadline: Date | null;
+  retentionWaiverApprovedAt: Date | null;
+  retentionWaiverApprovedBy: string | null;
+  retentionWaiverReason: string | null;
+  sourceDeletedAt: Date | null;
+};
+
+/** Explicit assessment time for deletion-eligibility comparisons. */
+export type DeletionEligibilityContext = ArchiveAvailabilityContext;
+
+/** Fixed, sanitized reasons why source deletion is not eligible or coherent. */
+export type DeletionEligibilityBlockerCode = ArchiveAvailabilityBlockerCode
+  | "STATUS_NOT_DELETE_ELIGIBLE" | "DESTINATION_WRITE_START_MISSING" | "DESTINATION_WRITE_START_INVALID"
+  | "DESTINATION_WRITE_START_FUTURE" | "OBSERVATION_COMPLETION_INVALID" | "OBSERVATION_COMPLETION_FUTURE"
+  | "OBSERVATION_BEFORE_SOURCE_WRITE_STOP" | "OBSERVATION_BEFORE_DESTINATION_WRITE_START"
+  | "RUNTIME_ROLLBACK_CLAIM_MISSING" | "RUNTIME_ROLLBACK_CLAIM_INVALID" | "RUNTIME_ROLLBACK_CLAIMED"
+  | "RETENTION_EVIDENCE_MISSING" | "RETENTION_DEADLINE_INVALID" | "RETENTION_DEADLINE_BEFORE_FINAL_SNAPSHOT"
+  | "RETENTION_DEADLINE_NOT_REACHED" | "RETENTION_WAIVER_INCOMPLETE" | "RETENTION_WAIVER_APPROVAL_INVALID"
+  | "RETENTION_WAIVER_APPROVAL_FUTURE" | "RETENTION_WAIVER_ACTOR_INVALID" | "RETENTION_WAIVER_REASON_INVALID"
+  | "SOURCE_DELETION_STATUS_CONTRADICTION" | "SOURCE_DELETION_INVALID" | "SOURCE_DELETION_FUTURE"
+  | "SOURCE_DELETION_BEFORE_OBSERVATION" | "SOURCE_DELETION_BEFORE_ARCHIVE_RESTORE"
+  | "SOURCE_DELETION_BEFORE_RETENTION_SATISFIED";
+
+/** Fixed-shape deletion result safe for logs and API projections. */
+export type DeletionEligibilitySummary = {
+  status: string | null;
+  sourceProvider: string | null;
+  destinationProvider: string | null;
+  deleteEligible: boolean;
+  blockerCodes: DeletionEligibilityBlockerCode[];
+};
+
+/** Full result of a pure source-deletion eligibility assessment. */
+export type DeletionEligibilityAssessment = {
+  deleteEligible: boolean;
+  summary: DeletionEligibilitySummary;
+};
+
 const ALLOWED_PROVIDERS = new Set(["RAILWAY", "AZURE", "SELF_HOSTED"]);
 const ALLOWED_STATUSES = new Set([
   "PLANNED", "SHADOW", "CUTOVER", "OBSERVING",
@@ -221,6 +262,101 @@ export function assessArchiveAvailability(
   }
 
   return archiveResult(status, sourceProvider, destinationProvider, blockers);
+}
+
+/** Assesses source-deletion eligibility and historical deletion coherence. */
+export function assessDeletionEligibility(
+  record: DeletionEligibilityRecord,
+  context: DeletionEligibilityContext
+): DeletionEligibilityAssessment {
+  const archive = assessArchiveAvailability(record, context);
+  const blockers: DeletionEligibilityBlockerCode[] = [...archive.summary.blockerCodes];
+  const { status, sourceProvider, destinationProvider } = archive.summary;
+  const result = (): DeletionEligibilityAssessment => {
+    const blockerCodes = [...new Set(blockers)];
+    const deleteEligible = status === "DELETE_ELIGIBLE" && archive.archiveAvailable && blockerCodes.length === 0;
+    return { deleteEligible, summary: { status, sourceProvider, destinationProvider, deleteEligible, blockerCodes } };
+  };
+  if (blockers.includes("INVALID_IDENTITY") || blockers.includes("INVALID_CONTEXT")) return result();
+
+  const assessedAt = context.assessedAt.getTime();
+  if (status !== "DELETE_ELIGIBLE") blockers.push("STATUS_NOT_DELETE_ELIGIBLE");
+
+  let destinationStart: number | null = null;
+  if (record.destinationWriteStartedAt == null) blockers.push("DESTINATION_WRITE_START_MISSING");
+  else if (!isValidDate(record.destinationWriteStartedAt)) blockers.push("DESTINATION_WRITE_START_INVALID");
+  else destinationStart = record.destinationWriteStartedAt.getTime();
+  if (destinationStart !== null && destinationStart > assessedAt) blockers.push("DESTINATION_WRITE_START_FUTURE");
+
+  let observation: number | null = null;
+  if (!isValidDate(record.observationCompletedAt)) blockers.push("OBSERVATION_COMPLETION_INVALID");
+  else observation = record.observationCompletedAt.getTime();
+  if (observation !== null && observation > assessedAt) blockers.push("OBSERVATION_COMPLETION_FUTURE");
+  if (observation !== null && isValidDate(record.sourceWriteStoppedAt) &&
+    observation < record.sourceWriteStoppedAt.getTime()) blockers.push("OBSERVATION_BEFORE_SOURCE_WRITE_STOP");
+  if (observation !== null && destinationStart !== null && observation < destinationStart) {
+    blockers.push("OBSERVATION_BEFORE_DESTINATION_WRITE_START");
+  }
+
+  const evidence = record.evidence;
+  const hasRuntimeClaim = evidence !== null && typeof evidence === "object" &&
+    Object.prototype.hasOwnProperty.call(evidence, "runtimeRollbackClaimed");
+  const runtimeClaim = hasRuntimeClaim ? evidence.runtimeRollbackClaimed : undefined;
+  if (!hasRuntimeClaim) blockers.push("RUNTIME_ROLLBACK_CLAIM_MISSING");
+  else if (runtimeClaim === true) blockers.push("RUNTIME_ROLLBACK_CLAIMED");
+  else if (runtimeClaim !== false) blockers.push("RUNTIME_ROLLBACK_CLAIM_INVALID");
+
+  const deadlineSupplied = record.archiveRetentionDeadline != null;
+  const waiverFields = [record.retentionWaiverApprovedAt, record.retentionWaiverApprovedBy,
+    record.retentionWaiverReason];
+  const waiverSupplied = waiverFields.some((value) => value != null);
+  if (!deadlineSupplied && !waiverSupplied) blockers.push("RETENTION_EVIDENCE_MISSING");
+
+  const snapshot = isValidDate(record.finalSnapshotAt) ? record.finalSnapshotAt.getTime() : null;
+  let deadline: number | null = null;
+  let deadlineOrdered = false;
+  if (deadlineSupplied) {
+    if (!isValidDate(record.archiveRetentionDeadline)) blockers.push("RETENTION_DEADLINE_INVALID");
+    else deadline = record.archiveRetentionDeadline.getTime();
+  }
+  deadlineOrdered = deadline !== null && snapshot !== null && deadline >= snapshot;
+  if (deadline !== null && snapshot !== null && deadline < snapshot) {
+    blockers.push("RETENTION_DEADLINE_BEFORE_FINAL_SNAPSHOT");
+  }
+
+  const approval = isValidDate(record.retentionWaiverApprovedAt) ? record.retentionWaiverApprovedAt.getTime() : null;
+  const actorValid = typeof record.retentionWaiverApprovedBy === "string" &&
+    record.retentionWaiverApprovedBy.trim().length > 0;
+  const reasonValid = typeof record.retentionWaiverReason === "string" &&
+    record.retentionWaiverReason.trim().length > 0;
+  const waiverMilestone = approval !== null && approval <= assessedAt && actorValid && reasonValid ? approval : null;
+  if (deadline !== null && deadline > assessedAt && !(deadlineOrdered && waiverMilestone !== null)) {
+    blockers.push("RETENTION_DEADLINE_NOT_REACHED");
+  }
+  if (waiverSupplied) {
+    if (waiverFields.some((value) => value == null)) blockers.push("RETENTION_WAIVER_INCOMPLETE");
+    if (record.retentionWaiverApprovedAt != null && approval === null) blockers.push("RETENTION_WAIVER_APPROVAL_INVALID");
+    if (approval !== null && approval > assessedAt) blockers.push("RETENTION_WAIVER_APPROVAL_FUTURE");
+    if (record.retentionWaiverApprovedBy != null && !actorValid) blockers.push("RETENTION_WAIVER_ACTOR_INVALID");
+    if (record.retentionWaiverReason != null && !reasonValid) blockers.push("RETENTION_WAIVER_REASON_INVALID");
+  }
+  const deadlineMilestone = deadline !== null && deadline <= assessedAt && deadlineOrdered ? deadline : null;
+  const retentionMilestones = [deadlineMilestone, waiverMilestone].filter((value): value is number => value !== null);
+
+  if (status !== "DELETED") {
+    if (record.sourceDeletedAt != null) blockers.push("SOURCE_DELETION_STATUS_CONTRADICTION");
+  } else if (!isValidDate(record.sourceDeletedAt)) blockers.push("SOURCE_DELETION_INVALID");
+  else {
+    const deletedAt = record.sourceDeletedAt.getTime();
+    if (deletedAt > assessedAt) blockers.push("SOURCE_DELETION_FUTURE");
+    if (observation !== null && deletedAt < observation) blockers.push("SOURCE_DELETION_BEFORE_OBSERVATION");
+    if (isValidDate(record.archiveRestoreTestedAt) && deletedAt < record.archiveRestoreTestedAt.getTime())
+      blockers.push("SOURCE_DELETION_BEFORE_ARCHIVE_RESTORE");
+    if (retentionMilestones.length === 0 || deletedAt < Math.min(...retentionMilestones)) {
+      blockers.push("SOURCE_DELETION_BEFORE_RETENTION_SATISFIED");
+    }
+  }
+  return result();
 }
 
 /**
