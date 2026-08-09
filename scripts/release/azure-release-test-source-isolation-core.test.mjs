@@ -102,12 +102,23 @@ describe("source-isolation import kernel", () => {
       { permittedImports: [{ module: "module", bindings: ["default=default"] }] },
       { permittedImports: [{ module: "module", bindings: ["namespace=await"] }] },
       { permittedImports: [{ module: "module", bindings: ["named:safe=local", "named:safe=local"] }] },
+      { permittedImports: [{ module: "module", bindings: ["default=first", "default=second"] }] },
+      { permittedImports: [{ module: "module", bindings: ["namespace=first", "namespace=second"] }] },
+      { permittedImports: [{ module: "module", bindings: ["namespace=namespaceValue", "named:safe=safe"] }] },
+      { permittedImports: [{ module: "module", bindings: ["default=local", "named:safe=local"] }] },
+      { permittedImports: [{ module: "first", bindings: ["default=local"] }, { module: "second", bindings: ["named:safe=local"] }] },
       { permittedImports: [{ module: "module", bindings: [] }, { module: "module", bindings: [] }] },
       { permittedImports: [{ module: "module", bindings: [], extra: true }] }
     ];
     for (const rejectedPolicy of rejectedPolicies) {
       expect(() => createSourceIsolationImportKernel(rejectedPolicy)).toThrow(TypeError);
     }
+    const representableKernel = createSourceIsolationImportKernel({ permittedImports: [
+      { module: "default-namespace", bindings: ["default=defaultValue", "namespace=namespaceValue"] },
+      { module: "default-named", bindings: ["default=defaultValue2", "named:repeated=firstRepeated", "named:repeated=secondRepeated"] }
+    ] });
+    const representableSource = "import defaultValue, * as namespaceValue from \"default-namespace\";\nimport defaultValue2, { repeated as firstRepeated, repeated as secondRepeated } from \"default-named\";";
+    expect(representableKernel.inspect(representableSource).findings).toStrictEqual([]);
     expect(() => kernel.inspect(null)).toThrow(TypeError);
     expect(() => kernel.inspect("const value = ;")).toThrow(SyntaxError);
     const phasedKernel = createSourceIsolationImportKernel({ permittedImports: [{ module: "module", bindings: ["namespace=value"] }] });
@@ -115,6 +126,36 @@ describe("source-isolation import kernel", () => {
       { code: "IMPORT_FORBIDDEN", node: "ImportDeclaration", line: 1, column: 1 },
       { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }
     ]);
+  });
+
+  test("fails closed outside the finite import-only source subset", () => {
+    const kernel = createSourceIsolationImportKernel({ permittedImports: [{ module: "module", bindings: ["default=value"] }] });
+    const adversarialCases = [
+      { source: "declare module \"x\" { import value from \"module\"; }",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "ModuleDeclaration", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }] },
+      { source: "import value from \"module\";\nconst value = 1;",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "FirstStatement", line: 2, column: 1 }] },
+      { source: "interface Example {}\nimport value from \"module\";",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "InterfaceDeclaration", line: 1, column: 1 }] },
+      { source: "import value from \"module\";\nconst await = import.meta;",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "FirstStatement", line: 2, column: 1 }] },
+      { source: "await using value = import.meta;",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "FirstStatement", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }] },
+      { source: "import value from \"module\";\nconst value = import.meta;",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "ImportDeclaration", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "FirstStatement", line: 2, column: 1 }] },
+      { source: "declare import value from \"module\";",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "ImportDeclaration", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }] },
+      { source: "export import value from \"module\";",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "ImportDeclaration", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }] },
+      { source: "@decorator import value from \"module\";",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "ImportDeclaration", line: 1, column: 1 }, { code: "IMPORT_FORBIDDEN", node: "SourceFile", line: 1, column: 1 }] },
+      { source: "import value from \"module\";\nfunction load() { return import(\"dynamic\"); }",
+        findings: [{ code: "IMPORT_FORBIDDEN", node: "FunctionDeclaration", line: 2, column: 1 }, { code: "IMPORT_DYNAMIC", node: "CallExpression", line: 2, column: 26 }] }
+    ];
+    for (const adversarialCase of adversarialCases) {
+      expect(kernel.inspect(adversarialCase.source).findings).toStrictEqual(adversarialCase.findings);
+      expect(adversarialCase.findings.length).toBeGreaterThan(0);
+    }
   });
 
   test("binds and executes the exact frozen fixture contract", () => {
