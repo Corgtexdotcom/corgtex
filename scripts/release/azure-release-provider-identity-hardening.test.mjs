@@ -269,7 +269,7 @@ describe("Azure release provider identity hardening", () => {
     expect(consoleMatcher.test("const consoleValue = true;")).toBe(false);
   });
 
-  test("has exactly the three locked tracked callers", () => {
+  test("has exactly the four locked tracked callers", () => {
     const output = execFileSync("git", ["grep", "-l", "assessAzureReleaseProviderIdentity"], {
       cwd: new URL("../../", import.meta.url),
       encoding: "utf8"
@@ -278,7 +278,8 @@ describe("Azure release provider identity hardening", () => {
     expect(paths).toStrictEqual([
       "scripts/release/azure-release-provider-identity-core.test.mjs",
       "scripts/release/azure-release-provider-identity-hardening.test.mjs",
-      "scripts/release/azure-release-provider-identity.mjs"
+      "scripts/release/azure-release-provider-identity.mjs",
+      "scripts/release/azure-release-workload-identity.mjs"
     ]);
   });
 });
