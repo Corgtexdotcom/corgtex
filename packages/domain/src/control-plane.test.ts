@@ -417,7 +417,6 @@ const POST_DEPLOY_REQUIRED_READ_SCOPES = [
   "proposals:read",
   "tensions:read",
   "meetings:read",
-  "finance:read",
   "execution:read",
   "brain:read",
 ];
@@ -7296,7 +7295,6 @@ describe("control plane domain", () => {
       "proposals:read",
       "tensions:read",
       "meetings:read",
-      "finance:read",
       "execution:read",
       "brain:read",
     ]));

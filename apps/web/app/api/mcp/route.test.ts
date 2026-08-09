@@ -52,6 +52,7 @@ vi.mock("@corgtex/domain", () => ({
   MCP_TOOL_CAPABILITIES: {
     create_action: { scopes: ["actions:write"] },
     upsert_tool_link: { scopes: ["tools:write"] },
+    daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read"] },
   },
   AppError: MockAppError,
   getMcpPublicUrl: (origin: string) => `${origin}/mcp`,
@@ -189,5 +190,35 @@ describe("MCP route OAuth discovery", () => {
       },
     });
     expect(createCorgtexMcpServerMock).not.toHaveBeenCalled();
+  });
+
+  it("passes route preflight for daily_overview with current default scopes missing finance", async () => {
+    authenticateMcpRequestMock.mockResolvedValueOnce({
+      actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
+      authKind: "oauth",
+      workspaceId: "ws-1",
+      scopes: defaultMcpScopes,
+    });
+
+    // provide a dummy server that can handle the request
+    createCorgtexMcpServerMock.mockReturnValueOnce({
+      handleMessage: vi.fn().mockResolvedValue({ jsonrpc: "2.0", id: 1, result: {} }),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { POST } = await import("./route");
+    const response = await POST(new NextRequest("https://internal.test/api/mcp", {
+      method: "POST",
+      headers: { host: "mcp.corgtex.com" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "daily_overview", arguments: {} },
+      }),
+    }));
+
+    expect(response.status).not.toBe(403);
+    expect(createCorgtexMcpServerMock).toHaveBeenCalled();
   });
 });
