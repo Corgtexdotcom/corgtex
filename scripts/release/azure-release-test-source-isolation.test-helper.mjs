@@ -123,6 +123,16 @@ function supportBinding(statement) {
   return importMeta || dynamic || arrow ? declaration.name.text : null;
 }
 
+function validatePotentialCleanTrivia(source) {
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, source);
+  for (let kind = scanner.scan();; kind = scanner.scan()) {
+    const triviaEnd = kind === ts.SyntaxKind.WhitespaceTrivia || kind === ts.SyntaxKind.NewLineTrivia ? scanner.getTextPos() : scanner.getTokenPos();
+    const trivia = source.slice(scanner.getStartPos(), triviaEnd);
+    if (!/^[\t\v\f \u00A0\uFEFF\n\r\u2028\u2029\p{Zs}]*$/u.test(trivia)) throw new SyntaxError("Invalid ECMAScript trivia");
+    if (kind === ts.SyntaxKind.EndOfFileToken) return;
+  }
+}
+
 function bindingsEqual(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -181,6 +191,7 @@ export function createSourceIsolationImportKernel(policy) {
       }
       visitDynamic(sourceFile);
       if (matchedModules.size !== permittedImports.length) addFinding("IMPORT_FORBIDDEN", sourceFile);
+      if (findings.length === 0) validatePotentialCleanTrivia(source);
       findings.sort((left, right) => {
         return left.line - right.line || left.column - right.column || left.code.localeCompare(right.code) || left.node.localeCompare(right.node);
       });

@@ -156,6 +156,10 @@ describe("source-isolation import kernel", () => {
       expect(kernel.inspect(adversarialCase.source).findings).toStrictEqual(adversarialCase.findings);
       expect(adversarialCase.findings.length).toBeGreaterThan(0);
     }
+    expect(() => kernel.inspect("\u0085import\u0085value\u0085from\u0085\"module\";\u0085")).toThrow(SyntaxError);
+    expect(() => kernel.inspect("\u200Bimport\u200Bvalue\u200Bfrom\u200B\"module\";\u200B")).toThrow(SyntaxError);
+    const validTriviaKernel = createSourceIsolationImportKernel({ permittedImports: [{ module: "module\u0085\u200B", bindings: ["default=value"] }] });
+    expect(validTriviaKernel.inspect("//\u0085\u200B\n/*\u0085\u200B*/\t\v\f \u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u202F\u205F\u3000\uFEFF\n\r\u2028\u2029import value from \"module\u0085\u200B\";").findings).toStrictEqual([]);
   });
 
   test("binds and executes the exact frozen fixture contract", () => {
