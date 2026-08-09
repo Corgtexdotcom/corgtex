@@ -6,6 +6,7 @@ const {
   createCorgtexMcpServerMock,
   defaultMcpScopes,
   handleRouteErrorMock,
+  handleRequestMock,
 } = vi.hoisted(() => ({
   authenticateMcpRequestMock: vi.fn(),
   createCorgtexMcpServerMock: vi.fn(),
@@ -27,6 +28,13 @@ const {
     "conversations:write",
   ],
   handleRouteErrorMock: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
+  handleRequestMock: vi.fn(),
+}));
+
+vi.mock("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js", () => ({
+  WebStandardStreamableHTTPServerTransport: class {
+    handleRequest = handleRequestMock;
+  },
 }));
 
 class MockAppError extends Error {
@@ -200,11 +208,19 @@ describe("MCP route OAuth discovery", () => {
       scopes: defaultMcpScopes,
     });
 
-    // provide a dummy server that can handle the request
+    const connectMock = vi.fn().mockResolvedValue(undefined);
+    const closeMock = vi.fn().mockResolvedValue(undefined);
     createCorgtexMcpServerMock.mockReturnValueOnce({
-      handleMessage: vi.fn().mockResolvedValue({ jsonrpc: "2.0", id: 1, result: {} }),
-      close: vi.fn().mockResolvedValue(undefined),
+      connect: connectMock,
+      close: closeMock,
     });
+
+    handleRequestMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const { POST } = await import("./route");
     const response = await POST(new NextRequest("https://internal.test/api/mcp", {
@@ -218,7 +234,10 @@ describe("MCP route OAuth discovery", () => {
       }),
     }));
 
-    expect(response.status).not.toBe(403);
+    expect(response.status).toBe(200);
     expect(createCorgtexMcpServerMock).toHaveBeenCalled();
+    expect(connectMock).toHaveBeenCalledWith(expect.anything());
+    expect(handleRequestMock).toHaveBeenCalled();
+    expect(closeMock).toHaveBeenCalled();
   });
 });

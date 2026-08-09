@@ -7298,6 +7298,7 @@ describe("control plane domain", () => {
       "execution:read",
       "brain:read",
     ]));
+    expect(getRequiredScopesForPostDeployReadProbes()).not.toContain("finance:read");
   });
 
   it("reports exact missing support connector scopes before marking post-deploy probes green", async () => {
