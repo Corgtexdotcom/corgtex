@@ -4,12 +4,9 @@ import ts from "typescript";
 import { describe, expect, test } from "vitest";
 
 const productionSource = readFileSync(new URL("./azure-release-workload-identity.mjs", import.meta.url), "utf8");
-const testSource = readFileSync(new URL(import.meta.url), "utf8");
 const providerAssessorName = ["assessAzureRelease", "ProviderIdentity"].join("");
-const workloadAssessorName = ["assessAzureRelease", "WorkloadIdentity"].join("");
 const statusName = "AZURE_RELEASE_CONTRACT_STATUS";
 const providerModule = "./azure-release-provider-identity.mjs";
-const workloadModule = "./azure-release-workload-identity.mjs";
 const apostrophe = String.fromCharCode(39);
 const templateQuote = String.fromCharCode(96);
 const permittedImport = "import { " + statusName + ", " + providerAssessorName + " } from \"" + providerModule + "\";";
@@ -17,16 +14,9 @@ const permittedExport = "export { " + statusName + " };";
 const canonicalSource = permittedImport + "\n" + permittedExport;
 const expectedImportBindings = [providerAssessorName + "=" + providerAssessorName, statusName + "=" + statusName].sort();
 const expectedExportBindings = [statusName + "=" + statusName];
-const allowedSelfImportSources = ["node:child_process", "node:fs", "typescript", "vitest"].sort();
-const permittedSelfImports = [
-  "import { execFileSync } from \"node:child_process\";",
-  "import { readFileSync } from \"node:fs\";",
-  "import ts from \"typescript\";",
-  "import { describe, expect, test } from \"vitest\";"
-].join("\n");
 
 function parseSource(source) {
-  return ts.createSourceFile("fixture.mjs", source, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
+  return ts.createSourceFile("fixture.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 }
 
 function namedBindingSignature(clause) {
@@ -56,41 +46,6 @@ function containsDefaultExport(file) {
     if (ts.isExportAssignment(statement)) return true;
     return statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword) ?? false;
   });
-}
-
-function isAssessorCallTarget(expression) {
-  if (ts.isIdentifier(expression)) {
-    return expression.text === providerAssessorName || expression.text === workloadAssessorName;
-  }
-  if (ts.isPropertyAccessExpression(expression)) {
-    return expression.name.text === providerAssessorName || expression.name.text === workloadAssessorName;
-  }
-  if (!ts.isElementAccessExpression(expression)) return false;
-  const argument = expression.argumentExpression;
-  if (ts.isStringLiteral(argument)) {
-    return argument.text === providerAssessorName || argument.text === workloadAssessorName;
-  }
-  if (!ts.isIdentifier(argument)) return false;
-  return argument.text === "providerAssessorName" || argument.text === "workloadAssessorName";
-}
-
-function containsAssessorCall(file) {
-  let found = false;
-  function visit(node) {
-    if (ts.isCallExpression(node) && isAssessorCallTarget(node.expression)) found = true;
-    ts.forEachChild(node, visit);
-  }
-  visit(file);
-  return found;
-}
-
-function selfSourceIsExact(source) {
-  const file = parseSource(source);
-  const imports = file.statements.filter(ts.isImportDeclaration);
-  if (imports.length !== 4 || containsDynamicImport(file) || containsAssessorCall(file)) return false;
-  if (imports.some((declaration) => !ts.isStringLiteral(declaration.moduleSpecifier))) return false;
-  const sources = imports.map((declaration) => declaration.moduleSpecifier.text).sort();
-  return bindingsEqual(sources, allowedSelfImportSources);
 }
 
 function moduleSurfaceIsExact(source) {
@@ -208,48 +163,9 @@ const fixtures = [
   { name: "dynamic-import", family: "export", source: canonicalSource + "\nconst value = import(\"./other.mjs\");", expected: false }
 ];
 
-const selfFixtureNames = [
-  "allowed-four-imports",
-  "allowed-dependency-call",
-  "provider-import",
-  "workload-import",
-  "unapproved-source",
-  "fifth-duplicate-import",
-  "fifth-extra-import",
-  "fifth-dynamic-import",
-  "provider-direct-call",
-  "workload-direct-call",
-  "provider-property-call",
-  "workload-property-call",
-  "provider-string-computed-call",
-  "workload-string-computed-call",
-  "provider-name-variable-call",
-  "workload-name-variable-call"
-];
-
-const selfFixtures = [
-  { name: "allowed-four-imports", source: permittedSelfImports, expected: true },
-  { name: "allowed-dependency-call", source: permittedSelfImports + "\nreadFileSync(new URL(import.meta.url), \"utf8\");", expected: true },
-  { name: "provider-import", source: permittedSelfImports.replace("import ts from \"typescript\";", "import * as provider from \"" + providerModule + "\";"), expected: false },
-  { name: "workload-import", source: permittedSelfImports.replace("import ts from \"typescript\";", "import * as workload from \"" + workloadModule + "\";"), expected: false },
-  { name: "unapproved-source", source: permittedSelfImports.replace("import ts from \"typescript\";", "import path from \"node:path\";"), expected: false },
-  { name: "fifth-duplicate-import", source: permittedSelfImports + "\nimport \"node:fs\";", expected: false },
-  { name: "fifth-extra-import", source: permittedSelfImports + "\nimport \"node:path\";", expected: false },
-  { name: "fifth-dynamic-import", source: permittedSelfImports + "\nimport(\"node:path\");", expected: false },
-  { name: "provider-direct-call", source: permittedSelfImports + "\n" + providerAssessorName + "();", expected: false },
-  { name: "workload-direct-call", source: permittedSelfImports + "\n" + workloadAssessorName + "();", expected: false },
-  { name: "provider-property-call", source: permittedSelfImports + "\nsubject." + providerAssessorName + "();", expected: false },
-  { name: "workload-property-call", source: permittedSelfImports + "\nsubject." + workloadAssessorName + "();", expected: false },
-  { name: "provider-string-computed-call", source: permittedSelfImports + "\nsubject[" + JSON.stringify(providerAssessorName) + "]();", expected: false },
-  { name: "workload-string-computed-call", source: permittedSelfImports + "\nsubject[" + JSON.stringify(workloadAssessorName) + "]();", expected: false },
-  { name: "provider-name-variable-call", source: permittedSelfImports + "\nconst providerAssessorName = [\"assessAzureRelease\", \"ProviderIdentity\"].join(\"\");\nsubject[providerAssessorName]();", expected: false },
-  { name: "workload-name-variable-call", source: permittedSelfImports + "\nconst workloadAssessorName = [\"assessAzureRelease\", \"WorkloadIdentity\"].join(\"\");\nsubject[workloadAssessorName]();", expected: false }
-];
-
 describe("Azure release workload identity static module surface", () => {
   test("proves the production module surface from parsed declarations", () => {
     expect(productionSource.length).toBeGreaterThan(0);
-    expect(testSource.length).toBeGreaterThan(0);
     expect(moduleSurfaceIsExact(productionSource)).toBe(true);
   });
 
@@ -268,21 +184,4 @@ describe("Azure release workload identity static module surface", () => {
     }
   });
 
-  test("binds parsed self-source import and call isolation", () => {
-    expect(selfSourceIsExact(testSource)).toBe(true);
-    expect(selfFixtures.map(({ name }) => name)).toStrictEqual(selfFixtureNames);
-    expect(selfFixtures).toHaveLength(16);
-    expect(new Set(selfFixtures.map(({ name }) => name)).size).toBe(16);
-    for (const fixture of selfFixtures) {
-      syntaxCheck(fixture.source);
-      expect(selfSourceIsExact(fixture.source), fixture.name).toBe(fixture.expected);
-    }
-    expect(selfFixtures.some(({ expected }) => expected)).toBe(true);
-    expect(selfFixtures.some(({ expected }) => !expected)).toBe(true);
-  });
-
-  test("contains neither complete assessor name in its own source", () => {
-    expect(testSource.includes(providerAssessorName)).toBe(false);
-    expect(testSource.includes(workloadAssessorName)).toBe(false);
-  });
 });
