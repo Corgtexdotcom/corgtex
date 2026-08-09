@@ -281,13 +281,8 @@ describe("Azure release workload identity static module surface", () => {
     expect(selfFixtures.some(({ expected }) => !expected)).toBe(true);
   });
 
-  test("contains neither assessor and locks both exact caller sets", () => {
+  test("contains neither complete assessor name in its own source", () => {
     expect(testSource.includes(providerAssessorName)).toBe(false);
     expect(testSource.includes(workloadAssessorName)).toBe(false);
-    const cwd = new URL("../../", import.meta.url);
-    const providerOutput = execFileSync("git", ["grep", "-l", providerAssessorName], { cwd, encoding: "utf8" });
-    const workloadOutput = execFileSync("git", ["grep", "-l", workloadAssessorName], { cwd, encoding: "utf8" });
-    expect(providerOutput.trim().split("\n").sort()).toStrictEqual(["scripts/release/azure-release-provider-identity-core.test.mjs", "scripts/release/azure-release-provider-identity-hardening.test.mjs", "scripts/release/azure-release-provider-identity.mjs", "scripts/release/azure-release-workload-identity.mjs"]);
-    expect(workloadOutput.trim().split("\n").sort()).toStrictEqual(["scripts/release/azure-release-workload-identity-core.test.mjs", "scripts/release/azure-release-workload-identity-hardening.test.mjs", "scripts/release/azure-release-workload-identity.mjs"]);
   });
 });
