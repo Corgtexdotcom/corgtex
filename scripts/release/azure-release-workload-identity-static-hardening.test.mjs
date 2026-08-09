@@ -37,26 +37,31 @@ function escapeRegExp(value) {
 }
 function markerPattern(marker) {
   const escaped = escapeRegExp(marker.name);
-  if (marker.kind === "call") return identifierStart + escaped + identifierEnd + gap + "\\(";
-  if (marker.kind === "call-or-construct") return "(?:" + keyword("new") + gap + ")?" + identifierStart + escaped + identifierEnd + gap + "\\(";
+  if (["call", "call-or-construct"].includes(marker.kind)) return identifierStart + escaped + identifierEnd;
   if (marker.kind === "member") return identifierStart + escaped + identifierEnd + gap + "(?=\\.|\\?\\.|\\[)";
   if (marker.kind === "string-exact") return "[\"\\x27]" + escaped + "[\"\\x27]";
-  if (marker.kind === "string-part") return "[\"\\x27](?:[^\"\\x27]*[^A-Za-z0-9_.-])?" + escaped + "(?![A-Za-z0-9_.-])[^\"\\x27]*[\"\\x27]";
+  if (marker.kind === "string-part") return "[\"\\x27]" + (marker.name.startsWith("/") ? "[^\"\\x27]*" : "(?:[^\"\\x27]*[^A-Za-z0-9_.-])?") + escaped + "(?![A-Za-z0-9_.-])[^\"\\x27]*[\"\\x27]";
   return identifierStart + escaped + identifierEnd;
 }
-function staticModuleSpecifiers(source) {
-  const file = ts.createSourceFile("fixture.mjs", source, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
-  return file.statements.flatMap((statement) => {
-    const declaration = ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement);
-    return declaration && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) ? [statement.moduleSpecifier.text] : [];
-  });
+function topLevelModuleDeclarations(source) {
+  return ts.createSourceFile("fixture.mjs", source, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS).statements.filter((statement) => ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement));
+}
+function moduleInventory(source) {
+  const declarations = topLevelModuleDeclarations(source);
+  const exports = declarations.filter(ts.isExportDeclaration);
+  return {
+    imports: declarations.filter(ts.isImportDeclaration).length,
+    sourceExports: exports.filter((declaration) => declaration.moduleSpecifier).length,
+    localNamedExports: exports.filter((declaration) => !declaration.moduleSpecifier && declaration.exportClause && ts.isNamedExports(declaration.exportClause)).length
+  };
 }
 function tokenMatcher(markers) {
   const moduleMarkers = markers.filter((marker) => ["module", "module-prefix"].includes(marker.kind));
   const rawMarkers = markers.filter((marker) => !moduleMarkers.includes(marker));
   const rawMatcher = rawMarkers.length > 0 ? new RegExp(rawMarkers.map(markerPattern).join("|")) : null;
   return { global: false, sticky: false, test(source) {
-    const specifiers = moduleMarkers.length > 0 ? staticModuleSpecifiers(source) : [];
+    const declarations = moduleMarkers.length > 0 ? topLevelModuleDeclarations(source) : [];
+    const specifiers = declarations.flatMap((declaration) => declaration.moduleSpecifier && ts.isStringLiteral(declaration.moduleSpecifier) ? [declaration.moduleSpecifier.text] : []);
     const moduleMatch = moduleMarkers.some((marker) => specifiers.some((specifier) => marker.kind === "module" ? specifier === marker.name : specifier.startsWith(marker.name)));
     return moduleMatch || rawMatcher?.test(source) === true;
   } };
@@ -124,6 +129,7 @@ const structuralRows = [
   { name: "exact-export-alias", family: familyNames[1], source: statusDeclaration + "export { " + statusName + " as status };", expected: false },
   { name: "exact-export-extra", family: familyNames[1], source: statusDeclaration + "const extra = 2;\nexport { " + statusName + ", extra };", expected: false },
   { name: "exact-export-from", family: familyNames[1], source: "export { " + statusName + " } from \"./module.mjs\";", expected: false },
+  { name: "exact-export-second-block", family: familyNames[1], source: statusDeclaration + "const other = 2;\n" + permittedExport + "\nexport { other };", expected: true, inventory: { imports: 0, sourceExports: 0, localNamedExports: 2 } },
   { name: "additional-wrong-source", family: familyNames[2], source: permittedImport.replace(providerModule, "./wrong.mjs"), expected: true },
   { name: "additional-missing-binding", family: familyNames[2], source: "import { " + statusName + " } from \"" + providerModule + "\";", expected: true },
   { name: "additional-alias", family: familyNames[2], source: "import { " + statusName + " as status, " + providerAssessorName + " } from \"" + providerModule + "\";", expected: true },
@@ -140,6 +146,7 @@ const structuralRows = [
   { name: "additional-second", family: familyNames[2], source: permittedImport + "\nimport value from \"./other.mjs\";", expected: true },
   { name: "additional-dynamic-near", family: familyNames[2], source: "const value = import(\"./module.mjs\");", expected: false },
   { name: "additional-meta-near", family: familyNames[2], source: "const value = import.meta.url;", expected: false },
+  { name: "additional-after-block-same-line", family: familyNames[2], source: "if (true) {} import value from \"./module.mjs\";", expected: false, inventory: { imports: 1, sourceExports: 0, localNamedExports: 0 } },
   { name: "named-source-direct", family: familyNames[3], source: "export{value}from\"./module.mjs\";", expected: true },
   { name: "named-source-asi-eof", family: familyNames[3], source: "export { value } from \"./module.mjs\"", expected: true },
   { name: "named-source-asi-next", family: familyNames[3], source: "export { value } from \"./module.mjs\"\nconst next = 1;", expected: true },
@@ -148,7 +155,8 @@ const structuralRows = [
   { name: "named-source-comment", family: familyNames[3], source: "export/*a*/{/*b*/value/*c*/}/*d*/from/*e*/\"./module.mjs\";", expected: true },
   { name: "named-source-lf", family: familyNames[3], source: "export//a\n{//b\nvalue//c\n}//d\nfrom//e\n\"./module.mjs\";", expected: true },
   { name: "named-source-crlf", family: familyNames[3], source: "export//a\r\n{//b\r\nvalue//c\r\n}//d\r\nfrom//e\r\n\"./module.mjs\";", expected: true },
-  { name: "named-source-near", family: familyNames[3], source: "export const value = 1;", expected: false },
+  { name: "named-source-near", family: familyNames[3], source: "export const value = 1;", expected: false, inventory: { imports: 0, sourceExports: 0, localNamedExports: 0 } },
+  { name: "named-source-after-block-same-line", family: familyNames[3], source: "if (true) {} export { value } from \"./module.mjs\";", expected: false, inventory: { imports: 0, sourceExports: 1, localNamedExports: 0 } },
   { name: "star-source-direct", family: familyNames[4], source: "export*from\"./module.mjs\";", expected: true },
   { name: "star-source-asi-eof", family: familyNames[4], source: "export * from \"./module.mjs\"", expected: true },
   { name: "star-source-asi-next", family: familyNames[4], source: "export * from \"./module.mjs\"\nconst next = 1;", expected: true },
@@ -158,7 +166,7 @@ const structuralRows = [
   { name: "star-source-block", family: familyNames[4], source: "export/*a*/*/*b*/from/*c*/\"./module.mjs\";", expected: true },
   { name: "star-source-lf", family: familyNames[4], source: "export//a\n*//b\nfrom//c\n\"./module.mjs\";", expected: true },
   { name: "star-source-crlf", family: familyNames[4], source: "export//a\r\n*//b\r\nfrom//c\r\n\"./module.mjs\";", expected: true },
-  { name: "star-source-near", family: familyNames[4], source: "export function value() {}", expected: false },
+  { name: "star-source-near", family: familyNames[4], source: "export function value() {}", expected: false, inventory: { imports: 0, sourceExports: 0, localNamedExports: 0 } },
   { name: "dynamic-direct", family: familyNames[5], source: "const value = import(\"./module.mjs\");", expected: true },
   { name: "dynamic-single-quote", family: familyNames[5], source: "const value = import(" + apostrophe + "./module.mjs" + apostrophe + ");", expected: true },
   { name: "dynamic-tab", family: familyNames[5], source: "const value = import\t(\"./module.mjs\");", expected: true },
@@ -200,15 +208,28 @@ const structuralRows = [
 
 function fixtureSource(marker, positive) {
   const near = marker.name.replace(/\/$/, "") + "Near";
-  if (marker.kind === "call") return (positive ? marker.name : near) + "();";
-  if (marker.kind === "call-or-construct") return (positive ? marker.name : near) + "();";
+  if (["call", "call-or-construct"].includes(marker.kind)) return (positive ? marker.name : near) + "();";
   if (marker.kind === "member") return (positive ? marker.name : near) + ".value;";
   if (marker.kind === "string-exact") return "const value = \"" + (positive ? marker.name : near) + "\";";
+  if (marker.kind === "string-part" && marker.name === "/api/control-plane") return "const value = \"https://ops.corgtex.com" + (positive ? marker.name : "/api/customer-plane") + "\";";
   if (marker.kind === "string-part") return "const value = \"prefix " + (positive ? marker.name : near) + " suffix\";";
   return "const " + (positive ? marker.name : near) + " = 1;";
 }
 
 function tokenFixtures(family, marker) {
+  if (["call", "call-or-construct"].includes(marker.kind)) {
+    const rows = [
+      { name: family.name + "-" + marker.name + "-direct-call", family: family.name, marker: marker.name, source: fixtureSource(marker, true), expected: true },
+      { name: family.name + "-" + marker.name + "-alias-reference", family: family.name, marker: marker.name, source: "const alias = " + marker.name + ";", expected: true }
+    ];
+    if (marker.kind === "call-or-construct") rows.push(
+      { name: family.name + "-" + marker.name + "-construction", family: family.name, marker: marker.name, source: "new " + marker.name + "();", expected: true },
+      { name: family.name + "-" + marker.name + "-construction-dollar-prefix", family: family.name, marker: marker.name, source: "new $" + marker.name + "();", expected: false },
+      { name: family.name + "-" + marker.name + "-construction-dollar-suffix", family: family.name, marker: marker.name, source: "new " + marker.name + "$();", expected: false }
+    );
+    rows.push({ name: family.name + "-" + marker.name + "-near-miss", family: family.name, marker: marker.name, source: fixtureSource(marker, false), expected: false });
+    return rows;
+  }
   if (!["module", "module-prefix"].includes(marker.kind)) return [
     { name: family.name + "-" + marker.name + "-positive", family: family.name, marker: marker.name, source: fixtureSource(marker, true), expected: true },
     { name: family.name + "-" + marker.name + "-near-miss", family: family.name, marker: marker.name, source: fixtureSource(marker, false), expected: false }
@@ -241,26 +262,9 @@ const dollarBoundaryRows = identifierMarkers.flatMap(({ family, marker }) => [
   { name: family.name + "-" + marker.name + "-dollar-prefix", family: family.name, source: dollarBoundarySource(marker, true) },
   { name: family.name + "-" + marker.name + "-dollar-suffix", family: family.name, source: dollarBoundarySource(marker, false) }
 ]);
-const functionConstructionRows = [
-  { name: "function-construction", source: "new Function();", expected: true },
-  { name: "function-construction-dollar-prefix", source: "new $Function();", expected: false },
-  { name: "function-construction-dollar-suffix", source: "new Function$();", expected: false }
-];
 
 function assertSyntax(source) {
   execFileSync(process.execPath, ["--check", "--input-type=module"], { input: source, stdio: ["pipe", "pipe", "pipe"] });
-}
-
-function countMatches(source, matcher) {
-  let count = 0;
-  let remaining = source;
-  let match = matcher.exec(remaining);
-  while (match) {
-    count += 1;
-    remaining = remaining.slice(match.index + match[0].length);
-    match = matcher.exec(remaining);
-  }
-  return count;
 }
 
 describe("Azure release workload identity static hardening", () => {
@@ -283,8 +287,9 @@ describe("Azure release workload identity static hardening", () => {
   });
 
   test("proves the exact permitted module surface", () => {
-    expect(countMatches(productionSource, exactProviderImportMatcher)).toBe(1);
-    expect(countMatches(productionSource, exactLocalStatusExportMatcher)).toBe(1);
+    expect(moduleInventory(productionSource)).toStrictEqual({ imports: 1, sourceExports: 0, localNamedExports: 1 });
+    expect(exactProviderImportMatcher.test(productionSource)).toBe(true);
+    expect(exactLocalStatusExportMatcher.test(productionSource)).toBe(true);
     expect(additionalStaticImportMatcher.test(productionSource)).toBe(false);
     expect(namedSourceReexportMatcher.test(productionSource)).toBe(false);
     expect(starSourceReexportMatcher.test(productionSource)).toBe(false);
@@ -296,13 +301,14 @@ describe("Azure release workload identity static hardening", () => {
   });
 
   test("binds every structural fixture and validates ESM syntax without execution", () => {
-    expect(structuralRows).toHaveLength(99);
-    expect(new Set(structuralRows.map(({ name }) => name)).size).toBe(99);
+    expect(structuralRows).toHaveLength(102);
+    expect(new Set(structuralRows.map(({ name }) => name)).size).toBe(102);
     expect(new Set(structuralRows.map(({ family }) => family)).size).toBe(7);
     for (const row of structuralRows) {
       assertSyntax(row.source);
       const family = families.find(({ name }) => name === row.family);
       expect(family.matcher.test(row.source), row.name).toBe(row.expected);
+      if (row.inventory) expect(moduleInventory(row.source), row.name).toStrictEqual(row.inventory);
       if (row.name.endsWith("asi-next")) {
         expect(family.matcher.exec(row.source)[0].includes("const next"), row.name).toBe(false);
       }
@@ -315,8 +321,8 @@ describe("Azure release workload identity static hardening", () => {
   });
 
   test("binds every locked token marker to one positive and near miss", () => {
-    expect(tokenRows).toHaveLength(300);
-    expect(new Set(tokenRows.map(({ name }) => name)).size).toBe(300);
+    expect(tokenRows).toHaveLength(320);
+    expect(new Set(tokenRows.map(({ name }) => name)).size).toBe(320);
     for (const row of tokenRows) {
       assertSyntax(row.source);
       const family = tokenFamilies.find(({ name }) => name === row.family);
@@ -325,13 +331,13 @@ describe("Azure release workload identity static hardening", () => {
     for (const family of tokenFamilies) {
       for (const marker of family.markers) {
         const rows = tokenRows.filter((row) => row.family === family.name && row.marker === marker.name);
-        const expected = ["module", "module-prefix"].includes(marker.kind) ? [true, true, true, false, false, false, false, false] : [true, false];
+        const expected = ["module", "module-prefix"].includes(marker.kind) ? [true, true, true, false, false, false, false, false] : marker.kind === "call" ? [true, true, false] : marker.kind === "call-or-construct" ? [true, true, true, false, false, false] : [true, false];
         expect(rows.map((row) => row.expected)).toStrictEqual(expected);
       }
     }
   });
 
-  test("uses JavaScript identifier boundaries and blocks both Function forms", () => {
+  test("uses JavaScript identifier boundaries for references and construction", () => {
     expect(identifierMarkers).toHaveLength(81);
     expect(dollarBoundaryRows).toHaveLength(162);
     expect(new Set(dollarBoundaryRows.map(({ name }) => name)).size).toBe(162);
@@ -339,12 +345,6 @@ describe("Azure release workload identity static hardening", () => {
       assertSyntax(row.source);
       const family = tokenFamilies.find(({ name }) => name === row.family);
       expect(family.matcher.test(row.source), row.name).toBe(false);
-    }
-    expect(functionConstructionRows).toHaveLength(3);
-    const matcher = tokenFamilies.find(({ name }) => name === "code-generation").matcher;
-    for (const row of functionConstructionRows) {
-      assertSyntax(row.source);
-      expect(matcher.test(row.source), row.name).toBe(row.expected);
     }
   });
 
