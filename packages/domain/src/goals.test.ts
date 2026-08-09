@@ -385,7 +385,7 @@ describe("Goals Domain", () => {
       }));
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
         where: expect.objectContaining({ id: "goal-existing" }),
-        data: { progressPercent: 20 },
+        data: expect.objectContaining({ progressPercent: 20 }),
       }));
       expect(result).toMatchObject({
         id: "goal-existing",
@@ -1147,10 +1147,10 @@ describe("Goals Domain", () => {
         data: { updatedAt: expect.any(Date) },
         select: { id: true },
       }));
-      expect(prisma.goal.update).toHaveBeenNthCalledWith(2, {
+      expect(prisma.goal.update).toHaveBeenNthCalledWith(2, expect.objectContaining({
         where: expect.objectContaining({ id: "goal-1" }),
-        data: { progressPercent: 55 },
-      });
+        data: expect.objectContaining({ progressPercent: 55 }),
+      }));
     });
 
     it("rejects stale progress updates if goal visibility changes before write", async () => {
@@ -1509,14 +1509,14 @@ describe("Goals Domain", () => {
       await recomputeGoalProgress("child-goal");
 
       expect(prisma.goal.update).toHaveBeenNthCalledWith(1, expect.objectContaining({
-        where: { id: "child-goal" },
-        data: { progressPercent: 75 },
+        where: expect.objectContaining({ id: "child-goal" }),
+        data: expect.objectContaining({ progressPercent: 75 }),
       }));
 
       // Recursive call for parent goal
       expect(prisma.goal.update).toHaveBeenNthCalledWith(2, expect.objectContaining({
-        where: { id: "parent-goal" },
-        data: { progressPercent: 75 },
+        where: expect.objectContaining({ id: "parent-goal" }),
+        data: expect.objectContaining({ progressPercent: 75 }),
       }));
     });
 
@@ -1550,9 +1550,126 @@ describe("Goals Domain", () => {
         }),
       }));
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: { id: "parent-goal" },
-        data: { progressPercent: 80 },
+        where: expect.objectContaining({ id: "parent-goal" }),
+        data: expect.objectContaining({ progressPercent: 80 }),
       }));
+    });
+  });
+
+  describe("Goal progress versioning regressions", () => {
+    const makeGoalFixture = (id: string, overrides: Record<string, unknown> = {}) => ({
+      id, workspaceId: "ws-1", title: `Goal ${id}`, descriptionMd: null, level: "COMPANY", cadence: "QUARTERLY",
+      status: "ACTIVE", isPrivate: false, progressPercent: 0, version: 1, authorUserId: "user-1", ownerMemberId: "member-1",
+      circleId: null, parentGoalId: null, targetDate: null, startDate: null, archivedAt: null, keyResults: [], childGoals: [],
+      createdAt: new Date("2026-07-20T10:00:00.000Z"), updatedAt: new Date("2026-07-20T10:05:00.000Z"), ...overrides,
+    });
+
+    it("atomically records version history and advances version during duplicate key result merging", async () => {
+      const existingGoal = makeGoalFixture("goal-dup", {
+        title: "Duplicate target goal",
+        version: 3, status: "DRAFT", isPrivate: true, parentGoalId: "parent-goal",
+        keyResults: [{ title: "KR 1", progressPercent: 0, sortOrder: 0 }],
+      });
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([existingGoal as any]);
+      vi.mocked(prisma.goal.findFirst).mockResolvedValue(existingGoal as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce(existingGoal as any)
+        .mockResolvedValueOnce(makeGoalFixture("parent-goal", { childGoals: [{ id: "goal-dup", progressPercent: 50 }] }) as any);
+      vi.mocked(prisma.keyResult.findMany).mockResolvedValueOnce([{ title: "KR 1", progressPercent: 0, sortOrder: 0 }] as any);
+      vi.mocked(prisma.keyResult.createMany).mockResolvedValueOnce({ count: 1 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValue({ id: "goal-dup", version: 4 } as any);
+
+      await createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Duplicate target goal",
+        keyResults: [{ title: "KR 2", currentValue: 100, targetValue: 100 }],
+        duplicateGuard: { resolution: "update_existing", targetEntityId: "goal-dup" },
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "goal-dup", version: 3, changedFields: expect.arrayContaining(["keyResults", "progressPercent"]) }),
+      }));
+      expect(prisma.goal.update).toHaveBeenLastCalledWith(expect.objectContaining({
+        where: { id: "goal-dup", version: 3 },
+        data: expect.objectContaining({ progressPercent: 50, version: 4 }),
+      }));
+    });
+
+    it("atomically records history and advances version in postGoalUpdate on successful progress update", async () => {
+      const activeGoal = makeGoalFixture("goal-post", { progressPercent: 20, version: 2 });
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(activeGoal as any);
+      vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({ id: "gu-1" } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...activeGoal, progressPercent: 60, version: 3 } as any);
+
+      await postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-post",
+        bodyMd: "Progress update",
+        newProgress: 60,
+        expectedVersion: 2,
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "goal-post", version: 2, changedFields: ["progressPercent"] }),
+      }));
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: "goal-post", version: 2 }),
+        data: expect.objectContaining({ progressPercent: 60, version: 3 }),
+      }));
+    });
+
+    it("rejects postGoalUpdate early with stale expectedVersion and no persisted side effects", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(makeGoalFixture("goal-post", { version: 2 }) as any);
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-post",
+        bodyMd: "Progress update",
+        newProgress: 60,
+        expectedVersion: 1,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+    });
+
+    it("recomputeGoalProgress records prior version/history and advances version for directly changed and parent goals", async () => {
+      const childGoal = makeGoalFixture("child-1", { parentGoalId: "parent-1", progressPercent: 10, version: 5, keyResults: [{ progressPercent: 90 }] });
+      const parentGoal = makeGoalFixture("parent-1", { progressPercent: 20, version: 2, childGoals: [{ id: "child-1", progressPercent: 90 }] });
+
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(childGoal as any)
+        .mockResolvedValueOnce(parentGoal as any);
+      vi.mocked(prisma.goal.update)
+        .mockResolvedValueOnce({ ...childGoal, progressPercent: 90, version: 6 } as any)
+        .mockResolvedValueOnce({ ...parentGoal, progressPercent: 90, version: 3 } as any);
+
+      await recomputeGoalProgress("child-1", actor);
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "child-1", version: 5, changedFields: ["progressPercent"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "parent-1", version: 2, changedFields: ["progressPercent"] }),
+      }));
+      expect(prisma.goal.update).toHaveBeenNthCalledWith(1, expect.objectContaining({ where: { id: "child-1", version: 5 }, data: { progressPercent: 90, version: 6 } }));
+      expect(prisma.goal.update).toHaveBeenNthCalledWith(2, expect.objectContaining({ where: { id: "parent-1", version: 2 }, data: { progressPercent: 90, version: 3 } }));
+    });
+
+    it("maps CAS P2025 in recomputeGoalProgress to 409 VERSION_CONFLICT", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(makeGoalFixture("child-collision", { keyResults: [{ progressPercent: 90 }] }) as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+
+      await expect(recomputeGoalProgress("child-collision", actor)).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
     });
   });
 });

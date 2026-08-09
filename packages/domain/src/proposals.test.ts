@@ -18,6 +18,7 @@ vi.mock("@corgtex/shared", () => ({
     action: {
       findMany: vi.fn(),
       updateMany: vi.fn(),
+      update: vi.fn(),
     },
     tension: {
       findFirst: vi.fn(),
@@ -1336,10 +1337,10 @@ describe("createProposalFromTension", () => {
         publishedAt: null,
       }),
     });
-    expect(prisma.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
-      data: { proposalId: "p-1" },
-    });
+    expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "t-1" }),
+      data: expect.objectContaining({ proposalId: "p-1" }),
+    }));
   });
 
   it("checks duplicates before creating a proposal from a tension", async () => {
@@ -1502,25 +1503,20 @@ describe("createProposalFromTension", () => {
       },
     })).resolves.toMatchObject({ id: "p-existing" });
 
-    expect(prisma.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
-      data: { proposalId: "p-existing" },
-    });
+    expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "t-1" }),
+      data: expect.objectContaining({ proposalId: "p-existing" }),
+    }));
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ id: "p-existing" }),
       data: expect.objectContaining({
         priority: 2,
       }),
     }));
-    expect(prisma.action.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        id: { in: ["a-1", "a-2"] },
-        workspaceId: "ws-1",
-        archivedAt: null,
-        proposalId: null,
-      }),
-      data: { proposalId: "p-existing" },
-    });
+    expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "a-1" }),
+      data: expect.objectContaining({ proposalId: "p-existing" }),
+    }));
     expect(prisma.proposal.create).not.toHaveBeenCalled();
   });
 
@@ -1671,7 +1667,7 @@ describe("createProposalFromTension", () => {
       relatedActionIds: ["a-1", "a-2"],
     });
 
-    expect(prisma.action.findMany).toHaveBeenCalledWith({
+    expect(prisma.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         id: { in: ["a-1", "a-2"] },
         workspaceId: "ws-1",
@@ -1683,22 +1679,22 @@ describe("createProposalFromTension", () => {
       },
       select: {
         id: true,
+        workspaceId: true,
+        title: true,
+        bodyMd: true,
+        priority: true,
+        circleId: true,
+        assigneeMemberId: true,
+        dueAt: true,
         proposalId: true,
+        status: true,
+        version: true,
       },
-    });
-    expect(prisma.action.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: { in: ["a-1", "a-2"] },
-        workspaceId: "ws-1",
-        archivedAt: null,
-        proposalId: null,
-        OR: [
-          { isPrivate: false },
-          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-        ],
-      },
-      data: { proposalId: "p-2" },
-    });
+    }));
+    expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "a-1" }),
+      data: expect.objectContaining({ proposalId: "p-2" }),
+    }));
   });
 
   it("rejects missing, hidden, archived, or cross-workspace source tensions", async () => {
@@ -2073,5 +2069,188 @@ describe("submitProposal event payload", () => {
         expect.objectContaining({ type: "proposal.support_reopened_resolved" }),
       ]),
     );
+  });
+
+  describe("Proposal link versioning & rollback regressions", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    const makeTension = (id = "t-1", overrides = {}) => ({
+      id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
+      assigneeMemberId: null, raisedByMemberId: null, proposalId: null, priority: 1, status: "OPEN", version: 1, ...overrides,
+    });
+    const makeAction = (id = "a-1", overrides = {}) => ({
+      id, workspaceId: "ws-1", title: `Action ${id}`, bodyMd: "Action body", priority: 1, circleId: null,
+      assigneeMemberId: null, dueAt: null, proposalId: null, status: "OPEN", version: 1, ...overrides,
+    });
+    const makeProposal = (id = "p-1", overrides = {}) => ({
+      id, workspaceId: "ws-1", title: `Proposal ${id}`, bodyMd: "Proposal body", summary: null, circleId: null,
+      ownerMemberId: null, priority: 0, status: "DRAFT", isPrivate: true, archivedAt: null, version: 1, ...overrides,
+    });
+
+    it("atomically records prior history and increments version on source Tension and related Actions during proposal creation", async () => {
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-versioned", { version: 1 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-versioned", { version: 4 })] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-versioned") as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-versioned", version: 2 } as any);
+      vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-versioned", version: 5 } as any);
+
+      await createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Versioned link proposal",
+        bodyMd: "Proposal body",
+        sourceTensionId: "t-versioned",
+        relatedActionIds: ["a-versioned"],
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Tension", entityId: "t-versioned", version: 1, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Action", entityId: "a-versioned", version: 4, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "t-versioned",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 1,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-versioned", version: 2 },
+      }));
+      expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "a-versioned",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 4,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-versioned", version: 5 },
+      }));
+    });
+
+    it("atomically records prior history and increments version during createProposalFromTension", async () => {
+      const { createProposalFromTension } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-from-tension", { version: 3 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-from-tension", { version: 2 })] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-from-tension") as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-from-tension", version: 4 } as any);
+      vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-from-tension", version: 3 } as any);
+
+      await createProposalFromTension(actor, {
+        workspaceId: "ws-1",
+        sourceTensionId: "t-from-tension",
+        relatedActionIds: ["a-from-tension"],
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Tension", entityId: "t-from-tension", version: 3, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Action", entityId: "a-from-tension", version: 2, changedFields: ["proposalId"] }),
+      }));
+    });
+
+    it("atomically records prior history and increments version on source Tension and related Actions during duplicate proposal update_existing path", async () => {
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      const existingProposal = makeProposal("p-existing", { title: "Duplicate proposal", bodyMd: "Proposal body" });
+
+      vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([existingProposal as any]);
+      vi.mocked(prisma.proposal.findFirst).mockResolvedValue(existingProposal as any);
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValue(existingProposal as any);
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-dup", { version: 2 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-dup", { version: 3 })] as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-dup", version: 3 } as any);
+      vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-dup", version: 4 } as any);
+
+      await createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Duplicate proposal",
+        bodyMd: "Proposal body",
+        sourceTensionId: "t-dup",
+        relatedActionIds: ["a-dup"],
+        duplicateGuard: { resolution: "update_existing", targetEntityId: "p-existing" },
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Tension", entityId: "t-dup", version: 2, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Action", entityId: "a-dup", version: 3, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "t-dup",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 2,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-existing", version: 3 },
+      }));
+      expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "a-dup",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 3,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-existing", version: 4 },
+      }));
+    });
+
+    it("rolls back transaction and returns 409 VERSION_CONFLICT when action link CAS fails, preventing downstream audit and events", async () => {
+      const { appendEvents } = await import("./events");
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-rollback") as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-rollback")] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-rollback") as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-rollback", version: 2 } as any);
+      vi.mocked(prisma.action.update).mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.auditLog.create).mockClear();
+      vi.mocked(appendEvents).mockClear();
+
+      await expect(createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Rollback proposal",
+        bodyMd: "Proposal body",
+        sourceTensionId: "t-rollback",
+        relatedActionIds: ["a-rollback"],
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
   });
 });

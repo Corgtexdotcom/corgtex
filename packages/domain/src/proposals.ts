@@ -243,13 +243,17 @@ async function loadVisibleSourceTension(
     },
     select: {
       id: true,
+      workspaceId: true,
       title: true,
       bodyMd: true,
       circleId: true,
       meetingId: true,
+      assigneeMemberId: true,
+      raisedByMemberId: true,
       proposalId: true,
       priority: true,
       status: true,
+      version: true,
     },
   });
 
@@ -266,7 +270,7 @@ async function validateRelatedActions(
   relatedActionIds?: string[] | null,
 ) {
   const actionIds = normalizeIds(relatedActionIds);
-  if (actionIds.length === 0) return actionIds;
+  if (actionIds.length === 0) return [];
 
   const actions = await tx.action.findMany({
     where: {
@@ -277,14 +281,23 @@ async function validateRelatedActions(
     },
     select: {
       id: true,
+      workspaceId: true,
+      title: true,
+      bodyMd: true,
+      priority: true,
+      circleId: true,
+      assigneeMemberId: true,
+      dueAt: true,
       proposalId: true,
+      status: true,
+      version: true,
     },
   });
 
   invariant(actions.length === actionIds.length, 404, "NOT_FOUND", "Related action not found.");
   invariant(!actions.some((action) => action.proposalId), 400, "INVALID_STATE", "Related action is already linked to a proposal.");
 
-  return actionIds;
+  return actions;
 }
 
 async function resolveProposalOwnerMemberId(
@@ -494,13 +507,126 @@ export async function getProposal(actor: AppActor, params: {
   return proposal;
 }
 
+type SourceTensionForLinking = NonNullable<Awaited<ReturnType<typeof loadVisibleSourceTension>>>;
+type RelatedActionForLinking = Awaited<ReturnType<typeof validateRelatedActions>>[number];
+
+async function linkProposalSourcesAndActions(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  membership: MembershipSummary | null,
+  params: {
+    workspaceId: string;
+    proposalId: string;
+    sourceTension?: SourceTensionForLinking | null;
+    relatedActions?: RelatedActionForLinking[] | null;
+  },
+) {
+  if (params.sourceTension) {
+    const currentVersion = params.sourceTension.version;
+    const newVersion = await recordWorkItemVersion(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Tension",
+      entityId: params.sourceTension.id,
+      currentVersion,
+      changedFields: ["proposalId"],
+      previousState: pickJsonSnapshot(params.sourceTension as unknown as Record<string, unknown>, [
+        "id",
+        "workspaceId",
+        "title",
+        "bodyMd",
+        "circleId",
+        "assigneeMemberId",
+        "raisedByMemberId",
+        "proposalId",
+        "priority",
+        "status",
+        "version",
+      ]),
+    });
+
+    const tensionWhere: Record<string, unknown> = {
+      id: params.sourceTension.id,
+      workspaceId: params.workspaceId,
+      archivedAt: null,
+      proposalId: null,
+      version: currentVersion,
+      ...privacyFilter(actor, membership),
+    };
+
+    try {
+      await tx.tension.update({
+        where: tensionWhere as Prisma.TensionWhereUniqueInput,
+        data: {
+          proposalId: params.proposalId,
+          version: newVersion,
+        },
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "VERSION_CONFLICT", "The source tension changed before this update could be applied. Please refresh and try again.");
+      }
+      throw error;
+    }
+  }
+
+  if (params.relatedActions && params.relatedActions.length > 0) {
+    for (const action of params.relatedActions) {
+      const currentVersion = action.version;
+      const newVersion = await recordWorkItemVersion(tx, actor, {
+        workspaceId: params.workspaceId,
+        entityType: "Action",
+        entityId: action.id,
+        currentVersion,
+        changedFields: ["proposalId"],
+        previousState: pickJsonSnapshot(action as unknown as Record<string, unknown>, [
+          "id",
+          "workspaceId",
+          "title",
+          "bodyMd",
+          "priority",
+          "circleId",
+          "assigneeMemberId",
+          "dueAt",
+          "proposalId",
+          "status",
+          "version",
+        ]),
+      });
+
+      const actionWhere: Record<string, unknown> = {
+        id: action.id,
+        workspaceId: params.workspaceId,
+        archivedAt: null,
+        proposalId: null,
+        version: currentVersion,
+        ...privacyFilter(actor, membership),
+      };
+
+      try {
+        await tx.action.update({
+          where: actionWhere as Prisma.ActionWhereUniqueInput,
+          data: {
+            proposalId: params.proposalId,
+            version: newVersion,
+          },
+        });
+      } catch (error) {
+        if (isPrismaNotFoundError(error)) {
+          invariant(false, 409, "VERSION_CONFLICT", "A related action changed before this update could be applied. Please refresh and try again.");
+        }
+        throw error;
+      }
+    }
+  }
+}
+
 async function applyProposalDuplicateUpdate(actor: AppActor, params: CreateProposalParams, proposalId: string) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
   const sourceTension = await loadVisibleSourceTension(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.sourceTensionId);
-  const relatedActionIds = await validateRelatedActions(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.relatedActionIds);
+  const relatedActions = await validateRelatedActions(prisma as unknown as Prisma.TransactionClient, actor, membership, params.workspaceId, params.relatedActionIds);
   const existing = await getProposal(actor, { workspaceId: params.workspaceId, proposalId });
   const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
   const updateParams: Parameters<typeof updateProposal>[1] = {
@@ -514,29 +640,14 @@ async function applyProposalDuplicateUpdate(actor: AppActor, params: CreatePropo
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   const proposal = Object.keys(updateParams).length > 2 ? await updateProposal(actor, updateParams) : existing;
 
-  if (sourceTension || relatedActionIds.length > 0) {
+  if (sourceTension || relatedActions.length > 0) {
     await prisma.$transaction(async (tx) => {
-      if (sourceTension) {
-        await tx.tension.update({
-          where: { id: sourceTension.id },
-          data: { proposalId },
-        });
-      }
-
-      if (relatedActionIds.length > 0) {
-        const linkedActions = await tx.action.updateMany({
-          where: {
-            id: { in: relatedActionIds },
-            workspaceId: params.workspaceId,
-            archivedAt: null,
-            proposalId: null,
-            ...privacyFilter(actor, membership),
-          },
-          data: { proposalId },
-        });
-
-        invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
-      }
+      await linkProposalSourcesAndActions(tx, actor, membership, {
+        workspaceId: params.workspaceId,
+        proposalId,
+        sourceTension,
+        relatedActions,
+      });
     });
   }
 
@@ -581,7 +692,8 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
 
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
-    const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const relatedActions = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const relatedActionIds = relatedActions.map((action) => action.id);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
       : await actorUserIdForWorkspace(actor, params.workspaceId);
@@ -614,26 +726,13 @@ export async function createProposal(actor: AppActor, params: CreateProposalPara
       canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Proposal", proposal),
     });
 
-    if (sourceTension) {
-      await tx.tension.update({
-        where: { id: sourceTension.id },
-        data: { proposalId: proposal.id },
+    if (sourceTension || relatedActions.length > 0) {
+      await linkProposalSourcesAndActions(tx, actor, membership, {
+        workspaceId: params.workspaceId,
+        proposalId: proposal.id,
+        sourceTension,
+        relatedActions,
       });
-    }
-
-    if (relatedActionIds.length > 0) {
-      const linkedActions = await tx.action.updateMany({
-        where: {
-          id: { in: relatedActionIds },
-          workspaceId: params.workspaceId,
-          archivedAt: null,
-          proposalId: null,
-          ...privacyFilter(actor, membership),
-        },
-        data: { proposalId: proposal.id },
-      });
-
-      invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
     }
 
     await tx.auditLog.create({
@@ -733,7 +832,8 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
   return prisma.$transaction(async (tx) => {
     const sourceTension = await loadVisibleSourceTension(tx, actor, membership, params.workspaceId, params.sourceTensionId);
     invariant(sourceTension, 404, "NOT_FOUND", "Source tension not found.");
-    const relatedActionIds = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const relatedActions = await validateRelatedActions(tx, actor, membership, params.workspaceId, params.relatedActionIds);
+    const relatedActionIds = relatedActions.map((action) => action.id);
     const draft = proposalDraftFromTension(sourceTension, params);
     let authorUserId = actor.kind === "user"
       ? actor.user.id
@@ -768,25 +868,12 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
       canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Proposal", proposal),
     });
 
-    await tx.tension.update({
-      where: { id: sourceTension.id },
-      data: { proposalId: proposal.id },
+    await linkProposalSourcesAndActions(tx, actor, membership, {
+      workspaceId: params.workspaceId,
+      proposalId: proposal.id,
+      sourceTension,
+      relatedActions,
     });
-
-    if (relatedActionIds.length > 0) {
-      const linkedActions = await tx.action.updateMany({
-        where: {
-          id: { in: relatedActionIds },
-          workspaceId: params.workspaceId,
-          archivedAt: null,
-          proposalId: null,
-          ...privacyFilter(actor, membership),
-        },
-        data: { proposalId: proposal.id },
-      });
-
-      invariant(linkedActions.count === relatedActionIds.length, 409, "CONFLICT", "Related actions changed before they could be linked.");
-    }
 
     await tx.auditLog.create({
       data: {
