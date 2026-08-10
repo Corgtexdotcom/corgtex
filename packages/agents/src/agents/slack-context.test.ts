@@ -815,6 +815,7 @@ describe("Slack context jobs", () => {
     { label: "completed reply with later future clause", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed. It will be archived tomorrow." }, text: "Jan needs to send the report by tomorrow." },
     { label: "past obligation with base-form step", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should have sent the report earlier; can someone confirm?" },
     { label: "past obligation with conjugated step", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "sent the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should have sent the report earlier; can someone confirm?" },
+    { label: "past obligation question after selected assignment", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan will send the report tomorrow. Jan should have sent the report earlier?" },
     { label: "inanimate finance phrase is not a role owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Finance report", concreteNextStep: "be approved tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Approve report" }, text: "Finance report needs to be approved tomorrow." },
     { label: "capitalized Rain is not a trusted owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Rain", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Rain needs to send the report by tomorrow." },
     { label: "vague grounded verb is not a deliverable", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send" }, text: "Jan needs to send something?" },
@@ -851,7 +852,6 @@ describe("Slack context jobs", () => {
     });
     expect(extractMock).toHaveBeenCalledTimes(1);
   });
-
   it.each([
     { label: "courtesy thanks does not veto future deliverable", text: "Thanks, Jan will send the report tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Thanks, Jan will send the report tomorrow." },
     { label: "single-word investigate deliverable", text: "Jan should investigate by tomorrow.", step: "investigate", owner: "Jan", title: "Investigate", bodyMd: "Jan should investigate by tomorrow." },

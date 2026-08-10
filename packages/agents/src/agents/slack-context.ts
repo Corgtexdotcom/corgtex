@@ -287,7 +287,7 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
   const paddedCorpus = ` ${normalizeText(corpus)} `;
   return paddedCorpus.includes(paddedValue);
 }
-function splitAssignmentClauses(text: string) { return text.split(/[\n;!?]+|\.(?=\s|$)/u).map(normalizeText); }
+function splitAssignmentClauses(text: string) { return text.split(/[\n;!]+|(?<=\?)|\.(?=\s|$)/u).map(clause => `${normalizeText(clause)}${clause.includes("?") ? " ?" : ""}`.trim()); }
 function isOrganizationalRole(ownerEvidence: string) { return /^(?:legal|finance|operations|engineering|product|sales|support|security|(?:[\p{L}\p{N}_-]+\s+){0,2}(?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))$/u.test(normalizeText(ownerEvidence)); }
 
 function hasGroundedOwnerCue(ownerEvidence: string, concreteNextStep: string, threadTexts: string[], trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
