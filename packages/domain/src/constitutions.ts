@@ -1,9 +1,128 @@
+import { createHash } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 
 const CONSTITUTION_VERSION_RETRY_LIMIT = 3;
+const INVALID_SOURCE_MESSAGE = "Invalid Constitution source reference.";
+
+export type ConstitutionSourceReferenceInput = {
+  pointOrder: number;
+  sourceOrder: number;
+  policyCorpusId: string;
+  sourceKind: "PROPOSAL" | "TENSION";
+  proposalId?: string;
+  tensionId?: string;
+};
+
+function canonicalizeFingerprintValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    return value
+      .map(canonicalizeFingerprintValue)
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, canonicalizeFingerprintValue(entry)]));
+  }
+  return value;
+}
+
+export function fingerprintConstitutionCorpus(corpus: readonly unknown[]) {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalizeFingerprintValue(corpus)))
+    .digest("hex");
+}
+
+function loadConstitutionCorpusForFingerprint(tx: Prisma.TransactionClient, workspaceId: string) {
+  return tx.policyCorpus.findMany({
+    where: { workspaceId },
+    select: {
+      id: true,
+      proposalId: true,
+      title: true,
+      bodyMd: true,
+      circleId: true,
+      acceptedAt: true,
+      proposal: {
+        select: {
+          title: true,
+          isPrivate: true,
+          publishedAt: true,
+          tensions: {
+            select: { id: true, title: true, isPrivate: true, publishedAt: true, archivedAt: true },
+          },
+        },
+      },
+    },
+  });
+}
+
+async function resolveSourceReferences(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  references: readonly ConstitutionSourceReferenceInput[],
+) {
+  const policyIds = [...new Set(references.map((reference) => reference.policyCorpusId))];
+  const policies = await tx.policyCorpus.findMany({
+    where: { workspaceId, id: { in: policyIds } },
+    select: {
+      id: true,
+      acceptedAt: true,
+      proposal: {
+        select: {
+          id: true,
+          title: true,
+          tensions: {
+            where: { isPrivate: false, publishedAt: { not: null } },
+            select: { id: true, title: true },
+          },
+        },
+      },
+    },
+  });
+  const policiesById = new Map(policies.map((policy) => [policy.id, policy]));
+  const orders = new Set<string>();
+  const targets = new Set<string>();
+
+  return references.map((reference) => {
+    const policy = policiesById.get(reference.policyCorpusId);
+    const validPoint = Number.isInteger(reference.pointOrder)
+      && reference.pointOrder >= 1 && reference.pointOrder <= 10;
+    const validOrder = Number.isInteger(reference.sourceOrder) && reference.sourceOrder >= 1;
+    const proposalSource = reference.sourceKind === "PROPOSAL"
+      && reference.proposalId === policy?.proposal.id && !reference.tensionId;
+    const tension = reference.sourceKind === "TENSION" && !reference.proposalId
+      ? policy?.proposal.tensions.find((candidate) => candidate.id === reference.tensionId)
+      : undefined;
+    const labelSnapshot = proposalSource ? policy?.proposal.title : tension?.title;
+    const orderKey = `${reference.pointOrder}:${reference.sourceOrder}`;
+    const targetKey = `${reference.pointOrder}:${reference.policyCorpusId}:${reference.sourceKind}:${reference.proposalId ?? reference.tensionId}`;
+
+    if (!policy || !validPoint || !validOrder || !labelSnapshot?.trim()
+      || orders.has(orderKey) || targets.has(targetKey)) {
+      throw new Error(INVALID_SOURCE_MESSAGE);
+    }
+    orders.add(orderKey);
+    targets.add(targetKey);
+
+    return {
+      pointKey: `point-${reference.pointOrder}`,
+      pointOrder: reference.pointOrder,
+      sourceOrder: reference.sourceOrder,
+      policyCorpusId: policy.id,
+      sourceKind: reference.sourceKind,
+      proposalId: proposalSource ? policy.proposal.id : null,
+      tensionId: tension?.id ?? null,
+      labelSnapshot,
+      acceptedAtSnapshot: policy.acceptedAt,
+    };
+  });
+}
 
 function isConstitutionVersionConflict(error: unknown) {
   if (!error || typeof error !== "object") {
@@ -17,6 +136,7 @@ function isConstitutionVersionConflict(error: unknown) {
     };
   };
 
+  if (prismaError.code === "P2034") return true;
   if (prismaError.code !== "P2002") {
     return false;
   }
@@ -66,25 +186,42 @@ export async function createConstitutionVersion(params: {
   modelUsed: string;
   promptTokens?: number | null;
   completionTokens?: number | null;
+  references?: readonly ConstitutionSourceReferenceInput[];
+  expectedCorpusFingerprint?: string | null;
 }) {
   for (let attempt = 0; attempt < CONSTITUTION_VERSION_RETRY_LIMIT; attempt += 1) {
-    const latest = await getCurrentConstitution(params.workspaceId);
-    const nextVersion = (latest?.version ?? 0) + 1;
-
     try {
-      return await prisma.constitution.create({
-        data: {
-          workspaceId: params.workspaceId,
-          version: nextVersion,
-          bodyMd: params.bodyMd,
-          diffSummary: params.diffSummary ?? null,
-          triggerType: params.triggerType ?? null,
-          triggerRef: params.triggerRef ?? null,
-          modelUsed: params.modelUsed,
-          promptTokens: params.promptTokens ?? null,
-          completionTokens: params.completionTokens ?? null,
-        },
-      });
+      return await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('constitution_version'), hashtext(${params.workspaceId}))`;
+        if (params.expectedCorpusFingerprint != null) {
+          const corpus = await loadConstitutionCorpusForFingerprint(tx, params.workspaceId);
+          if (fingerprintConstitutionCorpus(corpus) !== params.expectedCorpusFingerprint) {
+            throw new Error("Constitution policy corpus changed during synthesis.");
+          }
+        }
+        const sourceReferences = params.references === undefined
+          ? undefined
+          : await resolveSourceReferences(tx, params.workspaceId, params.references);
+        const latest = await tx.constitution.findFirst({
+          where: { workspaceId: params.workspaceId },
+          orderBy: { version: "desc" },
+        });
+
+        return tx.constitution.create({
+          data: {
+            workspaceId: params.workspaceId,
+            version: (latest?.version ?? 0) + 1,
+            bodyMd: params.bodyMd,
+            diffSummary: params.diffSummary ?? null,
+            triggerType: params.triggerType ?? null,
+            triggerRef: params.triggerRef ?? null,
+            modelUsed: params.modelUsed,
+            promptTokens: params.promptTokens ?? null,
+            completionTokens: params.completionTokens ?? null,
+            ...(sourceReferences?.length ? { sourceReferences: { create: sourceReferences } } : {}),
+          },
+        });
+      }, { isolationLevel: "Serializable" });
     } catch (error) {
       if (attempt === CONSTITUTION_VERSION_RETRY_LIMIT - 1 || !isConstitutionVersionConflict(error)) {
         throw error;
