@@ -143,6 +143,39 @@ describe("action domain lifecycle", () => {
     }));
   });
 
+  it("reuses a supplied transaction for atomic composed Action writes", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({
+      id: "action-composed",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Publish from Slack",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-08-10T12:00:00.000Z"),
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1",
+      title: "Publish from Slack",
+      isPrivate: false,
+      _tx: prismaMock as never,
+    })).resolves.toMatchObject({ id: "action-composed", status: "OPEN" });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.action.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "OPEN",
+        isPrivate: false,
+        publishedAt: expect.any(Date),
+      }),
+    });
+    expect(recordAudit).toHaveBeenCalledWith(prismaMock, actor, expect.objectContaining({
+      action: "action.published",
+      entityId: "action-composed",
+    }));
+  });
+
   it("fills a missing proposal link when updating an existing duplicate action", async () => {
     const existingAction = {
       id: "action-existing",

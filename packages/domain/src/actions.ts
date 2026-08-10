@@ -67,6 +67,7 @@ type CreateActionParams = {
   priority?: number | null;
   duplicateGuard?: DuplicateGuardOptions | null;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
+  _tx?: Prisma.TransactionClient;
 };
 
 function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter<"Action"> | undefined {
@@ -560,7 +561,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
   const isPrivate = params.isPrivate ?? true;
   const publishedAt = isPrivate ? null : new Date();
 
-  return prisma.$transaction(async (tx) => {
+  const create = async (tx: Prisma.TransactionClient) => {
     const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     let authorUserId = actor.kind === "user"
@@ -636,7 +637,9 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     }
 
     return action;
-  });
+  };
+
+  return params._tx ? create(params._tx) : prisma.$transaction(create);
 }
 
 export async function updateAction(actor: AppActor, params: {

@@ -1598,13 +1598,73 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
   raisedByMemberId?: string | null;
   dueAt?: Date | string | null;
   open?: boolean;
+  claimKey?: string | null;
 }) {
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Title is required.");
+  const claimKey = params.claimKey?.trim() || null;
+  invariant(params.claimKey == null || claimKey, 400, "INVALID_INPUT", "Communication claim key cannot be blank.");
+  invariant(!claimKey || claimKey.length <= 191, 400, "INVALID_INPUT", "Communication claim key must be 191 characters or fewer.");
+  invariant(!claimKey || (params.kind === "ACTION" && params.open === true), 400, "INVALID_INPUT", "Communication claim keys require an open Action.");
   const sourceNote = params.sourceMessageId ? `\n\n---\nCaptured from ${params.provider} source message.` : "";
   const bodyMd = `${params.bodyMd?.trim() || title}${sourceNote}`;
   const dueAt = typeof params.dueAt === "string" ? new Date(params.dueAt) : params.dueAt ?? null;
   const normalizedDueAt = dueAt instanceof Date && Number.isFinite(dueAt.getTime()) ? dueAt : null;
+
+  if (claimKey) {
+    try {
+      const action = await prisma.$transaction(async (tx) => {
+        const created = await createAction(actor, {
+          workspaceId: params.workspaceId,
+          title,
+          bodyMd,
+          assigneeMemberId: params.assigneeMemberId ?? null,
+          dueAt: normalizedDueAt,
+          isPrivate: false,
+          _tx: tx,
+        });
+        await tx.communicationEntityLink.create({
+          data: {
+            installationId: params.installationId,
+            workspaceId: params.workspaceId,
+            provider: params.provider,
+            messageId: params.sourceMessageId || null,
+            externalUserId: params.externalUserId ?? null,
+            claimKey,
+            entityType: "Action",
+            entityId: created.id,
+            action: "create_action",
+          },
+        });
+        return created;
+      });
+      return {
+        entityType: "Action",
+        entityId: action.id,
+        webUrl: entityUrl(params.workspaceId, "Action", action.id),
+        opened: true,
+      };
+    } catch (error) {
+      if (!isPrismaUniqueConstraintError(error)) throw error;
+      const existing = await prisma.communicationEntityLink.findUnique({
+        where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey } },
+      });
+      if (!existing
+        || existing.installationId !== params.installationId
+        || existing.provider !== params.provider
+        || existing.messageId !== (params.sourceMessageId || null)
+        || existing.entityType !== "Action"
+        || existing.action !== "create_action") {
+        throw error;
+      }
+      return {
+        entityType: "Action",
+        entityId: existing.entityId,
+        webUrl: entityUrl(params.workspaceId, "Action", existing.entityId),
+        opened: true,
+      };
+    }
+  }
 
   let result: { entityType: string; entityId: string };
   if (params.kind === "ACTION") {

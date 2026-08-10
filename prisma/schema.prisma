@@ -1503,6 +1503,7 @@ model CommunicationEntityLink {
   provider       CommunicationProvider
   messageId      String?
   externalUserId String?
+  claimKey       String?               @db.VarChar(191)
   entityType     String
   entityId       String
   action         String
@@ -1514,6 +1515,7 @@ model CommunicationEntityLink {
 
   @@index([workspaceId, entityType, entityId])
   @@index([installationId, action])
+  @@unique([workspaceId, claimKey])
 }
 
 model User {
