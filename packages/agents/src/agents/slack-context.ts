@@ -281,7 +281,7 @@ function hasGroundedOwnerCue(ownerEvidence: string, corpus: string): boolean {
   const owner = normalizeText(ownerEvidence);
   if (!owner || owner === "unknown") return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const normalizedCorpus = normalizeText(corpus);
+  const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
   return new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
     || new RegExp(`\\b(?:assigned\\s+to|owner\\s+is|have|ask)\\s+${escapedOwner}(?:\\s|$)`, "u").test(normalizedCorpus);
 }
@@ -333,8 +333,9 @@ function meetsActionPublicationPredicate(
   if (!parsed.hasValidCouldNotArray) return false;
   if (parsed.couldNot.length > 0) return false;
   if (parsed.confidence < confidenceThreshold) return false;
-  if (isDeterministicNegativeCategory(sourceText)) return false;
-  if (isNegatedActionRequest(sourceText)) return false;
+  const threadTexts = threadCorpus.replace(/\[[^\]]+\]\s+\S+:\s/g, "").split("\n");
+  if (threadTexts.some(isDeterministicNegativeCategory)) return false;
+  if (threadTexts.some(isNegatedActionRequest)) return false;
 
   const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus);
   const isExplicitRequest = parsed.explicitActionRequest === true && isDeterministicExplicitActionRequest(sourceText);
