@@ -6,8 +6,8 @@ single source of truth for how agents collaborate on Corgtex.
 
 Corgtex uses a fully autonomous three-agent pipeline:
 
-- **Planner** (Claude) writes plans.
-- **Executor** (Gemini in Antigravity) implements and opens the PR.
+- **Planner** (Claude Opus, or Codex Sol as fallback) writes plans.
+- **Executor** (Gemini in Antigravity, or Kimi) implements and opens the PR.
 - **Reviewer** (Codex) approves or rejects the PR.
 
 A human prompts each stage and can intervene via labels. No human
@@ -17,6 +17,23 @@ reviews code line-by-line. The full specification lives in
 ---
 
 ## Shared context (all agents read this)
+
+### Planner model policy
+
+- Every initial (first) planning pass must be authored only by **Claude
+  Opus** or **Codex Sol**. Try Opus first; use Sol only when Opus is
+  unavailable, unauthenticated, or out of subscription quota. If neither
+  is available, stop and request human direction — do not substitute
+  Kimi, Gemini, Claude Sonnet, Codex Terra, or any other model as
+  initial Planner.
+- Kimi, Gemini, Sonnet, Terra, and other models may analyze the problem
+  or execute an approved plan, but their analysis must never become the
+  initial plan contract. An allowed Planner (Opus or Sol) independently
+  evaluates any prior analysis before authoring the plan.
+- Kimi or Gemini may act as Executor.
+- The Reviewer stays a separate, independent, read-only agent that
+  reviews the exact current head of the PR; any later push invalidates
+  the review (stale-review invalidation). The Reviewer never edits code.
 
 ### Build, test, check
 
@@ -105,7 +122,7 @@ reviews code line-by-line. The full specification lives in
 
 ---
 
-## For Planners (Claude)
+## For Planners (Claude Opus, or Codex Sol as fallback)
 
 Your job is to produce a PR-body plan contract and nothing else. Do not write
 implementation code.
@@ -125,7 +142,7 @@ Stop there. Hand off to the Executor.
 
 ---
 
-## For Executors (Gemini in Antigravity)
+## For Executors (Gemini in Antigravity, or Kimi)
 
 Your job is to implement the plan. You do not plan, and you do not
 merge.
