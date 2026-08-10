@@ -244,7 +244,7 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
-  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|open|log|turn(?:\s+(?:this|that|it))?\s+into|convert(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:(?:this|that|it)\s+as\s+)?(?:(?:an?|the|new|another|corgtex)\s+)*(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
+  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|open|log|turn(?:\s+(?:this|that|it))?\s+into|convert(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:(?:this|that|it)\s+(?:as\s+)?)?(?:(?:an?|the|new|another|corgtex)\s+)*(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:(?:avoid(?:s|ed)?|skip(?:s|ped)?)\s+|refrain(?:s|ed)?\s+from\s+)(?:creating|adding|making|assigning|opening|logging|converting(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:an?\s+)?(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:not\s+an?|no)\s+(action|task|work item)\b/i.test(text)) return true;
   const verb = normalizeText(concreteNextStep).split(" ")[0];
