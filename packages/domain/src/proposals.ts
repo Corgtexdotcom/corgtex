@@ -32,7 +32,7 @@ import {
  * The following Proposal lifecycle and archive writers in this file can invalidate a pending AI-summary update
  * (or concurrent edit) on a Proposal and must acquire the work_item_version advisory lock for the proposal
  * under the transaction before performing state guards or modifications:
- * 1. updateProposal (edits content and generates AI summary under lock after reloading/re-checking)
+ * 1. updateProposal (edits content; generates AI summary outside the lock after admission, then re-checks under lock)
  * 2. archiveProposal / deleteProposal (archives proposal, transitioning archivedAt)
  * 3. submitProposal (lifecycle transition DRAFT -> OPEN)
  * 4. returnProposalToDraft (lifecycle transition OPEN/RESOLVED -> DRAFT)
@@ -946,7 +946,7 @@ export async function createProposalFromTension(actor: AppActor, params: CreateP
   });
 }
 
-export async function updateProposal(actor: AppActor, params: {
+type UpdateProposalParams = {
   workspaceId: string;
   proposalId: string;
   title?: string;
@@ -957,12 +957,43 @@ export async function updateProposal(actor: AppActor, params: {
   circleId?: string | null;
   ownerMemberId?: string | null;
   expectedVersion?: number;
-}) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
+};
 
+const PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE = "The record changed before this update could be applied. Please refresh and try again.";
+
+function requireUpdateProposalEditable(
+  actor: AppActor,
+  membership: MembershipSummary | null,
+  proposal: { archivedAt: Date | null; status: ProposalStatus } & Parameters<typeof requireProposalContentEditor>[2],
+) {
+  invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be edited.");
+  if (proposal.status === "DRAFT") {
+    requireProposalContentEditor(actor, membership, proposal);
+  } else {
+    invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be edited.");
+    requireProposalContentEditor(actor, membership, proposal);
+  }
+}
+
+function requireValidExpectedVersion(expectedVersion: number, currentVersion: number) {
+  invariant(Number.isInteger(expectedVersion) && expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+  invariant(expectedVersion === currentVersion, 409, "VERSION_CONFLICT", PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE);
+}
+
+type UpdateProposalAiAdmission = {
+  data: Record<string, unknown>;
+  effectiveTitle: string;
+  effectiveBodyMd: string;
+  status: ProposalStatus;
+  isPrivate: boolean;
+};
+
+async function runUpdateProposalTransaction(
+  actor: AppActor,
+  membership: MembershipSummary | null,
+  params: UpdateProposalParams,
+  aiAdmission: UpdateProposalAiAdmission | null,
+) {
   return prisma.$transaction(async (tx) => {
     await acquireProposalAdvisoryLock(tx, params.proposalId);
 
@@ -971,43 +1002,50 @@ export async function updateProposal(actor: AppActor, params: {
     });
 
     invariant(proposal && proposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
-    invariant(!proposal.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot be edited.");
-    if (proposal.status === "DRAFT") {
-      requireProposalContentEditor(actor, membership, proposal);
-    } else {
-      invariant(proposal.status === "OPEN", 400, "INVALID_STATE", "Only draft or open proposals can be edited.");
-      requireProposalContentEditor(actor, membership, proposal);
+    if (aiAdmission) {
+      // Drift checks: any inference input derived from stored state (fields the
+      // caller did not supply) must still match the authoritative reloaded
+      // state, and the lifecycle must not have moved since admission, otherwise
+      // the generated summary is stale.
+      const titleDrift = params.title === undefined && proposal.title !== aiAdmission.effectiveTitle;
+      const bodyDrift = params.bodyMd === undefined && proposal.bodyMd !== aiAdmission.effectiveBodyMd;
+      invariant(
+        !proposal.archivedAt
+          && proposal.status === aiAdmission.status
+          && proposal.isPrivate === aiAdmission.isPrivate
+          && !titleDrift
+          && !bodyDrift,
+        409,
+        "VERSION_CONFLICT",
+        PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE,
+      );
     }
+    requireUpdateProposalEditable(actor, membership, proposal);
 
     if (params.expectedVersion !== undefined) {
-      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
-      invariant(params.expectedVersion === proposal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+      requireValidExpectedVersion(params.expectedVersion, proposal.version);
     }
 
-    const data: Record<string, unknown> = {};
-    if (params.title !== undefined) {
-      const title = params.title.trim();
-      invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
-      data.title = title;
+    const data: Record<string, unknown> = aiAdmission ? { ...aiAdmission.data } : {};
+    if (!aiAdmission) {
+      if (params.title !== undefined) {
+        const title = params.title.trim();
+        invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
+        data.title = title;
+      }
+      if (params.bodyMd !== undefined) {
+        const bodyMd = params.bodyMd.trim();
+        invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
+        data.bodyMd = bodyMd;
+      }
+      if (params.includeAiSummary === false) {
+        data.summary = null;
+      } else if (params.summary !== undefined) {
+        data.summary = params.summary?.trim() || null;
+      }
+      if (params.priority !== undefined) data.priority = params.priority;
+      if (params.circleId !== undefined) data.circleId = params.circleId || null;
     }
-    if (params.bodyMd !== undefined) {
-      const bodyMd = params.bodyMd.trim();
-      invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
-      data.bodyMd = bodyMd;
-    }
-    if (params.includeAiSummary === true) {
-      data.summary = await generateProposalSummary({
-        workspaceId: params.workspaceId,
-        title: String(data.title ?? proposal.title),
-        bodyMd: String(data.bodyMd ?? proposal.bodyMd),
-      });
-    } else if (params.includeAiSummary === false) {
-      data.summary = null;
-    } else if (params.summary !== undefined) {
-      data.summary = params.summary?.trim() || null;
-    }
-    if (params.priority !== undefined) data.priority = params.priority;
-    if (params.circleId !== undefined) data.circleId = params.circleId || null;
     if (params.ownerMemberId !== undefined) {
       data.ownerMemberId = await resolveProposalOwnerMemberId(tx, params.workspaceId, params.ownerMemberId);
     }
@@ -1056,7 +1094,7 @@ export async function updateProposal(actor: AppActor, params: {
       });
     } catch (error) {
       if (isPrismaNotFoundError(error)) {
-        invariant(false, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+        invariant(false, 409, "VERSION_CONFLICT", PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE);
       }
       throw error;
     }
@@ -1072,8 +1110,77 @@ export async function updateProposal(actor: AppActor, params: {
       },
     });
 
+    await appendEvents(tx, [
+      {
+        workspaceId: params.workspaceId,
+        type: "proposal.updated",
+        aggregateType: "Proposal",
+        aggregateId: updated.id,
+        payload: { proposalId: updated.id, fields: changedUpdateFields },
+      },
+    ]);
+
     return updated;
   });
+}
+
+export async function updateProposal(actor: AppActor, params: UpdateProposalParams) {
+  const membership = await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+  });
+
+  if (params.includeAiSummary === true) {
+    // Admission phase: validate everything before any model gateway call,
+    // without holding a transaction or the proposal advisory lock.
+    const admissionProposal = await prisma.proposal.findUnique({
+      where: { id: params.proposalId },
+    });
+
+    invariant(admissionProposal && admissionProposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
+    requireUpdateProposalEditable(actor, membership, admissionProposal);
+    if (params.expectedVersion !== undefined) {
+      requireValidExpectedVersion(params.expectedVersion, admissionProposal.version);
+    }
+
+    const data: Record<string, unknown> = {};
+    if (params.title !== undefined) {
+      const title = params.title.trim();
+      invariant(title.length > 0, 400, "INVALID_INPUT", "Proposal title is required.");
+      data.title = title;
+    }
+    if (params.bodyMd !== undefined) {
+      const bodyMd = params.bodyMd.trim();
+      invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Proposal body is required.");
+      data.bodyMd = bodyMd;
+    }
+    if (params.priority !== undefined) data.priority = params.priority;
+    if (params.circleId !== undefined) data.circleId = params.circleId || null;
+    if (params.ownerMemberId !== undefined) {
+      // Resolvability is validated at admission; the value is re-resolved
+      // against the transaction client inside the final transaction.
+      await resolveProposalOwnerMemberId(prisma, params.workspaceId, params.ownerMemberId);
+    }
+
+    // Inference phase: outside every transaction and lock, exactly once.
+    const effectiveTitle = String(data.title ?? admissionProposal.title);
+    const effectiveBodyMd = String(data.bodyMd ?? admissionProposal.bodyMd);
+    data.summary = await generateProposalSummary({
+      workspaceId: params.workspaceId,
+      title: effectiveTitle,
+      bodyMd: effectiveBodyMd,
+    });
+
+    return runUpdateProposalTransaction(actor, membership, params, {
+      data,
+      effectiveTitle,
+      effectiveBodyMd,
+      status: admissionProposal.status,
+      isPrivate: admissionProposal.isPrivate,
+    });
+  }
+
+  return runUpdateProposalTransaction(actor, membership, params, null);
 }
 
 async function archiveProposalArtifactWithLock(
