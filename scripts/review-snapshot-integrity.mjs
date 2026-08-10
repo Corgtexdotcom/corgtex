@@ -53,8 +53,8 @@ export function parseAttestation(reviewBody, prNumber) {
   if (!/^[0-9a-f]{64}$/.test(a.bodyDigest) || !/^[0-9a-f]{64}$/.test(a.labelDigest)) return { error: "attestation digest is not 64 lowercase hex" };
   return { attestation: a };
 }
-export function selectLatestReviewerApproval(reviews) {
-  const eligible = (reviews ?? []).filter((r) => r && r.user?.login === REVIEWER_LOGIN && r.state === "APPROVED" && Number.isFinite(Date.parse(r.submitted_at)) && Number.isFinite(r.id));
+export function selectLatestReviewerReview(reviews) {
+  const eligible = (reviews ?? []).filter((r) => r && r.user?.login === REVIEWER_LOGIN && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state) && Number.isFinite(Date.parse(r.submitted_at)) && Number.isFinite(r.id));
   eligible.sort((a, b) => Date.parse(b.submitted_at) - Date.parse(a.submitted_at) || b.id - a.id);
   return eligible[0] ?? null;
 }
@@ -62,8 +62,15 @@ export function isSnapshotMutatingEvent(action, changes) {
   if (action === "edited") return Boolean(changes && (changes.body || changes.base));
   return MUTATING_EVENTS.has(action);
 }
-export function parseMergeGroupPrNumbers(headRef) {
-  return [...String(headRef ?? "").matchAll(/pr-(\d+)-/g)].map((m) => Number(m[1]));
+export function resolveMergeGroupPrNumbers(mergeGroup, connection) {
+  const entries = connection?.nodes;
+  invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && /^refs\/heads\/.+/.test(mergeGroup?.base_ref) && Array.isArray(entries) && entries.length > 0 && connection.pageInfo?.hasPreviousPage === false, "missing authoritative merge-group membership");
+  const tail = entries.filter((e) => e?.headCommit?.oid === mergeGroup.head_sha);
+  invariant(tail.length === 1, "ambiguous authoritative merge-group membership");
+  const members = entries.filter((e) => e?.position <= tail[0].position).sort((a, b) => a.position - b.position);
+  const numbers = members.map((e) => e?.pullRequest?.number);
+  invariant(members.every((e) => Number.isSafeInteger(e.position) && e.pullRequest?.state === "OPEN") && new Set(members.map((e) => e.position)).size === members.length && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length, "ambiguous authoritative merge-group membership");
+  return numbers;
 }
 function planSection(planText, title) {
   const out = [];
@@ -142,7 +149,8 @@ export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, fi
   if (filesTruncated) failures.push("API pagination truncated (3000-file cap or review truncation)");
   if (labelNames.includes("halt-agents")) failures.push("halt-agents label present");
   if (labelNames.includes("force-merge")) failures.push("force-merge label present");
-  const approval = selectLatestReviewerApproval(reviews);
+  const effectiveReview = selectLatestReviewerReview(reviews);
+  const approval = effectiveReview?.state === "APPROVED" ? effectiveReview : null;
   if (!approval) {
     failures.push("no non-dismissed beepto-codex APPROVED review");
   } else {
@@ -155,11 +163,14 @@ export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, fi
     }
   }
   failures.push(...evaluatePolicy({ body: pr.body ?? "", labels: labelNames, files, draft: pr.draft }));
-  const eventApprovals = reviews.filter((r) => r?.user?.login === REVIEWER_LOGIN && r.state === "APPROVED" && Number.isFinite(r.id) && Date.parse(r.submitted_at) <= Date.parse(eventUpdatedAt));
-  if (eventApprovals.length > 0 && isSnapshotMutatingEvent(action, changes)) {
-    writes.dismissReviewIds = eventApprovals.map((r) => r.id);
-    writes.disableAutoMerge = Boolean(pr.auto_merge);
-    writes.dequeue = true;
+  if (approval && isSnapshotMutatingEvent(action, changes)) {
+    const delta = Date.parse(approval.submitted_at) - Date.parse(eventUpdatedAt);
+    if (delta === 0) failures.push("approval and snapshot mutation order is ambiguous");
+    if (delta < 0) {
+      failures.push("approval predates snapshot mutation");
+      writes.dismissReviewIds = reviews.filter((r) => r?.user?.login === REVIEWER_LOGIN && r.state === "APPROVED" && Date.parse(r.submitted_at) < Date.parse(eventUpdatedAt)).map((r) => r.id);
+      writes.disableAutoMerge = Boolean(pr.auto_merge); writes.dequeue = true;
+    }
   }
   return { pass: failures.length === 0, noop: false, snapshot, payload, failures, writes };
 }
@@ -204,8 +215,9 @@ async function main() {
   let changes = null;
   let eventUpdatedAt = null;
   if (eventName === "pull_request_target") { prNumbers = [event.pull_request?.number]; action = event.action; changes = event.changes; eventUpdatedAt = event.pull_request?.updated_at; } else if (eventName === "merge_group") {
-    prNumbers = parseMergeGroupPrNumbers(event.merge_group?.head_ref);
-    if (prNumbers.length === 0) throw new Error("no pr-<N>- segments in merge_group.head_ref");
+    const [owner, name] = repo.split("/");
+    const repository = await graphql("query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){entries(first:100){nodes{position headCommit{oid} pullRequest{number state}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name, branch: String(event.merge_group?.base_ref ?? "").replace(/^refs\/heads\//, "") }, "repository");
+    prNumbers = resolveMergeGroupPrNumbers(event.merge_group, repository?.mergeQueue?.entries);
   } else {
     throw new Error(`unsupported event ${eventName}`);
   }

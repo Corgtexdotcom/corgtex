@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { api, buildAttestationPayload, computeSnapshot, decide, encodeLabelSet, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, parseMergeGroupPrNumbers, selectLatestReviewerApproval, sha256Bytes } from "./review-snapshot-integrity.mjs";
+import { api, buildAttestationPayload, computeSnapshot, decide, encodeLabelSet, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes } from "./review-snapshot-integrity.mjs";
 const PLAN = "## Risk tier\n\n- `low`\n\n## Files to touch\n\n- `scripts/x.mjs`\n\n## Acceptance criteria\n\n- [x] done\n";
 const FILES = [{ filename: "scripts/x.mjs", additions: 1, deletions: 1 }];
 const makePr = (over = {}) => ({ number: 7, state: "open", draft: false, body: PLAN, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, labels: [{ name: "ok" }], auto_merge: null, ...over });
@@ -49,11 +49,12 @@ describe("review snapshot integrity", () => {
     expect(run({ labels: [{ name: "ok" }, { name: "new" }] }).pass).toBe(false);
     expect(run({}, [approvalFor(makePr(), { commit_id: "d".repeat(40) })]).pass).toBe(false);
   });
-  it("rejects non-beepto-codex approvers; selects latest by submitted_at then highest id", () => {
-    expect(selectLatestReviewerApproval([approvalFor(makePr(), { user: { login: "puncar-dev" } })])).toBeNull();
-    expect(selectLatestReviewerApproval([approvalFor(makePr(), { state: "DISMISSED" })])).toBeNull();
-    expect(selectLatestReviewerApproval([approvalFor(makePr(), { id: 1 }), approvalFor(makePr(), { id: 2 })]).id).toBe(2);
-    expect(selectLatestReviewerApproval([approvalFor(makePr(), { id: 9, submitted_at: "2025-01-01T00:00:00Z" }), approvalFor(makePr(), { id: 1 })]).id).toBe(1);
+  it("uses the reviewer's latest decisive state by submitted_at then id", () => {
+    expect(selectLatestReviewerReview([approvalFor(makePr(), { user: { login: "puncar-dev" } })])).toBeNull();
+    expect(selectLatestReviewerReview([approvalFor(makePr(), { id: 1 }), approvalFor(makePr(), { id: 2 })]).id).toBe(2);
+    expect(selectLatestReviewerReview([approvalFor(makePr(), { id: 9, submitted_at: "2025-01-01T00:00:00Z" }), approvalFor(makePr(), { id: 1 })]).id).toBe(1);
+    expect(decide(state({ reviews: [approvalFor(makePr()), approvalFor(makePr(), { id: 2, state: "CHANGES_REQUESTED" })] })).pass).toBe(false);
+    expect(decide(state({ reviews: [approvalFor(makePr(), { state: "CHANGES_REQUESTED" }), approvalFor(makePr(), { id: 2 })] })).pass).toBe(true);
     expect(decide(state({ reviews: [approvalFor(makePr(), { user: { login: "puncar-dev" } })] })).pass).toBe(false);
   });
   it("classifies snapshot-mutating events including title-only edited", () => {
@@ -71,12 +72,17 @@ describe("review snapshot integrity", () => {
     expect(v.writes).toEqual({ dismissReviewIds: [1, 2], disableAutoMerge: true, dequeue: true });
     const v2 = decide({ action: "edited", changes: { title: {} }, eventUpdatedAt: "2026-01-03T00:00:00Z", pr, reviews, files: FILES, filesTruncated: false });
     expect(v2.writes.dismissReviewIds).toEqual([]);
-    expect(decide({ ...state({ action: "synchronize", reviews: [approvalFor(pr, { submitted_at: "2026-01-04T00:00:00Z" })] }), pr, eventUpdatedAt: "2026-01-03T00:00:00Z" }).writes.dismissReviewIds).toEqual([]);
+    expect(decide({ ...state({ action: "synchronize", reviews: [approvalFor(pr, { submitted_at: "2026-01-04T00:00:00Z" })] }), pr, eventUpdatedAt: "2026-01-03T00:00:00Z" }).pass).toBe(true);
+    const tie = decide({ ...state({ action: "reopened", reviews: [approvalFor(makePr(), { submitted_at: "2026-01-03T00:00:00Z" })] }), eventUpdatedAt: "2026-01-03T00:00:00Z" });
+    expect(tie.pass).toBe(false); expect(tie.writes.dismissReviewIds).toEqual([]);
+    const stale = decide({ ...state({ action: "reopened" }), eventUpdatedAt: "2026-01-03T00:00:00Z" });
+    expect(stale.pass).toBe(false); expect(stale.writes.dismissReviewIds).toEqual([1]);
   });
-  it("parses merge-group PR numbers, empty parse included", () => {
-    expect(parseMergeGroupPrNumbers("gh-readonly-queue/main/pr-12-abcdef")).toEqual([12]);
-    expect(parseMergeGroupPrNumbers("gh-readonly-queue/main/pr-1-a/pr-2-b")).toEqual([1, 2]);
-    expect(parseMergeGroupPrNumbers("gh-readonly-queue/main/")).toEqual([]);
+  it("requires complete, unambiguous API membership for merge groups", () => {
+    const group = { head_sha: "a".repeat(40), base_ref: "refs/heads/main", head_ref: "gh-readonly-queue/main/pr-2-tail" }; const entry = (position, number, oid = "b".repeat(40)) => ({ position, headCommit: { oid }, pullRequest: { number, state: "OPEN" } });
+    const connection = { nodes: [entry(1, 1), entry(2, 2, group.head_sha), entry(3, 3)], pageInfo: { hasPreviousPage: false, hasNextPage: true } };
+    expect(resolveMergeGroupPrNumbers(group, connection)).toEqual([1, 2]);
+    for (const bad of [{}, { ...connection, nodes: [] }, { ...connection, nodes: [entry(1, 1), entry(1, 2, group.head_sha)] }, { ...connection, nodes: [entry(1, 1)] }]) expect(() => resolveMergeGroupPrNumbers(group, bad)).toThrow();
   });
   it("fails on halt-agents and force-merge labels", () => {
     expect(decide(state({}, { labels: [{ name: "halt-agents" }] })).pass).toBe(false);
