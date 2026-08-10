@@ -1,6 +1,19 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { prisma } from "@corgtex/shared";
 
+const makeTension = (id = "t-1", overrides = {}) => ({
+  id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
+  assigneeMemberId: null, raisedByMemberId: null, proposalId: null, priority: 1, status: "OPEN", version: 1, ...overrides,
+});
+const makeAction = (id = "a-1", overrides = {}) => ({
+  id, workspaceId: "ws-1", title: `Action ${id}`, bodyMd: "Action body", priority: 1, circleId: null,
+  assigneeMemberId: null, dueAt: null, proposalId: null, status: "OPEN", version: 1, ...overrides,
+});
+const makeProposal = (id = "p-1", overrides = {}) => ({
+  id, workspaceId: "ws-1", title: `Proposal ${id}`, bodyMd: "Proposal body", summary: null, circleId: null,
+  ownerMemberId: null, priority: 0, status: "DRAFT", isPrivate: true, archivedAt: null, version: 1, ...overrides,
+});
+
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     proposal: {
@@ -18,6 +31,7 @@ vi.mock("@corgtex/shared", () => ({
     action: {
       findMany: vi.fn(),
       updateMany: vi.fn(),
+      update: vi.fn(),
     },
     tension: {
       findFirst: vi.fn(),
@@ -42,6 +56,9 @@ vi.mock("@corgtex/shared", () => ({
     },
     workspacePermalink: {
       upsert: vi.fn(),
+    },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
     },
     event: {
       createMany: vi.fn(),
@@ -83,6 +100,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./approvals", () => ({
   ensureApprovalFlow: vi.fn().mockResolvedValue({ id: "flow-1" }),
+  withdrawActiveApprovalFlowForSubject: vi.fn().mockResolvedValue(undefined),
   getApprovalPolicy: vi.fn().mockResolvedValue({
     mode: "CONSENT",
     decisionWindowHours: 168,
@@ -236,7 +254,7 @@ describe("proposal AI summaries", () => {
     });
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "p-edit" },
+      where: expect.objectContaining({ id: "p-edit" }),
       data: expect.objectContaining({
         bodyMd: words(130),
         summary: "Updated AI summary.",
@@ -572,7 +590,7 @@ describe("proposal owner updates", () => {
     });
 
     expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "p-owner-change" },
+      where: expect.objectContaining({ id: "p-owner-change" }),
       data: expect.objectContaining({
         ownerMemberId: "mem-owner",
         version: 2,
@@ -628,6 +646,236 @@ describe("proposal owner updates", () => {
     });
 
     expect(prisma.proposal.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale collaborative proposal edits when the proposal changes before write", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+      isPrivate: false,
+    } as any);
+    vi.mocked(prisma.proposal.update).mockRejectedValueOnce({ code: "P2025" });
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-author",
+      title: "Stale edit",
+      expectedVersion: 1,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "VERSION_CONFLICT",
+      message: "The record changed before this update could be applied. Please refresh and try again.",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith({
+      where: {
+        id: "p-open-author",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      },
+      data: expect.any(Object),
+    });
+  });
+
+  it("honors expectedVersion and succeeds if it matches current version", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+      isPrivate: false,
+    } as any);
+    vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ id: "p-open-author", version: 2 } as any);
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-author",
+      title: "Versioned edit",
+      expectedVersion: 1,
+    })).resolves.toMatchObject({
+      id: "p-open-author",
+    });
+
+    expect(prisma.proposal.update).toHaveBeenCalledWith({
+      where: {
+        id: "p-open-author",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      },
+      data: expect.objectContaining({
+        version: 2,
+      }),
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prisma.workItemVersion.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 3,
+      isPrivate: false,
+    } as any);
+
+    await expect(updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-open-author",
+      title: "Versioned edit",
+      bodyMd: words(130),
+      includeAiSummary: true,
+      expectedVersion: 2,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "VERSION_CONFLICT",
+      message: "The record changed before this update could be applied. Please refresh and try again.",
+    });
+
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({
+      id: "mem-author",
+      workspaceId: "ws-1",
+      userId: "u-author",
+      role: "MEMBER",
+      isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValue({
+      id: "p-open-author",
+      workspaceId: "ws-1",
+      authorUserId: "u-author",
+      title: "Old title",
+      summary: null,
+      bodyMd: "Old body",
+      priority: 0,
+      circleId: null,
+      status: "OPEN",
+      archivedAt: null,
+      version: 1,
+      isPrivate: false,
+    } as any);
+
+    for (const invalidVersion of [0, -1, 1.5]) {
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-open-author",
+        bodyMd: words(130),
+        includeAiSummary: true,
+        expectedVersion: invalidVersion,
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+    }
+
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent AI-summary updates under lock so only winning update calls gateway and loser receives VERSION_CONFLICT before extract", async () => {
+    const { updateProposal } = await import("./proposals");
+    const { requireWorkspaceMembership } = await import("./auth");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const actor = { kind: "user", user: { id: "u-author" } } as any;
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue({ id: "mem-author", workspaceId: "ws-1", userId: "u-author", role: "MEMBER", isActive: true } as any);
+    vi.mocked(defaultModelGateway.extract).mockResolvedValue({ output: { summary: "Generated AI Summary" } } as any);
+
+    let current: any = { id: "p-concurrent-ai", workspaceId: "ws-1", authorUserId: "u-author", title: "Concurrent AI Proposal", summary: null, bodyMd: "Initial body", priority: 0, circleId: null, status: "OPEN", archivedAt: null, version: 1, isPrivate: false };
+    let lockCount = 0;
+    let releaseWinnerLock!: () => void;
+    const winnerUpdated = new Promise<void>((resolve) => { releaseWinnerLock = resolve; });
+
+    vi.mocked((prisma as any).$executeRaw).mockImplementation(async () => { if (++lockCount === 2) await winnerUpdated; });
+    vi.mocked((prisma.proposal as any).findUnique).mockImplementation(async () => current);
+    vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => { current = { ...current, ...data, version: 2 }; releaseWinnerLock(); return current; });
+
+    const params = { workspaceId: "ws-1", proposalId: "p-concurrent-ai", bodyMd: words(130), includeAiSummary: true, expectedVersion: 1 };
+    const [res1, res2] = await Promise.allSettled([updateProposal(actor, params), updateProposal(actor, params)]);
+
+    expect(res1.status).toBe("fulfilled");
+    expect(res2.status).toBe("rejected");
+    if (res2.status === "rejected") expect(res2.reason).toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+    expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+    expect(prisma.proposal.update).toHaveBeenCalledTimes(1);
+    expect((prisma as any).workItemVersion.create).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1106,10 +1354,10 @@ describe("createProposalFromTension", () => {
         publishedAt: null,
       }),
     });
-    expect(prisma.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
-      data: { proposalId: "p-1" },
-    });
+    expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "t-1" }),
+      data: expect.objectContaining({ proposalId: "p-1" }),
+    }));
   });
 
   it("checks duplicates before creating a proposal from a tension", async () => {
@@ -1272,25 +1520,20 @@ describe("createProposalFromTension", () => {
       },
     })).resolves.toMatchObject({ id: "p-existing" });
 
-    expect(prisma.tension.update).toHaveBeenCalledWith({
-      where: { id: "t-1" },
-      data: { proposalId: "p-existing" },
-    });
-    expect(prisma.proposal.update).toHaveBeenCalledWith({
-      where: { id: "p-existing" },
+    expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "t-1" }),
+      data: expect.objectContaining({ proposalId: "p-existing" }),
+    }));
+    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "p-existing" }),
       data: expect.objectContaining({
         priority: 2,
       }),
-    });
-    expect(prisma.action.updateMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        id: { in: ["a-1", "a-2"] },
-        workspaceId: "ws-1",
-        archivedAt: null,
-        proposalId: null,
-      }),
-      data: { proposalId: "p-existing" },
-    });
+    }));
+    expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "a-1" }),
+      data: expect.objectContaining({ proposalId: "p-existing" }),
+    }));
     expect(prisma.proposal.create).not.toHaveBeenCalled();
   });
 
@@ -1441,7 +1684,7 @@ describe("createProposalFromTension", () => {
       relatedActionIds: ["a-1", "a-2"],
     });
 
-    expect(prisma.action.findMany).toHaveBeenCalledWith({
+    expect(prisma.action.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         id: { in: ["a-1", "a-2"] },
         workspaceId: "ws-1",
@@ -1453,22 +1696,22 @@ describe("createProposalFromTension", () => {
       },
       select: {
         id: true,
+        workspaceId: true,
+        title: true,
+        bodyMd: true,
+        priority: true,
+        circleId: true,
+        assigneeMemberId: true,
+        dueAt: true,
         proposalId: true,
+        status: true,
+        version: true,
       },
-    });
-    expect(prisma.action.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: { in: ["a-1", "a-2"] },
-        workspaceId: "ws-1",
-        archivedAt: null,
-        proposalId: null,
-        OR: [
-          { isPrivate: false },
-          { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-        ],
-      },
-      data: { proposalId: "p-2" },
-    });
+    }));
+    expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "a-1" }),
+      data: expect.objectContaining({ proposalId: "p-2" }),
+    }));
   });
 
   it("rejects missing, hidden, archived, or cross-workspace source tensions", async () => {
@@ -1843,5 +2086,381 @@ describe("submitProposal event payload", () => {
         expect.objectContaining({ type: "proposal.support_reopened_resolved" }),
       ]),
     );
+  });
+
+  describe("Proposal link versioning & rollback regressions", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it("atomically records prior history and increments version on source Tension and related Actions during proposal creation", async () => {
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-versioned", { version: 1 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-versioned", { version: 4 })] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-versioned") as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-versioned", version: 2 } as any);
+      vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-versioned", version: 5 } as any);
+
+      await createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Versioned link proposal",
+        bodyMd: "Proposal body",
+        sourceTensionId: "t-versioned",
+        relatedActionIds: ["a-versioned"],
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Tension", entityId: "t-versioned", version: 1, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Action", entityId: "a-versioned", version: 4, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "t-versioned",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 1,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-versioned", version: 2 },
+      }));
+      expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "a-versioned",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 4,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-versioned", version: 5 },
+      }));
+    });
+
+    it("atomically records prior history and increments version during createProposalFromTension", async () => {
+      const { createProposalFromTension } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-from-tension", { version: 3 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-from-tension", { version: 2 })] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-from-tension") as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-from-tension", version: 4 } as any);
+      vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-from-tension", version: 3 } as any);
+
+      await createProposalFromTension(actor, {
+        workspaceId: "ws-1",
+        sourceTensionId: "t-from-tension",
+        relatedActionIds: ["a-from-tension"],
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Tension", entityId: "t-from-tension", version: 3, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Action", entityId: "a-from-tension", version: 2, changedFields: ["proposalId"] }),
+      }));
+    });
+
+    it("atomically records prior history and increments version on source Tension and related Actions during duplicate proposal update_existing path", async () => {
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      const existingProposal = makeProposal("p-existing", { title: "Duplicate proposal", bodyMd: "Proposal body" });
+
+      vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([existingProposal as any]);
+      vi.mocked(prisma.proposal.findFirst).mockResolvedValue(existingProposal as any);
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValue(existingProposal as any);
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-dup", { version: 2 }) as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-dup", { version: 3 })] as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-dup", version: 3 } as any);
+      vi.mocked(prisma.action.update).mockResolvedValueOnce({ id: "a-dup", version: 4 } as any);
+
+      await createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Duplicate proposal",
+        bodyMd: "Proposal body",
+        sourceTensionId: "t-dup",
+        relatedActionIds: ["a-dup"],
+        duplicateGuard: { resolution: "update_existing", targetEntityId: "p-existing" },
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Tension", entityId: "t-dup", version: 2, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Action", entityId: "a-dup", version: 3, changedFields: ["proposalId"] }),
+      }));
+      expect(prisma.tension.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "t-dup",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 2,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-existing", version: 3 },
+      }));
+      expect(prisma.action.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: {
+          id: "a-dup",
+          workspaceId: "ws-1",
+          archivedAt: null,
+          proposalId: null,
+          version: 3,
+          OR: [
+            { isPrivate: false },
+            { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+          ],
+        },
+        data: { proposalId: "p-existing", version: 4 },
+      }));
+    });
+
+    it("rolls back transaction and returns 409 VERSION_CONFLICT when action link CAS fails, preventing downstream audit and events", async () => {
+      const { appendEvents } = await import("./events");
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.tension.findFirst).mockResolvedValueOnce(makeTension("t-rollback") as any);
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([makeAction("a-rollback")] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-rollback") as any);
+      vi.mocked(prisma.tension.update).mockResolvedValueOnce({ id: "t-rollback", version: 2 } as any);
+      vi.mocked(prisma.action.update).mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.auditLog.create).mockClear();
+      vi.mocked(appendEvents).mockClear();
+
+      await expect(createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Rollback proposal",
+        bodyMd: "Proposal body",
+        sourceTensionId: "t-rollback",
+        relatedActionIds: ["a-rollback"],
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Remediation items 8 & 12 proposal regressions", () => {
+    it("fails updateProposal with includeAiSummary when proposal is archived under lock and never calls model gateway", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(makeProposal("p-archived-lock", { archivedAt: new Date(), status: "OPEN" }) as any);
+      vi.mocked(defaultModelGateway.extract).mockClear();
+
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-archived-lock",
+        includeAiSummary: true,
+        title: "Long long title long long title",
+        bodyMd: words(200),
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_STATE",
+      });
+
+      const lockOrder = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const findOrder = vi.mocked(prisma.proposal.findUnique).mock.invocationCallOrder[0];
+      expect(lockOrder).toBeLessThan(findOrder);
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-archived-lock");
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    });
+
+    it("serializes the real generic Proposal archive writer with an AI-summary update and rejects before model usage", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { archiveWorkspaceArtifact } = await import("./archive");
+      const { updateProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      const proposalId = "p-generic-archive-ai";
+      const priorVersion = 4;
+      let current = makeProposal(proposalId, {
+        authorUserId: "u-1",
+        status: "OPEN",
+        isPrivate: false,
+        version: priorVersion,
+      }) as any;
+
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked((prisma.proposal as any).findFirst).mockImplementation(async () => current);
+      vi.mocked((prisma.proposal as any).findUnique).mockImplementation(async () => current);
+      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => {
+        current = { ...current, ...data };
+        return current;
+      });
+      vi.mocked((prisma as any).workspacePermalink.upsert).mockResolvedValue({});
+      vi.mocked((prisma as any).workspaceArchiveRecord.create).mockResolvedValue({});
+      vi.mocked((prisma as any).auditLog.create).mockResolvedValue({});
+      vi.mocked(defaultModelGateway.extract).mockClear();
+
+      await archiveWorkspaceArtifact(actor, {
+        workspaceId: "ws-1",
+        entityType: "Proposal",
+        entityId: proposalId,
+        reason: "Superseded",
+      });
+
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId,
+        title: "Long long title long long title",
+        bodyMd: words(200),
+        includeAiSummary: true,
+        expectedVersion: priorVersion,
+      })).rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
+
+      const proposalLocks = vi.mocked(prisma.$executeRaw).mock.calls
+        .map((call, index) => ({ key: call[1], order: vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[index] }))
+        .filter((call) => call.key === `Proposal:${proposalId}`);
+      expect(proposalLocks).toHaveLength(2);
+      expect(proposalLocks[0].order).toBeLessThan(vi.mocked((prisma.proposal as any).findFirst).mock.invocationCallOrder[0]);
+      expect(proposalLocks[1].order).toBeLessThan(vi.mocked((prisma.proposal as any).findUnique).mock.invocationCallOrder[0]);
+      expect(current.archivedAt).toBeInstanceOf(Date);
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+    });
+
+    it("verifies every inventoried Proposal lifecycle and archive writer acquires the proposal advisory lock", async () => {
+      const {
+        updateProposal, archiveProposal, submitProposal, returnProposalToDraft,
+        reopenProposal, supportReopenResolvedProposals, publishProposal, resolveProposal, deleteProposal,
+      } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      const proposalId = "p-lock-test";
+      const baseProposal = makeProposal(proposalId, { status: "DRAFT", isPrivate: true, archivedAt: null, authorUserId: "u-1" });
+
+      // 1. updateProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, title: "New Title" } as any);
+      await updateProposal(actor, { workspaceId: "ws-1", proposalId, title: "New Title" });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 2. archiveProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, archivedAt: new Date() } as any);
+      await archiveProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 3. submitProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce({ id: "flow-1" } as any);
+      vi.mocked(prisma.approvalFlow.update).mockResolvedValueOnce({ id: "flow-1", status: "ACTIVE" } as any);
+      await submitProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 4. returnProposalToDraft
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ ...baseProposal, status: "OPEN" } as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce(baseProposal as any);
+      await returnProposalToDraft(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 5. reopenProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ ...baseProposal, status: "RESOLVED" } as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, status: "OPEN" } as any);
+      await reopenProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 6. supportReopenResolvedProposals (batch)
+      const supportActor = { kind: "user", user: { id: "u-1", globalRole: "OPERATOR" }, isSupportRepair: true } as any;
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([{ ...baseProposal, id: "p-b", status: "RESOLVED" }, { ...baseProposal, id: "p-a", status: "RESOLVED" }] as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValue({ ...baseProposal, status: "OPEN" } as any);
+      await supportReopenResolvedProposals(supportActor, { workspaceId: "ws-1", proposalIds: ["p-b", "p-a"], reason: "Fix" });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-a");
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-b");
+
+      const executeRawCalls = vi.mocked(prisma.$executeRaw).mock.calls;
+      const callIndexPA = executeRawCalls.findIndex((call) => call[1] === "Proposal:p-a");
+      const callIndexPB = executeRawCalls.findIndex((call) => call[1] === "Proposal:p-b");
+      expect(callIndexPA).toBeGreaterThan(-1);
+      expect(callIndexPB).toBeGreaterThan(-1);
+      expect(callIndexPA).toBeLessThan(callIndexPB);
+
+      const orderPA = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[callIndexPA];
+      const orderPB = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[callIndexPB];
+      expect(orderPA).toBeLessThan(orderPB);
+
+      // 7. publishProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, isPrivate: false } as any);
+      await publishProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 8. resolveProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ ...baseProposal, status: "OPEN" } as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, status: "RESOLVED" } as any);
+      await resolveProposal(actor, { workspaceId: "ws-1", proposalId, outcome: "ADOPTED", decisionMd: "Adopted" });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 9. deleteProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, archivedAt: new Date() } as any);
+      await deleteProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+    });
+
+    it("acquires related-action advisory locks in stable id order in linkProposalSourcesAndActions regardless of input order", async () => {
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([
+        makeAction("action-z", { version: 1 }),
+        makeAction("action-a", { version: 1 }),
+        makeAction("action-m", { version: 1 }),
+      ] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-sorted-actions") as any);
+      vi.mocked(prisma.action.update).mockResolvedValue({ id: "act", version: 2 } as any);
+      vi.mocked(prisma.$executeRaw).mockClear();
+
+      await createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Sorted action locks proposal",
+        bodyMd: "Body",
+        relatedActionIds: ["action-z", "action-a", "action-m"],
+      });
+
+      const rawLockCalls = vi.mocked(prisma.$executeRaw).mock.calls
+        .map((call) => call[1])
+        .filter((entityString): entityString is string => typeof entityString === "string" && entityString.startsWith("Action:"));
+
+      expect(rawLockCalls).toEqual(["Action:action-a", "Action:action-m", "Action:action-z"]);
+
+      const lockCalls = vi.mocked(prisma.$executeRaw).mock.calls;
+      const indexA = lockCalls.findIndex((c) => c[1] === "Action:action-a");
+      const indexM = lockCalls.findIndex((c) => c[1] === "Action:action-m");
+      const indexZ = lockCalls.findIndex((c) => c[1] === "Action:action-z");
+      const orderA = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[indexA];
+      const orderM = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[indexM];
+      const orderZ = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[indexZ];
+      expect(orderA).toBeLessThan(orderM);
+      expect(orderM).toBeLessThan(orderZ);
+    });
   });
 });

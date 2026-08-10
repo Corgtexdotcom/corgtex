@@ -19,6 +19,7 @@ import {
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import {
+  acquireWorkItemAdvisoryLock,
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -374,6 +375,7 @@ export async function updateTension(actor: AppActor, params: {
   priority?: number;
   isPrivate?: boolean;
   evidenceDocumentIds?: string[] | null;
+  expectedVersion?: number;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -381,6 +383,7 @@ export async function updateTension(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Tension", params.tensionId);
     const tension = await tx.tension.findUnique({
       where: { id: params.tensionId },
     });
@@ -456,6 +459,11 @@ export async function updateTension(actor: AppActor, params: {
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      invariant(params.expectedVersion === tension.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+    }
+
     const contentFields = ["title", "bodyMd", "circleId", "assigneeMemberId", "raisedByMemberId", "proposalId", "priority"];
     const changedFields = changedDataFields(tension as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
@@ -491,7 +499,7 @@ export async function updateTension(actor: AppActor, params: {
       status: tension.status,
     };
     if (tension.isPrivate !== undefined) updateWhere.isPrivate = tension.isPrivate ?? false;
-    if (tension.version !== undefined) updateWhere.version = tension.version;
+    updateWhere.version = params.expectedVersion ?? tension.version;
 
     let updated;
     try {
@@ -501,7 +509,7 @@ export async function updateTension(actor: AppActor, params: {
       });
     } catch (error) {
       if (isPrismaNotFoundError(error)) {
-        invariant(false, 409, "CONFLICT", "Tension changed while editing. Refresh and try again.");
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
       }
       throw error;
     }

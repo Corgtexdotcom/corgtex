@@ -42,6 +42,8 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       create: vi.fn(),
     },
     workItemVersion: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
       deleteMany: vi.fn(),
     },
     knowledgeChunk: {
@@ -104,6 +106,8 @@ describe("workspace archive domain", () => {
     prismaMock.workspaceArchiveRecord.update.mockResolvedValue({});
     prismaMock.workspacePermalink.findMany.mockResolvedValue([]);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
+    prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
+    prismaMock.workItemVersion.create.mockResolvedValue({});
     prismaMock.workItemVersion.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.knowledgeChunk.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.financeImportBatch.findFirst.mockResolvedValue(null);
@@ -196,8 +200,10 @@ describe("workspace archive domain", () => {
       .mockResolvedValueOnce({ id: "parent-goal", progressPercent: 20 });
     prismaMock.goal.findUnique.mockResolvedValueOnce({
       id: "parent-goal",
+      workspaceId: "workspace-1",
       parentGoalId: null,
       progressPercent: 80,
+      version: 3,
       keyResults: [],
       childGoals: [{ id: "remaining-child", progressPercent: 20 }],
     });
@@ -221,8 +227,8 @@ describe("workspace archive domain", () => {
       }),
     }));
     expect(prismaMock.goal.update).toHaveBeenNthCalledWith(2, {
-      where: { id: "parent-goal" },
-      data: { progressPercent: 20 },
+      where: { id: "parent-goal", version: 3 },
+      data: { progressPercent: 20, version: 4 },
     });
   });
 
@@ -244,8 +250,10 @@ describe("workspace archive domain", () => {
       .mockResolvedValueOnce({ id: "parent-goal", progressPercent: 60 });
     prismaMock.goal.findUnique.mockResolvedValueOnce({
       id: "parent-goal",
+      workspaceId: "workspace-1",
       parentGoalId: null,
       progressPercent: 20,
+      version: 6,
       keyResults: [],
       childGoals: [
         { id: "remaining-child", progressPercent: 20 },
@@ -261,9 +269,114 @@ describe("workspace archive domain", () => {
     });
 
     expect(prismaMock.goal.update).toHaveBeenNthCalledWith(2, {
-      where: { id: "parent-goal" },
-      data: { progressPercent: 60 },
+      where: { id: "parent-goal", version: 6 },
+      data: { progressPercent: 60, version: 7 },
     });
+  });
+
+  it("locks generic Proposal archive and restore before the authoritative read", async () => {
+    const proposal = {
+      id: "proposal-locked",
+      workspaceId: "workspace-1",
+      title: "Locked proposal",
+      archivedAt: null,
+      status: "OPEN",
+    };
+    prismaMock.proposal.findFirst.mockResolvedValueOnce(proposal);
+    prismaMock.proposal.update.mockResolvedValueOnce({ ...proposal, archivedAt: new Date() });
+
+    const { archiveWorkspaceArtifact, restoreWorkspaceArtifact } = await import("./archive");
+    await archiveWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Proposal",
+      entityId: proposal.id,
+    });
+
+    const archiveLockOrder = prismaMock.$executeRaw.mock.invocationCallOrder[0];
+    const archiveReadOrder = prismaMock.proposal.findFirst.mock.invocationCallOrder[0];
+    expect(archiveLockOrder).toBeLessThan(archiveReadOrder);
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:proposal-locked");
+
+    vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.$executeRaw.mockResolvedValue(1);
+    prismaMock.proposal.findFirst.mockResolvedValueOnce({ ...proposal, archivedAt: new Date() });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValueOnce({ id: "archive-locked", previousState: { status: "OPEN" } });
+    prismaMock.proposal.update.mockResolvedValueOnce(proposal);
+    prismaMock.workspaceArchiveRecord.update.mockResolvedValueOnce({});
+    prismaMock.auditLog.create.mockResolvedValueOnce({});
+
+    await restoreWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Proposal",
+      entityId: proposal.id,
+    });
+
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.proposal.findFirst.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps Goal archive and recursive parent version history in one transaction and rejects on parent CAS failure", async () => {
+    const child = {
+      id: "child-rollback",
+      workspaceId: "workspace-1",
+      title: "Child",
+      archivedAt: null,
+      parentGoalId: "parent-rollback",
+    };
+    const parent = {
+      id: "parent-rollback",
+      workspaceId: "workspace-1",
+      title: "Parent",
+      parentGoalId: "ancestor-rollback",
+      progressPercent: 80,
+      version: 4,
+      keyResults: [],
+      childGoals: [{ id: "remaining", progressPercent: 20 }],
+    };
+    const ancestor = {
+      id: "ancestor-rollback",
+      workspaceId: "workspace-1",
+      title: "Ancestor",
+      parentGoalId: null,
+      progressPercent: 70,
+      version: 8,
+      keyResults: [],
+      childGoals: [{ id: "parent-rollback", progressPercent: 20 }],
+    };
+    prismaMock.goal.findFirst.mockResolvedValueOnce(child);
+    prismaMock.goal.findUnique
+      .mockResolvedValueOnce(parent)
+      .mockResolvedValueOnce(ancestor);
+    prismaMock.goal.update
+      .mockResolvedValueOnce({ ...child, archivedAt: new Date() })
+      .mockResolvedValueOnce({ ...parent, progressPercent: 20, version: 5 })
+      .mockRejectedValueOnce({ code: "P2025" });
+
+    const { archiveWorkspaceArtifact } = await import("./archive");
+    await expect(archiveWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Goal",
+      entityId: child.id,
+    })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ entityId: "parent-rollback", version: 4, changedFields: ["progressPercent"] }),
+    }));
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ entityId: "ancestor-rollback", version: 8, changedFields: ["progressPercent"] }),
+    }));
+    expect(prismaMock.workspaceArchiveRecord.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+
+    const firstLockFor = (entityId: string) => prismaMock.$executeRaw.mock.calls
+      .findIndex((call) => call[1] === `Goal:${entityId}`);
+    expect(firstLockFor("child-rollback")).toBeLessThan(firstLockFor("parent-rollback"));
+    expect(firstLockFor("parent-rollback")).toBeLessThan(firstLockFor("ancestor-rollback"));
+    const parentLockOrder = prismaMock.$executeRaw.mock.invocationCallOrder[firstLockFor("parent-rollback")];
+    const parentReadOrder = prismaMock.goal.findUnique.mock.invocationCallOrder[0];
+    expect(parentLockOrder).toBeLessThan(parentReadOrder);
   });
 
   it("withdraws active proposal approval flows when proposals are archived", async () => {

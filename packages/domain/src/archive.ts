@@ -13,6 +13,12 @@ import {
   workspaceEntityCanonicalPath,
   workspacePermanentPath,
 } from "./permalinks";
+import {
+  acquireWorkItemAdvisoryLock,
+  pickJsonSnapshot,
+  recordWorkItemVersion,
+  type WorkItemEntityType,
+} from "./work-item-versions";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -325,7 +331,25 @@ function jsonSnapshot(record: unknown) {
   return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
 }
 
-async function recomputeGoalProgressInTransaction(tx: Prisma.TransactionClient, goalId: string) {
+function isPrismaNotFoundError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
+}
+
+async function lockArchiveWorkItem(
+  tx: Prisma.TransactionClient,
+  entityType: ArchiveEntityType,
+  entityId: string,
+) {
+  if (!WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) return;
+  await acquireWorkItemAdvisoryLock(tx, entityType as WorkItemEntityType, entityId);
+}
+
+async function recomputeGoalProgressInTransaction(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  goalId: string,
+) {
+  await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
   const goal = await tx.goal.findUnique({
     where: { id: goalId },
     include: {
@@ -353,20 +377,59 @@ async function recomputeGoalProgressInTransaction(tx: Prisma.TransactionClient, 
   }
 
   if (computedProgress !== goal.progressPercent) {
-    await tx.goal.update({
-      where: { id: goalId },
-      data: { progressPercent: computedProgress },
+    const nextVersion = await recordWorkItemVersion(tx, actor, {
+      workspaceId: goal.workspaceId,
+      entityType: "Goal",
+      entityId: goal.id,
+      currentVersion: goal.version,
+      changedFields: ["progressPercent"],
+      previousState: pickJsonSnapshot(goal as unknown as Record<string, unknown>, [
+        "id",
+        "workspaceId",
+        "title",
+        "descriptionMd",
+        "level",
+        "cadence",
+        "progressPercent",
+        "targetDate",
+        "startDate",
+        "parentGoalId",
+        "circleId",
+        "ownerMemberId",
+        "authorUserId",
+        "isPrivate",
+        "publishedAt",
+        "status",
+        "version",
+      ]),
     });
+
+    try {
+      await tx.goal.update({
+        where: { id: goalId, version: goal.version },
+        data: { progressPercent: computedProgress, version: nextVersion },
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+      }
+      throw error;
+    }
+
     if (goal.parentGoalId) {
-      await recomputeGoalProgressInTransaction(tx, goal.parentGoalId);
+      await recomputeGoalProgressInTransaction(tx, actor, goal.parentGoalId);
     }
   }
 }
 
-async function recomputeGoalParentProgressForArchiveTransition(tx: Prisma.TransactionClient, record: any) {
+async function recomputeGoalParentProgressForArchiveTransition(
+  tx: Prisma.TransactionClient,
+  actor: AppActor,
+  record: any,
+) {
   const parentGoalId = typeof record.parentGoalId === "string" ? record.parentGoalId : null;
   if (parentGoalId) {
-    await recomputeGoalProgressInTransaction(tx, parentGoalId);
+    await recomputeGoalProgressInTransaction(tx, actor, parentGoalId);
   }
 }
 
@@ -426,6 +489,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   const reason = params.reason?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
+    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
     if (record.archivedAt) {
@@ -444,7 +508,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
       },
     });
     if (config.entityType === "Goal") {
-      await recomputeGoalParentProgressForArchiveTransition(tx, record);
+      await recomputeGoalParentProgressForArchiveTransition(tx, actor, record);
     }
 
     if (isWorkspacePermalinkEntityType(config.entityType)) {
@@ -508,6 +572,7 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
   const config = configFor(params.entityType);
 
   return prisma.$transaction(async (tx) => {
+    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", `${config.entityType} is not archived.`);
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
@@ -526,7 +591,7 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
       },
     });
     if (config.entityType === "Goal") {
-      await recomputeGoalParentProgressForArchiveTransition(tx, updated);
+      await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
     }
 
     if (archiveRecord) {
