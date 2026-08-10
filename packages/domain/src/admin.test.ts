@@ -4,12 +4,21 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as admin from "./admin";
 import { prisma } from "@corgtex/shared";
 import { requireGlobalOperator } from "./auth";
+import { AppError } from "./errors";
 
 // ── Mocks ──────────────────────────────────────────────────────────
 
 vi.mock("./auth", () => ({
   requireGlobalOperator: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
+}));
+
+// Dedicated transaction-client mock with separate delegates so tests can prove
+// that removeCustomerDeployment never falls through to the global prisma client.
+const txMocks = vi.hoisted(() => ({
+  providerCutover: { findFirst: vi.fn().mockResolvedValue(null) },
+  customerDeploymentEvent: { create: vi.fn().mockResolvedValue({ id: "evt_1" }) },
+  customerDeployment: { delete: vi.fn().mockResolvedValue({}) },
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -96,6 +105,7 @@ vi.mock("@corgtex/shared", () => ({
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ id: "event_1" }),
     },
+    $transaction: vi.fn((callback: (tx: typeof txMocks) => unknown) => callback(txMocks)),
   },
 }));
 
@@ -614,15 +624,85 @@ describe("Platform Admin Tools", () => {
     });
   });
 
-  // ── removeCustomerDeployment ───────────────────────────────────────
+  // ── removeCustomerDeployment cutover guard ───────────────────────
 
-  it("removeCustomerDeployment deletes the customer deployment record", async () => {
+  const CUTOVER_CONFLICT = {
+    status: 409,
+    code: "CUSTOMER_DEPLOYMENT_CUTOVER_CONFLICT",
+    message: "Customer deployment is referenced by a provider cutover and cannot be removed.",
+  };
+
+  it("removeCustomerDeployment blocks before any transaction or database call when authorization fails", async () => {
+    const forbidden = new AppError(403, "FORBIDDEN", "Only global operators can perform this action.");
+    vi.mocked(requireGlobalOperator).mockImplementationOnce(() => { throw forbidden; });
+
+    await expect(admin.removeCustomerDeployment(dummyActor, "inst_1")).rejects.toBe(forbidden);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(txMocks.providerCutover.findFirst).not.toHaveBeenCalled();
+    expect(txMocks.customerDeploymentEvent.create).not.toHaveBeenCalled();
+    expect(txMocks.customerDeployment.delete).not.toHaveBeenCalled();
+  });
+
+  it("removeCustomerDeployment runs precheck, one event, and one delete in order inside one transaction", async () => {
     await admin.removeCustomerDeployment(dummyActor, "inst_1");
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.customerDeployment.delete).toHaveBeenCalledWith({
-      where: { id: "inst_1" },
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(txMocks.providerCutover.findFirst).toHaveBeenCalledTimes(1);
+    expect(txMocks.providerCutover.findFirst).toHaveBeenCalledWith({
+      where: { OR: [{ sourceDeploymentId: "inst_1" }, { destinationDeploymentId: "inst_1" }] },
+      select: { id: true },
     });
+    expect(txMocks.customerDeploymentEvent.create).toHaveBeenCalledTimes(1);
+    expect(txMocks.customerDeploymentEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ deploymentId: "inst_1", action: "customer_deployment.removed" }),
+    });
+    expect(txMocks.customerDeployment.delete).toHaveBeenCalledTimes(1);
+    expect(txMocks.customerDeployment.delete).toHaveBeenCalledWith({ where: { id: "inst_1" } });
+    const eventOrder = txMocks.customerDeploymentEvent.create.mock.invocationCallOrder[0];
+    expect(eventOrder).toBeLessThan(txMocks.customerDeployment.delete.mock.invocationCallOrder[0]);
+    expect(prisma.customerDeployment.delete).not.toHaveBeenCalled();
+    expect(prisma.customerDeploymentEvent.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["source", { id: "cut_source" }],
+    ["destination", { id: "cut_destination" }],
+  ])("removeCustomerDeployment rejects with the sanitized conflict on a %s-role precheck hit", async (_role, hit) => {
+    txMocks.providerCutover.findFirst.mockResolvedValueOnce(hit);
+
+    const error = await admin.removeCustomerDeployment(dummyActor, "inst_1").catch((e) => e);
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject(CUTOVER_CONFLICT);
+    expect(error.message).not.toContain("inst_1");
+    expect(error.message).not.toContain(hit.id);
+    expect(txMocks.customerDeploymentEvent.create).not.toHaveBeenCalled();
+    expect(txMocks.customerDeployment.delete).not.toHaveBeenCalled();
+  });
+
+  it("removeCustomerDeployment maps a delete-time P2003 to the same sanitized conflict", async () => {
+    txMocks.customerDeployment.delete.mockRejectedValueOnce(Object.assign(new Error("fk restrict"), { code: "P2003" }));
+
+    const error = await admin.removeCustomerDeployment(dummyActor, "inst_1").catch((e) => e);
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject(CUTOVER_CONFLICT);
+    expect(txMocks.customerDeploymentEvent.create).toHaveBeenCalledTimes(1);    expect(txMocks.customerDeployment.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["P2025", Object.assign(new Error("missing record"), { code: "P2025" })],
+    ["generic", new Error("connection reset")],
+  ])("removeCustomerDeployment propagates delete-time %s errors unchanged", async (_kind, failure) => {
+    txMocks.customerDeployment.delete.mockRejectedValueOnce(failure);
+    await expect(admin.removeCustomerDeployment(dummyActor, "inst_1")).rejects.toBe(failure);
+  });
+
+  it("removeCustomerDeployment propagates event-create failures unchanged and never deletes", async () => {
+    const failure = Object.assign(new Error("deployment missing"), { code: "P2003" });
+    txMocks.customerDeploymentEvent.create.mockRejectedValueOnce(failure);
+
+    await expect(admin.removeCustomerDeployment(dummyActor, "inst_1")).rejects.toBe(failure);
+    expect(txMocks.customerDeployment.delete).not.toHaveBeenCalled();
   });
 
   // ── probeCustomerDeploymentHealth ──────────────────────────────────

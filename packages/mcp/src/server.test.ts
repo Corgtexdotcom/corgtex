@@ -1121,6 +1121,51 @@ describe("createCorgtexMcpServer", () => {
     })]);
   });
 
+  it("enforces all five legitimate daily overview scopes during invocation and never requires finance:read", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const { listMeetings, MCP_TOOL_CAPABILITIES } = await import("@corgtex/domain");
+
+    listActionsMock.mockResolvedValueOnce({ items: [], total: 0 });
+    listProposalsMock.mockResolvedValueOnce({ items: [], total: 0 });
+    listTensionsMock.mockResolvedValueOnce({ items: [], total: 0 });
+    vi.mocked(listMeetings).mockResolvedValueOnce([]);
+
+    expect(MCP_TOOL_CAPABILITIES.daily_overview.scopes).toEqual([
+      "workspace:read",
+      "actions:read",
+      "proposals:read",
+      "tensions:read",
+      "meetings:read",
+    ]);
+
+    const server = createCorgtexMcpServer({
+      actor: { kind: "agent", authProvider: "bootstrap" } as any,
+      workspaceId: "ws-1",
+      authKind: "agent",
+    });
+
+    vi.mocked(requireScope).mockClear();
+
+    await (server as any)._registeredTools.daily_overview.handler({ windowHours: 24 });
+
+    const calledScopes = vi.mocked(requireScope).mock.calls.map((call) => call[1]);
+    expect(calledScopes).toEqual([
+      "workspace:read",
+      "actions:read",
+      "proposals:read",
+      "tensions:read",
+      "meetings:read",
+      "workspace:read",
+      "actions:read",
+      "proposals:read",
+      "tensions:read",
+      "meetings:read",
+    ]);
+    expect(calledScopes).not.toContain("finance:read");
+  });
+
+
   it("lists and fetches work item versions with the matching entity read scope", async () => {
     const { createCorgtexMcpServer } = await import("./server");
     const { requireScope } = await import("./auth");

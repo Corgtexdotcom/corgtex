@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,92 +24,143 @@ const manifest = {
   releaseVersion: "main-8c56008ab7ca",
 };
 
+const OBSERVATION_HOST_ENV_KEYS = [
+  "AZURE_APPLICATIONINSIGHTS_APP_NAME",
+  "AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP",
+  "RAILWAY_API_TOKEN",
+  "FLEET_RELEASE_TARGETS_FILE",
+  "FLEET_RELEASE_TARGETS_JSON",
+  "FLEET_RELEASE_OPS_TARGET_JSON",
+  "FLEET_RELEASE_BACKUP_APP_TARGET_JSON",
+  "FLEET_RELEASE_AZURE_TARGET_JSON",
+  "POSTHOG_PROJECT_ID",
+  "POSTHOG_PERSONAL_API_KEY",
+  "POSTHOG_QUERY_API_KEY",
+  "POSTHOG_API_HOST",
+  "POSTHOG_QUERY_API_HOST",
+  "OBSERVATION_ENVIRONMENT",
+  "POSTHOG_ENVIRONMENT",
+  "AZURE_MONITOR_ENVIRONMENT",
+  "OBSERVATION_REQUIRE_SOURCE",
+  "OBSERVATION_TARGETS",
+  "OBSERVATION_SUMMARY_FILE",
+  "OBSERVATION_WINDOW_MINUTES",
+  "GITHUB_STEP_SUMMARY",
+];
+
+function sanitizedCliEnv(overrides = {}) {
+  const env = { ...process.env };
+  for (const key of OBSERVATION_HOST_ENV_KEYS) {
+    delete env[key];
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete env[key];
+    } else {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function runGateCli(args, envOverrides = {}) {
+  const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
+  return spawnSync(process.execPath, [scriptPath, ...args], {
+    encoding: "utf8",
+    env: sanitizedCliEnv(envOverrides),
+  });
+}
+
 describe("post-deploy observation gate", () => {
-  it("runs as a CLI from paths containing spaces", () => {
-    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
-    const output = execFileSync(process.execPath, [
-      scriptPath,
+  it("runs as a CLI from paths containing spaces and exits 0 on a passing gate", () => {
+    const result = runGateCli([
       "--release-git-sha",
       SHA,
       "--release-image-tag",
       `sha-${SHA}`,
       "--window-minutes",
       "1",
-    ], {
-      encoding: "utf8",
-      env: { ...process.env, AZURE_APPLICATIONINSIGHTS_APP_NAME: "", AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "" },
-    });
-    expect(JSON.parse(output).status).toBe("passed");
+    ]);
+    expect(result.status).toBe(0);
+    expect(result.signal).toBeNull();
+    const summary = JSON.parse(result.stdout);
+    expect(summary.status).toBe("passed");
   });
 
-  it("reports missing required observation sources without failing the CLI", () => {
-    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
-    const output = execFileSync(process.execPath, [
-      scriptPath,
+  it("fails closed with exit 1 and keeps diagnostics when required observation sources are missing", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "observation-gate-blocked-"));
+    const summaryFile = join(tempDir, "summary.json");
+    const stepSummaryFile = join(tempDir, "step-summary.md");
+    const result = runGateCli([
       "--release-git-sha",
       SHA,
       "--release-image-tag",
       `sha-${SHA}`,
       "--window-minutes",
       "1",
+      "--summary-file",
+      summaryFile,
     ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AZURE_APPLICATIONINSIGHTS_APP_NAME: "",
-        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "",
-        OBSERVATION_REQUIRE_SOURCE: "true",
-      },
+      OBSERVATION_REQUIRE_SOURCE: "true",
+      GITHUB_STEP_SUMMARY: stepSummaryFile,
     });
-    const summary = JSON.parse(output);
-    expect(summary.status).toBe("blocked");
-    expect(summary.blockerReason).toContain("missing_observation_sources");
-    expect(summary.missingRequiredSources).toContain("azure_monitor");
+
+    expect(result.status).toBe(1);
+    expect(result.signal).toBeNull();
+    const stdoutSummary = JSON.parse(result.stdout);
+    expect(stdoutSummary.status).toBe("blocked");
+    expect(stdoutSummary.blockingFailures).toEqual([]);
+    expect(stdoutSummary.blockerReason).toContain("missing_observation_sources");
+    expect(stdoutSummary.missingRequiredSources).toEqual(expect.arrayContaining([
+      "azure_monitor",
+      "railway-customers: railway or posthog",
+      "ops: railway or posthog",
+      "backup-app: railway or posthog",
+    ]));
+
+    const fileSummary = JSON.parse(readFileSync(summaryFile, "utf8"));
+    expect(fileSummary.status).toBe(stdoutSummary.status);
+    expect(fileSummary.release).toEqual(stdoutSummary.release);
+    expect(fileSummary.blockerReason).toBe(stdoutSummary.blockerReason);
+    expect(fileSummary.missingRequiredSources).toEqual(stdoutSummary.missingRequiredSources);
+
+    const markdown = readFileSync(stepSummaryFile, "utf8");
+    expect(markdown).toContain("Status: blocked");
+    expect(markdown).toContain("### Missing observation sources");
+    for (const source of stdoutSummary.missingRequiredSources) {
+      expect(markdown).toContain(source);
+    }
   });
 
   it("preserves explicit manifest aliases over runtime defaults", () => {
-    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
     const explicitSha = "1111111111111111111111111111111111111111";
     const runtimeSha = "2222222222222222222222222222222222222222";
-    const output = execFileSync(process.execPath, [
-      scriptPath,
+    const result = runGateCli([
       "--manifest-json",
       JSON.stringify({ release_git_sha: explicitSha }),
       "--window-minutes",
       "1",
     ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AZURE_APPLICATIONINSIGHTS_APP_NAME: "",
-        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "",
-        GITHUB_SHA: runtimeSha,
-      },
+      GITHUB_SHA: runtimeSha,
     });
 
-    expect(JSON.parse(output).release.gitSha).toBe(explicitSha);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).release.gitSha).toBe(explicitSha);
   });
 
   it("preserves target-only manifest JSON without runtime defaults", () => {
-    const scriptPath = fileURLToPath(new URL("./post-deploy-observation-gate.mjs", import.meta.url));
     const runtimeSha = "2222222222222222222222222222222222222222";
-    const output = execFileSync(process.execPath, [
-      scriptPath,
+    const result = runGateCli([
       "--manifest-json",
       JSON.stringify({ targetManifests: [{ target: "backup-app", gitSha: runtimeSha }] }),
       "--window-minutes",
       "1",
     ], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AZURE_APPLICATIONINSIGHTS_APP_NAME: "",
-        AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "",
-        GITHUB_SHA: runtimeSha,
-      },
+      GITHUB_SHA: runtimeSha,
     });
 
-    expect(JSON.parse(output).release.gitSha).toBeNull();
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).release.gitSha).toBeNull();
   });
 
   it("blocks release-correlated route failures", () => {

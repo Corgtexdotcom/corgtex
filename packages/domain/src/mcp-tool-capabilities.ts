@@ -29,7 +29,7 @@ export const MCP_TOOL_CAPABILITIES = {
   execute_external_tool: { scopes: ["external-tools:write"] },
   get_current_connection: { scopes: ["workspace:read"] },
   get_workspace_info: { scopes: ["workspace:read"] },
-  daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read", "finance:read"] },
+  daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read"] },
   create_execution_request: { scopes: ["execution:write"] },
   get_execution_packet: { scopes: ["execution:read"] },
   get_company_context: { scopes: ["execution:read", "workspace:read", "actions:read", "tensions:read", "proposals:read", "meetings:read", "brain:read"] },
