@@ -5,7 +5,7 @@ const PLAN = "## Risk tier\n\n- `low`\n\n## Files to touch\n\n- `scripts/x.mjs`\
 const FILES = [{ filename: "scripts/x.mjs", additions: 1, deletions: 1 }];
 const makePr = (over = {}) => ({ number: 7, state: "open", draft: false, body: PLAN, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, labels: [{ name: "ok" }], auto_merge: null, ...over });
 const approvalFor = (pr, over = {}) => ({ id: 1, state: "APPROVED", submitted_at: "2026-01-01T00:00:00Z", commit_id: pr.head.sha, user: { login: "beepto-codex" }, body: `looks good\n\`\`\`review-snapshot-attestation\n${buildAttestationPayload(pr.number, computeSnapshot(pr))}\n\`\`\``, ...over });
-const state = (over = {}, prOver = {}) => { const pr = makePr(prOver); return { action: "opened", changes: null, eventUpdatedAt: "2026-01-02T00:00:00Z", pr, reviews: [approvalFor(pr)], files: FILES, filesTruncated: false, ...over }; };
+const state = (over = {}, prOver = {}) => { const pr = makePr(prOver); return { action: "opened", eventUpdatedAt: "2026-01-02T00:00:00Z", pr, reviews: [approvalFor(pr)], files: FILES, filesTruncated: false, ...over }; };
 
 describe("review snapshot integrity", () => {
   it("hashes exact body bytes; CRLF/whitespace/newline variants differ", () => {
@@ -57,11 +57,11 @@ describe("review snapshot integrity", () => {
     expect(decide(state({ reviews: [approvalFor(makePr(), { user: { login: "puncar-dev" } })] })).pass).toBe(false);
   });
   it("classifies snapshot-mutating events including title-only edited", () => {
-    for (const e of ["labeled", "unlabeled", "synchronize", "ready_for_review", "converted_to_draft", "reopened"]) expect(isSnapshotMutatingEvent(e, null)).toBe(true);
+    for (const e of ["opened", "reopened", "labeled", "unlabeled", "synchronize", "ready_for_review", "converted_to_draft"]) { expect(() => decide(state({ action: e }))).not.toThrow(); expect(isSnapshotMutatingEvent(e, null)).toBe(e !== "opened"); }
     expect(isSnapshotMutatingEvent("edited", { body: {} })).toBe(true);
     expect(isSnapshotMutatingEvent("edited", { base: {} })).toBe(true);
     expect(isSnapshotMutatingEvent("edited", { title: {} })).toBe(false);
-    expect(isSnapshotMutatingEvent("opened", null)).toBe(false);
+    expect(() => decide(state({ action: "edited" }))).toThrow("unexpected live API state");
   });
   it("mutating events dismiss every beepto-codex approval, disable auto-merge, dequeue, and fail; title-only does not", () => {
     const reviews = [approvalFor(makePr()), approvalFor(makePr(), { id: 2, submitted_at: "2026-01-02T00:00:00Z" })];

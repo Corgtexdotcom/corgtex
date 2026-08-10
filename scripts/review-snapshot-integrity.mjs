@@ -129,8 +129,8 @@ export function evaluatePolicy({ body, labels, files, draft }) {
   }
   return failures;
 }
-export function decide({ action, changes, eventUpdatedAt, pr, reviews, files, filesTruncated }) {
-  invariant(Array.isArray(reviews) && reviews.every((r) => r && Number.isSafeInteger(r.id) && typeof r.user?.login === "string" && ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"].includes(r.state) && (r.body === null || typeof r.body === "string") && (r.submitted_at === null || Number.isFinite(Date.parse(r.submitted_at))) && typeof r.commit_id === "string") && typeof filesTruncated === "boolean" && (!action || (["opened", "edited", ...MUTATING_EVENTS].includes(action) && Number.isFinite(Date.parse(eventUpdatedAt)) && (changes === null || typeof changes === "object"))), "unexpected live API state");
+export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, files, filesTruncated }) {
+  invariant(Array.isArray(reviews) && reviews.every((r) => r && Number.isSafeInteger(r.id) && typeof r.user?.login === "string" && ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"].includes(r.state) && (r.body === null || typeof r.body === "string") && (r.submitted_at === null || Number.isFinite(Date.parse(r.submitted_at))) && typeof r.commit_id === "string") && typeof filesTruncated === "boolean" && (!action || (["opened", "edited", ...MUTATING_EVENTS].includes(action) && Number.isFinite(Date.parse(eventUpdatedAt)) && (action === "edited" ? changes && typeof changes === "object" : changes === null || typeof changes === "object"))), "unexpected live API state");
   const failures = [];
   const writes = { dismissReviewIds: [], disableAutoMerge: false, dequeue: false };
   const snapshot = computeSnapshot(pr);
