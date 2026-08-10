@@ -244,7 +244,7 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string): boolean {
-  return /\b(do not|don['’]t|no|not|never)\b(?:\s+[a-z]+){0,5}\s+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
+  return /\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:\s+[a-z]+){0,5}\s+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
     || /\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
     || /\bno\s+(action|task|work item)\b/i.test(text);
 }
@@ -279,7 +279,8 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
 
 function hasGroundedOwnerCue(ownerEvidence: string, corpus: string): boolean {
   const owner = normalizeText(ownerEvidence);
-  if (!owner || owner === "unknown") return false;
+  const identifiableOwner = (!/^(?:the|a|an|this|that|it)\b/i.test(ownerEvidence.trim()) && /^(?:<@[A-Z0-9]+(?:\|[^>]+)?>|[\p{Lu}\p{Lt}\p{Lo}])/u.test(ownerEvidence.trim())) || /\b(team|lead|manager|owner|counsel|department|group|committee|reviewer|approver|finance|legal|operations|engineering|product|sales|support|security)\b/i.test(ownerEvidence);
+  if (!owner || owner === "unknown" || !identifiableOwner) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
   return new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
