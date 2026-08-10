@@ -64,8 +64,6 @@ export function inspectSourceIsolationLexicalReferences(source) {
     throw new SyntaxError("Parse/syntactic diagnostics found");
   }
 
-  let hasUnsupported = false;
-
   function isExcludedRole(node) {
     const parent = node.parent;
     if (!parent) return false;
@@ -96,21 +94,6 @@ export function inspectSourceIsolationLexicalReferences(source) {
     return false;
   }
 
-  function preflight(node) {
-    if (ts.isShorthandPropertyAssignment(node)) {
-      hasUnsupported = true;
-    }
-    if (ts.isIdentifier(node) && node.text === "arguments" && !isExcludedRole(node)) {
-      hasUnsupported = true;
-    }
-    if (!ts.isImportAttribute(node)) ts.forEachChild(node, preflight);
-  }
-  preflight(sourceFile);
-
-  if (hasUnsupported) {
-    throw new Error("Unsupported lexical reference form");
-  }
-
   const checker = program.getTypeChecker();
   program.getSemanticDiagnostics(sourceFile);
 
@@ -130,9 +113,37 @@ export function inspectSourceIsolationLexicalReferences(source) {
            ts.isNamespaceImport(decl);
   }
 
+  function isNonArrowFunctionLike(node) {
+    return ts.isFunctionDeclaration(node) ||
+           ts.isFunctionExpression(node) ||
+           ts.isMethodDeclaration(node) ||
+           ts.isConstructorDeclaration(node) ||
+           ts.isGetAccessor(node) ||
+           ts.isSetAccessor(node);
+  }
+
+  function hasImplicitArgumentsBinding(node) {
+    let child = node;
+    for (let parent = node.parent; parent; child = parent, parent = parent.parent) {
+      if (isNonArrowFunctionLike(parent) &&
+          (parent.body === child || parent.parameters.includes(child))) {
+        return true;
+      }
+      if (ts.isPropertyDeclaration(parent) && parent.initializer === child) {
+        return false;
+      }
+      if (ts.isClassStaticBlockDeclaration(parent)) return false;
+    }
+    return false;
+  }
+
   function visit(node) {
     if (ts.isIdentifier(node) && !isExcludedRole(node)) {
-      const symbol = checker.getSymbolAtLocation(node);
+      const isShorthandName = ts.isShorthandPropertyAssignment(node.parent) &&
+                              node.parent.name === node;
+      const symbol = isShorthandName
+        ? checker.getShorthandAssignmentValueSymbol(node.parent)
+        : checker.getSymbolAtLocation(node);
       let isBound = false;
       if (symbol && symbol.declarations) {
         for (const decl of symbol.declarations) {
@@ -141,6 +152,9 @@ export function inspectSourceIsolationLexicalReferences(source) {
             break;
           }
         }
+      }
+      if (!isBound && node.text === "arguments") {
+        isBound = hasImplicitArgumentsBinding(node);
       }
       if (!isBound) {
         const lineAndChar = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
@@ -170,11 +184,11 @@ export function inspectSourceIsolationLexicalReferences(source) {
   deduplicated.sort((a, b) => a.start - b.start);
 
   return Object.freeze({
-    phase: "lexical-ordinary-unbound-references",
+    phase: "lexical-unbound-references",
     complete: false,
     capabilities: Object.freeze([
-      "ordinary-identifier-lexical-bindings",
-      "ordinary-unbound-references"
+      "lexical-bindings",
+      "unbound-references"
     ]),
     unboundReferences: Object.freeze(deduplicated.map(ref => Object.freeze(ref)))
   });
