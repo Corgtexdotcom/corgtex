@@ -13,11 +13,11 @@ describe("ordinary lexical core", () => {
     const result2 = inspectSourceIsolationLexicalReferences("fetch; fetch;");
 
     expect(result1).toStrictEqual({
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: [
         {
@@ -55,11 +55,11 @@ describe("ordinary lexical core", () => {
   it("Closed bound baseline", () => {
     const source = `import { imported as importedValue } from "closed-module";\nfunction outer(parameter) {\n  try { throw parameter; } catch (caught) { return importedValue + caught; }\n}\nclass LocalClass {}\nouter(new LocalClass());`;
     const result = {
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: []
     };
@@ -70,11 +70,11 @@ describe("ordinary lexical core", () => {
   it("Ordinary reads/writes/Unicode", () => {
     const source = `const local = 1;\nlocal + fetch + missingName;\nsafeGlobal = local;\nf\\u0065tch;`;
     expect(inspectSourceIsolationLexicalReferences(source)).toStrictEqual({
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: [
         { text: "fetch", node: "Identifier", start: 25, line: 2, column: 9 },
@@ -88,11 +88,11 @@ describe("ordinary lexical core", () => {
   it("Receiver/computed roles", () => {
     const source = `const local = 1;\nfetch.member = local;\nmissing[computed] = local;`;
     expect(inspectSourceIsolationLexicalReferences(source)).toStrictEqual({
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: [
         { text: "fetch", node: "Identifier", start: 17, line: 2, column: 1 },
@@ -105,11 +105,11 @@ describe("ordinary lexical core", () => {
   it("Forced-module scope", () => {
     const source = `{ function fetch() {} }\nfetch;`;
     expect(inspectSourceIsolationLexicalReferences(source)).toStrictEqual({
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: [
         { text: "fetch", node: "Identifier", start: 24, line: 2, column: 1 }
@@ -117,25 +117,14 @@ describe("ordinary lexical core", () => {
     });
   });
 
-  it("Fail-closed unsupported forms", () => {
-    const errorMsg = "Unsupported lexical reference form";
-    expect(() => inspectSourceIsolationLexicalReferences(`const local = 1; ({ local });`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`({ unbound });`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`const nested = { nestedShorthand };`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`({ assignmentShorthand } = {});`)).toThrow(new Error(errorMsg));
-
-    expect(() => inspectSourceIsolationLexicalReferences(`arguments;`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`function f() { arguments; }`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`() => arguments;`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`class C { field = arguments; }`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`class C { static { arguments; } }`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`class C { method() { arguments; } }`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`const obj = { [arguments]: 1 };`)).toThrow(new Error(errorMsg));
-    expect(() => inspectSourceIsolationLexicalReferences(`\\u0061rguments;`)).toThrow(new Error(errorMsg));
-
+  it("Arguments excluded roles and checker-first bindings", () => {
     const controls = `
       const arguments = 1;
-      function f(arguments) {}
+      arguments;
+      ({ arguments });
+      const arrow = (arguments) => arguments;
+      function f(arguments) { return arguments; }
+      function local() { const arguments = 2; return arguments; }
       const obj = { arguments: 1, arguments() {} };
       class C { arguments = 1; arguments() {} get arguments() {} }
       obj.arguments;
@@ -150,11 +139,11 @@ describe("ordinary lexical core", () => {
       import data4 from "pkg" with { type: arguments.member }; data4;
     `;
     expect(inspectSourceIsolationLexicalReferences(controls)).toStrictEqual({
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: []
     });
@@ -165,11 +154,11 @@ describe("ordinary lexical core", () => {
     expect(() => inspectSourceIsolationLexicalReferences(`const class = 1;`)).toThrow(SyntaxError);
 
     expect(inspectSourceIsolationLexicalReferences(`return safeGlobal;`)).toStrictEqual({
-      phase: "lexical-ordinary-unbound-references",
+      phase: "lexical-unbound-references",
       complete: false,
       capabilities: [
-        "ordinary-identifier-lexical-bindings",
-        "ordinary-unbound-references"
+        "lexical-bindings",
+        "unbound-references"
       ],
       unboundReferences: [
         { text: "safeGlobal", node: "Identifier", start: 7, line: 1, column: 8 }
