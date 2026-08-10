@@ -250,7 +250,7 @@ function isNegatedActionRequest(text: string): boolean {
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  if (/^(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)/i.test(text.trim())) return true;
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)[.!]?$)/i.test(text.trim())) return true;
   return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
@@ -279,7 +279,7 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
 
 function hasGroundedOwnerCue(ownerEvidence: string, corpus: string): boolean {
   const owner = normalizeText(ownerEvidence);
-  const identifiableOwner = (!/^(?:the|a|an|this|that|it)\b/i.test(ownerEvidence.trim()) && /^(?:<@[A-Z0-9]+(?:\|[^>]+)?>|[\p{Lu}\p{Lt}\p{Lo}])/u.test(ownerEvidence.trim())) || /\b(team|lead|manager|owner|counsel|department|group|committee|reviewer|approver|finance|legal|operations|engineering|product|sales|support|security)\b/i.test(ownerEvidence);
+  const identifiableOwner = (!/^(?:the|a|an|this|that|it|report|guide|document|proposal|task|action|alert|agreement|issue|request|project|status|message|email|file|plan|deadline|work|budget|server|database|service|system|website|application|environment|deployment|release|build|code|repository|contract|invoice|meeting|schedule|calendar)\b/i.test(ownerEvidence.trim()) && /^(?:<@[A-Z0-9]+(?:\|[^>]+)?>|[\p{Lu}\p{Lt}\p{Lo}])/u.test(ownerEvidence.trim())) || /\b(team|lead|manager|owner|counsel|department|group|committee|reviewer|approver|finance|legal|operations|engineering|product|sales|support|security)\b/i.test(ownerEvidence);
   if (!owner || owner === "unknown" || !identifiableOwner) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
@@ -327,8 +327,8 @@ function meetsActionPublicationPredicate(
   if (!botUserId) return false;
   if (parsed.resolutionState !== "open") return false;
   if (parsed.workDisposition !== "action") return false;
-  if (!parsed.concreteNextStep) return false;
-  if (!isGroundedInCorpus(parsed.concreteNextStep, threadCorpus)) return false;
+  const concreteStep = normalizeText(parsed.concreteNextStep);
+  if (!concreteStep || !isGroundedInCorpus(parsed.concreteNextStep, threadCorpus) || (!concreteStep.includes(" ") && !/[^\x00-\x7F]/.test(parsed.concreteNextStep)) || /\b(something|anything|stuff|thing)\b/.test(concreteStep)) return false;
   if (!parsed.hasExplicitNegativeCategoryFalse) return false;
   if (parsed.negativeCategory) return false;
   if (!parsed.hasValidCouldNotArray) return false;
@@ -676,8 +676,16 @@ export async function runSlackProactiveScan(params: {
     });
     if (terminalMarker) continue;
 
-    if (!linkedAction && (!(looksWorkLike(candidate.text) || isDeterministicExplicitActionRequest(candidate.text)) || isBotMentioned(candidate.text, installation.botUserId))) {
-      await recordProactiveMarker({
+    const threadMessages = await fetchHumanThreadMessages({
+      workspaceId: params.workspaceId,
+      installationId: params.installationId,
+      source: candidate,
+    });
+
+    const latestThreadMessage = threadMessages[threadMessages.length - 1] ?? candidate;
+    const shouldSkipReview = threadMessages.some(m => isBotMentioned(m.text || "", installation.botUserId)) || (!linkedAction && !threadMessages.some(m => looksWorkLike(m.text || "") || isDeterministicExplicitActionRequest(m.text || "")));
+    if (shouldSkipReview) {
+      if (!linkedAction) await recordProactiveMarker({
         installationId: params.installationId,
         workspaceId: params.workspaceId,
         messageId: candidate.id,
@@ -688,14 +696,6 @@ export async function runSlackProactiveScan(params: {
       });
       continue;
     }
-
-    const threadMessages = await fetchHumanThreadMessages({
-      workspaceId: params.workspaceId,
-      installationId: params.installationId,
-      source: candidate,
-    });
-
-    const latestThreadMessage = threadMessages[threadMessages.length - 1] ?? candidate;
     if (linkedAction) {
       const existingUpdate = await prisma.communicationEntityLink.findFirst({
         where: {
@@ -710,19 +710,6 @@ export async function runSlackProactiveScan(params: {
         select: { id: true },
       });
       if (existingUpdate) continue;
-    } else {
-      if (threadMessages.some(m => isBotMentioned(m.text || "", installation.botUserId))) {
-        await recordProactiveMarker({
-          installationId: params.installationId,
-          workspaceId: params.workspaceId,
-          messageId: candidate.id,
-          externalUserId: candidate.externalUserId,
-          entityType: "CommunicationMessage",
-          entityId: candidate.id,
-          action: "proactive_unanswered_resolved",
-        });
-        continue;
-      }
     }
 
     const parsed = await reviewThreadForAction({
@@ -763,14 +750,14 @@ export async function runSlackProactiveScan(params: {
     }
 
     const threadCorpus = transcriptForMessages(threadMessages);
-    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus) && parsed.title) {
+    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus)) {
       const item = await createWorkItemFromCommunicationSource(agentActor, {
         workspaceId: params.workspaceId,
         provider: "SLACK",
         installationId: params.installationId,
         kind: "ACTION",
-        title: parsed.title,
-        bodyMd: parsed.bodyMd || candidate.text,
+        title: parsed.concreteNextStep,
+        bodyMd: threadMessages.map((message) => message.text).filter(Boolean).join("\n"),
         sourceMessageId: candidate.id,
         externalUserId: candidate.externalUserId,
         open: true,
@@ -790,10 +777,10 @@ export async function runSlackProactiveScan(params: {
         await sendSlackMessage(params.installationId, {
           channel: candidate.externalChannelId,
           threadTs: threadTsForMessage(candidate),
-          text: `Created Corgtex action: ${parsed.title}`,
+          text: `Created Corgtex action: ${parsed.concreteNextStep}`,
         }, [{
           type: "section",
-          text: { type: "mrkdwn", text: `I created a Corgtex action because this still looked unresolved after 24 hours: <${item.webUrl}|${parsed.title}>.` },
+          text: { type: "mrkdwn", text: `I created a Corgtex action because this still looked unresolved after 24 hours: <${item.webUrl}|${parsed.concreteNextStep}>.` },
         }]);
       } catch (error) {
         if (await markSlackInstallationReauthRequired({ ...params, error })) {

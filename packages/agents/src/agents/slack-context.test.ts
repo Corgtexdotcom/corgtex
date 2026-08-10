@@ -431,7 +431,7 @@ describe("Slack context jobs", () => {
       workspaceId: "workspace-1",
       provider: "SLACK",
       kind: "ACTION",
-      title: "Confirm availability",
+      title: "confirm availability for the June 23 call",
       sourceMessageId: "message-1",
       open: true,
     }));
@@ -445,7 +445,7 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-      text: "Created Corgtex action: Confirm availability",
+      text: "Created Corgtex action: confirm availability for the June 23 call",
     }, expect.any(Array));
     expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("still looked unresolved after 24 hours");
   });
@@ -692,7 +692,7 @@ describe("Slack context jobs", () => {
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-4" }),
     });
 
-    // Thread-level check: candidate doesn't mention bot, but a thread reply does
+    // Linked thread-level check: an app mention skips extraction without a recurring terminal marker.
     const normalSource = candidate({ id: "msg-normal-1", text: "Can you update the docs?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(normalSource);
     prismaMock.communicationMessage.findMany
@@ -702,6 +702,7 @@ describe("Slack context jobs", () => {
         normalSource,
         candidate({ id: "reply-1", text: "Yes, I will tell <@bot-1> to do it.", messageTs: new Date("2026-04-28T15:35:00.000Z") })
       ]);
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "existing-action-link", entityId: "action-1" });
 
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
@@ -710,9 +711,7 @@ describe("Slack context jobs", () => {
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
 
     expect(extractMock).not.toHaveBeenCalled();
-    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-normal-1" }),
-    });
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-normal-1" }) }));
   });
 
   it("allows non-bot mentions <@U999|Alice> to be nudged and evaluated", async () => {
@@ -810,17 +809,11 @@ describe("Slack context jobs", () => {
   });
 
   it.each(["Ack", "Acknowledged"])("terminalizes standalone acknowledgement %s without model review", async (text) => {
-    const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
-    setupPendingNudge(source);
-
+    setupPendingNudge(candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") }));
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
-
     expect(extractMock).not.toHaveBeenCalled();
     expect(createWorkItemMock).not.toHaveBeenCalled();
-    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
-    });
   });
 
   it.each([
@@ -835,7 +828,18 @@ describe("Slack context jobs", () => {
     { label: "hallucinated owner substring trap", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "IT", concreteNextStep: "confirm when waiting is finished", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Confirm waiting" }, text: "Please confirm when waiting is finished for the report." },
     { label: "arbitrary grounded token is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "report", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
     { label: "speaker scaffold is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "U1", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
-    { label: "inanimate grammatical subject is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "The report", concreteNextStep: "go out tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "The report needs to go out tomorrow." },
+    { label: "inanimate grammatical subject is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Report", concreteNextStep: "go out tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Report needs to go out tomorrow." },
+    { label: "standalone completion reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent it." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone done reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Done." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone sent reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone completed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Completed." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone fixed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Fixed." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone resolved reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Resolved." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone upgraded reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Upgraded." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "standalone deployed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Deployed." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "capitalized budget is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Budget", concreteNextStep: "be approved tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Approve budget" }, text: "Budget needs to be approved tomorrow." },
+    { label: "capitalized server is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Server", concreteNextStep: "restart tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Restart server" }, text: "Server needs to restart tomorrow." },
+    { label: "vague grounded verb is not a deliverable", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send" }, text: "Jan needs to send something?" },
     { label: "ASCII contracted negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex can't create an action item for it." },
     { label: "single-word cannot negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex cannot create an action item for it." },
     { label: "typographic contracted negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex shouldn’t create an action item for it." },
@@ -875,15 +879,18 @@ describe("Slack context jobs", () => {
   });
 
   it.each([
-    { label: "named-owner concrete deliverable", text: "Jan needs to send the signed agreement by tomorrow.", step: "send the signed agreement", owner: "Jan", title: "Send signed agreement", bodyMd: "Jan needs to send the signed agreement by tomorrow." },
+    { label: "grounded fields override hallucinated model prose", text: "Jan needs to send the signed agreement by tomorrow.", step: "send the signed agreement", owner: "Jan", title: "Invent quarterly strategy", bodyMd: "Fabricated private context." },
     { label: "named-owner should cue", text: "Jan should send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report by tomorrow." },
     { label: "named-owner please cue", text: "Jan, please send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan, please send the report by tomorrow." },
+    { label: "ownership role cue", text: "Finance team needs to approve the budget by tomorrow.", step: "approve the budget", owner: "Finance team", title: "Approve budget", bodyMd: "Finance team needs to approve the budget by tomorrow." },
     { label: "requested ack deliverable", text: "Please have Jan ack the alert by tomorrow.", step: "ack the alert", owner: "Jan", title: "Acknowledge alert", bodyMd: "Please have Jan ack the alert by tomorrow." },
     { label: "CJK Unicode evidence", text: "田中さん needs to 確認する by tomorrow.", step: "確認する", owner: "田中さん", title: "Confirm by tomorrow", bodyMd: "田中さん needs to 確認する by tomorrow." },
-    { label: "'not already done' bypassing completed veto", text: "This is not already done, Jan needs to finish the report.", step: "finish the report", owner: "Jan", title: "Finish report", bodyMd: "This is not already done, Jan needs to finish the report." }
-  ])("creates exactly one Action for $label and no duplicate on later scan", async ({ text, step, owner, title, bodyMd }) => {
+    { label: "'not already done' bypassing completed veto", text: "This is not already done, Jan needs to finish the report.", step: "finish the report", owner: "Jan", title: "Finish report", bodyMd: "This is not already done, Jan needs to finish the report." },
+    { label: "later actionable reply", text: "Can anyone help?", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan needs to send the report by tomorrow.", reply: "Jan needs to send the report by tomorrow." }
+  ])("creates exactly one Action for $label and no duplicate on later scan", async ({ text, step, owner, title, bodyMd, reply }) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(source);
+    if (reply) prismaMock.communicationMessage.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([source, candidate({ id: "reply-actionable", text: reply })]);
     extractMock.mockResolvedValueOnce({
       output: {
         resolutionState: "open", workDisposition: "action", concreteNextStep: step, ownerEvidence: owner,
@@ -897,7 +904,7 @@ describe("Slack context jobs", () => {
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
 
     expect(createWorkItemMock).toHaveBeenCalledTimes(1);
-    expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title, sourceMessageId: "message-1" }));
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: step, bodyMd: reply ? `${text}\n${reply}` : text, sourceMessageId: "message-1" }));
 
     // Later scan idempotency check: existing linkedAction suppresses duplicate creation
     setupPendingNudge(source);
@@ -936,7 +943,7 @@ describe("Slack context jobs", () => {
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
 
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      title: "Fix the logo",
+      title: "fix the logo",
     }));
 
     for (const pronoun of ["this", "that", "it"]) {
@@ -949,7 +956,7 @@ describe("Slack context jobs", () => {
       await expect(runSlackProactiveScan({
         workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1",
       })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-      expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: "Update guide" }));
+      expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: "update the guide" }));
     }
 
     // Negated source text check: model output cannot override the deterministic source-text veto.
