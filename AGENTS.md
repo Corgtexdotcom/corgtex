@@ -32,8 +32,9 @@ reviews code line-by-line. The full specification lives in
   evaluates any prior analysis before authoring the plan.
 - Kimi or Gemini may act as Executor.
 - The Reviewer stays a separate, independent, read-only agent that
-  reviews the exact current head of the PR; any later push invalidates
-  the review (stale-review invalidation). The Reviewer never edits code.
+  reviews the exact current head and base of the PR; any later push
+  invalidates the review (stale-review invalidation). The Reviewer never
+  edits code.
 
 ### Build, test, check
 
