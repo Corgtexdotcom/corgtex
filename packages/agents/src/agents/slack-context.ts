@@ -257,8 +257,9 @@ function isDeterministicNegativeCategory(text: string, concreteNextStep = "", in
   const [verb, ...object] = normalizeText(concreteNextStep).split(" ");
   const completedVerb = /^(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)$/.test(verb) ? verb : verb === "send" ? "sent" : verb === "do" ? "done" : verb ? `${verb}${verb.endsWith("e") ? "d" : "ed"}` : "";
   const historicalStep = `${completedVerb} ${object.join(" ")}`.trim();
+  const categoryText = /\brun (?:the )?routing test\b/.test(normalizeText(concreteNextStep)) && /(?:^|\s)(?:[\p{L}\p{N}_-]+\s+){1,3}(?:needs?\s+to|should|must|will)\s+run\s+(?:the\s+)?routing\s*test\b/u.test(normalizeText(text)) ? text.replace(/\brouting\s*test|test\s*routing\b/gi, "") : text;
   if (includeCompletion && /^(?:(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|got it|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|got it|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(categoryText)
     || Boolean(includeCompletion && (/(?<!\b(?:not|never|don['’]t)\s)\balready\s+(?:done|sent|completed|fixed|resolved|upgraded|deployed)\b/i.test(text) || (historicalStep && new RegExp(`\\bshould have (?:been )?${historicalStep}\\b`, "u").test(normalizeText(text)) && (/\?/.test(text) || /\bconfirm\b/i.test(text)))))
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
@@ -290,13 +291,14 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
 function splitAssignmentClauses(text: string) { return text.split(/[\n;!]+|(?<=\?)|\.(?=\s|$)/u).map(clause => `${normalizeText(clause)}${clause.includes("?") ? " ?" : ""}`.trim()); }
 function isOrganizationalRole(ownerEvidence: string) { return /^(?:legal|finance|operations|engineering|product|sales|support|security|(?:[\p{L}\p{N}_-]+\s+){0,2}(?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))$/u.test(normalizeText(ownerEvidence)); }
 
-function hasGroundedOwnerCue(ownerEvidence: string, concreteNextStep: string, threadTexts: string[], trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
+function hasGroundedOwnerCue(ownerEvidence: string, concreteNextStep: string, threadTexts: string[], trustedUsers: Array<{ externalUserId: string; displayName: string | null }>, authorId: string | null = null, botUserId: string | null = null): boolean {
   const owner = normalizeText(ownerEvidence), step = normalizeText(concreteNextStep);
   if (!owner || owner === "unknown" || !step) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), escapedStep = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const assigned = threadTexts.flatMap(splitAssignmentClauses).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\s+${escapedStep}(?=\\s|$)`, "u").test(clause)
     || new RegExp(`(?:\\bhave\\s+${escapedOwner}\\s+(?:to\\s+)?${escapedStep}|^(?:please\\s+)?ask\\s+${escapedOwner}\\s+to\\s+${escapedStep})(?=\\s|$)`, "u").test(clause) || new RegExp(`\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}\\s+(?:(?:to|for)\\s+)?${escapedStep}(?=\\s|$)`, "u").test(clause));
   if (!assigned) return false;
+  if (owner === "i") return Boolean(authorId && authorId !== botUserId && trustedUsers.some(user => user.externalUserId === authorId));
   const identities = trustedUsers.map(user => ({ id: normalizeText(user.externalUserId), name: normalizeText(user.displayName || "") }));
   return isOrganizationalRole(owner) || identities.some(identity => identity.id === owner || (owner.includes(" ") && identity.name === owner)) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
 }
@@ -337,7 +339,7 @@ function meetsActionPublicationPredicate(
   confidenceThreshold: number,
   sourceText: string,
   threadTexts: string[],
-  trustedUsers: Array<{ externalUserId: string; displayName: string | null }>
+  trustedUsers: Array<{ externalUserId: string; displayName: string | null }>, threadAuthors: Array<string | null>
 ): boolean {
   if (!botUserId) return false;
   if (parsed.resolutionState !== "open") return false;
@@ -353,12 +355,12 @@ function meetsActionPublicationPredicate(
   if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep, parsed.ownerEvidence))) return false;
   if (threadTexts.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep, false))) return false;
 
-  const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, threadTexts, trustedUsers);
+  const hasGroundedOwner = threadTexts.some((text, index) => hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [text], trustedUsers, threadAuthors[index], botUserId));
   const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText, parsed.concreteNextStep) || threadTexts.some(text => isDeterministicExplicitActionRequest(text, parsed.concreteNextStep)));
   if (!hasGroundedOwner && !isExplicitRequest) return false;
   let assignmentTail = threadTexts;
   threadTexts.forEach((text, messageIndex) => splitAssignmentClauses(text).forEach((clause, clauseIndex, clauses) => {
-    if (hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [clause], trustedUsers) || (parsed.explicitActionRequest && isDeterministicExplicitActionRequest(clause, parsed.concreteNextStep))) assignmentTail = [...clauses.slice(clauseIndex), clauses.slice(clauseIndex).join(" "), ...threadTexts.slice(messageIndex + 1)];
+    if (hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [clause], trustedUsers, threadAuthors[messageIndex], botUserId) || (parsed.explicitActionRequest && isDeterministicExplicitActionRequest(clause, parsed.concreteNextStep))) assignmentTail = [...clauses.slice(clauseIndex), clauses.slice(clauseIndex).join(" "), ...threadTexts.slice(messageIndex + 1)];
   }));
   if (assignmentTail.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep))) return false;
   return true;
@@ -768,7 +770,7 @@ export async function runSlackProactiveScan(params: {
 
     const threadTexts = threadMessages.map(message => message.text || "");
     if (parsed.ownerEvidence && !isOrganizationalRole(parsed.ownerEvidence) && trustedUsers === null) trustedUsers = await prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isBot: false, isDeleted: false }, select: { externalUserId: true, displayName: true } });
-    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadTexts, trustedUsers || [])) {
+    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadTexts, trustedUsers || [], threadMessages.map(message => message.externalUserId))) {
       const item = await createWorkItemFromCommunicationSource(agentActor, {
         workspaceId: params.workspaceId,
         provider: "SLACK",
