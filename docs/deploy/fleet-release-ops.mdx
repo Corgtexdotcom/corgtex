@@ -29,6 +29,8 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
 | `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Legacy-named selfserve target inventory; each target still declares its provider. |
 | `FLEET_RELEASE_ACR_SERVER` | Variable, optional | Azure Container Registry server. Defaults to the production self-serve registry. |
+| `FLEET_RELEASE_ROLLBACK_FILE` | Per-run path | New, writable, non-secret artifact path required before a managed Azure release can mutate ACR or a Container App. Existing files are not overwritten. |
+| `FLEET_RELEASE_MANAGED_AZURE_OBSERVATION_DEPLOYMENT_ID` | Workflow-provided variable | Exact deployment ID whose tenant-scoped `azure-managed` observation is configured. The current workflow does not set it. |
 | `FLEET_RELEASE_PREFLIGHT_MAX_SECONDS` | Variable, optional | Dry-run preflight timing gate. Defaults to `30`. |
 | `GHCR_IMPORT_USERNAME` | Variable, optional | GHCR username for Azure imports. Defaults to the GitHub Actions actor. |
 
@@ -53,16 +55,42 @@ Railway targets must include:
 Azure targets must include:
 
 - `id`
+- `deploymentId`
 - `label`
 - `url`
 - an explicit workload `group`
 - `provider: "azure"`
 - `azure.resourceGroup`
 - `azure.acrName`
+- `azure.acrServer`
 - `azure.webAppName`
 - `azure.workerAppName`
 
-Only `selfserve` Azure targets are mutable in PR1. Azure managed-customer, core, backup, and Ops targets are shown with blockers and remain non-mutable until the generic Azure executor lands in PR3; they never inherit selfserve resource defaults.
+Every Container App must have a registry entry whose server equals `azure.acrServer` and whose `identity` names the pull identity. Managed targets never inherit self-serve resource defaults.
+
+## Managed Azure Exact-Target Contract
+
+A managed Azure invocation is intentionally narrower than fleet selection:
+
+- It must name one `--deployment-id` exactly once. A workload-only selection, no match, duplicate match, or a non-managed match stops before any provider call.
+- `--release` must be one full 40-character Git SHA. `latest-stable` is not accepted, and the manifest is rebuilt for that tenant's explicit ACR.
+- `--expected-current-release` must exactly equal the control-plane `releaseImageTag`. The runner rechecks that compare-and-stop condition immediately before mutation.
+- The source web and worker digests are resolved from GHCR. ACR imports use `repository@sha256:<digest>` without `--force`; an existing destination tag with a different digest stops before either Container App update.
+- Container Apps are updated to `azure.acrServer/repository@sha256:<digest>`, never to the mutable destination tag.
+
+Before any import or Container App update, the runner captures both current digest-pinned image references and both ready revision names. It creates `FLEET_RELEASE_ROLLBACK_FILE` with those values, the target resource identity, the incoming digests, and the prior/incoming release metadata. A missing or unwritable path stops before mutation. If either prior image is not digest-pinned, the record is written with `rollbackDigestPinned: false` and the release stops.
+
+Rollback consumes that exact record:
+
+```bash
+node scripts/release/fleet-release-runner.mjs rollback-managed-azure \
+  --record /secure/run-artifacts/managed-azure-rollback.json \
+  --reason "Restore the previously verified release."
+```
+
+The rollback command rejects malformed records and live control-plane resource drift, restores both previous digest references, waits for ready revisions, and then reuses the normal health, Azure runtime, MCP OAuth, post-deploy probe, fleet snapshot, and verified-release recording path.
+
+Managed promotion output is attributed to `azure-managed`, never `azure-selfserve`. A non-dry-run also requires an audited `workflow_dispatch` run and a matching `FLEET_RELEASE_MANAGED_AZURE_OBSERVATION_DEPLOYMENT_ID`. The current fleet workflows do not accept `--deployment-id` or `--expected-current-release`, do not configure tenant-scoped `azure-managed` observation, and do not set that variable. Therefore this PR alone cannot complete a managed release; the separate observation/workflow prerequisite must land first.
 
 Set `deploymentStatus` or `provisioningStatus` to `RETIRED` or `SUSPENDED`, or set `releaseEligible: false`, as soon as a target cannot receive releases. Default and `all` selections exclude those targets. A specific workload selection reports them as blockers and a real run fails before provider mutation.
 

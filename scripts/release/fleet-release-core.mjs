@@ -107,6 +107,8 @@ export function normalizeTargetGroup(value) { const group = String(value ?? "").
 
 export function targetSelectionDeprecations(value) { const selected = String(value ?? "").split(",").map((part) => part.trim()).filter(Boolean); return selected.filter((group) => TARGET_GROUP_ALIASES[group]).map((group) => `${group} is deprecated; use ${TARGET_GROUP_ALIASES[group]} and declare provider per target`); }
 
+export function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? (target.group === "managed-customers" ? "azure-managed" : "azure-selfserve") : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-managed", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); }
+
 export function buildReleaseManifest({
   gitSha,
   repository = "Corgtexdotcom/corgtex",
@@ -363,6 +365,8 @@ export function targetFromControlPlaneRow(row) {
     deploymentStatus: row.deploymentStatus ?? null,
     provisioningStatus: row.provisioningStatus ?? null,
     releaseEligible: row.releaseEligible !== false,
+    currentRelease: row.releaseImageTag ?? row.release?.current?.releaseImageTag ?? null,
+    currentReleaseVersion: row.releaseVersion ?? row.release?.current?.releaseVersion ?? null,
     railway: {
       projectId: row.railwayProjectId ?? row.providerProjectId ?? null,
       environmentId: row.railwayEnvironmentId ?? row.providerEnvironmentId ?? null,

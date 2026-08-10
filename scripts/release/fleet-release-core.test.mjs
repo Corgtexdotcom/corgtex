@@ -12,6 +12,7 @@ import {
   mcpOAuthProofErrors,
   normalizeReleaseInput,
   normalizeTargets,
+  observationTargetsFor,
   providerBoundaryErrors,
   releaseVersionForSha,
   targetEligibilityErrors,
@@ -170,6 +171,10 @@ describe("fleet release core", () => {
       url: "https://selfserve.corgtex.com",
     })).toMatchObject({ group: "managed-customers", provider: "railway" });
     expect(targetFromControlPlaneRow({ id: "backup", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY" })).toMatchObject({ group: "backup-app", provider: "railway" });
+  });
+
+  it("attributes managed Azure observation without changing other lanes", () => {
+    expect(observationTargetsFor([{ provider: "azure", group: "managed-customers" }, { provider: "azure", group: "selfserve" }, { provider: "railway", group: "managed-customers" }])).toEqual(["railway-customers", "azure-managed", "azure-selfserve"]);
   });
 
   it("formats progressive rings without UI-specific behavior", () => {

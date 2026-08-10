@@ -17,6 +17,7 @@ import {
   normalizeReleaseInput,
   normalizeTargetGroup,
   normalizeTargets,
+  observationTargetsFor,
   mcpOAuthProofErrors,
   parseBoolean,
   parseKeyValueArgs,
@@ -28,6 +29,16 @@ import {
   targetSelectionDeprecations,
   TERMINAL_RAILWAY_FAILURES,
 } from "./fleet-release-core.mjs";
+import {
+  buildManagedAzureRollbackRecord,
+  isManagedAzureTarget,
+  managedAzureContractErrors,
+  managedAzureRegistryErrors,
+  managedAzureRollbackRecordErrors,
+  normalizeImageDigest,
+  releaseShaFromTag,
+  selectManagedAzureTarget,
+} from "./azure-release-managed-target.mjs";
 import { notifyFleetReleaseFailure } from "./fleet-release-alerts.mjs";
 import { runPostDeployProbe } from "./fleet-release-probes.mjs";
 
@@ -69,13 +80,13 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     console.log(JSON.stringify({ stage: "image-check", ...result }, null, 2));
     return result;
   }
+  if (command === "rollback-managed-azure") return rollbackManagedAzure(args, deps);
   if (command !== "deploy") {
     throw new Error(`Unsupported fleet release command: ${command}`);
   }
 
   const env = deps.env ?? process.env;
   validateRuntimeObservabilityEnvironment(env);
-  const manifest = await resolveManifest(args, deps);
   const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default"; const selectedGroups = normalizeTargets(targetSelection);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
   const failOnBlockers = parseBoolean(args.failOnBlockers ?? env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
@@ -86,18 +97,32 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error("A release reason is required.");
   }
 
-  const allTargets = await discoverTargets(deps);
+  let manifest = await resolveManifest(args, deps);
+  const deploymentIdCount = argv.filter((value) => value === "--deployment-id").length;
+  const allTargets = await discoverTargets(deps, { preserveDuplicates: deploymentIdCount > 0 });
   const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase()) || [normalizeTargets("default"), normalizeTargets("all")].some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
-  let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
+  let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection });
+  const managedTarget = selectManagedAzureTarget(targets.filter((target) => targetEligibilityErrors(target).length === 0), args.deploymentId, deploymentIdCount);
+  if (managedTarget) targets = [managedTarget];
+  else if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
 
-  emitTargetInventory(targets, env, deps);
-  const preflight = targets.map((target) => ({
+  let preflight = targets.map((target) => ({
     target,
-    blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
+    blockers: preflightTarget(target, env, { args, dryRun, requireCurrentRelease: false, requireObservability: !dryRun }),
   }));
+  if (managedTarget) {
+    if (preflight[0].blockers.length > 0) throw new Error(formatPreflightFailure(preflight));
+    targets = [await revalidateSnapshotTarget(managedTarget, deps, true)];
+    preflight = [{ target: targets[0], blockers: preflightTarget(targets[0], env, { args, dryRun, requireCurrentRelease: true, requireObservability: !dryRun }) }];
+    if (preflight[0].blockers.length === 0) preflight[0].blockers.push(...managedAzureRegistryErrors(targets[0], readAzureRegistries(targets[0], deps)));
+    if (preflight[0].blockers.length > 0) throw new Error(formatPreflightFailure(preflight));
+  }
+  if (managedTarget && manifest.gitSha !== args.release.toLowerCase()) throw new Error("Managed Azure manifest gitSha does not match the explicit --release SHA.");
+  if (managedTarget) manifest = buildReleaseManifest({ ...manifest, acrServer: targets[0].azure.acrServer, acrWebImage: null, acrWorkerImage: null });
+  emitTargetInventory(targets, env, deps);
   const blockers = preflight.filter((item) => item.blockers.length > 0);
   const planTargets = preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers })); const deprecations = [...targetSelectionDeprecations(targetSelection), ...targets.flatMap((target) => target.deprecations ?? [])];
   const plan = formatReleasePlan({ manifest, targets: planTargets, dryRun, concurrency, deprecations: [...new Set(deprecations)] });
@@ -119,7 +144,9 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
       console.log(JSON.stringify({ stage: "ring-started", ring: ring.ring, targetCount: ring.targets.length }));
       const ringResults = await runWithConcurrency(ring.targets, concurrency, async (target) => {
         try {
-          const currentTarget = env.FLEET_RELEASE_TARGETS_FILE ? await revalidateSnapshotTarget(target, deps, true) : target; retainedTargets.add(target); const result = await deployTarget(currentTarget, manifest, reason, deps);
+          const currentTarget = env.FLEET_RELEASE_TARGETS_FILE || isManagedAzureTarget(target) ? await revalidateSnapshotTarget(target, deps, true) : target;
+          if (isManagedAzureTarget(currentTarget)) { const currentBlockers = preflightTarget(currentTarget, env, { args, dryRun: false, requireCurrentRelease: true, requireObservability: true }); if (currentBlockers.length) throw new Error(formatPreflightFailure([{ target: currentTarget, blockers: currentBlockers }])); }
+          retainedTargets.add(target); const result = await deployTarget(currentTarget, manifest, reason, deps);
           return { target: currentTarget, status: "succeeded", result };
         } catch (error) {
           return { target, status: "failed", error: error instanceof Error ? error.message : String(error) };
@@ -271,7 +298,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   };
 }
 
-function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps) { const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
+function emitTargetInventory(targets, env, deps) { const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
 
 function validateConfiguredTargetJson(name, raw, invalid) {
   if (!raw?.trim()) return;
@@ -371,18 +398,18 @@ async function resolveLatestStableSha(deps) {
   throw new Error("latest-stable could not be resolved. Set FLEET_RELEASE_STABLE_GIT_SHA to a canary-proven release SHA, or pass --release <full-sha> explicitly.");
 }
 
-async function discoverTargets(deps) {
+async function discoverTargets(deps, options = {}) {
   const env = deps.env ?? process.env;
   const snapshot = env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE);
   const configured = parseTargetJson(snapshot ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
-  if (snapshot) return revalidateTargets(dedupeTargets(configured.map(normalizeTarget)), deps);
+  if (snapshot) return revalidateTargets(options.preserveDuplicates ? configured.map(normalizeTarget) : dedupeTargets(configured.map(normalizeTarget)), deps);
   const discovered = configured.length > 0 ? [] : await discoverControlPlaneTargets(deps);
   const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
-  const targets = dedupeTargets([...configured, ...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
-  return targets;
+  const targets = [...configured, ...configuredTargets(env, { excludePrimary: configured.length > 0 }).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget);
+  return options.preserveDuplicates ? targets : dedupeTargets(targets);
 }
 
-function configuredTargets(env) { return [...parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON), ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })), ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })), ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" }))]; }
+function configuredTargets(env, options = {}) { return [...(options.excludePrimary ? [] : parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON)), ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })), ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })), ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" }))]; }
 
 function parseTargetJson(raw) {
   if (!raw?.trim()) return [];
@@ -400,7 +427,7 @@ async function discoverControlPlaneTargets(deps) {
   return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production" && row.deploymentKind !== "SHARED_WORKSPACE" && ["AZURE", "RAILWAY"].includes(row.cloudProvider)).map(targetFromControlPlaneRow);
 }
 
-async function revalidateTargets(targets, deps) { const revalidated = []; for (let index = 0; index < targets.length; index += 8) revalidated.push(...await Promise.all(targets.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps)))); return revalidated; } async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${target.label} authoritative provider or resource identity changed after preflight`); const classificationDrift = ["environment", "deploymentKind"].some((key) => target[key] && current[key] && target[key] !== current[key]); if (classificationDrift || (current.environment && String(current.environment).toLowerCase() !== "production")) throw new Error(`${target.label} authoritative workload or environment changed after preflight`); const revalidated = { ...target, environment: current.environment ?? target.environment, deploymentKind: current.deploymentKind ?? target.deploymentKind, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible }, errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${target.label}: ${errors.join("; ")}`); return revalidated; }
+async function revalidateTargets(targets, deps) { const revalidated = []; for (let index = 0; index < targets.length; index += 8) revalidated.push(...await Promise.all(targets.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps)))); return revalidated; } async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${target.label} authoritative provider or resource identity changed after preflight`); if (isManagedAzureTarget(target) && ["deploymentId", "url", "group", "workload"].some((key) => target[key] !== currentTarget[key])) throw new Error(`${target.label} authoritative managed target identity changed after preflight`); const classificationDrift = ["environment", "deploymentKind"].some((key) => target[key] && current[key] && target[key] !== current[key]); if (classificationDrift || (current.environment && String(current.environment).toLowerCase() !== "production")) throw new Error(`${target.label} authoritative workload or environment changed after preflight`); const revalidated = { ...target, environment: current.environment ?? target.environment, deploymentKind: current.deploymentKind ?? target.deploymentKind, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible, currentRelease: currentTarget.currentRelease, currentReleaseVersion: currentTarget.currentReleaseVersion }, errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${target.label}: ${errors.join("; ")}`); return revalidated; }
 function mutationIdentity(target) { const resource = target.provider === "azure" ? [target.azure?.resourceGroup, target.azure?.webAppName, target.azure?.workerAppName] : [target.railway?.projectId, target.railway?.environmentId, target.railway?.webServiceId, target.railway?.workerServiceId]; return JSON.stringify([target.provider, ...resource]); }
 
 function normalizeTarget(target) {
@@ -421,11 +448,13 @@ function normalizeTarget(target) {
     deploymentStatus: target.deploymentStatus ?? null,
     provisioningStatus: target.provisioningStatus ?? null,
     releaseEligible: target.releaseEligible !== false,
+    currentRelease: target.currentRelease ?? target.releaseImageTag ?? null,
+    currentReleaseVersion: target.currentReleaseVersion ?? target.releaseVersion ?? null,
     deprecations: target.deprecations ?? (group !== originalGroup ? [`${originalGroup} workload alias normalized to ${group}`] : []),
     railway: target.railway ?? {},
     azure: { ...(group === "selfserve" && provider === "azure" ? DEFAULT_AZURE : {}), ...(target.azure ?? {}) },
   };
-  if (normalized.provider === "azure" && normalized.azure.acrName) {
+  if (normalized.provider === "azure" && normalized.group !== "managed-customers" && normalized.azure.acrName) {
     normalized.azure.acrServer = target.azure?.acrServer ?? `${normalized.azure.acrName}.azurecr.io`;
   }
   return normalized;
@@ -446,7 +475,8 @@ function dedupeTargets(targets) {
 function preflightTarget(target, env, options = {}) {
   const blockers = [...providerBoundaryErrors(target), ...targetEligibilityErrors(target)];
   const requireObservability = options.requireObservability === true;
-  if (!target.url) blockers.push("runtime URL is missing");
+  const managedAzure = isManagedAzureTarget(target);
+  if (!target.url && !managedAzure) blockers.push("runtime URL is missing");
   if (target.group === "selfserve" && !target.deploymentId) blockers.push("Self-serve deploymentId is missing for readiness checks");
   if (target.deploymentId && !env.CONTROL_PLANE_AGENT_API_KEY) {
     blockers.push("CONTROL_PLANE_AGENT_API_KEY is missing for verified inventory recording");
@@ -475,7 +505,15 @@ function preflightTarget(target, env, options = {}) {
       }
     }
   } else if (target.provider === "azure") {
-    if (target.group !== "selfserve") blockers.push("Managed Azure targets are non-mutable until the generic Azure executor is implemented in PR3");
+    if (managedAzure) blockers.push(...managedAzureContractErrors(target, {
+      release: options.args?.release,
+      expectedCurrentRelease: options.args?.expectedCurrentRelease,
+      rollbackFile: env.FLEET_RELEASE_ROLLBACK_FILE,
+      requireCurrentRelease: options.requireCurrentRelease,
+      dryRun: options.dryRun,
+      auditedWorkflow: env.GITHUB_ACTIONS === "true" && env.GITHUB_EVENT_NAME === "workflow_dispatch" && Boolean(env.GITHUB_RUN_ID),
+      observationDeploymentId: env.FLEET_RELEASE_MANAGED_AZURE_OBSERVATION_DEPLOYMENT_ID,
+    }));
     if (requireObservability && !optionalText(env.APPLICATIONINSIGHTS_CONNECTION_STRING)) {
       blockers.push("APPLICATIONINSIGHTS_CONNECTION_STRING is missing for Azure observability");
     }
@@ -490,11 +528,18 @@ function preflightTarget(target, env, options = {}) {
   } else {
     blockers.push(`Unsupported provider: ${target.provider}`);
   }
-  return blockers;
+  return [...new Set(blockers)];
 }
 
 function formatPreflightFailure(blockers) {
   return `Fleet release preflight failed: ${blockers.map((item) => `${item.target.label}: ${item.blockers.join("; ")}`).join(" | ")}`;
+}
+
+function readAzureRegistries(target, deps) {
+  return Object.fromEntries([["web", target.azure.webAppName], ["worker", target.azure.workerAppName]].map(([role, name]) => {
+    const result = runCommand("az", ["containerapp", "show", "--name", name, "--resource-group", target.azure.resourceGroup, "--query", "properties.configuration.registries", "-o", "json"], deps);
+    try { return [role, JSON.parse(result.stdout)]; } catch { throw new Error(`${target.label} ${role} Container App registry preflight returned invalid JSON`); }
+  }));
 }
 
 export function checkReleaseImages(manifest, deps) {
@@ -520,6 +565,10 @@ async function deployTarget(target, manifest, reason, deps) {
   const providerResult = target.provider === "azure"
     ? await deployAzureTarget(target, { ...manifest, acrWebImage: `${target.azure.acrServer}/corgtex/web:${manifest.imageTag}`, acrWorkerImage: `${target.azure.acrServer}/corgtex/worker:${manifest.imageTag}` }, deps)
     : await deployRailwayTarget(target, manifest, deps);
+  return { providerResult, ...await proveTargetRelease(target, manifest, reason, deps) };
+}
+
+async function proveTargetRelease(target, manifest, reason, deps) {
   const health = await pollHealth(target.url, manifest, deps);
   assertHealthProof(health, manifest, target.label);
   const oauthProof = target.provider === "azure"
@@ -545,7 +594,7 @@ async function deployTarget(target, manifest, reason, deps) {
   if (target.deploymentId && !usesSelfServeReadiness) {
     verifiedRelease = await recordVerifiedRelease(target, manifest, reason, deps);
   }
-  return { providerResult, release: health.release, oauthProof, providerReadiness, postDeployProbe, postDeploySnapshots, verifiedRelease };
+  return { release: health.release, oauthProof, providerReadiness, postDeployProbe, postDeploySnapshots, verifiedRelease };
 }
 
 async function recordVerifiedRelease(target, manifest, reason, deps) {
@@ -848,6 +897,7 @@ export async function latestRailwayStatus(target, deployment, deps) {
 }
 
 async function deployAzureTarget(target, manifest, deps) {
+  if (isManagedAzureTarget(target)) return deployManagedAzureTarget(target, manifest, deps);
   assertAzureRuntimeContract(target, deps, "preflight");
   const env = deps.env ?? process.env;
   const username = env.GHCR_IMPORT_USERNAME || env.GITHUB_ACTOR;
@@ -877,6 +927,73 @@ async function deployAzureTarget(target, manifest, deps) {
     webRevision: showAzureRevision(target.azure.webAppName, target, deps),
     workerRevision: showAzureRevision(target.azure.workerAppName, target, deps),
   };
+}
+
+function resolveSourceDigest(image, deps) {
+  const result = runCommand("docker", ["buildx", "imagetools", "inspect", image, "--format", "{{json .Manifest}}"], deps);
+  try { return normalizeImageDigest(JSON.parse(result.stdout).digest); } catch (error) { throw new Error(`Could not resolve immutable digest for ${image}: ${error.message}`); }
+}
+
+function destinationDigest(target, repository, tag, deps) {
+  const result = runCommand("az", ["acr", "manifest", "list-metadata", "--registry", target.azure.acrName, "--name", repository, "--query", `[?contains(tags, '${tag}')].digest | [0]`, "-o", "tsv"], deps);
+  return result.stdout.trim() ? normalizeImageDigest(result.stdout) : null;
+}
+
+function captureAzureState(target, role, name, deps) {
+  const result = runCommand("az", ["containerapp", "show", "--name", name, "--resource-group", target.azure.resourceGroup, "--query", "{image:properties.template.containers[0].image,latestRevision:properties.latestRevisionName,readyRevision:properties.latestReadyRevisionName}", "-o", "json"], deps);
+  let state; try { state = JSON.parse(result.stdout); } catch { throw new Error(`${target.label} ${role} rollback capture returned invalid JSON`); }
+  if (!state.latestRevision || state.latestRevision !== state.readyRevision) throw new Error(`${target.label} ${role} current revision is not ready for exact rollback capture`);
+  return { image: state.image, readyRevision: state.readyRevision };
+}
+
+function managedAzureImages(target, manifest, deps) {
+  const images = Object.fromEntries([["web", manifest.ghcrWebImage], ["worker", manifest.ghcrWorkerImage]].map(([role, source]) => {
+    const repository = `corgtex/${role}`, digest = resolveSourceDigest(source, deps), current = destinationDigest(target, repository, manifest.imageTag, deps);
+    if (current && current !== digest) throw new Error(`${target.label} ${repository}:${manifest.imageTag} already exists with digest ${current}, expected ${digest}`);
+    return [role, { repository, source: `${source.replace(`:${manifest.imageTag}`, "")}@${digest}`, digest, current }];
+  }));
+  return images;
+}
+
+async function deployManagedAzureTarget(target, manifest, deps) {
+  assertAzureRuntimeContract(target, deps, "preflight");
+  const images = managedAzureImages(target, manifest, deps);
+  const previous = Object.fromEntries([["web", target.azure.webAppName], ["worker", target.azure.workerAppName]].map(([role, name]) => [role, captureAzureState(target, role, name, deps)]));
+  const record = buildManagedAzureRollbackRecord(target, manifest, previous, { webDigest: images.web.digest, workerDigest: images.worker.digest }, new Date().toISOString());
+  const current = await revalidateSnapshotTarget(target, deps, true);
+  if (current.currentRelease !== target.currentRelease) throw new Error(`${target.label} control-plane release changed before managed Azure mutation`);
+  writeFileSync((deps.env ?? process.env).FLEET_RELEASE_ROLLBACK_FILE, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx" });
+  const recordErrors = managedAzureRollbackRecordErrors(record);
+  if (recordErrors.length > 0) throw new Error(`${target.label} rollback capture failed: ${recordErrors.join("; ")}`);
+  const env = deps.env ?? process.env, username = env.GHCR_IMPORT_USERNAME || env.GITHUB_ACTOR, token = env.GHCR_IMPORT_TOKEN || env.GITHUB_TOKEN;
+  for (const image of Object.values(images)) if (!image.current) runCommand("az", ["acr", "import", "--name", target.azure.acrName, "--source", image.source, "--image", `${image.repository}:${manifest.imageTag}`, "--username", username, "--password", token], deps);
+  updateAzureContainerApp(target.azure.webAppName, `${target.azure.acrServer}/corgtex/web@${images.web.digest}`, target, manifest, deps);
+  updateAzureContainerApp(target.azure.workerAppName, `${target.azure.acrServer}/corgtex/worker@${images.worker.digest}`, target, manifest, deps);
+  return { webRevision: showAzureRevision(target.azure.webAppName, target, deps), workerRevision: showAzureRevision(target.azure.workerAppName, target, deps), webDigest: images.web.digest, workerDigest: images.worker.digest, rollbackFile: env.FLEET_RELEASE_ROLLBACK_FILE };
+}
+
+async function rollbackManagedAzure(args, deps) {
+  if (!args.record) throw new Error("rollback-managed-azure requires --record <file>.");
+  if (!args.reason?.trim()) throw new Error("rollback-managed-azure requires --reason <text>.");
+  let record;
+  try { record = JSON.parse(readFileSync(args.record, "utf8")); } catch (error) { throw new Error(`Could not read managed Azure rollback record: ${error.message}`); }
+  const errors = managedAzureRollbackRecordErrors(record);
+  if (errors.length > 0) throw new Error(`Managed Azure rollback record is invalid: ${errors.join("; ")}`);
+  const target = await revalidateSnapshotTarget(normalizeTarget(record.target), deps, true);
+  if (!target.currentRelease || ![record.incoming.releaseImageTag, record.previous.releaseImageTag].includes(target.currentRelease)) throw new Error(`${target.label} control-plane release drifted since rollback capture`);
+  const registryErrors = managedAzureRegistryErrors(target, readAzureRegistries(target, deps));
+  if (registryErrors.length > 0) throw new Error(`${target.label} rollback registry preflight failed: ${registryErrors.join("; ")}`);
+  assertAzureRuntimeContract(target, deps, "rollback-preflight");
+  if ((await revalidateSnapshotTarget(target, deps, true)).currentRelease !== target.currentRelease) throw new Error(`${target.label} control-plane release changed before managed Azure rollback`);
+  const manifest = buildReleaseManifest({ gitSha: releaseShaFromTag(record.previous.releaseImageTag), acrServer: target.azure.acrServer, stabilityStatus: "rollback" });
+  if (record.previous.releaseVersion) manifest.releaseVersion = record.previous.releaseVersion;
+  updateAzureContainerApp(target.azure.webAppName, record.previous.web.image, target, manifest, deps);
+  updateAzureContainerApp(target.azure.workerAppName, record.previous.worker.image, target, manifest, deps);
+  const providerResult = { webRevision: showAzureRevision(target.azure.webAppName, target, deps), workerRevision: showAzureRevision(target.azure.workerAppName, target, deps) };
+  const proof = await proveTargetRelease(target, manifest, args.reason, deps);
+  const result = { restored: true, record: args.record, providerResult, ...proof };
+  console.log(JSON.stringify({ stage: "managed-azure-rollback", result }, null, 2));
+  return result;
 }
 
 function assertAzureRuntimeContract(target, deps, stage) {

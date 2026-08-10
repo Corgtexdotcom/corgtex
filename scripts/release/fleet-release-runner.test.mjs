@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -1055,11 +1055,60 @@ describe("fleet release runner", () => {
     })).rejects.toThrow(expected);
   });
 
-  it("keeps managed Azure targets non-mutable until PR3", async () => {
-    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate managed Azure."], {
-      env: { FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ group: "managed-customers", label: "Managed Azure" }), CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", AZURE_CLIENT_ID: "azure-client", AZURE_TENANT_ID: "azure-tenant", AZURE_SUBSCRIPTION_ID: "azure-subscription" },
-      runCommand: vi.fn(), fetchImpl: vi.fn(), sleep: vi.fn(),
-    })).rejects.toThrow("non-mutable until the generic Azure executor is implemented in PR3");
+  it("rejects group-only managed Azure selection before provider calls", async () => {
+    const runCommand = vi.fn();
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--reason", "Validate managed Azure."], {
+      env: { FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ group: "managed-customers", label: "Managed Azure" }) }, runCommand, fetchImpl: vi.fn(),
+    })).rejects.toThrow("exactly one explicit --deployment-id");
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("releases and rolls back one managed Azure target by immutable digest", async () => {
+    const oldSha = "a".repeat(40), incoming = { web: `sha256:${"b".repeat(64)}`, worker: `sha256:${"c".repeat(64)}` }, previous = `sha256:${"d".repeat(64)}`;
+    const directory = mkdtempSync(join(tmpdir(), "managed-azure-")), record = join(directory, "rollback.json"), occupied = join(directory, "occupied.json"), origin = "https://managed.example";
+    const env = { FLEET_RELEASE_TARGETS_JSON: azureTargetJson({ group: "managed-customers", label: "Managed Azure", url: origin, azure: { resourceGroup: "rg-1", acrName: "acr1", acrServer: "acr1.azurecr.io", webAppName: "web-app", workerAppName: "worker-app" } }), FLEET_RELEASE_ROLLBACK_FILE: record,
+      CONTROL_PLANE_AGENT_API_KEY: "control-plane", AZURE_CLIENT_ID: "client", AZURE_TENANT_ID: "tenant", AZURE_SUBSCRIPTION_ID: "subscription", GITHUB_ACTOR: "actor", GITHUB_TOKEN: "token",
+      APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review", GITHUB_ACTIONS: "true", GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_RUN_ID: "run", FLEET_RELEASE_MANAGED_AZURE_OBSERVATION_DEPLOYMENT_ID: "dep-azure" };
+    let conflict = true, rollback = false, drift = false, casDrift = false, currentReleaseReads = 0; const toolCalls = [];
+    const runCommand = vi.fn((command, args) => {
+      if (command === "docker") return { stdout: JSON.stringify({ digest: args[3].includes("worker") ? incoming.worker : incoming.web }), stderr: "" };
+      if (args[0] === "acr" && args[1] === "manifest") return { stdout: conflict ? `sha256:${"e".repeat(64)}` : "", stderr: "" };
+      if (args[0] === "containerapp" && args[1] === "show") { const query = args[args.indexOf("--query") + 1], role = args[3].includes("worker") ? "worker" : "web";
+        if (query.includes("registries")) return { stdout: JSON.stringify([{ server: "acr1.azurecr.io", identity: "/subscriptions/pull" }]), stderr: "" };
+        if (query.includes(".env")) return { stdout: JSON.stringify(azurePublicUrlEntries(origin)), stderr: "" };
+        if (query.includes("{image:")) return { stdout: JSON.stringify({ image: `acr1.azurecr.io/corgtex/${role}@${previous}`, latestRevision: `${role}-ready`, readyRevision: `${role}-ready` }), stderr: "" };
+        return { stdout: JSON.stringify({ latest: `${role}-new`, ready: `${role}-new` }), stderr: "" };
+      } return { stdout: "", stderr: "" };
+    });
+    const fetchImpl = vi.fn(async (url, init = {}) => {
+      if (String(url).includes("/api/control-plane/mcp")) { const name = JSON.parse(init.body).params.name; toolCalls.push(name);
+        if (name === "get_customer_deployment_status") { currentReleaseReads += 1; return controlPlaneResult({ id: "dep-azure", label: "Managed Azure", runtimeUrl: origin, cloudProvider: "AZURE", workload: "managed-customers", providerResourceGroup: "rg-1", providerWebServiceId: drift ? "replacement-web" : "web-app", providerWorkerServiceId: "worker-app", deploymentStatus: "ACTIVE", releaseImageTag: rollback || (casDrift && currentReleaseReads === 3) ? `sha-${SHA}` : `sha-${oldSha}` }); }
+        if (name === "run_post_deploy_probe") return controlPlaneResult({ deploymentId: "dep-azure", status: "ok", supportConnectorReadiness: { status: "ready" }, supportAudit: { status: "completed" } });
+        if (name === "refresh_fleet_snapshots") return controlPlaneResult({ results: [] });
+        if (name === "record_verified_release") return controlPlaneResult({ recorded: true });
+      }
+      const path = new URL(String(url)).pathname, activeSha = rollback ? oldSha : SHA;
+      if (path === "/api/health") return { ok: true, json: async () => ({ status: "ok", database: "up", schema: "ready", release: { imageTag: `sha-${activeSha}`, gitSha: activeSha } }) };
+      if (path === "/.well-known/oauth-protected-resource") return publicJsonResponse({ resource: `${origin}/mcp`, authorization_servers: [origin], scopes_supported: [...MCP_CONNECTOR_DEFAULT_SCOPES] });
+      if (path === "/.well-known/oauth-authorization-server") return publicJsonResponse({ issuer: origin, authorization_endpoint: `${origin}/api/oauth/authorize`, token_endpoint: `${origin}/api/oauth/token`, registration_endpoint: `${origin}/api/oauth/register`, revocation_endpoint: `${origin}/api/oauth/revoke`, scopes_supported: [...MCP_CONNECTOR_DEFAULT_SCOPES] });
+      return oauthChallengeResponse(origin);
+    });
+    const releaseArgs = ["deploy", "--release", SHA, "--targets", "managed-customers", "--deployment-id", "dep-azure", "--expected-current-release", `sha-${oldSha}`, "--reason", "Managed release."];
+    await expect(runFleetRelease(releaseArgs, { env, runCommand, fetchImpl, sleep: vi.fn() })).rejects.toThrow("Ring 2 failed");
+    expect(runCommand.mock.calls.some(([command, args]) => command === "az" && args.includes("update"))).toBe(false);
+    conflict = false; writeFileSync(occupied, "occupied"); env.FLEET_RELEASE_ROLLBACK_FILE = occupied; runCommand.mockClear();
+    await expect(runFleetRelease(releaseArgs, { env, runCommand, fetchImpl, sleep: vi.fn() })).rejects.toThrow("Ring 2 failed"); expect(runCommand.mock.calls.some(([, args]) => args.includes("update") || args.includes("import"))).toBe(false);
+    env.FLEET_RELEASE_ROLLBACK_FILE = record; runCommand.mockClear();
+    casDrift = true; currentReleaseReads = 0; await expect(runFleetRelease(releaseArgs, { env, runCommand, fetchImpl, sleep: vi.fn() })).rejects.toThrow("Ring 2 failed");
+    expect(runCommand.mock.calls.some(([, args]) => args.includes("update") || args.includes("import"))).toBe(false); casDrift = false; currentReleaseReads = 0; runCommand.mockClear();
+    const released = await runFleetRelease(releaseArgs, { env, runCommand, fetchImpl, sleep: vi.fn() });
+    expect(released.results[0].status).toBe("succeeded"); expect(JSON.parse(readFileSync(record, "utf8"))).toMatchObject({ rollbackDigestPinned: true, incoming: { webDigest: incoming.web, workerDigest: incoming.worker } });
+    const imports = runCommand.mock.calls.filter(([, args]) => args[0] === "acr" && args[1] === "import"), updates = () => runCommand.mock.calls.filter(([, args]) => args[0] === "containerapp" && args[1] === "update");
+    expect(imports).toHaveLength(2); expect(imports.flatMap(([, args]) => args)).not.toContain("--force"); expect(updates().map(([, args]) => args[args.indexOf("--image") + 1])).toEqual([`acr1.azurecr.io/corgtex/web@${incoming.web}`, `acr1.azurecr.io/corgtex/worker@${incoming.worker}`]);
+    rollback = true; drift = true; await expect(runFleetRelease(["rollback-managed-azure", "--record", record, "--reason", "Reject drift."], { env, runCommand, fetchImpl, sleep: vi.fn() })).rejects.toThrow("provider or resource identity changed");
+    drift = false; const restored = await runFleetRelease(["rollback-managed-azure", "--record", record, "--reason", "Restore previous release."], { env, runCommand, fetchImpl, sleep: vi.fn() });
+    expect(restored.restored).toBe(true); expect(updates().slice(-2).map(([, args]) => args[args.indexOf("--image") + 1])).toEqual([`acr1.azurecr.io/corgtex/web@${previous}`, `acr1.azurecr.io/corgtex/worker@${previous}`]);
+    expect(toolCalls).toEqual(expect.arrayContaining(["run_post_deploy_probe", "refresh_fleet_snapshots", "record_verified_release"]));
   });
 
   it("discovers active replacements, deduplicates self-serve, and blocks retired mutation", async () => {
