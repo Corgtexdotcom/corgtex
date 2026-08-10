@@ -11,6 +11,7 @@ import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
 
 export type DecisionSummary = {
   approve: number;
@@ -349,6 +350,10 @@ async function finalizeApprovalFlow(tx: Prisma.TransactionClient, params: {
   actorUserId?: string | null;
   finalizedBy: "decision" | "expiry";
 }) {
+  if (params.flow.subjectType === "PROPOSAL") {
+    await acquireWorkItemAdvisoryLock(tx, "Proposal", params.flow.subjectId);
+  }
+
   await tx.approvalFlow.update({
     where: { id: params.flow.id },
     data: {

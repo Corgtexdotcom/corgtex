@@ -34,6 +34,7 @@ const prismaMock = vi.hoisted(() => {
       update: vi.fn(),
     },
   };
+  mock.$executeRaw = vi.fn();
   mock.$queryRaw = vi.fn();
   mock.$transaction = vi.fn(async (cb) => cb(mock));
   return mock;
@@ -73,6 +74,7 @@ beforeEach(() => {
   prismaMock.proposal.findMany.mockResolvedValue([]);
   prismaMock.proposal.update.mockResolvedValue({ id: "p-1" });
   prismaMock.policyCorpus.upsert.mockResolvedValue({});
+  prismaMock.$executeRaw.mockResolvedValue(1);
   appendEventsMock.mockResolvedValue(undefined);
 });
 
@@ -515,5 +517,45 @@ describe("finalizeExpiredApprovalFlows", () => {
 
     expect(prismaMock.proposal.update).not.toHaveBeenCalled();
     expect(prismaMock.approvalFlow.update).not.toHaveBeenCalled();
+  });
+
+  it("takes the Proposal advisory lock before approval-flow and Proposal finalization writes", async () => {
+    const expiredAt = new Date("2026-05-01T12:00:00.000Z");
+    let subjectTypeReadCount = 0;
+    // This mutable seam reaches the guarded internal Proposal outcome branch only;
+    // public expiry behavior still excludes Proposal flows and is not represented here.
+    const flow = {
+      id: "flow-proposal-finalize",
+      workspaceId: "ws-1",
+      subjectId: "proposal-finalize",
+      status: "ACTIVE",
+      mode: "CONSENT",
+      quorumPercent: 0,
+      minApproverCount: 1,
+      closesAt: expiredAt,
+      decisions: [],
+      objections: [],
+      get subjectType() {
+        subjectTypeReadCount += 1;
+        return subjectTypeReadCount === 1 ? "ACTION" : "PROPOSAL";
+      },
+    };
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: flow.id }]);
+    prismaMock.approvalFlow.findUnique.mockResolvedValueOnce(flow);
+    prismaMock.proposal.update.mockResolvedValueOnce({
+      id: "proposal-finalize",
+      workspaceId: "ws-1",
+      title: "Proposal",
+      bodyMd: "Body",
+      circleId: null,
+      decidedAt: new Date(),
+    });
+
+    await expect(finalizeExpiredApprovalFlows()).resolves.toBe(1);
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:proposal-finalize");
+    const lockOrder = prismaMock.$executeRaw.mock.invocationCallOrder[0];
+    expect(lockOrder).toBeLessThan(prismaMock.approvalFlow.update.mock.invocationCallOrder[0]);
+    expect(lockOrder).toBeLessThan(prismaMock.proposal.update.mock.invocationCallOrder[0]);
   });
 });

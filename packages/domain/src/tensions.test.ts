@@ -664,22 +664,164 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "Stale member edit",
+      expectedVersion: 1,
     })).rejects.toMatchObject({
       status: 409,
-      code: "CONFLICT",
+      code: "VERSION_CONFLICT",
+      message: "The record changed before this update could be applied. Please refresh and try again.",
     });
 
     expect(prismaMock.tension.update).toHaveBeenCalledWith({
-      where: expect.objectContaining({
+      where: {
         id: "t-open",
         workspaceId: "ws-1",
         archivedAt: null,
         status: "OPEN",
         isPrivate: false,
         version: 1,
-      }),
+      },
       data: { title: "Stale member edit", version: 2 },
     });
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
+  it("honors expectedVersion and succeeds if it matches current version", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    prismaMock.tension.update.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      title: "New title",
+      status: "OPEN",
+      version: 2,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+      title: "New title",
+      expectedVersion: 1,
+    })).resolves.toMatchObject({
+      id: "t-1",
+      version: 2,
+    });
+
+    expect(prismaMock.tension.update).toHaveBeenCalledWith({
+      where: {
+        id: "t-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      },
+      data: expect.objectContaining({
+        title: "New title",
+        version: 2,
+      }),
+    });
+    expect(prismaMock.workItemVersion.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.event.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      status: "OPEN",
+      version: 2,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    const { updateTension } = await import("./tensions");
+
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-1",
+      title: "New title",
+      expectedVersion: 1,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "VERSION_CONFLICT",
+      message: "The record changed before this update could be applied. Please refresh and try again.",
+    });
+
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
+    prismaMock.tension.findUnique.mockResolvedValue({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    const { updateTension } = await import("./tensions");
+
+    for (const invalidVersion of [0, -1, 1.5]) {
+      await expect(updateTension(actor, {
+        workspaceId: "ws-1",
+        tensionId: "t-1",
+        expectedVersion: invalidVersion,
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+    }
+
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+  });
+
+  it("locks before the authoritative Tension no-op read and rejects a concurrently advanced version without side effects", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-noop-stale",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Already current",
+      status: "OPEN",
+      version: 2,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+
+    const { updateTension } = await import("./tensions");
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-noop-stale",
+      title: "Already current",
+      expectedVersion: 1,
+    })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Tension:t-noop-stale");
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.tension.findUnique.mock.invocationCallOrder[0]);
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
     expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
     expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
