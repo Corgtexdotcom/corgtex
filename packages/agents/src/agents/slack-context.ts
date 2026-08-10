@@ -254,10 +254,10 @@ function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
 
 function isDeterministicNegativeCategory(text: string, concreteNextStep = ""): boolean {
   const [verb, ...object] = normalizeText(concreteNextStep).split(" ");
-  const completedVerb = verb === "send" ? "sent" : verb === "do" ? "done" : verb ? `${verb}${verb.endsWith("e") ? "d" : "ed"}` : "";
+  const completedVerb = /^(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)$/.test(verb) ? verb : verb === "send" ? "sent" : verb === "do" ? "done" : verb ? `${verb}${verb.endsWith("e") ? "d" : "ed"}` : "";
   const historicalStep = `${completedVerb} ${object.join(" ")}`.trim();
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
     || Boolean(historicalStep && new RegExp(`\\bshould have (?:been )?${historicalStep}\\b`, "u").test(normalizeText(text)) && (/\?/.test(text) || /\bconfirm\b/i.test(text)))
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
@@ -283,16 +283,17 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
   const paddedCorpus = ` ${normalizeText(corpus)} `;
   return paddedCorpus.includes(paddedValue);
 }
+function isOrganizationalRole(ownerEvidence: string) { return /^(?:legal|finance|operations|engineering|product|sales|support|security|(?:[\p{L}\p{N}_-]+\s+){0,2}(?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))$/u.test(normalizeText(ownerEvidence)); }
 
-function hasGroundedOwnerCue(ownerEvidence: string, corpus: string, trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
-  const owner = normalizeText(ownerEvidence);
-  if (!owner || owner === "unknown") return false;
+function hasGroundedOwnerCue(ownerEvidence: string, concreteNextStep: string, threadTexts: string[], trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
+  const owner = normalizeText(ownerEvidence), step = normalizeText(concreteNextStep);
+  if (!owner || owner === "unknown" || !step) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
-  if (!new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
-    && !new RegExp(`(?:\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}(?:\\s|$)|\\b(?:have|ask)\\s+${escapedOwner}\\s+(?!s\\b)(?:to\\s+)?[\\p{L}\\p{N}_-]+\\b)`, "u").test(normalizedCorpus)) return false;
+  const assigned = threadTexts.flatMap(text => text.split(/[.;!?]+/).map(normalizeText)).some(clause => isGroundedInCorpus(step, clause) && (new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(clause)
+    || new RegExp(`(?:\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}(?:\\s|$)|\\b(?:have|ask)\\s+${escapedOwner}\\s+(?!s\\b)(?:to\\s+)?[\\p{L}\\p{N}_-]+\\b)`, "u").test(clause)));
+  if (!assigned) return false;
   const identities = trustedUsers.map(user => ({ id: normalizeText(user.externalUserId), name: normalizeText(user.displayName || "") }));
-  return /^(?:(?:finance|legal|operations|engineering|product|sales|support|security)(?: (?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))?|team|lead|manager|owner|counsel|department|group|committee|reviewer|approver)$/.test(owner) || identities.some(identity => identity.id === owner || (owner.includes(" ") && identity.name === owner)) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
+  return isOrganizationalRole(owner) || identities.some(identity => identity.id === owner || (owner.includes(" ") && identity.name === owner)) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
 }
 
 function normalizeProactiveExtraction(output: Record<string, unknown>) {
@@ -330,24 +331,24 @@ function meetsActionPublicationPredicate(
   botUserId: string | null,
   confidenceThreshold: number,
   sourceText: string,
-  threadCorpus: string,
+  threadTexts: string[],
   trustedUsers: Array<{ externalUserId: string; displayName: string | null }>
 ): boolean {
   if (!botUserId) return false;
   if (parsed.resolutionState !== "open") return false;
   if (parsed.workDisposition !== "action") return false;
   const concreteStep = normalizeText(parsed.concreteNextStep);
+  const threadCorpus = threadTexts.join("\n");
   if (!concreteStep || !isGroundedInCorpus(parsed.concreteNextStep, threadCorpus) || (!concreteStep.includes(" ") && !/^(?:deploy|approve|investigate)$/.test(concreteStep) && !/[^\x00-\x7F]/.test(parsed.concreteNextStep)) || /\b(something|anything|stuff|thing)\b/.test(concreteStep)) return false;
   if (!parsed.hasExplicitNegativeCategoryFalse) return false;
   if (parsed.negativeCategory) return false;
   if (!parsed.hasValidCouldNotArray) return false;
   if (parsed.couldNot.length > 0) return false;
   if (parsed.confidence < confidenceThreshold) return false;
-  const threadTexts = threadCorpus.replace(/\[[^\]]+\]\s+\S+:\s/g, "").split("\n");
   if (threadTexts.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep))) return false;
   if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep))) return false;
 
-  const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus, trustedUsers);
+  const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, threadTexts, trustedUsers);
   const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText) || threadTexts.some(isDeterministicExplicitActionRequest));
 
   if (!hasGroundedOwner && !isExplicitRequest) return false;
@@ -416,7 +417,7 @@ async function reviewThreadForAction(params: {
       "Set explicitActionRequest to true if the text deterministically requests Corgtex to create/assign an action.",
       "Set negativeCategory to true for tests, FYIs, acknowledgements, information requests, already-completed tasks, or bot-directed messages.",
       "Populate concreteNextStep, ownerEvidence, and timingEvidence with grounded facts or leave empty.",
-      "Use ignore when no Corgtex record update is useful or the next step is unclear.",
+      "Use ignore when no Corgtex record update is useful, the request is unsafe, or the next step is unclear.",
     ].join(" "),
     schemaHint: "{ resolutionState: string, workDisposition: string, concreteNextStep: string, ownerEvidence: string, timingEvidence: string, explicitActionRequest: boolean, negativeCategory: boolean, confidence: number, reason: string, title: string, bodyMd: string, updateMd: string, followupDelayMultiplier: number, couldNot: string[] }",
     input: JSON.stringify({
@@ -757,9 +758,9 @@ export async function runSlackProactiveScan(params: {
       continue;
     }
 
-    const threadCorpus = transcriptForMessages(threadMessages);
-    if (parsed.ownerEvidence && !/^(?:(?:finance|legal|operations|engineering|product|sales|support|security)(?: (?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))?|team|lead|manager|owner|counsel|department|group|committee|reviewer|approver)$/.test(normalizeText(parsed.ownerEvidence)) && trustedUsers === null) trustedUsers = await prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isBot: false, isDeleted: false }, select: { externalUserId: true, displayName: true } });
-    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus, trustedUsers || [])) {
+    const threadTexts = threadMessages.map(message => message.text || "");
+    if (parsed.ownerEvidence && !isOrganizationalRole(parsed.ownerEvidence) && trustedUsers === null) trustedUsers = await prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isBot: false, isDeleted: false }, select: { externalUserId: true, displayName: true } });
+    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadTexts, trustedUsers || [])) {
       const item = await createWorkItemFromCommunicationSource(agentActor, {
         workspaceId: params.workspaceId,
         provider: "SLACK",
