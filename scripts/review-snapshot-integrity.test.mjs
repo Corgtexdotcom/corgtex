@@ -108,6 +108,9 @@ describe("review snapshot integrity", () => {
     expect(evaluatePolicy({ ...base, labels: ["forbidden-path-approved"], files: [wf] })).toEqual([]);
     expect(evaluatePolicy({ ...base, labels: ["forbidden-path-approved"], files: [{ ...wf, additions: 401 }] })[0]).toMatch("critical cap");
     expect(evaluatePolicy({ ...base, files: [{ filename: "docs/x.md", additions: 5000, deletions: 0 }] })).toEqual([]);
+    const guardedPlan = PLAN.replace("scripts/x.mjs", "scripts/review-snapshot-integrity.mjs");
+    const guarded = { filename: "scripts/review-snapshot-integrity.mjs", additions: 401, deletions: 0 };
+    expect(evaluatePolicy({ body: guardedPlan, labels: [], draft: true, files: [guarded] })[0]).toMatch("critical cap");
   });
   it("fails closed on truncated pagination, closed-PR no-ops, and api retries then throws", async () => {
     expect(decide(state({ filesTruncated: true })).pass).toBe(false);
@@ -117,6 +120,15 @@ describe("review snapshot integrity", () => {
     const statuses = [429, 500, 500]; vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: statuses.shift() })));
     await expect(api("/x")).rejects.toThrow("500");
     expect(fetch).toHaveBeenCalledTimes(3);
+    const signals = [];
+    vi.stubGlobal("fetch", vi.fn((_url, { signal }) => new Promise((_resolve, reject) => {
+      signals.push(signal);
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })));
+    await expect(api("/stalled", { timeoutMs: 5 })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(new Set(signals).size).toBe(3);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
     vi.unstubAllGlobals();
   });
 });

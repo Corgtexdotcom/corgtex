@@ -10,6 +10,8 @@ Corgtex uses a fully autonomous three-agent pipeline:
 - **Executor** (Gemini in Antigravity or Kimi K3) implements and opens the PR.
 - **Reviewer** (Codex) approves or rejects the PR.
 
+Kimi and Gemini may support analysis and execution, but never own the first planning pass.
+
 A human prompts each stage and can intervene via labels. No human
 reviews code line-by-line. The full specification lives in
 [docs/contributing/agent-pipeline.mdx](docs/contributing/agent-pipeline.mdx).
@@ -145,7 +147,7 @@ merge.
 5a. **Demo exposure:** For customer-visible product changes, either update `scripts/seed-jnj-demo.mjs` so the public J&J demo shows the safe parts of the feature, or state in the PR body's **Demo exposure** section why the feature cannot be shown safely (for example, because it requires private credentials, customer data, or write access).
 6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
 7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
-8. **No agent bypass:** Agents never apply `force-merge`, perform an elevated merge, or bypass branch protection, even when asked. A human administrator must perform any emergency override directly.
+8. **Human-directed bypass:** If the human explicitly instructs you via prompt to force-merge a specific PR, you may: (a) add the `force-merge` label, (b) run `gh pr merge <number> --admin --squash`, (c) add a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.` This is the **only** exception to rule 7's ban on `--admin` and self-merging. You must still never skip `--no-verify`, run `prisma db push`, or commit secrets.
 
 Stop when the PR is open and CI is green locally. Hand off to the Reviewer.
 
@@ -168,7 +170,7 @@ Summary:
 3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
 4. **No forbidden-path changes** without the `forbidden-path-approved` label.
 5. **Diff within risk-tier caps** unless `large-change-approved` is set.
-6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages, and no elevated merge or branch-protection bypass.
+6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages. `--admin` is forbidden unless the `force-merge` label is present and the PR comment trail documents the human directive.
 7. **Tests added** when `packages/domain/**` changed.
 8. **PR-body visual proof present** for any frontend-path change.
 9. **All required CI checks green.**
@@ -183,7 +185,16 @@ If all pass, approve the PR using `gh pr review <number> --approve`. You may lea
 The human prompter can intervene at any time using PR labels:
 
 - `halt-agents` — Reviewer will not merge; Executor will not push further commits.
-- `force-merge` — human-only emergency override. Agents must not apply it or act on it.
+- `force-merge` — human override. Logged in the PR and in the daily digest. When applied by an agent acting on explicit human instruction, the agent must add a PR comment documenting the directive and may use `--admin` to merge.
 - `needs-replan` — Executor sets this when stuck; Planner picks up.
 
-Emergency overrides remain available only to a human administrator acting directly. No prompt delegates that authority to an agent.
+### Human-directed agent bypass
+
+When a human explicitly instructs an agent (via prompt) to force-merge a PR:
+
+1. The agent adds the `force-merge` label to the PR.
+2. The agent adds a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.`
+3. The agent runs `gh pr merge <number> --admin --squash`.
+4. This is logged in the daily digest alongside all other `force-merge` events.
+
+**Scope:** This bypass covers branch protection (required reviews, status checks). It does **not** exempt the PR from secret scanning, `prisma db push` bans, or `--no-verify`.

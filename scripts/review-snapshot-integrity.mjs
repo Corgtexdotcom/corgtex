@@ -7,7 +7,7 @@ const MUTATING_EVENTS = new Set(["labeled", "unlabeled", "synchronize", "ready_f
 const DOC_EXT = new Set([".md", ".mdx"]);
 const RISK_CAPS = { low: [1200, 50], standard: [800, 25], high: [700, 15], critical: [400, 15] };
 const FORBIDDEN_PATHS = [/^deploy\//, /^\.github\/workflows\//, /^prisma\/migrations\//, /^packages\/domain\/src\/auth.*\.ts$/, /^apps\/web\/lib\/auth\.ts$/];
-const POLICY_PATHS = [/^AGENTS\.md$/, /^\.agents\/plan-template\.md$/, /^\.codex\/review\.md$/, /^\.codex\/ops\/.*\.md$/, /^\.github\/pull_request_template\.md$/, /^docs\/contributing\/agent-pipeline\.mdx$/, /^docs\/contributing\/pull-requests\.mdx$/, /^scripts\/check-plan(?:-policy(?:\.test)?)?\.mjs$/];
+const POLICY_PATHS = [/^AGENTS\.md$/, /^\.agents\/plan-template\.md$/, /^\.codex\/review\.md$/, /^\.codex\/ops\/.*\.md$/, /^\.github\/pull_request_template\.md$/, /^docs\/contributing\/agent-pipeline\.mdx$/, /^docs\/contributing\/pull-requests\.mdx$/, /^scripts\/check-plan(?:-policy(?:\.test)?)?\.mjs$/, /^scripts\/review-snapshot-integrity\.mjs$/];
 const SECRET_PATTERNS = [/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/, /-----BEGIN OPENSSH PRIVATE KEY-----/, /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/, /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, /\b(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}\b/, /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b/, /\bsk-or-v1-[A-Za-z0-9_-]{20,}\b/, /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/];
 const ATTESTATION_KEYS = ["v", "pr", "headSha", "baseSha", "bodyDigest", "labelDigest"];
 export function sha256Bytes(buf) { return createHash("sha256").update(buf).digest("hex"); }
@@ -163,11 +163,13 @@ export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, fi
   }
   return { pass: failures.length === 0, noop: false, snapshot, payload, failures, writes };
 }
-export async function api(path, { method = "GET", body } = {}) {
+export async function api(path, { method = "GET", body, timeoutMs = 10_000 } = {}) {
+  invariant(Number.isSafeInteger(timeoutMs) && timeoutMs > 0, "unexpected API timeout");
   let last;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetch(`https://api.github.com${path}`, { method, headers: { authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+      const signal = AbortSignal.timeout(timeoutMs);
+      const res = await fetch(`https://api.github.com${path}`, { method, signal, headers: { authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }, ...(body ? { body: JSON.stringify(body) } : {}) });
       if (res.status === 429 || res.status >= 500) { last = new Error(`${method} ${path} -> ${res.status}`); continue; }
       if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
       const json = await res.json();
