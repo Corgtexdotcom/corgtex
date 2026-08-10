@@ -353,6 +353,15 @@ async function resolveProposalOwnerMemberId(
   return owner.id;
 }
 
+async function isActiveProposalCircle(tx: Prisma.TransactionClient, workspaceId: string, circleId?: string | null) {
+  if (!circleId) return true;
+  const circle = await tx.circle.findUnique({
+    where: { id: circleId },
+    select: { workspaceId: true, archivedAt: true },
+  });
+  return Boolean(circle && circle.workspaceId === workspaceId && !circle.archivedAt);
+}
+
 export type ListProposalsOptions = {
   take?: number;
   skip?: number;
@@ -1019,6 +1028,10 @@ async function runUpdateProposalTransaction(
         "VERSION_CONFLICT",
         PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE,
       );
+      invariant(
+        await isActiveProposalCircle(tx, params.workspaceId, params.circleId),
+        409, "VERSION_CONFLICT", PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE,
+      );
     }
     requireUpdateProposalEditable(actor, membership, proposal);
 
@@ -1155,7 +1168,11 @@ export async function updateProposal(actor: AppActor, params: UpdateProposalPara
       data.bodyMd = bodyMd;
     }
     if (params.priority !== undefined) data.priority = params.priority;
-    if (params.circleId !== undefined) data.circleId = params.circleId || null;
+    if (params.circleId !== undefined) {
+      invariant(await isActiveProposalCircle(prisma, params.workspaceId, params.circleId),
+        400, "INVALID_INPUT", "Proposal circle must be active and belong to this workspace.");
+      data.circleId = params.circleId || null;
+    }
     if (params.ownerMemberId !== undefined) {
       // Resolvability is validated at admission; the value is re-resolved
       // against the transaction client inside the final transaction.
@@ -1171,7 +1188,9 @@ export async function updateProposal(actor: AppActor, params: UpdateProposalPara
       bodyMd: effectiveBodyMd,
     });
 
-    return runUpdateProposalTransaction(actor, membership, params, {
+    const finalMembership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+
+    return runUpdateProposalTransaction(actor, finalMembership, params, {
       data,
       effectiveTitle,
       effectiveBodyMd,

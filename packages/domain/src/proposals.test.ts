@@ -28,6 +28,9 @@ vi.mock("@corgtex/shared", () => ({
     member: {
       findFirst: vi.fn(),
     },
+    circle: {
+      findUnique: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
       updateMany: vi.fn(),
@@ -974,106 +977,52 @@ describe("updateProposal AI-summary transaction scope", () => {
     expect(appendEvents).not.toHaveBeenCalled();
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { requireWorkspaceMembership } = await import("./auth");
+    vi.mocked(requireWorkspaceMembership).mockReset().mockResolvedValue({
+      id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockReset();
     vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
     vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
     vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
   });
 
   describe("admission rejection (group 1)", () => {
-    it("rejects an archived proposal at admission before any gateway call or write", async () => {
+    it.each([
+      ["archived proposal", baseProposal({ archivedAt: new Date() }), {}, { status: 400, code: "INVALID_STATE" }],
+      ["resolved proposal", baseProposal({ status: "RESOLVED" }), {}, { status: 400, code: "INVALID_STATE" }],
+      ["missing proposal", null, {}, { status: 404, code: "NOT_FOUND" }],
+      ["cross-workspace proposal", baseProposal({ workspaceId: "ws-other" }), {}, { status: 404, code: "NOT_FOUND" }],
+      ["unauthorized actor", baseProposal({ authorUserId: "u-other" }), {}, { status: 403, code: "FORBIDDEN" }],
+      ["empty title", baseProposal(), { title: "   " }, { status: 400, code: "INVALID_INPUT" }],
+      ["empty body", baseProposal(), { bodyMd: "   " }, { status: 400, code: "INVALID_INPUT" }],
+    ])("rejects %s before any gateway call or write", async (_name, proposal, overrides, expected) => {
       const { updateProposal } = await import("./proposals");
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal({ archivedAt: new Date() }) as any);
-
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(proposal as any);
       await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        bodyMd: words(130),
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
-
+        workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, ...overrides,
+      })).rejects.toMatchObject(expected);
       await expectNoInferenceNoWrites();
     });
 
-    it("rejects a non-DRAFT/OPEN proposal at admission before any gateway call or write", async () => {
-      const { updateProposal } = await import("./proposals");
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal({ status: "RESOLVED" }) as any);
-
-      await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        bodyMd: words(130),
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
-
-      await expectNoInferenceNoWrites();
-    });
-
-    it("rejects missing and cross-workspace proposals at admission before any gateway call or write", async () => {
-      const { updateProposal } = await import("./proposals");
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(null);
-
-      await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        bodyMd: words(130),
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
-
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal({ workspaceId: "ws-other" }) as any);
-
-      await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        bodyMd: words(130),
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
-
-      await expectNoInferenceNoWrites();
-    });
-
-    it("rejects an unauthorized actor at admission before any gateway call or write", async () => {
-      const { updateProposal } = await import("./proposals");
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal({ authorUserId: "u-other" }) as any);
-
-      await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        bodyMd: words(130),
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
-
-      await expectNoInferenceNoWrites();
-    });
-
-    it("rejects an empty title at admission before any gateway call or write", async () => {
-      const { updateProposal } = await import("./proposals");
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
-
-      await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        title: "   ",
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT", message: "Proposal title is required." });
-
-      await expectNoInferenceNoWrites();
-    });
-
-    it("rejects an empty bodyMd at admission before any gateway call or write", async () => {
-      const { updateProposal } = await import("./proposals");
-      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
-
-      await expect(updateProposal(actor, {
-        workspaceId: "ws-1",
-        proposalId: "p-scope",
-        bodyMd: "   ",
-        includeAiSummary: true,
-      })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT", message: "Proposal body is required." });
-
-      await expectNoInferenceNoWrites();
-    });
+    it.each(["missing", "archived", "cross-workspace"])(
+      "rejects a %s circle before any gateway call or write",
+      async (variant) => {
+        const { updateProposal } = await import("./proposals");
+        vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
+        vi.mocked((prisma as any).circle.findUnique).mockResolvedValueOnce(variant === "missing" ? null : {
+          id: "circle-1",
+          workspaceId: variant === "cross-workspace" ? "ws-other" : "ws-1",
+          archivedAt: variant === "archived" ? new Date() : null,
+        });
+        await expect(updateProposal(actor, {
+          workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, circleId: "circle-1",
+        })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+        await expectNoInferenceNoWrites();
+      },
+    );
 
     it("rejects an unresolvable ownerMemberId at admission before any gateway call or write", async () => {
       const { updateProposal } = await import("./proposals");
@@ -1140,6 +1089,7 @@ describe("updateProposal AI-summary transaction scope", () => {
       params: Record<string, unknown>,
       drifted: Record<string, unknown>,
       admissionOverrides: Record<string, unknown> = {},
+      expected: Record<string, unknown> = { status: 409, code: "VERSION_CONFLICT" },
     ) => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const { updateProposal } = await import("./proposals");
@@ -1164,11 +1114,12 @@ describe("updateProposal AI-summary transaction scope", () => {
         includeAiSummary: true,
         ...params,
       } as any);
+      const rejection = expect(promise).rejects.toMatchObject(expected);
       await extractStarted;
       expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
       releaseExtract({ output: { summary: "Drifted summary." } });
 
-      await expect(promise).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+      await rejection;
       expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
       await expectNoInferenceNoWritesExceptExtract();
     };
@@ -1225,6 +1176,27 @@ describe("updateProposal AI-summary transaction scope", () => {
         { isPrivate: false, publishedAt: new Date() },
         { status: "DRAFT", isPrivate: true },
       );
+    });
+
+    it("rejects when the selected circle becomes invalid during inference", async () => {
+      vi.mocked((prisma as any).circle.findUnique)
+        .mockResolvedValueOnce({ id: "circle-1", workspaceId: "ws-1", archivedAt: null })
+        .mockResolvedValueOnce(null);
+      await runDriftScenario({ bodyMd: words(140), circleId: "circle-1" }, {});
+    });
+
+    it.each([
+      ["deactivated", null, { status: 403, code: "NOT_A_MEMBER" }],
+      ["demoted", { id: "mem-1", userId: "u-1", role: "MEMBER", isActive: true }, { status: 403, code: "FORBIDDEN" }],
+    ])("rejects a %s member after inference before any write", async (_label, finalMembership, expected) => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+        id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true,
+      } as any);
+      if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(finalMembership as any);
+      else vi.mocked(requireWorkspaceMembership).mockRejectedValueOnce(expected);
+      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected);
+      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
     });
   });
 
