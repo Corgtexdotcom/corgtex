@@ -756,6 +756,7 @@ describe("Slack context jobs", () => {
   });
   it.each([
     { label: "routing test remains thread-wide", text: "Please run this routing test for slack context", concreteNextStep: "send the report", reply: "Jan should send the report by tomorrow." },
+    { label: "unrelated routing marker survives assigned clause", text: "This is a routing test. Jan should run the routing test tomorrow?", concreteNextStep: "run the routing test" },
     { label: "generic past-tense test marker", text: "This was only a test. Jan should send the report tomorrow.", concreteNextStep: "send the report" },
     { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
@@ -1002,7 +1003,6 @@ describe("Slack context jobs", () => {
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
   });
-
 
   it("does not redundantly process or mark an installed-bot mention if a terminal marker already exists", async () => {
     const source = candidate({ id: "msg-bot-mention", text: "Hey <@bot-1> what's up?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
