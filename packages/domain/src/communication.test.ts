@@ -23,6 +23,7 @@ const {
       upsert: vi.fn(),
     },
     workflowJob: { upsert: vi.fn() },
+    communicationEntityLink: { create: vi.fn() },
   };
   const webClient = {
     conversations: {
@@ -90,6 +91,7 @@ const {
       },
       communicationEntityLink: {
         create: vi.fn(),
+        findUnique: vi.fn(),
       },
       user: {
         findUnique: vi.fn(),
@@ -190,6 +192,7 @@ describe("communication Slack integration", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     createActionMock.mockResolvedValue({ id: "action-1" });
     prismaMock.communicationEntityLink.create.mockResolvedValue({});
+    prismaMock.communicationEntityLink.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.communicationMessage.updateMany.mockResolvedValue({ count: 2 });
     prismaMock.communicationMessage.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.communicationMessage.findMany.mockReset().mockResolvedValue([]);
@@ -212,6 +215,7 @@ describe("communication Slack integration", () => {
     txMock.communicationInstallation.update.mockReset();
     txMock.communicationInstallation.upsert.mockReset().mockResolvedValue({ id: "install-1" });
     txMock.workflowJob.upsert.mockReset();
+    txMock.communicationEntityLink.create.mockReset().mockResolvedValue({});
     slackWebClientMock.conversations.list.mockReset();
     slackWebClientMock.conversations.join.mockReset();
     slackWebClientMock.conversations.history.mockReset();
@@ -940,6 +944,150 @@ describe("communication Slack integration", () => {
       isPrivate: true,
     }));
     expect(response.text).toContain("Action draft created");
+  });
+
+  it("atomically creates an open Action and final source link for a claim key", async () => {
+    const { createWorkItemFromCommunicationSource } = await import("./communication");
+
+    await expect(createWorkItemFromCommunicationSource({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" },
+    }, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "ACTION",
+      title: "Send the contract",
+      sourceMessageId: "message-1",
+      externalUserId: "U1",
+      open: true,
+      claimKey: "slack:proactive-action:message-1",
+    })).resolves.toMatchObject({
+      entityType: "Action",
+      entityId: "action-1",
+      opened: true,
+    });
+
+    expect(createActionMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      isPrivate: false,
+      _tx: txMock,
+    }));
+    expect(txMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        claimKey: "slack:proactive-action:message-1",
+        entityType: "Action",
+        entityId: "action-1",
+        action: "create_action",
+      }),
+    });
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+  });
+
+  it("returns the committed source-linked Action after a concurrent claim-key loss", async () => {
+    const uniqueError = Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+    txMock.communicationEntityLink.create.mockRejectedValueOnce(uniqueError);
+    prismaMock.communicationEntityLink.findUnique.mockResolvedValueOnce({
+      installationId: "install-1",
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      messageId: "message-1",
+      entityType: "Action",
+      entityId: "action-existing",
+      action: "create_action",
+      claimKey: "slack:proactive-action:message-1",
+    });
+    const { createWorkItemFromCommunicationSource } = await import("./communication");
+
+    await expect(createWorkItemFromCommunicationSource({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" },
+    }, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "ACTION",
+      title: "Send the contract",
+      sourceMessageId: "message-1",
+      open: true,
+      claimKey: "slack:proactive-action:message-1",
+    })).resolves.toMatchObject({
+      entityType: "Action",
+      entityId: "action-existing",
+      opened: true,
+    });
+  });
+
+  it("leaves no pre-claim when Action creation fails inside the transaction", async () => {
+    const createError = new Error("Action creation failed");
+    createActionMock.mockRejectedValueOnce(createError);
+    const { createWorkItemFromCommunicationSource } = await import("./communication");
+
+    await expect(createWorkItemFromCommunicationSource({
+      kind: "user",
+      user: { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" },
+    }, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "ACTION",
+      title: "Send the contract",
+      sourceMessageId: "message-1",
+      open: true,
+      claimKey: "slack:proactive-action:message-1",
+    })).rejects.toBe(createError);
+
+    expect(txMock.communicationEntityLink.create).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("does not mask unrelated unique failures or allow claim keys on non-open Actions", async () => {
+    const uniqueError = Object.assign(new Error("Unrelated unique constraint failed"), { code: "P2002" });
+    txMock.communicationEntityLink.create.mockRejectedValueOnce(uniqueError);
+    const { createWorkItemFromCommunicationSource } = await import("./communication");
+    const actor = {
+      kind: "user" as const,
+      user: { id: "user-1", email: "user@example.test", displayName: "User", globalRole: "USER" as const },
+    };
+
+    await expect(createWorkItemFromCommunicationSource(actor, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "ACTION",
+      title: "Send the contract",
+      sourceMessageId: "message-1",
+      open: true,
+      claimKey: "slack:proactive-action:message-1",
+    })).rejects.toBe(uniqueError);
+
+    await expect(createWorkItemFromCommunicationSource(actor, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "ACTION",
+      title: "Draft only",
+      claimKey: "slack:proactive-action:draft",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    await expect(createWorkItemFromCommunicationSource(actor, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "TENSION",
+      title: "Not an Action",
+      open: true,
+      claimKey: "slack:proactive-action:tension",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    await expect(createWorkItemFromCommunicationSource(actor, {
+      workspaceId: "workspace-1",
+      provider: "SLACK",
+      installationId: "install-1",
+      kind: "ACTION",
+      title: "Blank claim",
+      open: true,
+      claimKey: "   ",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
 
   it("enqueues plain Slack slash command text for the Slack agent", async () => {
