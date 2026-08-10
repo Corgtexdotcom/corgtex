@@ -252,13 +252,13 @@ function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
   return new RegExp(`\\b(?:(?:should|must|will|can|could|would|need)\\s+not|(?:do|does|did)\\s+not\\s+need\\s+to|(?:shouldn|mustn|can|couldn|wouldn|won|needn)['’]t|(?:don|doesn|didn)['’]t\\s+need\\s+to)(?:[\\s,;:()-]+[a-z]+){0,3}[\\s,;:()-]+${verb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
 }
 
-function isDeterministicNegativeCategory(text: string, concreteNextStep = ""): boolean {
+function isDeterministicNegativeCategory(text: string, concreteNextStep = "", includeCompletion = true): boolean {
   const [verb, ...object] = normalizeText(concreteNextStep).split(" ");
   const completedVerb = /^(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)$/.test(verb) ? verb : verb === "send" ? "sent" : verb === "do" ? "done" : verb ? `${verb}${verb.endsWith("e") ? "d" : "ed"}` : "";
   const historicalStep = `${completedVerb} ${object.join(" ")}`.trim();
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
-    || Boolean(historicalStep && new RegExp(`\\bshould have (?:been )?${historicalStep}\\b`, "u").test(normalizeText(text)) && (/\?/.test(text) || /\bconfirm\b/i.test(text)))
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim()) && (includeCompletion || /^(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)/iu.test(text.trim()))) return true;
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|got it|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
+    || Boolean(includeCompletion && (/(?<!\b(?:not|never|don['’]t)\s)\balready\s+(?:done|sent|completed|fixed|resolved|upgraded|deployed)\b/i.test(text) || (historicalStep && new RegExp(`\\bshould have (?:been )?${historicalStep}\\b`, "u").test(normalizeText(text)) && (/\?/.test(text) || /\bconfirm\b/i.test(text)))))
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
@@ -346,6 +346,7 @@ function meetsActionPublicationPredicate(
   if (parsed.couldNot.length > 0) return false;
   if (parsed.confidence < confidenceThreshold) return false;
   if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep))) return false;
+  if (threadTexts.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep, false))) return false;
 
   const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, threadTexts, trustedUsers);
   const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText) || threadTexts.some(isDeterministicExplicitActionRequest));

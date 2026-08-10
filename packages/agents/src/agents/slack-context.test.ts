@@ -762,15 +762,15 @@ describe("Slack context jobs", () => {
   });
 
   it.each([
-    { label: "routing test", text: "Please run this routing test for slack context", concreteNextStep: "run this routing test" },
+    { label: "routing test remains thread-wide", text: "Please run this routing test for slack context", concreteNextStep: "send the report", reply: "Jan should send the report by tomorrow." },
     { label: "generic past-tense test marker", text: "This was only a test. Jan should send the report tomorrow.", concreteNextStep: "send the report" },
     { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "already-completed", text: "I already sent the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "info-only", text: "Information only: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
-  ])("vetoes action creation for $label source text despite high-confidence action model output", async ({ text, concreteNextStep }) => {
+  ])("vetoes action creation for $label source text despite high-confidence action model output", async ({ text, concreteNextStep, reply }) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
-    setupPendingNudge(source);
+    setupPendingNudge(source); if (reply) prismaMock.communicationMessage.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([source, candidate({ id: "reply-negative", text: reply })]);
     extractMock.mockResolvedValueOnce({
       output: {
         resolutionState: "open",
