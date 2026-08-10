@@ -835,7 +835,11 @@ describe("Slack context jobs", () => {
     { label: "non-adjacent explicit request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Corgtex status is red; can someone please create an action item to update the guide?", id: "msg-non-adjacent-explicit" },
     { label: "owner-intervening explicit request for another deliverable", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", explicitActionRequest: true, confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [] }, text: "Corgtex, create a task for Jan to review the draft; then send the report.", id: "msg-unrelated-explicit" },
     { label: "later same-message selected-task negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [] }, text: "Jan should send the report tomorrow. Actually, Jan should not send the report." },
-    { label: "later reply selected-task negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [], reply: "Actually, Jan should not send the report." }, text: "Jan should send the report tomorrow." }
+    { label: "later reply selected-task negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [], reply: "Actually, Jan should not send the report." }, text: "Jan should send the report tomorrow." },
+    { label: "later same-message cannot negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [] }, text: "Jan should send the report tomorrow. Jan cannot send the report." },
+    { label: "later ASCII contracted reply negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [], reply: "Jan can't send the report." }, text: "Jan should send the report tomorrow." },
+    { label: "later contracted reply negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [], reply: "Jan can’t send the report." }, text: "Jan should send the report tomorrow." },
+    { label: "later never reply negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "Jan", confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [], reply: "Jan must never send the report." }, text: "Jan should send the report tomorrow." }
   ])("fails closed on $label, records terminal marker, and later scan does not re-evaluate", async ({ output, text, id, trustedUsers, replyAuthor }) => {
     const source = candidate({ id: id || "message-1", text: text || "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); if (trustedUsers) prismaMock.communicationExternalUser.findMany.mockResolvedValue(trustedUsers);
     setupPendingNudge(source);
@@ -1007,21 +1011,17 @@ describe("Slack context jobs", () => {
   it("does not redundantly process or mark an installed-bot mention if a terminal marker already exists", async () => {
     const source = candidate({ id: "msg-bot-mention", text: "Hey <@bot-1> what's up?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(source);
-
     prismaMock.communicationEntityLink.findFirst
       .mockResolvedValueOnce(null) // action lookup
       .mockResolvedValueOnce({ id: "terminal-marker" }); // resolved lookup
-
     prismaMock.communicationEntityLink.create.mockClear();
     extractMock.mockClear();
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(prismaMock.communicationExternalUser.findMany).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
   });

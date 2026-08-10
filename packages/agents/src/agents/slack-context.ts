@@ -250,7 +250,7 @@ function isNegatedActionRequest(text: string, concreteNextStep = "", ownerEviden
   const owner = normalizeText(ownerEvidence), step = normalizeText(concreteNextStep);
   if (!owner || !step) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), escapedStep = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return text.split(/[;!?]+|\.(?=\s|$)/u).map(clause => normalizeText(clause.replace(/\b(should|must|can|could|would|need|do|does|did)n['’]t\b/gi, "$1 not").replace(/\bwon['’]t\b/gi, "will not"))).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:(?:should|must|will|can|could|would|need(?:s)?(?:\\s+to)?)\\s+not|(?:do|does|did)\\s+not\\s+need\\s+to)(?:\\s+[\\p{L}\\p{N}_-]+){0,5}\\s+${escapedStep}(?=\\s|$)`, "u").test(clause));
+  return text.split(/[;!?]+|\.(?=\s|$)/u).map(clause => normalizeText(clause.replace(/\bcan(?:not|['’]t)\b/gi, "can not").replace(/\b(should|must|could|would|need|do|does|did)n['’]t\b/gi, "$1 not").replace(/\bwon['’]t\b/gi, "will not"))).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:(?:should|must|will|can|could|would|need(?:s)?(?:\\s+to)?)\\s+(?:not|never)|(?:do|does|did)\\s+not\\s+need\\s+to)(?:\\s+[\\p{L}\\p{N}_-]+){0,5}\\s+${escapedStep}(?=\\s|$)`, "u").test(clause));
 }
 
 function isDeterministicNegativeCategory(text: string, concreteNextStep = "", includeCompletion = true): boolean {
