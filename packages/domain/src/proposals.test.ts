@@ -28,6 +28,9 @@ vi.mock("@corgtex/shared", () => ({
     member: {
       findFirst: vi.fn(),
     },
+    circle: {
+      findUnique: vi.fn(),
+    },
     action: {
       findMany: vi.fn(),
       updateMany: vi.fn(),
@@ -220,11 +223,12 @@ describe("proposal AI summaries", () => {
   });
 
   it("regenerates or clears summaries when draft edits choose the AI summary option", async () => {
+    const { appendEvents } = await import("./events");
     const { defaultModelGateway } = await import("@corgtex/models");
     const { updateProposal } = await import("./proposals");
     const actor = { kind: "user", user: { id: "u-1" } } as any;
 
-    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({
+    const loaded = {
       id: "p-edit",
       workspaceId: "ws-1",
       authorUserId: "u-1",
@@ -233,7 +237,11 @@ describe("proposal AI summaries", () => {
       status: "DRAFT",
       archivedAt: null,
       version: 1,
-    } as any);
+    } as any;
+    // Admission read plus final-transaction reload.
+    vi.mocked(prisma.proposal.findUnique)
+      .mockResolvedValueOnce(loaded)
+      .mockResolvedValueOnce(loaded);
     vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
       output: { summary: "Updated AI summary." },
     } as any);
@@ -269,6 +277,18 @@ describe("proposal AI summaries", () => {
         changedFields: expect.arrayContaining(["bodyMd", "summary"]),
       }),
     }));
+    expect(appendEvents).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "proposal.updated",
+        aggregateType: "Proposal",
+        aggregateId: "p-edit",
+        payload: expect.objectContaining({
+          proposalId: "p-edit",
+          fields: expect.arrayContaining(["bodyMd", "summary"]),
+        }),
+      }),
+    ]);
 
     vi.clearAllMocks();
     vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
@@ -306,6 +326,17 @@ describe("proposal AI summaries", () => {
         version: 3,
       }),
     }));
+    expect(appendEvents).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "proposal.updated",
+        aggregateId: "p-edit",
+        payload: expect.objectContaining({
+          proposalId: "p-edit",
+          fields: expect.arrayContaining(["summary"]),
+        }),
+      }),
+    ]);
   });
 });
 
@@ -559,6 +590,7 @@ describe("proposal owner updates", () => {
   });
 
   it("records version history when the proposal owner changes", async () => {
+    const { appendEvents } = await import("./events");
     const { updateProposal } = await import("./proposals");
     const actor = { kind: "user", user: { id: "u-1" } } as any;
 
@@ -607,6 +639,18 @@ describe("proposal owner updates", () => {
         }),
       }),
     }));
+    expect(appendEvents).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "proposal.updated",
+        aggregateType: "Proposal",
+        aggregateId: "p-owner-change",
+        payload: expect.objectContaining({
+          proposalId: "p-owner-change",
+          fields: expect.arrayContaining(["ownerMemberId"]),
+        }),
+      }),
+    ]);
   });
 
   it("blocks proposal owners from editing open proposal content when they are not the author or admin", async () => {
@@ -649,6 +693,7 @@ describe("proposal owner updates", () => {
   });
 
   it("rejects stale collaborative proposal edits when the proposal changes before write", async () => {
+    const { appendEvents } = await import("./events");
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
     const actor = { kind: "user", user: { id: "u-author" } } as any;
@@ -698,9 +743,11 @@ describe("proposal owner updates", () => {
       },
       data: expect.any(Object),
     });
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("honors expectedVersion and succeeds if it matches current version", async () => {
+    const { appendEvents } = await import("./events");
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
     const actor = { kind: "user", user: { id: "u-author" } } as any;
@@ -752,9 +799,22 @@ describe("proposal owner updates", () => {
     });
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
     expect(prisma.workItemVersion.create).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "proposal.updated",
+        aggregateType: "Proposal",
+        aggregateId: "p-open-author",
+        payload: expect.objectContaining({
+          proposalId: "p-open-author",
+          fields: expect.arrayContaining(["title"]),
+        }),
+      }),
+    ]);
   });
 
   it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
+    const { appendEvents } = await import("./events");
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
     const { defaultModelGateway } = await import("@corgtex/models");
@@ -799,9 +859,11 @@ describe("proposal owner updates", () => {
     expect(prisma.proposal.update).not.toHaveBeenCalled();
     expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
+    const { appendEvents } = await import("./events");
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
     const { defaultModelGateway } = await import("@corgtex/models");
@@ -845,9 +907,12 @@ describe("proposal owner updates", () => {
     expect(defaultModelGateway.extract).not.toHaveBeenCalled();
     expect(prisma.proposal.update).not.toHaveBeenCalled();
     expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
-  it("serializes concurrent AI-summary updates under lock so only winning update calls gateway and loser receives VERSION_CONFLICT before extract", async () => {
+  it("serializes concurrent AI-summary updates so only the winning update calls the gateway and the loser receives VERSION_CONFLICT at admission before extract", async () => {
+    const { appendEvents } = await import("./events");
     const { updateProposal } = await import("./proposals");
     const { requireWorkspaceMembership } = await import("./auth");
     const { defaultModelGateway } = await import("@corgtex/models");
@@ -857,16 +922,19 @@ describe("proposal owner updates", () => {
     vi.mocked(defaultModelGateway.extract).mockResolvedValue({ output: { summary: "Generated AI Summary" } } as any);
 
     let current: any = { id: "p-concurrent-ai", workspaceId: "ws-1", authorUserId: "u-author", title: "Concurrent AI Proposal", summary: null, bodyMd: "Initial body", priority: 0, circleId: null, status: "OPEN", archivedAt: null, version: 1, isPrivate: false };
-    let lockCount = 0;
-    let releaseWinnerLock!: () => void;
-    const winnerUpdated = new Promise<void>((resolve) => { releaseWinnerLock = resolve; });
+    let markWinnerApplied!: () => void;
+    const winnerApplied = new Promise<void>((resolve) => { markWinnerApplied = resolve; });
 
-    vi.mocked((prisma as any).$executeRaw).mockImplementation(async () => { if (++lockCount === 2) await winnerUpdated; });
     vi.mocked((prisma.proposal as any).findUnique).mockImplementation(async () => current);
-    vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => { current = { ...current, ...data, version: 2 }; releaseWinnerLock(); return current; });
+    vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => { current = { ...current, ...data, version: 2 }; markWinnerApplied(); return current; });
 
     const params = { workspaceId: "ws-1", proposalId: "p-concurrent-ai", bodyMd: words(130), includeAiSummary: true, expectedVersion: 1 };
-    const [res1, res2] = await Promise.allSettled([updateProposal(actor, params), updateProposal(actor, params)]);
+    const winnerPromise = updateProposal(actor, params);
+    // The loser only starts after the winner's write has landed, so its stale
+    // expectedVersion is rejected at admission, before any gateway call.
+    await winnerApplied;
+    const loserPromise = updateProposal(actor, params);
+    const [res1, res2] = await Promise.allSettled([winnerPromise, loserPromise]);
 
     expect(res1.status).toBe("fulfilled");
     expect(res2.status).toBe("rejected");
@@ -876,6 +944,470 @@ describe("proposal owner updates", () => {
     expect(prisma.proposal.update).toHaveBeenCalledTimes(1);
     expect((prisma as any).workItemVersion.create).toHaveBeenCalledTimes(1);
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("updateProposal AI-summary transaction scope", () => {
+  const actor = { kind: "user", user: { id: "u-1" } } as any;
+  const baseProposal = (overrides = {}) => ({
+    id: "p-scope",
+    workspaceId: "ws-1",
+    authorUserId: "u-1",
+    title: "Scope title",
+    summary: null,
+    bodyMd: "Scope body",
+    priority: 0,
+    circleId: null,
+    ownerMemberId: null,
+    status: "OPEN",
+    isPrivate: false,
+    archivedAt: null,
+    version: 1,
+    ...overrides,
+  });
+
+  const expectNoInferenceNoWrites = async () => {
+    const { appendEvents } = await import("./events");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const { requireWorkspaceMembership } = await import("./auth");
+    vi.mocked(requireWorkspaceMembership).mockReset().mockResolvedValue({
+      id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true,
+    } as any);
+    vi.mocked(prisma.proposal.findUnique).mockReset();
+    vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
+    vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
+    vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
+  });
+
+  describe("admission rejection (group 1)", () => {
+    it.each([
+      ["archived proposal", baseProposal({ archivedAt: new Date() }), {}, { status: 400, code: "INVALID_STATE" }],
+      ["resolved proposal", baseProposal({ status: "RESOLVED" }), {}, { status: 400, code: "INVALID_STATE" }],
+      ["missing proposal", null, {}, { status: 404, code: "NOT_FOUND" }],
+      ["cross-workspace proposal", baseProposal({ workspaceId: "ws-other" }), {}, { status: 404, code: "NOT_FOUND" }],
+      ["unauthorized actor", baseProposal({ authorUserId: "u-other" }), {}, { status: 403, code: "FORBIDDEN" }],
+      ["empty title", baseProposal(), { title: "   " }, { status: 400, code: "INVALID_INPUT" }],
+      ["empty body", baseProposal(), { bodyMd: "   " }, { status: 400, code: "INVALID_INPUT" }],
+    ])("rejects %s before any gateway call or write", async (_name, proposal, overrides, expected) => {
+      const { updateProposal } = await import("./proposals");
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(proposal as any);
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, ...overrides,
+      })).rejects.toMatchObject(expected);
+      await expectNoInferenceNoWrites();
+    });
+
+    it.each(["missing", "archived", "cross-workspace"])(
+      "rejects a %s circle before any gateway call or write",
+      async (variant) => {
+        const { updateProposal } = await import("./proposals");
+        vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
+        vi.mocked((prisma as any).circle.findUnique).mockResolvedValueOnce(variant === "missing" ? null : {
+          id: "circle-1",
+          workspaceId: variant === "cross-workspace" ? "ws-other" : "ws-1",
+          archivedAt: variant === "archived" ? new Date() : null,
+        });
+        await expect(updateProposal(actor, {
+          workspaceId: "ws-1", proposalId: "p-scope", bodyMd: words(130), includeAiSummary: true, circleId: "circle-1",
+        })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+        await expectNoInferenceNoWrites();
+      },
+    );
+
+    it("rejects an unresolvable ownerMemberId at admission before any gateway call or write", async () => {
+      const { updateProposal } = await import("./proposals");
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal() as any);
+      vi.mocked((prisma as any).member.findFirst).mockResolvedValueOnce(null);
+
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        bodyMd: words(130),
+        includeAiSummary: true,
+        ownerMemberId: "mem-missing",
+      })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+
+      await expectNoInferenceNoWrites();
+    });
+  });
+
+  it("runs the model gateway outside any transaction and before the final advisory lock (group 2)", async () => {
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { updateProposal } = await import("./proposals");
+
+    let depth = 0;
+    const log: string[] = [];
+    const extractDepths: number[] = [];
+    vi.mocked((prisma as any).$transaction).mockImplementation(async (cb: any) => {
+      depth += 1;
+      try {
+        return await cb(prisma);
+      } finally {
+        depth -= 1;
+      }
+    });
+    vi.mocked((prisma as any).$executeRaw).mockImplementation(async () => { log.push("lock"); });
+    vi.mocked(defaultModelGateway.extract).mockImplementation(async () => {
+      extractDepths.push(depth);
+      log.push("extract");
+      return { output: { summary: "Probe summary." } } as any;
+    });
+
+    const loaded = baseProposal({ bodyMd: words(130) });
+    // Admission read plus final-transaction reload.
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValue(loaded as any);
+    vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...loaded, ...data }));
+
+    try {
+      await updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        title: "Probe title",
+        includeAiSummary: true,
+      });
+    } finally {
+      vi.mocked((prisma as any).$transaction).mockImplementation(async (cb: any) => cb(prisma));
+    }
+
+    expect(extractDepths).toEqual([0]);
+    expect(log.indexOf("extract")).toBeGreaterThanOrEqual(0);
+    expect(log.indexOf("extract")).toBeLessThan(log.indexOf("lock"));
+  });
+
+  describe("deferred generation with injected drift (group 3)", () => {
+    const runDriftScenario = async (
+      params: Record<string, unknown>,
+      drifted: Record<string, unknown>,
+      admissionOverrides: Record<string, unknown> = {},
+      expected: Record<string, unknown> = { status: 409, code: "VERSION_CONFLICT" },
+    ) => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+      const base = baseProposal({ bodyMd: words(130), ...admissionOverrides });
+
+      let releaseExtract!: (value: unknown) => void;
+      let markExtractStarted!: () => void;
+      const extractGate = new Promise((resolve) => { releaseExtract = resolve; });
+      const extractStarted = new Promise<void>((resolve) => { markExtractStarted = resolve; });
+      vi.mocked(defaultModelGateway.extract).mockImplementationOnce(() => {
+        markExtractStarted();
+        return extractGate as any;
+      });
+      // Admission read, then the final-transaction reload returns drifted state.
+      vi.mocked(prisma.proposal.findUnique)
+        .mockResolvedValueOnce(base as any)
+        .mockResolvedValueOnce({ ...base, ...drifted } as any);
+
+      const promise = updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        includeAiSummary: true,
+        ...params,
+      } as any);
+      const rejection = expect(promise).rejects.toMatchObject(expected);
+      await extractStarted;
+      expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+      releaseExtract({ output: { summary: "Drifted summary." } });
+
+      await rejection;
+      expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+      await expectNoInferenceNoWritesExceptExtract();
+    };
+
+    const expectNoInferenceNoWritesExceptExtract = async () => {
+      const { appendEvents } = await import("./events");
+      expect(prisma.proposal.update).not.toHaveBeenCalled();
+      expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    };
+
+    it("rejects with 409 VERSION_CONFLICT when the version drifts before the final transaction", async () => {
+      await runDriftScenario(
+        { bodyMd: words(140), expectedVersion: 1 },
+        { version: 2 },
+      );
+    });
+
+    it("rejects with 409 VERSION_CONFLICT when the stored title drifts under a body-only edit", async () => {
+      await runDriftScenario(
+        { bodyMd: words(140) },
+        { title: "Changed under the caller" },
+      );
+    });
+
+    it("rejects with 409 VERSION_CONFLICT when the stored bodyMd drifts under a title-only edit", async () => {
+      await runDriftScenario(
+        { title: "Caller supplied title" },
+        { bodyMd: words(150) },
+      );
+    });
+
+    it("rejects with 409 VERSION_CONFLICT when the lifecycle drifts (status or archive) before the final transaction", async () => {
+      await runDriftScenario(
+        { bodyMd: words(140) },
+        { status: "RESOLVED" },
+      );
+
+      vi.clearAllMocks();
+      vi.mocked((prisma as any).workItemVersion.findUnique).mockResolvedValue(null);
+      vi.mocked((prisma as any).workItemVersion.create).mockResolvedValue({});
+      vi.mocked((prisma as any).$executeRaw).mockResolvedValue({});
+
+      await runDriftScenario(
+        { bodyMd: words(140) },
+        { archivedAt: new Date() },
+      );
+    });
+
+    it("rejects with 409 VERSION_CONFLICT when publication changes proposal visibility during inference", async () => {
+      await runDriftScenario(
+        { bodyMd: words(140) },
+        { isPrivate: false, publishedAt: new Date() },
+        { status: "DRAFT", isPrivate: true },
+      );
+    });
+
+    it("rejects when the selected circle becomes invalid during inference", async () => {
+      vi.mocked((prisma as any).circle.findUnique)
+        .mockResolvedValueOnce({ id: "circle-1", workspaceId: "ws-1", archivedAt: null })
+        .mockResolvedValueOnce(null);
+      await runDriftScenario({ bodyMd: words(140), circleId: "circle-1" }, {});
+    });
+
+    it.each([
+      ["deactivated", null, { status: 403, code: "NOT_A_MEMBER" }],
+      ["demoted", { id: "mem-1", userId: "u-1", role: "MEMBER", isActive: true }, { status: 403, code: "FORBIDDEN" }],
+    ])("rejects a %s member after inference before any write", async (_label, finalMembership, expected) => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce({
+        id: "mem-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true,
+      } as any);
+      if (finalMembership) vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(finalMembership as any);
+      else vi.mocked(requireWorkspaceMembership).mockRejectedValueOnce(expected);
+      await runDriftScenario({ bodyMd: words(140) }, {}, { authorUserId: "u-other" }, expected);
+      expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("writes exactly one history row, update, audit row, and proposal.updated event on success (group 4)", async () => {
+    const { appendEvents } = await import("./events");
+    const { defaultModelGateway } = await import("@corgtex/models");
+    const { updateProposal } = await import("./proposals");
+
+    const loaded = baseProposal({ bodyMd: words(130) });
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValue(loaded as any);
+    vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+      output: { summary: "Generated **bold** summary." },
+    } as any);
+    vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...loaded, ...data }));
+
+    await updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-scope",
+      bodyMd: words(140),
+      includeAiSummary: true,
+      expectedVersion: 1,
+    });
+
+    expect((prisma as any).workItemVersion.create).toHaveBeenCalledTimes(1);
+    expect(prisma.proposal.update).toHaveBeenCalledTimes(1);
+    expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "p-scope", version: 1 }),
+      data: expect.objectContaining({
+        bodyMd: words(140),
+        summary: "Generated bold summary.",
+        version: 2,
+      }),
+    }));
+    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: "proposal.updated", entityType: "Proposal", entityId: "p-scope" }),
+    }));
+    expect(appendEvents).toHaveBeenCalledTimes(1);
+    expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        type: "proposal.updated",
+        aggregateType: "Proposal",
+        aggregateId: "p-scope",
+        payload: expect.objectContaining({
+          proposalId: "p-scope",
+          fields: expect.arrayContaining(["bodyMd", "summary"]),
+        }),
+      }),
+    ]);
+  });
+
+  describe("omitted expectedVersion compatibility (group 5)", () => {
+    it("applies an unchanged-input concurrent version bump and emits one event", async () => {
+      const { appendEvents } = await import("./events");
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+
+      const base = baseProposal({ bodyMd: words(130) });
+      vi.mocked(prisma.proposal.findUnique)
+        .mockResolvedValueOnce(base as any)
+        .mockResolvedValueOnce({ ...base, version: 2 } as any);
+      vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+        output: { summary: "Bump-safe summary." },
+      } as any);
+      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...base, ...data }));
+
+      await updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        bodyMd: words(140),
+        includeAiSummary: true,
+      });
+
+      expect(prisma.proposal.update).toHaveBeenCalledTimes(1);
+      expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ version: 2 }),
+      }));
+      expect(appendEvents).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects drifted AI inputs with 409, never persists the generated summary, and emits no event", async () => {
+      const { appendEvents } = await import("./events");
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+
+      const base = baseProposal({ bodyMd: words(130) });
+      vi.mocked(prisma.proposal.findUnique)
+        .mockResolvedValueOnce(base as any)
+        .mockResolvedValueOnce({ ...base, bodyMd: words(150) } as any);
+      vi.mocked(defaultModelGateway.extract).mockResolvedValueOnce({
+        output: { summary: "Stale summary." },
+      } as any);
+
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        title: "Caller supplied title",
+        includeAiSummary: true,
+      })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+      expect(defaultModelGateway.extract).toHaveBeenCalledTimes(1);
+      expect(prisma.proposal.update).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("threshold and disable paths (group 6)", () => {
+    it("makes no gateway call at or below the word threshold, sets summary to null, and emits one event", async () => {
+      const { appendEvents } = await import("./events");
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+
+      const loaded = baseProposal();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValue(loaded as any);
+      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...loaded, ...data }));
+
+      await updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        bodyMd: words(100),
+        includeAiSummary: true,
+      });
+
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ summary: null }),
+      }));
+      expect(appendEvents).toHaveBeenCalledTimes(1);
+    });
+
+    it("makes no gateway call when includeAiSummary is false, clears the summary, and emits one event", async () => {
+      const { appendEvents } = await import("./events");
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+
+      const loaded = baseProposal({ bodyMd: words(130), summary: "Existing summary." });
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(loaded as any);
+      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...loaded, ...data }));
+
+      await updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        includeAiSummary: false,
+      });
+
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ summary: null }),
+      }));
+      expect(appendEvents).toHaveBeenCalledTimes(1);
+      expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+        expect.objectContaining({
+          type: "proposal.updated",
+          payload: expect.objectContaining({
+            proposalId: "p-scope",
+            fields: expect.arrayContaining(["summary"]),
+          }),
+        }),
+      ]);
+    });
+
+    it("keeps an explicit summary when includeAiSummary is unset and emits one event", async () => {
+      const { appendEvents } = await import("./events");
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+
+      const loaded = baseProposal({ bodyMd: words(130) });
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(loaded as any);
+      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => ({ ...loaded, ...data }));
+
+      await updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-scope",
+        summary: "  Manual summary  ",
+      });
+
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.proposal.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ summary: "Manual summary" }),
+      }));
+      expect(appendEvents).toHaveBeenCalledTimes(1);
+      expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
+        expect.objectContaining({
+          type: "proposal.updated",
+          payload: expect.objectContaining({
+            proposalId: "p-scope",
+            fields: expect.arrayContaining(["summary"]),
+          }),
+        }),
+      ]);
+    });
+  });
+
+  it("short-circuits a no-op update without any history, update, audit, or event write", async () => {
+    const { appendEvents } = await import("./events");
+    const { updateProposal } = await import("./proposals");
+
+    const loaded = baseProposal();
+    vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(loaded as any);
+
+    const result = await updateProposal(actor, {
+      workspaceId: "ws-1",
+      proposalId: "p-scope",
+      title: "Scope title",
+    });
+
+    expect(result).toBe(loaded);
+    expect(prisma.proposal.update).not.toHaveBeenCalled();
+    expect((prisma as any).workItemVersion.create).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 });
 
@@ -2259,7 +2791,8 @@ describe("submitProposal event payload", () => {
   });
 
   describe("Remediation items 8 & 12 proposal regressions", () => {
-    it("fails updateProposal with includeAiSummary when proposal is archived under lock and never calls model gateway", async () => {
+    it("fails updateProposal with includeAiSummary when the proposal is archived at admission and never calls model gateway", async () => {
+      const { appendEvents } = await import("./events");
       const { defaultModelGateway } = await import("@corgtex/models");
       const { updateProposal } = await import("./proposals");
       const actor = { kind: "user", user: { id: "u-1" } } as any;
@@ -2279,11 +2812,13 @@ describe("submitProposal event payload", () => {
         code: "INVALID_STATE",
       });
 
-      const lockOrder = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
-      const findOrder = vi.mocked(prisma.proposal.findUnique).mock.invocationCallOrder[0];
-      expect(lockOrder).toBeLessThan(findOrder);
-      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-archived-lock");
+      // Rejected at admission, before any lock, gateway call, or write.
+      expect(prisma.$executeRaw).not.toHaveBeenCalled();
       expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.proposal.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
     });
 
     it("serializes the real generic Proposal archive writer with an AI-summary update and rejects before model usage", async () => {
@@ -2331,9 +2866,11 @@ describe("submitProposal event payload", () => {
       const proposalLocks = vi.mocked(prisma.$executeRaw).mock.calls
         .map((call, index) => ({ key: call[1], order: vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[index] }))
         .filter((call) => call.key === `Proposal:${proposalId}`);
-      expect(proposalLocks).toHaveLength(2);
+      // Only the archive writer acquires the proposal lock; the AI-summary
+      // update is rejected at admission before locking or model usage.
+      expect(proposalLocks).toHaveLength(1);
       expect(proposalLocks[0].order).toBeLessThan(vi.mocked((prisma.proposal as any).findFirst).mock.invocationCallOrder[0]);
-      expect(proposalLocks[1].order).toBeLessThan(vi.mocked((prisma.proposal as any).findUnique).mock.invocationCallOrder[0]);
+      expect(prisma.proposal.findUnique).toHaveBeenCalledTimes(1);
       expect(current.archivedAt).toBeInstanceOf(Date);
       expect(defaultModelGateway.extract).not.toHaveBeenCalled();
       expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
