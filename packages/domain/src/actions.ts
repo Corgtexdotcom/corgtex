@@ -20,6 +20,7 @@ import {
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import {
+  acquireWorkItemAdvisoryLock,
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -652,6 +653,7 @@ export async function updateAction(actor: AppActor, params: {
   isPrivate?: boolean;
   completedVia?: string | null;
   evidenceDocumentIds?: string[] | null;
+  expectedVersion?: number;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
 }) {
   const membership = await requireWorkspaceMembership({
@@ -661,6 +663,7 @@ export async function updateAction(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
@@ -732,6 +735,11 @@ export async function updateAction(actor: AppActor, params: {
     }
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      invariant(params.expectedVersion === action.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+    }
+
     const contentFields = ["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt", "proposalId"];
     const changedFields = changedDataFields(action as unknown as Record<string, unknown>, data)
       .filter((field) => contentFields.includes(field));
@@ -767,7 +775,7 @@ export async function updateAction(actor: AppActor, params: {
       status: action.status,
     };
     if (action.isPrivate !== undefined) updateWhere.isPrivate = action.isPrivate ?? false;
-    if (action.version !== undefined) updateWhere.version = action.version;
+    updateWhere.version = params.expectedVersion ?? action.version;
 
     let updated;
     try {
@@ -777,7 +785,7 @@ export async function updateAction(actor: AppActor, params: {
       });
     } catch (error) {
       if (isPrismaNotFoundError(error)) {
-        invariant(false, 409, "CONFLICT", "Action changed while editing. Refresh and try again.");
+        invariant(false, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
       }
       throw error;
     }

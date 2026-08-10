@@ -105,6 +105,16 @@ function actorLabel(actor: AppActor) {
   return actor.label || actor.authProvider || "agent";
 }
 
+export async function acquireWorkItemAdvisoryLock(
+  tx: Prisma.TransactionClient,
+  entityType: WorkItemEntityType,
+  entityId: string,
+) {
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext('work_item_version'), hashtext(${`${entityType}:${entityId}`}))
+  `;
+}
+
 export async function recordWorkItemVersion(
   tx: Prisma.TransactionClient,
   actor: AppActor,
@@ -123,9 +133,7 @@ export async function recordWorkItemVersion(
     return currentVersion;
   }
 
-  await tx.$executeRaw`
-    SELECT pg_advisory_xact_lock(hashtext('work_item_version'), hashtext(${`${params.entityType}:${params.entityId}`}))
-  `;
+  await acquireWorkItemAdvisoryLock(tx, params.entityType, params.entityId);
 
   const existing = await tx.workItemVersion.findUnique({
     where: {
@@ -137,7 +145,7 @@ export async function recordWorkItemVersion(
     },
     select: { id: true },
   });
-  invariant(!existing, 409, "CONFLICT", "Work item version already exists.");
+  invariant(!existing, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
 
   await tx.workItemVersion.create({
     data: {
