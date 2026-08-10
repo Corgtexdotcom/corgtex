@@ -233,7 +233,7 @@ function looksUnanswered(text: string) {
 }
 
 function looksWorkLike(text: string) {
-  return /\b(should|todo|to do|follow up|need to|needs to|please|can you|owner|by tomorrow|proposal|tension|action item)\b/i.test(text);
+  return /\b(should|will|must|todo|to do|follow up|need to|needs to|please|can you|owner|by tomorrow|proposal|tension|action item)\b/i.test(text);
 }
 
 function isBotMentioned(text: string, botUserId: string | null) {
@@ -250,7 +250,7 @@ function isNegatedActionRequest(text: string): boolean {
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)[.!]?$)/i.test(text.trim())) return true;
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)[.!]?$)/iu.test(text.trim())) return true;
   return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
