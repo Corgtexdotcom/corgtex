@@ -5,8 +5,7 @@ description: "Canonical specification for the autonomous three-agent development
 
 Corgtex is developed by a fully autonomous three-agent pipeline. One
 human prompts each stage; no human reviews code. Safety comes from
-**vendor separation** (three different AI providers, none of which can
-paper over another's mistakes) plus **mechanical CI gates** (Codex
+**role separation** (independent planning, execution, and exact-head review) plus **mechanical CI gates** (Codex
 cannot merge a PR whose required checks are red).
 
 This page is the canonical spec. `AGENTS.md` at the repo root is the
@@ -16,8 +15,8 @@ per-role quick reference loaded by each agent's harness.
 
 | Role | Agent | Writes code? | Opens PR? | Merges? |
 | --- | --- | --- | --- | --- |
-| **Planner** | Claude (Claude Code or Antigravity) | No | Draft only | No |
-| **Executor** | Gemini in Antigravity | Yes | Yes (ready) | No |
+| **Planner** | Claude Opus or Codex Sol | No | Draft only | No |
+| **Executor** | Gemini in Antigravity or Kimi K3 | Yes | Yes (ready) | No |
 | **Reviewer** | Codex (GitHub App) | No | No | Yes (via approval + auto-merge) |
 
 The human prompts each agent and can intervene with PR labels.
@@ -35,7 +34,7 @@ contract in the pull request body.
 
 ## Stage 1: Plan
 
-The Planner (Claude):
+The Planner (Claude Opus or Codex Sol; never Kimi or Gemini):
 
 1. Creates a new branch with a descriptive name.
 2. Copies the template into the PR body and fills every section, including `Risk tier`.
@@ -45,7 +44,7 @@ The Planner (Claude):
 
 ## Stage 2: Execute
 
-The Executor (Gemini in Antigravity):
+The Executor (Gemini in Antigravity or Kimi K3):
 
 1. **Verify branch:** First action is to run `git branch --show-current` to ensure branch correctness, since multiple agents often run concurrently in the workspace. Checkout or create the correct branch first.
 2. **Context:** Reads the PR body plan. If the PR does not exist yet, reads `.agents/plans/<branch>.md`.
@@ -69,6 +68,7 @@ The Reviewer (Codex) applies the checklist in
 - Tests added when domain code changed.
 - Visual proof links present in the PR body for frontend changes. Corgtex Build Artifacts links are preferred; PR attachments, CI artifacts, or private proof links are acceptable fallbacks when Build Artifacts is unavailable.
 - All required CI checks green.
+- The latest live `beepto-codex` approval contains the exact `rsi/v1` attestation for the live head, base, body digest, and full label-set digest, and `Review Snapshot Integrity` is green after that approval.
 
 Codex either approves (auto-merge fires) or requests changes (the
 Executor re-enters the fix loop).
@@ -102,19 +102,12 @@ on the same failed SHA:
 The human prompter controls the pipeline with PR labels:
 
 - `halt-agents` — the Reviewer will not merge and the Executor will stop pushing. Use when something looks wrong and you need to think.
-- `force-merge` — override the pipeline. Logged in the PR and in the daily digest. Rare. May be applied and executed by an agent when the human explicitly instructs it via prompt (see below).
+- `force-merge` — human-only emergency override. The integrity gate remains red while it is present, and agents must not apply it or act on it.
 - `needs-replan` — set by the Executor when stuck, or by the human. The Planner updates the PR body plan before handing work back.
 
-### Human-directed agent bypass
+### No agent force merge
 
-When a human explicitly instructs an agent (via prompt) to force-merge a PR:
-
-1. The agent adds the `force-merge` label to the PR.
-2. The agent adds a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.`
-3. The agent runs `gh pr merge <number> --admin --squash`.
-4. This is logged in the daily digest alongside all other `force-merge` events.
-
-**Scope:** This bypass covers branch protection (required reviews, status checks). It does **not** exempt the PR from secret scanning, `prisma db push` bans, or `--no-verify`.
+No agent may apply `force-merge`, perform an elevated merge, or bypass branch protection, even when prompted. An emergency override must be performed directly by a human administrator and remains outside the autonomous pipeline.
 
 ## Branch protection (required repo settings)
 
@@ -135,10 +128,12 @@ in GitHub → Settings → Branches → `main`:
   - `Scope Check`
   - `Secret Scan`
   - `Diff Size`
+  - `Client Data Scan`
+  - `Review Snapshot Integrity`
 - **Require branches to be up to date**: on.
 - **Require conversation resolution**: on.
-- **Require merge queue**: on (prevents two Executor PRs from racing).
-- **Do not allow bypassing the above settings** (no admin bypass): off — allows repo admins and human-directed agents to use `--admin` when needed.
+- **Require merge queue**: on, with `ALLGREEN`, merge method `MERGE`, `max_entries_to_build: 1`, and `max_entries_to_merge: 1`.
+- **Do not allow bypassing the above settings**: preserve the pre-existing `enforce_admins: false` and ruleset bypass actor unchanged. Agents are prohibited from using either bypass surface.
 - **Restrict who can push to matching branches**: allow only the Reviewer (Codex GitHub App) and the merge queue.
 
 ## Codex configuration (required app settings)
