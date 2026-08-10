@@ -250,7 +250,7 @@ function isNegatedActionRequest(text: string): boolean {
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!\b(?:will|shall|should|would|could|may|might|must)\s+be\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+be\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
   return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
