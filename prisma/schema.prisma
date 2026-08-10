@@ -632,6 +632,12 @@ enum CustomerDeploymentCloudProvider {
   UNKNOWN
 }
 
+enum CustomerDeploymentReleaseLeasePhase {
+  RESERVED
+  MUTATING
+  RECOVERY_REQUIRED
+}
+
 enum ProviderCutoverStatus {
   PLANNED
   SHADOW
@@ -5619,6 +5625,20 @@ model CustomerDeployment {
   bootstrapStatus              String                          @default("not_started")
   releaseVersion               String?
   releaseImageTag              String?
+  releaseLeaseFence            Int                             @default(0)
+  releaseLeaseId               String?                         @unique
+  releaseLeaseTokenHash        String?                         @unique
+  releaseLeaseOwner            String?
+  releaseLeaseExpectedImageTag String?
+  releaseLeaseIncomingImageTag String?
+  releaseLeaseIncomingVersion  String?
+  releaseLeasePhase            CustomerDeploymentReleaseLeasePhase?
+  releaseLeaseAcquiredAt       DateTime?
+  releaseLeaseHeartbeatAt      DateTime?
+  releaseLeaseExpiresAt        DateTime?
+  releaseLeaseRollbackRecord   Json?
+  releaseLeaseRecoveryEvidence Json?
+  releaseLeaseError            String?
   railwayProjectId             String?
   railwayEnvironmentId         String?
   railwayWebServiceId          String?
@@ -5685,6 +5705,7 @@ model CustomerDeployment {
   @@index([deploymentStatus])
   @@index([cloudProvider])
   @@index([cloudProvider, deploymentStatus])
+  @@index([releaseLeasePhase, releaseLeaseExpiresAt])
   @@index([provisioningStatus])
   @@index([bootstrapStatus])
   @@index([region])
