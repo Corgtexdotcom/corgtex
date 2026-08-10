@@ -288,9 +288,9 @@ function isOrganizationalRole(ownerEvidence: string) { return /^(?:legal|finance
 function hasGroundedOwnerCue(ownerEvidence: string, concreteNextStep: string, threadTexts: string[], trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
   const owner = normalizeText(ownerEvidence), step = normalizeText(concreteNextStep);
   if (!owner || owner === "unknown" || !step) return false;
-  const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const assigned = threadTexts.flatMap(text => text.split(/[.;!?]+/).map(normalizeText)).some(clause => isGroundedInCorpus(step, clause) && (new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(clause)
-    || new RegExp(`(?:\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}(?:\\s|$)|\\b(?:have|ask)\\s+${escapedOwner}\\s+(?!s\\b)(?:to\\s+)?[\\p{L}\\p{N}_-]+\\b)`, "u").test(clause)));
+  const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), escapedStep = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const assigned = threadTexts.flatMap(text => text.split(/[\n.;!?]+/).map(normalizeText)).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\s+${escapedStep}(?=\\s|$)`, "u").test(clause)
+    || new RegExp(`\\b(?:have|ask)\\s+${escapedOwner}\\s+(?:to\\s+)?${escapedStep}(?=\\s|$)`, "u").test(clause) || new RegExp(`\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}\\s+(?:(?:to|for)\\s+)?${escapedStep}(?=\\s|$)`, "u").test(clause));
   if (!assigned) return false;
   const identities = trustedUsers.map(user => ({ id: normalizeText(user.externalUserId), name: normalizeText(user.displayName || "") }));
   return isOrganizationalRole(owner) || identities.some(identity => identity.id === owner || (owner.includes(" ") && identity.name === owner)) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
