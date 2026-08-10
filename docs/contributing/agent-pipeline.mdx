@@ -33,11 +33,16 @@ Opus** or **Codex Sol**:
 - If neither is available, stop and request human direction. Do not
   substitute Kimi, Gemini, Claude Sonnet, Codex Terra, or any other
   model as initial Planner.
-- Kimi, Gemini, Sonnet, Terra, and other models may analyze the problem
-  or execute an approved plan, but their analysis must never become the
-  initial plan contract. An allowed Planner (Opus or Sol) independently
+- Broad analysis is permitted for Kimi, Gemini, Claude Sonnet, Codex
+  Terra, and other models, but analysis output is advisory evidence
+  only: it must never be copied, promoted, or treated as the initial
+  plan contract. An allowed Planner (Opus or Sol) independently
   evaluates any prior analysis before authoring the plan.
-- Kimi or Gemini may act as Executor.
+- Execution permission is narrower than analysis permission:
+  only Kimi or Gemini may act as Executor. Claude Opus, Codex Sol,
+  Claude Sonnet, Codex Terra, and every other model must not implement,
+  edit, commit, push, update the PR as Executor, enable auto-merge, or
+  run operational execution for the task.
 - The Reviewer stays a separate, independent, read-only agent that
   reviews the exact current head and base of the PR; any later push
   invalidates the review (stale-review invalidation). The Reviewer never

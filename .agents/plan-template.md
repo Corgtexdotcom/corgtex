@@ -3,7 +3,15 @@
 {/*
   This file is the canonical handoff from Planner (Claude Opus, or
   Codex Sol as fallback) to Executor (Gemini in Antigravity, or Kimi)
-  and to Reviewer (Codex). Copy this template
+  and to Reviewer (Codex). Every initial plan must be independently
+  authored by Claude Opus or Codex Sol (Opus first; Sol only when Opus
+  is unavailable, unauthenticated, or out of quota; stop if neither is
+  available). Analysis from Kimi, Gemini, Sonnet, Terra, or other
+  models is advisory evidence only and must never be copied, promoted,
+  or treated as this plan contract. Execution permission is narrower
+  than analysis permission: only Kimi or Gemini may execute. The
+  Reviewer independently reviews the exact current head and base; any
+  later push invalidates the review. Copy this template
   into the pull request body. For local checks before a PR exists, copy
   it to `.agents/plans/<branch>.md`; that directory is intentionally
   ignored and must not be committed.

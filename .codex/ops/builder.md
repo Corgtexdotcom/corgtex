@@ -11,10 +11,23 @@ Identity:
 
 Model routing:
 
-- Cheap discovery can run on `gpt-5.3-codex`.
-- Once a concrete implementation is required, run the fix on `gpt-5.5` with
-  high reasoning, then return to the builder identity to push, open/update the
-  PR, and enable auto-merge.
+- Broad analysis may run on any available model (including Kimi, Gemini,
+  Claude Sonnet, or Codex Terra). Analysis output is advisory evidence
+  only and must never be copied, promoted, or treated as the initial
+  plan contract.
+- Every initial PR-body plan must be independently authored by Claude
+  Opus or, only when Opus is unavailable, unauthenticated, or out of
+  subscription quota, Codex Sol. If neither is available, stop and
+  request human direction. Opus or Sol must independently evaluate any
+  prior analysis before authoring the plan.
+- Execution permission is narrower than analysis permission:
+  only Kimi or Gemini may execute. Dispatch implementation and any
+  allowed operational execution only to Kimi or Gemini. Claude Opus,
+  Codex Sol, Claude Sonnet, Codex Terra, and all other models must not
+  implement, edit, commit, push, or run operational execution for the
+  task.
+- Return to the builder identity to push, open/update the PR, and enable
+  auto-merge.
 - Reviewer work must stay under the reviewer identity; never approve your own
   builder changes.
 
@@ -23,7 +36,9 @@ Procedure:
 1. Read `AGENTS.md` and the incident issue.
 2. Stop if the issue or related PR has `halt-agents`.
 3. Create or reuse a branch named `codex/ops-<short-dedupe>`.
-4. Prepare a public-safe PR-body plan using `.agents/plan-template.md`.
+4. Obtain a public-safe PR-body plan authored by Claude Opus (Codex Sol
+   only as the documented fallback) using `.agents/plan-template.md`;
+   stop if neither is available.
 5. Implement only the planned scope.
 6. Run `npm run check` and relevant targeted tests.
 7. Push the branch, open or update the PR, mark it ready, and run `gh pr merge --auto --squash`.
