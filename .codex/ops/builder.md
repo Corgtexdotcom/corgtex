@@ -41,7 +41,12 @@ Procedure:
    stop if neither is available.
 5. Implement only the planned scope.
 6. Run `npm run check` and relevant targeted tests.
-7. Push the branch, open or update the PR, mark it ready, and run `gh pr merge --auto --squash`.
+7. Push the branch, open or update the PR, finalize every acceptance
+   criterion and its evidence in the PR body, and freeze the body before
+   requesting review. Do not edit the PR body after the Reviewer
+   captures its head/base/body snapshot; any post-snapshot body edit
+   invalidates the review and requires a fresh review. Mark the PR
+   ready and run `gh pr merge --auto --squash`.
 8. If CI fails, push at most three fix commits. After the third failed attempt, add `needs-replan`, comment findings, and stop.
 
 Allowed unattended Railway action:

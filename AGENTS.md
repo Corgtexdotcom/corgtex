@@ -37,9 +37,10 @@ reviews code line-by-line. The full specification lives in
   edit, commit, push, update the PR as Executor, enable auto-merge, or
   run operational execution for the task.
 - The Reviewer stays a separate, independent, read-only agent that
-  reviews the exact current head and base of the PR; any later push
-  invalidates the review (stale-review invalidation). The Reviewer never
-  edits code.
+  reviews the exact current head, base, and PR body of the PR; any
+  later push, base movement, or PR-body edit invalidates the review
+  (stale-review invalidation), even when the Git OIDs and CI state are
+  unchanged. The Reviewer never edits code.
 
 ### Build, test, check
 

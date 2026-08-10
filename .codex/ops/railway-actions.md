@@ -1,6 +1,15 @@
 # Railway Restart and Redeploy Rules
 
-Purpose: allow Codex to perform narrowly scoped Railway recovery actions without direct rollback access.
+Purpose: document narrowly scoped Railway recovery actions that only an authorized Kimi or Gemini Executor may perform, without direct rollback access.
+
+Actor and dispatch boundary:
+
+- `inspect` is read-only and does not grant mutation authority.
+- `restart` and `redeploy-current` are mutating operational execution and may be dispatched to and executed only by Kimi or Gemini.
+- Codex Planner, Reviewer, coordinator, and analysis-only models must not run Railway mutation commands.
+- The existing builder or operations identity may coordinate an approved dispatch, but identity ownership does not make a disallowed model an Executor.
+- Existing credentials remain configured outside model prompts and may be used only within their already approved scope.
+- Missing credentials, an absent allowlist entry, a new service or environment, credential rotation, configuration or IAM expansion, or any action beyond existing authorization requires explicit approval and a stop before any mutation.
 
 Supported commands:
 

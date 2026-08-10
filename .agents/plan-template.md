@@ -10,8 +10,9 @@
   models is advisory evidence only and must never be copied, promoted,
   or treated as this plan contract. Execution permission is narrower
   than analysis permission: only Kimi or Gemini may execute. The
-  Reviewer independently reviews the exact current head and base; any
-  later push invalidates the review. Copy this template
+  Reviewer independently reviews the exact current head, base, and PR
+  body; any later push, base movement, or PR-body edit invalidates the
+  review, even when the Git OIDs and CI state are unchanged. Copy this template
   into the pull request body. For local checks before a PR exists, copy
   it to `.agents/plans/<branch>.md`; that directory is intentionally
   ignored and must not be committed.
