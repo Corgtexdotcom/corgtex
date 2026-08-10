@@ -42,6 +42,9 @@ vi.mock("@corgtex/shared", () => ({
     goalUpdate: {
       create: vi.fn(),
     },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
+    },
     goalLink: {
       delete: vi.fn(),
       findUnique: vi.fn(),
@@ -1670,6 +1673,380 @@ describe("Goals Domain", () => {
         status: 409,
         code: "VERSION_CONFLICT",
       });
+    });
+
+    it("rejects body-only postGoalUpdate with a stale expectedVersion under lock and creates no GoalUpdate, event, or audit row", async () => {
+      const { appendEvents } = await import("./events");
+      const { recordAudit } = await import("./audit-trail");
+      const goal = makeGoalFixture("goal-body-stale", { version: 3 });
+
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
+      vi.mocked(prisma.goalUpdate.create).mockClear();
+      vi.mocked(appendEvents).mockClear();
+      vi.mocked(recordAudit).mockClear();
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-body-stale",
+        bodyMd: "Just notes body",
+        expectedVersion: 2,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Goal:goal-body-stale");
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("performs reload and rechecks inside transaction before GoalUpdate create in postGoalUpdate", async () => {
+      const goal = makeGoalFixture("goal-reload-recheck", { version: 1, archivedAt: new Date() });
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
+      vi.mocked(prisma.goalUpdate.create).mockClear();
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-reload-recheck",
+        bodyMd: "Notes",
+      })).rejects.toMatchObject({
+        status: 404,
+        code: "NOT_FOUND",
+      });
+
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Goal:goal-reload-recheck");
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
+    });
+
+    it("executes addKeyResult, updateKeyResult, and deleteKeyResult atomically with derived goal progress/version write", async () => {
+      const { addKeyResult, updateKeyResult, deleteKeyResult } = await import("./goals");
+      const goal = makeGoalFixture("goal-kr-atomic", { version: 1, progressPercent: 0, keyResults: [] });
+
+      // 1. addKeyResult
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(goal as any)
+        .mockResolvedValueOnce({ ...goal, keyResults: [{ id: "kr-1", progressPercent: 50 }] } as any);
+      vi.mocked(prisma.keyResult.create).mockResolvedValueOnce({ id: "kr-1", goalId: "goal-kr-atomic", progressPercent: 50 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, progressPercent: 50, version: 2 } as any);
+
+      await addKeyResult(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-kr-atomic",
+        title: "KR 1",
+        targetValue: 100,
+        currentValue: 50,
+      });
+
+      expect(prisma.keyResult.create).toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "goal-kr-atomic", version: 1 }),
+      }));
+
+      // 2. updateKeyResult
+      const kr = { id: "kr-1", goalId: "goal-kr-atomic", title: "KR 1", targetValue: 100, currentValue: 50, progressPercent: 50, goal };
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, progressPercent: 50, version: 2, keyResults: [{ id: "kr-1", progressPercent: 100 }] } as any);
+      vi.mocked(prisma.keyResult.update).mockResolvedValueOnce({ ...kr, currentValue: 100, progressPercent: 100 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, progressPercent: 100, version: 3 } as any);
+
+      await updateKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: "kr-1",
+        currentValue: 100,
+      });
+
+      expect(prisma.keyResult.update).toHaveBeenCalled();
+
+      // 3. deleteKeyResult
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, progressPercent: 100, version: 3, keyResults: [] } as any);
+      vi.mocked(prisma.keyResult.delete).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, progressPercent: 0, version: 4 } as any);
+
+      await deleteKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: "kr-1",
+      });
+
+      expect(prisma.keyResult.delete).toHaveBeenCalled();
+    });
+
+    it("proves nonexistent, unauthorized, or invalid-state Goal guard wins before invalid body/author validation, and stale body-only update creates nothing", async () => {
+      // 1. Nonexistent Goal guard wins before invalid body and author validation
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(null);
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "nonexistent-goal",
+        bodyMd: "",
+        authorMemberId: "invalid-author-id",
+      })).rejects.toMatchObject({
+        status: 404,
+        code: "NOT_FOUND",
+      });
+
+      // 2. Unauthorized Goal guard wins before invalid body and author validation
+      const draftGoalOtherUser = makeGoalFixture("unauthorized-goal", {
+        status: "DRAFT",
+        isPrivate: true,
+        authorUserId: "other-user",
+      });
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(draftGoalOtherUser as any);
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "unauthorized-goal",
+        bodyMd: "",
+        authorMemberId: "invalid-author-id",
+      })).rejects.toMatchObject({
+        status: 403,
+        code: "FORBIDDEN",
+      });
+
+      // 3. Invalid-state Goal guard wins before invalid body and author validation
+      const completedGoal = makeGoalFixture("completed-goal", {
+        status: "COMPLETED",
+      });
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(completedGoal as any);
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "completed-goal",
+        bodyMd: "",
+        authorMemberId: "invalid-author-id",
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_STATE",
+      });
+
+      // 4. Stale body-only expectedVersion creates no GoalUpdate
+      const activeGoal = makeGoalFixture("active-stale-body", {
+        status: "ACTIVE",
+        version: 3,
+      });
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(activeGoal as any);
+      vi.mocked(prisma.goalUpdate.create).mockClear();
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: "active-stale-body",
+        bodyMd: "Valid body text",
+        expectedVersion: 2,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      expect(prisma.goalUpdate.create).not.toHaveBeenCalled();
+    });
+
+    it("triggers versioned parent recomputation and history in the same transaction when deleteGoal archives a goal with a parent, and rejects archive transaction on forced parent CAS failure", async () => {
+      const { deleteGoal } = await import("./goals");
+      const { appendEvents } = await import("./events");
+      const { recordAudit } = await import("./audit-trail");
+      const childGoal = makeGoalFixture("child-del", { parentGoalId: "parent-del", version: 2 });
+      const parentGoal = makeGoalFixture("parent-del", { progressPercent: 50, version: 5, keyResults: [{ id: "kr-p1", progressPercent: 0 }] });
+
+      // 1. Successful delete with parent recompute
+      vi.mocked(prisma.goal.findFirst).mockResolvedValueOnce(childGoal as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...childGoal, archivedAt: new Date() } as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(parentGoal as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...parentGoal, progressPercent: 0, version: 6 } as any);
+
+      await deleteGoal(actor, { workspaceId: "ws-1", goalId: "child-del" });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "parent-del", version: 5, changedFields: ["progressPercent"] }),
+      }));
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "parent-del", version: 5 },
+        data: expect.objectContaining({ progressPercent: 0, version: 6 }),
+      }));
+
+      // 2. Forced parent CAS failure during recompute rejects archive transaction
+      vi.mocked(prisma.goal.findFirst).mockResolvedValueOnce(childGoal as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...childGoal, archivedAt: new Date() } as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(parentGoal as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(appendEvents).mockClear();
+      vi.mocked(recordAudit).mockClear();
+      vi.mocked(prisma.workspaceArchiveRecord.create).mockClear();
+      vi.mocked(prisma.$transaction).mockClear();
+
+      await expect(deleteGoal(actor, { workspaceId: "ws-1", goalId: "child-del" })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(prisma.workspaceArchiveRecord.create).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("forces derived Goal/WorkItemVersion path to fail after KR operation in addKeyResult, updateKeyResult, and deleteKeyResult, rejecting the single $transaction promise with no second transaction or survived events/audit", async () => {
+      const { addKeyResult, updateKeyResult, deleteKeyResult } = await import("./goals");
+      const { appendEvents } = await import("./events");
+      const { recordAudit } = await import("./audit-trail");
+      const goal = makeGoalFixture("goal-kr-fail", { version: 1, progressPercent: 0, keyResults: [] });
+      const kr = { id: "kr-fail-1", goalId: "goal-kr-fail", title: "KR 1", targetValue: 100, currentValue: 50, progressPercent: 50, goal };
+
+      // 1. addKeyResult failure on derived Goal update (after lock update & KR creation)
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(goal as any)
+        .mockResolvedValueOnce({ ...goal, keyResults: [{ id: "kr-fail-1", progressPercent: 50 }] } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal } as any);
+      vi.mocked(prisma.keyResult.create).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.keyResult.create).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.$transaction).mockClear();
+      vi.mocked(appendEvents).mockClear();
+      vi.mocked(recordAudit).mockClear();
+
+      await expect(addKeyResult(actor, {
+        workspaceId: "ws-1",
+        goalId: "goal-kr-fail",
+        title: "KR 1",
+        targetValue: 100,
+        currentValue: 50,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      const krCreateOrder1 = vi.mocked(prisma.keyResult.create).mock.invocationCallOrder[0];
+      const derivedGoalUpdateOrder1 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[1];
+      expect(krCreateOrder1).toBeLessThan(derivedGoalUpdateOrder1);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(appendEvents).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+
+      // 2. updateKeyResult failure on derived Goal update (after lock update & KR update)
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, keyResults: [{ id: "kr-fail-1", progressPercent: 100 }] } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal } as any);
+      vi.mocked(prisma.keyResult.update).mockResolvedValueOnce({ ...kr, currentValue: 100 } as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.keyResult.update).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.$transaction).mockClear();
+      vi.mocked(appendEvents).mockClear();
+      vi.mocked(recordAudit).mockClear();
+
+      await expect(updateKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: "kr-fail-1",
+        currentValue: 100,
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      const krUpdateOrder2 = vi.mocked(prisma.keyResult.update).mock.invocationCallOrder[0];
+      const derivedGoalUpdateOrder2 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[1];
+      expect(krUpdateOrder2).toBeLessThan(derivedGoalUpdateOrder2);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(appendEvents).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+
+      // 3. deleteKeyResult failure on derived Goal update (after lock update & KR deletion)
+      const goalWithKr = makeGoalFixture("goal-kr-fail", { version: 1, progressPercent: 50, keyResults: [{ id: "kr-fail-1", progressPercent: 50 }, { id: "kr-remaining", progressPercent: 0 }] });
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce({ ...kr, goal: goalWithKr } as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goalWithKr, keyResults: [{ id: "kr-remaining", progressPercent: 0 }] } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goalWithKr } as any);
+      vi.mocked(prisma.keyResult.delete).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.keyResult.delete).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.$transaction).mockClear();
+      vi.mocked(appendEvents).mockClear();
+      vi.mocked(recordAudit).mockClear();
+
+      await expect(deleteKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: "kr-fail-1",
+      })).rejects.toMatchObject({
+        status: 409,
+        code: "VERSION_CONFLICT",
+      });
+
+      const krDeleteOrder3 = vi.mocked(prisma.keyResult.delete).mock.invocationCallOrder[0];
+      const derivedGoalUpdateOrder3 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[1];
+      expect(krDeleteOrder3).toBeLessThan(derivedGoalUpdateOrder3);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(appendEvents).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it("verifies advisory $executeRaw occurs before the first goal.update row lock or update for representative Goal writer paths", async () => {
+      const { updateGoal, postGoalUpdate, addKeyResult, deleteGoal, createGoal } = await import("./goals");
+      const goal = makeGoalFixture("goal-order-test", { version: 1 });
+      const dupGoal = makeGoalFixture("goal-order-test", { version: 1, status: "DRAFT", isPrivate: true, authorUserId: "user-1" });
+
+      // 1. updateGoal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, title: "Updated" } as any);
+      await updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-order-test", title: "Updated" });
+      const lockOrder1 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const updateOrder1 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
+      expect(lockOrder1).toBeLessThan(updateOrder1);
+
+      // 2. postGoalUpdate
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
+      vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({ id: "gu-1" } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, updatedAt: new Date() } as any);
+      await postGoalUpdate(actor, { workspaceId: "ws-1", goalId: "goal-order-test", bodyMd: "Note" });
+      const lockOrder2 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const updateOrder2 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
+      expect(lockOrder2).toBeLessThan(updateOrder2);
+
+      // 3. KeyResult (addKeyResult)
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.keyResult.create).mockClear();
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue(goal as any);
+      vi.mocked(prisma.keyResult.create).mockResolvedValueOnce({ id: "kr-1", goalId: "goal-order-test" } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, version: 2 } as any);
+      await addKeyResult(actor, { workspaceId: "ws-1", goalId: "goal-order-test", title: "KR" });
+      const lockOrder3 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const krCreateOrder3 = vi.mocked(prisma.keyResult.create).mock.invocationCallOrder[0];
+      const updateOrder3 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
+      expect(lockOrder3).toBeLessThan(krCreateOrder3);
+      expect(lockOrder3).toBeLessThan(updateOrder3);
+
+      // 4. duplicate/recompute (createGoal duplicate merging)
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([dupGoal as any]);
+      vi.mocked(prisma.goal.findFirst).mockResolvedValue(dupGoal as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue(dupGoal as any);
+      vi.mocked(prisma.keyResult.findMany).mockResolvedValueOnce([] as any);
+      vi.mocked(prisma.keyResult.createMany).mockResolvedValueOnce({ count: 1 } as any);
+      vi.mocked(prisma.goal.update).mockResolvedValue({ ...dupGoal, version: 2 } as any);
+      await createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Goal goal-order-test",
+        keyResults: [{ title: "KR New", currentValue: 0, targetValue: 100 }],
+        duplicateGuard: { resolution: "update_existing", targetEntityId: "goal-order-test" },
+      });
+      const lockOrder4 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const updateOrder4 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
+      expect(lockOrder4).toBeLessThan(updateOrder4);
+
+      // 5. deleteGoal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.goal.update).mockClear();
+      vi.mocked(prisma.goal.findFirst).mockResolvedValueOnce(goal as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, archivedAt: new Date() } as any);
+      await deleteGoal(actor, { workspaceId: "ws-1", goalId: "goal-order-test" });
+      const lockOrder5 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const updateOrder5 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
+      expect(lockOrder5).toBeLessThan(updateOrder5);
     });
   });
 });

@@ -4,10 +4,10 @@ import { Prisma, type ProposalResolutionOutcome, type ProposalStatus } from "@pr
 import { defaultModelGateway } from "@corgtex/models";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, isGlobalOperator, requireWorkspaceMembership } from "./auth";
-import { getApprovalPolicy, ensureApprovalFlow } from "./approvals";
+import { getApprovalPolicy, ensureApprovalFlow, withdrawActiveApprovalFlowForSubject } from "./approvals";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
-import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { requireDraftManager } from "./draft-permissions";
 import { requireProposalContentEditor } from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
@@ -26,6 +26,24 @@ import {
   recordWorkItemVersion,
   resolveWorkspaceMemberUserId,
 } from "./work-item-versions";
+
+/**
+ * Proposal Lifecycle & Archive Invalidator Inventory:
+ * The following Proposal lifecycle and archive writers in this file can invalidate a pending AI-summary update
+ * (or concurrent edit) on a Proposal and must acquire the work_item_version advisory lock for the proposal
+ * under the transaction before performing state guards or modifications:
+ * 1. updateProposal (edits content and generates AI summary under lock after reloading/re-checking)
+ * 2. archiveProposal / deleteProposal (archives proposal, transitioning archivedAt)
+ * 3. submitProposal (lifecycle transition DRAFT -> OPEN)
+ * 4. returnProposalToDraft (lifecycle transition OPEN/RESOLVED -> DRAFT)
+ * 5. reopenProposal (lifecycle transition RESOLVED -> OPEN)
+ * 6. supportReopenResolvedProposals (batch lifecycle transition RESOLVED -> OPEN, locks in deterministic proposal ID order)
+ * 7. publishProposal (lifecycle transition isPrivate -> false)
+ * 8. resolveProposal (lifecycle transition DRAFT/OPEN -> RESOLVED)
+ */
+async function acquireProposalAdvisoryLock(tx: Prisma.TransactionClient, proposalId: string) {
+  await acquireWorkItemAdvisoryLock(tx, "Proposal", proposalId);
+}
 
 const PROPOSAL_RESOLUTION_OUTCOMES = new Set<ProposalResolutionOutcome>(["ADOPTED", "NOT_ADOPTED", "WITHDRAWN"]);
 const AI_SUMMARY_WORD_THRESHOLD = 120;
@@ -570,7 +588,8 @@ async function linkProposalSourcesAndActions(
   }
 
   if (params.relatedActions && params.relatedActions.length > 0) {
-    for (const action of params.relatedActions) {
+    const sortedActions = [...params.relatedActions].sort((a, b) => a.id.localeCompare(b.id));
+    for (const action of sortedActions) {
       const currentVersion = action.version;
       const newVersion = await recordWorkItemVersion(tx, actor, {
         workspaceId: params.workspaceId,
@@ -945,9 +964,7 @@ export async function updateProposal(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
-    if (params.includeAiSummary === true) {
-      await acquireWorkItemAdvisoryLock(tx, "Proposal", params.proposalId);
-    }
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
 
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
@@ -1059,19 +1076,100 @@ export async function updateProposal(actor: AppActor, params: {
   });
 }
 
-export async function archiveProposal(actor: AppActor, params: {
-  workspaceId: string;
-  proposalId: string;
-}) {
+async function archiveProposalArtifactWithLock(
+  actor: AppActor,
+  params: {
+    workspaceId: string;
+    proposalId: string;
+    reason: string;
+  },
+) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
 
-  return archiveWorkspaceArtifact(actor, {
+  return prisma.$transaction(async (tx) => {
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
+    const record = await tx.proposal.findFirst({
+      where: { id: params.proposalId, workspaceId: params.workspaceId },
+    });
+    invariant(record, 404, "NOT_FOUND", "Proposal not found.");
+    if (record.archivedAt) {
+      return record;
+    }
+
+    const previousState = JSON.parse(JSON.stringify(record)) as Prisma.InputJsonObject;
+    const archivedAt = new Date();
+    const actorUserId = actor.kind === "user" ? actor.user.id : null;
+    const actorLabel = actor.kind === "user"
+      ? (actor.user.displayName || actor.user.email || actor.user.id)
+      : (actor.label || actor.authProvider || "agent");
+
+    const updated = await tx.proposal.update({
+      where: { id: record.id },
+      data: {
+        archivedAt,
+        archivedByUserId: actorUserId,
+        archiveReason: params.reason,
+      },
+    });
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Proposal",
+      entityId: record.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Proposal", record),
+    });
+
+    await tx.workspaceArchiveRecord.create({
+      data: {
+        workspaceId: params.workspaceId,
+        entityType: "Proposal",
+        entityId: record.id,
+        entityLabel: record.title ?? record.id,
+        previousState: previousState as Prisma.InputJsonObject,
+        archiveReason: params.reason,
+        archivedByUserId: actorUserId,
+        archivedByLabel: actorLabel,
+        archivedAt,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        workspaceId: params.workspaceId,
+        actorUserId,
+        action: "workspace-artifact.archived",
+        entityType: "Proposal",
+        entityId: record.id,
+        meta: {
+          label: record.title ?? record.id,
+          reason: params.reason,
+        },
+      },
+    });
+
+    await withdrawActiveApprovalFlowForSubject(tx, {
+      workspaceId: params.workspaceId,
+      subjectType: "PROPOSAL",
+      subjectId: record.id,
+      cleanupReason: "Proposal archived",
+      actorUserId,
+      now: archivedAt,
+    });
+
+    return updated;
+  });
+}
+
+export async function archiveProposal(actor: AppActor, params: {
+  workspaceId: string;
+  proposalId: string;
+}) {
+  return archiveProposalArtifactWithLock(actor, {
     workspaceId: params.workspaceId,
-    entityType: "Proposal",
-    entityId: params.proposalId,
+    proposalId: params.proposalId,
     reason: "Archived from proposal archive path.",
   });
 }
@@ -1085,6 +1183,8 @@ export async function submitProposal(actor: AppActor, params: { workspaceId: str
   const policy = await getApprovalPolicy(params.workspaceId, "PROPOSAL");
 
   return prisma.$transaction(async (tx) => {
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
+
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
     });
@@ -1136,6 +1236,8 @@ export async function returnProposalToDraft(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
+
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
     });
@@ -1234,6 +1336,8 @@ export async function reopenProposal(actor: AppActor, params: {
   const now = new Date();
 
   return prisma.$transaction(async (tx) => {
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
+
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
     });
@@ -1345,6 +1449,11 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
   const now = new Date();
 
   return prisma.$transaction(async (tx) => {
+    const sortedIds = [...proposalIds].sort((a, b) => a.localeCompare(b));
+    for (const proposalId of sortedIds) {
+      await acquireProposalAdvisoryLock(tx, proposalId);
+    }
+
     const proposals = await tx.proposal.findMany({
       where: {
         id: { in: proposalIds },
@@ -1487,6 +1596,8 @@ export async function publishProposal(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
+
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
     });
@@ -1544,6 +1655,8 @@ export async function resolveProposal(actor: AppActor, params: {
   const now = new Date();
 
   return prisma.$transaction(async (tx) => {
+    await acquireProposalAdvisoryLock(tx, params.proposalId);
+
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
     });
@@ -1655,11 +1768,9 @@ export async function resolveProposal(actor: AppActor, params: {
 }
 
 export async function deleteProposal(actor: AppActor, params: { workspaceId: string; proposalId: string }) {
-  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
-  return archiveWorkspaceArtifact(actor, {
+  return archiveProposalArtifactWithLock(actor, {
     workspaceId: params.workspaceId,
-    entityType: "Proposal",
-    entityId: params.proposalId,
+    proposalId: params.proposalId,
     reason: "Archived from proposal delete path.",
   });
 }

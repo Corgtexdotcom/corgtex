@@ -1,6 +1,19 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { prisma } from "@corgtex/shared";
 
+const makeTension = (id = "t-1", overrides = {}) => ({
+  id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
+  assigneeMemberId: null, raisedByMemberId: null, proposalId: null, priority: 1, status: "OPEN", version: 1, ...overrides,
+});
+const makeAction = (id = "a-1", overrides = {}) => ({
+  id, workspaceId: "ws-1", title: `Action ${id}`, bodyMd: "Action body", priority: 1, circleId: null,
+  assigneeMemberId: null, dueAt: null, proposalId: null, status: "OPEN", version: 1, ...overrides,
+});
+const makeProposal = (id = "p-1", overrides = {}) => ({
+  id, workspaceId: "ws-1", title: `Proposal ${id}`, bodyMd: "Proposal body", summary: null, circleId: null,
+  ownerMemberId: null, priority: 0, status: "DRAFT", isPrivate: true, archivedAt: null, version: 1, ...overrides,
+});
+
 vi.mock("@corgtex/shared", () => ({
   prisma: {
     proposal: {
@@ -44,6 +57,9 @@ vi.mock("@corgtex/shared", () => ({
     workspacePermalink: {
       upsert: vi.fn(),
     },
+    workspaceArchiveRecord: {
+      create: vi.fn(),
+    },
     event: {
       createMany: vi.fn(),
     },
@@ -84,6 +100,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./approvals", () => ({
   ensureApprovalFlow: vi.fn().mockResolvedValue({ id: "flow-1" }),
+  withdrawActiveApprovalFlowForSubject: vi.fn().mockResolvedValue(undefined),
   getApprovalPolicy: vi.fn().mockResolvedValue({
     mode: "CONSENT",
     decisionWindowHours: 168,
@@ -2076,19 +2093,6 @@ describe("submitProposal event payload", () => {
       vi.clearAllMocks();
     });
 
-    const makeTension = (id = "t-1", overrides = {}) => ({
-      id, workspaceId: "ws-1", title: `Tension ${id}`, bodyMd: "Tension body", circleId: null, meetingId: null,
-      assigneeMemberId: null, raisedByMemberId: null, proposalId: null, priority: 1, status: "OPEN", version: 1, ...overrides,
-    });
-    const makeAction = (id = "a-1", overrides = {}) => ({
-      id, workspaceId: "ws-1", title: `Action ${id}`, bodyMd: "Action body", priority: 1, circleId: null,
-      assigneeMemberId: null, dueAt: null, proposalId: null, status: "OPEN", version: 1, ...overrides,
-    });
-    const makeProposal = (id = "p-1", overrides = {}) => ({
-      id, workspaceId: "ws-1", title: `Proposal ${id}`, bodyMd: "Proposal body", summary: null, circleId: null,
-      ownerMemberId: null, priority: 0, status: "DRAFT", isPrivate: true, archivedAt: null, version: 1, ...overrides,
-    });
-
     it("atomically records prior history and increments version on source Tension and related Actions during proposal creation", async () => {
       const { createProposal } = await import("./proposals");
       const actor = { kind: "user", user: { id: "u-1" } } as any;
@@ -2251,6 +2255,159 @@ describe("submitProposal event payload", () => {
 
       expect(prisma.auditLog.create).not.toHaveBeenCalled();
       expect(appendEvents).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Remediation items 8 & 12 proposal regressions", () => {
+    it("fails updateProposal with includeAiSummary when proposal is archived under lock and never calls model gateway", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { updateProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(makeProposal("p-archived-lock", { archivedAt: new Date(), status: "OPEN" }) as any);
+      vi.mocked(defaultModelGateway.extract).mockClear();
+
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId: "p-archived-lock",
+        includeAiSummary: true,
+        title: "Long long title long long title",
+        bodyMd: words(200),
+      })).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_STATE",
+      });
+
+      const lockOrder = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
+      const findOrder = vi.mocked(prisma.proposal.findUnique).mock.invocationCallOrder[0];
+      expect(lockOrder).toBeLessThan(findOrder);
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-archived-lock");
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+    });
+
+    it("verifies every inventoried Proposal lifecycle and archive writer acquires the proposal advisory lock", async () => {
+      const {
+        updateProposal, archiveProposal, submitProposal, returnProposalToDraft,
+        reopenProposal, supportReopenResolvedProposals, publishProposal, resolveProposal, deleteProposal,
+      } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      const proposalId = "p-lock-test";
+      const baseProposal = makeProposal(proposalId, { status: "DRAFT", isPrivate: true, archivedAt: null, authorUserId: "u-1" });
+
+      // 1. updateProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, title: "New Title" } as any);
+      await updateProposal(actor, { workspaceId: "ws-1", proposalId, title: "New Title" });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 2. archiveProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, archivedAt: new Date() } as any);
+      await archiveProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 3. submitProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.approvalFlow.findUnique).mockResolvedValueOnce({ id: "flow-1" } as any);
+      vi.mocked(prisma.approvalFlow.update).mockResolvedValueOnce({ id: "flow-1", status: "ACTIVE" } as any);
+      await submitProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 4. returnProposalToDraft
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ ...baseProposal, status: "OPEN" } as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce(baseProposal as any);
+      await returnProposalToDraft(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 5. reopenProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ ...baseProposal, status: "RESOLVED" } as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, status: "OPEN" } as any);
+      await reopenProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 6. supportReopenResolvedProposals (batch)
+      const supportActor = { kind: "user", user: { id: "u-1", globalRole: "OPERATOR" }, isSupportRepair: true } as any;
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findMany).mockResolvedValueOnce([{ ...baseProposal, id: "p-b", status: "RESOLVED" }, { ...baseProposal, id: "p-a", status: "RESOLVED" }] as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValue({ ...baseProposal, status: "OPEN" } as any);
+      await supportReopenResolvedProposals(supportActor, { workspaceId: "ws-1", proposalIds: ["p-b", "p-a"], reason: "Fix" });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-a");
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:p-b");
+
+      const executeRawCalls = vi.mocked(prisma.$executeRaw).mock.calls;
+      const callIndexPA = executeRawCalls.findIndex((call) => call[1] === "Proposal:p-a");
+      const callIndexPB = executeRawCalls.findIndex((call) => call[1] === "Proposal:p-b");
+      expect(callIndexPA).toBeGreaterThan(-1);
+      expect(callIndexPB).toBeGreaterThan(-1);
+      expect(callIndexPA).toBeLessThan(callIndexPB);
+
+      const orderPA = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[callIndexPA];
+      const orderPB = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[callIndexPB];
+      expect(orderPA).toBeLessThan(orderPB);
+
+      // 7. publishProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, isPrivate: false } as any);
+      await publishProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 8. resolveProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findUnique).mockResolvedValueOnce({ ...baseProposal, status: "OPEN" } as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, status: "RESOLVED" } as any);
+      await resolveProposal(actor, { workspaceId: "ws-1", proposalId, outcome: "ADOPTED", decisionMd: "Adopted" });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+
+      // 9. deleteProposal
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked(prisma.proposal.findFirst).mockResolvedValueOnce(baseProposal as any);
+      vi.mocked(prisma.proposal.update).mockResolvedValueOnce({ ...baseProposal, archivedAt: new Date() } as any);
+      await deleteProposal(actor, { workspaceId: "ws-1", proposalId });
+      expect(prisma.$executeRaw).toHaveBeenCalledWith(expect.anything(), `Proposal:${proposalId}`);
+    });
+
+    it("acquires related-action advisory locks in stable id order in linkProposalSourcesAndActions regardless of input order", async () => {
+      const { createProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+
+      vi.mocked(prisma.action.findMany).mockResolvedValueOnce([
+        makeAction("action-z", { version: 1 }),
+        makeAction("action-a", { version: 1 }),
+        makeAction("action-m", { version: 1 }),
+      ] as any);
+      vi.mocked(prisma.proposal.create).mockResolvedValueOnce(makeProposal("p-sorted-actions") as any);
+      vi.mocked(prisma.action.update).mockResolvedValue({ id: "act", version: 2 } as any);
+      vi.mocked(prisma.$executeRaw).mockClear();
+
+      await createProposal(actor, {
+        workspaceId: "ws-1",
+        title: "Sorted action locks proposal",
+        bodyMd: "Body",
+        relatedActionIds: ["action-z", "action-a", "action-m"],
+      });
+
+      const rawLockCalls = vi.mocked(prisma.$executeRaw).mock.calls
+        .map((call) => call[1])
+        .filter((entityString): entityString is string => typeof entityString === "string" && entityString.startsWith("Action:"));
+
+      expect(rawLockCalls).toEqual(["Action:action-a", "Action:action-m", "Action:action-z"]);
+
+      const lockCalls = vi.mocked(prisma.$executeRaw).mock.calls;
+      const indexA = lockCalls.findIndex((c) => c[1] === "Action:action-a");
+      const indexM = lockCalls.findIndex((c) => c[1] === "Action:action-m");
+      const indexZ = lockCalls.findIndex((c) => c[1] === "Action:action-z");
+      const orderA = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[indexA];
+      const orderM = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[indexM];
+      const orderZ = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[indexZ];
+      expect(orderA).toBeLessThan(orderM);
+      expect(orderM).toBeLessThan(orderZ);
     });
   });
 });

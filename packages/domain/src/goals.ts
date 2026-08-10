@@ -3,7 +3,7 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
-import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { privacyFilter } from "./privacy";
@@ -21,6 +21,7 @@ import {
 } from "./duplicate-guard";
 import type { Goal, GoalLevel, GoalCadence, GoalStatus, Prisma } from "@prisma/client";
 import {
+  acquireWorkItemAdvisoryLock,
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -382,6 +383,7 @@ async function appendMissingDuplicateGoalKeyResults(
 
   let parentGoalIdToRecompute: string | null = null;
   const didAppend = await prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, goalId);
     await lockGoalForKeyResultMutation(tx, actor, membership, goal);
 
@@ -647,6 +649,7 @@ export async function updateGoal(
 
   const parentGoalIdsToRecompute = new Set<string>();
   const updatedGoal = await prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
     await validateGoalReferences(tx, actor, membership, {
       workspaceId: params.workspaceId,
@@ -836,32 +839,78 @@ export async function deleteGoal(
     resolvedMembership: params._membership,
   });
 
-  const goal = await prisma.goal.findFirst({
-    where: {
-      id: params.goalId,
-      workspaceId: params.workspaceId,
-      ...(params.includeArchived ? {} : { archivedAt: null }),
-    },
-    select: {
-      id: true,
-      status: true,
-      archivedAt: true,
-      isPrivate: true,
-      authorUserId: true,
-    },
-  });
-  invariant(goal, 404, "NOT_FOUND", "Goal not found.");
-  if (goal.status === "DRAFT" || goal.isPrivate) {
-    requirePrivateDraftEditor(actor, membership, goal);
-  } else {
-    requireCollaborativeWorkItemEditor(actor, membership, goal);
-  }
+  return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
 
-  await archiveWorkspaceArtifact(actor, {
-    workspaceId: params.workspaceId,
-    entityType: "Goal",
-    entityId: params.goalId,
-    reason: "Archived from goal delete path.",
+    const goal = await tx.goal.findFirst({
+      where: {
+        id: params.goalId,
+        workspaceId: params.workspaceId,
+        ...(params.includeArchived ? {} : { archivedAt: null }),
+      },
+    });
+    invariant(goal, 404, "NOT_FOUND", "Goal not found.");
+    if (goal.status === "DRAFT" || goal.isPrivate) {
+      requirePrivateDraftEditor(actor, membership, goal);
+    } else {
+      requireCollaborativeWorkItemEditor(actor, membership, goal);
+    }
+
+    if (goal.archivedAt) {
+      return;
+    }
+
+    const previousState = JSON.parse(JSON.stringify(goal)) as Prisma.InputJsonObject;
+    const archivedAt = new Date();
+    const actorUserId = actor.kind === "user" ? actor.user.id : null;
+    const actorLabel = actor.kind === "user"
+      ? (actor.user.displayName || actor.user.email || actor.user.id)
+      : (actor.label || actor.authProvider || "agent");
+
+    await tx.goal.update({
+      where: { id: goal.id },
+      data: {
+        archivedAt,
+        archivedByUserId: actorUserId,
+        archiveReason: "Archived from goal delete path.",
+      },
+    });
+
+    if (goal.parentGoalId) {
+      await recomputeGoalProgress(goal.parentGoalId, actor, tx);
+    }
+
+    await ensureWorkspacePermalink(tx, actor, {
+      workspaceId: params.workspaceId,
+      entityType: "Goal",
+      entityId: goal.id,
+      canonicalPath: workspaceEntityCanonicalPath(params.workspaceId, "Goal", goal),
+    });
+
+    await tx.workspaceArchiveRecord.create({
+      data: {
+        workspaceId: params.workspaceId,
+        entityType: "Goal",
+        entityId: goal.id,
+        entityLabel: goal.title ?? goal.id,
+        previousState: previousState as Prisma.InputJsonObject,
+        archiveReason: "Archived from goal delete path.",
+        archivedByUserId: actorUserId,
+        archivedByLabel: actorLabel,
+        archivedAt,
+      },
+    });
+
+    await recordAudit(tx, actor, {
+      workspaceId: params.workspaceId,
+      action: "workspace-artifact.archived",
+      entityType: "Goal",
+      entityId: goal.id,
+      meta: {
+        label: goal.title ?? goal.id,
+        reason: "Archived from goal delete path.",
+      },
+    });
   });
 }
 
@@ -1183,7 +1232,9 @@ export async function addKeyResult(
 
   const progressPercent = keyResultProgress(params);
 
-  const kr = await prisma.$transaction(async (tx) => {
+  // Note: KeyResult mutation and derived Goal progress, version, and WorkItemVersion history commit atomically in one transaction via txClient. Parent goal recomputation cascades via txClient where applicable.
+  return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
     const goal = await tx.goal.findUnique({
       where: { id: params.goalId },
       select: { id: true, workspaceId: true, archivedAt: true, authorUserId: true, isPrivate: true, status: true },
@@ -1191,7 +1242,7 @@ export async function addKeyResult(
     invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
     await lockGoalForKeyResultMutation(tx, actor, membership, goal);
 
-    return tx.keyResult.create({
+    const kr = await tx.keyResult.create({
       data: {
         goalId: params.goalId,
         title,
@@ -1201,11 +1252,11 @@ export async function addKeyResult(
         progressPercent,
       },
     });
+
+    await recomputeGoalProgress(params.goalId, actor, tx);
+
+    return kr;
   });
-
-  await recomputeGoalProgress(params.goalId, actor);
-
-  return kr;
 }
 
 export async function updateKeyResult(
@@ -1226,12 +1277,14 @@ export async function updateKeyResult(
     resolvedMembership: params._membership,
   });
 
-  const updated = await prisma.$transaction(async (tx) => {
+  // Note: KeyResult mutation and derived Goal progress, version, and WorkItemVersion history commit atomically in one transaction via txClient. Parent goal recomputation cascades via txClient where applicable.
+  return prisma.$transaction(async (tx) => {
     const kr = await tx.keyResult.findUnique({
       where: { id: params.krId },
       include: { goal: true },
     });
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+    await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
     await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
     const data: any = {};
@@ -1253,15 +1306,15 @@ export async function updateKeyResult(
       currentValue: newCurrent,
     });
 
-    return tx.keyResult.update({
+    const updated = await tx.keyResult.update({
       where: { id: params.krId },
       data,
     });
+
+    await recomputeGoalProgress(updated.goalId, actor, tx);
+
+    return updated;
   });
-
-  await recomputeGoalProgress(updated.goalId, actor);
-
-  return updated;
 }
 
 export async function deleteKeyResult(
@@ -1278,18 +1331,20 @@ export async function deleteKeyResult(
     resolvedMembership: params._membership,
   });
 
-  const goalId = await prisma.$transaction(async (tx) => {
+  // Note: KeyResult mutation and derived Goal progress, version, and WorkItemVersion history commit atomically in one transaction via txClient. Parent goal recomputation cascades via txClient where applicable.
+  await prisma.$transaction(async (tx) => {
     const kr = await tx.keyResult.findUnique({
       where: { id: params.krId },
       include: { goal: true },
     });
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
+    await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
     await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
     await tx.keyResult.delete({ where: { id: params.krId } });
-    return kr.goalId;
+
+    await recomputeGoalProgress(kr.goalId, actor, tx);
   });
-  await recomputeGoalProgress(goalId, actor);
 }
 
 export async function postGoalUpdate(
@@ -1311,44 +1366,48 @@ export async function postGoalUpdate(
     resolvedMembership: params._membership,
   });
 
-  const goal = await prisma.goal.findUnique({
-    where: { id: params.goalId },
-  });
-  invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
-  if (goal.status === "DRAFT") {
-    requirePrivateDraftEditor(actor, membership, goal);
-  } else if (params.statusChange === "DRAFT") {
-    requirePrivateDraftEditor(actor, membership, goal);
-  } else {
-    invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can receive updates.");
-    requireCollaborativeWorkItemEditor(actor, membership, goal);
-  }
-  const bodyMd = params.bodyMd.trim();
-  invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Goal update body is required.");
-  const newProgress = params.newProgress !== undefined && params.newProgress !== null
-    ? clampProgressPercent(params.newProgress, "Goal progress")
-    : null;
-
-  if (params.expectedVersion !== undefined) {
-    invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
-    invariant(params.expectedVersion === goal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
-  }
-
-  if (params.authorMemberId) {
-    const author = await prisma.member.findUnique({
-      where: { id: params.authorMemberId },
-      select: { workspaceId: true, isActive: true },
-    });
-    invariant(
-      author && author.workspaceId === params.workspaceId && author.isActive,
-      400,
-      "INVALID_INPUT",
-      "Goal update author must be an active member in the same workspace.",
-    );
-  }
-
   const parentGoalIdsToRecompute = new Set<string>();
   const update = await prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
+
+    const goal = await tx.goal.findUnique({
+      where: { id: params.goalId },
+    });
+    invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+
+    if (goal.status === "DRAFT") {
+      requirePrivateDraftEditor(actor, membership, goal);
+    } else if (params.statusChange === "DRAFT") {
+      requirePrivateDraftEditor(actor, membership, goal);
+    } else {
+      invariant(EDITABLE_ACTIVE_GOAL_STATUSES.has(goal.status), 400, "INVALID_STATE", "Only draft or active goals can receive updates.");
+      requireCollaborativeWorkItemEditor(actor, membership, goal);
+    }
+
+    const bodyMd = params.bodyMd.trim();
+    invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Goal update body is required.");
+    const newProgress = params.newProgress !== undefined && params.newProgress !== null
+      ? clampProgressPercent(params.newProgress, "Goal progress")
+      : null;
+
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      invariant(params.expectedVersion === goal.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");
+    }
+
+    if (params.authorMemberId) {
+      const author = await tx.member.findUnique({
+        where: { id: params.authorMemberId },
+        select: { workspaceId: true, isActive: true },
+      });
+      invariant(
+        author && author.workspaceId === params.workspaceId && author.isActive,
+        400,
+        "INVALID_INPUT",
+        "Goal update author must be an active member in the same workspace.",
+      );
+    }
+
     await lockGoalForAuthorizedMutation(tx, goal);
 
     const update = await tx.goalUpdate.create({
