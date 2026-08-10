@@ -245,12 +245,12 @@ function isBotMentioned(text: string, botUserId: string | null) {
 
 function isNegatedActionRequest(text: string): boolean {
   return /\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
-    || /\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
+    || /\b(?:(?:should|must|will|can|could|would|need)\s+not|(?:do|does|did)\s+not\s+need\s+to)\b|\b(?:(?:shouldn|mustn|can|couldn|wouldn|won|needn)['’]t|(?:don|doesn|didn)['’]t\s+need\s+to)\b|\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
     || /\bno\s+(action|task|work item)\b/i.test(text);
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)[.!]?$)/iu.test(text.trim())) return true;
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!\b(?:will|shall|should|would|could|may|might|must)\s+be\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
   return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
@@ -339,7 +339,7 @@ function meetsActionPublicationPredicate(
   if (threadTexts.some(isNegatedActionRequest)) return false;
 
   const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus);
-  const isExplicitRequest = parsed.explicitActionRequest === true && isDeterministicExplicitActionRequest(sourceText);
+  const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText) || threadTexts.some(isDeterministicExplicitActionRequest));
 
   if (!hasGroundedOwner && !isExplicitRequest) return false;
 
@@ -402,7 +402,7 @@ async function reviewThreadForAction(params: {
       "Review this public Slack thread after Corgtex already asked whether someone should take it.",
       "Extract normalized fields. resolutionState: answered | open | unknown. workDisposition: action | awareness | information | test | ignore.",
       "If there is no linked action, you may use workDisposition 'action' only if there is a concrete future deliverable and no negative category.",
-      "If a linked action exists and a human reply gives a meaningful status, ownership, timing, or decision update, use workDisposition 'action' and provide updateMd.",
+      "If a linked action exists and a human reply gives a meaningful status, ownership, timing, or decision update, use workDisposition 'action' and provide updateMd grounded only in the thread.",
       "If they are waiting on another party or more time is needed, set followupDelayMultiplier to 2.",
       "Set explicitActionRequest to true if the text deterministically requests Corgtex to create/assign an action.",
       "Set negativeCategory to true for tests, FYIs, acknowledgements, information requests, already-completed tasks, or bot-directed messages.",

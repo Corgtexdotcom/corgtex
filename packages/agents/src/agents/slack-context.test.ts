@@ -93,10 +93,10 @@ function candidate(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setupPendingNudge(source: any) {
+function setupPendingNudge(source: any, threadMessages = [source]) {
   prismaMock.communicationMessage.findMany
     .mockResolvedValueOnce([])
-    .mockResolvedValueOnce([source]);
+    .mockResolvedValueOnce(threadMessages);
   prismaMock.communicationEntityLink.findMany
     .mockResolvedValueOnce([nudgeLink({ message: source })])
     .mockResolvedValueOnce([]);
@@ -660,7 +660,6 @@ describe("Slack context jobs", () => {
       candidate({ id: "msg-bot-1", text: "<@bot-1> can you check this status?", messageTs: new Date("2026-04-28T15:30:00.000Z") }),
       candidate({ id: "msg-bot-2", text: "Hey <@bot-1|Corgtex> please follow up", messageTs: new Date("2026-04-28T15:30:00.000Z") }),
     ]);
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
@@ -671,7 +670,6 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
     expect(extractMock).not.toHaveBeenCalled();
 
-    // Defense-in-depth check: pending nudges containing <@bot-1> AND <@bot-1|Corgtex> terminalize without model call
     const botMentionSource1 = candidate({ id: "msg-bot-3", text: "Hey <@bot-1> please update docs", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     const botMentionSource2 = candidate({ id: "msg-bot-4", text: "Hey <@bot-1|Corgtex> please update docs", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     prismaMock.communicationEntityLink.findMany
@@ -692,7 +690,6 @@ describe("Slack context jobs", () => {
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-4" }),
     });
 
-    // Linked thread-level check: an app mention skips extraction without a recurring terminal marker.
     const normalSource = candidate({ id: "msg-normal-1", text: "Can you update the docs?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(normalSource);
     prismaMock.communicationMessage.findMany
@@ -835,6 +832,7 @@ describe("Slack context jobs", () => {
     { label: "subject-prefixed done reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "It's done." }, text: "Jan needs to send the report by tomorrow." },
     { label: "standalone sent reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent." }, text: "Jan needs to send the report by tomorrow." },
     { label: "subject-is-completed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "completed reply with later future clause", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed. It will be archived tomorrow." }, text: "Jan needs to send the report by tomorrow." },
     { label: "subject-has-been-fixed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The issue has been fixed." }, text: "Jan needs to send the report by tomorrow." },
     { label: "standalone resolved reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Resolved." }, text: "Jan needs to send the report by tomorrow." },
     { label: "standalone upgraded reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Upgraded." }, text: "Jan needs to send the report by tomorrow." },
@@ -842,7 +840,8 @@ describe("Slack context jobs", () => {
     { label: "capitalized budget is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Budget", concreteNextStep: "be approved tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Approve budget" }, text: "Budget needs to be approved tomorrow." },
     { label: "capitalized server is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Server", concreteNextStep: "restart tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Restart server" }, text: "Server needs to restart tomorrow." },
     { label: "vague grounded verb is not a deliverable", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send" }, text: "Jan needs to send something?" },
-    { label: "ASCII contracted negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex can't create an action item for it." },
+    { label: "negated assigned task", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should not send the report; can someone confirm?" },
+    { label: "does-not-need task negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan does not need to send the report; can someone confirm?" },
     { label: "single-word cannot negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex cannot create an action item for it." },
     { label: "typographic contracted negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex shouldn’t create an action item for it." },
     { label: "later human reply veto", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Don't create an action; this is already done." }, text: "Jan needs to send the report by tomorrow." },
@@ -882,7 +881,7 @@ describe("Slack context jobs", () => {
   it.each([
     { label: "will cue and grounded fields override hallucinated prose", text: "Jan will send the report Friday; can someone confirm?", step: "send the report", owner: "Jan", title: "Invent quarterly strategy", bodyMd: "Fabricated private context." },
     { label: "assigned investigation deliverable", text: "Jan needs to find out why checkout fails and report back by tomorrow.", step: "find out why checkout fails and report back", owner: "Jan", title: "Investigate checkout", bodyMd: "Jan needs to find out why checkout fails and report back by tomorrow." },
-    { label: "named-owner should cue", text: "Jan should send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report by tomorrow." },
+    { label: "future modal completion phrases remain actionable", text: "Jan should deploy the release by tomorrow.", step: "deploy the release", owner: "Jan", title: "Deploy release", bodyMd: "Jan should deploy the release by tomorrow.", reply: "Will be deployed.\nShould be fixed." },
     { label: "named-owner please cue", text: "Jan, please send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan, please send the report by tomorrow." },
     { label: "ownership role cue", text: "Finance team needs to approve the budget by tomorrow.", step: "approve the budget", owner: "Finance team", title: "Approve budget", bodyMd: "Finance team needs to approve the budget by tomorrow." },
     { label: "requested ack deliverable", text: "Please have Jan ack the alert by tomorrow.", step: "ack the alert", owner: "Jan", title: "Acknowledge alert", bodyMd: "Please have Jan ack the alert by tomorrow." },
@@ -948,8 +947,8 @@ describe("Slack context jobs", () => {
     }));
 
     for (const pronoun of ["this", "that", "it"]) {
-      const naturalSource = candidate({ id: `msg-natural-${pronoun}`, text: `Corgtex, turn ${pronoun} into an action item: update the guide?`, messageTs: new Date("2026-04-28T15:30:00.000Z") });
-      setupPendingNudge(naturalSource);
+      const naturalSource = candidate({ id: `msg-natural-${pronoun}`, text: "Can anyone help?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+      setupPendingNudge(naturalSource, [naturalSource, candidate({ id: `reply-explicit-${pronoun}`, text: `Corgtex, turn ${pronoun} into an action item: update the guide?` })]);
       extractMock.mockResolvedValueOnce({ output: {
         resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "",
         explicitActionRequest: true, confidence: 0.95, negativeCategory: false, couldNot: [], title: "Update guide",
@@ -1002,12 +1001,9 @@ describe("Slack context jobs", () => {
       installationId: "install-1",
       workflowJobId: "job-1",
     })).rejects.toThrow("Transient model gateway timeout");
-
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
     }));
-
-    // Second scan: model succeeds and action is evaluated/created
     setupPendingNudge(source);
     extractMock.mockResolvedValueOnce({
       output: {
