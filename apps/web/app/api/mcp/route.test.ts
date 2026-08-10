@@ -6,6 +6,7 @@ const {
   createCorgtexMcpServerMock,
   defaultMcpScopes,
   handleRouteErrorMock,
+  handleRequestMock,
 } = vi.hoisted(() => ({
   authenticateMcpRequestMock: vi.fn(),
   createCorgtexMcpServerMock: vi.fn(),
@@ -27,6 +28,13 @@ const {
     "conversations:write",
   ],
   handleRouteErrorMock: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
+  handleRequestMock: vi.fn(),
+}));
+
+vi.mock("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js", () => ({
+  WebStandardStreamableHTTPServerTransport: class {
+    handleRequest = handleRequestMock;
+  },
 }));
 
 class MockAppError extends Error {
@@ -52,6 +60,7 @@ vi.mock("@corgtex/domain", () => ({
   MCP_TOOL_CAPABILITIES: {
     create_action: { scopes: ["actions:write"] },
     upsert_tool_link: { scopes: ["tools:write"] },
+    daily_overview: { scopes: ["workspace:read", "actions:read", "proposals:read", "tensions:read", "meetings:read"] },
   },
   AppError: MockAppError,
   getMcpPublicUrl: (origin: string) => `${origin}/mcp`,
@@ -189,5 +198,46 @@ describe("MCP route OAuth discovery", () => {
       },
     });
     expect(createCorgtexMcpServerMock).not.toHaveBeenCalled();
+  });
+
+  it("passes route preflight for daily_overview with current default scopes missing finance", async () => {
+    authenticateMcpRequestMock.mockResolvedValueOnce({
+      actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } },
+      authKind: "oauth",
+      workspaceId: "ws-1",
+      scopes: defaultMcpScopes,
+    });
+
+    const connectMock = vi.fn().mockResolvedValue(undefined);
+    const closeMock = vi.fn().mockResolvedValue(undefined);
+    createCorgtexMcpServerMock.mockReturnValueOnce({
+      connect: connectMock,
+      close: closeMock,
+    });
+
+    handleRequestMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { POST } = await import("./route");
+    const response = await POST(new NextRequest("https://internal.test/api/mcp", {
+      method: "POST",
+      headers: { host: "mcp.corgtex.com" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "daily_overview", arguments: {} },
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(createCorgtexMcpServerMock).toHaveBeenCalled();
+    expect(connectMock).toHaveBeenCalledWith(expect.anything());
+    expect(handleRequestMock).toHaveBeenCalled();
+    expect(closeMock).toHaveBeenCalled();
   });
 });
