@@ -63,9 +63,30 @@ function countsTowardParentProgress(goal: Pick<Goal, "status" | "isPrivate" | "a
   return !goal.archivedAt && !(goal.isPrivate && goal.status === "DRAFT");
 }
 
-async function recomputeGoalParents(parentGoalIds: Iterable<string | null | undefined>, actor?: AppActor) {
-  const uniqueParentIds = [...new Set([...parentGoalIds].filter((id): id is string => Boolean(id)))];
-  await Promise.all(uniqueParentIds.map((goalId) => recomputeGoalProgress(goalId, actor)));
+function sortedGoalIds(goalIds: Iterable<string | null | undefined>) {
+  return [...new Set([...goalIds].filter((id): id is string => Boolean(id)))].sort();
+}
+
+async function acquireGoalAdvisoryLocks(
+  tx: Prisma.TransactionClient,
+  goalIds: Iterable<string | null | undefined>,
+) {
+  const sortedIds = sortedGoalIds(goalIds);
+  for (const goalId of sortedIds) {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
+  }
+  return sortedIds;
+}
+
+async function recomputeGoalParentsInTransaction(
+  tx: Prisma.TransactionClient,
+  parentGoalIds: Iterable<string | null | undefined>,
+  actor?: AppActor,
+) {
+  const sortedIds = await acquireGoalAdvisoryLocks(tx, parentGoalIds);
+  for (const goalId of sortedIds) {
+    await recomputeGoalProgress(goalId, actor, tx);
+  }
 }
 
 function isPrismaNotFoundError(error: unknown) {
@@ -381,10 +402,10 @@ async function appendMissingDuplicateGoalKeyResults(
   const keyResults = normalizeKeyResults(params.keyResults);
   if (keyResults.length === 0) return false;
 
-  let parentGoalIdToRecompute: string | null = null;
-  const didAppend = await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, goalId);
+    await acquireGoalAdvisoryLocks(tx, [goal.parentGoalId]);
     await lockGoalForKeyResultMutation(tx, actor, membership, goal);
 
     const existingKeyResults = await tx.keyResult.findMany({
@@ -441,6 +462,8 @@ async function appendMissingDuplicateGoalKeyResults(
       data: { progressPercent, version: newVersion },
     });
 
+    await recomputeGoalParentsInTransaction(tx, [goal.parentGoalId], actor);
+
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "goal.updated",
@@ -466,18 +489,8 @@ async function appendMissingDuplicateGoalKeyResults(
       },
     ]);
 
-    if (goal.parentGoalId) {
-      parentGoalIdToRecompute = goal.parentGoalId;
-    }
-
     return true;
   });
-
-  if (didAppend && parentGoalIdToRecompute) {
-    await recomputeGoalParents([parentGoalIdToRecompute], actor);
-  }
-
-  return didAppend;
 }
 
 export async function createGoal(
@@ -647,10 +660,19 @@ export async function updateGoal(
     resolvedMembership: params._membership,
   });
 
-  const parentGoalIdsToRecompute = new Set<string>();
-  const updatedGoal = await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
     const goal = await assertGoalInWorkspace(tx, params.workspaceId, params.goalId);
+    const parentGoalIdsToRecompute = new Set<string>();
+    if (
+      params.parentGoalId !== undefined
+      || params.progressPercent !== undefined
+      || params.status !== undefined
+    ) {
+      if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
+      if (params.parentGoalId) parentGoalIdsToRecompute.add(params.parentGoalId);
+    }
+    await acquireGoalAdvisoryLocks(tx, parentGoalIdsToRecompute);
     await validateGoalReferences(tx, actor, membership, {
       workspaceId: params.workspaceId,
       currentGoalId: params.goalId,
@@ -784,6 +806,8 @@ export async function updateGoal(
       if (updated.parentGoalId) parentGoalIdsToRecompute.add(updated.parentGoalId);
     }
 
+    await recomputeGoalParentsInTransaction(tx, parentGoalIdsToRecompute, actor);
+
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
       action: "goal.updated",
@@ -807,8 +831,6 @@ export async function updateGoal(
 
     return updated;
   });
-  await recomputeGoalParents(parentGoalIdsToRecompute);
-  return updatedGoal;
 }
 
 export async function returnGoalToDraft(actor: AppActor, params: {
@@ -1366,14 +1388,18 @@ export async function postGoalUpdate(
     resolvedMembership: params._membership,
   });
 
-  const parentGoalIdsToRecompute = new Set<string>();
-  const update = await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", params.goalId);
 
     const goal = await tx.goal.findUnique({
       where: { id: params.goalId },
     });
     invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
+    const parentGoalIdsToRecompute = new Set<string>();
+    if (params.newProgress != null || params.statusChange != null) {
+      if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
+    }
+    await acquireGoalAdvisoryLocks(tx, parentGoalIdsToRecompute);
 
     if (goal.status === "DRAFT") {
       requirePrivateDraftEditor(actor, membership, goal);
@@ -1494,6 +1520,8 @@ export async function postGoalUpdate(
         if (goal.parentGoalId) parentGoalIdsToRecompute.add(goal.parentGoalId);
       }
 
+      await recomputeGoalParentsInTransaction(tx, parentGoalIdsToRecompute, actor);
+
       await appendEvents(tx, [
         {
           workspaceId: params.workspaceId,
@@ -1510,8 +1538,6 @@ export async function postGoalUpdate(
 
     return update;
   });
-  await recomputeGoalParents(parentGoalIdsToRecompute, actor);
-  return update;
 }
 
 export async function createGoalLink(
@@ -1631,6 +1657,7 @@ export async function recomputeGoalProgress(
   txClient?: Prisma.TransactionClient,
 ) {
   const execute = async (tx: Prisma.TransactionClient) => {
+    await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
     const goal = await tx.goal.findUnique({
       where: { id: goalId },
       include: {

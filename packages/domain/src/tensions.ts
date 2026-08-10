@@ -19,6 +19,7 @@ import {
   type DuplicateGuardOptions,
 } from "./duplicate-guard";
 import {
+  acquireWorkItemAdvisoryLock,
   changedDataFields,
   pickJsonSnapshot,
   recordWorkItemVersion,
@@ -382,6 +383,7 @@ export async function updateTension(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Tension", params.tensionId);
     const tension = await tx.tension.findUnique({
       where: { id: params.tensionId },
     });

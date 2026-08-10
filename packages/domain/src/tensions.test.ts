@@ -796,6 +796,36 @@ describe("tensions domain", () => {
     expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
   });
 
+  it("locks before the authoritative Tension no-op read and rejects a concurrently advanced version without side effects", async () => {
+    prismaMock.tension.findUnique.mockResolvedValueOnce({
+      id: "t-noop-stale",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Already current",
+      status: "OPEN",
+      version: 2,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+
+    const { updateTension } = await import("./tensions");
+    await expect(updateTension(actor, {
+      workspaceId: "ws-1",
+      tensionId: "t-noop-stale",
+      title: "Already current",
+      expectedVersion: 1,
+    })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Tension:t-noop-stale");
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.tension.findUnique.mock.invocationCallOrder[0]);
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
+  });
+
   it("lists tensions with raised-by metadata", async () => {
     const { listTensions } = await import("./tensions");
 

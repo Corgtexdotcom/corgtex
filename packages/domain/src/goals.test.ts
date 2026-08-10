@@ -1979,6 +1979,132 @@ describe("Goals Domain", () => {
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
+    it("keeps updateGoal child and parent recomputation atomic with parent lock-before-read ordering", async () => {
+      const { appendEvents } = await import("./events");
+      const { recordAudit } = await import("./audit-trail");
+      const child = makeGoalFixture("child-update-atomic", {
+        parentGoalId: "parent-update-atomic",
+        progressPercent: 10,
+        version: 2,
+      });
+      const parent = makeGoalFixture("parent-update-atomic", {
+        progressPercent: 10,
+        version: 4,
+        childGoals: [{ id: child.id, progressPercent: 80 }],
+      });
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(child as any)
+        .mockResolvedValueOnce(parent as any);
+      vi.mocked(prisma.goal.update)
+        .mockResolvedValueOnce({ ...child, progressPercent: 80, version: 3 } as any)
+        .mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.$transaction).mockClear();
+      vi.mocked(appendEvents).mockClear();
+      vi.mocked(recordAudit).mockClear();
+
+      await expect(updateGoal(actor, {
+        workspaceId: "ws-1",
+        goalId: child.id,
+        progressPercent: 80,
+        expectedVersion: 2,
+      })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityId: child.id, version: 2, changedFields: ["progressPercent"] }),
+      }));
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityId: parent.id, version: 4, changedFields: ["progressPercent"] }),
+      }));
+      const parentLockIndex = vi.mocked(prisma.$executeRaw).mock.calls
+        .findIndex((call) => call[1] === `Goal:${parent.id}`);
+      expect(parentLockIndex).toBeGreaterThan(-1);
+      expect(vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[parentLockIndex])
+        .toBeLessThan(vi.mocked(prisma.goal.findUnique).mock.invocationCallOrder[1]);
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("keeps postGoalUpdate and duplicate key-result merge parent failures inside their initiating transaction", async () => {
+      const { appendEvents } = await import("./events");
+      const { recordAudit } = await import("./audit-trail");
+      const child = makeGoalFixture("child-post-atomic", {
+        parentGoalId: "parent-post-atomic",
+        progressPercent: 10,
+        version: 2,
+      });
+      const parent = makeGoalFixture("parent-post-atomic", {
+        progressPercent: 10,
+        version: 4,
+        childGoals: [{ id: child.id, progressPercent: 80 }],
+      });
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(child as any)
+        .mockResolvedValueOnce(parent as any);
+      vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({ id: "goal-update-atomic" } as any);
+      vi.mocked(prisma.goal.update)
+        .mockResolvedValueOnce(child as any)
+        .mockResolvedValueOnce({ ...child, progressPercent: 80, version: 3 } as any)
+        .mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(prisma.$transaction).mockClear();
+      vi.mocked(appendEvents).mockClear();
+
+      await expect(postGoalUpdate(actor, {
+        workspaceId: "ws-1",
+        goalId: child.id,
+        bodyMd: "Advance progress",
+        newProgress: 80,
+        expectedVersion: 2,
+      })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.goalUpdate.create).toHaveBeenCalledTimes(1);
+      expect(appendEvents).not.toHaveBeenCalled();
+
+      vi.clearAllMocks();
+      const duplicate = makeGoalFixture("child-duplicate-atomic", {
+        title: "Duplicate atomic goal",
+        status: "DRAFT",
+        isPrivate: true,
+        parentGoalId: "parent-duplicate-atomic",
+        version: 3,
+      });
+      const duplicateParent = makeGoalFixture("parent-duplicate-atomic", {
+        progressPercent: 0,
+        version: 5,
+        childGoals: [{ id: duplicate.id, progressPercent: 50 }],
+      });
+      vi.mocked(prisma.$transaction).mockImplementation((fn: any) => fn(prisma));
+      vi.mocked(prisma.$executeRaw).mockResolvedValue({} as any);
+      vi.mocked(prisma.workItemVersion.findUnique).mockResolvedValue(null);
+      vi.mocked(prisma.workItemVersion.create).mockResolvedValue({} as any);
+      vi.mocked(prisma.goal.findMany).mockResolvedValueOnce([duplicate as any]);
+      vi.mocked(prisma.goal.findFirst).mockResolvedValue(duplicate as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce(duplicate as any)
+        .mockResolvedValueOnce(duplicateParent as any);
+      vi.mocked(prisma.keyResult.findMany).mockResolvedValueOnce([] as any);
+      vi.mocked(prisma.keyResult.createMany).mockResolvedValueOnce({ count: 1 } as any);
+      vi.mocked(prisma.goal.update)
+        .mockResolvedValueOnce(duplicate as any)
+        .mockResolvedValueOnce({ ...duplicate, progressPercent: 50, version: 4 } as any)
+        .mockRejectedValueOnce({ code: "P2025" });
+      vi.mocked(appendEvents).mockResolvedValue(undefined);
+      vi.mocked(recordAudit).mockResolvedValue({} as any);
+
+      await expect(createGoal(actor, {
+        workspaceId: "ws-1",
+        title: "Duplicate atomic goal",
+        keyResults: [{ title: "New KR", currentValue: 50, targetValue: 100 }],
+        duplicateGuard: { resolution: "update_existing", targetEntityId: duplicate.id },
+      })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.keyResult.createMany).toHaveBeenCalledTimes(1);
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
     it("verifies advisory $executeRaw occurs before the first goal.update row lock or update for representative Goal writer paths", async () => {
       const { updateGoal, postGoalUpdate, addKeyResult, deleteGoal, createGoal } = await import("./goals");
       const goal = makeGoalFixture("goal-order-test", { version: 1 });

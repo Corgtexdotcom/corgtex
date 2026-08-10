@@ -946,6 +946,36 @@ describe("action domain lifecycle", () => {
     expect(appendEvents).not.toHaveBeenCalled();
   });
 
+  it("locks before the authoritative Action no-op read and rejects a concurrently advanced version without side effects", async () => {
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "action-noop-stale",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Already current",
+      status: "OPEN",
+      version: 2,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+
+    const { updateAction } = await import("./actions");
+    await expect(updateAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-noop-stale",
+      title: "Already current",
+      expectedVersion: 1,
+    })).rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Action:action-noop-stale");
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.action.findUnique.mock.invocationCallOrder[0]);
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
+  });
+
   it("rejects 0, negative, or fractional expectedVersion as invalid input even on no-op", async () => {
     prismaMock.action.findUnique.mockResolvedValue({
       id: "action-1",

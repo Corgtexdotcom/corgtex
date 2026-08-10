@@ -2286,6 +2286,59 @@ describe("submitProposal event payload", () => {
       expect(defaultModelGateway.extract).not.toHaveBeenCalled();
     });
 
+    it("serializes the real generic Proposal archive writer with an AI-summary update and rejects before model usage", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const { archiveWorkspaceArtifact } = await import("./archive");
+      const { updateProposal } = await import("./proposals");
+      const actor = { kind: "user", user: { id: "u-1" } } as any;
+      const proposalId = "p-generic-archive-ai";
+      const priorVersion = 4;
+      let current = makeProposal(proposalId, {
+        authorUserId: "u-1",
+        status: "OPEN",
+        isPrivate: false,
+        version: priorVersion,
+      }) as any;
+
+      vi.mocked(prisma.$executeRaw).mockClear();
+      vi.mocked((prisma.proposal as any).findFirst).mockImplementation(async () => current);
+      vi.mocked((prisma.proposal as any).findUnique).mockImplementation(async () => current);
+      vi.mocked((prisma.proposal as any).update).mockImplementation(async ({ data }: any) => {
+        current = { ...current, ...data };
+        return current;
+      });
+      vi.mocked((prisma as any).workspacePermalink.upsert).mockResolvedValue({});
+      vi.mocked((prisma as any).workspaceArchiveRecord.create).mockResolvedValue({});
+      vi.mocked((prisma as any).auditLog.create).mockResolvedValue({});
+      vi.mocked(defaultModelGateway.extract).mockClear();
+
+      await archiveWorkspaceArtifact(actor, {
+        workspaceId: "ws-1",
+        entityType: "Proposal",
+        entityId: proposalId,
+        reason: "Superseded",
+      });
+
+      await expect(updateProposal(actor, {
+        workspaceId: "ws-1",
+        proposalId,
+        title: "Long long title long long title",
+        bodyMd: words(200),
+        includeAiSummary: true,
+        expectedVersion: priorVersion,
+      })).rejects.toMatchObject({ status: 400, code: "INVALID_STATE" });
+
+      const proposalLocks = vi.mocked(prisma.$executeRaw).mock.calls
+        .map((call, index) => ({ key: call[1], order: vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[index] }))
+        .filter((call) => call.key === `Proposal:${proposalId}`);
+      expect(proposalLocks).toHaveLength(2);
+      expect(proposalLocks[0].order).toBeLessThan(vi.mocked((prisma.proposal as any).findFirst).mock.invocationCallOrder[0]);
+      expect(proposalLocks[1].order).toBeLessThan(vi.mocked((prisma.proposal as any).findUnique).mock.invocationCallOrder[0]);
+      expect(current.archivedAt).toBeInstanceOf(Date);
+      expect(defaultModelGateway.extract).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+    });
+
     it("verifies every inventoried Proposal lifecycle and archive writer acquires the proposal advisory lock", async () => {
       const {
         updateProposal, archiveProposal, submitProposal, returnProposalToDraft,
