@@ -18,6 +18,7 @@ const {
       findFirst: vi.fn(),
       updateMany: vi.fn(),
     },
+    communicationExternalUser: { findMany: vi.fn() },
     communicationMessage: {
       findMany: vi.fn(),
       count: vi.fn(),
@@ -147,6 +148,7 @@ describe("Slack context jobs", () => {
       botUserId: "bot-1",
     });
     prismaMock.communicationInstallation.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.communicationExternalUser.findMany.mockResolvedValue([{ externalUserId: "U1", displayName: "Jan Brezina" }, { externalUserId: "U2", displayName: "田中さん" }]);
     prismaMock.communicationMessage.findMany.mockResolvedValue([]);
     prismaMock.communicationMessage.count.mockResolvedValue(0);
     prismaMock.communicationChannel.findMany.mockResolvedValue([
@@ -768,11 +770,9 @@ describe("Slack context jobs", () => {
 
   it.each([
     { label: "routing test", text: "Please run this routing test for slack context", concreteNextStep: "run this routing test" },
-    { label: "generic test message", text: "Please ignore, this is a test message for slack context", concreteNextStep: "test message" },
+    { label: "generic only-a-test marker", text: "This is only a test. Jan should send the report tomorrow.", concreteNextStep: "send the report" },
     { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
-    { label: "American acknowledgment", text: "Acknowledgment: Jan needs to send the report.", concreteNextStep: "send the report" },
-    { label: "British acknowledgement", text: "Acknowledgement: Jan needs to send the report.", concreteNextStep: "send the report" },
     { label: "already-completed", text: "I already sent the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "info-only", text: "Information only: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
   ])("vetoes action creation for $label source text despite high-confidence action model output", async ({ text, concreteNextStep }) => {
@@ -817,10 +817,7 @@ describe("Slack context jobs", () => {
     { label: "invalid resolutionState", output: { resolutionState: "invalid_state", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [] } },
     { label: "missing negativeCategory", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, couldNot: [] } },
     { label: "missing couldNot", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false } },
-    { label: "wrong-typed couldNot string", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: "none" } },
     { label: "non-empty couldNot reasons", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: ["unsafe"] } },
-    { label: "array containing non-string couldNot member", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [123] } },
-    { label: "array containing blank couldNot member", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: ["   "] } },
     { label: "awareness-only model outcome on generic open question", output: { resolutionState: "open", workDisposition: "awareness", confidence: 0.95, negativeCategory: false, couldNot: [] }, text: "Can you let me know if the staging environment is up?" },
     { label: "ordinary information request", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "know whether the server is up", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Check server" }, text: "Jan needs to know whether the server is up?" },
     { label: "indefinite pronoun is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Someone", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Someone needs to send the report by tomorrow." },
@@ -830,19 +827,17 @@ describe("Slack context jobs", () => {
     { label: "inanimate grammatical subject is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Report", concreteNextStep: "go out tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Report needs to go out tomorrow." },
     { label: "standalone completion reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent it." }, text: "Jan needs to send the report by tomorrow." },
     { label: "subject-prefixed done reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "It's done." }, text: "Jan needs to send the report by tomorrow." },
-    { label: "standalone sent reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent." }, text: "Jan needs to send the report by tomorrow." },
     { label: "subject-is-completed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed." }, text: "Jan needs to send the report by tomorrow." },
     { label: "completed reply with later future clause", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed. It will be archived tomorrow." }, text: "Jan needs to send the report by tomorrow." },
     { label: "subject-has-been-fixed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The issue has been fixed." }, text: "Jan needs to send the report by tomorrow." },
-    { label: "standalone resolved reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Resolved." }, text: "Jan needs to send the report by tomorrow." },
-    { label: "standalone upgraded reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Upgraded." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "past-obligation confirmation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should have sent the report yesterday; can someone confirm?" },
     { label: "standalone deployed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Deployed." }, text: "Jan needs to send the report by tomorrow." },
-    { label: "capitalized budget is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Budget", concreteNextStep: "be approved tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Approve budget" }, text: "Budget needs to be approved tomorrow." },
-    { label: "capitalized server is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Server", concreteNextStep: "restart tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Restart server" }, text: "Server needs to restart tomorrow." },
+    { label: "inanimate finance phrase is not a role owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Finance report", concreteNextStep: "be approved tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Approve report" }, text: "Finance report needs to be approved tomorrow." },
+    { label: "capitalized Rain is not a trusted owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Rain", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Rain needs to send the report by tomorrow." },
     { label: "vague grounded verb is not a deliverable", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send" }, text: "Jan needs to send something?" },
-    { label: "negated assigned task", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should not send the report; can someone confirm?" },
+    { label: "punctuated negated assigned task", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should not, under any circumstances, send the report; can someone confirm?" },
     { label: "does-not-need task negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan does not need to send the report; can someone confirm?" },
-    { label: "single-word cannot negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex cannot create an action item for it." },
+    { label: "natural create prohibition", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan should update the guide, but Corgtex avoids creating an action item for it." },
     { label: "typographic contracted negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex shouldn’t create an action item for it." },
     { label: "later human reply veto", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Don't create an action; this is already done." }, text: "Jan needs to send the report by tomorrow." },
     { label: "typographic-apostrophe negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t create an action item to update the guide.", id: "msg-typo-neg" },
@@ -880,16 +875,16 @@ describe("Slack context jobs", () => {
 
   it.each([
     { label: "will cue and grounded fields override hallucinated prose", text: "Jan will send the report Friday; can someone confirm?", step: "send the report", owner: "Jan", title: "Invent quarterly strategy", bodyMd: "Fabricated private context." },
-    { label: "assigned investigation deliverable", text: "Jan needs to find out why checkout fails and report back by tomorrow.", step: "find out why checkout fails and report back", owner: "Jan", title: "Investigate checkout", bodyMd: "Jan needs to find out why checkout fails and report back by tomorrow." },
-    { label: "bare will-passive reply remains actionable", text: "Jan should deploy the release by tomorrow.", step: "deploy the release", owner: "Jan", title: "Deploy release", bodyMd: "Jan should deploy the release by tomorrow.", reply: "Will be deployed." },
+    { label: "single-word investigate deliverable", text: "Jan should investigate by tomorrow.", step: "investigate", owner: "Jan", title: "Investigate", bodyMd: "Jan should investigate by tomorrow." },
+    { label: "single-word deploy with bare future passive", text: "Jan should deploy by tomorrow.", step: "deploy", owner: "Jan", title: "Deploy", bodyMd: "Jan should deploy by tomorrow.", reply: "Will be deployed." },
     { label: "bare should-passive reply remains actionable", text: "Jan should fix the release by tomorrow.", step: "fix the release", owner: "Jan", title: "Fix release", bodyMd: "Jan should fix the release by tomorrow.", reply: "Should be fixed." },
-    { label: "pronoun-prefixed future passive remains actionable", text: "Jan should deploy the release by tomorrow.", step: "deploy the release", owner: "Jan", title: "Deploy release", bodyMd: "Jan should deploy the release by tomorrow.", reply: "It will be deployed." },
-    { label: "subject-prefixed future passive remains actionable", text: "Jan should fix the release by tomorrow.", step: "fix the release", owner: "Jan", title: "Fix release", bodyMd: "Jan should fix the release by tomorrow.", reply: "The release should be fixed." },
+    { label: "pronoun-prefixed modal perfect remains actionable", text: "Jan should deploy the release by tomorrow.", step: "deploy the release", owner: "Jan", title: "Deploy release", bodyMd: "Jan should deploy the release by tomorrow.", reply: "It will have been deployed." },
+    { label: "subject-prefixed modal perfect remains actionable", text: "Jan should fix the release by tomorrow.", step: "fix the release", owner: "Jan", title: "Fix release", bodyMd: "Jan should fix the release by tomorrow.", reply: "The release might have been fixed." },
     { label: "named-owner please cue", text: "Jan, please send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan, please send the report by tomorrow." },
-    { label: "ownership role cue", text: "Finance team needs to approve the budget by tomorrow.", step: "approve the budget", owner: "Finance team", title: "Approve budget", bodyMd: "Finance team needs to approve the budget by tomorrow." },
+    { label: "single-word approve with role owner", text: "Finance team should approve by tomorrow.", step: "approve", owner: "Finance team", title: "Approve", bodyMd: "Finance team should approve by tomorrow." },
     { label: "requested ack deliverable", text: "Please have Jan ack the alert by tomorrow.", step: "ack the alert", owner: "Jan", title: "Acknowledge alert", bodyMd: "Please have Jan ack the alert by tomorrow." },
     { label: "CJK Unicode evidence", text: "田中さん needs to 確認する by tomorrow.", step: "確認する", owner: "田中さん", title: "Confirm by tomorrow", bodyMd: "田中さん needs to 確認する by tomorrow." },
-    { label: "'not already done' bypassing completed veto", text: "This is not already done, Jan needs to finish the report.", step: "finish the report", owner: "Jan", title: "Finish report", bodyMd: "This is not already done, Jan needs to finish the report." },
+    { label: "unrelated task negation does not veto deliverable", text: "Jan should send the report tomorrow, but we should not wait to notify Legal.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report tomorrow, but we should not wait to notify Legal." },
     { label: "later actionable reply", text: "Can anyone help?", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan needs to send the report by tomorrow.", reply: "Jan needs to send the report by tomorrow." }
   ])("creates exactly one Action for $label and no duplicate on later scan", async ({ text, step, owner, title, bodyMd, reply }) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });

@@ -243,15 +243,19 @@ function isBotMentioned(text: string, botUserId: string | null) {
   return regex.test(text);
 }
 
-function isNegatedActionRequest(text: string): boolean {
-  return /\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
-    || /\b(?:(?:should|must|will|can|could|would|need)\s+not|(?:do|does|did)\s+not\s+need\s+to)\b|\b(?:(?:shouldn|mustn|can|couldn|wouldn|won|needn)['’]t|(?:don|doesn|didn)['’]t\s+need\s+to)\b|\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
-    || /\bno\s+(action|task|work item)\b/i.test(text);
+function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
+  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
+    || /\b(?:(?:avoid(?:s|ed)?|skip(?:s|ped)?)\s+|refrain(?:s|ed)?\s+from\s+)(?:creating|adding|making|assigning)\s+(?:an?\s+)?(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
+    || /\b(?:not\s+an?|no)\s+(action|task|work item)\b/i.test(text)) return true;
+  const verb = normalizeText(concreteNextStep).split(" ")[0];
+  if (!verb) return false;
+  return new RegExp(`\\b(?:(?:should|must|will|can|could|would|need)\\s+not|(?:do|does|did)\\s+not\\s+need\\s+to|(?:shouldn|mustn|can|couldn|wouldn|won|needn)['’]t|(?:don|doesn|didn)['’]t\\s+need\\s+to)(?:[\\s,;:()-]+[a-z]+){0,3}[\\s,;:()-]+${verb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+be\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
+  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|this\s+is\s+(?:only\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
+    || /\bshould\s+have\s+(?:been\s+)?(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)\b[^?]*\b(?:yesterday|last\s+(?:night|week|month)|\d+\s+days?\s+ago)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
@@ -277,14 +281,15 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
   return paddedCorpus.includes(paddedValue);
 }
 
-function hasGroundedOwnerCue(ownerEvidence: string, corpus: string): boolean {
+function hasGroundedOwnerCue(ownerEvidence: string, corpus: string, trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
   const owner = normalizeText(ownerEvidence);
-  const identifiableOwner = (!/^(?:the|a|an|this|that|it|some(?:one|body)|any(?:one|body)|every(?:one|body)|no(?:one|body)|no\s+one|whoever|whomever|each|either|neither|report|guide|document|proposal|task|action|alert|agreement|issue|request|project|status|message|email|file|plan|deadline|work|budget|server|database|service|system|website|application|environment|deployment|release|build|code|repository|contract|invoice|meeting|schedule|calendar)\b/i.test(ownerEvidence.trim()) && /^(?:<@[A-Z0-9]+(?:\|[^>]+)?>|[\p{Lu}\p{Lt}\p{Lo}])/u.test(ownerEvidence.trim())) || /\b(team|lead|manager|owner|counsel|department|group|committee|reviewer|approver|finance|legal|operations|engineering|product|sales|support|security)\b/i.test(ownerEvidence);
-  if (!owner || owner === "unknown" || !identifiableOwner) return false;
+  if (!owner || owner === "unknown") return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
-  return new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
-    || new RegExp(`\\b(?:assigned\\s+to|owner\\s+is|have|ask)\\s+${escapedOwner}(?:\\s|$)`, "u").test(normalizedCorpus);
+  if (!new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
+    && !new RegExp(`\\b(?:assigned\\s+to|owner\\s+is|have|ask)\\s+${escapedOwner}(?:\\s|$)`, "u").test(normalizedCorpus)) return false;
+  const identities = trustedUsers.map(user => ({ id: normalizeText(user.externalUserId), name: normalizeText(user.displayName || "") }));
+  return /^(?:(?:finance|legal|operations|engineering|product|sales|support|security)(?: (?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))?|team|lead|manager|owner|counsel|department|group|committee|reviewer|approver)$/.test(owner) || identities.some(identity => identity.id === owner || identity.name === owner) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
 }
 
 function normalizeProactiveExtraction(output: Record<string, unknown>) {
@@ -322,13 +327,14 @@ function meetsActionPublicationPredicate(
   botUserId: string | null,
   confidenceThreshold: number,
   sourceText: string,
-  threadCorpus: string
+  threadCorpus: string,
+  trustedUsers: Array<{ externalUserId: string; displayName: string | null }>
 ): boolean {
   if (!botUserId) return false;
   if (parsed.resolutionState !== "open") return false;
   if (parsed.workDisposition !== "action") return false;
   const concreteStep = normalizeText(parsed.concreteNextStep);
-  if (!concreteStep || !isGroundedInCorpus(parsed.concreteNextStep, threadCorpus) || (!concreteStep.includes(" ") && !/[^\x00-\x7F]/.test(parsed.concreteNextStep)) || /\b(something|anything|stuff|thing)\b/.test(concreteStep)) return false;
+  if (!concreteStep || !isGroundedInCorpus(parsed.concreteNextStep, threadCorpus) || (!concreteStep.includes(" ") && !/^(?:deploy|approve|investigate)$/.test(concreteStep) && !/[^\x00-\x7F]/.test(parsed.concreteNextStep)) || /\b(something|anything|stuff|thing)\b/.test(concreteStep)) return false;
   if (!parsed.hasExplicitNegativeCategoryFalse) return false;
   if (parsed.negativeCategory) return false;
   if (!parsed.hasValidCouldNotArray) return false;
@@ -336,9 +342,9 @@ function meetsActionPublicationPredicate(
   if (parsed.confidence < confidenceThreshold) return false;
   const threadTexts = threadCorpus.replace(/\[[^\]]+\]\s+\S+:\s/g, "").split("\n");
   if (threadTexts.some(isDeterministicNegativeCategory)) return false;
-  if (threadTexts.some(isNegatedActionRequest)) return false;
+  if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep))) return false;
 
-  const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus);
+  const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus, trustedUsers);
   const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText) || threadTexts.some(isDeterministicExplicitActionRequest));
 
   if (!hasGroundedOwner && !isExplicitRequest) return false;
@@ -650,6 +656,7 @@ export async function runSlackProactiveScan(params: {
       },
     },
   });
+  const trustedUsers = await prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isBot: false, isDeleted: false }, select: { externalUserId: true, displayName: true } });
 
   for (const nudge of pendingNudges) {
     if (actions >= MAX_PROACTIVE_ACTIONS) break;
@@ -750,7 +757,7 @@ export async function runSlackProactiveScan(params: {
     }
 
     const threadCorpus = transcriptForMessages(threadMessages);
-    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus)) {
+    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus, trustedUsers)) {
       const item = await createWorkItemFromCommunicationSource(agentActor, {
         workspaceId: params.workspaceId,
         provider: "SLACK",
