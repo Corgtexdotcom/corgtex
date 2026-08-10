@@ -484,9 +484,9 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 
-  it("posts waiting replies as updates to the existing linked action", async () => {
+  it("posts waiting replies for linked actions even when the source is not work-like", async () => {
     const source = candidate({
-      text: "Please confirm availability for the June 23 call.",
+      text: "Availability update.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     const waitingReply = candidate({
@@ -539,6 +539,7 @@ describe("Slack context jobs", () => {
         entityId: "action-1",
       }),
     }));
+    expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_unanswered_resolved" }) }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 

@@ -676,7 +676,7 @@ export async function runSlackProactiveScan(params: {
     });
     if (terminalMarker) continue;
 
-    if (!(looksWorkLike(candidate.text) || isDeterministicExplicitActionRequest(candidate.text)) || isBotMentioned(candidate.text, installation.botUserId)) {
+    if (!linkedAction && (!(looksWorkLike(candidate.text) || isDeterministicExplicitActionRequest(candidate.text)) || isBotMentioned(candidate.text, installation.botUserId))) {
       await recordProactiveMarker({
         installationId: params.installationId,
         workspaceId: params.workspaceId,
