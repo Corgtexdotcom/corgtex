@@ -244,20 +244,21 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string): boolean {
-  return /\b(do not|don['’]t|no|not|never)\b(?:\s+[a-z]+){0,5}\s+(create|add|make|assign|turn into)\b/i.test(text)
+  return /\b(do not|don['’]t|no|not|never)\b(?:\s+[a-z]+){0,5}\s+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
     || /\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
     || /\bno\s+(action|task|work item)\b/i.test(text);
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|ack|acknowledg(?:e)?ment|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
+  if (/^(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)/i.test(text.trim())) return true;
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
 function isDeterministicExplicitActionRequest(text: string): boolean {
   if (isNegatedActionRequest(text)) return false;
   if (isDeterministicNegativeCategory(text)) return false;
-  return /\bcorgtex\b(?:[\s.,:;!]+(?:please|kindly|can you|could you|will you|would you|just)?)*\s*(create|add|make|assign|turn into)\b(?:\s+[a-z]+){0,3}\s+(action(?: item)?|task|work item)\b/i.test(text);
+  return /\bcorgtex\b(?:[\s.,:;!]+(?:please|kindly|can you|could you|will you|would you|just)?)*\s*(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b(?:\s+[a-z]+){0,3}\s+(action(?: item)?|task|work item)\b/i.test(text);
 }
 
 function normalizeText(text: string): string {
@@ -274,6 +275,15 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
   const paddedValue = ` ${normValue} `;
   const paddedCorpus = ` ${normalizeText(corpus)} `;
   return paddedCorpus.includes(paddedValue);
+}
+
+function hasGroundedOwnerCue(ownerEvidence: string, corpus: string): boolean {
+  const owner = normalizeText(ownerEvidence);
+  if (!owner || owner === "unknown") return false;
+  const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const normalizedCorpus = normalizeText(corpus);
+  return new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
+    || new RegExp(`\\b(?:assigned\\s+to|owner\\s+is|have|ask)\\s+${escapedOwner}(?:\\s|$)`, "u").test(normalizedCorpus);
 }
 
 function normalizeProactiveExtraction(output: Record<string, unknown>) {
@@ -293,7 +303,7 @@ function normalizeProactiveExtraction(output: Record<string, unknown>) {
     explicitActionRequest: output.explicitActionRequest === true,
     hasExplicitNegativeCategoryFalse: output.negativeCategory === false,
     negativeCategory: output.negativeCategory === true,
-    hasValidCouldNotArray: Array.isArray(output.couldNot) && output.couldNot.every(v => typeof v === "string"),
+    hasValidCouldNotArray: Array.isArray(output.couldNot) && output.couldNot.every(v => typeof v === "string" && v.trim().length > 0),
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
     title: asString(output.title),
     bodyMd: asString(output.bodyMd) || asString(output.body),
@@ -326,7 +336,7 @@ function meetsActionPublicationPredicate(
   if (isDeterministicNegativeCategory(sourceText)) return false;
   if (isNegatedActionRequest(sourceText)) return false;
 
-  const hasGroundedOwner = Boolean(parsed.ownerEvidence) && isGroundedInCorpus(parsed.ownerEvidence, threadCorpus);
+  const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus);
   const isExplicitRequest = parsed.explicitActionRequest === true && isDeterministicExplicitActionRequest(sourceText);
 
   if (!hasGroundedOwner && !isExplicitRequest) return false;

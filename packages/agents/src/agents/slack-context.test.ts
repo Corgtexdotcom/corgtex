@@ -775,6 +775,7 @@ describe("Slack context jobs", () => {
     { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "American acknowledgment", text: "Acknowledgment: Jan needs to send the report.", concreteNextStep: "send the report" },
+    { label: "British acknowledgement", text: "Acknowledgement: Jan needs to send the report.", concreteNextStep: "send the report" },
     { label: "already-completed", text: "I already sent the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "info-only", text: "Information only: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
   ])("vetoes action creation for $label source text despite high-confidence action model output", async ({ text, concreteNextStep }) => {
@@ -807,6 +808,20 @@ describe("Slack context jobs", () => {
     });
   });
 
+  it.each(["Ack", "Acknowledged"])("terminalizes standalone acknowledgement %s without model review", async (text) => {
+    const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    setupPendingNudge(source);
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+
+    expect(extractMock).not.toHaveBeenCalled();
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
+    });
+  });
+
   it.each([
     { label: "invalid resolutionState", output: { resolutionState: "invalid_state", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [] } },
     { label: "missing negativeCategory", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, couldNot: [] } },
@@ -814,8 +829,10 @@ describe("Slack context jobs", () => {
     { label: "wrong-typed couldNot string", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: "none" } },
     { label: "non-empty couldNot reasons", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: ["unsafe"] } },
     { label: "array containing non-string couldNot member", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [123] } },
+    { label: "array containing blank couldNot member", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: ["   "] } },
     { label: "awareness-only model outcome on generic open question", output: { resolutionState: "open", workDisposition: "awareness", confidence: 0.95, negativeCategory: false, couldNot: [] }, text: "Can you let me know if the staging environment is up?" },
     { label: "hallucinated owner substring trap", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "IT", concreteNextStep: "confirm when waiting is finished", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Confirm waiting" }, text: "Please confirm when waiting is finished for the report." },
+    { label: "arbitrary grounded token is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "report", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
     { label: "typographic-apostrophe negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t create an action item to update the guide.", id: "msg-typo-neg" },
     { label: "typographic-apostrophe negation with intervening words", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t ever create an action item to update the guide.", id: "msg-typo-neg-intervening" },
     { label: "synthetic unknown owner", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "unknown", confidence: 0.99, negativeCategory: false, couldNot: [] }, text: "unknown needs to send the report.", id: "msg-unknown-owner" },
@@ -851,6 +868,9 @@ describe("Slack context jobs", () => {
 
   it.each([
     { label: "named-owner concrete deliverable", text: "Jan needs to send the signed agreement by tomorrow.", step: "send the signed agreement", owner: "Jan", title: "Send signed agreement", bodyMd: "Jan needs to send the signed agreement by tomorrow." },
+    { label: "named-owner should cue", text: "Jan should send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report by tomorrow." },
+    { label: "named-owner please cue", text: "Jan, please send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan, please send the report by tomorrow." },
+    { label: "requested ack deliverable", text: "Please have Jan ack the alert by tomorrow.", step: "ack the alert", owner: "Jan", title: "Acknowledge alert", bodyMd: "Please have Jan ack the alert by tomorrow." },
     { label: "CJK Unicode evidence", text: "田中さん needs to 確認する by tomorrow.", step: "確認する", owner: "田中さん", title: "Confirm by tomorrow", bodyMd: "田中さん needs to 確認する by tomorrow." },
     { label: "'not already done' bypassing completed veto", text: "This is not already done, Jan needs to finish the report.", step: "finish the report", owner: "Jan", title: "Finish report", bodyMd: "This is not already done, Jan needs to finish the report." }
   ])("creates exactly one Action for $label and no duplicate on later scan", async ({ text, step, owner, title, bodyMd }) => {
@@ -911,8 +931,21 @@ describe("Slack context jobs", () => {
       title: "Fix the logo",
     }));
 
-    // Negated source text check: model outputs explicitActionRequest true, but source text says "Do NOT create an action item"
-    const negatedSource = candidate({ id: "msg-negated", text: "Do NOT create an action item for this issue.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    for (const pronoun of ["this", "that", "it"]) {
+      const naturalSource = candidate({ id: `msg-natural-${pronoun}`, text: `Corgtex, turn ${pronoun} into an action item: update the guide?`, messageTs: new Date("2026-04-28T15:30:00.000Z") });
+      setupPendingNudge(naturalSource);
+      extractMock.mockResolvedValueOnce({ output: {
+        resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "",
+        explicitActionRequest: true, confidence: 0.95, negativeCategory: false, couldNot: [], title: "Update guide",
+      } });
+      await expect(runSlackProactiveScan({
+        workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1",
+      })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
+      expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: "Update guide" }));
+    }
+
+    // Negated source text check: model output cannot override the deterministic source-text veto.
+    const negatedSource = candidate({ id: "msg-negated", text: "Don't turn that into an action item for this issue.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(negatedSource);
     extractMock.mockResolvedValueOnce({
       output: {
