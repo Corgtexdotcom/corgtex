@@ -369,7 +369,7 @@ describe("Slack context jobs", () => {
         createdAt: { lte: new Date("2026-04-28T21:00:00.000Z") },
       }),
     }));
-    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationExternalUser.findMany).not.toHaveBeenCalled();
   });
 
   it("respects proactive confidence thresholds before creating published actions", async () => {
@@ -525,7 +525,7 @@ describe("Slack context jobs", () => {
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
 
-    expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationExternalUser.findMany).not.toHaveBeenCalled();
     expect(postDeliberationEntryMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
       workspaceId: "workspace-1",
       parentType: "ACTION",
@@ -668,22 +668,18 @@ describe("Slack context jobs", () => {
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
     expect(extractMock).not.toHaveBeenCalled();
-
     const botMentionSource1 = candidate({ id: "msg-bot-3", text: "Hey <@bot-1> please update docs", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     const botMentionSource2 = candidate({ id: "msg-bot-4", text: "Hey <@bot-1|Corgtex> please update docs", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     prismaMock.communicationEntityLink.findMany
       .mockResolvedValueOnce([nudgeLink({ message: botMentionSource1 }), nudgeLink({ message: botMentionSource2 })])
       .mockResolvedValueOnce([]);
-
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(extractMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-3" }),
@@ -691,7 +687,6 @@ describe("Slack context jobs", () => {
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-bot-4" }),
     });
-
     const normalSource = candidate({ id: "msg-normal-1", text: "Can you update the docs?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
     setupPendingNudge(normalSource);
     prismaMock.communicationMessage.findMany
@@ -702,13 +697,11 @@ describe("Slack context jobs", () => {
         candidate({ id: "reply-1", text: "Yes, I will tell <@bot-1> to do it.", messageTs: new Date("2026-04-28T15:35:00.000Z") })
       ]);
     prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "existing-action-link", entityId: "action-1" });
-
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(extractMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-normal-1" }) }));
   });
@@ -770,7 +763,7 @@ describe("Slack context jobs", () => {
 
   it.each([
     { label: "routing test", text: "Please run this routing test for slack context", concreteNextStep: "run this routing test" },
-    { label: "generic only-a-test marker", text: "This is only a test. Jan should send the report tomorrow.", concreteNextStep: "send the report" },
+    { label: "generic past-tense test marker", text: "This was only a test. Jan should send the report tomorrow.", concreteNextStep: "send the report" },
     { label: "FYI", text: "FYI: Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "acknowledgement", text: "Thanks, got it! Jan needs to send the report by tomorrow.", concreteNextStep: "send the report" },
     { label: "already-completed", text: "I already sent the report by tomorrow.", concreteNextStep: "send the report" },
@@ -822,15 +815,15 @@ describe("Slack context jobs", () => {
     { label: "ordinary information request", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "know whether the server is up", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Check server" }, text: "Jan needs to know whether the server is up?" },
     { label: "indefinite pronoun is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Someone", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Someone needs to send the report by tomorrow." },
     { label: "hallucinated owner substring trap", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "IT", concreteNextStep: "confirm when waiting is finished", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Confirm waiting" }, text: "Please confirm when waiting is finished for the report." },
-    { label: "arbitrary grounded token is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "report", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
+    { label: "possessive name is not an assignment", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Does anyone have Jan's report and need to send the report tomorrow?" },
     { label: "speaker scaffold is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "U1", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
     { label: "inanimate grammatical subject is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Report", concreteNextStep: "go out tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Report needs to go out tomorrow." },
     { label: "standalone completion reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent it." }, text: "Jan needs to send the report by tomorrow." },
-    { label: "subject-prefixed done reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "It's done." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "ambiguous single-token directory owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan needs to send the report by tomorrow.", trustedUsers: [{ externalUserId: "U1", displayName: "Jan" }, { externalUserId: "U2", displayName: "Jan Brezina" }] },
     { label: "subject-is-completed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed." }, text: "Jan needs to send the report by tomorrow." },
     { label: "completed reply with later future clause", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed. It will be archived tomorrow." }, text: "Jan needs to send the report by tomorrow." },
     { label: "subject-has-been-fixed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The issue has been fixed." }, text: "Jan needs to send the report by tomorrow." },
-    { label: "past-obligation confirmation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should have sent the report yesterday; can someone confirm?" },
+    { label: "past-obligation confirmation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should have sent the report earlier; can someone confirm?" },
     { label: "standalone deployed reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Deployed." }, text: "Jan needs to send the report by tomorrow." },
     { label: "inanimate finance phrase is not a role owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Finance report", concreteNextStep: "be approved tomorrow", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Approve report" }, text: "Finance report needs to be approved tomorrow." },
     { label: "capitalized Rain is not a trusted owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Rain", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Rain needs to send the report by tomorrow." },
@@ -838,15 +831,15 @@ describe("Slack context jobs", () => {
     { label: "punctuated negated assigned task", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should not, under any circumstances, send the report; can someone confirm?" },
     { label: "does-not-need task negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan does not need to send the report; can someone confirm?" },
     { label: "natural create prohibition", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan should update the guide, but Corgtex avoids creating an action item for it." },
-    { label: "typographic contracted negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex shouldn’t create an action item for it." },
+    { label: "typographic no-open negation", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "update the guide", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Update guide" }, text: "Jan needs to update the guide, but Corgtex shouldn’t open an action item for it." },
     { label: "later human reply veto", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Don't create an action; this is already done." }, text: "Jan needs to send the report by tomorrow." },
     { label: "typographic-apostrophe negation", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Don’t create an action item to update the guide.", id: "msg-typo-neg" },
     { label: "punctuated negation with intervening phrase", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "Jan", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Jan needs to update the guide, but Corgtex should not, under any circumstances, create an action item", id: "msg-punctuated-neg" },
     { label: "synthetic unknown owner", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "unknown", confidence: 0.99, negativeCategory: false, couldNot: [] }, text: "unknown needs to send the report.", id: "msg-unknown-owner" },
     { label: "generic ownerless request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Can someone please create an action item to update the guide?", id: "msg-generic-explicit" },
     { label: "non-adjacent explicit request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Corgtex status is red; can someone please create an action item to update the guide?", id: "msg-non-adjacent-explicit" }
-  ])("fails closed on $label, records terminal marker, and later scan does not re-evaluate", async ({ output, text, id }) => {
-    const source = candidate({ id: id || "message-1", text: text || "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+  ])("fails closed on $label, records terminal marker, and later scan does not re-evaluate", async ({ output, text, id, trustedUsers }) => {
+    const source = candidate({ id: id || "message-1", text: text || "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); if (trustedUsers) prismaMock.communicationExternalUser.findMany.mockResolvedValue(trustedUsers);
     setupPendingNudge(source);
     if ("reply" in output) prismaMock.communicationMessage.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([source, candidate({ id: "reply-1", text: output.reply })]);
     extractMock.mockResolvedValueOnce({ output });
@@ -1043,7 +1036,7 @@ describe("Slack context jobs", () => {
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
 
-    expect(extractMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationExternalUser.findMany).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
   });
 });

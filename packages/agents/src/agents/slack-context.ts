@@ -244,8 +244,8 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
-  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
-    || /\b(?:(?:avoid(?:s|ed)?|skip(?:s|ped)?)\s+|refrain(?:s|ed)?\s+from\s+)(?:creating|adding|making|assigning)\s+(?:an?\s+)?(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
+  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|open|log|turn(?:\s+(?:this|that|it))?\s+into|convert(?:\s+(?:this|that|it))?\s+(?:to|into))\b/i.test(text)
+    || /\b(?:(?:avoid(?:s|ed)?|skip(?:s|ped)?)\s+|refrain(?:s|ed)?\s+from\s+)(?:creating|adding|making|assigning|opening|logging|converting(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:an?\s+)?(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:not\s+an?|no)\s+(action|task|work item)\b/i.test(text)) return true;
   const verb = normalizeText(concreteNextStep).split(" ")[0];
   if (!verb) return false;
@@ -254,8 +254,8 @@ function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
 
 function isDeterministicNegativeCategory(text: string): boolean {
   if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|this\s+is\s+(?:only\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
-    || /\bshould\s+have\s+(?:been\s+)?(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)\b[^?]*\b(?:yesterday|last\s+(?:night|week|month)|\d+\s+days?\s+ago)\b/i.test(text)
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
+    || /\bshould\s+have\s+(?:been\s+)?(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)\b[^?]*(?:\?|\bconfirm\b)/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
@@ -287,9 +287,9 @@ function hasGroundedOwnerCue(ownerEvidence: string, corpus: string, trustedUsers
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
   if (!new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\b`, "u").test(normalizedCorpus)
-    && !new RegExp(`\\b(?:assigned\\s+to|owner\\s+is|have|ask)\\s+${escapedOwner}(?:\\s|$)`, "u").test(normalizedCorpus)) return false;
+    && !new RegExp(`(?:\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}(?:\\s|$)|\\b(?:have|ask)\\s+${escapedOwner}\\s+(?!s\\b)(?:to\\s+)?[\\p{L}\\p{N}_-]+\\b)`, "u").test(normalizedCorpus)) return false;
   const identities = trustedUsers.map(user => ({ id: normalizeText(user.externalUserId), name: normalizeText(user.displayName || "") }));
-  return /^(?:(?:finance|legal|operations|engineering|product|sales|support|security)(?: (?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))?|team|lead|manager|owner|counsel|department|group|committee|reviewer|approver)$/.test(owner) || identities.some(identity => identity.id === owner || identity.name === owner) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
+  return /^(?:(?:finance|legal|operations|engineering|product|sales|support|security)(?: (?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))?|team|lead|manager|owner|counsel|department|group|committee|reviewer|approver)$/.test(owner) || identities.some(identity => identity.id === owner || (owner.includes(" ") && identity.name === owner)) || identities.filter(identity => identity.name.split(" ")[0] === owner).length === 1;
 }
 
 function normalizeProactiveExtraction(output: Record<string, unknown>) {
@@ -625,7 +625,7 @@ export async function runSlackProactiveScan(params: {
   const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   const agentActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-agent" };
-  let actions = 0;
+  let actions = 0, trustedUsers: Array<{ externalUserId: string; displayName: string | null }> | null = null;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
   const pendingNudges = await prisma.communicationEntityLink.findMany({
     where: {
@@ -656,8 +656,6 @@ export async function runSlackProactiveScan(params: {
       },
     },
   });
-  const trustedUsers = await prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isBot: false, isDeleted: false }, select: { externalUserId: true, displayName: true } });
-
   for (const nudge of pendingNudges) {
     if (actions >= MAX_PROACTIVE_ACTIONS) break;
     const candidate = nudge.message as SlackCandidateMessage | null;
@@ -757,7 +755,8 @@ export async function runSlackProactiveScan(params: {
     }
 
     const threadCorpus = transcriptForMessages(threadMessages);
-    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus, trustedUsers)) {
+    if (parsed.ownerEvidence && !/^(?:(?:finance|legal|operations|engineering|product|sales|support|security)(?: (?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))?|team|lead|manager|owner|counsel|department|group|committee|reviewer|approver)$/.test(normalizeText(parsed.ownerEvidence)) && trustedUsers === null) trustedUsers = await prisma.communicationExternalUser.findMany({ where: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", isBot: false, isDeleted: false }, select: { externalUserId: true, displayName: true } });
+    if (meetsActionPublicationPredicate(parsed, installation.botUserId, config.proactiveConfidenceThreshold, candidate.text, threadCorpus, trustedUsers || [])) {
       const item = await createWorkItemFromCommunicationSource(agentActor, {
         workspaceId: params.workspaceId,
         provider: "SLACK",
