@@ -873,11 +873,11 @@ describe("Slack context jobs", () => {
     { label: "bare should-passive reply remains actionable", text: "Jan should fix the release by tomorrow.", step: "fix the release", owner: "Jan", title: "Fix release", bodyMd: "Jan should fix the release by tomorrow.", reply: "Should be fixed." },
     { label: "pronoun-prefixed modal perfect remains actionable", text: "Jan should deploy the release by tomorrow.", step: "deploy the release", owner: "Jan", title: "Deploy release", bodyMd: "Jan should deploy the release by tomorrow.", reply: "It will have been deployed." },
     { label: "subject-prefixed modal perfect remains actionable", text: "Jan should fix the release by tomorrow.", step: "fix the release", owner: "Jan", title: "Fix release", bodyMd: "Jan should fix the release by tomorrow.", reply: "The release might have been fixed." },
-    { label: "named-owner please cue", text: "Jan, please send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan, please send the report by tomorrow." },
+    { label: "different past obligation does not veto future deliverable", text: "Jan should have sent the draft earlier, but Jan will send the final tomorrow; can someone confirm?", step: "send the final", owner: "Jan", title: "Send final", bodyMd: "Jan should have sent the draft earlier, but Jan will send the final tomorrow; can someone confirm?" },
     { label: "single-word approve with role owner", text: "Finance team should approve by tomorrow.", step: "approve", owner: "Finance team", title: "Approve", bodyMd: "Finance team should approve by tomorrow." },
     { label: "requested ack deliverable", text: "Please have Jan ack the alert by tomorrow.", step: "ack the alert", owner: "Jan", title: "Acknowledge alert", bodyMd: "Please have Jan ack the alert by tomorrow." },
     { label: "CJK Unicode evidence", text: "田中さん needs to 確認する by tomorrow.", step: "確認する", owner: "田中さん", title: "Confirm by tomorrow", bodyMd: "田中さん needs to 確認する by tomorrow." },
-    { label: "unrelated task negation does not veto deliverable", text: "Jan should send the report tomorrow, but we should not wait to notify Legal.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report tomorrow, but we should not wait to notify Legal." },
+    { label: "unrelated object and task negations do not veto deliverable", text: "Jan should send the report tomorrow; don't create the PDF yet, and we should not wait to notify Legal.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report tomorrow; don't create the PDF yet, and we should not wait to notify Legal." },
     { label: "later actionable reply", text: "Can anyone help?", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan needs to send the report by tomorrow.", reply: "Jan needs to send the report by tomorrow." }
   ])("creates exactly one Action for $label and no duplicate on later scan", async ({ text, step, owner, title, bodyMd, reply }) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
@@ -889,15 +889,12 @@ describe("Slack context jobs", () => {
         confidence: 0.95, title, bodyMd, negativeCategory: false, couldNot: [],
       },
     });
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-
     expect(createWorkItemMock).toHaveBeenCalledTimes(1);
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: step, bodyMd: reply ? `${text}\n${reply}` : text, sourceMessageId: "message-1" }));
-
     setupPendingNudge(source);
     prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link-1", entityId: "action-1" });
 

@@ -244,7 +244,7 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
-  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|open|log|turn(?:\s+(?:this|that|it))?\s+into|convert(?:\s+(?:this|that|it))?\s+(?:to|into))\b/i.test(text)
+  if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|open|log|turn(?:\s+(?:this|that|it))?\s+into|convert(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:(?:an?|the|new|another|corgtex)\s+)*(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:(?:avoid(?:s|ed)?|skip(?:s|ped)?)\s+|refrain(?:s|ed)?\s+from\s+)(?:creating|adding|making|assigning|opening|logging|converting(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:an?\s+)?(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:not\s+an?|no)\s+(action|task|work item)\b/i.test(text)) return true;
   const verb = normalizeText(concreteNextStep).split(" ")[0];
@@ -252,10 +252,13 @@ function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
   return new RegExp(`\\b(?:(?:should|must|will|can|could|would|need)\\s+not|(?:do|does|did)\\s+not\\s+need\\s+to|(?:shouldn|mustn|can|couldn|wouldn|won|needn)['’]t|(?:don|doesn|didn)['’]t\\s+need\\s+to)(?:[\\s,;:()-]+[a-z]+){0,3}[\\s,;:()-]+${verb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
 }
 
-function isDeterministicNegativeCategory(text: string): boolean {
+function isDeterministicNegativeCategory(text: string, concreteNextStep = ""): boolean {
+  const [verb, ...object] = normalizeText(concreteNextStep).split(" ");
+  const completedVerb = verb === "send" ? "sent" : verb === "do" ? "done" : verb ? `${verb}${verb.endsWith("e") ? "d" : "ed"}` : "";
+  const historicalStep = `${completedVerb} ${object.join(" ")}`.trim();
   if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
   return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
-    || /\bshould\s+have\s+(?:been\s+)?(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)\b[^?]*(?:\?|\bconfirm\b)/i.test(text)
+    || Boolean(historicalStep && new RegExp(`\\bshould have (?:been )?${historicalStep}\\b`, "u").test(normalizeText(text)) && (/\?/.test(text) || /\bconfirm\b/i.test(text)))
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
@@ -341,7 +344,7 @@ function meetsActionPublicationPredicate(
   if (parsed.couldNot.length > 0) return false;
   if (parsed.confidence < confidenceThreshold) return false;
   const threadTexts = threadCorpus.replace(/\[[^\]]+\]\s+\S+:\s/g, "").split("\n");
-  if (threadTexts.some(isDeterministicNegativeCategory)) return false;
+  if (threadTexts.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep))) return false;
   if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep))) return false;
 
   const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, threadCorpus, trustedUsers);
