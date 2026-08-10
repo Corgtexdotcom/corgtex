@@ -2,26 +2,22 @@ import { randomUUID } from "node:crypto";
 import { Prisma, type CustomerDeployment } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError } from "./errors";
-
 const IMAGE_TAG = /^sha-[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const CREDENTIAL_KEY = /(authorization|bearer|cookie|credential|password|passwd|secret|token|api[-_]?key|private[-_]?key)/i;
+const CREDENTIAL_KEY = /(authorization|bearer|cookie|credential|password|passwd|secret|token|api[-_]?key|private[-_]?key|database[-_]?url|connection[-_]?string|instrumentation[-_]?key)/i;
+const CREDENTIAL_VALUE = /(?:postgres(?:ql)?:\/\/[^\s/:]+:[^\s@/]+@|(?:instrumentationkey|connectionstring|accountkey|sharedaccesskey|clientsecret)\s*=)/i;
 const MAX_INT = 2_147_483_647;
 const TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PHASES = ["RESERVED", "MUTATING", "RECOVERY_REQUIRED"] as const;
-
 type LockedDeployment = CustomerDeployment & { databaseNow: Date };
 type LeaseHandle = { deploymentId: string; leaseId: string; capability: string; fence: number };
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-
 function reject(code: string, status = 409): never {
   throw new AppError(status, code, "Managed release lease request was rejected.");
 }
-
 function requireInput(condition: unknown): asserts condition {
   if (!condition) reject("MANAGED_RELEASE_INVALID_INPUT", 400);
 }
-
 function validateHandle(handle: LeaseHandle) {
   requireInput(handle && typeof handle === "object" && !Array.isArray(handle));
   requireInput(typeof handle.deploymentId === "string" && UUID.test(handle.deploymentId));
@@ -29,11 +25,10 @@ function validateHandle(handle: LeaseHandle) {
   requireInput(typeof handle.capability === "string" && handle.capability.length > 0 && handle.capability.length <= 512);
   requireInput(Number.isSafeInteger(handle.fence) && handle.fence > 0 && handle.fence <= MAX_INT);
 }
-
 function cleanJson(value: unknown, capability: string, depth = 0, walk = { seen: new WeakSet<object>(), nodes: 0 }): Json {
   requireInput(depth <= 32 && ++walk.nodes <= 10_000);
   if (value === null || typeof value === "boolean" || typeof value === "string") {
-    if (typeof value === "string" && value.includes(capability)) reject("MANAGED_RELEASE_INVALID_INPUT", 400);
+    if (typeof value === "string" && (value.includes(capability) || CREDENTIAL_VALUE.test(value))) reject("MANAGED_RELEASE_INVALID_INPUT", 400);
     return value;
   }
   if (typeof value === "number") {
@@ -51,18 +46,16 @@ function cleanJson(value: unknown, capability: string, depth = 0, walk = { seen:
   const result: Record<string, Json> = {};
   for (const [key, item] of Object.entries(value)) {
     requireInput(!CREDENTIAL_KEY.test(key) && !key.includes(capability));
-    result[key] = cleanJson(item, capability, depth + 1, walk);
+    Object.defineProperty(result, key, { value: cleanJson(item, capability, depth + 1, walk), enumerable: true, configurable: true, writable: true });
   }
   return result;
 }
-
 function validateRollbackPayload(value: unknown, capability: string) {
   requireInput(value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0);
   const clean = cleanJson(value, capability);
   requireInput(Buffer.byteLength(JSON.stringify(clean), "utf8") <= 65_536);
   return clean as Record<string, Json>;
 }
-
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
@@ -70,16 +63,15 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
-
 async function lock(tx: Prisma.TransactionClient, deploymentId: string) {
-  const [row] = await tx.$queryRaw<LockedDeployment[]>`
-    SELECT *, CURRENT_TIMESTAMP AS "databaseNow"
-    FROM "CustomerDeployment" WHERE "id" = ${deploymentId} FOR UPDATE
-  `;
+  const [row] = await tx.$queryRaw<CustomerDeployment[]>`SELECT * FROM "CustomerDeployment" WHERE "id" = ${deploymentId} FOR UPDATE`;
   if (!row) reject("MANAGED_RELEASE_DEPLOYMENT_NOT_FOUND", 404);
-  return row;
+  const [clock] = await tx.$queryRaw<Array<{ databaseNow: Date }>>`SELECT clock_timestamp() AS "databaseNow"`;
+  return { ...row, ...clock };
 }
-
+function eligible(row: CustomerDeployment) {
+  return Boolean(row.customerAccountId && row.deploymentKind === "REMOTE_MANAGED" && row.cloudProvider === "AZURE" && row.environment === "production" && row.deploymentStatus === "ACTIVE" && row.provisioningStatus === "active");
+}
 async function owned(tx: Prisma.TransactionClient, handle: LeaseHandle, allowExpired = false) {
   validateHandle(handle);
   const row = await lock(tx, handle.deploymentId);
@@ -88,7 +80,6 @@ async function owned(tx: Prisma.TransactionClient, handle: LeaseHandle, allowExp
   if (!allowExpired && (!row.releaseLeaseExpiresAt || row.releaseLeaseExpiresAt <= row.databaseNow)) reject("MANAGED_RELEASE_LEASE_EXPIRED");
   return row;
 }
-
 async function transact<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>) {
   try {
     return await prisma.$transaction(operation);
@@ -99,11 +90,9 @@ async function transact<T>(operation: (tx: Prisma.TransactionClient) => Promise<
     throw error;
   }
 }
-
 function view(row: LockedDeployment) {
   return { deploymentId: row.id, leaseId: row.releaseLeaseId!, fence: row.releaseLeaseFence, phase: row.releaseLeasePhase!, expiresAt: row.releaseLeaseExpiresAt! };
 }
-
 async function event(tx: Prisma.TransactionClient, row: LockedDeployment, action: string) {
   await tx.customerDeploymentEvent.create({
     data: {
@@ -130,7 +119,7 @@ export async function acquireManagedReleaseLease(params: { deploymentId: string;
   requireInput(typeof params.owner === "string" && /^[a-z0-9][a-z0-9._:/-]{0,127}$/.test(params.owner));
   return transact(async (tx) => {
     const row = await lock(tx, params.deploymentId);
-    if (!row.customerAccountId || row.deploymentKind !== "REMOTE_MANAGED" || row.cloudProvider !== "AZURE" || row.environment !== "production" || row.deploymentStatus !== "ACTIVE" || row.provisioningStatus !== "active") reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
+    if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
     if (row.releaseLeaseId && row.releaseLeaseExpiresAt! > row.databaseNow) reject("MANAGED_RELEASE_LEASE_CONFLICT");
     if (row.releaseLeaseId && row.releaseLeasePhase !== "RESERVED") reject("MANAGED_RELEASE_RECOVERY_REQUIRED");
     if (row.releaseImageTag !== params.expectedImageTag) reject("MANAGED_RELEASE_BASELINE_CONFLICT");
@@ -154,6 +143,7 @@ export async function acquireManagedReleaseLease(params: { deploymentId: string;
 export async function heartbeatManagedReleaseLease(handle: LeaseHandle) {
   return transact(async (tx) => {
     const row = await owned(tx, handle);
+    if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
     if (!row.releaseLeasePhase || !ACTIVE_PHASES.includes(row.releaseLeasePhase)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const expiresAt = new Date(row.databaseNow.getTime() + TTL_MS);
     const result = await tx.customerDeployment.updateMany({ where: {
@@ -176,7 +166,7 @@ export async function recordManagedReleaseRollbackRecord(handle: LeaseHandle, pa
       if (canonical(row.releaseLeaseRollbackRecord) !== canonical(envelope)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
       return { ...view(row), rollbackRecorded: true };
     }
-    await tx.customerDeployment.update({ where: { id: row.id }, data: { releaseLeaseRollbackRecord: envelope as Prisma.InputJsonObject } });
+    await tx.$executeRaw`UPDATE "CustomerDeployment" SET "releaseLeaseRollbackRecord" = CAST(${JSON.stringify(envelope)} AS jsonb) WHERE "id" = ${row.id}`;
     await event(tx, row, "control_plane.release_lease.rollback_recorded");
     return { ...view(row), rollbackRecorded: true };
   });
@@ -185,6 +175,7 @@ export async function recordManagedReleaseRollbackRecord(handle: LeaseHandle, pa
 export async function beginManagedReleaseMutation(handle: LeaseHandle) {
   return transact(async (tx) => {
     const row = await owned(tx, handle);
+    if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
     if (row.releaseLeasePhase === "MUTATING") return view(row);
     if (row.releaseLeasePhase !== "RESERVED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     if (row.releaseImageTag !== row.releaseLeaseExpectedImageTag) reject("MANAGED_RELEASE_BASELINE_CONFLICT");
