@@ -3,13 +3,7 @@ import { PrismaClient, type Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import {
-  abortManagedReleaseLease,
-  acquireManagedReleaseLease,
-  beginManagedReleaseMutation,
-  heartbeatManagedReleaseLease,
-  recordManagedReleaseRollbackRecord,
-} from "./control-plane-release-lease";
+import { abortManagedReleaseLease, acquireManagedReleaseLease, beginManagedReleaseMutation, heartbeatManagedReleaseLease, recordManagedReleaseRollbackRecord } from "./control-plane-release-lease";
 
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`;
@@ -44,6 +38,7 @@ beforeEach(async () => truncateAllTables());
 describe("managed release lease CAS", () => {
   it("validates exact targeting, eligibility, and baseline before reserving", async () => {
     const eligible = await deployment();
+    for (const incomingVersion of ["bad\u0000", "\uD800", "\uDC00"]) await expectCode(acquire(eligible.id, { incomingVersion }), "MANAGED_RELEASE_INVALID_INPUT", 400);
     await expectCode(acquireManagedReleaseLease({ deploymentId: "azure-prod", expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "v", owner: "fleet:test" }), "MANAGED_RELEASE_INVALID_INPUT", 400);
     await expectCode(acquire(eligible.id, { expectedImageTag: "latest" }), "MANAGED_RELEASE_INVALID_INPUT", 400);
     await expectCode(acquire(eligible.id, { incomingImageTag: BASE }), "MANAGED_RELEASE_INVALID_INPUT", 400);
@@ -54,6 +49,7 @@ describe("managed release lease CAS", () => {
       deployment({ environment: "staging" }), deployment({ deploymentStatus: "SUSPENDED" }), deployment({ provisioningStatus: "draft" }),
     ]);
     for (const row of ineligible) await expectCode(acquire(row.id), "MANAGED_RELEASE_TARGET_INELIGIBLE");
+    await expect(acquire(eligible.id, { incomingVersion: "release-\uD801\uDC00" })).resolves.toMatchObject({ deploymentId: eligible.id });
   });
 
   it("serializes simultaneous acquisition and heartbeats the exact owner without event noise", async () => {
@@ -124,13 +120,17 @@ describe("managed release lease CAS", () => {
     cyclic.self = cyclic;
     await expectCode(recordManagedReleaseRollbackRecord(handle, cyclic), "MANAGED_RELEASE_INVALID_INPUT", 400);
     for (const unsafe of [{ DATABASE_URL: "redacted" }, { dsn: "postgresql://user:password@host/db" }, { telemetry: "InstrumentationKey=redacted" }, { telemetry: "ConnectionString=redacted" }]) await expectCode(recordManagedReleaseRollbackRecord(handle, unsafe), "MANAGED_RELEASE_INVALID_INPUT", 400);
+    for (const descriptor of ["key", "name", "variableName"]) await expectCode(recordManagedReleaseRollbackRecord(handle, { [descriptor]: "API_KEY", value: "opaque-synthetic" }), "MANAGED_RELEASE_INVALID_INPUT", 400);
+    for (const unsafe of ["\u0000", "\uD800", "\uDC00"]) { await expectCode(recordManagedReleaseRollbackRecord(handle, { value: unsafe }), "MANAGED_RELEASE_INVALID_INPUT", 400); await expectCode(recordManagedReleaseRollbackRecord(handle, { [unsafe]: "opaque" }), "MANAGED_RELEASE_INVALID_INPUT", 400); }
+    const sparse: unknown[] = []; sparse[1] = "opaque"; await expectCode(recordManagedReleaseRollbackRecord(handle, { sparse }), "MANAGED_RELEASE_INVALID_INPUT", 400);
     await expectCode(recordManagedReleaseRollbackRecord(handle, JSON.parse(`{"__proto__":{"text":${JSON.stringify("x".repeat(65_537))}}}`)), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    await recordManagedReleaseRollbackRecord(handle, JSON.parse('{"__proto__":{"revision":"same"},"worker":{"revision":"r2"},"web":{"revision":"r1"}}'));
-    await recordManagedReleaseRollbackRecord(handle, JSON.parse('{"web":{"revision":"r1"},"worker":{"revision":"r2"},"__proto__":{"revision":"same"}}'));
+    await recordManagedReleaseRollbackRecord(handle, JSON.parse('{"\\u00e9":"nfc","e\\u0301":"nfd","\\ud801\\udc00":"\\ud801\\udc00","__proto__":{"revision":"same"},"worker":{"revision":"r2"},"web":{"revision":"r1"}}'));
+    await recordManagedReleaseRollbackRecord(handle, JSON.parse('{"web":{"revision":"r1"},"worker":{"revision":"r2"},"__proto__":{"revision":"same"},"\\ud801\\udc00":"\\ud801\\udc00","e\\u0301":"nfd","\\u00e9":"nfc"}'));
     await expectCode(recordManagedReleaseRollbackRecord(handle, { web: { revision: "different" } }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const reserved = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
     expect(reserved.releaseLeaseRollbackRecord).toMatchObject({ version: 1, deploymentId: target.id, leaseId: handle.leaseId, fence: handle.fence, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2" });
-    expect(JSON.stringify(reserved.releaseLeaseRollbackRecord)).toContain('"__proto__":{"revision":"same"}');
+    const payload = (reserved.releaseLeaseRollbackRecord as { payload: Record<string, unknown> }).payload;
+    expect(payload["__proto__"]).toEqual({ revision: "same" }); expect(payload["\u00e9"]).toBe("nfc"); expect(payload["e\u0301"]).toBe("nfd"); expect(payload["\uD801\uDC00"]).toBe("\uD801\uDC00");
     await beginManagedReleaseMutation(handle);
     const retry = await beginManagedReleaseMutation(handle);
     expect(retry).not.toHaveProperty("capability");
@@ -156,7 +156,7 @@ describe("managed release lease CAS", () => {
     expect(cleared.releaseImageTag).toBe(BASE);
   });
 
-  it("fences every eligibility drift before provider work while retaining safe abort", async () => {
+  it("rejects every eligibility drift after mutation begins and leaves the row unchanged", async () => {
     const drifts: Prisma.CustomerDeploymentUncheckedUpdateInput[] = [
       { customerAccountId: null }, { deploymentKind: "SHARED_WORKSPACE" }, { cloudProvider: "RAILWAY" },
       { environment: "staging" }, { deploymentStatus: "SUSPENDED" }, { provisioningStatus: "draft" },
@@ -164,10 +164,11 @@ describe("managed release lease CAS", () => {
     for (const data of drifts) {
       const target = await deployment(); const handle = await acquire(target.id);
       await recordManagedReleaseRollbackRecord(handle, { web: "prior" });
-      await prisma.customerDeployment.update({ where: { id: target.id }, data });
-      await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_TARGET_INELIGIBLE");
-      await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_TARGET_INELIGIBLE");
-      await expect(abortManagedReleaseLease(handle)).resolves.toMatchObject({ aborted: true, fence: handle.fence });
+      await beginManagedReleaseMutation(handle);
+      const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
+      const failure = await prisma.customerDeployment.update({ where: { id: target.id }, data }).catch((error: unknown) => error);
+      expect(failure).toMatchObject({ message: expect.stringContaining("CustomerDeployment_release_lease_eligibility_check") });
+      expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
     }
   });
 
@@ -182,6 +183,7 @@ describe("managed release lease CAS", () => {
       await expect(prisma.customerDeployment.update({ where: { id: target.id }, data })).rejects.toBeTruthy();
       expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
     }
+    await expect(prisma.customerDeployment.delete({ where: { id: target.id } })).rejects.toThrow("MANAGED_RELEASE_LEASE_DELETE_CONFLICT"); expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
     await prisma.customerDeployment.update({ where: { id: target.id }, data: { releaseLeaseFence: 2_147_483_647,
       releaseLeaseId: null, releaseLeaseTokenHash: null, releaseLeaseOwner: null, releaseLeaseExpectedImageTag: null, releaseLeaseIncomingImageTag: null,
       releaseLeaseIncomingVersion: null, releaseLeasePhase: null, releaseLeaseAcquiredAt: null, releaseLeaseHeartbeatAt: null, releaseLeaseExpiresAt: null,

@@ -6,6 +6,7 @@ const IMAGE_TAG = /^sha-[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CREDENTIAL_KEY = /(authorization|bearer|cookie|credential|password|passwd|secret|token|api[-_]?key|private[-_]?key|database[-_]?url|connection[-_]?string|instrumentation[-_]?key)/i;
 const CREDENTIAL_VALUE = /(?:postgres(?:ql)?:\/\/[^\s/:]+:[^\s@/]+@|(?:instrumentationkey|connectionstring|accountkey|sharedaccesskey|clientsecret)\s*=)/i;
+const POSTGRES_UNSAFE_STRING = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const MAX_INT = 2_147_483_647;
 const TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PHASES = ["RESERVED", "MUTATING", "RECOVERY_REQUIRED"] as const;
@@ -28,7 +29,7 @@ function validateHandle(handle: LeaseHandle) {
 function cleanJson(value: unknown, capability: string, depth = 0, walk = { seen: new WeakSet<object>(), nodes: 0 }): Json {
   requireInput(depth <= 32 && ++walk.nodes <= 10_000);
   if (value === null || typeof value === "boolean" || typeof value === "string") {
-    if (typeof value === "string" && (value.includes(capability) || CREDENTIAL_VALUE.test(value))) reject("MANAGED_RELEASE_INVALID_INPUT", 400);
+    if (typeof value === "string" && (POSTGRES_UNSAFE_STRING.test(value) || value.includes(capability) || CREDENTIAL_VALUE.test(value))) reject("MANAGED_RELEASE_INVALID_INPUT", 400);
     return value;
   }
   if (typeof value === "number") {
@@ -36,7 +37,7 @@ function cleanJson(value: unknown, capability: string, depth = 0, walk = { seen:
     return value;
   }
   if (Array.isArray(value)) {
-    requireInput(!walk.seen.has(value));
+    requireInput(!walk.seen.has(value) && Object.keys(value).length === value.length && Object.keys(value).every((key, index) => key === String(index)));
     walk.seen.add(value);
     return value.map((item) => cleanJson(item, capability, depth + 1, walk));
   }
@@ -45,7 +46,7 @@ function cleanJson(value: unknown, capability: string, depth = 0, walk = { seen:
   walk.seen.add(value);
   const result: Record<string, Json> = {};
   for (const [key, item] of Object.entries(value)) {
-    requireInput(!CREDENTIAL_KEY.test(key) && !key.includes(capability));
+    requireInput(!POSTGRES_UNSAFE_STRING.test(key) && !CREDENTIAL_KEY.test(key) && !key.includes(capability) && !(/^(?:key|name|variable(?:Name)?)$/i.test(key) && typeof item === "string" && CREDENTIAL_KEY.test(item)));
     Object.defineProperty(result, key, { value: cleanJson(item, capability, depth + 1, walk), enumerable: true, configurable: true, writable: true });
   }
   return result;
@@ -59,7 +60,7 @@ function validateRollbackPayload(value: unknown, capability: string) {
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+    return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : Number(a > b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
   }
   return JSON.stringify(value);
 }
@@ -115,7 +116,7 @@ export async function acquireManagedReleaseLease(params: { deploymentId: string;
   requireInput(typeof params.deploymentId === "string" && UUID.test(params.deploymentId));
   requireInput(typeof params.expectedImageTag === "string" && IMAGE_TAG.test(params.expectedImageTag));
   requireInput(typeof params.incomingImageTag === "string" && IMAGE_TAG.test(params.incomingImageTag) && params.incomingImageTag !== params.expectedImageTag);
-  requireInput(typeof params.incomingVersion === "string" && params.incomingVersion.trim().length > 0 && params.incomingVersion.length <= 128 && !/[\u0000-\u001f\u007f]/.test(params.incomingVersion));
+  requireInput(typeof params.incomingVersion === "string" && params.incomingVersion.trim().length > 0 && params.incomingVersion.length <= 128 && !/[\u0000-\u001f\u007f]/.test(params.incomingVersion) && !POSTGRES_UNSAFE_STRING.test(params.incomingVersion));
   requireInput(typeof params.owner === "string" && /^[a-z0-9][a-z0-9._:/-]{0,127}$/.test(params.owner));
   return transact(async (tx) => {
     const row = await lock(tx, params.deploymentId);
