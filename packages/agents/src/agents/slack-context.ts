@@ -244,14 +244,14 @@ function isBotMentioned(text: string, botUserId: string | null) {
 }
 
 function isNegatedActionRequest(text: string): boolean {
-  return /\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:\s+[a-z]+){0,5}\s+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
+  return /\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b/i.test(text)
     || /\bnot\s+an?\s+(action|task|work item)\b/i.test(text)
     || /\bno\s+(action|task|work item)\b/i.test(text);
 }
 
 function isDeterministicNegativeCategory(text: string): boolean {
   if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)[.!]?$)/iu.test(text.trim())) return true;
-  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
+  return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|thanks|thank you|got it|already\s+(done|sent|completed|fixed|resolved|upgraded|deployed)|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|this\s+is\s+a\s+test\s*message|test\s*message)\b/i.test(text)
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
@@ -279,7 +279,7 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
 
 function hasGroundedOwnerCue(ownerEvidence: string, corpus: string): boolean {
   const owner = normalizeText(ownerEvidence);
-  const identifiableOwner = (!/^(?:the|a|an|this|that|it|report|guide|document|proposal|task|action|alert|agreement|issue|request|project|status|message|email|file|plan|deadline|work|budget|server|database|service|system|website|application|environment|deployment|release|build|code|repository|contract|invoice|meeting|schedule|calendar)\b/i.test(ownerEvidence.trim()) && /^(?:<@[A-Z0-9]+(?:\|[^>]+)?>|[\p{Lu}\p{Lt}\p{Lo}])/u.test(ownerEvidence.trim())) || /\b(team|lead|manager|owner|counsel|department|group|committee|reviewer|approver|finance|legal|operations|engineering|product|sales|support|security)\b/i.test(ownerEvidence);
+  const identifiableOwner = (!/^(?:the|a|an|this|that|it|some(?:one|body)|any(?:one|body)|every(?:one|body)|no(?:one|body)|no\s+one|whoever|whomever|each|either|neither|report|guide|document|proposal|task|action|alert|agreement|issue|request|project|status|message|email|file|plan|deadline|work|budget|server|database|service|system|website|application|environment|deployment|release|build|code|repository|contract|invoice|meeting|schedule|calendar)\b/i.test(ownerEvidence.trim()) && /^(?:<@[A-Z0-9]+(?:\|[^>]+)?>|[\p{Lu}\p{Lt}\p{Lo}])/u.test(ownerEvidence.trim())) || /\b(team|lead|manager|owner|counsel|department|group|committee|reviewer|approver|finance|legal|operations|engineering|product|sales|support|security)\b/i.test(ownerEvidence);
   if (!owner || owner === "unknown" || !identifiableOwner) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const normalizedCorpus = normalizeText(corpus.replace(/\[[^\]]+\]\s+\S+:\s/g, " "));
