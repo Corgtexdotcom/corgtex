@@ -705,22 +705,18 @@ describe("Slack context jobs", () => {
     expect(extractMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: "msg-normal-1" }) }));
   });
-
   it("allows non-bot mentions <@U999|Alice> to be nudged and evaluated", async () => {
     prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
       candidate({ id: "msg-other-user", text: "<@U999|Alice> can someone help with the report?", messageTs: new Date("2026-04-28T15:30:00.000Z") }),
     ]);
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 1, actions: 0, followups: 0, drafts: 0 });
-
     expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
   });
-
   it("fails closed for auto-publication when botUserId is missing without broadly excluding mentions", async () => {
     prismaMock.communicationInstallation.findFirst.mockResolvedValueOnce({
       id: "install-1",
@@ -742,14 +738,12 @@ describe("Slack context jobs", () => {
         bodyMd: "Jan will send the proposal by Friday.",
       },
     });
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(extractMock).toHaveBeenCalledTimes(1);
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
@@ -760,7 +754,6 @@ describe("Slack context jobs", () => {
       }),
     });
   });
-
   it.each([
     { label: "routing test remains thread-wide", text: "Please run this routing test for slack context", concreteNextStep: "send the report", reply: "Jan should send the report by tomorrow." },
     { label: "generic past-tense test marker", text: "This was only a test. Jan should send the report tomorrow.", concreteNextStep: "send the report" },
@@ -783,21 +776,18 @@ describe("Slack context jobs", () => {
         title: "Test title",
       },
     });
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(extractMock).toHaveBeenCalledTimes(1);
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: "proactive_unanswered_resolved" }),
     });
   });
-
   it.each(["Ack", "Acknowledged"])("terminalizes standalone acknowledgement %s without model review", async (text) => {
     setupPendingNudge(candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") }));
     const { runSlackProactiveScan } = await import("./slack-context");
@@ -805,7 +795,6 @@ describe("Slack context jobs", () => {
     expect(extractMock).not.toHaveBeenCalled();
     expect(createWorkItemMock).not.toHaveBeenCalled();
   });
-
   it.each([
     { label: "invalid resolutionState", output: { resolutionState: "invalid_state", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [] } },
     { label: "missing negativeCategory", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, couldNot: [] } },
@@ -819,6 +808,7 @@ describe("Slack context jobs", () => {
     { label: "timestamp scaffold does not ground a deliverable", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "2026 04", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Invalid timestamp task" }, text: "Jan should send the report by tomorrow." },
     { label: "owner and deliverable from different assignments", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should review the draft\nSomeone needs to send the report; Jan should review the draft while someone needs to send the report." },
     { label: "standalone completion reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent it." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "acknowledgement after assignment", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Thanks." }, text: "Jan needs to send the report by tomorrow." },
     { label: "ambiguous single-token directory owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan needs to send the report by tomorrow.", trustedUsers: [{ externalUserId: "U1", displayName: "Jan" }, { externalUserId: "U2", displayName: "Jan Brezina" }] },
     { label: "owner-seeking ask question", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Who can ask Jan to send the report?" },
     { label: "completed reply with later future clause", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed. It will be archived tomorrow." }, text: "Jan needs to send the report by tomorrow." },
@@ -836,7 +826,8 @@ describe("Slack context jobs", () => {
     { label: "punctuated negation with intervening phrase", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "Jan", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Jan needs to update the guide, but Corgtex should not, under any circumstances, create an action item", id: "msg-punctuated-neg" },
     { label: "synthetic unknown owner", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "unknown", confidence: 0.99, negativeCategory: false, couldNot: [] }, text: "unknown needs to send the report.", id: "msg-unknown-owner" },
     { label: "generic ownerless request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Can someone please create an action item to update the guide?", id: "msg-generic-explicit" },
-    { label: "non-adjacent explicit request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Corgtex status is red; can someone please create an action item to update the guide?", id: "msg-non-adjacent-explicit" }
+    { label: "non-adjacent explicit request failing explicit exception", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "update the guide", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Update guide", negativeCategory: false, couldNot: [] }, text: "Corgtex status is red; can someone please create an action item to update the guide?", id: "msg-non-adjacent-explicit" },
+    { label: "explicit request for another deliverable", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send the report", ownerEvidence: "", explicitActionRequest: true, confidence: 0.95, title: "Send report", negativeCategory: false, couldNot: [] }, text: "Corgtex, create a task to review the draft; then send the report.", id: "msg-unrelated-explicit" }
   ])("fails closed on $label, records terminal marker, and later scan does not re-evaluate", async ({ output, text, id, trustedUsers }) => {
     const source = candidate({ id: id || "message-1", text: text || "Jan needs to send the report by tomorrow.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); if (trustedUsers) prismaMock.communicationExternalUser.findMany.mockResolvedValue(trustedUsers);
     setupPendingNudge(source);
@@ -878,6 +869,9 @@ describe("Slack context jobs", () => {
     { label: "imperative ask eligibility", text: "Ask Jan to send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Ask Jan to send the report by tomorrow." },
     { label: "CJK Unicode evidence", text: "田中さん needs to 確認する by tomorrow.", step: "確認する", owner: "田中さん", title: "Confirm by tomorrow", bodyMd: "田中さん needs to 確認する by tomorrow." },
     { label: "unrelated object and task negations do not veto deliverable", text: "Jan should send the report tomorrow; don't create the PDF yet, and we should not wait to notify Legal.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should send the report tomorrow; don't create the PDF yet, and we should not wait to notify Legal." },
+    { label: "another owner's negation does not veto selected assignment", text: "Legal should not send the draft; Jan should send the final tomorrow.", step: "send the final", owner: "Jan", title: "Send final", bodyMd: "Legal should not send the draft; Jan should send the final tomorrow." },
+    { label: "standalone acknowledgement is superseded by later assignment", text: "Can anyone help?", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Can anyone help?", replies: ["Thanks.", "Jan will send the report tomorrow."] },
+    { label: "dotted deliverable remains owner-bound", text: "Jan should upgrade Node.js tomorrow?", step: "upgrade Node.js", owner: "Jan", title: "Upgrade Node.js", bodyMd: "Jan should upgrade Node.js tomorrow?" },
     { label: "later assignment reopens completed work", text: "Jan needs to send the report tomorrow.", step: "send the revised report", owner: "Jan", title: "Send revised report", bodyMd: "Jan needs to send the revised report tomorrow.", replies: ["Sent it.", "Jan needs to send the revised report tomorrow."] }
   ])("creates exactly one Action for $label and no duplicate on later scan", async ({ text, step, owner, title, bodyMd, reply, replies }) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });

@@ -243,29 +243,33 @@ function isBotMentioned(text: string, botUserId: string | null) {
   return regex.test(text);
 }
 
-function isNegatedActionRequest(text: string, concreteNextStep = ""): boolean {
+function isNegatedActionRequest(text: string, concreteNextStep = "", ownerEvidence = ""): boolean {
   if (/\b(do not|cannot|(?:don|doesn|didn|shouldn|couldn|can|won|wouldn|mustn|needn|isn|aren|wasn|weren|shan)['’]t|no|not|never)\b(?:[\s,;:()-]+[a-z]+){0,5}[\s,;:()-]+(create|add|make|assign|open|log|turn(?:\s+(?:this|that|it))?\s+into|convert(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:(?:this|that|it)\s+(?:as\s+)?)?(?:(?:an?|the|new|another|corgtex)\s+)*(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:(?:avoid(?:s|ed)?|skip(?:s|ped)?)\s+|refrain(?:s|ed)?\s+from\s+)(?:creating|adding|making|assigning|opening|logging|converting(?:\s+(?:this|that|it))?\s+(?:to|into))\s+(?:an?\s+)?(?:action(?:\s+item)?|task|work\s+item)\b/i.test(text)
     || /\b(?:not\s+an?|no)\s+(action|task|work item)\b/i.test(text)) return true;
-  const verb = normalizeText(concreteNextStep).split(" ")[0];
-  if (!verb) return false;
-  return new RegExp(`\\b(?:(?:should|must|will|can|could|would|need)\\s+not|(?:do|does|did)\\s+not\\s+need\\s+to|(?:shouldn|mustn|can|couldn|wouldn|won|needn)['’]t|(?:don|doesn|didn)['’]t\\s+need\\s+to)(?:[\\s,;:()-]+[a-z]+){0,3}[\\s,;:()-]+${verb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+  const owner = normalizeText(ownerEvidence), step = normalizeText(concreteNextStep);
+  if (!owner || !step) return false;
+  const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), escapedStep = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.split(/[;!?]+|\.(?=\s|$)/u).map(clause => normalizeText(clause.replace(/\b(should|must|can|could|would|need|do|does|did)n['’]t\b/gi, "$1 not").replace(/\bwon['’]t\b/gi, "will not"))).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:(?:should|must|will|can|could|would|need(?:s)?(?:\\s+to)?)\\s+not|(?:do|does|did)\\s+not\\s+need\\s+to)(?:\\s+[\\p{L}\\p{N}_-]+){0,5}\\s+${escapedStep}(?=\\s|$)`, "u").test(clause));
 }
 
 function isDeterministicNegativeCategory(text: string, concreteNextStep = "", includeCompletion = true): boolean {
   const [verb, ...object] = normalizeText(concreteNextStep).split(" ");
   const completedVerb = /^(?:sent|done|completed|fixed|resolved|upgraded|deployed|approved|investigated)$/.test(verb) ? verb : verb === "send" ? "sent" : verb === "do" ? "done" : verb ? `${verb}${verb.endsWith("e") ? "d" : "ed"}` : "";
   const historicalStep = `${completedVerb} ${object.join(" ")}`.trim();
-  if (/^(?:(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim()) && (includeCompletion || /^(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)/iu.test(text.trim()))) return true;
+  if (includeCompletion && /^(?:(?:ack|acknowledged|acknowledg(?:e)?ment|thanks|thank you)(?:\s*:|[.!]?\s*$)|(?!.*\bnot\b)(?!(?:(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2}\s+)?(?:will|shall|should|would|could|may|might|must)\s+(?:be|have\s+been)\b)(?:(?:it['’]s|(?:the\s+)?[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+){0,2})\s+)?(?:(?:is|was)\s+|(?:has|have)\s+been\s+)?(?:done|sent(?: it)?|completed|fixed|resolved|upgraded|deployed)(?:[.!]\s+.+)?[.!]?$)/iu.test(text.trim())) return true;
   return /(?<!\b(?:not|never|don['’]t)\s+(?:a\s+|an\s+)?)\b(routing\s*test|test\s*routing|fyi|for your information|got it|info\s*only|information\s*only|(?=[^?]*\?\s*$)(?:(?:needs?|wants?)\s+to\s+(?:know|understand|find\s+out)|(?:do|does)\s+(?:you|anyone|someone)\s+know)|just\s+sharing|just\s+an?\s+update|(?:this|it)\s+(?:is|was)\s+(?:(?:only|just)\s+)?a\s+test(?:\s+message)?|test\s*message)\b/i.test(text)
     || Boolean(includeCompletion && (/(?<!\b(?:not|never|don['’]t)\s)\balready\s+(?:done|sent|completed|fixed|resolved|upgraded|deployed)\b/i.test(text) || (historicalStep && new RegExp(`\\bshould have (?:been )?${historicalStep}\\b`, "u").test(normalizeText(text)) && (/\?/.test(text) || /\bconfirm\b/i.test(text)))))
     || /(?<!\b(?:not|never|don['’]t)\s+)^(?:test|testing)[\s/:-]/i.test(text.trim());
 }
 
-function isDeterministicExplicitActionRequest(text: string): boolean {
+function isDeterministicExplicitActionRequest(text: string, concreteNextStep = ""): boolean {
   if (isNegatedActionRequest(text)) return false;
   if (isDeterministicNegativeCategory(text)) return false;
-  return /\bcorgtex\b(?:[\s.,:;!]+(?:please|kindly|can you|could you|will you|would you|just)?)*\s*(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b(?:\s+[a-z]+){0,3}\s+(action(?: item)?|task|work item)\b/i.test(text);
+  const request = /\bcorgtex\b(?:[\s.,:;!]+(?:please|kindly|can you|could you|will you|would you|just)?)*\s*(create|add|make|assign|turn(?:\s+(?:this|that|it))?\s+into)\b(?:\s+[a-z]+){0,3}\s+(action(?: item)?|task|work item)\b/i.exec(text);
+  if (!request || !concreteNextStep) return Boolean(request);
+  const remainder = normalizeText(text.slice(request.index + request[0].length)).replace(/^(?:to|for)\s+/, "");
+  return remainder === normalizeText(concreteNextStep) || remainder.startsWith(`${normalizeText(concreteNextStep)} `);
 }
 
 function normalizeText(text: string): string {
@@ -283,13 +287,14 @@ function isGroundedInCorpus(value: string, corpus: string): boolean {
   const paddedCorpus = ` ${normalizeText(corpus)} `;
   return paddedCorpus.includes(paddedValue);
 }
+function splitAssignmentClauses(text: string) { return text.split(/[\n;!?]+|\.(?=\s|$)/u).map(normalizeText); }
 function isOrganizationalRole(ownerEvidence: string) { return /^(?:legal|finance|operations|engineering|product|sales|support|security|(?:[\p{L}\p{N}_-]+\s+){0,2}(?:team|lead|manager|owner|counsel|department|group|committee|reviewer|approver))$/u.test(normalizeText(ownerEvidence)); }
 
 function hasGroundedOwnerCue(ownerEvidence: string, concreteNextStep: string, threadTexts: string[], trustedUsers: Array<{ externalUserId: string; displayName: string | null }>): boolean {
   const owner = normalizeText(ownerEvidence), step = normalizeText(concreteNextStep);
   if (!owner || owner === "unknown" || !step) return false;
   const escapedOwner = owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), escapedStep = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const assigned = threadTexts.flatMap(text => text.split(/[\n.;!?]+/).map(normalizeText)).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\s+${escapedStep}(?=\\s|$)`, "u").test(clause)
+  const assigned = threadTexts.flatMap(splitAssignmentClauses).some(clause => new RegExp(`(?:^|\\s)${escapedOwner}\\s+(?:needs?\\s+to|should|must|will|please)\\s+${escapedStep}(?=\\s|$)`, "u").test(clause)
     || new RegExp(`(?:\\bhave\\s+${escapedOwner}\\s+(?:to\\s+)?${escapedStep}|^(?:please\\s+)?ask\\s+${escapedOwner}\\s+to\\s+${escapedStep})(?=\\s|$)`, "u").test(clause) || new RegExp(`\\b(?:assigned\\s+to|owner\\s+is)\\s+${escapedOwner}\\s+(?:(?:to|for)\\s+)?${escapedStep}(?=\\s|$)`, "u").test(clause));
   if (!assigned) return false;
   const identities = trustedUsers.map(user => ({ id: normalizeText(user.externalUserId), name: normalizeText(user.displayName || "") }));
@@ -345,13 +350,13 @@ function meetsActionPublicationPredicate(
   if (!parsed.hasValidCouldNotArray) return false;
   if (parsed.couldNot.length > 0) return false;
   if (parsed.confidence < confidenceThreshold) return false;
-  if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep))) return false;
+  if (threadTexts.some(text => isNegatedActionRequest(text, parsed.concreteNextStep, parsed.ownerEvidence))) return false;
   if (threadTexts.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep, false))) return false;
 
   const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, threadTexts, trustedUsers);
-  const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText) || threadTexts.some(isDeterministicExplicitActionRequest));
+  const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText, parsed.concreteNextStep) || threadTexts.some(text => isDeterministicExplicitActionRequest(text, parsed.concreteNextStep)));
   if (!hasGroundedOwner && !isExplicitRequest) return false;
-  const assignmentIndex = threadTexts.reduce((latest, text, index) => hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [text], trustedUsers) || (parsed.explicitActionRequest && isDeterministicExplicitActionRequest(text)) ? index : latest, -1);
+  const assignmentIndex = threadTexts.reduce((latest, text, index) => hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [text], trustedUsers) || (parsed.explicitActionRequest && isDeterministicExplicitActionRequest(text, parsed.concreteNextStep)) ? index : latest, -1);
   if (threadTexts.slice(Math.max(0, assignmentIndex)).some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep))) return false;
   return true;
 }
