@@ -541,11 +541,11 @@ describe("Slack context jobs", () => {
 
   it.each([
     ["routing test", "Routing check: Jan, please send the signed vendor agreement by Friday."],
-    ["FYI", "FYI, Jan will send the signed vendor agreement by Friday."],
+    ["FYI", "Quick FYI: Jan will send the signed vendor agreement by Friday."],
     ["acknowledgement", "Thanks."],
-    ["completed request", "Jan already sent the signed vendor agreement."],
+    ["completed request", "Jan finished the signed vendor agreement."],
     ["standalone completion", "Done. Jan handled the vendor agreement."],
-    ["first-person completion", "I've handled it; the vendor agreement is sent."],
+    ["passive completion", "The vendor agreement was sent."],
     ["finished completion", "I finished it, thanks."],
     ["did-it completion", "I did it; no follow-up is needed."],
   ])("terminalizes %s content even when the model proposes a high-confidence Action", async (_label, text) => {
@@ -628,10 +628,10 @@ describe("Slack context jobs", () => {
 
   it.each([
     ["owner evidence", { ownerEvidence: "" }, undefined],
-    ["non-trivial owner evidence", { ownerEvidence: "a" }, undefined],
+    ["non-owner token", { ownerEvidence: "by" }, undefined],
     ["concrete deliverable", { concreteNextStep: "" }, undefined],
     ["grounded deliverable evidence", { concreteNextStep: "prepare the budget" }, undefined],
-    ["non-vague deliverable evidence", { concreteNextStep: "send it" }, "Jan, please send it by Friday."],
+    ["timing-only deliverable evidence", { ownerEvidence: "by", concreteNextStep: "by Friday" }, "Please send the agreement by Friday."],
   ])("fails closed when high-confidence Action output lacks %s", async (_label, overrides, sourceText) => {
     const source = candidate({
       text: sourceText ?? "Jan, please send the signed vendor agreement by Friday.",

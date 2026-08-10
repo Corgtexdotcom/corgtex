@@ -292,9 +292,9 @@ function normalizeProactiveExtraction(output: Record<string, unknown>) {
 
 function hasDeterministicNegativeCategory(text: string) {
   return /(?:^|[.!?\n]\s*)(?:this is |just |only )?(?:a )?(?:test(?:ing)?(?: message)?|dry run|routing check|checking (?:the )?routing)\b/im.test(text)
-    || /(?:^|\n)\s*(?:fyi|for your information|heads[- ]?up)\b/im.test(text)
+    || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(text)
     || /(?:^|\n)\s*(?:ack(?:nowledged)?|got it|sounds good|thank you|thanks)[.!]?\s*$/im.test(text)
-    || /\b(?:already (?:done|sent|handled|finished|completed|resolved)|(?:i|we|it|this|that)(?:'s|'ve| have| is)? (?:already )?(?:did|sent|handled|finished|completed|resolved|done)|(?:did|sent|handled|finished|completed|resolved) it|no action (?:is )?needed|not an? action item)\b/i.test(text)
+    || /\b(?:already (?:done|sent|handled|finished|completed|resolved)|(?:i|we|it|this|that)(?:'s|'ve| have| is)? (?:already )?(?:did|sent|handled|finished|completed|resolved|done)|(?:has|have|had|was|were|is|are) (?:already )?(?:been )?(?:done|sent|handled|finished|completed|resolved)|(?:[A-Z][\p{L}'-]*|<@[A-Z0-9]+(?:\|[^>]+)?>) (?:already )?(?:sent|handled|finished|completed|resolved)|(?:did|sent|handled|finished|completed|resolved) it|no action (?:is )?needed|not an? action item)\b/iu.test(text)
     || /(?:^|[.!?]\s*)done\b/i.test(text);
 }
 
@@ -314,14 +314,14 @@ function evidenceIsGrounded(evidence: string, threadMessages: SlackCandidateMess
 }
 
 function hasConcreteOwnerEvidence(ownerEvidence: string, threadMessages: SlackCandidateMessage[]) {
-  return !/^(?:someone|somebody|anyone|anybody|team|we|us|they|owner|unknown|tbd|unassigned)$/i.test(ownerEvidence)
+  return !/^(?:a|an|and|at|by|for|from|in|it|of|on|or|please|someone|somebody|anyone|anybody|team|the team|to|us|we|they|owner|unknown|tbd|unassigned|today|tomorrow|(?:mon|tues|wednes|thurs|fri|satur|sun)day)$/i.test(ownerEvidence.trim()) && (/<@[A-Z0-9]+(?:\|[^>]+)?>/i.test(ownerEvidence) || threadMessages.some((message) => (message.text ?? "").includes(ownerEvidence)))
     && evidenceIsGrounded(ownerEvidence, threadMessages);
 }
 
 function hasConcreteDeliverableEvidence(evidence: string, threadMessages: SlackCandidateMessage[]) {
   const words = evidence.match(/[a-z0-9]+/gi) ?? [];
   return words.length >= 2
-    && !/^(?:send|do|handle|check|review|confirm|follow up|look into|take care of) (?:it|this|that)$/i.test(evidence)
+    && !/^(?:(?:send|do|handle|check|review|confirm|follow up|look into|take care of) (?:it|this|that)|(?:by|before|after|on|at|during|until|this|next)\s+(?:the\s+)?(?:end\s+of\s+)?[a-z0-9'-]+)$/i.test(evidence.trim())
     && evidenceIsGrounded(evidence, threadMessages);
 }
 
