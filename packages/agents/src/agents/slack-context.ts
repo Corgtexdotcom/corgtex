@@ -356,8 +356,11 @@ function meetsActionPublicationPredicate(
   const hasGroundedOwner = hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, threadTexts, trustedUsers);
   const isExplicitRequest = parsed.explicitActionRequest === true && (isDeterministicExplicitActionRequest(sourceText, parsed.concreteNextStep) || threadTexts.some(text => isDeterministicExplicitActionRequest(text, parsed.concreteNextStep)));
   if (!hasGroundedOwner && !isExplicitRequest) return false;
-  const assignmentIndex = threadTexts.reduce((latest, text, index) => hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [text], trustedUsers) || (parsed.explicitActionRequest && isDeterministicExplicitActionRequest(text, parsed.concreteNextStep)) ? index : latest, -1);
-  if (threadTexts.slice(Math.max(0, assignmentIndex)).some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep))) return false;
+  let assignmentTail = threadTexts;
+  threadTexts.forEach((text, messageIndex) => splitAssignmentClauses(text).forEach((clause, clauseIndex, clauses) => {
+    if (hasGroundedOwnerCue(parsed.ownerEvidence, parsed.concreteNextStep, [clause], trustedUsers) || (parsed.explicitActionRequest && isDeterministicExplicitActionRequest(clause, parsed.concreteNextStep))) assignmentTail = [...clauses.slice(clauseIndex), clauses.slice(clauseIndex).join(" "), ...threadTexts.slice(messageIndex + 1)];
+  }));
+  if (assignmentTail.some(text => isDeterministicNegativeCategory(text, parsed.concreteNextStep))) return false;
   return true;
 }
 

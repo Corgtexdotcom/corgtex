@@ -809,6 +809,7 @@ describe("Slack context jobs", () => {
     { label: "owner and deliverable from different assignments", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan should review the draft\nSomeone needs to send the report; Jan should review the draft while someone needs to send the report." },
     { label: "standalone completion reply", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Sent it." }, text: "Jan needs to send the report by tomorrow." },
     { label: "acknowledgement after assignment", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "Thanks." }, text: "Jan needs to send the report by tomorrow." },
+    { label: "completion after same-message assignment", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan will send the report tomorrow. The report is completed." },
     { label: "ambiguous single-token directory owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Jan needs to send the report by tomorrow.", trustedUsers: [{ externalUserId: "U1", displayName: "Jan" }, { externalUserId: "U2", displayName: "Jan Brezina" }] },
     { label: "owner-seeking ask question", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Who can ask Jan to send the report?" },
     { label: "completed reply with later future clause", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report", reply: "The report is completed. It will be archived tomorrow." }, text: "Jan needs to send the report by tomorrow." },
@@ -833,26 +834,21 @@ describe("Slack context jobs", () => {
     setupPendingNudge(source);
     if ("reply" in output) prismaMock.communicationMessage.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([source, candidate({ id: "reply-1", text: output.reply })]);
     extractMock.mockResolvedValueOnce({ output });
-
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1",
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
-
     expect(createWorkItemMock).not.toHaveBeenCalled();
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: id || "message-1" }),
     });
-
     setupPendingNudge(source);
     prismaMock.communicationEntityLink.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ id: "terminal-1" });
-
     await runSlackProactiveScan({
       workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1",
     });
-
     expect(extractMock).toHaveBeenCalledTimes(1);
   });
 
@@ -864,6 +860,8 @@ describe("Slack context jobs", () => {
     { label: "pronoun-prefixed modal perfect remains actionable", text: "Jan should deploy the release by tomorrow.", step: "deploy the release", owner: "Jan", title: "Deploy release", bodyMd: "Jan should deploy the release by tomorrow.", reply: "It will have been deployed." },
     { label: "subject-prefixed modal perfect remains actionable", text: "Jan should fix the release by tomorrow.", step: "fix the release", owner: "Jan", title: "Fix release", bodyMd: "Jan should fix the release by tomorrow.", reply: "The release might have been fixed." },
     { label: "different past obligation does not veto future deliverable", text: "Jan should have sent the draft earlier, but Jan will send the final tomorrow; can someone confirm?", step: "send the final", owner: "Jan", title: "Send final", bodyMd: "Jan should have sent the draft earlier, but Jan will send the final tomorrow; can someone confirm?" },
+    { label: "same-message completion is superseded by later assignment", text: "The draft is completed. Jan will send the report tomorrow; can someone confirm?", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "The draft is completed. Jan will send the report tomorrow; can someone confirm?" },
+    { label: "same-step past obligation is superseded by later assignment", text: "Jan should have sent the report earlier. Jan will send the report tomorrow; can someone confirm?", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Jan should have sent the report earlier. Jan will send the report tomorrow; can someone confirm?" },
     { label: "single-word approve with generic role owner", text: "Marketing team should approve by tomorrow.", step: "approve", owner: "Marketing team", title: "Approve", bodyMd: "Marketing team should approve by tomorrow." },
     { label: "requested ack deliverable", text: "Please have Jan ack the alert by tomorrow.", step: "ack the alert", owner: "Jan", title: "Acknowledge alert", bodyMd: "Please have Jan ack the alert by tomorrow." },
     { label: "imperative ask eligibility", text: "Ask Jan to send the report by tomorrow.", step: "send the report", owner: "Jan", title: "Send report", bodyMd: "Ask Jan to send the report by tomorrow." },
