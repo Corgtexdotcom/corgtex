@@ -1,9 +1,11 @@
 # Plan: Short title
 
 {/*
-  This file is the canonical handoff from Planner (Claude) to Executor
-  (Gemini in Antigravity) and to Reviewer (Codex). Copy this template
-  into the pull request body. For local checks before a PR exists, copy
+  This file is the canonical handoff from the initial Planner (Claude
+  Opus first; Codex Sol fallback) to Executor (Gemini in Antigravity or
+  Kimi K3) and Reviewer (Codex). Kimi and Gemini may execute or analyze,
+  but never own the first planning pass. Copy this template into the
+  pull request body. For local checks before a PR exists, copy
   it to `.agents/plans/<branch>.md`; that directory is intentionally
   ignored and must not be committed.
 
