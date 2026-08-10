@@ -825,6 +825,7 @@ describe("Slack context jobs", () => {
     { label: "array containing non-string couldNot member", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: [123] } },
     { label: "array containing blank couldNot member", output: { resolutionState: "open", workDisposition: "action", concreteNextStep: "send report", ownerEvidence: "Jan", confidence: 0.99, negativeCategory: false, couldNot: ["   "] } },
     { label: "awareness-only model outcome on generic open question", output: { resolutionState: "open", workDisposition: "awareness", confidence: 0.95, negativeCategory: false, couldNot: [] }, text: "Can you let me know if the staging environment is up?" },
+    { label: "ordinary information request", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "Jan", concreteNextStep: "know whether the server is up", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Check server" }, text: "Jan needs to know whether the server is up?" },
     { label: "hallucinated owner substring trap", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "IT", concreteNextStep: "confirm when waiting is finished", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Confirm waiting" }, text: "Please confirm when waiting is finished for the report." },
     { label: "arbitrary grounded token is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "report", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
     { label: "speaker scaffold is not an owner", output: { resolutionState: "open", workDisposition: "action", ownerEvidence: "U1", concreteNextStep: "send the report", confidence: 0.99, negativeCategory: false, couldNot: [], title: "Send report" }, text: "Please send the report by tomorrow." },
@@ -865,7 +866,6 @@ describe("Slack context jobs", () => {
       data: expect.objectContaining({ action: "proactive_unanswered_resolved", entityId: id || "message-1" }),
     });
 
-    // Re-evaluate idempotency check
     setupPendingNudge(source);
     prismaMock.communicationEntityLink.findFirst
       .mockResolvedValueOnce(null)
