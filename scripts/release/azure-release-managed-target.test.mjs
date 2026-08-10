@@ -49,8 +49,10 @@ describe("managed Azure release contract", () => {
     const image = `acr.azurecr.io/corgtex/web@${DIGEST}`;
     const record = buildManagedAzureRollbackRecord(target(), { gitSha: SHA, imageTag: `sha-${SHA}`, releaseVersion: `main-${SHA.slice(0, 12)}` },
       { web: { image, readyRevision: "web-ready" }, worker: { image: image.replace("web", "worker"), readyRevision: "worker-ready" } }, { webDigest: DIGEST, workerDigest: DIGEST }, "2026-08-10T00:00:00.000Z");
+    const unsafe = buildManagedAzureRollbackRecord(target(), record.incoming, { ...record.previous, worker: { ...record.previous.worker, image: "acr.azurecr.io/corgtex/worker:mutable" } }, record.incoming, record.capturedAt);
     expect(normalizeImageDigest(DIGEST.toUpperCase())).toBe(DIGEST);
     expect(managedAzureRollbackRecordErrors(record)).toEqual([]);
+    expect(unsafe.rollbackDigestPinned).toBe(false); expect(managedAzureRollbackRecordErrors(null)).toEqual(["rollback record must be an object"]);
     expect(managedAzureRollbackRecordErrors({ ...record, previous: { ...record.previous, web: { ...record.previous.web, image: `other.example/corgtex/web@${DIGEST}` } } })).toContain("previous.web.image must be target-registry digest-pinned");
     expect(managedAzureRollbackRecordErrors({ ...record, rollbackDigestPinned: false, previous: { ...record.previous, worker: {} } })).toEqual(expect.arrayContaining([
       "previous.worker.image must be target-registry digest-pinned", "rollbackDigestPinned must be true",
