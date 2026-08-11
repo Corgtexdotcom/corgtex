@@ -275,7 +275,7 @@ async function evaluatePullRequest(repo, number, action, changes, eventUpdatedAt
   const files = await apiAll(`/repos/${repo}/pulls/${number}/files`);
   const reviews = await apiAll(`/repos/${repo}/pulls/${number}/reviews`);
   const verdict = decide({ action, changes, eventUpdatedAt, pr, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
-  return { pr, verdict };
+  return { pr, verdict, reviewerReview: selectLatestReviewerReview(reviews.items) };
 }
 async function applyEnforcement(repo, number, pr, writes, action) {
   const errors = [];
@@ -381,18 +381,25 @@ export async function evaluateMergeGroup(repo, event, runSha) {
     const finalStates = await readMergeGroupFinalStates(repo, members);
     for (const [index, latest] of latestEvaluations.entries()) {
       const final = finalStates[index];
-      invariant(final.number === members[index].number && final.state === "OPEN" && final.headRefOid === members[index].headSha && final.baseRefOid === group.base_sha && final.updatedAt === latest.pr.updated_at && latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === group.base_sha && latest.verdict.pass && !latest.verdict.noop && latest.verdict.payload === snapshots[index] && latest.verdict.writes.dismissReviewIds.length === 0 && latest.verdict.writes.disableAutoMerge === false && latest.verdict.writes.dequeue === false, "merge-group PR snapshot drifted before success");
+      invariant(final.number === members[index].number && final.state === "OPEN" && final.isDraft === latest.pr.draft && final.headRefOid === members[index].headSha && final.baseRefOid === group.base_sha && latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === group.base_sha && JSON.stringify(final.snapshot) === JSON.stringify(latest.verdict.snapshot) && JSON.stringify(final.reviewerReview) === JSON.stringify(reviewIdentity(latest.reviewerReview)) && latest.verdict.pass && !latest.verdict.noop && latest.verdict.payload === snapshots[index] && latest.verdict.writes.dismissReviewIds.length === 0 && latest.verdict.writes.disableAutoMerge === false && latest.verdict.writes.dequeue === false, "merge-group PR snapshot drifted before success");
     }
   }
   return { failed, prNumbers, summary };
 }
+function reviewIdentity(review) {
+  return review ? { id: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commitOid: review.commit_id, author: review.user.login } : null;
+}
 async function readMergeGroupFinalStates(repo, members) {
   const [owner, name] = repo.split("/");
-  const selections = members.map(({ number }, index) => `p${index}:pullRequest(number:${number}){number state updatedAt headRefOid baseRefOid}`).join(" ");
+  const selections = members.map(({ number }, index) => `p${index}:pullRequest(number:${number}){number state isDraft body headRefOid baseRefOid labels(first:100){nodes{name}pageInfo{hasPreviousPage hasNextPage}}reviews(last:100,author:"${REVIEWER_LOGIN}",states:[APPROVED,CHANGES_REQUESTED,DISMISSED]){nodes{fullDatabaseId state submittedAt body commit{oid}author{login}}pageInfo{hasPreviousPage hasNextPage}}}`).join(" ");
   const repository = await graphql(`query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${selections}}}`, { owner, name }, "repository");
-  const states = members.map((_, index) => repository?.[`p${index}`]);
-  invariant(states.every((state) => Number.isSafeInteger(state?.number) && typeof state.state === "string" && Number.isFinite(Date.parse(state.updatedAt)) && /^[0-9a-f]{40}$/.test(state.headRefOid) && /^[0-9a-f]{40}$/.test(state.baseRefOid)), "unexpected final merge-group PR state");
-  return states;
+  return members.map((_, index) => {
+    const state = repository?.[`p${index}`];
+    invariant(Number.isSafeInteger(state?.number) && typeof state.state === "string" && typeof state.isDraft === "boolean" && typeof state.body === "string" && /^[0-9a-f]{40}$/.test(state.headRefOid) && /^[0-9a-f]{40}$/.test(state.baseRefOid) && Array.isArray(state.labels?.nodes) && state.labels.nodes.every((label) => typeof label?.name === "string") && state.labels.pageInfo?.hasPreviousPage === false && state.labels.pageInfo?.hasNextPage === false && Array.isArray(state.reviews?.nodes) && state.reviews.nodes.every((review) => /^\d+$/.test(review?.fullDatabaseId) && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state) && Number.isFinite(Date.parse(review.submittedAt)) && typeof review.body === "string" && /^[0-9a-f]{40}$/.test(review.commit?.oid) && review.author?.login === REVIEWER_LOGIN) && state.reviews.pageInfo?.hasPreviousPage === false && state.reviews.pageInfo?.hasNextPage === false, "unexpected final merge-group PR state");
+    const reviews = state.reviews.nodes.map((review) => ({ id: Number(review.fullDatabaseId), state: review.state, submitted_at: review.submittedAt, body: review.body, commit_id: review.commit.oid, user: review.author }));
+    invariant(reviews.every((review) => Number.isSafeInteger(review.id)), "unexpected final merge-group PR state");
+    return { ...state, snapshot: computeSnapshot({ number: state.number, state: state.state.toLowerCase(), draft: state.isDraft, body: state.body, head: { sha: state.headRefOid }, base: { sha: state.baseRefOid }, labels: state.labels.nodes, auto_merge: null }), reviewerReview: reviewIdentity(selectLatestReviewerReview(reviews)) };
+  });
 }
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY;

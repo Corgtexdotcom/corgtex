@@ -161,7 +161,7 @@ describe("review snapshot integrity merge group", () => {
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
   const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, headCommit: { oid: prHead }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
   const queuePr = (number) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
-  const stub = (entries, { truncateFiles = false, driftPr = null, finalUpdatedAtDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
+  const stub = (entries, { truncateFiles = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
     const seen = [];
     const pullReads = new Map();
     const groupCommits = new Map(); let base = group.base_sha;
@@ -172,7 +172,7 @@ describe("review snapshot integrity merge group", () => {
       if (u.endsWith("/graphql")) {
         const query = JSON.parse(opts.body).query;
         if (query.includes("mergeQueue")) return reply({ data: { repository: { mergeQueue: { entries: { nodes: entries, pageInfo: { hasPreviousPage: false, hasNextPage: false } } } } } });
-        return reply({ data: { repository: Object.fromEntries(entries.slice(0, memberCount).map((entry, index) => [`p${index}`, { number: entry.pullRequest.number, state: "OPEN", updatedAt: entry.pullRequest.number === finalUpdatedAtDriftPr ? "2026-01-03T00:00:00Z" : "2026-01-02T00:00:00Z", headRefOid: entry.headCommit.oid, baseRefOid: group.base_sha }])) } });
+        return reply({ data: { repository: Object.fromEntries(entries.slice(0, memberCount).map((entry, index) => { const pr = queuePr(entry.pullRequest.number); const review = approvalFor(pr, entry.pullRequest.number === finalReviewDriftPr ? { state: "CHANGES_REQUESTED" } : {}); return [`p${index}`, { number: pr.number, state: "OPEN", isDraft: pr.draft, body: pr.number === finalBodyDriftPr ? `${pr.body}drift` : pr.body, headRefOid: entry.headCommit.oid, baseRefOid: group.base_sha, labels: { nodes: pr.labels, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, reviews: { nodes: [{ fullDatabaseId: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commit: { oid: review.commit_id }, author: review.user }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }]; })) } });
       }
       if (u.includes("/git/commits/")) return reply(groupCommits.get(u.split("/").at(-1)));
       const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number);
@@ -207,7 +207,10 @@ describe("review snapshot integrity merge group", () => {
     vi.unstubAllGlobals();
   });
   it("fails if any PR changes after its concurrent evaluation but before native success", async () => {
-    stub(queueEntries([1, 2]), { finalUpdatedAtDriftPr: 1 });
+    stub(queueEntries([1, 2]), { finalBodyDriftPr: 1 });
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("snapshot drifted");
+    vi.unstubAllGlobals();
+    stub(queueEntries([1, 2]), { finalReviewDriftPr: 1 });
     await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("snapshot drifted");
     vi.unstubAllGlobals();
   });

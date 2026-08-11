@@ -101,9 +101,12 @@ activation if the complementary native or merge-group gate is absent.
   queues (more than 100 entries) fail closed. Before success, one concurrent
   final wave rechecks membership plus every included PR's complete files and
   reviews with bounded API retries and timeouts, followed by one batched
-  GraphQL watermark read of every PR's `updatedAt` and head/base SHAs. A later
-  body/label mutation is independently caught by the PR-head publisher, which
-  fails the status and dequeues the stale approved snapshot.
+  GraphQL read that compares every PR's exact body and label digests, draft and
+  open state, head/base SHAs, and latest decisive reviewer state/body/commit.
+  Pagination or any mismatch fails closed; second-level timestamps are not
+  treated as change tokens. A later PR metadata mutation is independently
+  caught by the PR-head publisher, which fails the status and dequeues the
+  stale approved snapshot.
 - The merge-group workflow cannot validate the merge group for the PR that
   first adds it because GitHub loads this event workflow from the default
   branch. Its first real shadow evidence is therefore the next merge group
