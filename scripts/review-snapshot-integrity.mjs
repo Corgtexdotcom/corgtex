@@ -3,6 +3,15 @@ import { appendFileSync, readFileSync } from "node:fs";
 import process from "node:process";
 export const REVIEWER_LOGIN = "beepto-codex";
 export const ATTESTATION_VERSION = "rsi/v1";
+export const STATUS_CONTEXT = "Review Snapshot Integrity";
+export const STATUS_DESCRIPTIONS = {
+  pending: "Evaluating review snapshot integrity",
+  success: "Review snapshot verified",
+  failure: "Review snapshot integrity check failed",
+};
+const MAX_STATUSES_PER_CONTEXT = 1000;
+const STATUS_CREATOR = "github-actions[bot]";
+const PUBLISHER_ACTIONS = new Set(["opened", "reopened", "synchronize", "edited", "labeled", "unlabeled", "ready_for_review", "converted_to_draft"]);
 const MUTATING_EVENTS = new Set(["labeled", "unlabeled", "synchronize", "ready_for_review", "converted_to_draft", "reopened"]);
 const DOC_EXT = new Set([".md", ".mdx"]);
 const RISK_CAPS = { low: [1200, 50], standard: [800, 25], high: [700, 15], critical: [400, 15] };
@@ -174,19 +183,26 @@ export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, fi
   }
   return { pass: failures.length === 0, noop: false, snapshot, payload, failures, writes };
 }
-export async function api(path, { method = "GET", body, timeoutMs = 10_000 } = {}) {
-  invariant(Number.isSafeInteger(timeoutMs) && timeoutMs > 0, "unexpected API timeout");
+export async function api(path, { method = "GET", body, timeoutMs = 10_000, attempts = 3 } = {}) {
+  invariant(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && Number.isSafeInteger(attempts) && attempts > 0 && attempts <= 3, "unexpected API retry configuration");
   let last;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let res;
     try {
       const signal = AbortSignal.timeout(timeoutMs);
-      const res = await fetch(`https://api.github.com${path}`, { method, signal, headers: { authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }, ...(body ? { body: JSON.stringify(body) } : {}) });
-      if (res.status === 429 || res.status >= 500) { last = new Error(`${method} ${path} -> ${res.status}`); continue; }
-      if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
-      const json = await res.json();
-      if (json && Array.isArray(json.errors) && json.errors.length > 0) throw new Error(`${method} ${path} graphql error: ${json.errors[0].message}`);
-      return json;
-    } catch (err) { if (attempt === 2) throw err; last = err; }
+      res = await fetch(`https://api.github.com${path}`, { method, signal, headers: { authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    } catch (err) { if (attempt === attempts - 1) throw err; last = err; continue; }
+    if (res.status === 429 || res.status >= 500) {
+      last = new Error(`${method} ${path} -> ${res.status}`);
+      if (attempt === attempts - 1) throw last;
+      const seconds = Number(res.headers?.get?.("retry-after"));
+      if (Number.isFinite(seconds) && seconds > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(seconds * 1000, 10_000)));
+      continue;
+    }
+    if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
+    const json = await res.json();
+    if (json && Array.isArray(json.errors) && json.errors.length > 0) throw new Error(`${method} ${path} graphql error: ${json.errors[0].message}`);
+    return json;
   }
   throw last;
 }
@@ -205,22 +221,117 @@ async function graphql(query, variables, field) {
   invariant(json?.data && Object.hasOwn(json.data, field) && json.data[field] !== null, `unexpected GraphQL ${field} response`);
   return json.data[field];
 }
+export function validatePublisherEvent(event, repo) {
+  const pr = event?.pull_request;
+  invariant(PUBLISHER_ACTIONS.has(event?.action), "unsupported pull_request_target action");
+  invariant(event?.repository?.full_name === repo, "unexpected event repository");
+  invariant(pr && Number.isSafeInteger(pr.number) && pr.number > 0, "unexpected pull_request event");
+  invariant(/^[0-9a-f]{40}$/.test(pr.head?.sha) && /^[0-9a-f]{40}$/.test(pr.base?.sha), "unexpected event sha");
+  invariant(pr.base?.ref === "main", "unexpected event base ref");
+  invariant(pr.base?.repo?.full_name === repo, "unexpected event base repository");
+  invariant(typeof pr.head?.repo?.full_name === "string" && pr.head.repo.full_name.length > 0, "unexpected event head repository");
+  invariant(Number.isFinite(Date.parse(pr.updated_at)), "unexpected event updated_at");
+  return pr;
+}
+export async function postStatus(repo, sha, state, { requirePreflight = true } = {}) {
+  invariant(/^[0-9a-f]{40}$/.test(sha) && Object.hasOwn(STATUS_DESCRIPTIONS, state), "unexpected status write");
+  let before;
+  try { before = new Set((await contextStatuses(repo, sha)).map((status) => status.id)); }
+  catch (readError) { if (requirePreflight) throw readError; }
+  let created;
+  try { created = await api(`/repos/${repo}/statuses/${sha}`, { method: "POST", attempts: 1, body: { state, context: STATUS_CONTEXT, description: STATUS_DESCRIPTIONS[state] } }); }
+  catch (writeError) {
+    if (!before) throw writeError;
+    const candidates = (await contextStatuses(repo, sha)).filter((status) => !before.has(status.id) && status.state === state && status.creator.login === STATUS_CREATOR);
+    if (candidates.length !== 1) throw writeError;
+    [created] = candidates;
+  }
+  invariant(Number.isSafeInteger(created?.id) && created.state === state && created.context === STATUS_CONTEXT && created.creator?.login === STATUS_CREATOR, "unexpected status write response");
+  return created;
+}
+async function contextStatuses(repo, sha) {
+  const { items, truncated } = await apiAll(`/repos/${repo}/commits/${sha}/statuses`);
+  invariant(!truncated, "status pagination truncated");
+  invariant(items.every((s) => s && typeof s.context === "string" && ["pending", "success", "failure", "error"].includes(s.state) && Number.isSafeInteger(s.id) && typeof s.creator?.login === "string"), "unexpected status readback schema");
+  return items.filter((s) => s.context === STATUS_CONTEXT);
+}
+export async function confirmStatus(repo, sha, expected) {
+  const ours = await contextStatuses(repo, sha);
+  invariant(ours.length <= MAX_STATUSES_PER_CONTEXT, "status count ceiling reached");
+  const written = ours.find((status) => status.id === expected.id);
+  invariant(written?.state === expected.state && written.creator.login === STATUS_CREATOR, `unconfirmed ${expected.state} status write`);
+}
+async function evaluatePullRequest(repo, number, action, changes, eventUpdatedAt) {
+  const pr = await api(`/repos/${repo}/pulls/${number}`);
+  const files = await apiAll(`/repos/${repo}/pulls/${number}/files`);
+  const reviews = await apiAll(`/repos/${repo}/pulls/${number}/reviews`);
+  const verdict = decide({ action, changes, eventUpdatedAt, pr, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
+  return { pr, verdict };
+}
+async function applyEnforcement(repo, number, pr, writes, action) {
+  const errors = [];
+  for (const id of writes.dismissReviewIds) { try { await api(`/repos/${repo}/pulls/${number}/reviews/${id}/dismissals`, { method: "PUT", body: { message: `Review snapshot changed (${action}); approval dismissed by Review Snapshot Integrity.` } }); } catch (e) { errors.push(e.message); } }
+  if (writes.disableAutoMerge) { try { await graphql("mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}", { id: pr.node_id }, "disablePullRequestAutoMerge"); } catch (e) { errors.push(e.message); } }
+  if (writes.dequeue) { try {
+    const node = await graphql("query($id:ID!){node(id:$id){...on PullRequest{mergeQueueEntry{id}}}}", { id: pr.node_id }, "node");
+    invariant(Object.hasOwn(node, "mergeQueueEntry") && (node.mergeQueueEntry === null || typeof node.mergeQueueEntry?.id === "string"), "unexpected GraphQL mergeQueueEntry response");
+    if (node.mergeQueueEntry) await graphql("mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}", { id: pr.node_id }, "dequeuePullRequest");
+  } catch (e) { errors.push(e.message); } }
+  invariant(errors.length === 0, `enforcement write failure: ${errors.join("; ")}`);
+}
+export async function publishPullRequestStatus(repo, event) {
+  const sha = event?.pull_request?.head?.sha;
+  invariant(/^[0-9a-f]{40}$/.test(sha), "unexpected event head sha");
+  const summary = [];
+  let state = "failure";
+  try {
+    const eventPr = validatePublisherEvent(event, repo);
+    invariant((await contextStatuses(repo, sha)).length <= MAX_STATUSES_PER_CONTEXT - 3, "status count ceiling reserve reached");
+    const pending = await postStatus(repo, sha, "pending");
+    await confirmStatus(repo, sha, pending);
+    const { pr, verdict } = await evaluatePullRequest(repo, eventPr.number, event.action, event.changes ?? null, eventPr.updated_at);
+    summary.push(`### PR #${eventPr.number} (event pull_request_target/${event.action})`, `- rsi/v1 payload: \`${verdict.payload}\``, `- headSha: ${verdict.snapshot.headSha}`, `- baseSha: ${verdict.snapshot.baseSha}`, `- bodyDigest: ${verdict.snapshot.bodyDigest}`, `- labelDigest: ${verdict.snapshot.labelDigest}`, `- verdict: ${verdict.pass ? "pass" : `FAIL (${verdict.failures.length} reason(s))`}`);
+    invariant(pr.head.sha === sha, "event head is no longer current");
+    const beforeWrites = await api(`/repos/${repo}/pulls/${eventPr.number}`);
+    invariant(JSON.stringify(computeSnapshot(beforeWrites)) === JSON.stringify(verdict.snapshot), "snapshot drifted before enforcement");
+    await applyEnforcement(repo, eventPr.number, pr, verdict.writes, event.action);
+    if (verdict.pass && !verdict.noop) {
+      const finalEvaluation = await evaluatePullRequest(repo, eventPr.number, event.action, event.changes ?? null, eventPr.updated_at);
+      invariant(finalEvaluation.verdict.pass && !finalEvaluation.verdict.noop && finalEvaluation.pr.head.sha === sha && JSON.stringify(finalEvaluation.verdict.snapshot) === JSON.stringify(verdict.snapshot), "live PR evaluation drifted before success write");
+      const success = await postStatus(repo, sha, "success");
+      await confirmStatus(repo, sha, success);
+      const afterSuccess = await evaluatePullRequest(repo, eventPr.number, event.action, event.changes ?? null, eventPr.updated_at);
+      invariant(afterSuccess.verdict.pass && !afterSuccess.verdict.noop && afterSuccess.pr.head.sha === sha && JSON.stringify(afterSuccess.verdict.snapshot) === JSON.stringify(verdict.snapshot), "live PR evaluation drifted after success write");
+      state = "success";
+    }
+  } catch (err) {
+    summary.push(`- publisher error: ${err.message}`);
+  }
+  if (state !== "success") {
+    try {
+      const failure = await postStatus(repo, sha, "failure", { requirePreflight: false });
+      await confirmStatus(repo, sha, failure);
+    } catch (err) {
+      summary.push(`- failure status write error: ${err.message}`);
+    }
+  }
+  if (process.env.GITHUB_STEP_SUMMARY) { try { appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary.join("\n")}\n`); } catch { summary.push("- step summary write failed"); } }
+  console.log(summary.join("\n"));
+  if (state !== "success") process.exitCode = 1;
+}
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
   const eventName = process.env.GITHUB_EVENT_NAME;
-  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   if (!repo || !process.env.GITHUB_TOKEN) throw new Error("missing GITHUB_REPOSITORY or GITHUB_TOKEN");
-  let prNumbers;
-  let action = null;
-  let changes = null;
-  let eventUpdatedAt = null;
-  if (eventName === "pull_request_target") { prNumbers = [event.pull_request?.number]; action = event.action; changes = event.changes; eventUpdatedAt = event.pull_request?.updated_at; } else if (eventName === "merge_group") {
-    const [owner, name] = repo.split("/");
-    const repository = await graphql("query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){entries(first:100){nodes{position headCommit{oid} pullRequest{number state}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name, branch: String(event.merge_group?.base_ref ?? "").replace(/^refs\/heads\//, "") }, "repository");
-    prNumbers = resolveMergeGroupPrNumbers(event.merge_group, repository?.mergeQueue?.entries);
-  } else {
-    throw new Error(`unsupported event ${eventName}`);
-  }
+  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+  if (eventName === "pull_request_target") return publishPullRequestStatus(repo, event);
+  if (eventName !== "merge_group") throw new Error(`unsupported event ${eventName}`);
+  const action = null;
+  const changes = null;
+  const eventUpdatedAt = null;
+  const [owner, name] = repo.split("/");
+  const repository = await graphql("query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){entries(first:100){nodes{position headCommit{oid} pullRequest{number state}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name, branch: String(event.merge_group?.base_ref ?? "").replace(/^refs\/heads\//, "") }, "repository");
+  const prNumbers = resolveMergeGroupPrNumbers(event.merge_group, repository?.mergeQueue?.entries);
   if (prNumbers.some((n) => !Number.isSafeInteger(n) || n <= 0)) throw new Error("unresolvable PR number");
   const summary = [];
   let failed = false;
@@ -235,19 +346,7 @@ async function main() {
     if (!verdict.noop) pending.push({ n, pr, writes: verdict.writes });
   }
   for (const { n, pr, writes } of pending) {
-    const errors = [];
-    for (const id of writes.dismissReviewIds) { try { await api(`/repos/${repo}/pulls/${n}/reviews/${id}/dismissals`, { method: "PUT", body: { message: `Review snapshot changed (${action}); approval dismissed by Review Snapshot Integrity.` } }); } catch (e) { errors.push(e.message); } }
-    if (writes.disableAutoMerge) {
-      try { await graphql("mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}", { id: pr.node_id }, "disablePullRequestAutoMerge"); } catch (e) { errors.push(e.message); }
-    }
-    if (writes.dequeue) {
-      try {
-        const node = await graphql("query($id:ID!){node(id:$id){...on PullRequest{mergeQueueEntry{id}}}}", { id: pr.node_id }, "node");
-        invariant(Object.hasOwn(node, "mergeQueueEntry") && (node.mergeQueueEntry === null || (typeof node.mergeQueueEntry === "object" && typeof node.mergeQueueEntry.id === "string")), "unexpected GraphQL mergeQueueEntry response");
-        if (node.mergeQueueEntry) await graphql("mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}", { id: pr.node_id }, "dequeuePullRequest");
-      } catch (e) { errors.push(e.message); }
-    }
-    if (errors.length > 0) { failed = true; summary.push(`### PR #${n} enforcement write failures: ${errors.join("; ")}`); }
+    try { await applyEnforcement(repo, n, pr, writes, action); } catch (e) { failed = true; summary.push(`### PR #${n} enforcement write failure`); }
   }
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary.join("\n")}\n`);
   console.log(summary.join("\n"));

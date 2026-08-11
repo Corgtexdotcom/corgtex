@@ -554,8 +554,12 @@ describe("finalizeExpiredApprovalFlows", () => {
     await expect(finalizeExpiredApprovalFlows()).resolves.toBe(1);
 
     expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "Proposal:proposal-finalize");
-    const lockOrder = prismaMock.$executeRaw.mock.invocationCallOrder[0];
-    expect(lockOrder).toBeLessThan(prismaMock.approvalFlow.update.mock.invocationCallOrder[0]);
-    expect(lockOrder).toBeLessThan(prismaMock.proposal.update.mock.invocationCallOrder[0]);
+    expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(2);
+    const proposalLockOrder = prismaMock.$executeRaw.mock.invocationCallOrder[0];
+    const corpusLockOrder = prismaMock.$executeRaw.mock.invocationCallOrder[1];
+    expect(proposalLockOrder).toBeLessThan(corpusLockOrder);
+    expect(corpusLockOrder).toBeLessThan(prismaMock.approvalFlow.update.mock.invocationCallOrder[0]);
+    expect(corpusLockOrder).toBeLessThan(prismaMock.proposal.update.mock.invocationCallOrder[0]);
+    expect(corpusLockOrder).toBeLessThan(prismaMock.policyCorpus.upsert.mock.invocationCallOrder[0]);
   });
 });

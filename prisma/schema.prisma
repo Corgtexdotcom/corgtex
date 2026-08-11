@@ -97,6 +97,11 @@ enum ProposalResolutionOutcome {
   WITHDRAWN
 }
 
+enum ConstitutionSourceKind {
+  PROPOSAL
+  TENSION
+}
+
 enum ApprovalMode {
   SINGLE
   MAJORITY
@@ -733,6 +738,7 @@ model Workspace {
   workItemEvidence               WorkItemEvidence[]
   policyCorpus                   PolicyCorpus[]
   constitutions                  Constitution[]
+  constitutionSourceReferences  ConstitutionSourceReference[]        @relation("ConstitutionSourceWorkspace")
   governanceScores               GovernanceScore[]
   auditLogs                      AuditLog[]
   productAnalyticsEvents         ProductAnalyticsEvent[]
@@ -2394,7 +2400,6 @@ model Tension {
   raisedByMember Member?         @relation("TensionRaisedBy", fields: [raisedByMemberId], references: [id], onDelete: SetNull)
   meeting        Meeting?        @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   upvotes        TensionUpvote[]
-
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, publishedAt])
@@ -2436,7 +2441,6 @@ model Proposal {
   actions       Action[]
   tensions      Tension[]
   adviceProcess AdviceProcess?
-
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, priority])
@@ -3085,7 +3089,6 @@ model PolicyCorpus {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   proposal  Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   circle    Circle?   @relation(fields: [circleId], references: [id], onDelete: SetNull)
-
   @@index([workspaceId])
 }
 
@@ -3102,10 +3105,38 @@ model Constitution {
   completionTokens Int?
   createdAt        DateTime @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace        Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceReferences ConstitutionSourceReference[] @relation("ConstitutionSourceConstitution")
 
   @@unique([workspaceId, version])
+  @@unique([id, workspaceId])
   @@index([workspaceId, createdAt])
+}
+
+model ConstitutionSourceReference {
+  id                 String                 @id @default(uuid())
+  workspaceId        String
+  constitutionId     String
+  pointKey           String
+  pointOrder         Int
+  sourceOrder        Int
+  policyCorpusId     String
+  sourceKind         ConstitutionSourceKind
+  proposalId         String?
+  tensionId          String?
+  labelSnapshot      String
+  acceptedAtSnapshot DateTime
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  workspace    Workspace    @relation("ConstitutionSourceWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  constitution Constitution @relation("ConstitutionSourceConstitution", fields: [constitutionId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([constitutionId, pointOrder, sourceOrder], map: "ConstitutionSource_constitution_point_source_key")
+  @@index([workspaceId, constitutionId, pointOrder, sourceOrder], map: "ConstitutionSource_workspace_constitution_order_idx")
+  @@index([policyCorpusId], map: "ConstitutionSource_policy_idx")
+  @@index([proposalId], map: "ConstitutionSource_proposal_idx")
+  @@index([tensionId], map: "ConstitutionSource_tension_idx")
 }
 
 model GovernanceScore {

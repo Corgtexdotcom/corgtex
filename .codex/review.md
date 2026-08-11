@@ -69,12 +69,42 @@ Approve only when **all** of:
 - The plan's "Test plan" commands match what CI actually executed.
 - The automated policy checks in `scope-check` and `diff-size` pass.
 
-When you approve, run:
-```
-gh pr review <number> --approve --body "All review criteria pass. Approved by beepto-codex."
-```
+The attested command in the next section is the single authoritative approval
+procedure; an un-attested approval is invalid.
 
 The Executor has already set auto-merge (`gh pr merge --auto --squash`); the PR will merge itself once your approval lands.
+
+## Review Snapshot Integrity attestation
+
+Every approval you submit must be bound to the exact snapshot you reviewed.
+The full protocol lives in
+[`.codex/ops/review-snapshot-integrity.md`](ops/review-snapshot-integrity.md).
+
+1. Immediately before approving, recheck freshly pulled live state: head SHA,
+   base SHA, full PR body, labels, required checks, and review threads.
+2. Generate the attestation from live API state while executing only the
+   trusted `origin/main` evaluator. Never run a PR-head script with reviewer
+   credentials. From any clean checkout, create a temporary trusted worktree
+   and pipe public PR JSON from `gh` into Node; the Node process receives no
+   GitHub token:
+
+   ```bash
+   RSI_TRUSTED_ROOT="$(mktemp -d)"
+   RSI_TRUSTED_DIR="$RSI_TRUSTED_ROOT/main"
+   git worktree add --detach "$RSI_TRUSTED_DIR" origin/main
+   GH_CONFIG_DIR="$HOME/.config/gh-codex-reviewer" gh api repos/Corgtexdotcom/corgtex/pulls/<pr-number> | RSI_TRUSTED_SCRIPT="$RSI_TRUSTED_DIR/scripts/review-snapshot-integrity.mjs" env -u GH_TOKEN -u GITHUB_TOKEN node --input-type=module -e 'import {pathToFileURL} from "node:url"; let json=""; for await (const chunk of process.stdin) json+=chunk; const m=await import(pathToFileURL(process.env.RSI_TRUSTED_SCRIPT)); const pr=JSON.parse(json); console.log(m.buildAttestationPayload(pr.number,m.computeSnapshot(pr)));'
+   git worktree remove "$RSI_TRUSTED_DIR"
+   ```
+3. Include exactly one `review-snapshot-attestation` fenced block containing
+   that single-line JSON payload in the `--body` of your
+   `gh pr review <number> --approve`.
+4. After the approval lands, rerun the exact `Review Snapshot Integrity
+   Publisher` workflow run for the current head so the shadow status
+   recomputes against the new approval. Same-head reruns recompute current
+   metadata; stale-head runs only write to their immutable event head SHA.
+
+An approval without a matching attestation, or one whose head/base/body/label
+digests no longer match live state, is treated as absent by the evaluator.
 
 ## Special cases
 

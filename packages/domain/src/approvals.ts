@@ -12,6 +12,7 @@ import { invariant } from "./errors";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
 import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
+import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 
 export type DecisionSummary = {
   approve: number;
@@ -352,6 +353,9 @@ async function finalizeApprovalFlow(tx: Prisma.TransactionClient, params: {
 }) {
   if (params.flow.subjectType === "PROPOSAL") {
     await acquireWorkItemAdvisoryLock(tx, "Proposal", params.flow.subjectId);
+    if (params.nextStatus === "APPROVED") {
+      await acquireConstitutionCorpusAdvisoryLock(tx, params.flow.workspaceId);
+    }
   }
 
   await tx.approvalFlow.update({
