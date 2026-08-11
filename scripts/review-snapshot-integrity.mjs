@@ -73,12 +73,12 @@ export function isSnapshotMutatingEvent(action, changes) {
 }
 export function resolveMergeGroupPrNumbers(mergeGroup, connection) {
   const entries = connection?.nodes;
-  invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && /^refs\/heads\/.+/.test(mergeGroup?.base_ref) && Array.isArray(entries) && entries.length > 0 && connection.pageInfo?.hasPreviousPage === false, "missing authoritative merge-group membership");
+  invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false, "missing authoritative merge-group membership");
   const tail = entries.filter((e) => e?.headCommit?.oid === mergeGroup.head_sha);
   invariant(tail.length === 1, "ambiguous authoritative merge-group membership");
   const members = entries.filter((e) => e?.position <= tail[0].position).sort((a, b) => a.position - b.position);
   const numbers = members.map((e) => e?.pullRequest?.number);
-  invariant(members.every((e) => Number.isSafeInteger(e.position) && e.pullRequest?.state === "OPEN") && new Set(members.map((e) => e.position)).size === members.length && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length, "ambiguous authoritative merge-group membership");
+  invariant(members.length > 0 && members.every((e) => Number.isSafeInteger(e.position) && e.position >= 0 && /^[0-9a-f]{40}$/.test(e.headCommit?.oid) && e.pullRequest?.state === "OPEN") && new Set(members.map((e) => e.position)).size === members.length && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length, "ambiguous authoritative merge-group membership");
   return numbers;
 }
 function planSection(planText, title) {
@@ -233,6 +233,15 @@ export function validatePublisherEvent(event, repo) {
   invariant(Number.isFinite(Date.parse(pr.updated_at)), "unexpected event updated_at");
   return pr;
 }
+export function validateMergeGroupEvent(event, repo, runSha) {
+  const group = event?.merge_group;
+  invariant(event?.action === "checks_requested", "unsupported merge_group action");
+  invariant(event?.repository?.full_name === repo && repo.split("/").length === 2, "unexpected event repository");
+  invariant(/^[0-9a-f]{40}$/.test(group?.head_sha) && /^[0-9a-f]{40}$/.test(group?.base_sha) && group.head_sha !== group.base_sha, "unexpected merge_group sha");
+  invariant(group.base_ref === "refs/heads/main" && /^refs\/heads\/gh-readonly-queue\/main\/.+/.test(group.head_ref), "unexpected merge_group refs");
+  invariant(runSha === group.head_sha, "workflow run sha disagrees with merge_group head");
+  return group;
+}
 export async function postStatus(repo, sha, state, { requirePreflight = true } = {}) {
   invariant(/^[0-9a-f]{40}$/.test(sha) && Object.hasOwn(STATUS_DESCRIPTIONS, state), "unexpected status write");
   let before;
@@ -319,6 +328,43 @@ export async function publishPullRequestStatus(repo, event) {
   console.log(summary.join("\n"));
   if (state !== "success") process.exitCode = 1;
 }
+async function readMergeGroupPrNumbers(repo, group) {
+  const [owner, name] = repo.split("/");
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const repository = await graphql("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){mergeQueue(branch:\"main\"){entries(first:100){nodes{position headCommit{oid} pullRequest{number state}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name }, "repository");
+    try { return resolveMergeGroupPrNumbers(group, repository?.mergeQueue?.entries); }
+    catch (err) {
+      if (!/authoritative merge-group membership/.test(err.message) || attempt === 2) throw err;
+      last = err;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+  throw last;
+}
+export async function evaluateMergeGroup(repo, event, runSha) {
+  const group = validateMergeGroupEvent(event, repo, runSha);
+  const prNumbers = await readMergeGroupPrNumbers(repo, group);
+  const summary = [];
+  const snapshots = [];
+  let failed = false;
+  for (const number of prNumbers) {
+    const { pr, verdict } = await evaluatePullRequest(repo, number, null, null, null);
+    invariant(pr.number === number && pr.state === "open" && pr.base?.ref === "main" && pr.base?.repo?.full_name === repo && typeof pr.head?.repo?.full_name === "string", "unexpected merge-group PR state");
+    invariant(!verdict.noop && verdict.writes.dismissReviewIds.length === 0 && verdict.writes.disableAutoMerge === false && verdict.writes.dequeue === false, "merge-group evaluation produced mutation intent");
+    summary.push(`### PR #${number} (event merge_group/checks_requested)`, `- rsi/v1 payload: \`${verdict.payload}\``, `- verdict: ${verdict.pass ? "pass" : `FAIL (${verdict.failures.length} reason(s))`}`);
+    snapshots.push(verdict.payload);
+    if (!verdict.pass) failed = true;
+  }
+  if (!failed) {
+    for (const [index, number] of prNumbers.entries()) {
+      const latest = await evaluatePullRequest(repo, number, null, null, null);
+      invariant(latest.verdict.pass && !latest.verdict.noop && latest.verdict.payload === snapshots[index] && latest.verdict.writes.dismissReviewIds.length === 0 && latest.verdict.writes.disableAutoMerge === false && latest.verdict.writes.dequeue === false, "merge-group PR snapshot drifted before success");
+    }
+    invariant(JSON.stringify(await readMergeGroupPrNumbers(repo, group)) === JSON.stringify(prNumbers), "merge-group membership drifted before success");
+  }
+  return { failed, prNumbers, summary };
+}
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
   const eventName = process.env.GITHUB_EVENT_NAME;
@@ -326,31 +372,10 @@ async function main() {
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   if (eventName === "pull_request_target") return publishPullRequestStatus(repo, event);
   if (eventName !== "merge_group") throw new Error(`unsupported event ${eventName}`);
-  const action = null;
-  const changes = null;
-  const eventUpdatedAt = null;
-  const [owner, name] = repo.split("/");
-  const repository = await graphql("query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){entries(first:100){nodes{position headCommit{oid} pullRequest{number state}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name, branch: String(event.merge_group?.base_ref ?? "").replace(/^refs\/heads\//, "") }, "repository");
-  const prNumbers = resolveMergeGroupPrNumbers(event.merge_group, repository?.mergeQueue?.entries);
-  if (prNumbers.some((n) => !Number.isSafeInteger(n) || n <= 0)) throw new Error("unresolvable PR number");
-  const summary = [];
-  let failed = false;
-  const pending = [];
-  for (const n of prNumbers) {
-    const pr = await api(`/repos/${repo}/pulls/${n}`);
-    const files = await apiAll(`/repos/${repo}/pulls/${n}/files`);
-    const reviews = await apiAll(`/repos/${repo}/pulls/${n}/reviews`);
-    const verdict = decide({ action, changes, eventUpdatedAt, pr, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
-    summary.push(`### PR #${n} (event ${eventName}${action ? `/${action}` : ""})`, `- rsi/v1 payload: \`${verdict.payload}\``, `- headSha: ${verdict.snapshot.headSha}`, `- baseSha: ${verdict.snapshot.baseSha}`, `- bodyDigest: ${verdict.snapshot.bodyDigest}`, `- labelDigest: ${verdict.snapshot.labelDigest}`, `- verdict: ${verdict.pass ? "pass" : `FAIL: ${verdict.failures.join("; ")}`}`);
-    if (!verdict.pass) failed = true;
-    if (!verdict.noop) pending.push({ n, pr, writes: verdict.writes });
-  }
-  for (const { n, pr, writes } of pending) {
-    try { await applyEnforcement(repo, n, pr, writes, action); } catch (e) { failed = true; summary.push(`### PR #${n} enforcement write failure`); }
-  }
-  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary.join("\n")}\n`);
+  const { failed, summary } = await evaluateMergeGroup(repo, event, process.env.GITHUB_SHA);
+  if (process.env.GITHUB_STEP_SUMMARY) { try { appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary.join("\n")}\n`); } catch { summary.push("- step summary write failed"); } }
   console.log(summary.join("\n"));
-  if (failed) process.exit(1);
+  if (failed) process.exitCode = 1;
 }
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) main().catch((err) => {
   console.error(`review-snapshot-integrity: ${err.message}`); process.exit(1);

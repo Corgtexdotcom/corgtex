@@ -22,6 +22,14 @@ stale approval can never merge mutated content.
   `GITHUB_TOKEN`, checks out only the trusted base SHA without persisted
   credentials, installs nothing, and never checks out, interpolates, or
   executes PR-controlled content. PR metadata is read only through the API.
+- `.github/workflows/review-snapshot-integrity-merge-group.yml` — shadow-mode
+  `merge_group` `checks_requested` workflow for `main`. GitHub attaches its
+  native job/check name `Review Snapshot Integrity` to the immutable synthetic
+  merge-group SHA. The distinct workflow name avoids a source/name collision
+  with the explicit PR-head commit status. Its job has only `contents: read`
+  and `pull-requests: read`; it has no status, check, PR, or other write scope.
+  It checks out only the trusted merge-group base SHA, installs nothing, and
+  evaluates PR content only as API metadata.
 - The status is **shadow-only**: it is not a required context and no ruleset,
   queue, Actions default, or repository setting references it.
 
@@ -66,7 +74,7 @@ the untrusted-code boundary. Native required-review protection remains the
 authoritative immediate gate for dismissed or superseded reviews; reviewers
 must rerun the trusted publisher after any review-state change. Likewise, a
 main-branch advance is immediately guarded by strict branch protection and is
-re-evaluated on the merge-group SHA by the separately delivered PR2 check.
+re-evaluated on the merge-group SHA by the separate read-only native check.
 Because the PR-head status is shadow-only until both halves and this behavior
 are observed, a stale shadow status cannot authorize a merge and blocks Gate B
 activation if the complementary native or merge-group gate is absent.
@@ -74,7 +82,8 @@ activation if the complementary native or merge-group gate is absent.
 ## Shadow evidence and stop boundaries
 
 - Evidence: the public `Review Snapshot Integrity` status history on PR head
-  commits plus the job step summary (digests only; no PR body content).
+  commits and native checks on synthetic merge-group SHAs, plus job summaries
+  containing only PR numbers, digests, and pass/fail counts.
 - Stop boundaries: never make the context required, never add `checks: write`
   or any other permission, never check out or execute PR code in the
   privileged job, never add installs/caches/artifacts.
@@ -83,8 +92,16 @@ activation if the complementary native or merge-group gate is absent.
   publish a final state is a fail-stuck shadow signal and blocks activation;
   rerun it while shadow-only. If observed after activation, remove the
   required context first as described below.
-- The read-only `merge_group` workflow is separately approved PR2 and must
-  not be added by this PR.
+- Merge-group membership is resolved from the ordered `main` merge queue up
+  to the entry whose authoritative head commit equals the event's exact
+  synthetic SHA. Empty, duplicate, non-open, malformed, ambiguous, or
+  paginated queues (more than 100 entries) fail closed; batches and reruns
+  re-read every included PR's complete files and reviews with bounded API
+  retries and timeouts.
+- The merge-group workflow cannot validate the merge group for the PR that
+  first adds it because GitHub loads this event workflow from the default
+  branch. Its first real shadow evidence is therefore the next merge group
+  after this PR lands. Missing or partial evidence blocks activation.
 - Activation is a separately approved gate after both PRs merge and bounded
   shadow evidence passes: first add the exact context plus GitHub Actions
   source, verify queue behavior, and only then apply separately approved queue

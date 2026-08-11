@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { api, buildAttestationPayload, computeSnapshot, confirmStatus, decide, encodeLabelSet, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, postStatus, publishPullRequestStatus, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes, STATUS_CONTEXT, validatePublisherEvent } from "./review-snapshot-integrity.mjs";
+import { api, buildAttestationPayload, computeSnapshot, confirmStatus, decide, encodeLabelSet, evaluateMergeGroup, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, postStatus, publishPullRequestStatus, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes, STATUS_CONTEXT, validateMergeGroupEvent, validatePublisherEvent } from "./review-snapshot-integrity.mjs";
 const PLAN = "## Risk tier\n\n- `low`\n\n## Files to touch\n\n- `scripts/x.mjs`\n\n## Acceptance criteria\n\n- [x] done\n";
 const FILES = [{ filename: "scripts/x.mjs", additions: 1, deletions: 1 }];
 const makePr = (over = {}) => ({ number: 7, state: "open", draft: false, body: PLAN, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, labels: [{ name: "ok" }], auto_merge: null, ...over });
@@ -78,11 +78,21 @@ describe("review snapshot integrity", () => {
     const stale = decide({ ...state({ action: "reopened" }), eventUpdatedAt: "2026-01-03T00:00:00Z" });
     expect(stale.pass).toBe(false); expect(stale.writes.dismissReviewIds).toEqual([1]);
   });
-  it("requires complete, unambiguous API membership for merge groups", () => {
+  it("resolves exact ordered merge-group batches of 1, 2, and 5", () => {
     const group = { head_sha: "a".repeat(40), base_ref: "refs/heads/main", head_ref: "gh-readonly-queue/main/pr-2-tail" }; const entry = (position, number, oid = "b".repeat(40)) => ({ position, headCommit: { oid }, pullRequest: { number, state: "OPEN" } });
-    const connection = { nodes: [entry(1, 1), entry(2, 2, group.head_sha), entry(3, 3)], pageInfo: { hasPreviousPage: false, hasNextPage: true } };
-    expect(resolveMergeGroupPrNumbers(group, connection)).toEqual([1, 2]);
-    for (const bad of [{}, { ...connection, nodes: [] }, { ...connection, nodes: [entry(1, 1), entry(1, 2, group.head_sha)] }, { ...connection, nodes: [entry(1, 1)] }]) expect(() => resolveMergeGroupPrNumbers(group, bad)).toThrow();
+    const connection = (count) => ({ nodes: Array.from({ length: count }, (_, i) => entry(i + 1, i + 1, i + 1 === count ? group.head_sha : String(i + 1).padStart(40, "0"))), pageInfo: { hasPreviousPage: false, hasNextPage: false } });
+    for (const count of [1, 2, 5]) expect(resolveMergeGroupPrNumbers(group, connection(count))).toEqual(Array.from({ length: count }, (_, i) => i + 1));
+  });
+  it("rejects partial, duplicate, malformed, closed, or ambiguous merge-queue membership", () => {
+    const group = { head_sha: "a".repeat(40), base_ref: "refs/heads/main" }; const entry = (position, number, oid = "b".repeat(40), state = "OPEN") => ({ position, headCommit: { oid }, pullRequest: { number, state } });
+    const good = { nodes: [entry(1, 1), entry(2, 2, group.head_sha)], pageInfo: { hasPreviousPage: false, hasNextPage: false } };
+    for (const bad of [
+      {}, { ...good, nodes: [] }, { ...good, pageInfo: { ...good.pageInfo, hasPreviousPage: true } }, { ...good, pageInfo: { ...good.pageInfo, hasNextPage: true } },
+      { ...good, nodes: Array.from({ length: 101 }, (_, i) => entry(i, i + 1, i === 100 ? group.head_sha : String(i).padStart(40, "0"))) },
+      { ...good, nodes: [entry(1, 1), entry(1, 2, group.head_sha)] }, { ...good, nodes: [entry(1, 1), entry(2, 1, group.head_sha)] },
+      { ...good, nodes: [entry(1, 1), entry(2, 2, group.head_sha, "CLOSED")] }, { ...good, nodes: [entry(1, 1), entry(2, 2, "bad")] },
+      { ...good, nodes: [entry(1, 1)] }, { ...good, nodes: [entry(1, 1, group.head_sha), entry(2, 2, group.head_sha)] },
+    ]) expect(() => resolveMergeGroupPrNumbers(group, bad)).toThrow();
   });
   it("fails on halt-agents and force-merge labels", () => {
     expect(decide(state({}, { labels: [{ name: "halt-agents" }] })).pass).toBe(false);
@@ -138,6 +148,60 @@ describe("review snapshot integrity", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(new Set(signals).size).toBe(3);
     expect(signals.every((signal) => signal.aborted)).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("review snapshot integrity merge group", () => {
+  const repo = "o/r";
+  const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main", head_ref: "refs/heads/gh-readonly-queue/main/pr-2-tail" };
+  const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
+  const queueEntry = (position, number, oid = String(position).padStart(40, "0")) => ({ position, headCommit: { oid }, pullRequest: { number, state: "OPEN" } });
+  const queuePr = (number) => makePr({ number, head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
+  const stub = (entries, { truncateFiles = false, driftPr = null } = {}) => {
+    const seen = [];
+    const pullReads = new Map();
+    vi.stubGlobal("fetch", vi.fn(async (url, opts = {}) => {
+      const u = String(url); const method = opts.method ?? "GET"; seen.push({ u, method, body: opts.body });
+      const reply = (json) => ({ ok: true, status: 200, json: async () => json });
+      if (u.endsWith("/graphql")) return reply({ data: { repository: { mergeQueue: { entries: { nodes: entries, pageInfo: { hasPreviousPage: false, hasNextPage: false } } } } } });
+      const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number);
+      if (u.endsWith(`/pulls/${number}`)) { const reads = (pullReads.get(number) ?? 0) + 1; pullReads.set(number, reads); return reply(number === driftPr && reads > 1 ? { ...pr, body: `${pr.body}drift` } : pr); }
+      if (u.includes(`/pulls/${number}/files`)) return reply(truncateFiles ? Array.from({ length: 100 }, () => FILES[0]) : FILES);
+      if (u.includes(`/pulls/${number}/reviews`)) return reply([approvalFor(pr)]);
+      throw new Error(`unexpected fetch ${u}`);
+    }));
+    return seen;
+  };
+  it("validates action, repository, refs, SHAs, and the native run SHA", () => {
+    expect(validateMergeGroupEvent(event, repo, group.head_sha)).toBe(group);
+    for (const bad of [
+      { ...event, action: "destroy" }, { ...event, repository: { full_name: "evil/r" } },
+      { ...event, merge_group: { ...group, head_sha: "bad" } }, { ...event, merge_group: { ...group, base_sha: group.head_sha } },
+      { ...event, merge_group: { ...group, base_ref: "refs/heads/dev" } }, { ...event, merge_group: { ...group, head_ref: "refs/heads/main" } },
+    ]) expect(() => validateMergeGroupEvent(bad, repo, group.head_sha)).toThrow();
+    expect(() => validateMergeGroupEvent(event, repo, "c".repeat(40))).toThrow("run sha");
+  });
+  it("evaluates every exact member in order through read-only API calls", async () => {
+    const entries = [queueEntry(1, 1), queueEntry(2, 2, group.head_sha), queueEntry(3, 3)]; const seen = stub(entries);
+    const result = await evaluateMergeGroup(repo, event, group.head_sha);
+    expect(result).toMatchObject({ failed: false, prNumbers: [1, 2] });
+    expect(seen.filter((r) => r.u.includes("/pulls/") && !r.u.includes("/files") && !r.u.includes("/reviews")).map((r) => r.u)).toEqual(["https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2", "https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2"]);
+    expect(seen.every((r) => r.method === "GET" || (r.u.endsWith("/graphql") && r.method === "POST" && JSON.parse(r.body).query.startsWith("query(")))).toBe(true);
+    expect(seen.some((r) => /statuses|dismissals/.test(r.u) || /mutation/i.test(r.body ?? ""))).toBe(false);
+    vi.unstubAllGlobals();
+  });
+  it("fails if same-SHA PR metadata drifts before native success", async () => {
+    stub([queueEntry(1, 1, group.head_sha)], { driftPr: 1 });
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("snapshot drifted");
+    vi.unstubAllGlobals();
+  });
+  it("fails closed at the PR pagination bound without attempting a write", async () => {
+    const seen = stub([queueEntry(1, 1, group.head_sha)], { truncateFiles: true });
+    const result = await evaluateMergeGroup(repo, event, group.head_sha);
+    expect(result.failed).toBe(true);
+    expect(seen.filter((r) => r.u.includes("/files")).length).toBe(30);
+    expect(seen.every((r) => r.method === "GET" || r.u.endsWith("/graphql"))).toBe(true);
     vi.unstubAllGlobals();
   });
 });

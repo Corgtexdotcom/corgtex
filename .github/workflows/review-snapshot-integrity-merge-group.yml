@@ -1,0 +1,37 @@
+# Read-only native check for the synthetic merge-group SHA. The checked-out
+# evaluator is always trusted default-branch content; pull-request content is
+# read only as metadata through GitHub's API and is never fetched or executed.
+name: Review Snapshot Integrity Merge Group
+
+on:
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
+
+permissions: {}
+
+concurrency:
+  group: review-snapshot-integrity-merge-${{ github.event.merge_group.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: Review Snapshot Integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+
+      - run: node scripts/review-snapshot-integrity.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
