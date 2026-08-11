@@ -73,7 +73,7 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
   const parseContainerName = (value: unknown, max = 63) => pattern(value, 1, max, /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/);
   const exactRecord: Reader["exactRecord"] = (value, keys) => {
     const record = describeRecord(value);
-    if (new Set(keys).size !== keys.length || record.keys.length !== keys.length || keys.some((key) => !Object.hasOwn(record.descriptors, key))) fail();
+    if (new Set(keys).size !== keys.length || keys.some((key) => /^(?:0|[1-9][0-9]*)$/.test(key) && Number(key) < 4_294_967_295) || record.keys.length !== keys.length || keys.some((key) => !Object.hasOwn(record.descriptors, key))) fail();
     if (rawSeen.has(record.value)) fail();
     rawSeen.add(record.value);
     const snapshot = Object.freeze(Object.fromEntries(keys.map((key) => [key, record.descriptors[key]!.value])));

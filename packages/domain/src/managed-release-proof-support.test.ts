@@ -19,7 +19,7 @@ describe("managed release proof reader support", () => {
     const nullRecord = Object.assign(Object.create(null) as Record<string, unknown>, { first: 1, second: 2 });
     expect(copy).toEqual({ first: 1, second: 2 }); expect(copy).not.toBe(plain); expect(Object.isFrozen(copy)).toBe(true); expect(Object.keys(copy)).toEqual(["first", "second"]); expect(plain).toEqual({ second: 2, first: 1 });
     expect(makeReader().exactRecord(nullRecord, ["second", "first"] as const)).toEqual({ second: 2, first: 1 });
-    expect(makeReader().exactRecord({ first: 1 }, ["first"] as const)).toEqual({ first: 1 });
+    expect(makeReader().exactRecord({ first: 1 }, ["first"] as const)).toEqual({ first: 1 }); expect(Object.keys(makeReader().exactRecord({ "4294967295": 1, "01": 2 }, ["01", "4294967295"] as const))).toEqual(["01", "4294967295"]);
   });
 
   it("rejects malformed records and every callable proxy while projecting hidden carriers into safe snapshots", () => {
@@ -33,7 +33,7 @@ describe("managed release proof reader support", () => {
     const callable = new Proxy(() => 1, { getPrototypeOf: () => { proxyTrapped = true; throw new Error("secret"); } });
     const revokedCallable = Proxy.revocable(() => 1, {}); revokedCallable.revoke();
     const revoked = Proxy.revocable({ x: 1 }, {}); revoked.revoke();
-    rejects([() => makeReader().exactRecord({}, ["x"]), () => makeReader().exactRecord({ x: 1, y: 2 }, ["x"]),
+    rejects([() => makeReader().exactRecord({}, ["x"]), () => makeReader().exactRecord({ x: 1, y: 2 }, ["x"]), () => makeReader().exactRecord({ 1: "one", 2: "two" }, ["2", "1"]), () => makeReader().exactRecord({ 4294967294: "index" }, ["4294967294"]),
       () => makeReader().exactRecord(accessor, ["x"]), () => makeReader().exactRecord(hidden, ["x"]),
       () => makeReader().exactRecord(inherited, ["y"]), () => makeReader().exactRecord(symbol, ["x"]),
       () => makeReader().exactRecord([], []), () => makeReader().exactRecord(new Array(1), []),
