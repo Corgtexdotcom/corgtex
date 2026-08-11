@@ -2400,9 +2400,6 @@ model Tension {
   raisedByMember Member?         @relation("TensionRaisedBy", fields: [raisedByMemberId], references: [id], onDelete: SetNull)
   meeting        Meeting?        @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   upvotes        TensionUpvote[]
-  constitutionSourceReferences ConstitutionSourceReference[] @relation("ConstitutionSourceTension")
-
-  @@unique([id, workspaceId])
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, publishedAt])
@@ -2444,9 +2441,6 @@ model Proposal {
   actions       Action[]
   tensions      Tension[]
   adviceProcess AdviceProcess?
-  constitutionSourceReferences ConstitutionSourceReference[] @relation("ConstitutionSourceProposal")
-
-  @@unique([id, workspaceId])
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, priority])
@@ -3095,9 +3089,6 @@ model PolicyCorpus {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   proposal  Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   circle    Circle?   @relation(fields: [circleId], references: [id], onDelete: SetNull)
-  constitutionSourceReferences ConstitutionSourceReference[] @relation("ConstitutionSourcePolicy")
-
-  @@unique([id, workspaceId])
   @@index([workspaceId])
 }
 
@@ -3140,9 +3131,6 @@ model ConstitutionSourceReference {
 
   workspace    Workspace    @relation("ConstitutionSourceWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
   constitution Constitution @relation("ConstitutionSourceConstitution", fields: [constitutionId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  policyCorpus PolicyCorpus @relation("ConstitutionSourcePolicy", fields: [policyCorpusId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  proposal     Proposal?    @relation("ConstitutionSourceProposal", fields: [proposalId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  tension      Tension?     @relation("ConstitutionSourceTension", fields: [tensionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@unique([constitutionId, pointOrder, sourceOrder], map: "ConstitutionSource_constitution_point_source_key")
   @@index([workspaceId, constitutionId, pointOrder, sourceOrder], map: "ConstitutionSource_workspace_constitution_order_idx")

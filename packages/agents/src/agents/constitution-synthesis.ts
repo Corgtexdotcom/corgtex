@@ -1,7 +1,7 @@
 import type { AgentTriggerType } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
-import { createConstitutionVersion } from "@corgtex/domain";
+import { createConstitutionVersion, loadConstitutionCorpusSnapshot } from "@corgtex/domain";
 import { executeAgentRun } from "../runtime";
 
 export async function runConstitutionSynthesisAgent(params: {
@@ -18,15 +18,8 @@ export async function runConstitutionSynthesisAgent(params: {
     payload: {},
     plan: ["load-context", "synthesize-constitution", "persist-version"],
     buildContext: (helpers) => helpers.tool("policy.load-corpus", {}, async () => {
-      const [policies, currentConstitution] = await Promise.all([
-        prisma.policyCorpus.findMany({
-          where: { workspaceId: params.workspaceId },
-          include: {
-            proposal: { select: { id: true, title: true } },
-            circle: { select: { id: true, name: true } },
-          },
-          orderBy: { acceptedAt: "asc" },
-        }),
+      const [corpusSnapshot, currentConstitution] = await Promise.all([
+        loadConstitutionCorpusSnapshot(prisma, params.workspaceId),
         prisma.constitution.findFirst({
           where: { workspaceId: params.workspaceId },
           orderBy: { version: "desc" },
@@ -34,7 +27,8 @@ export async function runConstitutionSynthesisAgent(params: {
       ]);
 
       return {
-        policies,
+        policies: corpusSnapshot.corpus,
+        corpusFingerprint: corpusSnapshot.fingerprint,
         currentConstitution: currentConstitution ? {
           version: currentConstitution.version,
           bodyMd: currentConstitution.bodyMd,
@@ -44,6 +38,9 @@ export async function runConstitutionSynthesisAgent(params: {
     }),
     execute: async (context, helpers, runId, model) => {
       const policies = Array.isArray(context.policies) ? context.policies : [];
+      const corpusFingerprint = typeof context.corpusFingerprint === "string"
+        ? context.corpusFingerprint
+        : null;
       const currentConstitution = context.currentConstitution as {
         version: number;
         bodyMd: string;
@@ -128,6 +125,7 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
           modelUsed: synthesized.usage?.model ?? "unknown",
           promptTokens: synthesized.usage?.inputTokens ?? null,
           completionTokens: synthesized.usage?.outputTokens ?? null,
+          expectedCorpusFingerprint: corpusFingerprint,
         })
       );
 

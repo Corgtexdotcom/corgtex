@@ -37,13 +37,21 @@ const createParams = {
   modelUsed: "gpt-test",
 };
 const acceptedAt = new Date("2026-05-02T00:00:00.000Z");
+const publishedAt = new Date("2026-05-01T00:00:00.000Z");
 const policy = {
   id: "policy-1",
+  proposalId: "proposal-1",
+  title: "Switch to Slack",
+  bodyMd: "Use Slack for operating communication.",
+  circleId: null,
   acceptedAt,
+  circle: null,
   proposal: {
     id: "proposal-1",
     title: "Switch to Slack",
-    tensions: [{ id: "tension-1", title: "Fragmented communication" }],
+    isPrivate: false,
+    publishedAt,
+    tensions: [{ id: "tension-1", title: "Fragmented communication", publishedAt }],
   },
 };
 
@@ -56,7 +64,7 @@ describe("createConstitutionVersion", () => {
     prismaMock.$transaction.mockReset().mockImplementation((callback) => callback(txMock));
   });
 
-  it("retries serializable and mixed-deployment version conflicts", async () => {
+  it("retries mixed-deployment conflicts with lock-first read-committed snapshots", async () => {
     txMock.constitution.findFirst
       .mockResolvedValueOnce({ version: 1 })
       .mockResolvedValueOnce({ version: 2 })
@@ -92,7 +100,7 @@ describe("createConstitutionVersion", () => {
         version: 3,
       }),
     });
-    expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+    expect(prismaMock.$transaction).toHaveBeenLastCalledWith(expect.any(Function), { isolationLevel: "ReadCommitted" });
   });
 
   it("derives snapshots and creates version-owned references atomically", async () => {
@@ -137,22 +145,60 @@ describe("createConstitutionVersion", () => {
         .rejects.toThrow("Invalid Constitution source reference.");
     }
 
-    txMock.policyCorpus.findMany.mockResolvedValue([{ id: "changed" }]);
+    const proposalReference = [{
+      pointOrder: 1,
+      sourceOrder: 1,
+      policyCorpusId: "policy-1",
+      sourceKind: "PROPOSAL" as const,
+      proposalId: "proposal-1",
+    }];
+    txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, proposal: { ...policy.proposal, isPrivate: true } }]);
+    await expect(createConstitutionVersion({ ...createParams, references: proposalReference }))
+      .rejects.toThrow("Invalid Constitution source reference.");
+    txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, proposal: { ...policy.proposal, publishedAt: null } }]);
+    await expect(createConstitutionVersion({ ...createParams, references: proposalReference }))
+      .rejects.toThrow("Invalid Constitution source reference.");
+
+    txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, title: "Changed" }]);
     await expect(createConstitutionVersion({
       ...createParams,
-      expectedCorpusFingerprint: fingerprintConstitutionCorpus([{ id: "expected" }]),
+      expectedCorpusFingerprint: fingerprintConstitutionCorpus([policy]),
     })).rejects.toThrow("Constitution policy corpus changed during synthesis.");
     expect(txMock.constitution.create).not.toHaveBeenCalled();
+
+    expect(txMock.policyCorpus.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      select: expect.objectContaining({
+        proposal: expect.objectContaining({
+          select: expect.objectContaining({
+            isPrivate: true,
+            publishedAt: true,
+            tensions: expect.objectContaining({
+              where: { isPrivate: false, publishedAt: { not: null }, archivedAt: null },
+            }),
+          }),
+        }),
+      }),
+    }));
   });
 });
 
 describe("fingerprintConstitutionCorpus", () => {
-  it("ignores input order but changes with material source data", () => {
-    const corpus = [{ id: "a", title: "A", tensions: [{ id: "2" }, { id: "1" }] }, { id: "b" }];
-    const reordered = [{ id: "b" }, { tensions: [{ id: "1" }, { id: "2" }], title: "A", id: "a" }];
+  it("projects a fixed shape, ignores order, and changes with material source data", () => {
+    const secondPolicy = {
+      ...policy,
+      id: "policy-2",
+      proposalId: "proposal-2",
+      title: "Second policy",
+      proposal: { ...policy.proposal, id: "proposal-2", title: "Second proposal", tensions: [] },
+    };
+    const corpus = [policy, secondPolicy];
+    const reordered = [
+      { ...secondPolicy, ignoredCallerField: "ignored" },
+      { ...policy, proposal: { ...policy.proposal, tensions: [...policy.proposal.tensions].reverse() } },
+    ];
     expect(fingerprintConstitutionCorpus(corpus)).toBe(fingerprintConstitutionCorpus(reordered));
     expect(fingerprintConstitutionCorpus(corpus)).not.toBe(
-      fingerprintConstitutionCorpus([{ ...corpus[0], title: "Changed" }, corpus[1]]),
+      fingerprintConstitutionCorpus([{ ...policy, bodyMd: "Changed" }, secondPolicy]),
     );
   });
 });

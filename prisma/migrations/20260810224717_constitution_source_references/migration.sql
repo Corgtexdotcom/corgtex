@@ -30,11 +30,39 @@ CREATE UNIQUE INDEX "ConstitutionSource_constitution_point_source_key" ON "Const
 CREATE UNIQUE INDEX "ConstitutionSource_point_policy_proposal_key" ON "ConstitutionSourceReference"("constitutionId", "pointOrder", "policyCorpusId", "proposalId") WHERE "sourceKind" = 'PROPOSAL';
 CREATE UNIQUE INDEX "ConstitutionSource_point_policy_tension_key" ON "ConstitutionSourceReference"("constitutionId", "pointOrder", "policyCorpusId", "tensionId") WHERE "sourceKind" = 'TENSION';
 CREATE UNIQUE INDEX "Constitution_id_workspaceId_key" ON "Constitution"("id", "workspaceId");
-CREATE UNIQUE INDEX "PolicyCorpus_id_workspaceId_key" ON "PolicyCorpus"("id", "workspaceId");
-CREATE UNIQUE INDEX "Proposal_id_workspaceId_key" ON "Proposal"("id", "workspaceId");
-CREATE UNIQUE INDEX "Tension_id_workspaceId_key" ON "Tension"("id", "workspaceId");
 ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_constitutionId_workspaceId_fkey" FOREIGN KEY ("constitutionId", "workspaceId") REFERENCES "Constitution"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_policyCorpusId_workspaceId_fkey" FOREIGN KEY ("policyCorpusId", "workspaceId") REFERENCES "PolicyCorpus"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_proposalId_workspaceId_fkey" FOREIGN KEY ("proposalId", "workspaceId") REFERENCES "Proposal"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_tensionId_workspaceId_fkey" FOREIGN KEY ("tensionId", "workspaceId") REFERENCES "Tension"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+CREATE FUNCTION "validateConstitutionSourceReference"() RETURNS TRIGGER AS $$
+DECLARE "policyProposalId" TEXT;
+BEGIN
+  SELECT "proposalId" INTO "policyProposalId" FROM "PolicyCorpus"
+    WHERE "id" = NEW."policyCorpusId" AND "workspaceId" = NEW."workspaceId";
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23503',
+      MESSAGE = 'Invalid Constitution policy source reference.',
+      CONSTRAINT = 'ConstitutionSourceReference_policy_source_check';
+  END IF;
+  IF NEW."sourceKind" = 'PROPOSAL' THEN
+    IF NEW."proposalId" <> "policyProposalId" OR NOT EXISTS (
+      SELECT 1 FROM "Proposal" WHERE "id" = NEW."proposalId" AND "workspaceId" = NEW."workspaceId"
+    ) THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23503',
+        MESSAGE = 'Invalid Constitution proposal source reference.',
+        CONSTRAINT = 'ConstitutionSourceReference_proposal_source_check';
+    END IF;
+  ELSIF NOT EXISTS (
+    SELECT 1 FROM "Tension" WHERE "id" = NEW."tensionId" AND "workspaceId" = NEW."workspaceId"
+      AND "proposalId" = "policyProposalId"
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23503',
+      MESSAGE = 'Invalid Constitution tension source reference.',
+      CONSTRAINT = 'ConstitutionSourceReference_tension_source_check';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER "ConstitutionSourceReference_source_check" BEFORE INSERT OR UPDATE OF "workspaceId", "policyCorpusId", "sourceKind", "proposalId", "tensionId"
+  ON "ConstitutionSourceReference" FOR EACH ROW EXECUTE FUNCTION "validateConstitutionSourceReference"();
