@@ -643,7 +643,7 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
   invariant(reason.length > 0, 400, "INVALID_INPUT", "Purge reason is required.");
 
   const purged = await prisma.$transaction(async (tx) => {
-    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
+    await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     if (config.entityType === "Proposal") {
       await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
     }
