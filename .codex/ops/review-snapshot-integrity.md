@@ -29,6 +29,7 @@ stale approval can never merge mutated content.
   with the explicit PR-head commit status. Its job has only `contents: read`
   and `pull-requests: read`; it has no status, check, PR, or other write scope.
   It checks out only the trusted merge-group base SHA, installs nothing, and
+  explicitly disables setup-node's automatic package-manager cache. It
   evaluates PR content only as API metadata.
 - The status is **shadow-only**: it is not a required context and no ruleset,
   queue, Actions default, or repository setting references it.

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { api, buildAttestationPayload, computeSnapshot, confirmStatus, decide, encodeLabelSet, evaluateMergeGroup, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, postStatus, publishPullRequestStatus, resolveMergeGroupMembers, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes, STATUS_CONTEXT, validateMergeGroupEvent, validatePublisherEvent } from "./review-snapshot-integrity.mjs";
 const PLAN = "## Risk tier\n\n- `low`\n\n## Files to touch\n\n- `scripts/x.mjs`\n\n## Acceptance criteria\n\n- [x] done\n";
@@ -161,6 +162,10 @@ describe("review snapshot integrity merge group", () => {
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
   const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, headCommit: { oid: prHead }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
   const queuePr = (number) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
+  it("disables setup-node automatic package-manager caching", () => {
+    const workflow = readFileSync(new URL("../.github/workflows/review-snapshot-integrity-merge-group.yml", import.meta.url), "utf8");
+    expect(workflow).toContain("package-manager-cache: false");
+  });
   const stub = (entries, { truncateFiles = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
     const seen = [];
     const pullReads = new Map();
