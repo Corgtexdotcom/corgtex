@@ -162,6 +162,17 @@ describe("createConstitutionVersion", () => {
     txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, proposal: { ...policy.proposal, workspaceId: "ws-2" } }]);
     await expect(createConstitutionVersion({ ...createParams, references: proposalReference }))
       .rejects.toThrow("Invalid Constitution source reference.");
+    txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, proposal: { ...policy.proposal, workspaceId: "ws-2" } }]);
+    await expect(createConstitutionVersion({
+      ...createParams,
+      references: [{
+        pointOrder: 1,
+        sourceOrder: 1,
+        policyCorpusId: "policy-1",
+        sourceKind: "TENSION",
+        tensionId: "tension-1",
+      }],
+    })).rejects.toThrow("Invalid Constitution source reference.");
 
     txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, title: "Changed" }]);
     await expect(createConstitutionVersion({

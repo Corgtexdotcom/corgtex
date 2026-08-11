@@ -33,33 +33,42 @@ CREATE UNIQUE INDEX "Constitution_id_workspaceId_key" ON "Constitution"("id", "w
 ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ConstitutionSourceReference" ADD CONSTRAINT "ConstitutionSourceReference_constitutionId_workspaceId_fkey" FOREIGN KEY ("constitutionId", "workspaceId") REFERENCES "Constitution"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
 CREATE FUNCTION "validateConstitutionSourceReference"() RETURNS TRIGGER AS $$
-DECLARE "policyProposalId" TEXT;
+DECLARE
+  "policyProposalId" TEXT;
+  "policyProposalIsPrivate" BOOLEAN;
+  "policyProposalPublishedAt" TIMESTAMP(3);
 BEGIN
-  SELECT "proposalId" INTO "policyProposalId" FROM "PolicyCorpus"
-    WHERE "id" = NEW."policyCorpusId" AND "workspaceId" = NEW."workspaceId";
-  IF NOT FOUND THEN
+  SELECT pc."proposalId", p."isPrivate", p."publishedAt"
+    INTO "policyProposalId", "policyProposalIsPrivate", "policyProposalPublishedAt"
+    FROM "PolicyCorpus" AS pc
+    JOIN "Proposal" AS p ON p."id" = pc."proposalId" AND p."workspaceId" = NEW."workspaceId"
+    WHERE pc."id" = NEW."policyCorpusId" AND pc."workspaceId" = NEW."workspaceId"
+    FOR SHARE OF pc, p;
+  IF NOT FOUND OR "policyProposalIsPrivate" OR "policyProposalPublishedAt" IS NULL THEN
     RAISE EXCEPTION USING
       ERRCODE = '23503',
       MESSAGE = 'Invalid Constitution policy source reference.',
       CONSTRAINT = 'ConstitutionSourceReference_policy_source_check';
   END IF;
   IF NEW."sourceKind" = 'PROPOSAL' THEN
-    IF NEW."proposalId" <> "policyProposalId" OR NOT EXISTS (
-      SELECT 1 FROM "Proposal" WHERE "id" = NEW."proposalId" AND "workspaceId" = NEW."workspaceId"
-    ) THEN
+    IF NEW."proposalId" IS DISTINCT FROM "policyProposalId" THEN
       RAISE EXCEPTION USING
         ERRCODE = '23503',
         MESSAGE = 'Invalid Constitution proposal source reference.',
         CONSTRAINT = 'ConstitutionSourceReference_proposal_source_check';
     END IF;
-  ELSIF NOT EXISTS (
-    SELECT 1 FROM "Tension" WHERE "id" = NEW."tensionId" AND "workspaceId" = NEW."workspaceId"
-      AND "proposalId" = "policyProposalId"
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '23503',
-      MESSAGE = 'Invalid Constitution tension source reference.',
-      CONSTRAINT = 'ConstitutionSourceReference_tension_source_check';
+  ELSE
+    PERFORM 1 FROM "Tension" AS t
+      WHERE t."id" = NEW."tensionId" AND t."workspaceId" = NEW."workspaceId"
+        AND t."proposalId" = "policyProposalId"
+        AND NOT t."isPrivate" AND t."publishedAt" IS NOT NULL AND t."archivedAt" IS NULL
+        FOR SHARE OF t;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23503',
+        MESSAGE = 'Invalid Constitution tension source reference.',
+        CONSTRAINT = 'ConstitutionSourceReference_tension_source_check';
+    END IF;
   END IF;
   RETURN NEW;
 END;

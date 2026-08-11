@@ -80,6 +80,22 @@ async function waitForQueuedCorpusLock(workspaceId: string) {
   throw new Error("Constitution writer did not queue on the corpus lock.");
 }
 
+async function waitForBlockedSourceInsert() {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const [query] = await prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT COUNT(*)::int AS count
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+        AND query LIKE '%ConstitutionSourceReference%'
+    `;
+    if (query?.count === 1) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Source insert did not wait for the eligibility row lock.");
+}
+
 describe("Constitution provenance database contract", () => {
   it("serializes six same-workspace writers without retry exhaustion", async () => {
     const workspace = await createWorkspace("constitution-concurrency");
@@ -132,7 +148,7 @@ describe("Constitution provenance database contract", () => {
         publishedAt: new Date("2026-08-08T00:00:00.000Z"),
       },
     });
-    const [crossProposalPolicy, localPolicy, foreignTension] = await Promise.all([
+    const [crossProposalPolicy, localPolicy, foreignTension, combinedTension] = await Promise.all([
       prisma.policyCorpus.create({
         data: {
           workspaceId: localWorkspace.id,
@@ -159,6 +175,18 @@ describe("Constitution provenance database contract", () => {
           proposalId: localProposal.id,
           title: "DO NOT DISCLOSE TENSION",
           bodyMd: "Foreign tension body",
+          status: "OPEN",
+          isPrivate: false,
+          publishedAt: new Date("2026-08-08T00:00:00.000Z"),
+        },
+      }),
+      prisma.tension.create({
+        data: {
+          workspaceId: localWorkspace.id,
+          authorUserId: localUser.id,
+          proposalId: foreignProposal.id,
+          title: "Local tension linked to a foreign proposal",
+          bodyMd: "This combined malformed relation must fail closed.",
           status: "OPEN",
           isPrivate: false,
           publishedAt: new Date("2026-08-08T00:00:00.000Z"),
@@ -198,6 +226,81 @@ describe("Constitution provenance database contract", () => {
       }],
     })).rejects.toThrow("Invalid Constitution source reference.");
     await expect(prisma.constitution.count({ where: { workspaceId: localWorkspace.id } })).resolves.toBe(0);
+
+    await expect(createConstitutionVersion({
+      workspaceId: localWorkspace.id,
+      bodyMd: "# Combined malformed tension",
+      modelUsed: "integration-test",
+      references: [{
+        pointOrder: 1,
+        sourceOrder: 1,
+        policyCorpusId: crossProposalPolicy.id,
+        sourceKind: "TENSION",
+        tensionId: combinedTension.id,
+      }],
+    })).rejects.toThrow("Invalid Constitution source reference.");
+    const constitution = await createConstitutionVersion({
+      workspaceId: localWorkspace.id,
+      bodyMd: "# Trigger boundary",
+      modelUsed: "integration-test",
+    });
+    await expect(prisma.constitutionSourceReference.create({
+      data: {
+        workspaceId: localWorkspace.id,
+        constitutionId: constitution.id,
+        pointKey: "point-1",
+        pointOrder: 1,
+        sourceOrder: 1,
+        policyCorpusId: crossProposalPolicy.id,
+        sourceKind: "TENSION",
+        tensionId: combinedTension.id,
+        labelSnapshot: combinedTension.title,
+        acceptedAtSnapshot: crossProposalPolicy.acceptedAt,
+      },
+    })).rejects.toThrow();
+    await expect(prisma.constitutionSourceReference.count({ where: { constitutionId: constitution.id } }))
+      .resolves.toBe(0);
+  });
+
+  it("linearizes tension eligibility at the source insert boundary", async () => {
+    const { workspace, tension, policy } = await createCorpusFixture("constitution-eligibility-race");
+    const constitution = await createConstitutionVersion({
+      workspaceId: workspace.id,
+      bodyMd: "# Eligibility race",
+      modelUsed: "integration-test",
+    });
+    let releaseWriter = () => {};
+    let writerLocked = () => {};
+    const release = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const locked = new Promise<void>((resolve) => { writerLocked = resolve; });
+
+    const writer = prisma.$transaction(async (tx) => {
+      await tx.tension.update({ where: { id: tension.id }, data: { archivedAt: new Date() } });
+      writerLocked();
+      await release;
+    });
+    await locked;
+    const sourceInsert = prisma.constitutionSourceReference.create({
+      data: {
+        workspaceId: workspace.id,
+        constitutionId: constitution.id,
+        pointKey: "point-1",
+        pointOrder: 1,
+        sourceOrder: 1,
+        policyCorpusId: policy.id,
+        sourceKind: "TENSION",
+        tensionId: tension.id,
+        labelSnapshot: tension.title,
+        acceptedAtSnapshot: policy.acceptedAt,
+      },
+    }).then((reference) => reference);
+    await waitForBlockedSourceInsert();
+    releaseWriter();
+    await writer;
+
+    await expect(sourceInsert).rejects.toThrow();
+    await expect(prisma.constitutionSourceReference.count({ where: { constitutionId: constitution.id } }))
+      .resolves.toBe(0);
   });
 
   it("rechecks corpus drift after the shared writer lock", async () => {

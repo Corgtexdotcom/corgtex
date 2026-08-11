@@ -114,11 +114,12 @@ async function resolveSourceReferences(
     const validPoint = Number.isInteger(reference.pointOrder)
       && reference.pointOrder >= 1 && reference.pointOrder <= 10;
     const validOrder = Number.isInteger(reference.sourceOrder) && reference.sourceOrder >= 1;
+    const policyProposalEligible = policy?.proposal.workspaceId === workspaceId
+      && !policy.proposal.isPrivate && policy.proposal.publishedAt != null;
     const proposalSource = reference.sourceKind === "PROPOSAL"
       && reference.proposalId === policy?.proposal.id && !reference.tensionId
-      && policy?.proposal.workspaceId === workspaceId
-      && !policy?.proposal.isPrivate && policy?.proposal.publishedAt != null;
-    const tension = reference.sourceKind === "TENSION" && !reference.proposalId
+      && policyProposalEligible;
+    const tension = reference.sourceKind === "TENSION" && !reference.proposalId && policyProposalEligible
       ? policy?.proposal.tensions.find((candidate) => candidate.id === reference.tensionId)
       : undefined;
     const labelSnapshot = proposalSource ? policy?.proposal.title : tension?.title;
