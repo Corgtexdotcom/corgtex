@@ -26,7 +26,7 @@ type Reader = Readonly<{
 }>;
 
 export function createManagedReleaseProofReader(invalid: () => never): Reader {
-  const rawSeen = new WeakSet<object>();
+  const rawSeen = new WeakSet<object>(); const snapshots = new WeakSet<object>(); const validated = new WeakSet<object>();
   function fail(): never { return invalid(); }
   const safeText = (value: string) => {
     if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) return false;
@@ -41,18 +41,12 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     return true;
   };
   const safeAsciiScalar = (value: string) => safeText(value) && value === value.trim() && /^[\x20-\x7e]*$/.test(value);
-  const exotic = (value: object) => nodeTypes.isAnyArrayBuffer(value) || nodeTypes.isArgumentsObject(value)
-    || nodeTypes.isArrayBufferView(value) || nodeTypes.isBoxedPrimitive(value) || nodeTypes.isCryptoKey(value)
-    || nodeTypes.isDate(value) || nodeTypes.isExternal(value) || nodeTypes.isGeneratorObject(value)
-    || nodeTypes.isKeyObject(value) || nodeTypes.isMap(value) || nodeTypes.isMapIterator(value)
-    || nodeTypes.isModuleNamespaceObject(value) || nodeTypes.isNativeError(value) || nodeTypes.isPromise(value)
-    || nodeTypes.isRegExp(value) || nodeTypes.isSet(value) || nodeTypes.isSetIterator(value)
-    || nodeTypes.isWeakMap(value) || nodeTypes.isWeakSet(value);
-  const describeRecord = (value: unknown): { value: object; descriptors: Record<PropertyKey, PropertyDescriptor>; keys: string[] } => {
-    if (value === null) fail();
-    if (typeof value !== "object") fail();
+  const objectValue = (value: unknown): object => {
     if (nodeTypes.isProxy(value)) fail();
-    if (exotic(value)) fail();
+    if (value === null || typeof value !== "object" || Array.isArray(value)) fail();
+    return value;
+  };
+  const inspectRecord = (value: object): { value: object; descriptors: Record<PropertyKey, PropertyDescriptor>; keys: string[] } => {
     const prototype = Object.getPrototypeOf(value);
     const keys = Reflect.ownKeys(value);
     if (keys.length > 1_024) fail();
@@ -61,6 +55,7 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     if (keys.some((key) => typeof key !== "string" || !descriptors[key]!.enumerable || !("value" in descriptors[key]!))) fail();
     return { value, descriptors, keys: keys as string[] };
   };
+  const describeRecord = (value: unknown) => inspectRecord(objectValue(value));
   const primitive = (value: unknown) => value === null || typeof value === "boolean"
     || (typeof value === "string" && safeText(value))
     || (typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0));
@@ -82,7 +77,8 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     if (new Set(keys).size !== keys.length || record.keys.length !== keys.length || keys.some((key) => !Object.hasOwn(record.descriptors, key))) fail();
     if (rawSeen.has(record.value)) fail();
     rawSeen.add(record.value);
-    return Object.fromEntries(keys.map((key) => [key, record.descriptors[key]!.value])) as never;
+    const snapshot = Object.freeze(Object.fromEntries(keys.map((key) => [key, record.descriptors[key]!.value])));
+    snapshots.add(snapshot); return snapshot as never;
   };
   const literal: Reader["literal"] = (value, expected) => {
     if (!primitive(value) || !Object.is(value, expected) || (typeof value === "string" && !safeAsciiScalar(value))) fail();
@@ -102,15 +98,14 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
   const deepFreeze = <T>(value: T): T => {
     const objects: object[] = []; const seen = new Set<object>(); const pending: unknown[] = [value];
     while (pending.length) {
-      const item = pending.pop(); if (primitive(item)) continue; if (objects.length >= 1_024) fail();
-      const record = describeRecord(item);
-      if (!Object.isExtensible(record.value) || record.keys.some((key) => {
-        const descriptor = record.descriptors[key]!; return descriptor.configurable !== true || descriptor.writable !== true;
-      }) || seen.has(record.value)) fail();
+      const item = pending.pop(); if (primitive(item)) continue;
+      const object = objectValue(item); if (!snapshots.has(object) || seen.has(object) || objects.length >= 1_024) fail();
+      const record = inspectRecord(object); if (!Object.isFrozen(record.value)) fail();
       seen.add(record.value); objects.push(record.value);
       for (const key of record.keys) pending.push(record.descriptors[key]!.value);
     }
     for (let index = objects.length - 1; index >= 0; index -= 1) Object.freeze(objects[index]!);
+    for (const object of objects) validated.add(object);
     return value;
   };
   const canonicalJsonBytes = (value: unknown) => {
@@ -136,7 +131,7 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
         if (item.length > 16_384 || !safeText(item)) fail();
         return emit(JSON.stringify(item));
       }
-      const record = describeRecord(item);
+      const object = objectValue(item); if (!validated.has(object)) fail(); const record = inspectRecord(object);
       if (seen.has(record.value)) fail();
       seen.add(record.value);
       emit("{");
@@ -180,7 +175,7 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
       const match = /^([a-z0-9]{5,50})\.azurecr\.io\/corgtex\/(web|worker)@(sha256:[0-9a-f]{64})$/.exec(value);
       if (!match) fail();
       if (match[2] !== role) fail();
-      return deepFreeze({ image: value, acrName: parseAcrName(match[1]), acrServer: `${match[1]}.azurecr.io`, digest: match[3]! });
+      return deepFreeze(exactRecord({ image: value, acrName: parseAcrName(match[1]), acrServer: `${match[1]}.azurecr.io`, digest: match[3]! }, ["image", "acrName", "acrServer", "digest"] as const)) as never;
     },
     azureRevision: (value, appName) => {
       const prefix = `${parseAppName(appName)}--`;
