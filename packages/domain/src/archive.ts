@@ -66,6 +66,7 @@ type ArchiveConfig = {
     actor: AppActor;
     membership: MembershipSummary | null;
   }) => Promise<void>;
+  canRestore?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   canPurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   beforePurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   afterPurge?: (record: any) => Promise<void>;
@@ -113,6 +114,33 @@ const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
   "Proposal",
   "Tension",
 ]);
+const CRM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>(["CrmAccount", "CrmActivity", "CrmContact", "CrmDeal"]);
+type CrmParentSpec = readonly [ArchiveEntityType, "crmAccount" | "crmContact" | "crmDeal", "accountId" | "contactId" | "dealId"];
+
+async function requireActiveCrmRestoreParents(tx: Prisma.TransactionClient, record: any, parents: readonly CrmParentSpec[]) {
+  for (const [entityType, delegateName, field] of parents) {
+    const parentId = record[field];
+    if (!parentId) continue;
+    await lockWorkspaceArchiveArtifact(tx, entityType, parentId);
+    const parent = await (tx[delegateName] as any).findFirst({ where: {
+      id: parentId, workspaceId: record.workspaceId, archivedAt: null,
+    }, select: { id: true } });
+    invariant(parent, 409, "ARCHIVED_PARENT", `Restore the linked ${entityType} before restoring this record.`);
+  }
+}
+
+async function requireNoActiveActivityOrphan(tx: Prisma.TransactionClient, record: any, entityType: "CrmContact" | "CrmDeal") {
+  if (entityType === "CrmDeal") await tx.$queryRaw`SELECT "id" FROM "CrmDeal" WHERE "id" = ${record.id} FOR UPDATE`;
+  else await tx.$queryRaw`SELECT "id" FROM "CrmContact" WHERE "id" = ${record.id} FOR UPDATE`;
+  const where = entityType === "CrmDeal"
+    ? { workspaceId: record.workspaceId, archivedAt: null, accountId: null, contactId: null, dealId: record.id }
+    : { workspaceId: record.workspaceId, archivedAt: null, accountId: null, OR: [
+      { contactId: record.id, OR: [{ dealId: null }, { deal: { contactId: record.id } }] },
+      { contactId: null, deal: { contactId: record.id } },
+    ] };
+  const activity = await tx.crmActivity.findFirst({ where, select: { id: true } });
+  invariant(!activity, 409, "CRM_ACTIVITY_ORPHAN", "Archive the active solely linked CRM activities before purging this record.");
+}
 
 const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   Action: {
@@ -175,22 +203,28 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     label: titleOrName,
   },
   CrmActivity: {
-    entityType: "CrmActivity",
-    delegate: "crmActivity",
-    findWhere: directWorkspace,
-    label: titleOrName,
+    entityType: "CrmActivity", delegate: "crmActivity", findWhere: directWorkspace, label: titleOrName,
+    canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [
+      ["CrmAccount", "crmAccount", "accountId"], ["CrmContact", "crmContact", "contactId"], ["CrmDeal", "crmDeal", "dealId"],
+    ]),
   },
   CrmContact: {
     entityType: "CrmContact",
     delegate: "crmContact",
     findWhere: directWorkspace,
     label: titleOrName,
+    canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [["CrmAccount", "crmAccount", "accountId"]]),
+    canPurge: (tx, record) => requireNoActiveActivityOrphan(tx, record, "CrmContact"),
   },
   CrmDeal: {
     entityType: "CrmDeal",
     delegate: "crmDeal",
     findWhere: directWorkspace,
     label: titleOrName,
+    canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [
+      ["CrmAccount", "crmAccount", "accountId"], ["CrmContact", "crmContact", "contactId"],
+    ]),
+    canPurge: (tx, record) => requireNoActiveActivityOrphan(tx, record, "CrmDeal"),
   },
   Document: {
     entityType: "Document",
@@ -348,7 +382,7 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (entityType === "CrmActivity") {
+  if (CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
   }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
@@ -587,6 +621,7 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", `${config.entityType} is not archived.`);
+    await config.canRestore?.(tx, record);
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
     const previousState = archiveRecord?.previousState && typeof archiveRecord.previousState === "object"
       ? archiveRecord.previousState as Record<string, unknown>

@@ -14,11 +14,8 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       update: vi.fn(),
       delete: vi.fn(),
     },
-    crmActivity: {
-      findFirst: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
-    },
+    crmActivity: { findFirst: vi.fn(), update: vi.fn(), delete: vi.fn() },
+    crmAccount: { findFirst: vi.fn() },
     goal: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
@@ -163,14 +160,8 @@ describe("workspace archive domain", () => {
   it("archives and restores CRM activities through one reversible ledger", async () => {
     const active = { id: "activity-1", workspaceId: "workspace-1", title: "Follow up", archivedAt: null };
     const archived = { ...active, archivedAt: new Date("2026-08-11T18:00:00.000Z") };
-    prismaMock.crmActivity.findFirst
-      .mockResolvedValueOnce(active)
-      .mockResolvedValueOnce(archived)
-      .mockResolvedValueOnce(archived)
-      .mockResolvedValueOnce(active);
-    prismaMock.crmActivity.update
-      .mockResolvedValueOnce(archived)
-      .mockResolvedValueOnce(active);
+    prismaMock.crmActivity.findFirst.mockResolvedValueOnce(active).mockResolvedValueOnce(archived).mockResolvedValueOnce(archived).mockResolvedValueOnce(active);
+    prismaMock.crmActivity.update.mockResolvedValueOnce(archived).mockResolvedValueOnce(active);
     prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-activity-1", previousState: active });
 
     const { archiveWorkspaceArtifact, restoreWorkspaceArtifact } = await import("./archive");
@@ -182,22 +173,28 @@ describe("workspace archive domain", () => {
 
     expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "workspace_archive:CrmActivity:activity-1");
-    expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ entityType: "CrmActivity", entityId: "activity-1", entityLabel: "Follow up" }),
-    }));
-    expect(prismaMock.workspaceArchiveRecord.update).toHaveBeenCalledWith({
-      where: { id: "archive-activity-1" },
-      data: { restoredAt: expect.any(Date), restoredByUserId: "admin-1" },
-    });
+    expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      entityType: "CrmActivity", entityId: "activity-1", entityLabel: "Follow up" }) }));
+    expect(prismaMock.workspaceArchiveRecord.update).toHaveBeenCalledWith({ where: { id: "archive-activity-1" }, data: { restoredAt: expect.any(Date), restoredByUserId: "admin-1" } });
+  });
+
+  it("keeps the child archived and ledger open when restore has an archived parent", async () => {
+    prismaMock.crmActivity.findFirst.mockResolvedValue({ id: "activity-1", workspaceId: "workspace-1", accountId: "account-1", archivedAt: new Date() });
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-activity-1", previousState: {} });
+    const { restoreWorkspaceArtifact } = await import("./archive");
+
+    await expect(restoreWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1", entityType: "CrmActivity", entityId: "activity-1",
+    })).rejects.toMatchObject({ code: "ARCHIVED_PARENT" });
+    expect(prismaMock.crmActivity.update).not.toHaveBeenCalled();
+    expect(prismaMock.workspaceArchiveRecord.update).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported archive entity types", async () => {
     const { archiveWorkspaceArtifact } = await import("./archive");
-    await expect(archiveWorkspaceArtifact(actor, {
-      workspaceId: "workspace-1",
-      entityType: "CrmUnknown",
-      entityId: "unknown-1",
-    })).rejects.toThrow("Unsupported archive entity type");
+    await expect(archiveWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "CrmUnknown", entityId: "unknown-1" }))
+      .rejects.toThrow("Unsupported archive entity type");
   });
 
   it("restores proposals to their previous status", async () => {

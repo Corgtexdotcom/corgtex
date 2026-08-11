@@ -155,7 +155,12 @@ async function findRelationshipMatch(
   const domain = emailDomain(email);
 
   const contact = await tx.crmContact.findFirst({
-    where: { workspaceId, email, archivedAt: null },
+    where: {
+      workspaceId,
+      email,
+      archivedAt: null,
+      OR: [{ accountId: null }, { account: { archivedAt: null } }],
+    },
     select: {
       id: true,
       name: true,

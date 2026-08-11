@@ -118,6 +118,9 @@ describe("crm information gathering", () => {
 
     expect(first).toMatchObject({ activitiesCreated: 1, conversationsCreated: 1 });
     expect(second).toMatchObject({ activitiesUpdated: 1, conversationsUpdated: 1 });
+    expect(prismaMock.crmContact.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      archivedAt: null, OR: [{ accountId: null }, { account: { archivedAt: null } }],
+    }) }));
     expect(prismaMock.crmConversation.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.crmConversation.update).toHaveBeenCalledTimes(1);
   });
@@ -144,34 +147,19 @@ describe("crm information gathering", () => {
 
   it("locks and skips an archived activity during repeated email materialization", async () => {
     prismaMock.crmContact.findFirst.mockResolvedValue({
-      id: "contact-1",
-      name: "Buyer",
-      email: "buyer@example.test",
-      company: "Example",
+      id: "contact-1", name: "Buyer", email: "buyer@example.test", company: "Example",
       account: { id: "account-1", name: "Example", domain: "example.test" },
     });
     prismaMock.crmActivity.findUnique.mockResolvedValue({ id: "activity-1" });
     prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 0 });
 
-    const result = await materializeCrmEmailTouchpoints({
-      workspaceId: "workspace-1",
-      connectionId: "conn-1",
-      messages: [{
-        id: "msg-1",
-        provider: "GOOGLE",
-        subject: "Archived",
-        from: "buyer@example.test",
-        receivedAt: null,
-        webUrl: null,
-        snippet: "Do not overwrite.",
-        filter: "from:buyer@example.test",
-      }],
-    });
+    const result = await materializeCrmEmailTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", messages: [{
+      id: "msg-1", provider: "GOOGLE", subject: "Archived", from: "buyer@example.test",
+      receivedAt: null, webUrl: null, snippet: "Do not overwrite.", filter: "from:buyer@example.test",
+    }] });
 
     expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(prismaMock, "CrmActivity", "activity-1");
-    expect(prismaMock.crmActivity.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ archivedAt: null }),
-    }));
+    expect(prismaMock.crmActivity.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ archivedAt: null }) }));
     expect(result.activitiesUpdated).toBe(0);
   });
 
@@ -213,15 +201,11 @@ describe("crm information gathering", () => {
     prismaMock.crmActivity.findUnique.mockResolvedValue({ id: "activity-1" });
     prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 0 });
 
-    const result = await materializeCrmCalendarTouchpoints({
-      workspaceId: "workspace-1",
-      connectionId: "conn-1",
-      events: [{
+    const result = await materializeCrmCalendarTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", events: [{
         id: "event-1", provider: "GOOGLE", title: "Archived", description: null,
         startTime: new Date("2026-06-18T10:00:00.000Z"), endTime: new Date("2026-06-18T10:30:00.000Z"),
         attendees: ["buyer@example.test"], organizerEmail: null, meetingUrl: null, htmlLink: null, status: null,
-      }],
-    });
+    }] });
 
     expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(prismaMock, "CrmActivity", "activity-1");
     expect(result.activitiesUpdated).toBe(0);
