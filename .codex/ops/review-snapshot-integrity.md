@@ -92,17 +92,18 @@ activation if the complementary native or merge-group gate is absent.
   publish a final state is a fail-stuck shadow signal and blocks activation;
   rerun it while shadow-only. If observed after activation, remove the
   required context first as described below.
-- Merge-group membership is resolved from the ordered `main` merge queue up
-  to the entry whose authoritative head commit equals the event's exact
-  synthetic SHA. Each cumulative queue commit must form an unbroken two-parent
-  chain from the event base SHA and bind its second parent to that PR's queued
-  head SHA; live PR head/base SHAs must still match those immutable inputs.
+- Merge-group membership is resolved by traversing the event's immutable
+  synthetic two-parent merge-commit chain back to its exact base SHA, then
+  matching each second-parent PR head to one unique, increasing-position entry
+  in the ordered `main` merge queue. Each queue entry's PR head and live PR
+  head/base SHAs must still match those immutable inputs.
   Empty, duplicate, non-open, malformed, ambiguous, disconnected, or paginated
   queues (more than 100 entries) fail closed. Before success, one concurrent
   final wave rechecks membership plus every included PR's complete files and
-  reviews with bounded API retries and timeouts. A later body/label mutation is
-  independently caught by the PR-head publisher, which fails the status and
-  dequeues the stale approved snapshot.
+  reviews with bounded API retries and timeouts, followed by one batched
+  GraphQL watermark read of every PR's `updatedAt` and head/base SHAs. A later
+  body/label mutation is independently caught by the PR-head publisher, which
+  fails the status and dequeues the stale approved snapshot.
 - The merge-group workflow cannot validate the merge group for the PR that
   first adds it because GitHub loads this event workflow from the default
   branch. Its first real shadow evidence is therefore the next merge group

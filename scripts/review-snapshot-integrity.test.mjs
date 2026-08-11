@@ -80,21 +80,22 @@ describe("review snapshot integrity", () => {
   });
   it("resolves exact ordered merge-group batches of 1, 2, and 5", () => {
     const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main", head_ref: "gh-readonly-queue/main/pr-2-tail" };
-    const connection = (count) => { let base = group.base_sha; return { nodes: Array.from({ length: count }, (_, i) => { const head = i + 1 === count ? group.head_sha : String(i + 1).padStart(40, "0"); const prHead = String(i + 101).padStart(40, "0"); const entry = { position: i + 1, baseCommit: { oid: base }, headCommit: { oid: head, parents: { nodes: [{ oid: base }, { oid: prHead }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }, pullRequest: { number: i + 1, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; base = head; return entry; }), pageInfo: { hasPreviousPage: false, hasNextPage: false } }; };
-    for (const count of [1, 2, 5]) expect(resolveMergeGroupPrNumbers(group, connection(count))).toEqual(Array.from({ length: count }, (_, i) => i + 1));
+    const connection = (count) => ({ nodes: Array.from({ length: count }, (_, i) => { const prHead = String(i + 101).padStart(40, "0"); return { position: i + 1, headCommit: { oid: prHead }, pullRequest: { number: i + 1, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; }), pageInfo: { hasPreviousPage: false, hasNextPage: false } });
+    for (const count of [1, 2, 5]) { const queue = connection(count); expect(resolveMergeGroupPrNumbers(group, queue, queue.nodes.map((entry) => entry.headCommit.oid))).toEqual(Array.from({ length: count }, (_, i) => i + 1)); }
   });
   it("rejects partial, duplicate, malformed, closed, or ambiguous merge-queue membership", () => {
-    const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" }; const entry = (position, number, oid, base, state = "OPEN") => { const prHead = String(number + 100).padStart(40, "0"); return { position, baseCommit: { oid: base }, headCommit: { oid, parents: { nodes: [{ oid: base }, { oid: prHead }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }, pullRequest: { number, state, headRefOid: prHead, baseRefOid: group.base_sha } }; };
-    const firstHead = "1".repeat(40); const good = { nodes: [entry(1, 1, firstHead, group.base_sha), entry(2, 2, group.head_sha, firstHead)], pageInfo: { hasPreviousPage: false, hasNextPage: false } };
+    const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" }; const entry = (position, number, state = "OPEN") => { const prHead = String(number + 100).padStart(40, "0"); return { position, headCommit: { oid: prHead }, pullRequest: { number, state, headRefOid: prHead, baseRefOid: group.base_sha } }; };
+    const good = { nodes: [entry(1, 1), entry(2, 2)], pageInfo: { hasPreviousPage: false, hasNextPage: false } }; const heads = good.nodes.map((e) => e.headCommit.oid);
     for (const bad of [
       {}, { ...good, nodes: [] }, { ...good, pageInfo: { ...good.pageInfo, hasPreviousPage: true } }, { ...good, pageInfo: { ...good.pageInfo, hasNextPage: true } },
-      { ...good, nodes: Array.from({ length: 101 }, (_, i) => entry(i, i + 1, i === 100 ? group.head_sha : String(i).padStart(40, "0"), group.base_sha)) },
+      { ...good, nodes: Array.from({ length: 101 }, (_, i) => entry(i, i + 1)) },
       { ...good, nodes: [good.nodes[0], { ...good.nodes[1], position: 1 }] }, { ...good, nodes: [good.nodes[0], { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, number: 1 } }] },
       { ...good, nodes: [good.nodes[0], { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, state: "CLOSED" } }] }, { ...good, nodes: [good.nodes[0], { ...good.nodes[1], headCommit: { ...good.nodes[1].headCommit, oid: "bad" } }] },
       { ...good, nodes: [{ ...good.nodes[0], position: undefined }, good.nodes[1]] }, { ...good, nodes: [{ ...good.nodes[0], pullRequest: { ...good.nodes[0].pullRequest, number: undefined } }, good.nodes[1]] },
-      { ...good, nodes: [good.nodes[0]] }, { ...good, nodes: [{ ...good.nodes[0], headCommit: { ...good.nodes[0].headCommit, oid: group.head_sha } }, good.nodes[1]] },
-    ]) expect(() => resolveMergeGroupPrNumbers(group, bad)).toThrow();
-    for (const bad of [{ ...good.nodes[1], baseCommit: { oid: group.base_sha } }, { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, headRefOid: "c".repeat(40) } }, { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, baseRefOid: "c".repeat(40) } }]) expect(() => resolveMergeGroupMembers(group, { ...good, nodes: [good.nodes[0], bad] })).toThrow();
+      { ...good, nodes: [good.nodes[0]] }, { ...good, nodes: [good.nodes[0], { ...good.nodes[1], headCommit: { oid: good.nodes[0].headCommit.oid } }] },
+    ]) expect(() => resolveMergeGroupPrNumbers(group, bad, heads)).toThrow();
+    for (const bad of [{ ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, headRefOid: "c".repeat(40) } }, { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, baseRefOid: "c".repeat(40) } }]) expect(() => resolveMergeGroupMembers(group, { ...good, nodes: [good.nodes[0], bad] }, heads)).toThrow();
+    expect(() => resolveMergeGroupMembers(group, good, [...heads].reverse())).toThrow();
   });
   it("fails on halt-agents and force-merge labels", () => {
     expect(decide(state({}, { labels: [{ name: "halt-agents" }] })).pass).toBe(false);
@@ -158,15 +159,22 @@ describe("review snapshot integrity merge group", () => {
   const repo = "o/r";
   const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main", head_ref: "refs/heads/gh-readonly-queue/main/pr-2-tail" };
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
-  const queueEntries = (numbers, tail = numbers.length) => { let base = group.base_sha; return numbers.map((number, index) => { const head = index + 1 === tail ? group.head_sha : String(index + 1).padStart(40, "0"); const prHead = String(number + 10).padStart(40, "0"); const entry = { position: index + 1, baseCommit: { oid: base }, headCommit: { oid: head, parents: { nodes: [{ oid: base }, { oid: prHead }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; base = head; return entry; }); };
-  const queuePr = (number) => makePr({ number, head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
-  const stub = (entries, { truncateFiles = false, driftPr = null } = {}) => {
+  const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, headCommit: { oid: prHead }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
+  const queuePr = (number) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
+  const stub = (entries, { truncateFiles = false, driftPr = null, finalUpdatedAtDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
     const seen = [];
     const pullReads = new Map();
+    const groupCommits = new Map(); let base = group.base_sha;
+    for (const [index, entry] of entries.slice(0, memberCount).entries()) { const sha = index + 1 === memberCount ? group.head_sha : String(index + 1).padStart(40, "0"); groupCommits.set(sha, { sha, parents: malformedGroupCommit && index === 0 ? [{ sha: base }] : [{ sha: base }, { sha: entry.headCommit.oid }] }); base = sha; }
     vi.stubGlobal("fetch", vi.fn(async (url, opts = {}) => {
       const u = String(url); const method = opts.method ?? "GET"; seen.push({ u, method, body: opts.body });
       const reply = (json) => ({ ok: true, status: 200, json: async () => json });
-      if (u.endsWith("/graphql")) return reply({ data: { repository: { mergeQueue: { entries: { nodes: entries, pageInfo: { hasPreviousPage: false, hasNextPage: false } } } } } });
+      if (u.endsWith("/graphql")) {
+        const query = JSON.parse(opts.body).query;
+        if (query.includes("mergeQueue")) return reply({ data: { repository: { mergeQueue: { entries: { nodes: entries, pageInfo: { hasPreviousPage: false, hasNextPage: false } } } } } });
+        return reply({ data: { repository: Object.fromEntries(entries.slice(0, memberCount).map((entry, index) => [`p${index}`, { number: entry.pullRequest.number, state: "OPEN", updatedAt: entry.pullRequest.number === finalUpdatedAtDriftPr ? "2026-01-03T00:00:00Z" : "2026-01-02T00:00:00Z", headRefOid: entry.headCommit.oid, baseRefOid: group.base_sha }])) } });
+      }
+      if (u.includes("/git/commits/")) return reply(groupCommits.get(u.split("/").at(-1)));
       const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number);
       if (u.endsWith(`/pulls/${number}`)) { const reads = (pullReads.get(number) ?? 0) + 1; pullReads.set(number, reads); return reply(number === driftPr && reads > 1 ? { ...pr, body: `${pr.body}drift` } : pr); }
       if (u.includes(`/pulls/${number}/files`)) return reply(truncateFiles ? Array.from({ length: 100 }, () => FILES[0]) : FILES);
@@ -185,7 +193,7 @@ describe("review snapshot integrity merge group", () => {
     expect(() => validateMergeGroupEvent(event, repo, "c".repeat(40))).toThrow("run sha");
   });
   it("evaluates every exact member in order through read-only API calls", async () => {
-    const entries = queueEntries([1, 2, 3], 2); const seen = stub(entries);
+    const entries = queueEntries([1, 2, 3]); const seen = stub(entries, { memberCount: 2 });
     const result = await evaluateMergeGroup(repo, event, group.head_sha);
     expect(result).toMatchObject({ failed: false, prNumbers: [1, 2] });
     expect(seen.filter((r) => r.u.includes("/pulls/") && !r.u.includes("/files") && !r.u.includes("/reviews")).map((r) => r.u)).toEqual(["https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2", "https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2"]);
@@ -196,6 +204,16 @@ describe("review snapshot integrity merge group", () => {
   it("fails if same-SHA PR metadata drifts before native success", async () => {
     stub(queueEntries([1]), { driftPr: 1 });
     await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("snapshot drifted");
+    vi.unstubAllGlobals();
+  });
+  it("fails if any PR changes after its concurrent evaluation but before native success", async () => {
+    stub(queueEntries([1, 2]), { finalUpdatedAtDriftPr: 1 });
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("snapshot drifted");
+    vi.unstubAllGlobals();
+  });
+  it("fails closed when the synthetic merge chain is not a two-parent chain to the event base", async () => {
+    stub(queueEntries([1]), { malformedGroupCommit: true });
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("authoritative merge-group membership");
     vi.unstubAllGlobals();
   });
   it("fails closed at the PR pagination bound without attempting a write", async () => {
