@@ -108,10 +108,12 @@ activation if the complementary native or merge-group gate is absent.
   treated as change tokens. A later PR metadata mutation is independently
   caught by the PR-head publisher, which fails the status and dequeues the
   stale approved snapshot.
-- The merge-group workflow cannot validate the merge group for the PR that
-  first adds it because GitHub loads this event workflow from the default
-  branch. Its first real shadow evidence is therefore the next merge group
-  after this PR lands. Missing or partial evidence blocks activation.
+- The workflow definition may launch for the synthetic merge group that first
+  adds it, but the job deliberately checks out that event's pre-merge base
+  evaluator. Such a run can validate workflow permissions and setup only, not
+  the newly delivered evaluator. The first qualifying evaluator evidence is
+  therefore the next merge group after this PR lands. Missing or partial
+  evidence blocks activation.
 - Activation is a separately approved gate after both PRs merge and bounded
   shadow evidence passes: first add the exact context plus GitHub Actions
   source, verify queue behavior, and only then apply separately approved queue
