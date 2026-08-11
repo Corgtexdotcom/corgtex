@@ -4,6 +4,7 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
+  AppError,
   createTension,
   createProposalFromTension,
   createAdviceRequest,
@@ -18,6 +19,7 @@ import {
   upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
+import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 function asStringArray(formData: FormData, key: string) {
@@ -27,6 +29,18 @@ function asStringArray(formData: FormData, key: string) {
 function asOptionalDate(formData: FormData, key: string) {
   const value = asOptional(formData, key);
   return value ? new Date(value) : null;
+}
+
+function expectedVersionFromForm(formData: FormData) {
+  const value = asString(formData, "expectedVersion");
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  const expectedVersion = Number(value);
+  if (!Number.isSafeInteger(expectedVersion)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  return expectedVersion;
 }
 
 export async function createTensionAction(formData: FormData) {
@@ -117,6 +131,36 @@ export async function updateTensionAction(formData: FormData) {
     priority: formData.has("priority") ? Number.parseInt(asString(formData, "priority"), 10) : undefined,
   });
   refresh(workspaceId);
+}
+
+export async function editTensionAction(
+  _state: WorkItemEditActionState,
+  formData: FormData,
+): Promise<WorkItemEditActionState> {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  try {
+    await updateTension(actor, {
+      workspaceId,
+      tensionId: asString(formData, "tensionId"),
+      expectedVersion: expectedVersionFromForm(formData),
+      title: asOptional(formData, "title") ?? undefined,
+      bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
+      assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
+      raisedByMemberId: formData.has("raisedByMemberId") ? asOptional(formData, "raisedByMemberId") : undefined,
+      priority: formData.has("priority") ? Number.parseInt(asString(formData, "priority"), 10) : undefined,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      return { status: "conflict" };
+    }
+    throw error;
+  }
+  refresh(workspaceId);
+  return { status: "success" };
 }
 
 export async function attachTensionExternalResourceAction(formData: FormData) {
