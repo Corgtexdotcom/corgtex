@@ -347,7 +347,9 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
+  if (entityType === "CrmActivity") {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
+  }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await acquireWorkItemAdvisoryLock(tx, entityType as WorkItemEntityType, entityId);
   }

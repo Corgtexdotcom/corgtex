@@ -181,6 +181,7 @@ describe("workspace archive domain", () => {
     await expect(restoreWorkspaceArtifact(actor, params)).rejects.toThrow("CrmActivity is not archived");
 
     expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.$executeRaw).toHaveBeenCalledWith(expect.anything(), "workspace_archive:CrmActivity:activity-1");
     expect(prismaMock.workspaceArchiveRecord.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ entityType: "CrmActivity", entityId: "activity-1", entityLabel: "Follow up" }),
     }));
