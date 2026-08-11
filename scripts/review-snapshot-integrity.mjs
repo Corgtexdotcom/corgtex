@@ -71,17 +71,24 @@ export function isSnapshotMutatingEvent(action, changes) {
   if (action === "edited") return Boolean(changes && (changes.body || changes.base));
   return MUTATING_EVENTS.has(action);
 }
-export function resolveMergeGroupPrNumbers(mergeGroup, connection) {
+export function resolveMergeGroupMembers(mergeGroup, connection) {
   const entries = connection?.nodes;
-  invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false, "missing authoritative merge-group membership");
-  invariant(entries.every((e) => Number.isSafeInteger(e?.position) && e.position >= 0 && /^[0-9a-f]{40}$/.test(e.headCommit?.oid) && Number.isSafeInteger(e.pullRequest?.number) && e.pullRequest.number > 0 && e.pullRequest.state === "OPEN") && new Set(entries.map((e) => e.position)).size === entries.length, "ambiguous authoritative merge-group membership");
+  invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && /^[0-9a-f]{40}$/.test(mergeGroup?.base_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false, "missing authoritative merge-group membership");
+  invariant(entries.every((e) => Number.isSafeInteger(e?.position) && e.position >= 0 && /^[0-9a-f]{40}$/.test(e.baseCommit?.oid) && /^[0-9a-f]{40}$/.test(e.headCommit?.oid) && Array.isArray(e.headCommit.parents?.nodes) && e.headCommit.parents.nodes.length === 2 && e.headCommit.parents.pageInfo?.hasPreviousPage === false && e.headCommit.parents.pageInfo?.hasNextPage === false && Number.isSafeInteger(e.pullRequest?.number) && e.pullRequest.number > 0 && e.pullRequest.state === "OPEN" && /^[0-9a-f]{40}$/.test(e.pullRequest.headRefOid) && e.pullRequest.baseRefOid === mergeGroup.base_sha) && new Set(entries.map((e) => e.position)).size === entries.length, "ambiguous authoritative merge-group membership");
   const tail = entries.filter((e) => e?.headCommit?.oid === mergeGroup.head_sha);
   invariant(tail.length === 1, "ambiguous authoritative merge-group membership");
   const members = entries.filter((e) => e?.position <= tail[0].position).sort((a, b) => a.position - b.position);
-  const numbers = members.map((e) => e?.pullRequest?.number);
-  invariant(members.length > 0 && new Set(numbers).size === numbers.length, "ambiguous authoritative merge-group membership");
-  return numbers;
+  let expectedBase = mergeGroup.base_sha;
+  for (const entry of members) {
+    const parents = entry.headCommit.parents.nodes.map((parent) => parent?.oid);
+    invariant(entry.baseCommit.oid === expectedBase && parents[0] === expectedBase && parents[1] === entry.pullRequest.headRefOid, "merge-group commit chain disagrees with queue membership");
+    expectedBase = entry.headCommit.oid;
+  }
+  const resolved = members.map((e) => ({ number: e.pullRequest.number, headSha: e.pullRequest.headRefOid }));
+  invariant(resolved.length > 0 && new Set(resolved.map((m) => m.number)).size === resolved.length && new Set(resolved.map((m) => m.headSha)).size === resolved.length, "ambiguous authoritative merge-group membership");
+  return resolved;
 }
+export function resolveMergeGroupPrNumbers(mergeGroup, connection) { return resolveMergeGroupMembers(mergeGroup, connection).map((member) => member.number); }
 function planSection(planText, title) {
   const out = [];
   let inside = false;
@@ -329,12 +336,12 @@ export async function publishPullRequestStatus(repo, event) {
   console.log(summary.join("\n"));
   if (state !== "success") process.exitCode = 1;
 }
-async function readMergeGroupPrNumbers(repo, group) {
+async function readMergeGroupMembers(repo, group) {
   const [owner, name] = repo.split("/");
   let last;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const repository = await graphql("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){mergeQueue(branch:\"main\"){entries(first:100){nodes{position headCommit{oid} pullRequest{number state}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name }, "repository");
-    try { return resolveMergeGroupPrNumbers(group, repository?.mergeQueue?.entries); }
+    const repository = await graphql("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){mergeQueue(branch:\"main\"){entries(first:100){nodes{position baseCommit{oid} headCommit{oid parents(first:2){nodes{oid}pageInfo{hasPreviousPage hasNextPage}}} pullRequest{number state headRefOid baseRefOid}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name }, "repository");
+    try { return resolveMergeGroupMembers(group, repository?.mergeQueue?.entries); }
     catch (err) {
       if (!/authoritative merge-group membership/.test(err.message) || attempt === 2) throw err;
       last = err;
@@ -345,24 +352,25 @@ async function readMergeGroupPrNumbers(repo, group) {
 }
 export async function evaluateMergeGroup(repo, event, runSha) {
   const group = validateMergeGroupEvent(event, repo, runSha);
-  const prNumbers = await readMergeGroupPrNumbers(repo, group);
+  const members = await readMergeGroupMembers(repo, group);
+  const prNumbers = members.map((member) => member.number);
   const summary = [];
   const snapshots = [];
   let failed = false;
-  for (const number of prNumbers) {
+  for (const { number, headSha } of members) {
     const { pr, verdict } = await evaluatePullRequest(repo, number, null, null, null);
-    invariant(pr.number === number && pr.state === "open" && pr.base?.ref === "main" && pr.base?.repo?.full_name === repo && typeof pr.head?.repo?.full_name === "string", "unexpected merge-group PR state");
+    invariant(pr.number === number && pr.state === "open" && pr.head?.sha === headSha && pr.base?.sha === group.base_sha && pr.base?.ref === "main" && pr.base?.repo?.full_name === repo && typeof pr.head?.repo?.full_name === "string", "unexpected merge-group PR state");
     invariant(!verdict.noop && verdict.writes.dismissReviewIds.length === 0 && verdict.writes.disableAutoMerge === false && verdict.writes.dequeue === false, "merge-group evaluation produced mutation intent");
     summary.push(`### PR #${number} (event merge_group/checks_requested)`, `- rsi/v1 payload: \`${verdict.payload}\``, `- verdict: ${verdict.pass ? "pass" : `FAIL (${verdict.failures.length} reason(s))`}`);
     snapshots.push(verdict.payload);
     if (!verdict.pass) failed = true;
   }
   if (!failed) {
-    for (const [index, number] of prNumbers.entries()) {
-      const latest = await evaluatePullRequest(repo, number, null, null, null);
-      invariant(latest.verdict.pass && !latest.verdict.noop && latest.verdict.payload === snapshots[index] && latest.verdict.writes.dismissReviewIds.length === 0 && latest.verdict.writes.disableAutoMerge === false && latest.verdict.writes.dequeue === false, "merge-group PR snapshot drifted before success");
+    const [latestMembers, ...latestEvaluations] = await Promise.all([readMergeGroupMembers(repo, group), ...members.map(({ number }) => evaluatePullRequest(repo, number, null, null, null))]);
+    invariant(JSON.stringify(latestMembers) === JSON.stringify(members), "merge-group membership drifted before success");
+    for (const [index, latest] of latestEvaluations.entries()) {
+      invariant(latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === group.base_sha && latest.verdict.pass && !latest.verdict.noop && latest.verdict.payload === snapshots[index] && latest.verdict.writes.dismissReviewIds.length === 0 && latest.verdict.writes.disableAutoMerge === false && latest.verdict.writes.dequeue === false, "merge-group PR snapshot drifted before success");
     }
-    invariant(JSON.stringify(await readMergeGroupPrNumbers(repo, group)) === JSON.stringify(prNumbers), "merge-group membership drifted before success");
   }
   return { failed, prNumbers, summary };
 }
