@@ -443,6 +443,34 @@ describe("workspace archive domain", () => {
     expect(prismaMock.action.delete).toHaveBeenCalledWith({ where: { id: "action-1" } });
   });
 
+  it("locks Proposal purge in proposal-then-corpus order before the authoritative read", async () => {
+    const proposal = {
+      id: "proposal-purge-locked",
+      workspaceId: "workspace-1",
+      title: "Archived accepted proposal",
+      archivedAt: new Date("2026-04-25T12:00:00.000Z"),
+      status: "RESOLVED",
+    };
+    prismaMock.proposal.findFirst.mockResolvedValue(proposal);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-proposal" });
+    prismaMock.proposal.delete.mockResolvedValue(proposal);
+
+    const { purgeWorkspaceArtifact } = await import("./archive");
+    await expect(purgeWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "Proposal",
+      entityId: proposal.id,
+      reason: "retention window elapsed",
+    })).resolves.toEqual({ id: proposal.id });
+
+    expect(prismaMock.$executeRaw).toHaveBeenNthCalledWith(1, expect.anything(), `Proposal:${proposal.id}`);
+    expect(prismaMock.$executeRaw).toHaveBeenNthCalledWith(2, expect.anything(), "workspace-1");
+    const [proposalLockOrder, corpusLockOrder] = prismaMock.$executeRaw.mock.invocationCallOrder;
+    const proposalReadOrder = prismaMock.proposal.findFirst.mock.invocationCallOrder[0];
+    expect(proposalLockOrder).toBeLessThan(corpusLockOrder);
+    expect(corpusLockOrder).toBeLessThan(proposalReadOrder);
+  });
+
   it.each([
     ["Document", "document", "documentId"],
     ["BrainSource", "brainSource", "brainSourceId"],
