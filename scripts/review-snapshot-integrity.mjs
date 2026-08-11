@@ -74,11 +74,12 @@ export function isSnapshotMutatingEvent(action, changes) {
 export function resolveMergeGroupPrNumbers(mergeGroup, connection) {
   const entries = connection?.nodes;
   invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false, "missing authoritative merge-group membership");
+  invariant(entries.every((e) => Number.isSafeInteger(e?.position) && e.position >= 0 && /^[0-9a-f]{40}$/.test(e.headCommit?.oid) && Number.isSafeInteger(e.pullRequest?.number) && e.pullRequest.number > 0 && e.pullRequest.state === "OPEN") && new Set(entries.map((e) => e.position)).size === entries.length, "ambiguous authoritative merge-group membership");
   const tail = entries.filter((e) => e?.headCommit?.oid === mergeGroup.head_sha);
   invariant(tail.length === 1, "ambiguous authoritative merge-group membership");
   const members = entries.filter((e) => e?.position <= tail[0].position).sort((a, b) => a.position - b.position);
   const numbers = members.map((e) => e?.pullRequest?.number);
-  invariant(members.length > 0 && members.every((e) => Number.isSafeInteger(e.position) && e.position >= 0 && /^[0-9a-f]{40}$/.test(e.headCommit?.oid) && e.pullRequest?.state === "OPEN") && new Set(members.map((e) => e.position)).size === members.length && numbers.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(numbers).size === numbers.length, "ambiguous authoritative merge-group membership");
+  invariant(members.length > 0 && new Set(numbers).size === numbers.length, "ambiguous authoritative merge-group membership");
   return numbers;
 }
 function planSection(planText, title) {

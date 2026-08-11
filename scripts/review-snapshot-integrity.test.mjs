@@ -91,6 +91,7 @@ describe("review snapshot integrity", () => {
       { ...good, nodes: Array.from({ length: 101 }, (_, i) => entry(i, i + 1, i === 100 ? group.head_sha : String(i).padStart(40, "0"))) },
       { ...good, nodes: [entry(1, 1), entry(1, 2, group.head_sha)] }, { ...good, nodes: [entry(1, 1), entry(2, 1, group.head_sha)] },
       { ...good, nodes: [entry(1, 1), entry(2, 2, group.head_sha, "CLOSED")] }, { ...good, nodes: [entry(1, 1), entry(2, 2, "bad")] },
+      { ...good, nodes: [entry(undefined, 1), entry(2, 2, group.head_sha)] }, { ...good, nodes: [entry(1, undefined), entry(2, 2, group.head_sha)] },
       { ...good, nodes: [entry(1, 1)] }, { ...good, nodes: [entry(1, 1, group.head_sha), entry(2, 2, group.head_sha)] },
     ]) expect(() => resolveMergeGroupPrNumbers(group, bad)).toThrow();
   });
