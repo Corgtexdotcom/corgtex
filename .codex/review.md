@@ -92,7 +92,7 @@ The full protocol lives in
    RSI_TRUSTED_ROOT="$(mktemp -d)"
    RSI_TRUSTED_DIR="$RSI_TRUSTED_ROOT/main"
    git worktree add --detach "$RSI_TRUSTED_DIR" origin/main
-   GH_CONFIG_DIR="$HOME/.config/gh-codex-reviewer" gh api repos/Corgtexdotcom/corgtex/pulls/<pr-number> | RSI_TRUSTED_SCRIPT="$RSI_TRUSTED_DIR/scripts/review-snapshot-integrity.mjs" node --input-type=module -e 'import {pathToFileURL} from "node:url"; let json=""; for await (const chunk of process.stdin) json+=chunk; const m=await import(pathToFileURL(process.env.RSI_TRUSTED_SCRIPT)); const pr=JSON.parse(json); console.log(m.buildAttestationPayload(pr.number,m.computeSnapshot(pr)));'
+   GH_CONFIG_DIR="$HOME/.config/gh-codex-reviewer" gh api repos/Corgtexdotcom/corgtex/pulls/<pr-number> | RSI_TRUSTED_SCRIPT="$RSI_TRUSTED_DIR/scripts/review-snapshot-integrity.mjs" env -u GH_TOKEN -u GITHUB_TOKEN node --input-type=module -e 'import {pathToFileURL} from "node:url"; let json=""; for await (const chunk of process.stdin) json+=chunk; const m=await import(pathToFileURL(process.env.RSI_TRUSTED_SCRIPT)); const pr=JSON.parse(json); console.log(m.buildAttestationPayload(pr.number,m.computeSnapshot(pr)));'
    git worktree remove "$RSI_TRUSTED_DIR"
    ```
 3. Include exactly one `review-snapshot-attestation` fenced block containing
