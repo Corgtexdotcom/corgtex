@@ -31,6 +31,7 @@ describe("managed release proof reader support", () => {
     const trapped = new Proxy({ x: 1 }, { ownKeys: () => { proxyTrapped = true; throw new Error("secret"); } });
     const inconsistent = new Proxy({ x: 1 }, { getOwnPropertyDescriptor: (target, key) => { inconsistentReads += 1; return Reflect.getOwnPropertyDescriptor(target, key); } });
     const exotic = new Date(); Object.setPrototypeOf(exotic, Object.prototype);
+    const hiddenState = [new Map([["private", 1]]), new Set([1]), new ArrayBuffer(8), Promise.resolve()]; hiddenState.forEach((item) => Object.setPrototypeOf(item, Object.prototype));
     const revoked = Proxy.revocable({ x: 1 }, {}); revoked.revoke();
     rejects([() => makeReader().exactRecord({}, ["x"]), () => makeReader().exactRecord({ x: 1, y: 2 }, ["x"]),
       () => makeReader().exactRecord(accessor, ["x"]), () => makeReader().exactRecord(hidden, ["x"]),
@@ -38,11 +39,15 @@ describe("managed release proof reader support", () => {
       () => makeReader().exactRecord([], []), () => makeReader().exactRecord(new Array(1), []),
       () => makeReader().exactRecord(exotic, []), () => makeReader().exactRecord(new Proxy({ x: 1 }, {}), ["x"]), () => makeReader().exactRecord(trapped, ["x"]),
       () => makeReader().exactRecord(inconsistent, ["x"]), () => makeReader().exactRecord(revoked.proxy, ["x"])]);
+    rejects(hiddenState.flatMap((item) => [() => makeReader().exactRecord(item, []), () => makeReader().canonicalJsonBytes(item), () => makeReader().deepFreeze(item)]));
     const repeated = { x: 1 }; const repeatReader = makeReader(); repeatReader.exactRecord(repeated, ["x"]);
     expect(() => repeatReader.exactRecord(repeated, ["x"])).toThrow("INVALID_A");
     const cyclic: { self?: unknown } = {}; cyclic.self = cyclic; const cycleReader = makeReader(); const root = cycleReader.exactRecord(cyclic, ["self"] as const);
     expect(() => cycleReader.exactRecord(root.self, ["self"])).toThrow("INVALID_A");
     expect(getterCalled).toBe(false); expect(proxyTrapped).toBe(false); expect(inconsistentReads).toBe(0);
+    let tagRead = false; let clean: unknown; Object.defineProperty(Object.prototype, Symbol.toStringTag, { configurable: true, get: () => { tagRead = true; throw new Error("LEAKED_TAG"); } });
+    try { clean = makeReader().exactRecord({ x: 1 }, ["x"]); } finally { Reflect.deleteProperty(Object.prototype, Symbol.toStringTag); }
+    expect(clean).toEqual({ x: 1 }); expect(tagRead).toBe(false);
     expect(makeReader().exactRecord({ x: 1 }, ["x"])).toEqual({ x: 1 });
   });
 
@@ -93,6 +98,9 @@ describe("managed release proof reader support", () => {
     expect(() => makeReader().deepFreeze(rigidRoot)).toThrow("INVALID_A"); expect(Object.isFrozen(rigidRoot)).toBe(false); expect(Object.isFrozen(rigidChild)).toBe(false);
     const shared = { ok: 1 }; rejects([() => makeReader().deepFreeze({ left: shared, right: shared }), () => { const cycle: Record<string, unknown> = {}; cycle.self = cycle; return makeReader().deepFreeze(cycle); },
       () => makeReader().deepFreeze([1]), () => makeReader().deepFreeze(new Proxy({ ok: 1 }, { get: () => { throw new Error("secret"); } }))]);
+    expect(makeReader().deepFreeze(Object.fromEntries(Array.from({ length: 1_024 }, (_, index) => [`k${index}`, index])))).toBeTruthy();
+    let tooDeep: Record<string, unknown> = {}; for (let index = 0; index < 5_000; index += 1) tooDeep = { child: tooDeep };
+    expect(() => makeReader().deepFreeze(tooDeep)).toThrow(/^INVALID_A$/); expect(Object.isFrozen(tooDeep)).toBe(false);
   });
 
   it("emits deterministic bounded canonical UTF-8 bytes for the closed record subset", () => {
@@ -139,8 +147,9 @@ describe("managed release proof reader support", () => {
     const proxy = inspector.indexOf("nodeTypes.isProxy(value)");
     for (const operation of ["Object.getPrototypeOf(value)", "Object.getOwnPropertyDescriptors(value)", "Reflect.ownKeys(value)"]) expect(inspector.indexOf(operation)).toBeGreaterThan(proxy);
     expect(source.match(/Object\.getPrototypeOf\(/g)).toHaveLength(1); expect(source.match(/Object\.getOwnPropertyDescriptors\(/g)).toHaveLength(1); expect(source.match(/Reflect\.ownKeys\(/g)).toHaveLength(1);
-    expect(source.indexOf("const record = describeRecord(value)")).toBeLessThan(source.indexOf("Object.isExtensible(record.value)"));
-    expect(source.indexOf("validateGraph(value, new Set<object>(), objects)")).toBeLessThan(source.indexOf("Object.freeze(objects[index]!)"));
+    expect(source).not.toContain("Object.prototype.toString"); expect(source).toContain("nodeTypes.isMap(value)"); expect(source).toContain("nodeTypes.isPromise(value)");
+    expect(source.indexOf("const record = describeRecord(item)")).toBeLessThan(source.indexOf("Object.isExtensible(record.value)"));
+    expect(source.indexOf("while (pending.length)")).toBeLessThan(source.indexOf("Object.freeze(objects[index]!)"));
     expect(source.indexOf("nodeTypes.isProxy(reader)")).toBeLessThan(source.lastIndexOf("Object.freeze(reader)"));
   });
 });

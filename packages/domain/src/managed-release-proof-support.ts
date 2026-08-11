@@ -41,17 +41,24 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     return true;
   };
   const safeAsciiScalar = (value: string) => safeText(value) && value === value.trim() && /^[\x20-\x7e]*$/.test(value);
+  const exotic = (value: object) => nodeTypes.isAnyArrayBuffer(value) || nodeTypes.isArgumentsObject(value)
+    || nodeTypes.isArrayBufferView(value) || nodeTypes.isBoxedPrimitive(value) || nodeTypes.isCryptoKey(value)
+    || nodeTypes.isDate(value) || nodeTypes.isExternal(value) || nodeTypes.isGeneratorObject(value)
+    || nodeTypes.isKeyObject(value) || nodeTypes.isMap(value) || nodeTypes.isMapIterator(value)
+    || nodeTypes.isModuleNamespaceObject(value) || nodeTypes.isNativeError(value) || nodeTypes.isPromise(value)
+    || nodeTypes.isRegExp(value) || nodeTypes.isSet(value) || nodeTypes.isSetIterator(value)
+    || nodeTypes.isWeakMap(value) || nodeTypes.isWeakSet(value);
   const describeRecord = (value: unknown): { value: object; descriptors: Record<PropertyKey, PropertyDescriptor>; keys: string[] } => {
     if (value === null) fail();
     if (typeof value !== "object") fail();
     if (nodeTypes.isProxy(value)) fail();
+    if (exotic(value)) fail();
     const prototype = Object.getPrototypeOf(value);
     const keys = Reflect.ownKeys(value);
     if (keys.length > 1_024) fail();
     const descriptors = Object.getOwnPropertyDescriptors(value) as Record<PropertyKey, PropertyDescriptor>;
     if (prototype !== Object.prototype && prototype !== null) fail();
     if (keys.some((key) => typeof key !== "string" || !descriptors[key]!.enumerable || !("value" in descriptors[key]!))) fail();
-    if (Object.prototype.toString.call(value) !== "[object Object]") fail();
     return { value, descriptors, keys: keys as string[] };
   };
   const primitive = (value: unknown) => value === null || typeof value === "boolean"
@@ -92,21 +99,17 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     if (!Number.isSafeInteger(value) || Object.is(value, -0) || value < min || value > max) fail();
     return value;
   };
-  const validateGraph = (value: unknown, seen: Set<object>, objects: object[]): void => {
-    if (primitive(value)) return;
-    const record = describeRecord(value);
-    if (!Object.isExtensible(record.value) || record.keys.some((key) => {
-      const descriptor = record.descriptors[key]!;
-      return descriptor.configurable !== true || descriptor.writable !== true;
-    })) fail();
-    if (seen.has(record.value)) fail();
-    seen.add(record.value);
-    objects.push(record.value);
-    for (const key of record.keys) validateGraph(record.descriptors[key]!.value, seen, objects);
-  };
   const deepFreeze = <T>(value: T): T => {
-    const objects: object[] = [];
-    validateGraph(value, new Set<object>(), objects);
+    const objects: object[] = []; const seen = new Set<object>(); const pending: unknown[] = [value];
+    while (pending.length) {
+      const item = pending.pop(); if (primitive(item)) continue; if (objects.length >= 1_024) fail();
+      const record = describeRecord(item);
+      if (!Object.isExtensible(record.value) || record.keys.some((key) => {
+        const descriptor = record.descriptors[key]!; return descriptor.configurable !== true || descriptor.writable !== true;
+      }) || seen.has(record.value)) fail();
+      seen.add(record.value); objects.push(record.value);
+      for (const key of record.keys) pending.push(record.descriptors[key]!.value);
+    }
     for (let index = objects.length - 1; index >= 0; index -= 1) Object.freeze(objects[index]!);
     return value;
   };
