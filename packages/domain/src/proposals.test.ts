@@ -121,6 +121,12 @@ function words(count: number) {
   return Array.from({ length: count }, (_, index) => `word${index + 1}`).join(" ");
 }
 
+function expectCorpusLockBefore(write: ReturnType<typeof vi.fn>) {
+  const raw = vi.mocked((prisma as any).$executeRaw);
+  expect(raw).toHaveBeenCalledTimes(2);
+  expect(raw.mock.invocationCallOrder[1]).toBeLessThan(write.mock.invocationCallOrder[0]);
+}
+
 describe("proposal AI summaries", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1600,6 +1606,7 @@ describe("resolveProposal", () => {
     expect(prisma.policyCorpus.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { proposalId: "p-1" },
     }));
+    expectCorpusLockBefore(vi.mocked(prisma.policyCorpus.upsert));
     expect(appendEvents).toHaveBeenCalledWith(
       expect.anything(),
       expect.arrayContaining([
@@ -2436,6 +2443,7 @@ describe("submitProposal event payload", () => {
     });
 
     expect((prisma as any).policyCorpus.deleteMany).toHaveBeenCalledWith({ where: { proposalId: "p-1" } });
+    expectCorpusLockBefore(vi.mocked((prisma as any).policyCorpus.deleteMany));
     expect((prisma.proposal as any).update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "p-1" },
       data: expect.objectContaining({
@@ -2500,6 +2508,7 @@ describe("submitProposal event payload", () => {
       }),
     }));
     expect((prisma as any).policyCorpus.deleteMany).toHaveBeenCalledWith({ where: { proposalId: "p-1" } });
+    expectCorpusLockBefore(vi.mocked((prisma as any).policyCorpus.deleteMany));
     expect((prisma.proposal as any).update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "p-1" },
       data: expect.objectContaining({
@@ -2588,6 +2597,7 @@ describe("submitProposal event payload", () => {
     expect((prisma as any).policyCorpus.deleteMany).toHaveBeenCalledWith({
       where: { proposalId: "p-1" },
     });
+    expectCorpusLockBefore(vi.mocked((prisma as any).policyCorpus.deleteMany));
     expect((prisma.proposal as any).update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "p-1" },
       data: expect.objectContaining({
