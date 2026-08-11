@@ -741,7 +741,7 @@ describe("Slack context jobs", () => {
 
   it("creates one source-claimed published Action for owner-backed future work", async () => {
     const source = candidate({
-      text: "Jan, please send the signed vendor agreement by Friday.",
+      text: "Jan, please ensure the signed vendor agreement is completed by Friday.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     prismaMock.communicationMessage.findMany
@@ -751,7 +751,7 @@ describe("Slack context jobs", () => {
       .mockResolvedValueOnce([nudgeLink({ message: source })])
       .mockResolvedValueOnce([]);
     extractMock.mockResolvedValueOnce({
-      output: actionableExtraction(),
+      output: actionableExtraction({ concreteNextStep: "ensure the signed vendor agreement is completed" }),
     });
 
     const { runSlackProactiveScan } = await import("./slack-context");
@@ -765,8 +765,8 @@ describe("Slack context jobs", () => {
       workspaceId: "workspace-1",
       provider: "SLACK",
       kind: "ACTION",
-      title: "Send the signed vendor agreement",
-      bodyMd: "Jan, please send the signed vendor agreement by Friday.",
+      title: "Ensure the signed vendor agreement is completed",
+      bodyMd: "Jan, please ensure the signed vendor agreement is completed by Friday.",
       sourceMessageId: "message-1",
       open: true,
       claimKey: "slack-proactive-action:install-1:message-1",
@@ -775,7 +775,7 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-      text: "Created Corgtex action: Send the signed vendor agreement",
+      text: "Created Corgtex action: Ensure the signed vendor agreement is completed",
     }, expect.any(Array));
     expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("concrete future deliverable");
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({

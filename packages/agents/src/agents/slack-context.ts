@@ -291,10 +291,10 @@ function normalizeProactiveExtraction(output: Record<string, unknown>) {
 }
 
 function hasDeterministicNegativeCategory(text: string) {
-  return /(?:^|[.!?\n]\s*)(?:this is |just |only )?(?:a )?(?:test(?:ing)?(?: message)?|dry run|routing check|checking (?:the )?routing)\b/im.test(text)
-    || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(text)
+  if (/\b(?:not\s+(?:yet\s+)?(?:done|sent|handled|finished|completed|resolved)|(?:must|should|will|needs? to|please ensure(?: that)?)[^.!?\n]{0,80}\b(?:be|is|are)\s+(?:done|sent|handled|finished|completed|resolved))\b/i.test(text)) return false;
+  return /(?:^|[.!?\n]\s*)(?:this is |just |only )?(?:a )?(?:test(?:ing)?(?: message)?|dry run|routing check|checking (?:the )?routing)\b/im.test(text) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(text)
     || /(?:^|\n)\s*(?:ack(?:nowledged)?|got it|sounds good|thank you|thanks)[.!]?\s*$/im.test(text)
-    || /\b(?:already (?:done|sent|handled|finished|completed|resolved)|(?:i|we|it|this|that)(?:'s|'ve| have| is)? (?:already )?(?:did|sent|handled|finished|completed|resolved|done)|(?:has|have|had|was|were|is|are) (?:already )?(?:been )?(?:done|sent|handled|finished|completed|resolved)|(?:[A-Z][\p{L}'-]*|<@[A-Z0-9]+(?:\|[^>]+)?>) (?:already )?(?:sent|handled|finished|completed|resolved)|(?:did|sent|handled|finished|completed|resolved) it|no action (?:is )?needed|not an? action item)\b/iu.test(text)
+    || (/\b(?:already (?:done|sent|handled|finished|completed|resolved)|(?:i|we|it|this|that)(?:'s|'ve| have| is)? (?:already )?(?:did|sent|handled|finished|completed|resolved|done)|(?:has|have|had|was|were|is|are) (?:already )?(?:been )?(?:done|sent|handled|finished|completed|resolved)|(?:did|sent|handled|finished|completed|resolved) it|no action (?:is )?needed|not an? action item)\b/i.test(text) || /\b(?:[A-Z][\p{L}'-]*|<@[A-Z0-9]+(?:\|[^>]+)?>) (?:already )?(?:sent|handled|finished|completed|resolved)\b/u.test(text))
     || /(?:^|[.!?]\s*)done\b/i.test(text);
 }
 
