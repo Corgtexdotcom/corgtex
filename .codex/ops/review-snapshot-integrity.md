@@ -30,9 +30,10 @@ stale approval can never merge mutated content.
 1. Complete the full `.codex/review.md` checklist against freshly pulled PR
    state: head SHA, base SHA, full PR body, labels, checks, and review
    threads must all be rechecked at approval time.
-2. Generate the attestation payload from live API state:
-   `node scripts/review-snapshot-integrity.mjs --attest <pr-number>` (requires
-   `GITHUB_TOKEN` and `GITHUB_REPOSITORY`).
+2. Generate the attestation payload with the exact trusted-worktree pipeline
+   in `.codex/review.md`. Never execute the reviewed PR's script with reviewer
+   credentials; only `gh` receives the credential, while the trusted
+   `origin/main` evaluator receives public PR JSON on stdin.
 3. Submit the approval as `beepto-codex` with exactly one attestation block in
    the body:
 
@@ -58,6 +59,17 @@ that the event head and evaluated snapshot are still current, dismisses stale
 applicable. Stale-head runs perform no PR mutation. Title-only edits recompute
 but do not change attested state. An approval and a snapshot mutation at the
 identical timestamp are ambiguous and fail closed.
+
+`pull_request_review` is intentionally not a write-capable trigger: GitHub
+runs that workflow from the PR merge commit, so granting it writes would cross
+the untrusted-code boundary. Native required-review protection remains the
+authoritative immediate gate for dismissed or superseded reviews; reviewers
+must rerun the trusted publisher after any review-state change. Likewise, a
+main-branch advance is immediately guarded by strict branch protection and is
+re-evaluated on the merge-group SHA by the separately delivered PR2 check.
+Because the PR-head status is shadow-only until both halves and this behavior
+are observed, a stale shadow status cannot authorize a merge and blocks Gate B
+activation if the complementary native or merge-group gate is absent.
 
 ## Shadow evidence and stop boundaries
 

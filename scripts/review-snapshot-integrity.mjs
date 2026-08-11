@@ -183,18 +183,18 @@ export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, fi
   }
   return { pass: failures.length === 0, noop: false, snapshot, payload, failures, writes };
 }
-export async function api(path, { method = "GET", body, timeoutMs = 10_000 } = {}) {
-  invariant(Number.isSafeInteger(timeoutMs) && timeoutMs > 0, "unexpected API timeout");
+export async function api(path, { method = "GET", body, timeoutMs = 10_000, attempts = 3 } = {}) {
+  invariant(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && Number.isSafeInteger(attempts) && attempts > 0 && attempts <= 3, "unexpected API retry configuration");
   let last;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     let res;
     try {
       const signal = AbortSignal.timeout(timeoutMs);
       res = await fetch(`https://api.github.com${path}`, { method, signal, headers: { authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" }, ...(body ? { body: JSON.stringify(body) } : {}) });
-    } catch (err) { if (attempt === 2) throw err; last = err; continue; }
+    } catch (err) { if (attempt === attempts - 1) throw err; last = err; continue; }
     if (res.status === 429 || res.status >= 500) {
       last = new Error(`${method} ${path} -> ${res.status}`);
-      if (attempt === 2) throw last;
+      if (attempt === attempts - 1) throw last;
       const seconds = Number(res.headers?.get?.("retry-after"));
       if (Number.isFinite(seconds) && seconds > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(seconds * 1000, 10_000)));
       continue;
@@ -235,7 +235,14 @@ export function validatePublisherEvent(event, repo) {
 }
 export async function postStatus(repo, sha, state) {
   invariant(/^[0-9a-f]{40}$/.test(sha) && Object.hasOwn(STATUS_DESCRIPTIONS, state), "unexpected status write");
-  const created = await api(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: { state, context: STATUS_CONTEXT, description: STATUS_DESCRIPTIONS[state] } });
+  const before = new Set((await contextStatuses(repo, sha)).map((status) => status.id));
+  let created;
+  try { created = await api(`/repos/${repo}/statuses/${sha}`, { method: "POST", attempts: 1, body: { state, context: STATUS_CONTEXT, description: STATUS_DESCRIPTIONS[state] } }); }
+  catch (writeError) {
+    const candidates = (await contextStatuses(repo, sha)).filter((status) => !before.has(status.id) && status.state === state && status.creator.login === STATUS_CREATOR);
+    if (candidates.length !== 1) throw writeError;
+    [created] = candidates;
+  }
   invariant(Number.isSafeInteger(created?.id) && created.state === state && created.context === STATUS_CONTEXT && created.creator?.login === STATUS_CREATOR, "unexpected status write response");
   return created;
 }
@@ -250,10 +257,6 @@ export async function confirmStatus(repo, sha, expected) {
   invariant(ours.length <= MAX_STATUSES_PER_CONTEXT, "status count ceiling reached");
   const written = ours.find((status) => status.id === expected.id);
   invariant(written?.state === expected.state && written.creator.login === STATUS_CREATOR, `unconfirmed ${expected.state} status write`);
-}
-export async function printAttestation(repo, prNumber) {
-  const pr = await api(`/repos/${repo}/pulls/${prNumber}`);
-  console.log(buildAttestationPayload(pr.number, computeSnapshot(pr)));
 }
 async function evaluatePullRequest(repo, number, action, changes, eventUpdatedAt) {
   const pr = await api(`/repos/${repo}/pulls/${number}`);
@@ -274,11 +277,12 @@ async function applyEnforcement(repo, number, pr, writes, action) {
   invariant(errors.length === 0, `enforcement write failure: ${errors.join("; ")}`);
 }
 export async function publishPullRequestStatus(repo, event) {
-  const eventPr = validatePublisherEvent(event, repo);
-  const sha = eventPr.head.sha;
+  const sha = event?.pull_request?.head?.sha;
+  invariant(/^[0-9a-f]{40}$/.test(sha), "unexpected event head sha");
   const summary = [];
   let state = "failure";
   try {
+    const eventPr = validatePublisherEvent(event, repo);
     invariant((await contextStatuses(repo, sha)).length <= MAX_STATUSES_PER_CONTEXT - 3, "status count ceiling reserve reached");
     const pending = await postStatus(repo, sha, "pending");
     await confirmStatus(repo, sha, pending);
@@ -289,8 +293,8 @@ export async function publishPullRequestStatus(repo, event) {
     invariant(JSON.stringify(computeSnapshot(beforeWrites)) === JSON.stringify(verdict.snapshot), "snapshot drifted before enforcement");
     await applyEnforcement(repo, eventPr.number, pr, verdict.writes, event.action);
     if (verdict.pass && !verdict.noop) {
-      const refetch = await api(`/repos/${repo}/pulls/${eventPr.number}`);
-      invariant(JSON.stringify(computeSnapshot(refetch)) === JSON.stringify(verdict.snapshot), "snapshot drifted before success write");
+      const finalEvaluation = await evaluatePullRequest(repo, eventPr.number, event.action, event.changes ?? null, eventPr.updated_at);
+      invariant(finalEvaluation.verdict.pass && !finalEvaluation.verdict.noop && finalEvaluation.pr.head.sha === sha && JSON.stringify(finalEvaluation.verdict.snapshot) === JSON.stringify(verdict.snapshot), "live PR evaluation drifted before success write");
       const success = await postStatus(repo, sha, "success");
       await confirmStatus(repo, sha, success);
       state = "success";
@@ -314,11 +318,6 @@ async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
   const eventName = process.env.GITHUB_EVENT_NAME;
   if (!repo || !process.env.GITHUB_TOKEN) throw new Error("missing GITHUB_REPOSITORY or GITHUB_TOKEN");
-  if (process.argv[2] === "--attest") {
-    const prNumber = Number(process.argv[3]);
-    invariant(Number.isSafeInteger(prNumber) && prNumber > 0, "unexpected --attest PR number");
-    return printAttestation(repo, prNumber);
-  }
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   if (eventName === "pull_request_target") return publishPullRequestStatus(repo, event);
   if (eventName !== "merge_group") throw new Error(`unsupported event ${eventName}`);

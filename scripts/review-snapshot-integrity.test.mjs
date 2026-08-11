@@ -146,7 +146,7 @@ describe("review snapshot integrity publisher", () => {
   const repo = "o/r";
   const creator = { login: "github-actions[bot]" };
   const eventFor = (pr, over = {}) => ({ action: "opened", changes: null, repository: { full_name: repo }, pull_request: { number: pr.number, updated_at: "2026-01-02T00:00:00Z", head: { sha: pr.head.sha, repo: { full_name: repo } }, base: { sha: pr.base.sha, ref: "main", repo: { full_name: repo } } }, ...over });
-  const stubPublisherApi = (pr, { reviews = [approvalFor(pr)], files = FILES, statuses = [], failStatus = null, hideStatusWrites = false, refetchPr = null } = {}) => {
+  const stubPublisherApi = (pr, { reviews = [approvalFor(pr)], files = FILES, statuses = [], failStatus = null, loseStatusResponse = null, hideStatusWrites = false, refetchPr = null } = {}) => {
     const posts = [];
     posts.mutations = [];
     let statusList = statuses;
@@ -160,6 +160,7 @@ describe("review snapshot integrity publisher", () => {
         const created = { id: Math.max(0, ...statusList.map((status) => status.id)) + 1, context: body.context, state: body.state, creator };
         posts.push({ url: u, body });
         if (!hideStatusWrites) statusList = [...statusList, created];
+        if (loseStatusResponse === body.state) throw new TypeError("status response lost");
         return reply(201, created);
       }
       if (u.includes("/commits/") && u.includes("/statuses")) { const page = Number(u.match(/[?&]page=(\d+)/)?.[1] ?? 1); return reply(200, statusList.slice((page - 1) * 100, page * 100)); }
@@ -216,6 +217,10 @@ describe("review snapshot integrity publisher", () => {
     expect(posts.map((p) => p.body.state)).toEqual(["failure"]);
     expect(process.exitCode).toBe(1);
   });
+  it("recovers one ambiguous committed status by readback without replaying the POST", async () => {
+    const posts = await run(makePr(), { loseStatusResponse: "pending" });
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "success"]);
+  });
   it("ambiguous pending write readback attempts failure, never success", async () => {
     const pr = makePr();
     const posts = await run(pr, { hideStatusWrites: true });
@@ -227,6 +232,12 @@ describe("review snapshot integrity publisher", () => {
     const posts = await run(pr, { refetchPr: makePr({ body: `${PLAN}edited` }) });
     expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
     expect(process.exitCode).toBe(1);
+    expect((await run(pr, { refetchPr: makePr({ draft: true }) })).map((p) => p.body.state)).toEqual(["pending", "failure"]);
+  });
+  it("uses a valid event head for failure when later source validation rejects", async () => {
+    const pr = makePr();
+    const posts = await run(pr, {}, { pull_request: { ...eventFor(pr).pull_request, head: { sha: pr.head.sha, repo: null } } });
+    expect(posts.map((p) => p.body.state)).toEqual(["failure"]);
   });
   it("stale-head runs target only the event head SHA and fail on head drift", async () => {
     const stale = makePr();
@@ -280,10 +291,10 @@ describe("review snapshot integrity publisher", () => {
     await expect(postStatus(repo, "a".repeat(40), "error")).rejects.toThrow("unexpected status write");
     process.env.GITHUB_TOKEN = "t";
     const seen = [];
-    vi.stubGlobal("fetch", vi.fn(async (url, opts) => { const body = JSON.parse(opts.body); seen.push({ url, body }); return { ok: true, status: 201, json: async () => ({ id: 1, context: body.context, state: body.state, creator }) }; }));
+    vi.stubGlobal("fetch", vi.fn(async (url, opts = {}) => { if (opts.method !== "POST") return { ok: true, status: 200, json: async () => [] }; const body = JSON.parse(opts.body); seen.push({ url, body }); return { ok: true, status: 201, json: async () => ({ id: 1, context: body.context, state: body.state, creator }) }; }));
     await postStatus(repo, "a".repeat(40), "failure");
     expect(seen[0].body).toEqual({ state: "failure", context: "Review Snapshot Integrity", description: "Review snapshot integrity check failed" });
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 201, json: async () => ({ id: 2, context: STATUS_CONTEXT, state: "failure", creator: { login: "other-bot" } }) })));
+    vi.stubGlobal("fetch", vi.fn(async (_url, opts = {}) => opts.method !== "POST" ? { ok: true, status: 200, json: async () => [] } : { ok: true, status: 201, json: async () => ({ id: 2, context: STATUS_CONTEXT, state: "failure", creator: { login: "other-bot" } }) }));
     await expect(postStatus(repo, "a".repeat(40), "failure")).rejects.toThrow("write response");
     vi.unstubAllGlobals();
   });
