@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { defaultStorage } from "@corgtex/storage";
 import { withdrawActiveApprovalFlowForSubject } from "./approvals";
+import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 import { lockFinanceImportArtifactOwnership } from "./finance-import-artifact-ownership";
 import {
   ensureWorkspacePermalink,
@@ -631,6 +632,10 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
   invariant(reason.length > 0, 400, "INVALID_INPUT", "Purge reason is required.");
 
   const purged = await prisma.$transaction(async (tx) => {
+    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
+    if (config.entityType === "Proposal") {
+      await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
+    }
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", "Archive the artifact before purging it.");
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);

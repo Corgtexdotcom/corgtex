@@ -12,6 +12,7 @@ import { requireDraftManager } from "./draft-permissions";
 import { requireProposalContentEditor } from "./collaborative-permissions";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { createWorkItemEvidenceLinks } from "./work-item-evidence";
+import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import {
   checkWorkspaceDuplicateGuard,
@@ -1363,6 +1364,7 @@ export async function returnProposalToDraft(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     await acquireProposalAdvisoryLock(tx, params.proposalId);
+    await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
 
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
@@ -1463,6 +1465,7 @@ export async function reopenProposal(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     await acquireProposalAdvisoryLock(tx, params.proposalId);
+    await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
 
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
@@ -1579,6 +1582,7 @@ export async function supportReopenResolvedProposals(actor: AppActor, params: {
     for (const proposalId of sortedIds) {
       await acquireProposalAdvisoryLock(tx, proposalId);
     }
+    await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
 
     const proposals = await tx.proposal.findMany({
       where: {
@@ -1782,6 +1786,9 @@ export async function resolveProposal(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     await acquireProposalAdvisoryLock(tx, params.proposalId);
+    if (params.outcome === "ADOPTED") {
+      await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
+    }
 
     const proposal = await tx.proposal.findUnique({
       where: { id: params.proposalId },
