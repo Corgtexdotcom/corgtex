@@ -8,15 +8,8 @@ import {
   receiveEmailReply,
   syncEmailReplyToConversation,
   provisionProspectWorkspace,
-  archiveCrmAccount,
-  archiveCrmActivity,
-  archiveContact,
-  archiveCrmDeal,
-  completeActivity,
-  listContacts,
-  listCrmActivities,
-  listDeals,
-  updateActivity,
+  archiveCrmAccount, archiveCrmActivity, archiveContact, archiveCrmDeal, completeActivity,
+  listContacts, listCrmActivities, listDeals, updateActivity,
 } from "./crm";
 import { purgeWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 
@@ -59,19 +52,16 @@ describe("CRM Integration Lifecycle", () => {
     const contact = await prisma.crmContact.create({ data: { workspaceId: workspace.id, accountId: account.id, email: `linked-${suffix}@example.test` } });
     const unlinked = await prisma.crmContact.create({ data: { workspaceId: workspace.id, email: `unlinked-${suffix}@example.test` } });
     const deal = await prisma.crmDeal.create({ data: { workspaceId: workspace.id, accountId: account.id, contactId: contact.id, title: "Archive deal" } });
-    const activity = await prisma.crmActivity.create({ data: { workspaceId: workspace.id, accountId: account.id,
-      contactId: contact.id, dealId: deal.id, title: "Archive activity" } });
-
+    const activity = await prisma.crmActivity.create({ data: { workspaceId: workspace.id, accountId: account.id, contactId: contact.id,
+      dealId: deal.id, title: "Archive activity" } });
     await archiveCrmAccount(adminActor, { workspaceId: workspace.id, accountId: account.id });
     expect(await prisma.crmContact.findUnique({ where: { id: contact.id } })).toMatchObject({ archivedAt: null });
     expect((await listContacts(adminActor, workspace.id)).items.map((item) => item.id)).toContain(unlinked.id);
     expect((await listDeals(adminActor, workspace.id)).items.map((item) => item.id)).not.toContain(deal.id);
     expect((await listCrmActivities(adminActor, workspace.id)).items.map((item) => item.id)).not.toContain(activity.id);
-
     await restoreWorkspaceArtifact(adminActor, { workspaceId: workspace.id, entityType: "CrmAccount", entityId: account.id });
     expect((await listDeals(adminActor, workspace.id)).items.map((item) => item.id)).toContain(deal.id);
     expect((await listCrmActivities(adminActor, workspace.id)).items.map((item) => item.id)).toContain(activity.id);
-
     await archiveCrmDeal(adminActor, { workspaceId: workspace.id, dealId: deal.id });
     await archiveCrmActivity(adminActor, { workspaceId: workspace.id, activityId: activity.id });
     await expect(updateActivity(adminActor, { workspaceId: workspace.id, activityId: activity.id, title: "Must fail" })).rejects.toThrow("Activity not found");
@@ -82,12 +72,9 @@ describe("CRM Integration Lifecycle", () => {
     await restoreWorkspaceArtifact(adminActor, { workspaceId: workspace.id, entityType: "CrmAccount", entityId: account.id });
     expect((await listDeals(adminActor, workspace.id)).items.map((item) => item.id)).not.toContain(deal.id);
     expect((await listCrmActivities(adminActor, workspace.id, { archiveFilter: "all" })).items.map((item) => item.id)).toContain(activity.id);
-
-    const ledgers = await prisma.workspaceArchiveRecord.findMany({ where: {
-      workspaceId: workspace.id, entityId: { in: [deal.id, activity.id] }, restoredAt: null,
-    } });
+    const ledgers = await prisma.workspaceArchiveRecord.findMany({ where: { workspaceId: workspace.id,
+      entityId: { in: [deal.id, activity.id] }, restoredAt: null } });
     expect(ledgers.map((record) => record.entityType).sort()).toEqual(["CrmActivity", "CrmDeal"]);
-
     const soleDeal = await prisma.crmDeal.create({ data: { workspaceId: workspace.id, contactId: unlinked.id, title: "Sole-link deal" } });
     await prisma.crmActivity.create({ data: { workspaceId: workspace.id, dealId: soleDeal.id, title: "Sole-link activity" } });
     await archiveCrmDeal(adminActor, { workspaceId: workspace.id, dealId: soleDeal.id });
@@ -95,17 +82,15 @@ describe("CRM Integration Lifecycle", () => {
       entityId: soleDeal.id, reason: "integration test" })).rejects.toMatchObject({ code: "CRM_ACTIVITY_ORPHAN" });
     const survivingActivity = await prisma.crmActivity.create({ data: { workspaceId: workspace.id, accountId: account.id,
       contactId: contact.id, dealId: deal.id, title: "Multiple-link activity" } });
-
     await purgeWorkspaceArtifact(adminActor, { workspaceId: workspace.id, entityType: "CrmDeal", entityId: deal.id, reason: "integration test" });
     expect(await prisma.crmActivity.findUnique({ where: { id: activity.id } })).toMatchObject({ dealId: null, archivedAt: expect.any(Date) });
     expect(await prisma.crmActivity.findUnique({ where: { id: survivingActivity.id } })).toMatchObject({ dealId: null, accountId: account.id, archivedAt: null });
     await archiveContact(adminActor, { workspaceId: workspace.id, contactId: contact.id });
     await purgeWorkspaceArtifact(adminActor, { workspaceId: workspace.id, entityType: "CrmContact", entityId: contact.id, reason: "integration test" });
     expect(await prisma.crmActivity.findUnique({ where: { id: activity.id } })).toMatchObject({ contactId: null, archivedAt: expect.any(Date) });
-    expect(await prisma.workspaceArchiveRecord.findFirst({ where: { workspaceId: workspace.id,
-      entityType: "CrmActivity", entityId: activity.id, restoredAt: null, purgedAt: null } })).toBeTruthy();
+    expect(await prisma.workspaceArchiveRecord.findFirst({ where: { workspaceId: workspace.id, entityType: "CrmActivity",
+      entityId: activity.id, restoredAt: null, purgedAt: null } })).toBeTruthy();
   });
-
   it("completes the full approval and provisioning lifecycle", async () => {
     // 1. Capture flow
     const captureParams = {
@@ -118,7 +103,6 @@ describe("CRM Integration Lifecycle", () => {
     expect(demoLead.email).toBe(captureParams.email);
     expect(demoLead.qualifyToken).toBeTruthy();
     expect(contact.email).toBe(captureParams.email);
-
     // 2. Qualify flow
     const qualResponse = await submitQualification({
       token: demoLead.qualifyToken!,

@@ -118,7 +118,8 @@ const CRM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>(["CrmAccount", "CrmA
 type CrmParentSpec = readonly [ArchiveEntityType, "crmAccount" | "crmContact" | "crmDeal", "accountId" | "contactId" | "dealId"];
 
 async function requireActiveCrmRestoreParents(tx: Prisma.TransactionClient, record: any, parents: readonly CrmParentSpec[]) {
-  for (const [entityType, delegateName, field] of parents) {
+  const order = ["CrmDeal", "CrmContact", "CrmAccount"];
+  for (const [entityType, delegateName, field] of [...parents].sort((left, right) => order.indexOf(left[0]) - order.indexOf(right[0]))) {
     const parentId = record[field];
     if (!parentId) continue;
     await lockWorkspaceArchiveArtifact(tx, entityType, parentId);

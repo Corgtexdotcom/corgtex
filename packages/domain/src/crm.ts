@@ -82,6 +82,8 @@ const CLOSED_CRM_DEAL_STAGES = new Set<CrmDealStage>([
 ]);
 
 type CrmArchiveParent = "account" | "contact" | "deal" | "activity";
+type CrmLinks = { accountId?: string | null; contactId?: string | null; dealId?: string | null; activityId?: string | null };
+const CRM_LOCK_FIELDS = [["CrmActivity", "activityId"], ["CrmDeal", "dealId"], ["CrmContact", "contactId"], ["CrmAccount", "accountId"]] as const;
 
 function activeCrmParentWhere(parents: readonly CrmArchiveParent[], filter: ArchiveFilter = "active", required: readonly CrmArchiveParent[] = []) {
   if (filter !== "active") return {};
@@ -92,12 +94,13 @@ function activeCrmParentWhere(parents: readonly CrmArchiveParent[], filter: Arch
   };
 }
 
-async function lockCrmLinks(tx: any, links: { accountId?: string | null; contactId?: string | null; dealId?: string | null; activityId?: string | null }) {
-  const linked = [["CrmAccount", links.accountId], ["CrmContact", links.contactId],
-    ["CrmDeal", links.dealId], ["CrmActivity", links.activityId]] as const;
-  for (const [entityType, id] of linked) {
-    if (id) await lockWorkspaceArchiveArtifact(tx, entityType, id);
-  }
+async function lockCrmLinks(tx: any, ...links: CrmLinks[]) {
+  const linked = links.flatMap((link) => CRM_LOCK_FIELDS.map(([type, field]) => [type, link[field]] as const))
+    .filter((entry): entry is readonly ["CrmActivity" | "CrmDeal" | "CrmContact" | "CrmAccount", string] => Boolean(entry[1]));
+  const unique = [...new Map(linked.map(([type, id]) => [`${type}:${id}`, [type, id] as const])).values()]
+    .sort(([leftType, leftId], [rightType, rightId]) => CRM_LOCK_FIELDS.findIndex(([type]) => type === leftType)
+      - CRM_LOCK_FIELDS.findIndex(([type]) => type === rightType) || leftId.localeCompare(rightId));
+  for (const [entityType, id] of unique) await lockWorkspaceArchiveArtifact(tx, entityType, id);
 }
 
 function normalizeCrmCode(value: string | null | undefined, fallback: string, label: string) {
@@ -1766,8 +1769,13 @@ export async function updateDeal(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
-    const deal = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
-    invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
+    const links = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
+    invariant(links && links.workspaceId === params.workspaceId && !links.archivedAt, 404, "NOT_FOUND", "Deal not found.");
+    await lockCrmLinks(tx, { dealId: links.id, contactId: links.contactId, accountId: links.accountId }, { accountId: params.accountId });
+    const deal = tx.crmDeal.findFirst ? await tx.crmDeal.findFirst({ where: {
+      id: params.dealId, workspaceId: params.workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"]),
+    } }) : links;
+    invariant(deal, 404, "NOT_FOUND", "Deal not found.");
 
     const data: any = {};
     let stageChanged = false;
@@ -1922,11 +1930,15 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   return { items, total, take, skip };
 }
 
-async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId: string) {
+async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId: string, replacements: CrmLinks = {}) {
   await lockWorkspaceArchiveArtifact(tx, "CrmActivity", activityId);
   const links = await tx.crmActivity.findUnique({ where: { id: activityId } });
   invariant(links && links.workspaceId === workspaceId && !links.archivedAt, 404, "NOT_FOUND", "Activity not found.");
-  await lockCrmLinks(tx, links);
+  await lockCrmLinks(tx, { dealId: links.dealId, contactId: links.contactId }, { dealId: replacements.dealId, contactId: replacements.contactId });
+  const [contact, deal] = await Promise.all([replacements.contactId ? tx.crmContact.findUnique({ where: { id: replacements.contactId } }) : null,
+    replacements.dealId ? tx.crmDeal.findUnique({ where: { id: replacements.dealId } }) : null]);
+  await lockCrmLinks(tx, { accountId: links.accountId }, { accountId: replacements.accountId },
+    { accountId: contact?.accountId }, { accountId: deal?.accountId });
   const activity = tx.crmActivity.findFirst ? await tx.crmActivity.findFirst({ where: {
     id: activityId, workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]),
   } }) : links;
@@ -2002,7 +2014,9 @@ export async function updateActivity(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
-    const activity = await requireActiveCrmActivity(tx, params.workspaceId, params.activityId);
+    const activity = await requireActiveCrmActivity(tx, params.workspaceId, params.activityId, {
+      accountId: params.accountId, contactId: params.contactId, dealId: params.dealId,
+    });
 
     const data: any = {};
     if (params.title !== undefined) {
@@ -2642,14 +2656,14 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
 
     if (qual.companyName || account) {
       const contacts = await tx.crmContact.findMany({
-        where: { workspaceId: params.workspaceId, email: qual.demoLead.email },
+        where: { workspaceId: params.workspaceId, email: qual.demoLead.email, archivedAt: null },
         select: { id: true, email: true },
       });
       const contactData: any = {};
       if (qual.companyName) contactData.company = qual.companyName;
       if (account) contactData.accountId = account.id;
       await tx.crmContact.updateMany({
-        where: { workspaceId: params.workspaceId, email: qual.demoLead.email },
+        where: { workspaceId: params.workspaceId, email: qual.demoLead.email, archivedAt: null },
         data: contactData,
       });
 
