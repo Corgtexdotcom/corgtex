@@ -354,8 +354,9 @@ async function resolveCommunicationSuggestionLinks(tx: any, params: {
   const activityId = params.activityId !== undefined ? params.activityId : existing?.activityId ?? null;
 
   if (activityId) {
+    await lockWorkspaceArchiveArtifact(tx, "CrmActivity", activityId);
     const activity = await tx.crmActivity.findUnique({ where: { id: activityId } });
-    invariant(activity && activity.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Activity not found.");
+    invariant(activity && activity.workspaceId === params.workspaceId && !activity.archivedAt, 404, "NOT_FOUND", "Activity not found.");
     if (accountId && activity.accountId) {
       invariant(accountId === activity.accountId, 400, "INVALID_INPUT", "Suggestion account must match the linked activity.");
     }
@@ -405,13 +406,28 @@ async function recordDealStageTransition(tx: any, params: {
 }
 
 async function syncCrmAccountLinksForContact(tx: any, params: { workspaceId: string; contactId: string; email?: string | null; accountId: string }) {
+  const activityIds = await tx.crmActivity.findMany({
+    where: { workspaceId: params.workspaceId, contactId: params.contactId, accountId: null, archivedAt: null },
+    select: { id: true },
+    orderBy: { id: "asc" },
+  });
+  for (const activity of activityIds) {
+    await lockWorkspaceArchiveArtifact(tx, "CrmActivity", activity.id);
+  }
+
   const [deals, activities, conversations] = await Promise.all([
     tx.crmDeal.updateMany({
       where: { workspaceId: params.workspaceId, contactId: params.contactId, accountId: null },
       data: { accountId: params.accountId },
     }),
     tx.crmActivity.updateMany({
-      where: { workspaceId: params.workspaceId, contactId: params.contactId, accountId: null },
+      where: {
+        id: { in: activityIds.map((activity: { id: string }) => activity.id) },
+        workspaceId: params.workspaceId,
+        contactId: params.contactId,
+        accountId: null,
+        archivedAt: null,
+      },
       data: { accountId: params.accountId },
     }),
     tx.crmConversation.updateMany({
@@ -750,6 +766,16 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
     }
 
     const tags = crmInquiryTags(source, persona);
+    const existingContact = await tx.crmContact.findUnique({
+      where: {
+        workspaceId_email: {
+          workspaceId: workspace.id,
+          email,
+        },
+      },
+    });
+    invariant(!existingContact?.archivedAt, 409, "ARCHIVED_PARENT", "Restore the matching contact before capturing this inquiry.");
+
     const account = await ensureCrmAccount(tx, workspace.id, {
       email,
       company: params.company,
@@ -760,14 +786,6 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
       tags,
     });
 
-    const existingContact = await tx.crmContact.findUnique({
-      where: {
-        workspaceId_email: {
-          workspaceId: workspace.id,
-          email,
-        },
-      },
-    });
     const contactBaseData = {
       accountId: account?.id ?? existingContact?.accountId ?? null,
       email,
@@ -961,10 +979,10 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
       include: {
         _count: {
           select: {
-            contacts: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } },
-            deals: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) } },
-            activities: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) } },
-            crmConversations: { where: activeCrmParentWhere(["account", "contact", "deal"]) },
+            contacts: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account"], opts?.archiveFilter) } },
+            deals: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], opts?.archiveFilter, ["contact"]) } },
+            activities: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"], opts?.archiveFilter) } },
+            crmConversations: { where: activeCrmParentWhere(["account", "contact", "deal"], opts?.archiveFilter) },
           },
         },
       },
@@ -2759,11 +2777,15 @@ export async function createConversationMessage(actor: AppActor, params: {
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  const conversation = await prisma.crmConversation.findUnique({
-    where: { id: params.conversationId },
+  const conversation = await prisma.crmConversation.findFirst({
+    where: {
+      id: params.conversationId,
+      workspaceId: params.workspaceId,
+      ...activeCrmParentWhere(["account", "contact", "deal"]),
+    },
     include: { account: true, contact: true, demoLead: true },
   });
-  invariant(conversation && conversation.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
+  invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
 
   return prisma.$transaction(async (tx) => {
     const message = await tx.crmConversationMessage.create({
@@ -2789,8 +2811,12 @@ export async function createConversationMessage(actor: AppActor, params: {
 export async function getCrmConversation(actor: AppActor, params: { workspaceId: string; conversationId: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  const conversation = await prisma.crmConversation.findUnique({
-    where: { id: params.conversationId },
+  const conversation = await prisma.crmConversation.findFirst({
+    where: {
+      id: params.conversationId,
+      workspaceId: params.workspaceId,
+      ...activeCrmParentWhere(["account", "contact", "deal"]),
+    },
     include: {
       account: true,
       contact: true,
@@ -2802,7 +2828,7 @@ export async function getCrmConversation(actor: AppActor, params: { workspaceId:
       },
     },
   });
-  invariant(conversation && conversation.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
+  invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
 
   return conversation;
 }

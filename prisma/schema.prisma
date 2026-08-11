@@ -4636,8 +4636,8 @@ model CrmActivity {
 
   workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   account                  CrmAccount?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: SetNull)
   communicationSuggestions CrmCommunicationSuggestion[]
 
   @@unique([workspaceId, source, sourceExternalId])

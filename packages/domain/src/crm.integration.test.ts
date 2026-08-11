@@ -10,6 +10,7 @@ import {
   provisionProspectWorkspace,
   archiveCrmAccount,
   archiveCrmActivity,
+  archiveContact,
   archiveCrmDeal,
   completeActivity,
   listContacts,
@@ -17,7 +18,7 @@ import {
   listDeals,
   updateActivity,
 } from "./crm";
-import { restoreWorkspaceArtifact } from "./archive";
+import { purgeWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 
 describe("CRM Integration Lifecycle", () => {
   let adminActor: any;
@@ -106,6 +107,19 @@ describe("CRM Integration Lifecycle", () => {
       where: { workspaceId: workspace.id, entityId: { in: [deal.id, activity.id] }, restoredAt: null },
     });
     expect(ledgers.map((record) => record.entityType).sort()).toEqual(["CrmActivity", "CrmDeal"]);
+
+    await purgeWorkspaceArtifact(adminActor, {
+      workspaceId: workspace.id, entityType: "CrmDeal", entityId: deal.id, reason: "integration test",
+    });
+    expect(await prisma.crmActivity.findUnique({ where: { id: activity.id } })).toMatchObject({ dealId: null, archivedAt: expect.any(Date) });
+    await archiveContact(adminActor, { workspaceId: workspace.id, contactId: contact.id });
+    await purgeWorkspaceArtifact(adminActor, {
+      workspaceId: workspace.id, entityType: "CrmContact", entityId: contact.id, reason: "integration test",
+    });
+    expect(await prisma.crmActivity.findUnique({ where: { id: activity.id } })).toMatchObject({ contactId: null, archivedAt: expect.any(Date) });
+    expect(await prisma.workspaceArchiveRecord.findFirst({
+      where: { workspaceId: workspace.id, entityType: "CrmActivity", entityId: activity.id, restoredAt: null, purgedAt: null },
+    })).toBeTruthy();
   });
 
   it("completes the full approval and provisioning lifecycle", async () => {

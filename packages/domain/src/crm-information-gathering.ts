@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { CrmActivityType, type MeetingInsight, type OAuthProvider, type Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
+import { lockWorkspaceArchiveArtifact } from "./archive";
 import { invariant } from "./errors";
 
 const CRM_EMAIL_SOURCE = "oauth_email";
@@ -266,8 +267,12 @@ export async function materializeCrmEmailTouchpoints(params: {
         sourceOccurredAt: occurredAt,
       };
       if (existingActivity) {
-        await tx.crmActivity.update({ where: { id: existingActivity.id }, data: activityData });
-        summary.activitiesUpdated += 1;
+        await lockWorkspaceArchiveArtifact(tx, "CrmActivity", existingActivity.id);
+        const updated = await tx.crmActivity.updateMany({
+          where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
+          data: activityData,
+        });
+        summary.activitiesUpdated += updated.count;
       } else {
         await tx.crmActivity.create({
           data: {
@@ -376,8 +381,12 @@ export async function materializeCrmCalendarTouchpoints(params: {
         sourceOccurredAt: event.startTime,
       };
       if (existingActivity) {
-        await tx.crmActivity.update({ where: { id: existingActivity.id }, data: activityData });
-        summary.activitiesUpdated += 1;
+        await lockWorkspaceArchiveArtifact(tx, "CrmActivity", existingActivity.id);
+        const updated = await tx.crmActivity.updateMany({
+          where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
+          data: activityData,
+        });
+        summary.activitiesUpdated += updated.count;
       } else {
         await tx.crmActivity.create({
           data: {
