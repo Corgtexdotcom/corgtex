@@ -69,10 +69,8 @@ Approve only when **all** of:
 - The plan's "Test plan" commands match what CI actually executed.
 - The automated policy checks in `scope-check` and `diff-size` pass.
 
-When you approve, run:
-```
-gh pr review <number> --approve --body "All review criteria pass. Approved by beepto-codex."
-```
+The attested command in the next section is the single authoritative approval
+procedure; an un-attested approval is invalid.
 
 The Executor has already set auto-merge (`gh pr merge --auto --squash`); the PR will merge itself once your approval lands.
 

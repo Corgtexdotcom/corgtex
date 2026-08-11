@@ -233,12 +233,15 @@ export function validatePublisherEvent(event, repo) {
   invariant(Number.isFinite(Date.parse(pr.updated_at)), "unexpected event updated_at");
   return pr;
 }
-export async function postStatus(repo, sha, state) {
+export async function postStatus(repo, sha, state, { requirePreflight = true } = {}) {
   invariant(/^[0-9a-f]{40}$/.test(sha) && Object.hasOwn(STATUS_DESCRIPTIONS, state), "unexpected status write");
-  const before = new Set((await contextStatuses(repo, sha)).map((status) => status.id));
+  let before;
+  try { before = new Set((await contextStatuses(repo, sha)).map((status) => status.id)); }
+  catch (readError) { if (requirePreflight) throw readError; }
   let created;
   try { created = await api(`/repos/${repo}/statuses/${sha}`, { method: "POST", attempts: 1, body: { state, context: STATUS_CONTEXT, description: STATUS_DESCRIPTIONS[state] } }); }
   catch (writeError) {
+    if (!before) throw writeError;
     const candidates = (await contextStatuses(repo, sha)).filter((status) => !before.has(status.id) && status.state === state && status.creator.login === STATUS_CREATOR);
     if (candidates.length !== 1) throw writeError;
     [created] = candidates;
@@ -297,6 +300,8 @@ export async function publishPullRequestStatus(repo, event) {
       invariant(finalEvaluation.verdict.pass && !finalEvaluation.verdict.noop && finalEvaluation.pr.head.sha === sha && JSON.stringify(finalEvaluation.verdict.snapshot) === JSON.stringify(verdict.snapshot), "live PR evaluation drifted before success write");
       const success = await postStatus(repo, sha, "success");
       await confirmStatus(repo, sha, success);
+      const afterSuccess = await evaluatePullRequest(repo, eventPr.number, event.action, event.changes ?? null, eventPr.updated_at);
+      invariant(afterSuccess.verdict.pass && !afterSuccess.verdict.noop && afterSuccess.pr.head.sha === sha && JSON.stringify(afterSuccess.verdict.snapshot) === JSON.stringify(verdict.snapshot), "live PR evaluation drifted after success write");
       state = "success";
     }
   } catch (err) {
@@ -304,7 +309,7 @@ export async function publishPullRequestStatus(repo, event) {
   }
   if (state !== "success") {
     try {
-      const failure = await postStatus(repo, sha, "failure");
+      const failure = await postStatus(repo, sha, "failure", { requirePreflight: false });
       await confirmStatus(repo, sha, failure);
     } catch (err) {
       summary.push(`- failure status write error: ${err.message}`);

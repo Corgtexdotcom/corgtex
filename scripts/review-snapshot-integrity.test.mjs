@@ -146,7 +146,7 @@ describe("review snapshot integrity publisher", () => {
   const repo = "o/r";
   const creator = { login: "github-actions[bot]" };
   const eventFor = (pr, over = {}) => ({ action: "opened", changes: null, repository: { full_name: repo }, pull_request: { number: pr.number, updated_at: "2026-01-02T00:00:00Z", head: { sha: pr.head.sha, repo: { full_name: repo } }, base: { sha: pr.base.sha, ref: "main", repo: { full_name: repo } } }, ...over });
-  const stubPublisherApi = (pr, { reviews = [approvalFor(pr)], files = FILES, statuses = [], failStatus = null, loseStatusResponse = null, hideStatusWrites = false, refetchPr = null } = {}) => {
+  const stubPublisherApi = (pr, { reviews = [approvalFor(pr)], files = FILES, statuses = [], failStatus = null, failStatusRead = false, loseStatusResponse = null, hideStatusWrites = false, refetchPr = null } = {}) => {
     const posts = [];
     posts.mutations = [];
     let statusList = statuses;
@@ -163,8 +163,8 @@ describe("review snapshot integrity publisher", () => {
         if (loseStatusResponse === body.state) throw new TypeError("status response lost");
         return reply(201, created);
       }
-      if (u.includes("/commits/") && u.includes("/statuses")) { const page = Number(u.match(/[?&]page=(\d+)/)?.[1] ?? 1); return reply(200, statusList.slice((page - 1) * 100, page * 100)); }
-      if (u.endsWith(`/pulls/${pr.number}`)) { pullsGets += 1; return reply(200, pullsGets > 1 && refetchPr ? refetchPr : pr); }
+      if (u.includes("/commits/") && u.includes("/statuses")) { if (failStatusRead) return reply(500, {}); const page = Number(u.match(/[?&]page=(\d+)/)?.[1] ?? 1); return reply(200, statusList.slice((page - 1) * 100, page * 100)); }
+      if (u.endsWith(`/pulls/${pr.number}`)) { pullsGets += 1; return reply(200, typeof refetchPr === "function" ? refetchPr(pullsGets) : pullsGets > 1 && refetchPr ? refetchPr : pr); }
       if (u.includes(`/pulls/${pr.number}/files`)) return reply(200, files);
       if (u.includes("/dismissals") && opts.method === "PUT") { posts.mutations.push("dismiss"); return reply(200, {}); }
       if (u.includes(`/pulls/${pr.number}/reviews`)) return reply(200, reviews);
@@ -217,6 +217,11 @@ describe("review snapshot integrity publisher", () => {
     expect(posts.map((p) => p.body.state)).toEqual(["failure"]);
     expect(process.exitCode).toBe(1);
   });
+  it("attempts a one-shot failure write when status preflight cannot be read", async () => {
+    const posts = await run(makePr(), { failStatusRead: true });
+    expect(posts.map((p) => p.body.state)).toEqual(["failure"]);
+    expect(process.exitCode).toBe(1);
+  });
   it("recovers one ambiguous committed status by readback without replaying the POST", async () => {
     const posts = await run(makePr(), { loseStatusResponse: "pending" });
     expect(posts.map((p) => p.body.state)).toEqual(["pending", "success"]);
@@ -233,6 +238,12 @@ describe("review snapshot integrity publisher", () => {
     expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
     expect(process.exitCode).toBe(1);
     expect((await run(pr, { refetchPr: makePr({ draft: true }) })).map((p) => p.body.state)).toEqual(["pending", "failure"]);
+  });
+  it("overwrites success with failure when the complete post-write refetch drifts", async () => {
+    const pr = makePr();
+    const posts = await run(pr, { refetchPr: (count) => count >= 4 ? makePr({ draft: true }) : pr });
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "success", "failure"]);
+    expect(process.exitCode).toBe(1);
   });
   it("uses a valid event head for failure when later source validation rejects", async () => {
     const pr = makePr();
