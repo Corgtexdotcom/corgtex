@@ -27,8 +27,12 @@ describe("runConstitutionSynthesisAgent", () => {
         title: "Policy",
         bodyMd: "Policy body",
         acceptedAt: new Date("2026-08-10T00:00:00.000Z"),
-        circle: null,
-        proposal: { id: "proposal-1", title: "Proposal" },
+        circle: { id: "foreign-circle", name: "DO NOT DISCLOSE CIRCLE" },
+        proposal: {
+          id: "foreign-proposal",
+          title: "DO NOT DISCLOSE PROPOSAL",
+          tensions: [{ id: "foreign-tension", title: "DO NOT DISCLOSE TENSION" }],
+        },
       }],
       fingerprint: "corpus-fingerprint",
     });
@@ -57,5 +61,8 @@ describe("runConstitutionSynthesisAgent", () => {
       bodyMd: "# Constitution",
       expectedCorpusFingerprint: "corpus-fingerprint",
     }));
+    const synthesisPrompt = mocks.chat.mock.calls[0]?.[0]?.messages?.[1]?.content;
+    expect(synthesisPrompt).toContain("Policy body");
+    expect(synthesisPrompt).not.toContain("DO NOT DISCLOSE");
   });
 });

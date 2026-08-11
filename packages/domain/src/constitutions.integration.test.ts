@@ -94,6 +94,112 @@ describe("Constitution provenance database contract", () => {
       .toEqual([1, 2, 3, 4, 5, 6]);
   });
 
+  it("keeps cross-workspace relation metadata out of synthesis and source resolution", async () => {
+    const localWorkspace = await createWorkspace("constitution-tenant-local");
+    const foreignWorkspace = await createWorkspace("constitution-tenant-foreign");
+    const [localUser, foreignUser] = await Promise.all([
+      prisma.user.create({
+        data: { email: "constitution-local@example.com", displayName: "Local", passwordHash: "test-password-hash" },
+      }),
+      prisma.user.create({
+        data: { email: "constitution-foreign@example.com", displayName: "Foreign", passwordHash: "test-password-hash" },
+      }),
+    ]);
+    const foreignProposal = await prisma.proposal.create({
+      data: {
+        workspaceId: foreignWorkspace.id,
+        authorUserId: foreignUser.id,
+        title: "DO NOT DISCLOSE PROPOSAL",
+        bodyMd: "Foreign proposal body",
+        status: "RESOLVED",
+        resolutionOutcome: "ADOPTED",
+        isPrivate: false,
+        publishedAt: new Date("2026-08-07T00:00:00.000Z"),
+      },
+    });
+    const foreignCircle = await prisma.circle.create({
+      data: { workspaceId: foreignWorkspace.id, name: "DO NOT DISCLOSE CIRCLE" },
+    });
+    const localProposal = await prisma.proposal.create({
+      data: {
+        workspaceId: localWorkspace.id,
+        authorUserId: localUser.id,
+        title: "Local source proposal",
+        bodyMd: "Local proposal body",
+        status: "RESOLVED",
+        resolutionOutcome: "ADOPTED",
+        isPrivate: false,
+        publishedAt: new Date("2026-08-08T00:00:00.000Z"),
+      },
+    });
+    const [crossProposalPolicy, localPolicy, foreignTension] = await Promise.all([
+      prisma.policyCorpus.create({
+        data: {
+          workspaceId: localWorkspace.id,
+          proposalId: foreignProposal.id,
+          circleId: foreignCircle.id,
+          title: "Workspace-owned policy one",
+          bodyMd: "Safe policy body one",
+          acceptedAt: new Date("2026-08-09T00:00:00.000Z"),
+        },
+      }),
+      prisma.policyCorpus.create({
+        data: {
+          workspaceId: localWorkspace.id,
+          proposalId: localProposal.id,
+          title: "Workspace-owned policy two",
+          bodyMd: "Safe policy body two",
+          acceptedAt: new Date("2026-08-10T00:00:00.000Z"),
+        },
+      }),
+      prisma.tension.create({
+        data: {
+          workspaceId: foreignWorkspace.id,
+          authorUserId: foreignUser.id,
+          proposalId: localProposal.id,
+          title: "DO NOT DISCLOSE TENSION",
+          bodyMd: "Foreign tension body",
+          status: "OPEN",
+          isPrivate: false,
+          publishedAt: new Date("2026-08-08T00:00:00.000Z"),
+        },
+      }),
+    ]);
+
+    const snapshot = await loadConstitutionCorpusSnapshot(prisma, localWorkspace.id);
+    expect(snapshot.corpus.map((row) => Object.keys(row).sort())).toEqual([
+      ["acceptedAt", "bodyMd", "id", "title"],
+      ["acceptedAt", "bodyMd", "id", "title"],
+    ]);
+    expect(JSON.stringify(snapshot.corpus)).not.toContain("DO NOT DISCLOSE");
+
+    await expect(createConstitutionVersion({
+      workspaceId: localWorkspace.id,
+      bodyMd: "# Cross-workspace proposal",
+      modelUsed: "integration-test",
+      references: [{
+        pointOrder: 1,
+        sourceOrder: 1,
+        policyCorpusId: crossProposalPolicy.id,
+        sourceKind: "PROPOSAL",
+        proposalId: foreignProposal.id,
+      }],
+    })).rejects.toThrow("Invalid Constitution source reference.");
+    await expect(createConstitutionVersion({
+      workspaceId: localWorkspace.id,
+      bodyMd: "# Cross-workspace tension",
+      modelUsed: "integration-test",
+      references: [{
+        pointOrder: 1,
+        sourceOrder: 1,
+        policyCorpusId: localPolicy.id,
+        sourceKind: "TENSION",
+        tensionId: foreignTension.id,
+      }],
+    })).rejects.toThrow("Invalid Constitution source reference.");
+    await expect(prisma.constitution.count({ where: { workspaceId: localWorkspace.id } })).resolves.toBe(0);
+  });
+
   it("rechecks corpus drift after the shared writer lock", async () => {
     const { workspace, policy } = await createCorpusFixture("constitution-drift");
     const snapshot = await loadConstitutionCorpusSnapshot(prisma, workspace.id);

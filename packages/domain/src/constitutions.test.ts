@@ -49,6 +49,7 @@ const policy = {
   proposal: {
     id: "proposal-1",
     title: "Switch to Slack",
+    workspaceId: "ws-1",
     isPrivate: false,
     publishedAt,
     tensions: [{ id: "tension-1", title: "Fragmented communication", publishedAt }],
@@ -158,6 +159,9 @@ describe("createConstitutionVersion", () => {
     txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, proposal: { ...policy.proposal, publishedAt: null } }]);
     await expect(createConstitutionVersion({ ...createParams, references: proposalReference }))
       .rejects.toThrow("Invalid Constitution source reference.");
+    txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, proposal: { ...policy.proposal, workspaceId: "ws-2" } }]);
+    await expect(createConstitutionVersion({ ...createParams, references: proposalReference }))
+      .rejects.toThrow("Invalid Constitution source reference.");
 
     txMock.policyCorpus.findMany.mockResolvedValue([{ ...policy, title: "Changed" }]);
     await expect(createConstitutionVersion({
@@ -172,8 +176,14 @@ describe("createConstitutionVersion", () => {
           select: expect.objectContaining({
             isPrivate: true,
             publishedAt: true,
+            workspaceId: true,
             tensions: expect.objectContaining({
-              where: { isPrivate: false, publishedAt: { not: null }, archivedAt: null },
+              where: {
+                workspaceId: "ws-1",
+                isPrivate: false,
+                publishedAt: { not: null },
+                archivedAt: null,
+              },
             }),
           }),
         }),
@@ -183,7 +193,7 @@ describe("createConstitutionVersion", () => {
 });
 
 describe("fingerprintConstitutionCorpus", () => {
-  it("projects a fixed shape, ignores order, and changes with material source data", () => {
+  it("hashes only Policy Corpus-owned synthesis data and changes with material policy data", () => {
     const secondPolicy = {
       ...policy,
       id: "policy-2",
@@ -196,7 +206,16 @@ describe("fingerprintConstitutionCorpus", () => {
       { ...secondPolicy, ignoredCallerField: "ignored" },
       { ...policy, proposal: { ...policy.proposal, tensions: [...policy.proposal.tensions].reverse() } },
     ];
+    const callerWithRelations = {
+      ...policy,
+      circle: { id: "foreign-circle", name: "Foreign circle" },
+      proposal: { ...policy.proposal, title: "Foreign proposal", tensions: [] },
+    };
     expect(fingerprintConstitutionCorpus(corpus)).toBe(fingerprintConstitutionCorpus(reordered));
+    expect(fingerprintConstitutionCorpus(corpus)).toBe(fingerprintConstitutionCorpus([
+      callerWithRelations,
+      secondPolicy,
+    ]));
     expect(fingerprintConstitutionCorpus(corpus)).not.toBe(
       fingerprintConstitutionCorpus([{ ...policy, bodyMd: "Changed" }, secondPolicy]),
     );

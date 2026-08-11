@@ -83,8 +83,6 @@ ${currentConstitution ? "You are UPDATING the existing constitution. You MUST pr
               policies: policies.map((p: Record<string, unknown>) => ({
                 title: p.title,
                 bodyMd: p.bodyMd,
-                circle: p.circle,
-                proposal: p.proposal,
                 acceptedAt: p.acceptedAt,
               })),
             }),

@@ -19,25 +19,9 @@ export type ConstitutionSourceReferenceInput = {
 
 const CONSTITUTION_CORPUS_SELECT = {
   id: true,
-  proposalId: true,
   title: true,
   bodyMd: true,
-  circleId: true,
   acceptedAt: true,
-  circle: { select: { id: true, name: true } },
-  proposal: {
-    select: {
-      id: true,
-      title: true,
-      isPrivate: true,
-      publishedAt: true,
-      tensions: {
-        where: { isPrivate: false, publishedAt: { not: null }, archivedAt: null },
-        select: { id: true, title: true, publishedAt: true },
-        orderBy: { id: "asc" },
-      },
-    },
-  },
 } as const satisfies Prisma.PolicyCorpusSelect;
 
 export type ConstitutionCorpusFingerprintRow = Prisma.PolicyCorpusGetPayload<{
@@ -64,23 +48,9 @@ function canonicalizeFingerprintValue(value: unknown): unknown {
 export function fingerprintConstitutionCorpus(corpus: readonly ConstitutionCorpusFingerprintRow[]) {
   const projected = corpus.map((policy) => ({
     id: policy.id,
-    proposalId: policy.proposalId,
     title: policy.title,
     bodyMd: policy.bodyMd,
-    circleId: policy.circleId,
     acceptedAt: policy.acceptedAt,
-    circle: policy.circle && { id: policy.circle.id, name: policy.circle.name },
-    proposal: {
-      id: policy.proposal.id,
-      title: policy.proposal.title,
-      isPrivate: policy.proposal.isPrivate,
-      publishedAt: policy.proposal.publishedAt,
-      tensions: policy.proposal.tensions.map((tension) => ({
-        id: tension.id,
-        title: tension.title,
-        publishedAt: tension.publishedAt,
-      })),
-    },
   }));
   return createHash("sha256")
     .update(JSON.stringify(canonicalizeFingerprintValue(projected)))
@@ -119,10 +89,16 @@ async function resolveSourceReferences(
         select: {
           id: true,
           title: true,
+          workspaceId: true,
           isPrivate: true,
           publishedAt: true,
           tensions: {
-            where: { isPrivate: false, publishedAt: { not: null }, archivedAt: null },
+            where: {
+              workspaceId,
+              isPrivate: false,
+              publishedAt: { not: null },
+              archivedAt: null,
+            },
             select: { id: true, title: true },
           },
         },
@@ -140,6 +116,7 @@ async function resolveSourceReferences(
     const validOrder = Number.isInteger(reference.sourceOrder) && reference.sourceOrder >= 1;
     const proposalSource = reference.sourceKind === "PROPOSAL"
       && reference.proposalId === policy?.proposal.id && !reference.tensionId
+      && policy?.proposal.workspaceId === workspaceId
       && !policy?.proposal.isPrivate && policy?.proposal.publishedAt != null;
     const tension = reference.sourceKind === "TENSION" && !reference.proposalId
       ? policy?.proposal.tensions.find((candidate) => candidate.id === reference.tensionId)
