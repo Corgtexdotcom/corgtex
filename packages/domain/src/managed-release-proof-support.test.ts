@@ -48,6 +48,7 @@ describe("managed release proof reader support", () => {
     let tagRead = false; let clean: unknown; Object.defineProperty(Object.prototype, Symbol.toStringTag, { configurable: true, get: () => { tagRead = true; throw new Error("LEAKED_TAG"); } });
     try { clean = makeReader().exactRecord({ x: 1 }, ["x"]); } finally { Reflect.deleteProperty(Object.prototype, Symbol.toStringTag); }
     expect(clean).toEqual({ x: 1 }); expect(tagRead).toBe(false);
+    let reflectionError: unknown; const descriptors = Object.getOwnPropertyDescriptors; Object.getOwnPropertyDescriptors = () => { throw new Error("LEAKED_REFLECTION"); }; try { makeReader().exactRecord({ x: 1 }, ["x"]); } catch (error) { reflectionError = error; } finally { Object.getOwnPropertyDescriptors = descriptors; } expect(reflectionError).toEqual(new Error("INVALID_A"));
     const referent = {}; const memory = new WebAssembly.Memory({ initial: 1 }); const parameters = new URLSearchParams("x=1");
     const carriers: object[] = [new Map([["private", 1]]), new Set([1]), new ArrayBuffer(8), Promise.resolve(), new URL("https://example.test"), parameters, new WeakRef(referent), new FinalizationRegistry(() => undefined), [1].values(), "x"[Symbol.iterator](), memory, new WebAssembly.Table({ element: "anyfunc", initial: 1 }), new WebAssembly.Global({ value: "i32" }, 1), new Intl.DateTimeFormat("en"), new AbortController()];
     carriers.forEach((carrier) => Object.setPrototypeOf(carrier, Object.prototype));

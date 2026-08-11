@@ -47,10 +47,9 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     return value;
   };
   const inspectRecord = (value: object): { value: object; descriptors: Record<PropertyKey, PropertyDescriptor>; keys: string[] } => {
-    const prototype = Object.getPrototypeOf(value);
-    const keys = Reflect.ownKeys(value);
+    let prototype: object | null; let keys: PropertyKey[]; let descriptors: Record<PropertyKey, PropertyDescriptor>;
+    try { prototype = Object.getPrototypeOf(value); keys = Reflect.ownKeys(value); descriptors = Object.getOwnPropertyDescriptors(value) as Record<PropertyKey, PropertyDescriptor>; } catch { fail(); }
     if (keys.length > 1_024) fail();
-    const descriptors = Object.getOwnPropertyDescriptors(value) as Record<PropertyKey, PropertyDescriptor>;
     if (prototype !== Object.prototype && prototype !== null) fail();
     if (keys.some((key) => typeof key !== "string" || !descriptors[key]!.enumerable || !("value" in descriptors[key]!))) fail();
     return { value, descriptors, keys: keys as string[] };
