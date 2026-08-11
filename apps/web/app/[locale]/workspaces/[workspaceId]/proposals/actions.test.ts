@@ -10,6 +10,16 @@ const actor = {
   },
 };
 
+class MockAppError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 const archiveProposal = vi.fn();
 const createAdviceRequest = vi.fn();
 const createProposal = vi.fn();
@@ -24,6 +34,7 @@ const returnProposalToDraft = vi.fn();
 const submitProposal = vi.fn();
 const updateDeliberationEntry = vi.fn();
 const updateProposal = vi.fn();
+const revalidatePath = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -34,6 +45,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: MockAppError,
   archiveProposal,
   createAdviceRequest,
   createProposal,
@@ -49,7 +61,7 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 vi.mock("next/cache", () => ({
-  revalidatePath: vi.fn(),
+  revalidatePath,
 }));
 
 afterEach(() => {
@@ -57,6 +69,62 @@ afterEach(() => {
 });
 
 describe("proposal server actions", () => {
+  function editForm(expectedVersion = "11") {
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("proposalId", "proposal-1");
+    formData.set("expectedVersion", expectedVersion);
+    formData.set("title", "Updated proposal");
+    formData.set("bodyMd", "Preserved draft");
+    return formData;
+  }
+
+  it("passes the exact rendered version and reports success only after revalidation", async () => {
+    const { editProposalAction } = await import("./actions");
+
+    const result = await editProposalAction({ status: "idle" }, editForm());
+
+    expect(updateProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      proposalId: "proposal-1",
+      expectedVersion: 11,
+      title: "Updated proposal",
+      bodyMd: "Preserved draft",
+    }));
+    expect(revalidatePath).toHaveBeenCalled();
+    expect(updateProposal.mock.invocationCallOrder[0]).toBeLessThan(revalidatePath.mock.invocationCallOrder[0]);
+    expect(result).toEqual({ status: "success" });
+  });
+
+  it.each(["", "0", "-1", "1.5", "11x", "9007199254740992"])(
+    "rejects invalid expected version %j without calling the writer",
+    async (expectedVersion) => {
+      const { editProposalAction } = await import("./actions");
+
+      await expect(editProposalAction({ status: "idle" }, editForm(expectedVersion))).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+      expect(updateProposal).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns only safe conflict state for a stale edit without revalidation", async () => {
+    updateProposal.mockRejectedValueOnce(new MockAppError(409, "VERSION_CONFLICT", "internal detail"));
+    const { editProposalAction } = await import("./actions");
+
+    await expect(editProposalAction({ status: "idle" }, editForm())).resolves.toEqual({ status: "conflict" });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("does not swallow permission or unrelated domain errors", async () => {
+    const error = new MockAppError(403, "FORBIDDEN", "No access");
+    updateProposal.mockRejectedValueOnce(error);
+    const { editProposalAction } = await import("./actions");
+
+    await expect(editProposalAction({ status: "idle" }, editForm())).rejects.toBe(error);
+  });
+
   it("passes source tension and related action metadata when creating a proposal", async () => {
     const { createProposalAction } = await import("./actions");
     const formData = new FormData();

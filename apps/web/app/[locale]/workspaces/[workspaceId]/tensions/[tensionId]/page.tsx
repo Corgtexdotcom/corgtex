@@ -13,11 +13,12 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
+import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { WorkItemLifecycleBadge } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { attachTensionExternalResourceAction, createProposalFromTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
+import { attachTensionExternalResourceAction, createProposalFromTensionAction, editTensionAction, postTensionDeliberationAction, publishTensionAction, requestTensionInputAction, returnTensionToDraftAction, resolveTensionDeliberationAction, updateTensionAction, updateTensionDeliberationAction } from "../../actions";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
@@ -333,7 +334,13 @@ export default async function TensionDetailPage({
           {canEditContent && (
             <details style={{ marginTop: 12 }}>
               <summary className="secondary small nr-hide-marker" style={{ cursor: "pointer", display: "inline-block" }}>{t("btnEdit")}</summary>
-              <form action={updateTensionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+              <WorkItemEditForm
+                action={editTensionAction}
+                expectedVersion={tension.version}
+                currentHref={`/workspaces/${workspaceId}/tensions/${tension.id}`}
+                submitLabel={tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}
+                className="stack nr-form-section mt-3"
+              >
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="tensionId" value={tension.id} />
                 <label>
@@ -359,8 +366,7 @@ export default async function TensionDetailPage({
                   defaultValue={tension.raisedByMemberId}
                 />
                 <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={tension.priority} />
-                <button type="submit" className="secondary small">{tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-              </form>
+              </WorkItemEditForm>
             </details>
           )}
         </section>
