@@ -207,6 +207,12 @@ describe("review snapshot integrity publisher", () => {
     expect(posts.every((p) => p.body.context === STATUS_CONTEXT)).toBe(true);
     expect(process.exitCode).toBeUndefined();
   });
+  it("keeps a valid success when advisory step-summary I/O fails", async () => {
+    process.env.GITHUB_STEP_SUMMARY = "/dev/null/unwritable";
+    const posts = await run(makePr());
+    delete process.env.GITHUB_STEP_SUMMARY;
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "success"]);
+  });
   it("writes pending then failure and exits nonzero when evaluation fails", async () => {
     const posts = await run(makePr(), { reviews: [] });
     expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);

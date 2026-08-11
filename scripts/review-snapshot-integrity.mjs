@@ -315,7 +315,7 @@ export async function publishPullRequestStatus(repo, event) {
       summary.push(`- failure status write error: ${err.message}`);
     }
   }
-  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary.join("\n")}\n`);
+  if (process.env.GITHUB_STEP_SUMMARY) { try { appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary.join("\n")}\n`); } catch { summary.push("- step summary write failed"); } }
   console.log(summary.join("\n"));
   if (state !== "success") process.exitCode = 1;
 }
