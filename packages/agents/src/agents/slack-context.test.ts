@@ -597,14 +597,14 @@ describe("Slack context jobs", () => {
 
   it("vetoes Action publication when a later human reply says the request is completed", async () => {
     const source = candidate({
-      text: "Jan, please send the signed vendor agreement by Friday.",
+      text: "Jan, please ensure the signed vendor agreement is completed by Friday.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     const completedReply = candidate({
       id: "message-2",
       externalMessageId: "1714323600.000100",
       threadExternalId: source.externalMessageId,
-      text: "Already sent, thanks.",
+      text: "Done.",
       messageTs: new Date("2026-04-28T22:00:00.000Z"),
     });
     prismaMock.communicationMessage.findMany
@@ -613,7 +613,7 @@ describe("Slack context jobs", () => {
     prismaMock.communicationEntityLink.findMany
       .mockResolvedValueOnce([nudgeLink({ message: source })])
       .mockResolvedValueOnce([]);
-    extractMock.mockResolvedValueOnce({ output: actionableExtraction() });
+    extractMock.mockResolvedValueOnce({ output: actionableExtraction({ concreteNextStep: "ensure the signed vendor agreement is completed" }) });
 
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({
