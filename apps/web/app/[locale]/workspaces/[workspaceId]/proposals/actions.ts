@@ -4,6 +4,7 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
+  AppError,
   archiveProposal,
   createProposal,
   createProposalFromTension,
@@ -22,6 +23,7 @@ import {
   upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
+import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 function asStringArray(formData: FormData, key: string) {
@@ -35,6 +37,18 @@ function asOptionalDate(formData: FormData, key: string) {
 
 function ownerMemberIdFromForm(formData: FormData) {
   return formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined;
+}
+
+function expectedVersionFromForm(formData: FormData) {
+  const value = asString(formData, "expectedVersion");
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  const expectedVersion = Number(value);
+  if (!Number.isSafeInteger(expectedVersion)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  return expectedVersion;
 }
 
 export async function createProposalAction(formData: FormData) {
@@ -95,6 +109,36 @@ export async function updateProposalAction(formData: FormData) {
     includeAiSummary: formData.has("includeAiSummaryRendered") ? formData.get("includeAiSummary") === "on" : undefined,
   });
   refresh(workspaceId);
+}
+
+export async function editProposalAction(
+  _state: WorkItemEditActionState,
+  formData: FormData,
+): Promise<WorkItemEditActionState> {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  try {
+    await updateProposal(actor, {
+      workspaceId,
+      proposalId: asString(formData, "proposalId"),
+      expectedVersion: expectedVersionFromForm(formData),
+      title: asOptional(formData, "title") ?? undefined,
+      bodyMd: asOptional(formData, "bodyMd") ?? undefined,
+      priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
+      ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
+      includeAiSummary: formData.has("includeAiSummaryRendered") ? formData.get("includeAiSummary") === "on" : undefined,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      return { status: "conflict" };
+    }
+    throw error;
+  }
+  refresh(workspaceId);
+  return { status: "success" };
 }
 
 export async function attachProposalExternalResourceAction(formData: FormData) {

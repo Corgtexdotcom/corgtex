@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { requirePageActor } from "@/lib/auth";
 import {
   createTensionAction,
+  editTensionAction,
   updateTensionAction,
   upvoteTensionAction,
   deleteTensionAction,
@@ -11,6 +12,7 @@ import {
   createProposalFromTensionAction,
 } from "../actions";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
+import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { MarkdownExcerpt } from "@/lib/components/MarkdownRenderer";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
@@ -252,7 +254,14 @@ export default async function TensionsPage({
     }
     if (canEditContent) {
       moreItems.push(
-        <form key="edit-raised-by" action={updateTensionAction} className="action-menu-form">
+        <WorkItemEditForm
+          key="edit-raised-by"
+          action={editTensionAction}
+          expectedVersion={tension.version}
+          currentHref={`/workspaces/${workspaceId}/tensions/${tension.id}`}
+          submitLabel={t("btnSaveRaisedBy")}
+          className="action-menu-form"
+        >
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="tensionId" value={tension.id} />
           <span className="action-menu-label">{t("btnEditRaisedBy")}</span>
@@ -262,15 +271,20 @@ export default async function TensionsPage({
               <option value={member.id} key={member.id}>{member.label}</option>
             ))}
           </select>
-          <button type="submit" className="secondary small">{t("btnSaveRaisedBy")}</button>
-        </form>,
+        </WorkItemEditForm>,
       );
       moreItems.push(
         <details key="edit">
           <summary className="nr-hide-marker nr-action-summary">
             {t("btnEdit")}
           </summary>
-          <form action={updateTensionAction} className="action-menu-form">
+          <WorkItemEditForm
+            action={editTensionAction}
+            expectedVersion={tension.version}
+            currentHref={`/workspaces/${workspaceId}/tensions/${tension.id}`}
+            submitLabel={tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}
+            className="action-menu-form"
+          >
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="tensionId" value={tension.id} />
             <label>
@@ -289,8 +303,7 @@ export default async function TensionsPage({
               defaultValue={tension.assigneeMemberId}
             />
             <WorkItemPrioritySelect label={t("formPriority")} labels={priorityLabels} defaultValue={tension.priority} />
-            <button type="submit" className="secondary small">{tension.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-          </form>
+          </WorkItemEditForm>
         </details>,
       );
     }

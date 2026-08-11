@@ -12,6 +12,7 @@ import {
   WorkItemToolbar,
 } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
+import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDialog";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
@@ -24,13 +25,13 @@ import {
 } from "@/lib/work-item-view";
 import { CreateProposalForm } from "./CreateProposalForm";
 import { ProposalDraftFields } from "./ProposalDraftFields";
+import { editProposalAction } from "./actions";
 import {
   archiveProposalAction,
   resolveProposalAction,
   reopenProposalAction,
   submitProposalAction,
   returnProposalToDraftAction,
-  updateProposalAction,
 } from "../actions";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { getTranslations } from "next-intl/server";
@@ -289,7 +290,13 @@ export default async function ProposalsPage({
           <summary className="nr-hide-marker nr-action-summary">
             {t("btnEdit")}
           </summary>
-          <form action={updateProposalAction} className="action-menu-form">
+          <WorkItemEditForm
+            action={editProposalAction}
+            expectedVersion={proposal.version}
+            currentHref={`/workspaces/${workspaceId}/proposals/${proposal.id}`}
+            submitLabel={proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}
+            className="action-menu-form"
+          >
             <input type="hidden" name="workspaceId" value={workspaceId} />
             <input type="hidden" name="proposalId" value={proposal.id} />
             <ProposalDraftFields
@@ -299,8 +306,7 @@ export default async function ProposalsPage({
               defaultOwnerMemberId={proposal.ownerMemberId}
               members={memberOptions}
             />
-            <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-          </form>
+          </WorkItemEditForm>
         </details>,
       );
     }

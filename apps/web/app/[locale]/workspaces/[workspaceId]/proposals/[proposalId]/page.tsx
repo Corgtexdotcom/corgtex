@@ -13,11 +13,12 @@ import { DeliberationThread } from "@/lib/components/DeliberationThread";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { WorkItemConversationSurface, WorkItemRequestList } from "@/lib/components/WorkItemConversation";
+import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { WorkItemAttentionBadge, WorkItemBadge, WorkItemLifecycleBadge, WorkItemRelationshipTag } from "@/lib/components/WorkItemControls";
 import { getDeliberationTargets } from "@/lib/deliberation-targets";
 import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
-import { createProposalObjectionAction, decideProposalApprovalAction, requestProposalAdviceAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction, updateProposalAction } from "../actions";
+import { createProposalObjectionAction, decideProposalApprovalAction, editProposalAction, requestProposalAdviceAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
@@ -624,7 +625,13 @@ export default async function ProposalDetailPage({
           {canEditContent && (
             <details className="stack mb-8">
               <summary className="secondary small nr-hide-marker cursor-pointer">{t("btnEdit")}</summary>
-              <form action={updateProposalAction} className="stack nr-form-section mt-3">
+              <WorkItemEditForm
+                action={editProposalAction}
+                expectedVersion={proposal.version}
+                currentHref={`/workspaces/${workspaceId}/proposals/${proposal.id}`}
+                submitLabel={proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}
+                className="stack nr-form-section mt-3"
+              >
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="proposalId" value={proposal.id} />
                 <ProposalDraftFields
@@ -634,8 +641,7 @@ export default async function ProposalDetailPage({
                   defaultOwnerMemberId={proposal.ownerMemberId}
                   members={memberOptions}
                 />
-                <button type="submit" className="secondary small">{proposal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-              </form>
+              </WorkItemEditForm>
             </details>
           )}
 

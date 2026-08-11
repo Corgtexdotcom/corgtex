@@ -10,6 +10,16 @@ const actor = {
   },
 };
 
+class MockAppError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 const createProposalFromTension = vi.fn();
 const createAdviceRequest = vi.fn();
 const createTension = vi.fn();
@@ -23,6 +33,7 @@ const returnTensionToDraft = vi.fn();
 const updateDeliberationEntry = vi.fn();
 const updateTension = vi.fn();
 const upvoteTension = vi.fn();
+const revalidatePath = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -33,6 +44,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: MockAppError,
   createAdviceRequest,
   createProposalFromTension,
   createTension,
@@ -51,7 +63,7 @@ vi.mock("../work-item-evidence-upload", () => ({
 }));
 
 vi.mock("next/cache", () => ({
-  revalidatePath: vi.fn(),
+  revalidatePath,
 }));
 
 afterEach(() => {
@@ -59,6 +71,62 @@ afterEach(() => {
 });
 
 describe("tension server actions", () => {
+  function editForm(expectedVersion = "7") {
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("expectedVersion", expectedVersion);
+    formData.set("title", "Updated tension");
+    formData.set("bodyMd", "Preserved draft");
+    return formData;
+  }
+
+  it("passes the exact rendered version and reports success only after revalidation", async () => {
+    const { editTensionAction } = await import("./actions");
+
+    const result = await editTensionAction({ status: "idle" }, editForm());
+
+    expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      tensionId: "tension-1",
+      expectedVersion: 7,
+      title: "Updated tension",
+      bodyMd: "Preserved draft",
+    }));
+    expect(revalidatePath).toHaveBeenCalled();
+    expect(updateTension.mock.invocationCallOrder[0]).toBeLessThan(revalidatePath.mock.invocationCallOrder[0]);
+    expect(result).toEqual({ status: "success" });
+  });
+
+  it.each(["", "0", "-1", "1.5", "7x", "9007199254740992"])(
+    "rejects invalid expected version %j without calling the writer",
+    async (expectedVersion) => {
+      const { editTensionAction } = await import("./actions");
+
+      await expect(editTensionAction({ status: "idle" }, editForm(expectedVersion))).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+      expect(updateTension).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns only safe conflict state for a stale edit without revalidation", async () => {
+    updateTension.mockRejectedValueOnce(new MockAppError(409, "VERSION_CONFLICT", "internal detail"));
+    const { editTensionAction } = await import("./actions");
+
+    await expect(editTensionAction({ status: "idle" }, editForm())).resolves.toEqual({ status: "conflict" });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("does not swallow permission or unrelated domain errors", async () => {
+    const error = new MockAppError(403, "FORBIDDEN", "No access");
+    updateTension.mockRejectedValueOnce(error);
+    const { editTensionAction } = await import("./actions");
+
+    await expect(editTensionAction({ status: "idle" }, editForm())).rejects.toBe(error);
+  });
+
   it("passes priority when creating a draft tension", async () => {
     const { createTensionAction } = await import("./actions");
     const formData = new FormData();
