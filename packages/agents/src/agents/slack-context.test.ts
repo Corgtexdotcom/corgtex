@@ -144,10 +144,10 @@ function actionableExtraction(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function preparePendingEvaluation(source: ReturnType<typeof candidate>, output: Record<string, unknown>) {
+function preparePendingEvaluation(source: ReturnType<typeof candidate>, output: Record<string, unknown>, replyText?: string) {
   prismaMock.communicationMessage.findMany
     .mockResolvedValueOnce([])
-    .mockResolvedValueOnce([source]);
+    .mockResolvedValueOnce(replyText ? [source, candidate({ id: "message-2", threadExternalId: source.externalMessageId, text: replyText })] : [source]);
   prismaMock.communicationEntityLink.findMany
     .mockResolvedValueOnce([nudgeLink({ message: source })])
     .mockResolvedValueOnce([]);
@@ -538,14 +538,10 @@ describe("Slack context jobs", () => {
   });
 
   it.each([
-    ["routing test", "Routing check: Jan, please send the signed vendor agreement by Friday."],
-    ["FYI", "Quick FYI: Jan will send the signed vendor agreement by Friday."],
-    ["acknowledgement", "Thanks."],
-    ["completed request", "Jan finished the signed vendor agreement."],
-    ["standalone completion", "Done. Jan handled the vendor agreement."],
-    ["passive completion", "The vendor agreement was sent."],
-    ["finished completion", "I finished it, thanks."],
-    ["did-it completion", "I did it; no follow-up is needed."],
+    ["routing test", "Routing check: Jan, please send the signed vendor agreement by Friday."], ["smoke test", "This is a smoke test. Jan will send the signed vendor agreement by Friday."], ["FYI", "Quick FYI: Jan will send the signed vendor agreement by Friday."],
+    ["acknowledgement", "Thanks."], ["completed request", "Jan finished the signed vendor agreement."],
+    ["standalone completion", "Done. Jan handled the vendor agreement."], ["passive completion", "The vendor agreement was sent."],
+    ["finished completion", "I finished it, thanks."], ["did-it completion", "I did it; no follow-up is needed."],
   ])("terminalizes %s content even when the model proposes a high-confidence Action", async (_label, text) => {
     const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") });
     preparePendingEvaluation(source, actionableExtraction());
@@ -625,17 +621,15 @@ describe("Slack context jobs", () => {
   });
 
   it.each([
-    ["owner evidence", { ownerEvidence: "" }, undefined],
-    ["non-person owner evidence", { ownerEvidence: "signed vendor agreement" }, "Please send the signed vendor agreement by Friday."],
-    ["concrete deliverable", { concreteNextStep: "" }, undefined],
-    ["future deliverable evidence", { concreteNextStep: "delivered the signed vendor agreement" }, "Jan delivered the signed vendor agreement yesterday."],
-    ["timing-only deliverable evidence", { ownerEvidence: "by", concreteNextStep: "by Friday" }, "Please send the agreement by Friday."],
-  ])("fails closed when high-confidence Action output lacks %s", async (_label, overrides, sourceText) => {
+    ["owner evidence", { ownerEvidence: "" }, undefined, undefined], ["non-person owner evidence", { ownerEvidence: "signed vendor agreement" }, "Please send the signed vendor agreement by Friday.", undefined],
+    ["concrete deliverable", { concreteNextStep: "" }, undefined, undefined], ["future deliverable evidence", { concreteNextStep: "delivered the signed vendor agreement" }, "Jan delivered the signed vendor agreement yesterday.", undefined],
+    ["timing-only deliverable evidence", { ownerEvidence: "by", concreteNextStep: "by Friday" }, "Please send the agreement by Friday.", undefined], ["bot-directed reply", { concreteNextStep: "send the renewal packet" }, "Can someone own the renewal?", "<@B1> can you check this? Jan will send the renewal packet by Friday."], ["negated owner deliverable", {}, "Jan will not send the signed vendor agreement; please confirm?", undefined], ["never owner deliverable", {}, "Jan will never send the signed vendor agreement; please confirm?", undefined], ["cannot owner deliverable", {}, "Jan cannot send the signed vendor agreement; please confirm?", undefined], ["contracted negated owner deliverable", {}, "Jan: won’t send the signed vendor agreement; please confirm?", undefined], ["non-Corgtex explicit create", { ownerEvidence: "", concreteNextStep: "create a GitHub Action", explicitActionRequest: true }, "Please create a GitHub Action to run the integration tests by Friday.", undefined],
+  ])("fails closed when high-confidence Action output lacks %s", async (_label, overrides, sourceText, replyText) => {
     const source = candidate({
       text: sourceText ?? "Jan, please send the signed vendor agreement by Friday.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
-    preparePendingEvaluation(source, actionableExtraction(overrides));
+    preparePendingEvaluation(source, actionableExtraction(overrides), replyText);
 
     const { runSlackProactiveScan } = await import("./slack-context");
     await runSlackProactiveScan({
@@ -649,12 +643,9 @@ describe("Slack context jobs", () => {
   });
 
   it.each([
-    ["missing semantic fields", { intent: "create_action", confidence: 0.99, title: "Send agreement" }],
-    ["invalid enum values", actionableExtraction({ resolutionState: "pending", workDisposition: "todo" })],
-    ["negative model category", actionableExtraction({ negativeCategory: true })],
-    ["contradictory intent", actionableExtraction({ intent: "ignore" })],
-    ["string confidence", actionableExtraction({ confidence: "0.99" })],
-    ["non-array couldNot", actionableExtraction({ couldNot: "none" })],
+    ["missing semantic fields", { intent: "create_action", confidence: 0.99, title: "Send agreement" }], ["invalid enum values", actionableExtraction({ resolutionState: "pending", workDisposition: "todo" })],
+    ["negative model category", actionableExtraction({ negativeCategory: true })], ["contradictory intent", actionableExtraction({ intent: "ignore" })],
+    ["string confidence", actionableExtraction({ confidence: "0.99" })], ["non-array couldNot", actionableExtraction({ couldNot: "none" })],
   ])("terminalizes %s instead of retrying or creating an Action", async (_label, output) => {
     const source = candidate({
       text: "Jan, please send the signed vendor agreement by Friday.",
@@ -744,12 +735,12 @@ describe("Slack context jobs", () => {
     });
     prismaMock.communicationMessage.findMany
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([source, candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T22:00:00.000Z") })]);
+      .mockResolvedValueOnce([source, candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "I submitted the draft. Jan will call IT by Friday.", messageTs: new Date("2026-04-28T22:00:00.000Z") })]);
     prismaMock.communicationEntityLink.findMany
       .mockResolvedValueOnce([nudgeLink({ message: source })])
       .mockResolvedValueOnce([]);
     extractMock.mockResolvedValueOnce({
-      output: actionableExtraction({ concreteNextStep: "send the renewal packet", timingEvidence: "by Friday" }),
+      output: actionableExtraction({ concreteNextStep: "call IT", timingEvidence: "by Friday" }),
     });
 
     const { runSlackProactiveScan } = await import("./slack-context");
@@ -763,17 +754,17 @@ describe("Slack context jobs", () => {
       workspaceId: "workspace-1",
       provider: "SLACK",
       kind: "ACTION",
-      title: "Send the renewal packet",
-      bodyMd: "Can someone own the renewal?\n\nJan will send the renewal packet by Friday.",
+      title: "Call IT",
+      bodyMd: "Can someone own the renewal?\n\nI submitted the draft. Jan will call IT by Friday.",
       sourceMessageId: "message-1",
       open: true,
-      claimKey: "slack-proactive-action:install-1:message-1",
+      claimKey: "slack-proactive-disposition:install-1:message-1",
     }));
     expect(createWorkItemMock).toHaveBeenCalledTimes(1);
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-      text: "Created Corgtex action: Send the renewal packet",
+      text: "Created Corgtex action: Call IT",
     }, expect.any(Array));
     expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("concrete future deliverable");
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -801,18 +792,29 @@ describe("Slack context jobs", () => {
 
     expect(createWorkItemMock).toHaveBeenCalledTimes(1);
     expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      claimKey: "slack-proactive-action:install-1:message-1",
+      claimKey: "slack-proactive-disposition:install-1:message-1",
     }));
   });
+  it("makes concurrent terminal and Action dispositions mutually exclusive", async () => {
+    const source = candidate({ text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ concreteNextStep: "send the renewal packet" })); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "terminal-1" }); createWorkItemMock.mockRejectedValueOnce({ code: "P2002" });
+    const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ claimKey: "slack-proactive-disposition:install-1:message-1" })); expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
 
-  it.each(["do not", "never", "must not", "cannot", "can't"])("keeps the explicit-create exception negation-safe for '%s'", async (negation) => {
+  it("sends Action confirmation only for the winning confirmation claim", async () => {
+    const source = candidate({ text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ concreteNextStep: "send the renewal packet" })); prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
+    const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: "proactive_unanswered_action_confirmation", claimKey: "slack-proactive-confirmation:install-1:message-1" }) }); expect(sendSlackMessageMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["do not", "don't", "don’t", "never", "must not", "cannot", "can't"])("keeps the explicit-create exception negation-safe for '%s'", async (negation) => {
     const source = candidate({
-      text: `Please ${negation} create a Corgtex Action; this is only a routing check.`,
+      text: `Please ${negation} create a Corgtex Action to send the renewal packet by Friday.`,
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     preparePendingEvaluation(source, actionableExtraction({
       ownerEvidence: "",
-      concreteNextStep: "routing check",
+      concreteNextStep: "send the renewal packet",
       explicitActionRequest: true,
     }));
 
@@ -884,7 +886,7 @@ describe("Slack context jobs", () => {
         action: "proactive_unanswered_non_action",
         entityType: "CommunicationMessage",
         entityId: "message-1",
-        claimKey: "slack-proactive-non-action:install-1:message-1",
+        claimKey: "slack-proactive-disposition:install-1:message-1",
       }),
     }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
@@ -892,7 +894,7 @@ describe("Slack context jobs", () => {
 
   it("posts waiting replies as updates to the existing linked action", async () => {
     const source = candidate({
-      text: "Please confirm availability for the June 23 call.",
+      text: "<@B1> Please confirm availability for the June 23 call.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     const waitingReply = candidate({
@@ -913,7 +915,7 @@ describe("Slack context jobs", () => {
     extractMock.mockResolvedValueOnce({
       output: {
         intent: "wait_existing_action",
-        confidence: 0.96,
+        confidence: "0.96",
         updateMd: "Daniel said no more action is needed yet; the team is waiting on the owner to confirm a June 23 time slot.",
         followupDelayMultiplier: 2,
       },
@@ -971,7 +973,7 @@ describe("Slack context jobs", () => {
         OR: expect.arrayContaining([
           expect.objectContaining({
             action: "create_action",
-            claimKey: { startsWith: "slack-proactive-action:install-1:" },
+            claimKey: { startsWith: "slack-proactive-disposition:install-1:" },
           }),
         ]),
       }),
