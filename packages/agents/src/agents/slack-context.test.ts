@@ -268,19 +268,17 @@ describe("Slack context jobs", () => {
   it.each([
     ["plain mention", "<@B1> can you confirm the routing works?"],
     ["labeled mention", "<@B1|Corgtex> can you confirm the routing works?"],
-  ])("excludes installed-bot %s before proactive nudging", async (_label, text) => {
-    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([
-      candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") }),
-    ]);
+  ])("excludes installed-bot %s before the proactive nudge limit", async (_label, text) => {
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([...Array.from({ length: 10 }, () => candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") })), candidate({ id: "eligible-11", externalMessageId: "1714320000.000111", text: "Does anyone know who owns the launch checklist?", messageTs: new Date("2026-04-28T15:29:00.000Z") })]);
 
     const { runSlackProactiveScan } = await import("./slack-context");
     await expect(runSlackProactiveScan({
       workspaceId: "workspace-1",
       installationId: "install-1",
       workflowJobId: "job-1",
-    })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    })).resolves.toEqual({ agendaJobs: 0, nudges: 1, actions: 0, followups: 0, drafts: 0 });
 
-    expect(sendSlackMessageMock).not.toHaveBeenCalled();
+    expect(sendSlackMessageMock).toHaveBeenCalledTimes(1);
     expect(extractMock).not.toHaveBeenCalled();
     expect(createWorkItemMock).not.toHaveBeenCalled();
   });
@@ -628,9 +626,9 @@ describe("Slack context jobs", () => {
 
   it.each([
     ["owner evidence", { ownerEvidence: "" }, undefined],
-    ["non-owner token", { ownerEvidence: "by" }, undefined],
+    ["non-person owner evidence", { ownerEvidence: "signed vendor agreement" }, "Please send the signed vendor agreement by Friday."],
     ["concrete deliverable", { concreteNextStep: "" }, undefined],
-    ["grounded deliverable evidence", { concreteNextStep: "prepare the budget" }, undefined],
+    ["future deliverable evidence", { concreteNextStep: "delivered the signed vendor agreement" }, "Jan delivered the signed vendor agreement yesterday."],
     ["timing-only deliverable evidence", { ownerEvidence: "by", concreteNextStep: "by Friday" }, "Please send the agreement by Friday."],
   ])("fails closed when high-confidence Action output lacks %s", async (_label, overrides, sourceText) => {
     const source = candidate({
@@ -741,17 +739,17 @@ describe("Slack context jobs", () => {
 
   it("creates one source-claimed published Action for owner-backed future work", async () => {
     const source = candidate({
-      text: "Jan, please ensure the signed vendor agreement is completed by Friday.",
+      text: "Can someone own the renewal?",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
     prismaMock.communicationMessage.findMany
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([source]);
+      .mockResolvedValueOnce([source, candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T22:00:00.000Z") })]);
     prismaMock.communicationEntityLink.findMany
       .mockResolvedValueOnce([nudgeLink({ message: source })])
       .mockResolvedValueOnce([]);
     extractMock.mockResolvedValueOnce({
-      output: actionableExtraction({ concreteNextStep: "ensure the signed vendor agreement is completed" }),
+      output: actionableExtraction({ concreteNextStep: "send the renewal packet", timingEvidence: "by Friday" }),
     });
 
     const { runSlackProactiveScan } = await import("./slack-context");
@@ -765,8 +763,8 @@ describe("Slack context jobs", () => {
       workspaceId: "workspace-1",
       provider: "SLACK",
       kind: "ACTION",
-      title: "Ensure the signed vendor agreement is completed",
-      bodyMd: "Jan, please ensure the signed vendor agreement is completed by Friday.",
+      title: "Send the renewal packet",
+      bodyMd: "Can someone own the renewal?\n\nJan will send the renewal packet by Friday.",
       sourceMessageId: "message-1",
       open: true,
       claimKey: "slack-proactive-action:install-1:message-1",
@@ -775,7 +773,7 @@ describe("Slack context jobs", () => {
     expect(sendSlackMessageMock).toHaveBeenCalledWith("install-1", {
       channel: "C1",
       threadTs: "1714320000.000100",
-      text: "Created Corgtex action: Ensure the signed vendor agreement is completed",
+      text: "Created Corgtex action: Send the renewal packet",
     }, expect.any(Array));
     expect(sendSlackMessageMock.mock.calls[0][2][0].text.text).toContain("concrete future deliverable");
     expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -807,7 +805,7 @@ describe("Slack context jobs", () => {
     }));
   });
 
-  it.each(["do not", "never", "must not"])("keeps the explicit-create exception negation-safe for '%s'", async (negation) => {
+  it.each(["do not", "never", "must not", "cannot", "can't"])("keeps the explicit-create exception negation-safe for '%s'", async (negation) => {
     const source = candidate({
       text: `Please ${negation} create a Corgtex Action; this is only a routing check.`,
       messageTs: new Date("2026-04-28T15:30:00.000Z"),

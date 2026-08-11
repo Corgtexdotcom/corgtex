@@ -294,12 +294,12 @@ function hasDeterministicNegativeCategory(text: string) {
   const completionText = text.replace(/\b(?:not\s+(?:yet\s+)?(?:done|sent|handled|finished|completed|resolved)|(?:must|should|will|needs? to|please ensure(?: that)?)[^.!?\n]{0,80}\b(?:be|is|are)\s+(?:done|sent|handled|finished|completed|resolved))\b/gi, "");
   return /(?:^|[.!?\n]\s*)(?:this is |just |only )?(?:a )?(?:test(?:ing)?(?: message)?|dry run|routing check|checking (?:the )?routing)\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
     || /(?:^|\n)\s*(?:ack(?:nowledged)?|got it|sounds good|thank you|thanks)[.!]?\s*$/im.test(completionText)
-    || (/\b(?:already (?:done|sent|handled|finished|completed|resolved)|(?:i|we|it|this|that)(?:'s|'ve| have| is)? (?:already )?(?:did|sent|handled|finished|completed|resolved|done)|(?:has|have|had|was|were|is|are) (?:already )?(?:been )?(?:done|sent|handled|finished|completed|resolved)|(?:did|sent|handled|finished|completed|resolved) it|no action (?:is )?needed|not an? action item)\b/i.test(completionText) || /\b(?:[A-Z][\p{L}'-]*|<@[A-Z0-9]+(?:\|[^>]+)?>) (?:already )?(?:sent|handled|finished|completed|resolved)\b/u.test(completionText))
+    || (/\b(?:already (?:done|sent|handled|finished|completed|resolved|delivered|submitted|uploaded|provided|published|shared)|(?:i|we|it|this|that)(?:'s|'ve| have| is)? (?:already )?(?:did|sent|handled|finished|completed|resolved|delivered|submitted|uploaded|provided|published|shared|done)|(?:has|have|had|was|were|is|are) (?:already )?(?:been )?(?:done|sent|handled|finished|completed|resolved|delivered|submitted|uploaded|provided|published|shared)|(?:did|sent|handled|finished|completed|resolved|delivered|submitted|uploaded|provided|published|shared) it|no action (?:is )?needed|not an? action item)\b/i.test(completionText) || /\b(?:[A-Z][\p{L}'-]*|<@[A-Z0-9]+(?:\|[^>]+)?>) (?:already )?(?:sent|handled|finished|completed|resolved|delivered|submitted|uploaded|provided|published|shared)\b/u.test(completionText))
     || /(?:^|[.!?]\s*)done\b/i.test(completionText);
 }
 
 function hasExplicitActionCreateRequest(text: string) {
-  if (/\b(?:do not|don't|dont|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text)
+  if (/\b(?:do not|don't|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text)
     || /\bnot an? action item\b/i.test(text)) {
     return false;
   }
@@ -314,13 +314,13 @@ function evidenceIsGrounded(evidence: string, threadMessages: SlackCandidateMess
 }
 
 function hasConcreteOwnerEvidence(ownerEvidence: string, threadMessages: SlackCandidateMessage[]) {
-  return !/^(?:a|an|and|at|by|for|from|in|it|of|on|or|please|someone|somebody|anyone|anybody|team|the team|to|us|we|they|owner|unknown|tbd|unassigned|today|tomorrow|(?:mon|tues|wednes|thurs|fri|satur|sun)day)$/i.test(ownerEvidence.trim()) && (/<@[A-Z0-9]+(?:\|[^>]+)?>/i.test(ownerEvidence) || threadMessages.some((message) => (message.text ?? "").includes(ownerEvidence)))
+  return !/^(?:a|an|and|at|by|for|from|in|it|of|on|or|please|someone|somebody|anyone|anybody|team|the team|to|us|we|they|owner|unknown|tbd|unassigned|today|tomorrow|(?:mon|tues|wednes|thurs|fri|satur|sun)day)$/i.test(ownerEvidence.trim()) && (/<@[A-Z0-9]+(?:\|[^>]+)?>/i.test(ownerEvidence) || (/^[A-Z][\p{L}'-]*(?:\s+[A-Z][\p{L}'-]*){0,2}$/u.test(ownerEvidence) && threadMessages.some((message) => new RegExp(`(?:^|[.!?]\\s+)${escapeRegExp(ownerEvidence)}(?=\\s*(?:,|:|\\b(?:will|should|must|can|could|owns?|is responsible|has to)\\b))`, "u").test(message.text ?? ""))))
     && evidenceIsGrounded(ownerEvidence, threadMessages);
 }
 
 function hasConcreteDeliverableEvidence(evidence: string, threadMessages: SlackCandidateMessage[]) {
   const words = evidence.match(/[a-z0-9]+/gi) ?? [];
-  return words.length >= 2
+  return words.length >= 2 && /^(?:send|prepare|complete|review|confirm|follow up|create|make|open|add|assign|turn|test|ensure|deliver|submit|upload|provide|publish|share|update|draft|schedule|contact|call|write|finish|resolve|handle|check|investigate|approve|sign|renew|pay|file|book|organize|finalize)\b/i.test(evidence.trim())
     && !/^(?:(?:send|do|handle|check|review|confirm|follow up|look into|take care of) (?:it|this|that)|(?:by|before|after|on|at|during|until|this|next)\s+(?:the\s+)?(?:end\s+of\s+)?[a-z0-9'-]+)$/i.test(evidence.trim())
     && evidenceIsGrounded(evidence, threadMessages);
 }
@@ -578,8 +578,7 @@ export async function runSlackProactiveScan(params: {
   });
 
   let nudges = 0;
-  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "")).slice(0, 10)) {
-    if (isAddressedToSlackBot(candidate.text ?? "", installation.botUserId)) continue;
+  for (const candidate of candidates.filter((message) => looksUnanswered(message.text ?? "") && !isAddressedToSlackBot(message.text ?? "", installation.botUserId)).slice(0, 10)) {
     const threadTs = threadTsForMessage(candidate);
     const alreadyNudged = await prisma.communicationEntityLink.findFirst({
       where: {
@@ -800,7 +799,7 @@ export async function runSlackProactiveScan(params: {
       installationId: params.installationId,
       kind: "ACTION",
       title: actionTitle,
-      bodyMd: candidate.text,
+      bodyMd: threadMessages.map((message) => message.text).filter(Boolean).join("\n\n"),
       sourceMessageId: candidate.id,
       externalUserId: candidate.externalUserId,
       open: true,
