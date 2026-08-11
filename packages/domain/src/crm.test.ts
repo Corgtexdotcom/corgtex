@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 // ---------- mocks ----------
 
 const archiveWorkspaceArtifact = vi.fn().mockResolvedValue({ id: "archive-1" });
+const lockWorkspaceArchiveArtifact = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@corgtex/shared", () => {
   return {
@@ -281,6 +282,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./archive", () => ({
   archiveWorkspaceArtifact,
+  lockWorkspaceArchiveArtifact,
   archiveFilterWhere: vi.fn((filter = "active") => {
     if (filter === "all") return {};
     if (filter === "archived") return { archivedAt: { not: null } };
@@ -1081,7 +1083,7 @@ describe("CRM domain", () => {
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { workspaceId: "ws-1", accountId: "account-1" },
+        where: expect.objectContaining({ workspaceId: "ws-1", accountId: "account-1" }),
         take: 10,
       }));
       expect(result.total).toBe(1);
@@ -1118,6 +1120,94 @@ describe("CRM domain", () => {
           { createdAt: "desc" },
         ],
       }));
+    });
+
+    it("shares nullable-safe active-parent predicates across relationship lists and counts", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const {
+        listCommunicationSuggestions,
+        listContacts,
+        listCrmActivities,
+        listCrmConversations,
+        listCrmProspectWorkspaces,
+        listDeals,
+      } = await import("./crm");
+      for (const delegate of [
+        prisma.crmContact,
+        prisma.crmDeal,
+        prisma.crmActivity,
+        prisma.crmCommunicationSuggestion,
+        prisma.crmConversation,
+        prisma.crmProspectWorkspace,
+      ]) {
+        vi.mocked(delegate.findMany).mockResolvedValue([] as never);
+        vi.mocked(delegate.count).mockResolvedValue(0);
+      }
+
+      await listContacts(dummyActor, "ws-1");
+      await listDeals(dummyActor, "ws-1");
+      await listCrmActivities(dummyActor, "ws-1");
+      await listCommunicationSuggestions(dummyActor, "ws-1");
+      await listCrmConversations(dummyActor, "ws-1");
+      await listCrmProspectWorkspaces(dummyActor, "ws-1");
+
+      for (const delegate of [
+        prisma.crmContact,
+        prisma.crmDeal,
+        prisma.crmActivity,
+        prisma.crmCommunicationSuggestion,
+        prisma.crmConversation,
+        prisma.crmProspectWorkspace,
+      ]) {
+        const where = vi.mocked(delegate.findMany).mock.calls[0]![0]!.where;
+        expect(delegate.count).toHaveBeenCalledWith({ where });
+      }
+      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[0]![0]!.where).toMatchObject({
+        archivedAt: null,
+        AND: expect.arrayContaining([
+          { OR: [{ accountId: null }, { account: { archivedAt: null } }] },
+        ]),
+      });
+
+      await listCrmActivities(dummyActor, "ws-1", { archiveFilter: "archived" });
+      await listCrmActivities(dummyActor, "ws-1", { archiveFilter: "all" });
+      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[1]![0]!.where).toEqual({
+        workspaceId: "ws-1",
+        archivedAt: { not: null },
+      });
+      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[2]![0]!.where).toEqual({ workspaceId: "ws-1" });
+    });
+
+    it("archives named CRM records and fails closed on archived activity writes", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { archiveCrmActivity, archiveCrmDeal, completeActivity, updateActivity } = await import("./crm");
+      await archiveCrmDeal(dummyActor, { workspaceId: "ws-1", dealId: "deal-1" });
+      await archiveCrmActivity(dummyActor, { workspaceId: "ws-1", activityId: "activity-1" });
+      expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(dummyActor, expect.objectContaining({ entityType: "CrmDeal" }));
+      expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(dummyActor, expect.objectContaining({ entityType: "CrmActivity" }));
+
+      const archived = {
+        id: "activity-1",
+        workspaceId: "ws-1",
+        archivedAt: new Date(),
+        completedAt: null,
+      };
+      const updates = vi.fn();
+      const archivedTx = (async (fn: any) => fn({
+        crmActivity: { findUnique: vi.fn().mockResolvedValue(archived), update: updates },
+      })) as any;
+      vi.mocked(prisma.$transaction).mockImplementationOnce(archivedTx).mockImplementationOnce(archivedTx);
+      await expect(updateActivity(dummyActor, {
+        workspaceId: "ws-1",
+        activityId: "activity-1",
+        title: "Changed",
+      })).rejects.toThrow("Activity not found");
+      await expect(completeActivity(dummyActor, {
+        workspaceId: "ws-1",
+        activityId: "activity-1",
+      })).rejects.toThrow("Activity not found");
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledTimes(2);
+      expect(updates).not.toHaveBeenCalled();
     });
 
     it("creates a due reminder task with validated owner and source metadata", async () => {
@@ -1324,7 +1414,7 @@ describe("CRM domain", () => {
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmProspectWorkspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" },
+        where: expect.objectContaining({ crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" }),
         take: 5,
       }));
       expect(result.total).toBe(1);
@@ -1419,7 +1509,7 @@ describe("CRM domain", () => {
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmCommunicationSuggestion.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } },
+        where: expect.objectContaining({ workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } }),
         take: 10,
       }));
       expect(result.total).toBe(1);

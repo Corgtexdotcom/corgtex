@@ -3,7 +3,12 @@ import { env, prisma, toInputJson } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireGlobalOperator, requireWorkspaceMembership } from "./auth";
-import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from "./archive";
+import {
+  archiveFilterWhere,
+  archiveWorkspaceArtifact,
+  lockWorkspaceArchiveArtifact,
+  type ArchiveFilter,
+} from "./archive";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
 import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
@@ -75,6 +80,17 @@ const CLOSED_CRM_DEAL_STAGES = new Set<CrmDealStage>([
   CrmDealStage.CLOSED_WON,
   CrmDealStage.CLOSED_LOST,
 ]);
+
+type CrmArchiveParent = "account" | "contact" | "deal" | "activity";
+
+function activeCrmParentWhere(parents: readonly CrmArchiveParent[], filter: ArchiveFilter = "active", required: readonly CrmArchiveParent[] = []) {
+  if (filter !== "active") return {};
+  return {
+    AND: parents.map((parent) => required.includes(parent)
+      ? { [parent]: { archivedAt: null } }
+      : { OR: [{ [`${parent}Id`]: null }, { [parent]: { archivedAt: null } }] }),
+  };
+}
 
 function normalizeCrmCode(value: string | null | undefined, fallback: string, label: string) {
   const normalized = (value?.trim() || fallback)
@@ -944,7 +960,12 @@ export async function listCrmAccounts(actor: AppActor, workspaceId: string, opts
       where,
       include: {
         _count: {
-          select: { contacts: true, deals: true, activities: true, crmConversations: true },
+          select: {
+            contacts: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } },
+            deals: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) } },
+            activities: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) } },
+            crmConversations: { where: activeCrmParentWhere(["account", "contact", "deal"]) },
+          },
         },
       },
       orderBy: { updatedAt: "desc" },
@@ -964,18 +985,23 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
     where: { id: params.accountId },
     include: {
       contacts: {
-        where: { archivedAt: null },
+        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
         orderBy: { lastSeenAt: "desc" },
       },
       deals: {
-        where: { archivedAt: null },
+        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
         orderBy: { updatedAt: "desc" },
         include: {
           contact: {
             select: { id: true, name: true, email: true, avatarUrl: true },
           },
           activities: {
-            where: { type: CrmActivityType.TASK, completedAt: null },
+            where: {
+              type: CrmActivityType.TASK,
+              completedAt: null,
+              ...archiveFilterWhere(),
+              ...activeCrmParentWhere(["account", "contact", "deal"]),
+            },
             orderBy: [
               { dueAt: { sort: "asc", nulls: "last" } },
               { createdAt: "desc" },
@@ -1000,6 +1026,7 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
         },
       },
       activities: {
+        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) },
         orderBy: { createdAt: "desc" },
         take: 50,
         include: {
@@ -1012,6 +1039,7 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
         },
       },
       crmConversations: {
+        where: activeCrmParentWhere(["account", "contact", "deal"]),
         orderBy: { updatedAt: "desc" },
         take: 25,
         include: {
@@ -1019,6 +1047,7 @@ export async function getCrmAccount(actor: AppActor, params: { workspaceId: stri
         },
       },
       prospectWorkspaces: {
+        where: activeCrmParentWhere(["account"]),
         orderBy: { provisionedAt: "desc" },
         take: 25,
         include: {
@@ -1320,7 +1349,11 @@ export async function listContacts(actor: AppActor, workspaceId: string, opts?: 
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
   
-  let where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
+  let where: any = {
+    workspaceId,
+    ...archiveFilterWhere(opts?.archiveFilter),
+    ...activeCrmParentWhere(["account"], opts?.archiveFilter),
+  };
   if (opts?.accountId) {
     where.accountId = opts.accountId;
   }
@@ -1343,7 +1376,10 @@ export async function listContacts(actor: AppActor, workspaceId: string, opts?: 
           select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
         },
         _count: {
-          select: { deals: true, activities: true },
+          select: {
+            deals: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) } },
+            activities: { where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) } },
+          },
         },
       },
       orderBy: { lastSeenAt: "desc" },
@@ -1364,17 +1400,23 @@ export async function getContact(actor: AppActor, params: { workspaceId: string;
     include: {
       account: true,
       deals: {
-        where: { archivedAt: null },
+        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]) },
         orderBy: { updatedAt: "desc" },
       },
       activities: {
+        where: { ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]) },
         orderBy: { createdAt: "desc" },
         take: 50,
       },
     },
   });
   
-  invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
+  invariant(
+    contact && contact.workspaceId === params.workspaceId && !contact.archivedAt && (!contact.accountId || !contact.account?.archivedAt),
+    404,
+    "NOT_FOUND",
+    "Contact not found.",
+  );
   return contact;
 }
 
@@ -1545,7 +1587,11 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
   const take = opts?.take ?? 100;
   const skip = opts?.skip ?? 0;
   
-  const where: any = { workspaceId, ...archiveFilterWhere(opts?.archiveFilter) };
+  const where: any = {
+    workspaceId,
+    ...archiveFilterWhere(opts?.archiveFilter),
+    ...activeCrmParentWhere(["account", "contact"], opts?.archiveFilter, ["contact"]),
+  };
   if (opts?.accountId) {
     where.accountId = opts.accountId;
   }
@@ -1567,10 +1613,15 @@ export async function listDeals(actor: AppActor, workspaceId: string, opts?: { t
           select: { id: true, name: true, slug: true, domain: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
         },
         contact: {
-          select: { id: true, name: true, company: true, email: true, avatarUrl: true },
+          select: { id: true, name: true, company: true, email: true, avatarUrl: true, archivedAt: true },
         },
         activities: {
-          where: { type: CrmActivityType.TASK, completedAt: null },
+          where: {
+            type: CrmActivityType.TASK,
+            completedAt: null,
+            ...archiveFilterWhere(),
+            ...activeCrmParentWhere(["account", "contact", "deal"]),
+          },
           orderBy: [
             { dueAt: { sort: "asc", nulls: "last" } },
             { createdAt: "desc" },
@@ -1748,17 +1799,25 @@ export async function updateDeal(actor: AppActor, params: {
   });
 }
 
-export async function deleteDeal(actor: AppActor, params: { workspaceId: string; dealId: string }) {
+async function archiveDealWithReason(actor: AppActor, params: { workspaceId: string; dealId: string; reason: string }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "CrmDeal",
     entityId: params.dealId,
-    reason: "Archived from deal delete path.",
+    reason: params.reason,
   });
 
   return { id: params.dealId };
+}
+
+export async function archiveCrmDeal(actor: AppActor, params: { workspaceId: string; dealId: string }) {
+  return archiveDealWithReason(actor, { ...params, reason: "Archived from CRM deal archive action." });
+}
+
+export async function deleteDeal(actor: AppActor, params: { workspaceId: string; dealId: string }) {
+  return archiveDealWithReason(actor, { ...params, reason: "Archived from deal delete path." });
 }
 
 // --- ACTIVITIES ---
@@ -1778,12 +1837,17 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
   sort?: "recent" | "due";
   take?: number;
   skip?: number;
+  archiveFilter?: ArchiveFilter;
 }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
-  const where: any = { workspaceId };
+  const where: any = {
+    workspaceId,
+    ...archiveFilterWhere(opts?.archiveFilter),
+    ...activeCrmParentWhere(["account", "contact", "deal"], opts?.archiveFilter),
+  };
   if (opts?.accountId) where.accountId = opts.accountId;
   if (opts?.contactId) where.contactId = opts.contactId;
   if (opts?.dealId) where.dealId = opts.dealId;
@@ -1813,13 +1877,13 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
       where,
       include: {
         account: {
-          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true },
+          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
         },
         contact: {
-          select: { id: true, name: true, email: true, company: true },
+          select: { id: true, name: true, email: true, company: true, archivedAt: true },
         },
         deal: {
-          select: { id: true, title: true, stage: true, valueCents: true },
+          select: { id: true, title: true, stage: true, valueCents: true, archivedAt: true },
         },
       },
       orderBy,
@@ -1900,8 +1964,9 @@ export async function updateActivity(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceArchiveArtifact(tx, "CrmActivity", params.activityId);
     const activity = await tx.crmActivity.findUnique({ where: { id: params.activityId } });
-    invariant(activity && activity.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Activity not found.");
+    invariant(activity && activity.workspaceId === params.workspaceId && !activity.archivedAt, 404, "NOT_FOUND", "Activity not found.");
 
     const data: any = {};
     if (params.title !== undefined) {
@@ -1962,8 +2027,9 @@ export async function completeActivity(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceArchiveArtifact(tx, "CrmActivity", params.activityId);
     const activity = await tx.crmActivity.findUnique({ where: { id: params.activityId } });
-    invariant(activity && activity.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Activity not found.");
+    invariant(activity && activity.workspaceId === params.workspaceId && !activity.archivedAt, 404, "NOT_FOUND", "Activity not found.");
     if (activity.completedAt) return activity;
 
     const completedAt = normalizeCrmActivityDate(params.completedAt, "Completed date") ?? new Date();
@@ -1990,18 +2056,29 @@ export async function completeActivity(actor: AppActor, params: {
   });
 }
 
+export async function archiveCrmActivity(actor: AppActor, params: { workspaceId: string; activityId: string }) {
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await archiveWorkspaceArtifact(actor, {
+    workspaceId: params.workspaceId,
+    entityType: "CrmActivity",
+    entityId: params.activityId,
+    reason: "Archived from CRM activity archive action.",
+  });
+  return { id: params.activityId };
+}
+
 const communicationSuggestionInclude = {
   account: {
-    select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true },
+    select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
   },
   contact: {
-    select: { id: true, name: true, email: true, company: true },
+    select: { id: true, name: true, email: true, company: true, archivedAt: true },
   },
   deal: {
-    select: { id: true, title: true, stage: true, valueCents: true },
+    select: { id: true, title: true, stage: true, valueCents: true, archivedAt: true },
   },
   activity: {
-    select: { id: true, title: true, type: true, dueAt: true, completedAt: true },
+    select: { id: true, title: true, type: true, dueAt: true, completedAt: true, archivedAt: true },
   },
 };
 
@@ -2036,7 +2113,7 @@ export async function listCommunicationSuggestions(actor: AppActor, workspaceId:
 }) {
   await requireWorkspaceMembership({ actor, workspaceId });
 
-  const where: any = { workspaceId };
+  const where: any = { workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) };
   if (opts?.accountId) where.accountId = opts.accountId;
   if (opts?.contactId) where.contactId = opts.contactId;
   if (opts?.dealId) where.dealId = opts.dealId;
@@ -2736,7 +2813,7 @@ export async function listCrmConversations(actor: AppActor, workspaceId: string,
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
   
-  const where: any = { workspaceId };
+  const where: any = { workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]) };
   if (opts?.accountId) where.accountId = opts.accountId;
   if (opts?.contactId) where.contactId = opts.contactId;
   if (opts?.demoLeadId) where.demoLeadId = opts.demoLeadId;
@@ -2745,8 +2822,8 @@ export async function listCrmConversations(actor: AppActor, workspaceId: string,
     prisma.crmConversation.findMany({
       where,
       include: {
-        account: { select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true } },
-        contact: { select: { id: true, name: true, email: true, company: true } },
+        account: { select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true } },
+        contact: { select: { id: true, name: true, email: true, company: true, archivedAt: true } },
         demoLead: { select: { id: true, email: true } },
         messages: { orderBy: { createdAt: "desc" }, take: 1 },
       },
@@ -2772,7 +2849,7 @@ export async function listCrmProspectWorkspaces(actor: AppActor, workspaceId: st
 
   const take = opts?.take ?? 50;
   const skip = opts?.skip ?? 0;
-  const where: any = { crmWorkspaceId: workspaceId };
+  const where: any = { crmWorkspaceId: workspaceId, ...activeCrmParentWhere(["account"]) };
   if (opts?.accountId) where.accountId = opts.accountId;
   if (opts?.status) where.status = opts.status;
 
@@ -2781,7 +2858,7 @@ export async function listCrmProspectWorkspaces(actor: AppActor, workspaceId: st
       where,
       include: {
         account: {
-          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true },
+          select: { id: true, name: true, slug: true, relationshipType: true, lifecycleStage: true, archivedAt: true },
         },
         demoLead: true,
         targetWorkspace: { select: { id: true, slug: true, name: true } },

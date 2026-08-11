@@ -8,7 +8,16 @@ import {
   receiveEmailReply,
   syncEmailReplyToConversation,
   provisionProspectWorkspace,
+  archiveCrmAccount,
+  archiveCrmActivity,
+  archiveCrmDeal,
+  completeActivity,
+  listContacts,
+  listCrmActivities,
+  listDeals,
+  updateActivity,
 } from "./crm";
+import { restoreWorkspaceArtifact } from "./archive";
 
 describe("CRM Integration Lifecycle", () => {
   let adminActor: any;
@@ -36,10 +45,67 @@ describe("CRM Integration Lifecycle", () => {
       data: {
         workspaceId: workspace.id,
         userId: adminUser.id,
+        role: "ADMIN",
       },
     });
 
     adminActor = { kind: "user", user: adminUser, member };
+  });
+
+  it("preserves non-cascading parent restore and independently archived children", async () => {
+    const suffix = Date.now().toString();
+    const account = await prisma.crmAccount.create({
+      data: { workspaceId: workspace.id, name: `Archive ${suffix}`, slug: `archive-${suffix}` },
+    });
+    const contact = await prisma.crmContact.create({
+      data: { workspaceId: workspace.id, accountId: account.id, email: `linked-${suffix}@example.test` },
+    });
+    const unlinked = await prisma.crmContact.create({
+      data: { workspaceId: workspace.id, email: `unlinked-${suffix}@example.test` },
+    });
+    const deal = await prisma.crmDeal.create({
+      data: { workspaceId: workspace.id, accountId: account.id, contactId: contact.id, title: "Archive deal" },
+    });
+    const activity = await prisma.crmActivity.create({
+      data: {
+        workspaceId: workspace.id,
+        accountId: account.id,
+        contactId: contact.id,
+        dealId: deal.id,
+        title: "Archive activity",
+      },
+    });
+
+    await archiveCrmAccount(adminActor, { workspaceId: workspace.id, accountId: account.id });
+    expect(await prisma.crmContact.findUnique({ where: { id: contact.id } })).toMatchObject({ archivedAt: null });
+    expect((await listContacts(adminActor, workspace.id)).items.map((item) => item.id)).toContain(unlinked.id);
+    expect((await listDeals(adminActor, workspace.id)).items.map((item) => item.id)).not.toContain(deal.id);
+    expect((await listCrmActivities(adminActor, workspace.id)).items.map((item) => item.id)).not.toContain(activity.id);
+
+    await restoreWorkspaceArtifact(adminActor, { workspaceId: workspace.id, entityType: "CrmAccount", entityId: account.id });
+    expect((await listDeals(adminActor, workspace.id)).items.map((item) => item.id)).toContain(deal.id);
+    expect((await listCrmActivities(adminActor, workspace.id)).items.map((item) => item.id)).toContain(activity.id);
+
+    await archiveCrmDeal(adminActor, { workspaceId: workspace.id, dealId: deal.id });
+    await archiveCrmActivity(adminActor, { workspaceId: workspace.id, activityId: activity.id });
+    await expect(updateActivity(adminActor, {
+      workspaceId: workspace.id,
+      activityId: activity.id,
+      title: "Must fail",
+    })).rejects.toThrow("Activity not found");
+    await expect(completeActivity(adminActor, {
+      workspaceId: workspace.id,
+      activityId: activity.id,
+    })).rejects.toThrow("Activity not found");
+    await archiveCrmAccount(adminActor, { workspaceId: workspace.id, accountId: account.id });
+    await restoreWorkspaceArtifact(adminActor, { workspaceId: workspace.id, entityType: "CrmAccount", entityId: account.id });
+    expect((await listDeals(adminActor, workspace.id)).items.map((item) => item.id)).not.toContain(deal.id);
+    expect((await listCrmActivities(adminActor, workspace.id, { archiveFilter: "all" })).items.map((item) => item.id)).toContain(activity.id);
+
+    const ledgers = await prisma.workspaceArchiveRecord.findMany({
+      where: { workspaceId: workspace.id, entityId: { in: [deal.id, activity.id] }, restoredAt: null },
+    });
+    expect(ledgers.map((record) => record.entityType).sort()).toEqual(["CrmActivity", "CrmDeal"]);
   });
 
   it("completes the full approval and provisioning lifecycle", async () => {

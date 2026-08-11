@@ -35,6 +35,7 @@ type ArchiveEntityType =
   | "BrainSource"
   | "Circle"
   | "CrmAccount"
+  | "CrmActivity"
   | "CrmContact"
   | "CrmDeal"
   | "Document"
@@ -169,6 +170,12 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   CrmAccount: {
     entityType: "CrmAccount",
     delegate: "crmAccount",
+    findWhere: directWorkspace,
+    label: titleOrName,
+  },
+  CrmActivity: {
+    entityType: "CrmActivity",
+    delegate: "crmActivity",
     findWhere: directWorkspace,
     label: titleOrName,
   },
@@ -335,13 +342,15 @@ function isPrismaNotFoundError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
-async function lockArchiveWorkItem(
+export async function lockWorkspaceArchiveArtifact(
   tx: Prisma.TransactionClient,
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (!WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) return;
-  await acquireWorkItemAdvisoryLock(tx, entityType as WorkItemEntityType, entityId);
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
+  if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+    await acquireWorkItemAdvisoryLock(tx, entityType as WorkItemEntityType, entityId);
+  }
 }
 
 async function recomputeGoalProgressInTransaction(
@@ -489,7 +498,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   const reason = params.reason?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
-    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
+    await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
     if (record.archivedAt) {
@@ -572,7 +581,7 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
   const config = configFor(params.entityType);
 
   return prisma.$transaction(async (tx) => {
-    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
+    await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", `${config.entityType} is not archived.`);
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);

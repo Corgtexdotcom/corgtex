@@ -4598,6 +4598,9 @@ model CrmActivity {
   sourceOccurredAt  DateTime?
   dueAt             DateTime?
   completedAt       DateTime?
+  archivedAt        DateTime?
+  archivedByUserId  String?
+  archiveReason     String?
   createdAt         DateTime        @default(now())
 
   workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -4610,6 +4613,7 @@ model CrmActivity {
   @@index([workspaceId, createdAt])
   @@index([workspaceId, type, dueAt])
   @@index([workspaceId, completedAt])
+  @@index([workspaceId, archivedAt])
   @@index([workspaceId, ownerUserId, dueAt])
   @@index([workspaceId, source, sourceOccurredAt])
   @@index([accountId])
