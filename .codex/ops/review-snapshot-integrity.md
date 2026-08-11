@@ -1,0 +1,82 @@
+# Review Snapshot Integrity
+
+Purpose: bind every `beepto-codex` approval to the exact PR snapshot it
+reviewed (head SHA, base SHA, UTF-8 PR body bytes, canonical label set) so a
+stale approval can never merge mutated content.
+
+## Components
+
+- `scripts/review-snapshot-integrity.mjs` — offline-testable evaluator and
+  publisher. Pure functions compute the snapshot, parse the attestation, and
+  decide pass/fail; `publishPullRequestStatus` publishes the commit status.
+- `.github/workflows/review-snapshot-integrity-pr.yml` — shadow-mode trusted
+  `pull_request_target` workflow on `main` (opened, reopened, synchronize,
+  edited, labeled, unlabeled, ready_for_review, converted_to_draft only). It
+  publishes the explicit commit status context `Review Snapshot Integrity` on
+  the immutable event PR head SHA: `pending` before evaluation, `success`
+  only after a complete pass with an unchanged post-write refetch, `failure`
+  on every other path. Each write is confirmed by exact returned status ID,
+  state, context, and the `github-actions[bot]` creator; workflow/job names are
+  deliberately distinct from the explicit context. The job has job-local `contents: read`,
+  `pull-requests: write`, `statuses: write` only, uses the ephemeral
+  `GITHUB_TOKEN`, checks out only the trusted base SHA without persisted
+  credentials, installs nothing, and never checks out, interpolates, or
+  executes PR-controlled content. PR metadata is read only through the API.
+- The status is **shadow-only**: it is not a required context and no ruleset,
+  queue, Actions default, or repository setting references it.
+
+## Attestation protocol (reviewer)
+
+1. Complete the full `.codex/review.md` checklist against freshly pulled PR
+   state: head SHA, base SHA, full PR body, labels, checks, and review
+   threads must all be rechecked at approval time.
+2. Generate the attestation payload from live API state:
+   `node scripts/review-snapshot-integrity.mjs --attest <pr-number>` (requires
+   `GITHUB_TOKEN` and `GITHUB_REPOSITORY`).
+3. Submit the approval as `beepto-codex` with exactly one attestation block in
+   the body:
+
+   ````
+   ```review-snapshot-attestation
+   {"v":"rsi/v1","pr":<n>,"headSha":"...","baseSha":"...","bodyDigest":"...","labelDigest":"..."}
+   ```
+   ````
+
+4. **Post-approval rerun:** rerun the exact publisher workflow run for the
+   current head (`gh run rerun <run-id>` or re-trigger the event) so the
+   publisher observes the new approval and flips the status to `success`. A
+   same-head rerun recomputes all live metadata; a stale-head run can only
+   write to its immutable event head SHA and can never affect a newer head.
+
+## Invalidation
+
+Any same-SHA drift (body, base, labels, draft/readiness) or head
+synchronization invalidates the approval: the attestation no longer matches
+the live snapshot, the publisher emits `failure`, and, only after confirming
+that the event head and evaluated snapshot are still current, dismisses stale
+`beepto-codex` approvals, disables auto-merge, and dequeues the PR when
+applicable. Stale-head runs perform no PR mutation. Title-only edits recompute
+but do not change attested state. An approval and a snapshot mutation at the
+identical timestamp are ambiguous and fail closed.
+
+## Shadow evidence and stop boundaries
+
+- Evidence: the public `Review Snapshot Integrity` status history on PR head
+  commits plus the job step summary (digests only; no PR body content).
+- Stop boundaries: never make the context required, never add `checks: write`
+  or any other permission, never check out or execute PR code in the
+  privileged job, never add installs/caches/artifacts.
+- Canceling concurrency always has a successor run, but a canceled run can
+  briefly leave `pending`. Any orphaned `pending` or successor that cannot
+  publish a final state is a fail-stuck shadow signal and blocks activation;
+  rerun it while shadow-only. If observed after activation, remove the
+  required context first as described below.
+- The read-only `merge_group` workflow is separately approved PR2 and must
+  not be added by this PR.
+- Activation is a separately approved gate after both PRs merge and bounded
+  shadow evidence passes: first add the exact context plus GitHub Actions
+  source, verify queue behavior, and only then apply separately approved queue
+  maxima. If activation wedges, remove the required context first, verify the
+  queue recovers, and only then revert code by normal protected PR. Before
+  activation, rollback is only that protected revert PR. Historical statuses
+  remain public audit evidence.

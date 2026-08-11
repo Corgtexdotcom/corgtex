@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { api, buildAttestationPayload, computeSnapshot, decide, encodeLabelSet, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes } from "./review-snapshot-integrity.mjs";
+import { api, buildAttestationPayload, computeSnapshot, confirmStatus, decide, encodeLabelSet, evaluatePolicy, isSnapshotMutatingEvent, matchesAllowlist, parseAttestation, postStatus, publishPullRequestStatus, resolveMergeGroupPrNumbers, selectLatestReviewerReview, sha256Bytes, STATUS_CONTEXT, validatePublisherEvent } from "./review-snapshot-integrity.mjs";
 const PLAN = "## Risk tier\n\n- `low`\n\n## Files to touch\n\n- `scripts/x.mjs`\n\n## Acceptance criteria\n\n- [x] done\n";
 const FILES = [{ filename: "scripts/x.mjs", additions: 1, deletions: 1 }];
 const makePr = (over = {}) => ({ number: 7, state: "open", draft: false, body: PLAN, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) }, labels: [{ name: "ok" }], auto_merge: null, ...over });
@@ -126,6 +126,9 @@ describe("review snapshot integrity", () => {
     const statuses = [429, 500, 500]; vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: statuses.shift() })));
     await expect(api("/x")).rejects.toThrow("500");
     expect(fetch).toHaveBeenCalledTimes(3);
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 422 })));
+    await expect(api("/bad-request")).rejects.toThrow("422");
+    expect(fetch).toHaveBeenCalledTimes(1);
     const signals = [];
     vi.stubGlobal("fetch", vi.fn((_url, { signal }) => new Promise((_resolve, reject) => {
       signals.push(signal);
@@ -135,6 +138,153 @@ describe("review snapshot integrity", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(new Set(signals).size).toBe(3);
     expect(signals.every((signal) => signal.aborted)).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("review snapshot integrity publisher", () => {
+  const repo = "o/r";
+  const creator = { login: "github-actions[bot]" };
+  const eventFor = (pr, over = {}) => ({ action: "opened", changes: null, repository: { full_name: repo }, pull_request: { number: pr.number, updated_at: "2026-01-02T00:00:00Z", head: { sha: pr.head.sha, repo: { full_name: repo } }, base: { sha: pr.base.sha, ref: "main", repo: { full_name: repo } } }, ...over });
+  const stubPublisherApi = (pr, { reviews = [approvalFor(pr)], files = FILES, statuses = [], failStatus = null, hideStatusWrites = false, refetchPr = null } = {}) => {
+    const posts = [];
+    posts.mutations = [];
+    let statusList = statuses;
+    let pullsGets = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url, opts = {}) => {
+      const u = String(url);
+      const reply = (status, json) => ({ ok: status < 400, status, json: async () => json });
+      if (u.includes(`/statuses/`) && opts.method === "POST") {
+        const body = JSON.parse(opts.body);
+        if (failStatus === body.state) return reply(422, { message: "nope" });
+        const created = { id: Math.max(0, ...statusList.map((status) => status.id)) + 1, context: body.context, state: body.state, creator };
+        posts.push({ url: u, body });
+        if (!hideStatusWrites) statusList = [...statusList, created];
+        return reply(201, created);
+      }
+      if (u.includes("/commits/") && u.includes("/statuses")) { const page = Number(u.match(/[?&]page=(\d+)/)?.[1] ?? 1); return reply(200, statusList.slice((page - 1) * 100, page * 100)); }
+      if (u.endsWith(`/pulls/${pr.number}`)) { pullsGets += 1; return reply(200, pullsGets > 1 && refetchPr ? refetchPr : pr); }
+      if (u.includes(`/pulls/${pr.number}/files`)) return reply(200, files);
+      if (u.includes("/dismissals") && opts.method === "PUT") { posts.mutations.push("dismiss"); return reply(200, {}); }
+      if (u.includes(`/pulls/${pr.number}/reviews`)) return reply(200, reviews);
+      if (u.endsWith("/graphql")) {
+        const query = JSON.parse(opts.body).query;
+        if (query.includes("disablePullRequestAutoMerge")) { posts.mutations.push("disable"); return reply(200, { data: { disablePullRequestAutoMerge: { clientMutationId: null } } }); }
+        if (query.includes("mergeQueueEntry")) { posts.mutations.push("inspect-queue"); return reply(200, { data: { node: { mergeQueueEntry: { id: "queue-id" } } } }); }
+        if (query.includes("dequeuePullRequest")) { posts.mutations.push("dequeue"); return reply(200, { data: { dequeuePullRequest: { clientMutationId: null } } }); }
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    }));
+    return posts;
+  };
+  const run = async (pr, opts, eventOver) => {
+    process.exitCode = undefined;
+    const posts = stubPublisherApi(pr, opts);
+    await publishPullRequestStatus(repo, eventFor(pr, eventOver));
+    vi.unstubAllGlobals();
+    return posts;
+  };
+  it("validates event action, SHAs, base ref/repository, and head repository", () => {
+    const pr = makePr();
+    expect(validatePublisherEvent(eventFor(pr), repo).number).toBe(7);
+    expect(validatePublisherEvent(eventFor(pr), repo).head.sha).toBe(pr.head.sha);
+    expect(validatePublisherEvent(eventFor(pr, { pull_request: { ...eventFor(pr).pull_request, head: { sha: pr.head.sha, repo: { full_name: "fork/r" } } } }), repo).head.repo.full_name).toBe("fork/r");
+    for (const bad of [
+      eventFor(pr, { action: "closed" }),
+      eventFor(pr, { repository: { full_name: "evil/r" } }),
+      eventFor(pr, { pull_request: { ...eventFor(pr).pull_request, head: { sha: "zzz", repo: { full_name: repo } } } }),
+      eventFor(pr, { pull_request: { ...eventFor(pr).pull_request, base: { sha: pr.base.sha, ref: "dev", repo: { full_name: repo } } } }),
+      eventFor(pr, { pull_request: { ...eventFor(pr).pull_request, base: { sha: pr.base.sha, ref: "main", repo: { full_name: "evil/r" } } } }),
+      eventFor(pr, { pull_request: { ...eventFor(pr).pull_request, head: { sha: pr.head.sha, repo: null } } }),
+      { action: "opened" },
+    ]) expect(() => validatePublisherEvent(bad, repo)).toThrow();
+  });
+  it("writes pending then success on the immutable event head SHA after a stable pass", async () => {
+    const posts = await run(makePr());
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "success"]);
+    expect(posts.every((p) => p.url.includes(`/statuses/${"a".repeat(40)}`))).toBe(true);
+    expect(posts.every((p) => p.body.context === STATUS_CONTEXT)).toBe(true);
+    expect(process.exitCode).toBeUndefined();
+  });
+  it("writes pending then failure and exits nonzero when evaluation fails", async () => {
+    const posts = await run(makePr(), { reviews: [] });
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("pending write failure attempts failure and can never emit success", async () => {
+    const posts = await run(makePr(), { failStatus: "pending" });
+    expect(posts.map((p) => p.body.state)).toEqual(["failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("ambiguous pending write readback attempts failure, never success", async () => {
+    const pr = makePr();
+    const posts = await run(pr, { hideStatusWrites: true });
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("snapshot drift on the post-evaluation refetch blocks success", async () => {
+    const pr = makePr();
+    const posts = await run(pr, { refetchPr: makePr({ body: `${PLAN}edited` }) });
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("stale-head runs target only the event head SHA and fail on head drift", async () => {
+    const stale = makePr();
+    const live = makePr({ head: { sha: "c".repeat(40) } });
+    const posts = await run(live, { reviews: [approvalFor(live)] }, { pull_request: { ...eventFor(stale).pull_request, number: live.number } });
+    expect(posts.every((p) => p.url.includes(`/statuses/${"a".repeat(40)}`))).toBe(true);
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("same-head rerun recomputes current metadata instead of trusting the event", async () => {
+    const pr = makePr({ labels: [{ name: "ok" }, { name: "halt-agents" }] });
+    const posts = await run(pr, { reviews: [approvalFor(pr)] });
+    expect(posts.map((p) => p.body.state)).toEqual(["pending", "failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("reserves capacity for a fail-closed final status near the API ceiling", async () => {
+    const statuses = Array.from({ length: 998 }, (_, i) => ({ id: i + 1, context: STATUS_CONTEXT, state: "success", creator }));
+    const posts = await run(makePr(), { statuses });
+    expect(posts.map((p) => p.body.state)).toEqual(["failure"]);
+    expect(process.exitCode).toBe(1);
+  });
+  it("performs stale-approval enforcement only while the event head is current", async () => {
+    const pr = makePr({ node_id: "pr-id", labels: [{ name: "ok" }, { name: "changed" }], auto_merge: { merge_method: "SQUASH" } });
+    const posts = await run(pr, { reviews: [approvalFor(makePr())] }, { action: "labeled", pull_request: { ...eventFor(pr).pull_request, updated_at: "2026-01-03T00:00:00Z" } });
+    expect(posts.mutations).toEqual(["dismiss", "disable", "inspect-queue", "dequeue"]);
+    const live = makePr({ head: { sha: "c".repeat(40) }, node_id: "pr-id" });
+    const stale = await run(live, { reviews: [approvalFor(live)] }, { pull_request: eventFor(makePr()).pull_request });
+    expect(stale.mutations).toEqual([]);
+  });
+  it("enforces the status-count ceiling, readback schema, and confirmation", async () => {
+    process.exitCode = undefined;
+    process.env.GITHUB_TOKEN = "t";
+    const ceiling = Array.from({ length: 1000 }, (_, i) => ({ id: i + 1, context: STATUS_CONTEXT, state: "failure", creator }));
+    vi.stubGlobal("fetch", vi.fn(async (url) => { const page = Number(String(url).match(/[?&]page=(\d+)/)[1]); return { ok: true, status: 200, json: async () => ceiling.slice((page - 1) * 100, page * 100) }; }));
+    await expect(confirmStatus(repo, "a".repeat(40), { id: 1001, state: "pending" })).rejects.toThrow("unconfirmed");
+    const overflow = [...ceiling, { id: 1001, context: STATUS_CONTEXT, state: "failure", creator }];
+    vi.stubGlobal("fetch", vi.fn(async (url) => { const page = Number(String(url).match(/[?&]page=(\d+)/)[1]); return { ok: true, status: 200, json: async () => overflow.slice((page - 1) * 100, page * 100) }; }));
+    await expect(confirmStatus(repo, "a".repeat(40), { id: 1001, state: "failure" })).rejects.toThrow("ceiling");
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => [{ id: 1, context: STATUS_CONTEXT, state: "bogus" }] })));
+    await expect(confirmStatus(repo, "a".repeat(40), { id: 1, state: "pending" })).rejects.toThrow("schema");
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => [{ id: 1, context: "other", state: "success", creator }] })));
+    await expect(confirmStatus(repo, "a".repeat(40), { id: 1, state: "pending" })).rejects.toThrow("unconfirmed");
+    vi.stubGlobal("fetch", vi.fn(async (url) => String(url).includes("page=2")
+      ? { ok: true, status: 200, json: async () => [] }
+      : { ok: true, status: 200, json: async () => Array.from({ length: 100 }, (_, i) => ({ id: i + 1, context: "x", state: "success", creator })) }));
+    await expect(confirmStatus(repo, "a".repeat(40), { id: 1, state: "pending" })).rejects.toThrow("unconfirmed");
+    vi.unstubAllGlobals();
+  });
+  it("postStatus validates SHA/state and sends the exact context", async () => {
+    await expect(postStatus(repo, "nope", "pending")).rejects.toThrow("unexpected status write");
+    await expect(postStatus(repo, "a".repeat(40), "error")).rejects.toThrow("unexpected status write");
+    process.env.GITHUB_TOKEN = "t";
+    const seen = [];
+    vi.stubGlobal("fetch", vi.fn(async (url, opts) => { const body = JSON.parse(opts.body); seen.push({ url, body }); return { ok: true, status: 201, json: async () => ({ id: 1, context: body.context, state: body.state, creator }) }; }));
+    await postStatus(repo, "a".repeat(40), "failure");
+    expect(seen[0].body).toEqual({ state: "failure", context: "Review Snapshot Integrity", description: "Review snapshot integrity check failed" });
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 201, json: async () => ({ id: 2, context: STATUS_CONTEXT, state: "failure", creator: { login: "other-bot" } }) })));
+    await expect(postStatus(repo, "a".repeat(40), "failure")).rejects.toThrow("write response");
     vi.unstubAllGlobals();
   });
 });

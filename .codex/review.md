@@ -76,6 +76,27 @@ gh pr review <number> --approve --body "All review criteria pass. Approved by be
 
 The Executor has already set auto-merge (`gh pr merge --auto --squash`); the PR will merge itself once your approval lands.
 
+## Review Snapshot Integrity attestation
+
+Every approval you submit must be bound to the exact snapshot you reviewed.
+The full protocol lives in
+[`.codex/ops/review-snapshot-integrity.md`](ops/review-snapshot-integrity.md).
+
+1. Immediately before approving, recheck freshly pulled live state: head SHA,
+   base SHA, full PR body, labels, required checks, and review threads.
+2. Generate the attestation payload from live API state with
+   `node scripts/review-snapshot-integrity.mjs --attest <pr-number>`.
+3. Include exactly one `review-snapshot-attestation` fenced block containing
+   that single-line JSON payload in the `--body` of your
+   `gh pr review <number> --approve`.
+4. After the approval lands, rerun the exact `Review Snapshot Integrity
+   Publisher` workflow run for the current head so the shadow status
+   recomputes against the new approval. Same-head reruns recompute current
+   metadata; stale-head runs only write to their immutable event head SHA.
+
+An approval without a matching attestation, or one whose head/base/body/label
+digests no longer match live state, is treated as absent by the evaluator.
+
 ## Special cases
 
 - **`auto-revert` label:** skip criteria 1, 2, 3, 8, 9. Verify only: the diff is a clean `git revert` of a single commit, CI is green, gitleaks is green. Approve quickly.
