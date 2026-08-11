@@ -280,7 +280,7 @@ describe("Constitution provenance database contract", () => {
       await release;
     });
     await locked;
-    const sourceInsert = prisma.constitutionSourceReference.create({
+    const sourceInsertRejection = expect(prisma.constitutionSourceReference.create({
       data: {
         workspaceId: workspace.id,
         constitutionId: constitution.id,
@@ -293,12 +293,12 @@ describe("Constitution provenance database contract", () => {
         labelSnapshot: tension.title,
         acceptedAtSnapshot: policy.acceptedAt,
       },
-    }).then((reference) => reference);
+    })).rejects.toThrow();
     await waitForBlockedSourceInsert();
     releaseWriter();
     await writer;
 
-    await expect(sourceInsert).rejects.toThrow();
+    await sourceInsertRejection;
     await expect(prisma.constitutionSourceReference.count({ where: { constitutionId: constitution.id } }))
       .resolves.toBe(0);
   });
