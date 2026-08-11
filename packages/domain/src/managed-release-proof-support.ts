@@ -51,7 +51,7 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
     try { prototype = Object.getPrototypeOf(value); keys = Reflect.ownKeys(value); descriptors = Object.getOwnPropertyDescriptors(value) as Record<PropertyKey, PropertyDescriptor>; } catch { fail(); }
     if (keys.length > 1_024) fail();
     if (prototype !== Object.prototype && prototype !== null) fail();
-    if (keys.some((key) => typeof key !== "string" || !descriptors[key]!.enumerable || !("value" in descriptors[key]!))) fail();
+    if (keys.some((key) => typeof key !== "string" || !descriptors[key]!.enumerable || !Object.hasOwn(descriptors[key]!, "value"))) fail();
     return { value, descriptors, keys: keys as string[] };
   };
   const describeRecord = (value: unknown) => inspectRecord(objectValue(value));
