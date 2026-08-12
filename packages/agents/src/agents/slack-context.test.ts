@@ -434,12 +434,49 @@ describe("Slack context jobs", () => {
     expect(createWorkItemMock).not.toHaveBeenCalled();
   });
 
-  it("paginates past 50 settled linked nudges to newer actionable work", async () => {
-    const settled = Array.from({ length: 50 }, (_, index) => nudgeLink({ id: `settled-nudge-${index}`, message: candidate({ id: `settled-${index}`, externalMessageId: `settled-${index}`, text: "Already linked.", messageTs: new Date("2026-04-28T15:30:00.000Z") }) })), newer = nudgeLink({ id: "newer-nudge", message: candidate({ id: "newer", externalMessageId: "newer", text: "Jan will send the signed vendor agreement by Friday.", messageTs: new Date("2026-04-28T16:00:00.000Z") }) });
-    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]); [...settled.map((nudge) => nudge.message), newer.message].forEach((message) => prismaMock.communicationMessage.findMany.mockResolvedValueOnce([message])); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce(settled).mockResolvedValueOnce([newer]);
-    settled.forEach((nudge) => prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: `link-${nudge.id}`, entityId: `action-${nudge.id}`, claimKey: null })); extractMock.mockResolvedValueOnce({ output: actionableExtraction() });
-    const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
-    expect(prismaMock.communicationEntityLink.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: { id: "settled-nudge-49" }, skip: 1 })); expect(createWorkItemMock).toHaveBeenCalledTimes(1);
+  it("paginates past settled rows but caps semantic reviews at 50", async () => {
+    const settled = Array.from({ length: 50 }, (_, index) => nudgeLink({ id: `settled-nudge-${index}`, message: candidate({ id: `settled-${index}`, externalMessageId: `settled-${index}`, text: "Already linked." }) })), eligible = Array.from({ length: 51 }, (_, index) => nudgeLink({ id: `eligible-nudge-${index}`, message: candidate({ id: `eligible-${index}`, externalMessageId: `eligible-${index}`, text: "Jan will send the signed vendor agreement by Friday." }) })), pendingQueries: unknown[] = [];
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]); prismaMock.communicationEntityLink.findMany.mockImplementation(async (query) => { if (query.where?.action !== "proactive_unanswered_nudge") return []; pendingQueries.push(query); return pendingQueries.length === 1 ? settled : pendingQueries.length === 2 ? eligible.slice(0, 50) : eligible.slice(50); }); settled.forEach((nudge) => prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: `link-${nudge.id}`, entityId: `action-${nudge.id}`, claimKey: null })); extractMock.mockResolvedValue({ output: actionableExtraction({ negativeCategory: true }) });
+    const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(pendingQueries).toHaveLength(2); expect(pendingQueries[1]).toEqual(expect.objectContaining({ cursor: { id: "settled-nudge-49" }, skip: 1 })); expect(extractMock).toHaveBeenCalledTimes(50); expect(createWorkItemMock).not.toHaveBeenCalled();
+  });
+
+  it("records 50 successful linked no-ops so the next scan reaches later actionable work", async () => {
+    const linkedSources = Array.from({ length: 50 }, (_, index) => candidate({ id: `linked-source-${index}`, externalMessageId: `linked-thread-${index}`, text: `Question ${index}`, messageTs: new Date("2026-04-28T15:30:00.000Z") }));
+    const linkedReplies = linkedSources.map((source, index) => candidate({ id: `linked-reply-${index}`, externalMessageId: `linked-reply-external-${index}`, threadExternalId: source.externalMessageId, text: `Answer ${index}`, messageTs: new Date("2026-04-28T22:00:00.000Z") }));
+    const linkedNudges = linkedSources.map((message, index) => nudgeLink({ id: `linked-nudge-${index}`, message }));
+    const laterSource = candidate({ id: "later-source", externalMessageId: "later-thread", text: "Jan will send the signed vendor agreement by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const laterNudge = nudgeLink({ id: "later-nudge", message: laterSource });
+    const processedClaims = new Set<string>();
+    prismaMock.communicationMessage.findMany.mockImplementation(async (query) => {
+      if (query.take !== 40) return [];
+      const threadTs = query.where.OR[0].externalMessageId;
+      const index = linkedSources.findIndex((source) => source.externalMessageId === threadTs);
+      return index >= 0 ? [linkedSources[index], linkedReplies[index]] : [laterSource];
+    });
+    prismaMock.communicationEntityLink.findMany.mockImplementation(async (query) => {
+      if (query.where?.action !== "proactive_unanswered_nudge") return [];
+      if (!query.cursor) return linkedNudges;
+      return query.cursor.id === "linked-nudge-49" ? [laterNudge] : [];
+    });
+    prismaMock.communicationEntityLink.findFirst.mockImplementation(async (query) => {
+      const messageId = query.where?.messageId;
+      if (query.where?.entityType === "Action" && messageId?.startsWith("linked-source-")) return { id: `action-link-${messageId}`, entityId: `action-${messageId}`, claimKey: null };
+      const processedClaimKey = query.where?.OR?.[1]?.claimKey;
+      return processedClaimKey && processedClaims.has(processedClaimKey) ? { id: `processed-${messageId}` } : null;
+    });
+    prismaMock.communicationEntityLink.create.mockImplementation(async (query) => {
+      if (query.data.action === "proactive_action_processed_reply" && query.data.claimKey) processedClaims.add(query.data.claimKey);
+      return { id: "link-1" };
+    });
+    extractMock.mockImplementation(async (query) => ({ output: JSON.parse(query.input).linkedActionId ? { intent: "ignore", confidence: 0.99 } : actionableExtraction() }));
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+    expect(extractMock).toHaveBeenCalledTimes(50); expect(processedClaims.size).toBe(50); expect(createWorkItemMock).not.toHaveBeenCalled();
+
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-2" });
+    expect(extractMock).toHaveBeenCalledTimes(51); expect(createWorkItemMock).toHaveBeenCalledTimes(1); expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sourceMessageId: "later-source" }));
   });
 
   it("respects proactive confidence thresholds before creating published actions", async () => {
@@ -482,7 +519,7 @@ describe("Slack context jobs", () => {
   });
 
   it.each([
-    ["routing test", "Routing check: Jan, please send the signed vendor agreement by Friday.", {}], ["routing test label", "This is a routing test. Jan will send the signed vendor agreement by Friday.", {}], ["test of routing", "This is a test of routing. Jan will send the signed vendor agreement by Friday.", {}], ["smoke test", "This is a smoke test. Jan will send the signed vendor agreement by Friday.", {}], ["smoke testing", "Smoke testing the integration. Jan will send the signed vendor agreement by Friday.", {}], ["FYI", "Quick FYI: Jan will send the signed vendor agreement by Friday.", {}],
+    ["routing test", "Routing check: Jan, please send the signed vendor agreement by Friday.", {}], ["plain test label", "This is a test. Jan will send the signed vendor agreement by Friday.", {}], ["just test label", "Just a test. Jan will send the signed vendor agreement by Friday.", {}], ["embedded just test label", "This is just a test. Jan will send the signed vendor agreement by Friday.", {}], ["embedded only test label", "This is only a test. Jan will send the signed vendor agreement by Friday.", {}], ["routing test label", "This is a routing test. Jan will send the signed vendor agreement by Friday.", {}], ["test of routing", "This is a test of routing. Jan will send the signed vendor agreement by Friday.", {}], ["smoke test", "This is a smoke test. Jan will send the signed vendor agreement by Friday.", {}], ["smoke testing", "Smoke testing the integration. Jan will send the signed vendor agreement by Friday.", {}], ["FYI", "Quick FYI: Jan will send the signed vendor agreement by Friday.", {}],
     ["acknowledgement", "Thanks.", {}], ["regular completion", "Jan will review the renewal packet by Friday. Jan reviewed the renewal packet.", { concreteNextStep: "review the renewal packet" }],
     ["standalone completion", "Jan will send the signed vendor agreement by Friday. Done.", {}], ["passive completion", "Jan will send the signed vendor agreement by Friday. The signed vendor agreement was sent.", {}],
     ["regular finished completion", "Jan will finish the signed vendor agreement by Friday. Jan finished the signed vendor agreement.", { concreteNextStep: "finish the signed vendor agreement" }], ["did completion", "Jan will do the renewal audit by Friday. Jan did the renewal audit.", { concreteNextStep: "do the renewal audit" }],
@@ -692,6 +729,36 @@ describe("Slack context jobs", () => {
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 1, followups: 0, drafts: 1 });
     expect(createWorkItemMock).toHaveBeenCalledTimes(1); expect(createWorkItemMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ claimKey: "slack-proactive-disposition:install-1:message-1" }));
   });
+
+  it.each([["owner imperative", "Jan will send the signed vendor agreement by Friday. Do not create a Corgtex Action.", {}], ["owner no-need", "Jan will send the signed vendor agreement by Friday. No need for a Corgtex Action.", {}], ["owner article-is-not-needed", "Jan will send the signed vendor agreement by Friday. A Corgtex Action is not needed.", {}], ["owner direct-not-needed", "Jan will send the signed vendor agreement by Friday. Corgtex Action not needed.", {}], ["explicit no-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. No Corgtex Action needed.", { ownerEvidence: "", explicitActionRequest: true }], ["explicit isn't-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. Corgtex Action isn't needed.", { ownerEvidence: "", explicitActionRequest: true }], ["explicit is-not-needed", "Send the signed vendor agreement by Friday. Create a Corgtex Action for this. Corgtex Action is not needed.", { ownerEvidence: "", explicitActionRequest: true }]])("vetoes %s Action-creation negation even when model output is positive", async (_label, text, overrides) => {
+    const source = candidate({ text, messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ negativeCategory: false, ...overrides }));
+    const { runSlackProactiveScan } = await import("./slack-context"); await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+    expect(createWorkItemMock).not.toHaveBeenCalled(); expect(prismaMock.communicationEntityLink.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([["U1", "U1", "I'll send the signed vendor agreement by Friday.", true], ["U1", "U1", "I will send the signed vendor agreement by Friday.", true], ["U9", "U1", "I'll send the signed vendor agreement by Friday.", false], ["U1", "U2", "I'll send the signed vendor agreement by Friday.", false], ["I", "U1", "I'll send the signed vendor agreement by Friday.", false]])("grounds owner ID %s against speaker %s", async (ownerEvidence, externalUserId, text, publishes) => {
+    const source = candidate({ externalUserId, text, messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ ownerEvidence }));
+    const { runSlackProactiveScan } = await import("./slack-context"); await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+    expect(createWorkItemMock).toHaveBeenCalledTimes(publishes ? 1 : 0);
+  });
+
+  it("grounds first-person ownership to the reply speaker ID", async () => {
+    const source = candidate({ externalUserId: "U2", text: "Can someone own the agreement?" }); preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "U1" }), "I'll send the signed vendor agreement by Friday.");
+    const { runSlackProactiveScan } = await import("./slack-context"); await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+    expect(createWorkItemMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not borrow first-person ownership from a different sentence", async () => {
+    const source = candidate({ externalUserId: "U1", text: "I'll ask Jan tomorrow. Jan will send the signed vendor agreement by Friday." }); preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "U1" }));
+    const { runSlackProactiveScan } = await import("./slack-context"); await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a delegated deliverable as the speaker's commitment", async () => {
+    const source = candidate({ externalUserId: "U1", text: "I'll ask Jan to send the signed vendor agreement by Friday." }); preparePendingEvaluation(source, actionableExtraction({ ownerEvidence: "U1" }));
+    const { runSlackProactiveScan } = await import("./slack-context"); await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+    expect(createWorkItemMock).not.toHaveBeenCalled();
+  });
   it("makes concurrent terminal and Action dispositions mutually exclusive", async () => {
     const source = candidate({ text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); preparePendingEvaluation(source, actionableExtraction({ concreteNextStep: "send the renewal packet" })); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "terminal-1" }); createWorkItemMock.mockRejectedValueOnce({ code: "P2002" });
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
@@ -717,6 +784,71 @@ describe("Slack context jobs", () => {
     const source = candidate({ text: "Jan will send the renewal packet by Friday.", messageTs: new Date("2026-04-28T15:30:00.000Z") }); prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([]); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null });
     const { runSlackProactiveScan } = await import("./slack-context"); await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
     expect(extractMock).not.toHaveBeenCalled(); expect(postDeliberationEntryMock).not.toHaveBeenCalled();
+  });
+
+  it("reviews the newest stored reply beyond 40 rows with deterministic equal-timestamp ordering", async () => {
+    const source = candidate({ text: "Can someone confirm the renewal status?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const replies = Array.from({ length: 41 }, (_, index) => candidate({ id: `reply-${String(index + 1).padStart(2, "0")}`, externalMessageId: `1714323600.${String(index + 1).padStart(6, "0")}`, threadExternalId: source.externalMessageId, text: `Stored reply ${index + 1}`, messageTs: new Date("2026-04-28T22:00:00.000Z") }));
+    const newestFortyDescending = replies.slice(1).reverse();
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce(newestFortyDescending);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]);
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null }).mockResolvedValueOnce(null);
+    extractMock.mockResolvedValueOnce({ output: { intent: "ignore", confidence: 0.99 } });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" });
+
+    expect(prismaMock.communicationMessage.findMany).toHaveBeenCalledWith(expect.objectContaining({ orderBy: [{ messageTs: "desc" }, { externalMessageId: "desc" }, { id: "desc" }], take: 40 }));
+    const reviewInput = JSON.parse(extractMock.mock.calls[0][0].input);
+    expect(reviewInput.threadTranscript.split("\n")).toHaveLength(40); expect(reviewInput.threadTranscript).toContain("Can someone confirm the renewal status?"); expect(reviewInput.threadTranscript).toContain("Stored reply 3"); expect(reviewInput.threadTranscript).toContain("Stored reply 41"); expect(reviewInput.threadTranscript).not.toContain("Stored reply 2\n");
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_action_processed_reply", messageId: "reply-41", claimKey: "slack-proactive-disposition:install-1:message-1:processed:reply-41" }) }));
+  });
+
+  it.each(["model", "post"])("retries a linked reply after a transient %s failure", async (failureStage) => {
+    const source = candidate({ text: "Can someone confirm the renewal status?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "Jan is waiting for the signed agreement.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]).mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([nudgeLink({ message: source })]);
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null }).mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null }).mockResolvedValueOnce(null);
+    const update = { output: { intent: "wait_existing_action", confidence: 0.97, updateMd: "Jan is waiting for the signed agreement.", followupDelayMultiplier: 2 } };
+    if (failureStage === "model") extractMock.mockRejectedValueOnce(new Error("temporary model outage")).mockResolvedValueOnce(update);
+    else { extractMock.mockResolvedValue(update); postDeliberationEntryMock.mockRejectedValueOnce(new Error("temporary post outage")); }
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).rejects.toThrow(`temporary ${failureStage} outage`);
+    if (failureStage === "model") expect(prismaMock.communicationEntityLink.create).not.toHaveBeenCalled();
+    else expect(prismaMock.communicationEntityLink.deleteMany).toHaveBeenCalledWith({ where: { id: "link-1", workspaceId: "workspace-1", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-2" } });
+
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-2" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_action_processed_reply", messageId: "message-2", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-2" }) }));
+  });
+
+  it("does not post or write a secondary marker when another scan wins the processed-reply claim", async () => {
+    const source = candidate({ text: "Can someone confirm the renewal status?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "Jan is waiting for the signed agreement.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]); prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]); prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null }).mockResolvedValueOnce(null);
+    extractMock.mockResolvedValueOnce({ output: { intent: "wait_existing_action", confidence: 0.97, updateMd: "Jan is waiting for the signed agreement.", followupDelayMultiplier: 2 } }); prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" });
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledTimes(1); expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_action_processed_reply", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-2" }) })); expect(postDeliberationEntryMock).not.toHaveBeenCalled(); expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("retains the processed claim after a successful post if the secondary update marker fails", async () => {
+    const source = candidate({ text: "Can someone confirm the renewal status?", messageTs: new Date("2026-04-28T15:30:00.000Z") });
+    const reply = candidate({ id: "message-2", externalMessageId: "1714323600.000100", threadExternalId: source.externalMessageId, text: "Jan is waiting for the signed agreement.", messageTs: new Date("2026-04-28T22:00:00.000Z") });
+    prismaMock.communicationMessage.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]).mockResolvedValueOnce([]).mockResolvedValueOnce([source, reply]);
+    prismaMock.communicationEntityLink.findMany.mockResolvedValueOnce([nudgeLink({ message: source })]).mockResolvedValueOnce([nudgeLink({ message: source })]);
+    prismaMock.communicationEntityLink.findFirst.mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null }).mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "action-link", entityId: "action-1", claimKey: null }).mockResolvedValueOnce({ id: "processed-claim" });
+    extractMock.mockResolvedValueOnce({ output: { intent: "wait_existing_action", confidence: 0.97, updateMd: "Jan is waiting for the signed agreement.", followupDelayMultiplier: 2 } });
+    prismaMock.communicationEntityLink.create.mockResolvedValueOnce({ id: "processed-claim" }).mockRejectedValueOnce(new Error("secondary marker write failed"));
+
+    const { runSlackProactiveScan } = await import("./slack-context");
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-1" })).rejects.toThrow("secondary marker write failed");
+    expect(prismaMock.communicationEntityLink.create.mock.invocationCallOrder[0]).toBeLessThan(postDeliberationEntryMock.mock.invocationCallOrder[0]); expect(prismaMock.communicationEntityLink.deleteMany).not.toHaveBeenCalled();
+
+    await expect(runSlackProactiveScan({ workspaceId: "workspace-1", installationId: "install-1", workflowJobId: "job-2" })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
+    expect(extractMock).toHaveBeenCalledTimes(1); expect(postDeliberationEntryMock).toHaveBeenCalledTimes(1);
   });
 
   it.each(["do not", "don't", "don’t", "never", "must not", "cannot", "can't"])("keeps the explicit-create exception negation-safe for '%s'", async (negation) => {
@@ -809,21 +941,22 @@ describe("Slack context jobs", () => {
       text: "<@B1> Please confirm availability for the June 23 call.",
       messageTs: new Date("2026-04-28T15:30:00.000Z"),
     });
+    const previousReply = candidate({ id: "message-2", externalMessageId: "1714321800.000100", text: "I am checking with the owner.", messageTs: new Date("2026-04-28T21:30:00.000Z") });
     const waitingReply = candidate({
-      id: "message-2",
+      id: "message-3",
       externalMessageId: "1714323600.000100",
       text: "No need for more action yet. We are just waiting on the owner to confirm a time slot on June 23.",
       messageTs: new Date("2026-04-28T22:00:00.000Z"),
     });
     prismaMock.communicationMessage.findMany
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([source, waitingReply]);
+      .mockResolvedValueOnce([source, previousReply, waitingReply]);
     prismaMock.communicationEntityLink.findMany
       .mockResolvedValueOnce([nudgeLink({ message: source })])
       .mockResolvedValueOnce([]);
     prismaMock.communicationEntityLink.findFirst
       .mockResolvedValueOnce({ id: "existing-action-link", entityId: "action-1", claimKey })
-      .mockImplementationOnce((query) => !claimKey && JSON.stringify(query).includes("proactive_action_processed_reply") ? { id: "unrelated-marker" } : null);
+      .mockImplementationOnce((query) => query.where.OR[1].claimKey.endsWith(":processed:message-2") ? { id: "processed-previous-reply" } : null);
     if (claimKey) { prismaMock.action.findMany.mockResolvedValueOnce([{ id: "action-1", title: "Confirm availability" }]); prismaMock.communicationEntityLink.create.mockRejectedValueOnce({ code: "P2002" }); }
     extractMock.mockResolvedValueOnce({
       output: {
@@ -842,6 +975,7 @@ describe("Slack context jobs", () => {
     })).resolves.toEqual({ agendaJobs: 0, nudges: 0, actions: 0, followups: 0, drafts: 0 });
 
     expect(createWorkItemMock).not.toHaveBeenCalled();
+    expect(prismaMock.communicationEntityLink.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ messageId: "message-3", OR: expect.arrayContaining([expect.objectContaining({ action: "proactive_action_processed_reply", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-3" })]) }) }));
     expect(postDeliberationEntryMock).toHaveBeenCalledWith(expect.objectContaining({ kind: "agent" }), expect.objectContaining({
       workspaceId: "workspace-1",
       parentType: "ACTION",
@@ -852,11 +986,12 @@ describe("Slack context jobs", () => {
     expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         action: "proactive_action_waiting_update",
-        messageId: "message-2",
+        messageId: "message-3",
         entityType: "Action",
         entityId: "action-1",
       }),
     }));
+    expect(prismaMock.communicationEntityLink.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "proactive_action_processed_reply", messageId: "message-3", claimKey: "slack-proactive-disposition:install-1:message-1:processed:message-3" }) }));
     expect(sendSlackMessageMock).not.toHaveBeenCalled();
   });
 
