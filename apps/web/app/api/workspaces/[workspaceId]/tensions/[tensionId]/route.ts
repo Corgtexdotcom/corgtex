@@ -16,7 +16,8 @@ const updateTensionSchema = z.object({
   raisedByMemberId: z.string().optional().nullable(),
   priority: z.union([z.number().int(), z.string()]).optional().nullable(),
   priorityLabel: z.string().optional().nullable(),
-});
+  expectedVersion: z.number().int().positive(),
+}).strict();
 
 export async function PATCH(request: NextRequest, { params }: Params) {
   try {
@@ -34,6 +35,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       assigneeMemberId: body.assigneeMemberId !== undefined ? body.assigneeMemberId : undefined,
       raisedByMemberId: body.raisedByMemberId !== undefined ? body.raisedByMemberId : undefined,
       priority: workItemPriorityFromBody(body),
+      expectedVersion: body.expectedVersion,
     });
     const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, tension.id) ?? tension;
     return NextResponse.json({ tension: serializeTensionWorkItem(tensionForResponse) });

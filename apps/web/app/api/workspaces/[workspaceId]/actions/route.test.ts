@@ -11,6 +11,7 @@ const {
   loadAdviceRequestCountSummaries,
   listActions,
   prisma,
+  resolveRequestActor,
   updateAction,
 } = vi.hoisted(() => ({
   actor: {
@@ -45,8 +46,11 @@ const {
       findFirst: vi.fn(),
     },
   },
+  resolveRequestActor: vi.fn(),
   updateAction: vi.fn(),
 }));
+
+resolveRequestActor.mockResolvedValue(actor);
 
 vi.mock("@corgtex/domain", async () => {
   const {
@@ -87,9 +91,11 @@ vi.mock("@corgtex/domain", async () => {
 });
 
 vi.mock("@corgtex/shared", () => ({
+  captureErrorTelemetry: vi.fn(),
   env: {
     APP_URL: "https://app.corgtex.com",
   },
+  isDatabaseUnavailableError: vi.fn(() => false),
   prisma,
 }));
 
@@ -106,7 +112,7 @@ vi.mock("@/lib/route-handler", () => ({
 }));
 
 vi.mock("@/lib/auth", () => ({
-  resolveRequestActor: vi.fn(async () => actor),
+  resolveRequestActor,
 }));
 
 function context(workspaceId = "workspace-1") {
@@ -115,6 +121,18 @@ function context(workspaceId = "workspace-1") {
 
 function request(path: string) {
   return new NextRequest(path);
+}
+
+function actionPatchRequest(body: unknown) {
+  return new NextRequest("http://localhost/api/workspaces/workspace-1/actions/action-1", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function routeError(status: number, code: string, message: string) {
+  return Object.assign(new Error(message), { status, code });
 }
 
 describe("GET /api/workspaces/[workspaceId]/actions", () => {
@@ -260,12 +278,14 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
       status: "OPEN",
       priority: 3,
       assigneeMemberId: "member-2",
+      version: 3,
     });
     prisma.action.findFirst.mockResolvedValue({
       id: "action-1",
       status: "OPEN",
       priority: 3,
       assigneeMemberId: "member-2",
+      version: 3,
       assigneeMember: { id: "member-2", user: { displayName: "Assignee", email: "assignee@example.test" } },
     });
     loadAdviceRequestCountSummaries.mockResolvedValue(new Map([
@@ -282,13 +302,10 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
     const { PATCH } = await import("./[actionId]/route");
 
     const response = await PATCH(
-      new NextRequest("http://localhost/api/workspaces/workspace-1/actions/action-1", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          assigneeMemberId: "member-2",
-          priority: "Urgent",
-        }),
+      actionPatchRequest({
+        assigneeMemberId: "member-2",
+        priority: "Urgent",
+        expectedVersion: 2,
       }),
       { params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }) },
     );
@@ -298,6 +315,7 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
       actionId: "action-1",
       assigneeMemberId: "member-2",
       priority: 3,
+      expectedVersion: 2,
     }));
     await expect(response.json()).resolves.toMatchObject({
       action: {
@@ -308,7 +326,90 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
         assigneeMemberId: "member-2",
         assigneeMemberName: "Assignee",
         assignee: "Assignee",
+        version: 3,
       },
     });
+  });
+
+  it.each([
+    ["missing", { title: "Updated action" }],
+    ["zero", { title: "Updated action", expectedVersion: 0 }],
+    ["negative", { title: "Updated action", expectedVersion: -1 }],
+    ["fractional", { title: "Updated action", expectedVersion: 1.5 }],
+    ["non-numeric", { title: "Updated action", expectedVersion: "2" }],
+  ])("rejects a %s expectedVersion before mutation", async (_label, body) => {
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest(body), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(updateAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown request fields before mutation", async () => {
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({
+      title: "Updated action",
+      expectedVersion: 2,
+      unexpected: true,
+    }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(updateAction).not.toHaveBeenCalled();
+  });
+
+  it("returns the shared safe conflict response for a stale edit", async () => {
+    updateAction.mockRejectedValueOnce(routeError(
+      409,
+      "VERSION_CONFLICT",
+      "The record changed before this update could be applied. Please refresh and try again.",
+    ));
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({ title: "Stale title", expectedVersion: 1 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "VERSION_CONFLICT",
+        message: "The record changed before this update could be applied. Please refresh and try again.",
+      },
+    });
+  });
+
+  it("preserves unauthenticated behavior before domain mutation", async () => {
+    resolveRequestActor.mockRejectedValueOnce(routeError(401, "UNAUTHENTICATED", "Authentication required."));
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({ title: "Updated", expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "UNAUTHENTICATED", message: "Authentication required." },
+    });
+    expect(updateAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["wrong-workspace, deleted, or missing records", 404, "NOT_FOUND", "Action not found."],
+    ["unauthorized or private records", 403, "FORBIDDEN", "You do not have permission to edit this action."],
+    ["archived records", 400, "INVALID_STATE", "Archived actions cannot be edited."],
+    ["terminal lifecycle states", 400, "INVALID_STATE", "Only draft, open, or in-progress actions can be edited."],
+  ])("preserves %s errors", async (_label, status, code, message) => {
+    updateAction.mockRejectedValueOnce(routeError(status as number, code as string, message as string));
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({ title: "Updated", expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code, message } });
   });
 });
