@@ -29,9 +29,9 @@ function expectInvalid(operation, canary = "private-credential-canary") {
 }
 describe("managed Azure release intent primitives", () => {
   test("exports only the four fixed functions and stays inert", () => {
-    expect(Object.keys(releaseModule)).toStrictEqual([
-      "canonicalizeManagedAzureReleaseIntentV1", "canonicalizeManagedAzureImportRequestV1",
-      "canonicalizeManagedAzureImportRequestValueV1", "compareManagedAzureDestinationDigestV1",
+    expect(Object.keys(releaseModule).sort()).toStrictEqual([
+      "canonicalizeManagedAzureImportRequestV1", "canonicalizeManagedAzureImportRequestValueV1",
+      "canonicalizeManagedAzureReleaseIntentV1", "compareManagedAzureDestinationDigestV1",
     ]);
     const source = readFileSync(new URL("./azure-release-managed-target.mjs", import.meta.url), "utf8");
     expect(source).not.toMatch(/node:fs|node:child_process|node:http|node:https|\bfetch\b|\beval\b|\bFunction\b|\brequire\s*\(|process\.|console\.|setTimeout|setInterval|Math\.random|Date\.|import\s*\(/);
@@ -138,12 +138,16 @@ describe("managed Azure release intent primitives", () => {
     cyclicFieldRow.provider = {}; cyclicFieldRow.provider.self = cyclicFieldRow.provider; hiddenCycle.deployments.push(cyclicFieldRow); cases.push(hiddenCycle);
     const hiddenProxy = input(); const proxyFieldRow = structuredClone(target); proxyFieldRow.deploymentId = "00000000-0000-4000-8000-000000000199";
     proxyFieldRow.group = new Proxy({}, { ownKeys() { traps += 1; throw new Error("private-credential-canary"); } }); hiddenProxy.deployments.push(proxyFieldRow); cases.push(hiddenProxy);
+    const deep = input(); let cursor = deep.deployments[0].azure; for (let depth = 0; depth < 2_000; depth += 1) { cursor.nested = {}; cursor = cursor.nested; } cases.push(deep);
     cases.push([]); cases.push({ deployments: [], gitSha: SHA, manifests: {} });
     for (const candidate of cases) expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
     expect(traps).toBe(0);
 
     const proxy = new Proxy(input(), { ownKeys() { throw new Error("private-credential-canary"); } });
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(proxy));
+    Object.defineProperty(Object.prototype, "credential", { configurable: true, enumerable: true, value: "private-credential-canary" });
+    let pollutedError; try { releaseModule.canonicalizeManagedAzureReleaseIntentV1(input()); } catch (error) { pollutedError = error; } finally { delete Object.prototype.credential; }
+    expect(pollutedError?.message).toBe("MANAGED_AZURE_RELEASE_INPUT_INVALID");
   });
   test("request value canonicalizer rejects every mutation and builder input", () => {
     const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(input());

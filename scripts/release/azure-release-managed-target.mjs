@@ -5,6 +5,8 @@ function objectValue(value) {
     if (nodeTypes.isProxy(value) || value === null || typeof value !== "object" || Array.isArray(value)) invalid();
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) invalid();
+    const inherited = prototype && Object.getOwnPropertyDescriptors(prototype);
+    if (inherited && Reflect.ownKeys(inherited).some((key) => inherited[key].enumerable)) invalid();
     return value;
   } catch {
     invalid();
@@ -38,19 +40,25 @@ function exactArray(value) {
     invalid();
   }
 }
-function safeTopology(value, ancestors = new Set()) {
-  if (value === null || typeof value === "string" || typeof value === "boolean"
-    || (typeof value === "number" && Number.isFinite(value))) return;
-  const object = objectValue(value);
-  if (ancestors.has(object)) invalid();
-  ancestors.add(object);
-  const descriptors = Object.getOwnPropertyDescriptors(object);
-  for (const key of Reflect.ownKeys(object)) {
-    const descriptor = descriptors[key];
-    if (typeof key !== "string" || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) invalid();
-    safeTopology(descriptor.value, ancestors);
-  }
-  ancestors.delete(object);
+function safeTopology(value) {
+  try {
+    const stack = [value]; const seen = new Set();
+    while (stack.length > 0) {
+      const item = stack.pop();
+      if (item === null || typeof item === "string" || typeof item === "boolean"
+        || (typeof item === "number" && Number.isFinite(item))) continue;
+      const object = objectValue(item);
+      if (seen.has(object) || seen.size >= 1_024) invalid();
+      seen.add(object);
+      const names = Reflect.ownKeys(object); const descriptors = Object.getOwnPropertyDescriptors(object);
+      if (names.length > 1_024) invalid();
+      for (const key of names) {
+        const descriptor = descriptors[key];
+        if (typeof key !== "string" || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) invalid();
+        stack.push(descriptor.value);
+      }
+    }
+  } catch { invalid(); }
 }
 function text(value, expression, maxLength) {
   if (typeof value !== "string" || value.length > maxLength || !expression.test(value)) invalid();
