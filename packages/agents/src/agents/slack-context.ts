@@ -286,7 +286,7 @@ function hasDeterministicNegativeCategory(text: string, concreteNextStep: string
   const completionText = text.replace(/\b(?:not\s+(?:yet\s+)?(?:done|sent|handled|finished|completed|resolved)|(?:must|should|will|needs? to|please ensure(?: that)?)[^.!?\n]{0,80}\b(?:be|is|are)\s+(?:done|sent|handled|finished|completed|resolved))\b/gi, "");
   const [rawVerb = "", ...deliverableWords] = concreteNextStep.match(/[a-z0-9]+/gi) ?? [], deliverableVerb = rawVerb.toLowerCase(), completedVerbs = ({ send: ["sent"], do: ["did", "done"], pay: ["paid"], write: ["wrote", "written"], make: ["made"], submit: ["submitted"] } as Record<string, string[]>)[deliverableVerb] ?? [`${deliverableVerb}${deliverableVerb.endsWith("e") ? "d" : "ed"}`];
   const scopedSentences = completionText.split(/[.!?\n]+/).filter((sentence) => deliverableWords.filter((word) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => token.toLowerCase() === word.toLowerCase())).length >= Math.min(2, deliverableWords.length)), completionScope = scopedSentences.filter((sentence) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => completedVerbs.includes(token.toLowerCase()))).join("\n"), deliverableScope = scopedSentences.filter((sentence) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => token.toLowerCase() === deliverableVerb || completedVerbs.includes(token.toLowerCase()))).join("\n");
-  return /(?:^|[.!?\n]\s*)(?:(?:this is|just|only)\s+)?(?:a\s+)?(?:(?:smoke|routing)\s+test(?:ing)?(?:\s+[^.!?\n]+)?|test\s+of\s+routing|test(?:ing)?(?: message)?(?=\s*(?:[.!?:]|$))|dry run|routing check|checking (?:the )?routing)\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
+  return /(?:^|[.!?\n]\s*)(?:(?:(?:this is|just|only)\s+(?:a\s+)?(?:(?:smoke|routing)\s+test(?:\s+[^.!?\n]+)?|test\s+of\s+routing)|smoke\s+testing(?:\s+[^.!?\n]+)?|(?:smoke\s+|routing\s+)?test(?:ing)?(?: message)?(?=\s*(?:[.!?:]|$))|dry run|routing check|checking (?:the )?routing))\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
     || /^\s*(?:ack(?:nowledged)?|got it|sounds good|thank you|thanks)[.!]?\s*$/i.test(completionText)
     || Boolean(completionScope) || /(?:^|[.!?]\s*)done\b/i.test(completionText) || /\b(?:never|cannot|(?:(?:will|would|can|could|should|must|do|does|did|is|are)\s+not|won['’]t|wouldn['’]t|can['’]t|couldn['’]t|shouldn['’]t|mustn['’]t|don['’]t|doesn['’]t|didn['’]t|isn['’]t|aren['’]t))\b/i.test(deliverableScope);
 }
@@ -323,7 +323,7 @@ function hasConcreteOwnerEvidence(ownerEvidence: string, threadMessages: SlackCa
 
 function hasConcreteDeliverableEvidence(evidence: string, threadMessages: SlackCandidateMessage[]) {
   const words = evidence.match(/[a-z0-9]+/gi) ?? [];
-  return words.length >= 2 && /^(?:send|do|prepare|complete|review|confirm|follow up|create|make|open|add|assign|turn|test|ensure|deliver|submit|upload|provide|publish|share|update|draft|schedule|contact|call|write|finish|resolve|handle|check|investigate|approve|sign|renew|pay|file|book|organize|finalize)\b/i.test(evidence.trim())
+  return words.length >= 2 && /^(?:send|do|prepare|complete|review|confirm|follow up|create|make|open|add|assign|turn|(?:smoke )?test|ensure|deliver|submit|upload|provide|publish|share|update|draft|schedule|contact|call|write|finish|resolve|handle|check|investigate|approve|sign|renew|pay|file|book|organize|finalize)\b/i.test(evidence.trim())
     && !/^(?:(?:send|do|handle|check|review|confirm|follow up|look into|take care of) (?:it|this|that)|(?:by|before|after|on|at|during|until|this|next)\s+(?:the\s+)?(?:end\s+of\s+)?[a-z0-9'-]+)$/i.test(evidence.trim())
     && evidenceIsGrounded(evidence, threadMessages);
 }
@@ -628,7 +628,9 @@ export async function runSlackProactiveScan(params: {
   const agentActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-agent" };
   let actions = 0;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
-  const pendingNudges = await prisma.communicationEntityLink.findMany({
+  let pendingNudgeCursor: string | undefined;
+  while (actions < MAX_PROACTIVE_ACTIONS) {
+    const pendingNudges = await prisma.communicationEntityLink.findMany({
     where: {
       workspaceId: params.workspaceId,
       installationId: params.installationId,
@@ -638,7 +640,9 @@ export async function runSlackProactiveScan(params: {
       message: { is: { OR: [{ entityLinks: { none: { workspaceId: params.workspaceId, action: { in: ["proactive_unanswered_resolved", PROACTIVE_NON_ACTION] } } } }, { entityLinks: { some: { workspaceId: params.workspaceId, entityType: "Action" } } }] } },
       createdAt: { lte: actionCreationCutoff },
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    cursor: pendingNudgeCursor ? { id: pendingNudgeCursor } : undefined,
+    skip: pendingNudgeCursor ? 1 : 0,
     take: 50,
     select: {
       id: true,
@@ -658,8 +662,10 @@ export async function runSlackProactiveScan(params: {
       },
     },
   });
+    if (pendingNudges.length === 0) break;
+    pendingNudgeCursor = pendingNudges[pendingNudges.length - 1]?.id;
 
-  for (const nudge of pendingNudges) {
+    for (const nudge of pendingNudges) {
     if (actions >= MAX_PROACTIVE_ACTIONS) break;
     const candidate = nudge.message as SlackCandidateMessage | null;
     if (!candidate || !candidate.text || !channelIds.includes(candidate.externalChannelId)) continue;
@@ -814,6 +820,7 @@ export async function runSlackProactiveScan(params: {
       }
       throw error;
     }
+  }
   }
 
   let followups = 0;
