@@ -18,8 +18,8 @@ import { upsertBuildArtifact } from "./build-artifacts";
 import { createMeeting } from "./meetings";
 import { createProposal } from "./proposals";
 import { createTension } from "./tensions";
-import { createConversationMessage, failCommunicationSuggestion, markCommunicationSuggestionSent } from "./crm";
-import { activeCrmParentWhere } from "./crm-archive-guards";
+import { createConversationMessage, failCommunicationSuggestion, lockActiveCommunicationSuggestion, markCommunicationSuggestionSent } from "./crm";
+import { activeCrmParentWhere, type CrmLinks } from "./crm-archive-guards";
 import { recordAudit } from "./audit-trail";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
@@ -42,6 +42,7 @@ type WritebackTargetSummary = {
   status: string | null;
   webPath: string;
   context?: JsonRecord;
+  crmLinks?: CrmLinks;
 };
 
 type ExecutionRequestRecord = Awaited<ReturnType<typeof loadExecutionRequest>>;
@@ -531,6 +532,10 @@ async function validateWritebackTarget(
           recipientEmail: true,
           recipientName: true,
           source: true,
+          accountId: true,
+          contactId: true,
+          dealId: true,
+          activityId: true,
           account: {
             select: {
               id: true,
@@ -579,6 +584,7 @@ async function validateWritebackTarget(
         status: item.status,
         webPath: item.account ? `/leads/accounts/${item.account.id}?view=review` : "/leads?view=review",
         context: crmCommunicationTargetContext(item),
+        crmLinks: { accountId: item.accountId, contactId: item.contactId, dealId: item.dealId, activityId: item.activityId },
       };
     }
     case "COMMENT":
@@ -659,6 +665,13 @@ export async function createExecutionRequest(actor: AppActor, params: CreateExec
   let request: NonNullable<ExecutionRequestRecord>;
   try {
     request = await prisma.$transaction(async (tx) => {
+      if (targetType === "CRM_COMMUNICATION" && target?.id) {
+        await lockActiveCommunicationSuggestion(tx, {
+          workspaceId: params.workspaceId,
+          suggestionId: target.id,
+          expectedLinks: target.crmLinks,
+        });
+      }
       const created = await tx.executionRequest.create({
         data: {
           workspaceId: params.workspaceId,

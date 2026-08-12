@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { CrmActivityType, type MeetingInsight, type OAuthProvider, type Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
-import { lockCrmLinks } from "./crm-archive-guards";
+import { lockCrmLinkClosure } from "./crm-archive-guards";
 import { invariant } from "./errors";
 
 const CRM_EMAIL_SOURCE = "oauth_email";
@@ -229,11 +229,11 @@ async function existingActivityBatch(tx: Prisma.TransactionClient, workspaceId: 
 
 async function isActiveRelationshipMatch(tx: Prisma.TransactionClient, workspaceId: string, match: RelationshipMatch) {
   if (match.contactId) return Boolean(await tx.crmContact.findFirst({ where: {
-    id: match.contactId, workspaceId, archivedAt: null,
-    OR: [{ accountId: null }, { accountId: match.accountId, account: { archivedAt: null } }],
+    id: match.contactId, workspaceId, email: match.email, archivedAt: null,
+    ...(match.accountId ? { accountId: match.accountId, account: { archivedAt: null } } : { accountId: null }),
   }, select: { id: true } }));
   return Boolean(match.accountId && await tx.crmAccount.findFirst({
-    where: { id: match.accountId, workspaceId, archivedAt: null }, select: { id: true },
+    where: { id: match.accountId, workspaceId, domain: match.domain, archivedAt: null }, select: { id: true },
   }));
 }
 
@@ -272,7 +272,7 @@ export async function materializeCrmEmailTouchpoints(params: {
       const externalId = sourceExternalId("oauth-email", params.connectionId, message.provider, message.id);
       matched.push({ message, fromEmail, match, externalId });
     }
-    await lockCrmLinks(tx, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
+    await lockCrmLinkClosure(tx, params.workspaceId, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
       ...matched.map(({ match }) => ({ contactId: match.contactId, accountId: match.accountId })));
     for (const { message, fromEmail, match, externalId } of matched) {
       if (!await isActiveRelationshipMatch(tx, params.workspaceId, match)) {
@@ -390,7 +390,7 @@ export async function materializeCrmCalendarTouchpoints(params: {
       const externalId = sourceExternalId("oauth-calendar", params.connectionId, event.provider, event.id);
       matched.push({ event, match, externalId });
     }
-    await lockCrmLinks(tx, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
+    await lockCrmLinkClosure(tx, params.workspaceId, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
       ...matched.map(({ match }) => ({ contactId: match.contactId, accountId: match.accountId })));
     for (const { event, match, externalId } of matched) {
       if (!await isActiveRelationshipMatch(tx, params.workspaceId, match)) {

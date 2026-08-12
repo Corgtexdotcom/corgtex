@@ -7,9 +7,10 @@ const CRM_LOCK_FIELDS = [["CrmActivity", "activityId"], ["CrmDeal", "dealId"], [
 
 export function activeCrmParentWhere(parents: readonly CrmArchiveParent[], filter: ArchiveFilter = "active", required: readonly CrmArchiveParent[] = []) {
   if (filter !== "active") return {};
+  const activeContact = { archivedAt: null, OR: [{ accountId: null }, { account: { archivedAt: null } }] };
   const activeParent = (parent: CrmArchiveParent) => parent === "deal"
-    ? { archivedAt: null, contact: { archivedAt: null }, OR: [{ accountId: null }, { account: { archivedAt: null } }] }
-    : { archivedAt: null };
+    ? { archivedAt: null, contact: activeContact, OR: [{ accountId: null }, { account: { archivedAt: null } }] }
+    : parent === "contact" ? activeContact : { archivedAt: null };
   return { AND: parents.map((parent) => required.includes(parent)
     ? { [parent]: activeParent(parent) }
     : { OR: [{ [`${parent}Id`]: null }, { [parent]: activeParent(parent) }] }) };
@@ -28,15 +29,20 @@ export async function lockCrmLinkClosure(tx: Prisma.TransactionClient, workspace
   const activityIds = new Set(links.flatMap((link) => link.activityId ? [link.activityId] : []));
   await lockCrmLinks(tx, ...[...activityIds].map((activityId) => ({ activityId })));
   const activities = activityIds.size ? await tx.crmActivity.findMany({ where: { workspaceId, id: { in: [...activityIds] } },
-    select: { accountId: true, contactId: true, dealId: true } }) : [];
+    select: { id: true, accountId: true, contactId: true, dealId: true } }) : [];
   const dealIds = new Set([...links, ...activities].flatMap((link) => link.dealId ? [link.dealId] : []));
   await lockCrmLinks(tx, ...[...dealIds].map((dealId) => ({ dealId })));
   const deals = dealIds.size ? await tx.crmDeal.findMany({ where: { workspaceId, id: { in: [...dealIds] } },
-    select: { accountId: true, contactId: true } }) : [];
+    select: { id: true, accountId: true, contactId: true } }) : [];
   const contactIds = new Set([...links, ...activities, ...deals].flatMap((link) => link.contactId ? [link.contactId] : []));
   await lockCrmLinks(tx, ...[...contactIds].map((contactId) => ({ contactId })));
   const contacts = contactIds.size ? await tx.crmContact.findMany({ where: { workspaceId, id: { in: [...contactIds] } },
-    select: { accountId: true } }) : [];
+    select: { id: true, accountId: true } }) : [];
   const accountIds = new Set([...links, ...activities, ...deals, ...contacts].flatMap((link) => link.accountId ? [link.accountId] : []));
   await lockCrmLinks(tx, ...[...accountIds].map((accountId) => ({ accountId })));
+  return { activities, deals, contacts, accountIds: [...accountIds].sort() };
+}
+
+export async function lockCrmProspectProvisioning(tx: Prisma.TransactionClient, workspaceId: string, demoLeadId: string) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`crm_prospect:${workspaceId}:${demoLeadId}`}, 0))`;
 }

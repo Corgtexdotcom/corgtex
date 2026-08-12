@@ -9,6 +9,7 @@ import {
   isHumanNewspaperRecipientIdentity,
   normalizeNewspaperCadence,
   recordNewspaperDelivery,
+  recordDemoWelcomeCrmActivity,
   buildWorkspaceBriefingFromCandidates,
   buildWorkspaceBriefingFromDigest,
   collectWorkspaceBriefingCandidates,
@@ -1917,20 +1918,6 @@ export async function sendDemoWelcomeNewspaper(params: {
       data: { welcomeEmailSentAt: new Date() },
     });
 
-    await tx.crmActivity.create({
-      data: {
-        workspaceId: params.workspaceId,
-        contactId: lead.convertedContactId,
-        type: "EMAIL",
-        title: "Sent welcome newspaper",
-        bodyMd: [
-          "Sent the Corgtex welcome newspaper.",
-          "",
-          "The email introduced the Corgtex newspaper as a first operating picture for shared memory, decisions, actions, meetings, company context, ownership and control, and human-reviewed AI work.",
-        ].join("\n"),
-      },
-    });
-
     const now = new Date();
     await tx.newspaperDelivery.create({
       data: {
@@ -1948,6 +1935,11 @@ export async function sendDemoWelcomeNewspaper(params: {
         skippedAt: deliveryStatus === "SKIPPED" ? now : null,
       },
     });
+  });
+  await recordDemoWelcomeCrmActivity({
+    workspaceId: params.workspaceId,
+    demoLeadId: lead.id,
+    expectedContactId: lead.convertedContactId,
   });
 
   logger.info("newspaper_delivery_completed", {

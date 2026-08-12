@@ -118,19 +118,33 @@ const CRM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>(["CrmAccount", "CrmA
 type CrmParentSpec = readonly [ArchiveEntityType, "crmAccount" | "crmContact" | "crmDeal", "accountId" | "contactId" | "dealId"];
 
 async function requireActiveCrmRestoreParents(tx: Prisma.TransactionClient, record: any, parents: readonly CrmParentSpec[]) {
-  const order = ["CrmDeal", "CrmContact", "CrmAccount"];
-  for (const [entityType, delegateName, field] of [...parents].sort((left, right) => order.indexOf(left[0]) - order.indexOf(right[0]))) {
-    const parentId = record[field];
-    if (!parentId) continue;
-    await lockWorkspaceArchiveArtifact(tx, entityType, parentId);
-    const parent = await (tx[delegateName] as any).findFirst({ where: {
-      id: parentId, workspaceId: record.workspaceId, archivedAt: null,
-      ...(entityType === "CrmDeal" ? {
-        contact: { archivedAt: null }, OR: [{ accountId: null }, { account: { archivedAt: null } }],
-      } : {}),
-    }, select: { id: true } });
-    invariant(parent, 409, "ARCHIVED_PARENT", `Restore the linked ${entityType} before restoring this record.`);
-  }
+  const ids = (type: ArchiveEntityType) => parents.flatMap(([entityType, , field]) =>
+    entityType === type && record[field] ? [record[field] as string] : []);
+  const dealIds = [...new Set(ids("CrmDeal"))].sort();
+  for (const id of dealIds) await lockWorkspaceArchiveArtifact(tx, "CrmDeal", id);
+  const deals = dealIds.length ? await tx.crmDeal.findMany({ where: { id: { in: dealIds }, workspaceId: record.workspaceId },
+    select: { id: true, archivedAt: true, contactId: true, accountId: true } }) : [];
+  const contactIds = [...new Set([...ids("CrmContact"), ...deals.map((deal) => deal.contactId)])].sort();
+  for (const id of contactIds) await lockWorkspaceArchiveArtifact(tx, "CrmContact", id);
+  const contacts = contactIds.length ? await tx.crmContact.findMany({ where: { id: { in: contactIds }, workspaceId: record.workspaceId },
+    select: { id: true, archivedAt: true, accountId: true } }) : [];
+  const accountIds = [...new Set([...ids("CrmAccount"), ...deals.flatMap((deal) => deal.accountId ? [deal.accountId] : []),
+    ...contacts.flatMap((contact) => contact.accountId ? [contact.accountId] : [])])].sort();
+  for (const id of accountIds) await lockWorkspaceArchiveArtifact(tx, "CrmAccount", id);
+  const accounts = accountIds.length ? await tx.crmAccount.findMany({ where: { id: { in: accountIds }, workspaceId: record.workspaceId },
+    select: { id: true, archivedAt: true } }) : [];
+  const activeDeals = new Set(deals.filter((deal) => !deal.archivedAt).map((deal) => deal.id));
+  const activeContacts = new Set(contacts.filter((contact) => !contact.archivedAt).map((contact) => contact.id));
+  const activeAccounts = new Set(accounts.filter((account) => !account.archivedAt).map((account) => account.id));
+  const contactById = new Map(contacts.map((contact) => [contact.id, contact]));
+  invariant(dealIds.every((id) => { const deal = deals.find((item) => item.id === id); return deal && activeDeals.has(id)
+    && activeContacts.has(deal.contactId) && (!deal.accountId || activeAccounts.has(deal.accountId)); }),
+  409, "ARCHIVED_PARENT", "Restore the linked CrmDeal and its parents before restoring this record.");
+  invariant(contactIds.every((id) => { const contact = contactById.get(id); return contact && activeContacts.has(id)
+    && (!contact.accountId || activeAccounts.has(contact.accountId)); }),
+  409, "ARCHIVED_PARENT", "Restore the linked CrmContact and its account before restoring this record.");
+  invariant(ids("CrmAccount").every((id) => activeAccounts.has(id)), 409, "ARCHIVED_PARENT",
+    "Restore the linked CrmAccount before restoring this record.");
 }
 
 async function requireNoActiveActivityOrphan(tx: Prisma.TransactionClient, record: any, entityType: "CrmContact" | "CrmDeal") {

@@ -15,6 +15,7 @@ const {
   getWorkspaceNewspaperCadenceMock,
   instrumentNewspaperHtmlLinksMock,
   recordNewspaperDeliveryMock,
+  recordDemoWelcomeCrmActivityMock,
   upsertNewspaperEditionMock,
   collectWorkspaceBriefingCandidatesMock,
   upsertWorkspaceBriefingMock,
@@ -97,6 +98,7 @@ const {
   getWorkspaceNewspaperCadenceMock: vi.fn(),
   instrumentNewspaperHtmlLinksMock: vi.fn(),
   recordNewspaperDeliveryMock: vi.fn(),
+  recordDemoWelcomeCrmActivityMock: vi.fn().mockResolvedValue({ created: true, activityId: "activity-1" }),
   upsertNewspaperEditionMock: vi.fn(),
   collectWorkspaceBriefingCandidatesMock: vi.fn(),
   upsertWorkspaceBriefingMock: vi.fn(),
@@ -228,6 +230,7 @@ vi.mock("@corgtex/domain", () => ({
   },
   instrumentNewspaperHtmlLinks: instrumentNewspaperHtmlLinksMock,
   recordNewspaperDelivery: recordNewspaperDeliveryMock,
+  recordDemoWelcomeCrmActivity: recordDemoWelcomeCrmActivityMock,
   workspaceBriefingPeriodFromCadence: (cadence: string) => cadence === "WEEKLY" ? "WEEKLY" : "DAILY",
   workspaceBriefingContextSince: (period: string, date: Date) => new Date(date.getTime() - (period === "WEEKLY" ? 90 : 30) * 24 * 60 * 60 * 1000),
   collectWorkspaceBriefingCandidates: collectWorkspaceBriefingCandidatesMock,
@@ -1612,15 +1615,11 @@ describe("runDailyDigest", () => {
       where: { id: "lead-1" },
       data: { welcomeEmailSentAt: expect.any(Date) },
     });
-    expect(txMock.crmActivity.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        workspaceId: "workspace-1",
-        contactId: "contact-1",
-	        type: "EMAIL",
-	        title: "Sent welcome newspaper",
-	        bodyMd: expect.stringContaining("ownership and control"),
-	      }),
-	    });
+    expect(recordDemoWelcomeCrmActivityMock).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      demoLeadId: "lead-1",
+      expectedContactId: "contact-1",
+    });
     expect(txMock.newspaperDelivery.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         workspaceId: "workspace-1",
@@ -1630,6 +1629,8 @@ describe("runDailyDigest", () => {
         providerMessageId: "email-1",
       }),
     });
+    expect(txMock.newspaperDelivery.create.mock.invocationCallOrder[0])
+      .toBeLessThan(recordDemoWelcomeCrmActivityMock.mock.invocationCallOrder[0]!);
   });
 
   it("does not resend the demo welcome newspaper when it already has a sent timestamp", async () => {
