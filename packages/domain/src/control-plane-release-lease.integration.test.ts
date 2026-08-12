@@ -4,29 +4,36 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { abortManagedReleaseLease, acquireManagedReleaseLease, beginManagedReleaseMutation, heartbeatManagedReleaseLease, recordManagedReleaseRollbackRecord } from "./control-plane-release-lease";
-
 const prisma = getPrismaClient();
-const BASE = `sha-${"a".repeat(40)}`;
-const NEXT = `sha-${"b".repeat(40)}`;
-
+const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
+const SUBSCRIPTION = "123e4567-e89b-12d3-a456-426614174000"; const [RG, WEB, WORKER, ACR] = ["rg.Safe_1", "web-app", "worker-app", "acr12.azurecr.io"];
+const DIGESTS = ["1", "2", "3", "4"].map((value) => `sha256:${value.repeat(64)}`);
+function rollbackPayload() {
+  return {
+    schemaVersion: 1,
+    target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
+    previous: { releaseVersion: "release-1", web: { containerName: "web--old", image: `${ACR}/corgtex/web@${DIGESTS[0]}`, readyRevision: `${WEB}--rev-1` },
+      worker: { containerName: "worker--old", image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, readyRevision: `${WORKER}--rev-2` } },
+    incoming: { webDigest: DIGESTS[2], workerDigest: DIGESTS[3] },
+  };
+}
+function reverseKeys(value: unknown): unknown { if (!value || typeof value !== "object" || Array.isArray(value)) return value; return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reverseKeys(item)])); }
 async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput> = {}) {
   const suffix = randomUUID();
   const account = await prisma.customerAccount.create({ data: { slug: `lease-${suffix}`, displayName: "Synthetic lease account" } });
   return prisma.customerDeployment.create({ data: {
     label: "Synthetic managed Azure", url: `https://${suffix}.example.test`, customerAccountId: account.id,
     deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE",
-    provisioningStatus: "active", releaseImageTag: BASE, ...overrides,
+    provisioningStatus: "active", releaseImageTag: BASE, releaseVersion: "release-1", providerSubscriptionId: SUBSCRIPTION,
+    providerResourceGroup: RG, providerWebServiceId: WEB, providerWorkerServiceId: WORKER, ...overrides,
   } });
 }
-
 function acquire(deploymentId: string, overrides = {}) {
   return acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test", ...overrides });
 }
-
-async function expectCode(value: Promise<unknown>, code: string, status = 409) {
-  await expect(value).rejects.toMatchObject({ code, status, message: "Managed release lease request was rejected." });
+async function expectCode(value: Promise<unknown>, code: string, status = 409, message = "Managed release lease request was rejected.") {
+  await expect(value).rejects.toMatchObject({ code, status, message });
 }
-
 async function expire(deploymentId: string) {
   const now = Date.now();
   await prisma.customerDeployment.update({ where: { id: deploymentId }, data: {
@@ -34,7 +41,6 @@ async function expire(deploymentId: string) {
   } });
 }
 beforeEach(async () => truncateAllTables());
-
 describe("managed release lease CAS", () => {
   it("validates exact targeting, eligibility, and baseline before reserving", async () => {
     const eligible = await deployment();
@@ -51,7 +57,6 @@ describe("managed release lease CAS", () => {
     for (const row of ineligible) await expectCode(acquire(row.id), "MANAGED_RELEASE_TARGET_INELIGIBLE");
     await expect(acquire(eligible.id, { incomingVersion: "release-\uD801\uDC00" })).resolves.toMatchObject({ deploymentId: eligible.id });
   });
-
   it("serializes simultaneous acquisition and heartbeats the exact owner without event noise", async () => {
     const target = await deployment();
     const attempts = await Promise.allSettled([acquire(target.id), acquire(target.id)]);
@@ -60,8 +65,7 @@ describe("managed release lease CAS", () => {
     const loser = attempts.find((result) => result.status === "rejected")!;
     expect(loser.reason).toMatchObject({ code: "MANAGED_RELEASE_LEASE_CONFLICT", status: 409 });
     const stored = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
-    expect(stored.releaseLeaseTokenHash).toBe(sha256(handle.capability));
-    expect(stored.releaseLeaseTokenHash).not.toBe(handle.capability);
+    expect(stored.releaseLeaseTokenHash).toBe(sha256(handle.capability)); expect(stored.releaseLeaseTokenHash).not.toBe(handle.capability);
     expect(stored.releaseLeaseExpiresAt!.getTime() - stored.releaseLeaseAcquiredAt!.getTime()).toBe(300_000);
     const heartbeat = await heartbeatManagedReleaseLease(handle);
     expect(heartbeat).not.toHaveProperty("capability");
@@ -70,7 +74,6 @@ describe("managed release lease CAS", () => {
     await expectCode(heartbeatManagedReleaseLease({ ...handle, capability: stored.releaseLeaseTokenHash! }), "MANAGED_RELEASE_LEASE_CONFLICT");
     await expectCode(heartbeatManagedReleaseLease({ ...handle, fence: handle.fence + 1 }), "MANAGED_RELEASE_LEASE_CONFLICT");
   });
-
   it("checks expiry against post-lock database wall time", async () => {
     const target = await deployment();
     const handle = await acquire(target.id);
@@ -85,21 +88,19 @@ describe("managed release lease CAS", () => {
     await expired;
     await locker.$disconnect();
   });
-
   it("replaces only expired reservations and fences every operation from the prior owner", async () => {
     const target = await deployment();
     const old = await acquire(target.id);
     await expire(target.id);
     const current = await acquire(target.id);
-    expect(current.fence).toBe(old.fence + 1);
-    expect(current.leaseId).not.toBe(old.leaseId);
+    expect(current.fence).toBe(old.fence + 1); expect(current.leaseId).not.toBe(old.leaseId);
     const stale = [
-      () => heartbeatManagedReleaseLease(old), () => recordManagedReleaseRollbackRecord(old, { revision: "old" }),
+      () => heartbeatManagedReleaseLease(old), () => recordManagedReleaseRollbackRecord(old, rollbackPayload()),
       () => beginManagedReleaseMutation(old), () => abortManagedReleaseLease(old),
     ];
     for (const operation of stale) await expectCode(operation(), "MANAGED_RELEASE_LEASE_CONFLICT");
     expect((await prisma.customerDeploymentEvent.findMany({ where: { deploymentId: target.id } })).map(({ action }) => action)).toEqual(["control_plane.release_lease.acquired", "control_plane.release_lease.reservation_replaced"]);
-    await recordManagedReleaseRollbackRecord(current, { revision: "current" });
+    await recordManagedReleaseRollbackRecord(current, rollbackPayload());
     await beginManagedReleaseMutation(current);
     await expectCode(acquire(target.id), "MANAGED_RELEASE_LEASE_CONFLICT");
     await expire(target.id);
@@ -108,54 +109,49 @@ describe("managed release lease CAS", () => {
     await expectCode(acquire(target.id), "MANAGED_RELEASE_RECOVERY_REQUIRED");
     expect((await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).releaseLeaseId).toBe(current.leaseId);
   });
-
-  it("persists one bounded semantic rollback envelope and begins mutation idempotently", async () => {
+  it("persists one exact canonical rollback envelope and begins mutation idempotently", async () => {
     const target = await deployment();
     const handle = await acquire(target.id);
     await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_ROLLBACK_RECORD_REQUIRED");
-    await expectCode(recordManagedReleaseRollbackRecord(handle, { apiKey: "unsafe" }), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    await expectCode(recordManagedReleaseRollbackRecord(handle, { nested: handle.capability }), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    await expectCode(recordManagedReleaseRollbackRecord(handle, { when: new Date() }), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    const cyclic: Record<string, unknown> = {};
-    cyclic.self = cyclic;
-    await expectCode(recordManagedReleaseRollbackRecord(handle, cyclic), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    for (const unsafe of [{ DATABASE_URL: "redacted" }, { dsn: "postgresql://user:password@host/db" }, { telemetry: "InstrumentationKey=redacted" }, { telemetry: "ConnectionString=redacted" }]) await expectCode(recordManagedReleaseRollbackRecord(handle, unsafe), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    for (const descriptor of ["key", "name", "variableName"]) await expectCode(recordManagedReleaseRollbackRecord(handle, { [descriptor]: "API_KEY", value: "opaque-synthetic" }), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    for (const unsafe of ["\u0000", "\uD800", "\uDC00"]) { await expectCode(recordManagedReleaseRollbackRecord(handle, { value: unsafe }), "MANAGED_RELEASE_INVALID_INPUT", 400); await expectCode(recordManagedReleaseRollbackRecord(handle, { [unsafe]: "opaque" }), "MANAGED_RELEASE_INVALID_INPUT", 400); }
-    const sparse: unknown[] = []; sparse[1] = "opaque"; await expectCode(recordManagedReleaseRollbackRecord(handle, { sparse }), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    await expectCode(recordManagedReleaseRollbackRecord(handle, JSON.parse(`{"__proto__":{"text":${JSON.stringify("x".repeat(65_537))}}}`)), "MANAGED_RELEASE_INVALID_INPUT", 400);
-    await recordManagedReleaseRollbackRecord(handle, JSON.parse('{"\\u00e9":"nfc","e\\u0301":"nfd","\\ud801\\udc00":"\\ud801\\udc00","__proto__":{"revision":"same"},"worker":{"revision":"r2"},"web":{"revision":"r1"}}'));
-    await recordManagedReleaseRollbackRecord(handle, JSON.parse('{"web":{"revision":"r1"},"worker":{"revision":"r2"},"__proto__":{"revision":"same"},"\\ud801\\udc00":"\\ud801\\udc00","e\\u0301":"nfd","\\u00e9":"nfc"}'));
-    await expectCode(recordManagedReleaseRollbackRecord(handle, { web: { revision: "different" } }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const parserMessage = "Managed release rollback payload is invalid."; const missing = rollbackPayload(); delete (missing.previous.web as { containerName?: string }).containerName;
+    const rejected = rollbackPayload(); rejected.previous.web.containerName = "Web--old"; const extra = { ...rollbackPayload(), arbitrary: "not-preserved" };
+    for (const value of [missing, rejected, extra]) await expectCode(recordManagedReleaseRollbackRecord(handle, value), "MANAGED_RELEASE_INVALID_INPUT", 400, parserMessage);
+    for (const change of [
+      (value: ReturnType<typeof rollbackPayload>) => { value.target.subscriptionId = "123e4567-e89b-12d3-a456-426614174001"; }, (value: ReturnType<typeof rollbackPayload>) => { value.target.resourceGroup = "rg.Other_1"; },
+      (value: ReturnType<typeof rollbackPayload>) => { value.target.webAppName = "web-other"; value.previous.web.readyRevision = "web-other--rev-1"; }, (value: ReturnType<typeof rollbackPayload>) => { value.target.workerAppName = "worker-other"; value.previous.worker.readyRevision = "worker-other--rev-2"; },
+      (value: ReturnType<typeof rollbackPayload>) => { Object.assign(value.previous, { releaseVersion: null }); },
+    ]) { const value = rollbackPayload(); change(value); await expectCode(recordManagedReleaseRollbackRecord(handle, value), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); }
+    const payload = rollbackPayload(); await recordManagedReleaseRollbackRecord(handle, payload);
+    await recordManagedReleaseRollbackRecord(handle, reverseKeys(payload));
+    const changed = rollbackPayload(); changed.previous.web.containerName = "web--changed";
+    await expectCode(recordManagedReleaseRollbackRecord(handle, changed), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const reserved = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
     expect(reserved.releaseLeaseRollbackRecord).toMatchObject({ version: 1, deploymentId: target.id, leaseId: handle.leaseId, fence: handle.fence, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2" });
-    const payload = (reserved.releaseLeaseRollbackRecord as { payload: Record<string, unknown> }).payload;
-    expect(payload["__proto__"]).toEqual({ revision: "same" }); expect(payload["\u00e9"]).toBe("nfc"); expect(payload["e\u0301"]).toBe("nfd"); expect(payload["\uD801\uDC00"]).toBe("\uD801\uDC00");
-    await beginManagedReleaseMutation(handle);
-    const retry = await beginManagedReleaseMutation(handle);
-    expect(retry).not.toHaveProperty("capability");
+    expect((reserved.releaseLeaseRollbackRecord as { payload: unknown }).payload).toEqual(payload);
+    await beginManagedReleaseMutation(handle); expect(await beginManagedReleaseMutation(handle)).not.toHaveProperty("capability");
+    await prisma.customerDeployment.update({ where: { id: target.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } }); await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     await expectCode(abortManagedReleaseLease(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const events = await prisma.customerDeploymentEvent.findMany({ where: { deploymentId: target.id } });
     expect(events.map(({ action }) => action)).toEqual(["control_plane.release_lease.acquired", "control_plane.release_lease.rollback_recorded", "control_plane.release_lease.mutation_begun"]);
     expect(JSON.stringify(events)).not.toContain(handle.capability);
-    expect(JSON.stringify(events)).not.toContain("revision");
+    expect(JSON.stringify(events)).not.toContain("web--old");
+    const corrupt = await deployment(); const corruptHandle = await acquire(corrupt.id); await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } });
+    await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
   });
-
   it("permits safe expired-reservation abort and clears the slot without resetting its fence or baseline", async () => {
     const target = await deployment();
     const handle = await acquire(target.id);
-    await recordManagedReleaseRollbackRecord(handle, { web: "prior" });
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
     await expire(target.id);
     await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_LEASE_EXPIRED");
-    await expectCode(recordManagedReleaseRollbackRecord(handle, { web: "prior" }), "MANAGED_RELEASE_LEASE_EXPIRED");
+    await expectCode(recordManagedReleaseRollbackRecord(handle, rollbackPayload()), "MANAGED_RELEASE_LEASE_EXPIRED");
     await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_LEASE_EXPIRED");
     expect(await abortManagedReleaseLease(handle)).toEqual({ deploymentId: target.id, fence: handle.fence, aborted: true });
     const cleared = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
     expect(Object.entries(cleared).filter(([key]) => key.startsWith("releaseLease") && key !== "releaseLeaseFence").every(([, value]) => value === null)).toBe(true);
-    expect(cleared.releaseLeaseFence).toBe(handle.fence);
-    expect(cleared.releaseImageTag).toBe(BASE);
+    expect(cleared.releaseLeaseFence).toBe(handle.fence); expect(cleared.releaseImageTag).toBe(BASE);
   });
-
   it("rejects every eligibility drift after mutation begins and leaves the row unchanged", async () => {
     const drifts: Prisma.CustomerDeploymentUncheckedUpdateInput[] = [
       { customerAccountId: null }, { deploymentKind: "SHARED_WORKSPACE" }, { cloudProvider: "RAILWAY" },
@@ -163,7 +159,7 @@ describe("managed release lease CAS", () => {
     ];
     for (const data of drifts) {
       const target = await deployment(); const handle = await acquire(target.id);
-      await recordManagedReleaseRollbackRecord(handle, { web: "prior" });
+      await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
       await beginManagedReleaseMutation(handle);
       const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
       const failure = await prisma.customerDeployment.update({ where: { id: target.id }, data }).catch((error: unknown) => error);
@@ -171,7 +167,6 @@ describe("managed release lease CAS", () => {
       expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
     }
   });
-
   it("enforces database backstops without partially changing the leased row", async () => {
     const target = await deployment();
     const handle = await acquire(target.id);
