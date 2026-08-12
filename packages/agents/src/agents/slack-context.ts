@@ -18,6 +18,7 @@ const DEFAULT_STALE_ACTION_FOLLOWUP_DELAY_MINUTES = 72 * 60;
 const PROACTIVE_LOOKBACK_MINUTES = 7 * 24 * 60;
 const MAX_PROACTIVE_NUDGES = 3;
 const MAX_PROACTIVE_ACTIONS = 3;
+const MAX_PROACTIVE_REVIEWS = 50;
 const MAX_PROACTIVE_ACTION_FOLLOWUPS = 3;
 const PROACTIVE_EXISTING_ACTION_UPDATE = "proactive_existing_action_update";
 const PROACTIVE_ACTION_WAITING_UPDATE = "proactive_action_waiting_update";
@@ -286,19 +287,20 @@ function hasDeterministicNegativeCategory(text: string, concreteNextStep: string
   const completionText = text.replace(/\b(?:not\s+(?:yet\s+)?(?:done|sent|handled|finished|completed|resolved)|(?:must|should|will|needs? to|please ensure(?: that)?)[^.!?\n]{0,80}\b(?:be|is|are)\s+(?:done|sent|handled|finished|completed|resolved))\b/gi, "");
   const [rawVerb = "", ...deliverableWords] = concreteNextStep.match(/[a-z0-9]+/gi) ?? [], deliverableVerb = rawVerb.toLowerCase(), completedVerbs = ({ send: ["sent"], do: ["did", "done"], pay: ["paid"], write: ["wrote", "written"], make: ["made"], submit: ["submitted"] } as Record<string, string[]>)[deliverableVerb] ?? [`${deliverableVerb}${deliverableVerb.endsWith("e") ? "d" : "ed"}`];
   const scopedSentences = completionText.split(/[.!?\n]+/).filter((sentence) => deliverableWords.filter((word) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => token.toLowerCase() === word.toLowerCase())).length >= Math.min(2, deliverableWords.length)), completionScope = scopedSentences.filter((sentence) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => completedVerbs.includes(token.toLowerCase()))).join("\n"), deliverableScope = scopedSentences.filter((sentence) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => token.toLowerCase() === deliverableVerb || completedVerbs.includes(token.toLowerCase()))).join("\n");
-  return /(?:^|[.!?\n]\s*)(?:(?:(?:this is|just|only)\s+(?:a\s+)?(?:(?:smoke|routing)\s+test(?:\s+[^.!?\n]+)?|test\s+of\s+routing)|smoke\s+testing(?:\s+[^.!?\n]+)?|(?:smoke\s+|routing\s+)?test(?:ing)?(?: message)?(?=\s*(?:[.!?:]|$))|dry run|routing check|checking (?:the )?routing))\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
+  return /(?:^|[.!?\n]\s*)(?:(?:(?:this is(?:\s+(?:just|only))?|just|only)\s+(?:a\s+)?(?:(?:smoke|routing)\s+test(?:\s+[^.!?\n]+)?|test\s+of\s+routing|test(?: message)?(?=\s*(?:[.!?:]|$)))|smoke\s+testing(?:\s+[^.!?\n]+)?|(?:smoke\s+|routing\s+)?test(?:ing)?(?: message)?(?=\s*(?:[.!?:]|$))|dry run|routing check|checking (?:the )?routing))\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
     || /^\s*(?:ack(?:nowledged)?|got it|sounds good|thank you|thanks)[.!]?\s*$/i.test(completionText)
     || Boolean(completionScope) || /(?:^|[.!?]\s*)done\b/i.test(completionText) || /\b(?:never|cannot|(?:(?:will|would|can|could|should|must|do|does|did|is|are)\s+not|won['’]t|wouldn['’]t|can['’]t|couldn['’]t|shouldn['’]t|mustn['’]t|don['’]t|doesn['’]t|didn['’]t|isn['’]t|aren['’]t))\b/i.test(deliverableScope);
 }
 
 function hasExplicitActionCreateRequest(text: string) {
-  if (/\b(?:do not|don['’]t|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text)
-    || /\bnot an? action item\b/i.test(text)) {
+  if (hasActionCreationNegation(text)) {
     return false;
   }
   return /\b(?:create|make|open|add|assign)\b[^.!?\n]{0,50}\b(?:corgtex\s+action|action item|work item)\b/i.test(text)
     || /\bturn\b[^.!?\n]{0,30}\binto\b[^.!?\n]{0,20}\b(?:an?\s+)?(?:corgtex\s+action|action item|work item)\b/i.test(text);
 }
+
+function hasActionCreationNegation(text: string) { return /\b(?:do not|don['’]t|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text) || /\bnot an? action item\b/i.test(text) || /\bno\s+(?:need\s+for\s+(?:an?\s+)?(?:corgtex\s+action|action item|work item)|(?:corgtex\s+action|action item|work item)\s+(?:is\s+)?needed)\b/i.test(text) || /\b(?:an?\s+)?(?:corgtex\s+action|action item|work item)\s+(?:(?:is\s+)?not|isn['’]?t)\s+needed\b/i.test(text); }
 
 function evidenceIsGrounded(evidence: string, threadMessages: SlackCandidateMessage[]) { return evidence.trim().length >= 2 && threadMessages.map((message) => message.text ?? "").join("\n").toLowerCase().includes(evidence.toLowerCase()); }
 
@@ -316,9 +318,10 @@ async function sendProactiveActionConfirmation(params: { workspaceId: string; in
   } catch (error) { await prisma.communicationEntityLink.deleteMany({ where: { id: claim.id, workspaceId: params.workspaceId, claimKey } }); throw error; }
 }
 
-function hasConcreteOwnerEvidence(ownerEvidence: string, threadMessages: SlackCandidateMessage[]) {
-  return !/^(?:a|an|and|at|by|for|from|in|it|of|on|or|please|someone|somebody|anyone|anybody|team|the team|to|us|we|they|owner|unknown|tbd|unassigned|today|tomorrow|(?:mon|tues|wednes|thurs|fri|satur|sun)day)$/i.test(ownerEvidence.trim()) && (/<@[A-Z0-9]+(?:\|[^>]+)?>/i.test(ownerEvidence) || (/^[A-Z][\p{L}'-]*(?:\s+[A-Z][\p{L}'-]*){0,2}$/u.test(ownerEvidence) && threadMessages.some((message) => new RegExp(`(?:^|[.!?]\\s+)${escapeRegExp(ownerEvidence)}(?=\\s*(?:,|:|\\b(?:will|should|must|can|could|owns?|is responsible|has to)\\b))`, "u").test(message.text ?? ""))))
-    && evidenceIsGrounded(ownerEvidence, threadMessages);
+function hasConcreteOwnerEvidence(ownerEvidence: string, concreteNextStep: string, threadMessages: SlackCandidateMessage[]) {
+  const owner = ownerEvidence.trim(), directCommitment = new RegExp(`\\bI(?:['’](?:ll|m going to)|\\s+(?:will|should|must|can|could|am going to))\\s+(?:(?:personally|directly|definitely|certainly)\\s+)?${escapeRegExp(concreteNextStep)}\\b`, "i"), speakerCommitment = /^[A-Z][A-Z0-9]{1,}$/.test(owner) && threadMessages.some((message) => message.externalUserId === owner && directCommitment.test(message.text ?? ""));
+  const namedOwner = !/^(?:a|an|and|at|by|for|from|i|me|my|you|your|he|she|him|her|in|it|of|on|or|please|someone|somebody|anyone|anybody|team|the team|to|us|we|they|owner|unknown|tbd|unassigned|today|tomorrow|(?:mon|tues|wednes|thurs|fri|satur|sun)day)$/i.test(owner) && (/<@[A-Z0-9]+(?:\|[^>]+)?>/i.test(owner) || (/^[A-Z][\p{L}'-]*(?:\s+[A-Z][\p{L}'-]*){0,2}$/u.test(owner) && threadMessages.some((message) => new RegExp(`(?:^|[.!?]\\s+)${escapeRegExp(owner)}(?=\\s*(?:,|:|\\b(?:will|should|must|can|could|owns?|is responsible|has to)\\b))`, "u").test(message.text ?? ""))));
+  return speakerCommitment || (namedOwner && evidenceIsGrounded(owner, threadMessages));
 }
 
 function hasConcreteDeliverableEvidence(evidence: string, threadMessages: SlackCandidateMessage[]) {
@@ -331,10 +334,10 @@ function hasConcreteDeliverableEvidence(evidence: string, threadMessages: SlackC
 function shouldPublishProactiveAction(params: { parsed: ReturnType<typeof normalizeProactiveExtraction>; sourceText: string; threadMessages: SlackCandidateMessage[]; botUserId: string | null; confidenceThreshold: number; publicationEnabled: boolean }) {
   const { parsed } = params;
   const threadText = params.threadMessages.map((message) => message.text ?? "").join("\n");
-  const hasOwner = hasConcreteOwnerEvidence(parsed.ownerEvidence, params.threadMessages);
+  const hasOwner = hasConcreteOwnerEvidence(parsed.ownerEvidence, parsed.concreteNextStep, params.threadMessages);
   const hasExplicitCreate = parsed.explicitActionRequest && hasExplicitActionCreateRequest(params.sourceText);
   return params.publicationEnabled && Boolean(params.botUserId) && !params.threadMessages.some((message) => isAddressedToSlackBot(message.text ?? "", params.botUserId)) && parsed.resolutionState === "open" && parsed.workDisposition === "action" && parsed.intent === "create_action"
-    && hasConcreteDeliverableEvidence(parsed.concreteNextStep, params.threadMessages) && !parsed.negativeCategory && !hasDeterministicNegativeCategory(threadText, parsed.concreteNextStep) && parsed.couldNot.length === 0 && parsed.confidence >= params.confidenceThreshold && (hasOwner || hasExplicitCreate);
+    && hasConcreteDeliverableEvidence(parsed.concreteNextStep, params.threadMessages) && !parsed.negativeCategory && !hasActionCreationNegation(threadText) && !hasDeterministicNegativeCategory(threadText, parsed.concreteNextStep) && parsed.couldNot.length === 0 && parsed.confidence >= params.confidenceThreshold && (hasOwner || hasExplicitCreate);
 }
 
 function threadTsForMessage(message: SlackCandidateMessage) {
@@ -369,11 +372,13 @@ async function fetchHumanThreadMessages(params: {
       isDeleted: false,
       OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }],
     },
-    orderBy: { messageTs: "asc" },
+    orderBy: [{ messageTs: "desc" }, { externalMessageId: "desc" }, { id: "desc" }],
     take: 40,
   });
 
-  return messages.length > 0 ? messages as SlackCandidateMessage[] : [params.source];
+  const ordered = (messages as SlackCandidateMessage[]).sort((left, right) => (left.messageTs?.getTime() ?? 0) - (right.messageTs?.getTime() ?? 0) || left.externalMessageId.localeCompare(right.externalMessageId) || left.id.localeCompare(right.id));
+  if (ordered.length === 0) return [params.source];
+  return ordered.some((message) => message.id === params.source.id) ? ordered : [params.source, ...ordered.slice(-39)];
 }
 
 async function reviewThreadForAction(params: {
@@ -454,6 +459,15 @@ async function recordProactiveMarker(params: {
     return;
   }
   await prisma.communicationEntityLink.create({ data });
+}
+
+async function claimProcessedReply(params: { workspaceId: string; installationId: string; message: SlackCandidateMessage; claimKey: string }) {
+  try {
+    return await prisma.communicationEntityLink.create({
+      data: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", messageId: params.message.id, externalUserId: params.message.externalUserId, entityType: "CommunicationMessage", entityId: params.message.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: params.claimKey },
+      select: { id: true },
+    });
+  } catch (error) { if (isUniqueConstraintError(error)) return null; throw error; }
 }
 
 function isSlackInvalidAuthError(error: unknown) {
@@ -627,9 +641,10 @@ export async function runSlackProactiveScan(params: {
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
   const agentActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-agent" };
   let actions = 0;
+  let semanticReviews = 0;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);
   let pendingNudgeCursor: string | undefined;
-  while (actions < MAX_PROACTIVE_ACTIONS) {
+  while (actions < MAX_PROACTIVE_ACTIONS && semanticReviews < MAX_PROACTIVE_REVIEWS) {
     const pendingNudges = await prisma.communicationEntityLink.findMany({
     where: {
       workspaceId: params.workspaceId,
@@ -730,13 +745,15 @@ export async function runSlackProactiveScan(params: {
           installationId: params.installationId,
           provider: "SLACK",
           messageId: latestThreadMessage.id,
-          OR: [{ entityType: "Action", entityId: linkedAction.entityId, action: { in: [PROACTIVE_EXISTING_ACTION_UPDATE, PROACTIVE_ACTION_WAITING_UPDATE] } }, ...(scannerCreatedAction ? [{ entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey }] : [])],
+          OR: [{ entityType: "Action", entityId: linkedAction.entityId, action: { in: [PROACTIVE_EXISTING_ACTION_UPDATE, PROACTIVE_ACTION_WAITING_UPDATE] } }, { entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey }],
         },
         select: { id: true },
       });
       if (existingUpdate) continue;
     }
 
+    if (semanticReviews >= MAX_PROACTIVE_REVIEWS) break;
+    semanticReviews += 1;
     const parsed = await reviewThreadForAction({
       workspaceId: params.workspaceId,
       workflowJobId: params.workflowJobId,
@@ -750,14 +767,21 @@ export async function runSlackProactiveScan(params: {
     if (linkedAction) {
       const updateMd = parsed.updateMd || parsed.bodyMd;
       const shouldPostUpdate = parsed.intent === "update_existing_action" || parsed.intent === "wait_existing_action";
+      const processedClaim = await claimProcessedReply({ workspaceId: params.workspaceId, installationId: params.installationId, message: latestThreadMessage, claimKey: processedReplyClaimKey });
+      if (!processedClaim) continue;
       if (shouldPostUpdate && parsed.linkedConfidence >= config.proactiveConfidenceThreshold && updateMd) {
-        await postDeliberationEntry(agentActor, {
-          workspaceId: params.workspaceId,
-          parentType: "ACTION",
-          parentId: linkedAction.entityId,
-          entryType: "REACTION",
-          bodyMd: updateMd,
-        });
+        try {
+          await postDeliberationEntry(agentActor, {
+            workspaceId: params.workspaceId,
+            parentType: "ACTION",
+            parentId: linkedAction.entityId,
+            entryType: "REACTION",
+            bodyMd: updateMd,
+          });
+        } catch (error) {
+          await prisma.communicationEntityLink.deleteMany({ where: { id: processedClaim.id, workspaceId: params.workspaceId, claimKey: processedReplyClaimKey } });
+          throw error;
+        }
 
         await recordProactiveMarker({
           installationId: params.installationId,
