@@ -1,16 +1,15 @@
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
 function invalid() { throw new Error("MANAGED_AZURE_RELEASE_INPUT_INVALID"); }
+function hasEnumerable(prototype) { const descriptors = Object.getOwnPropertyDescriptors(prototype);
+  return Reflect.ownKeys(descriptors).some((key) => descriptors[key].enumerable); }
 function objectValue(value) {
   try {
     if (nodeTypes.isProxy(value) || value === null || typeof value !== "object" || Array.isArray(value)) invalid();
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) invalid();
-    const inherited = prototype && Object.getOwnPropertyDescriptors(prototype);
-    if (inherited && Reflect.ownKeys(inherited).some((key) => inherited[key].enumerable)) invalid();
+    if (hasEnumerable(Object.prototype)) invalid();
     return value;
-  } catch {
-    invalid();
-  }
+  } catch { invalid(); }
 }
 function exactRecord(value, keys) {
   const object = objectValue(value);
@@ -21,15 +20,12 @@ function exactRecord(value, keys) {
       || names.some((key) => typeof key !== "string" || !descriptors[key].enumerable
         || !Object.hasOwn(descriptors[key], "value"))) invalid();
     return Object.fromEntries(keys.map((key) => [key, descriptors[key].value]));
-  } catch {
-    invalid();
-  }
+  } catch { invalid(); }
 }
 function exactArray(value) {
   try {
     if (nodeTypes.isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 1_024) invalid();
-    const inherited = Object.getOwnPropertyDescriptors(Array.prototype);
-    if (Reflect.ownKeys(inherited).some((key) => inherited[key].enumerable)) invalid();
+    if (hasEnumerable(Array.prototype) || hasEnumerable(Object.prototype)) invalid();
     const names = Reflect.ownKeys(value);
     const descriptors = Object.getOwnPropertyDescriptors(value);
     if (names.length !== value.length + 1 || names[value.length] !== "length") invalid();
@@ -38,9 +34,7 @@ function exactArray(value) {
       if (names[index] !== key || !descriptors[key].enumerable || !Object.hasOwn(descriptors[key], "value")) invalid();
       return descriptors[key].value;
     });
-  } catch {
-    invalid();
-  }
+  } catch { invalid(); }
 }
 function safeTopology(value) {
   try {
@@ -92,6 +86,14 @@ function targetProjection(value) {
   if (resourceGroup.endsWith(".") || target.acrServer !== `${acrName}.azurecr.io`
     || webAppName.includes("--") || workerAppName.includes("--") || webAppName === workerAppName) invalid();
   return target;
+}
+function overlapsTarget(target, value) {
+  try { const descriptors = Object.getOwnPropertyDescriptors(objectValue(value)); const read = (key) => Object.hasOwn(descriptors, key) ? descriptors[key].value : null;
+    const subscriptionId = read("subscriptionId"); const resourceGroup = read("resourceGroup"); const names = [read("webAppName"), read("workerAppName")];
+    return typeof subscriptionId === "string" && subscriptionId.toLowerCase() === target.subscriptionId && typeof resourceGroup === "string"
+      && resourceGroup.toLowerCase() === target.resourceGroup.toLowerCase()
+      && names.some((name) => typeof name === "string" && [target.webAppName, target.workerAppName].includes(name.toLowerCase()));
+  } catch { return false; }
 }
 function deployment(value) {
   const row = exactRecord(value, [
@@ -166,11 +168,12 @@ function canonicalIntent(value) {
 export function canonicalizeManagedAzureReleaseIntentV1(input) {
   const raw = exactRecord(input, ["deploymentId", "deployments", "gitSha", "manifests"]);
   const deploymentId = uuid(raw.deploymentId);
-  const matches = exactArray(raw.deployments).map(deployment).filter((row) => row.deploymentId === deploymentId);
+  const deployments = exactArray(raw.deployments).map(deployment); const matches = deployments.filter((row) => row.deploymentId === deploymentId);
   if (matches.length !== 1) invalid();
+  const target = targetFromDeployment(matches[0], deploymentId); if (deployments.some((row) => row !== matches[0] && overlapsTarget(target, row.azure))) invalid();
   const gitSha = sha(raw.gitSha); const imageTag = `sha-${gitSha}`;
   const manifests = exactRecord(raw.manifests, ["web", "worker"]);
-  return deepFreeze({ schemaVersion: 1, deploymentId, target: targetFromDeployment(matches[0], deploymentId), gitSha, imageTag,
+  return deepFreeze({ schemaVersion: 1, deploymentId, target, gitSha, imageTag,
     roles: { web: bindingFromManifest(manifests.web, "web", gitSha), worker: bindingFromManifest(manifests.worker, "worker", gitSha) } });
 }
 export function canonicalizeManagedAzureImportRequestV1(input) {

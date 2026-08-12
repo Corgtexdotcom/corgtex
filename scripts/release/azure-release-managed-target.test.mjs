@@ -1,10 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import * as releaseModule from "./azure-release-managed-target.mjs";
-const SHA = "a".repeat(40);
-const WEB_DIGEST = `sha256:${"b".repeat(64)}`;
-const WORKER_DIGEST = `sha256:${"c".repeat(64)}`;
-const DEPLOYMENT_ID = "aaaaaaaa-aaaa-faaa-0aaa-aaaaaaaa0101";
+const SHA = "a".repeat(40); const WEB_DIGEST = `sha256:${"b".repeat(64)}`;
+const WORKER_DIGEST = `sha256:${"c".repeat(64)}`; const DEPLOYMENT_ID = "aaaaaaaa-aaaa-faaa-0aaa-aaaaaaaa0101";
 const target = {
   deploymentId: DEPLOYMENT_ID, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production",
   deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure",
@@ -12,7 +10,6 @@ const target = {
   azure: { subscriptionId: "bbbbbbbb-bbbb-0bbb-fbbb-bbbbbbbb0102", resourceGroup: "rg-managed",
     acrName: "acrmanaged", acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
 };
-
 function input() {
   return { deploymentId: DEPLOYMENT_ID, deployments: [structuredClone(target)], gitSha: SHA,
     manifests: {
@@ -36,10 +33,8 @@ describe("managed Azure release intent primitives", () => {
     const source = readFileSync(new URL("./azure-release-managed-target.mjs", import.meta.url), "utf8");
     expect(source).not.toMatch(/node:fs|node:child_process|node:http|node:https|\bfetch\b|\beval\b|\bFunction\b|\brequire\s*\(|process\.|console\.|setTimeout|setInterval|Math\.random|Date\.|import\s*\(/);
   });
-
   test("builds fresh exact frozen intent and role requests", () => {
-    const firstInput = input();
-    const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(firstInput);
+    const firstInput = input(); const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(firstInput);
     expect(Object.keys(intent)).toStrictEqual(["schemaVersion", "deploymentId", "target", "gitSha", "imageTag", "roles"]);
     expect(Object.keys(intent.target)).toStrictEqual(["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
     expect(Object.keys(intent.roles)).toStrictEqual(["web", "worker"]);
@@ -47,15 +42,12 @@ describe("managed Azure release intent primitives", () => {
     expect(intent.roles.web).toStrictEqual({ role: "web", sourceTag: firstInput.manifests.web.sourceTag, sourceDigest: WEB_DIGEST,
       sourceDigestRef: `ghcr.io/corgtexdotcom/corgtex/web@${WEB_DIGEST}`, destinationRepository: "corgtex/web", destinationTag: `corgtex/web:sha-${SHA}` });
     expect(intent.roles.worker.sourceDigest).toBe(WORKER_DIGEST);
-    expect(Object.isFrozen(intent)).toBe(true);
-    expect(Object.isFrozen(intent.target)).toBe(true);
-    expect(Object.isFrozen(intent.roles.web)).toBe(true);
-    expect(JSON.stringify(intent)).not.toContain("private-credential-canary");
+    expect(Object.isFrozen(intent)).toBe(true); expect(Object.isFrozen(intent.target)).toBe(true);
+    expect(Object.isFrozen(intent.roles.web)).toBe(true); expect(JSON.stringify(intent)).not.toContain("private-credential-canary");
     firstInput.deployments[0].azure.acrName = "mutated";
     firstInput.manifests.web.raw = "mutated";
     expect(intent.target.acrName).toBe("acrmanaged");
     expect(intent.roles.web.sourceDigest).toBe(WEB_DIGEST);
-
     for (const role of ["web", "worker"]) {
       const request = releaseModule.canonicalizeManagedAzureImportRequestV1({ intent, role });
       expect(Object.keys(request)).toStrictEqual(["schemaVersion", "deploymentId", "target", "binding", "mode"]);
@@ -70,8 +62,7 @@ describe("managed Azure release intent primitives", () => {
     }
   });
   test("accepts null-prototype records and opposite caller key order", () => {
-    const ordinary = input();
-    const nullRoot = Object.assign(Object.create(null), ordinary);
+    const ordinary = input(); const nullRoot = Object.assign(Object.create(null), ordinary);
     const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(nullRoot);
     const reversed = Object.fromEntries(Object.entries(intent).reverse());
     reversed.target = Object.fromEntries(Object.entries(reversed.target).reverse());
@@ -86,6 +77,14 @@ describe("managed Azure release intent primitives", () => {
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(duplicate));
     const missing = input(); missing.deploymentId = "00000000-0000-4000-8000-000000000199";
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(missing));
+    const alias = input(); const sibling = structuredClone(target); sibling.deploymentId = "00000000-0000-4000-8000-000000000199"; sibling.azure.resourceGroup = "RG-MANAGED";
+    sibling.azure.webAppName = target.azure.workerAppName; sibling.azure.workerAppName = "managed-other"; alias.deployments.push(sibling);
+    expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(alias));
+    sibling.azure.webAppName = "other-web"; sibling.azure.workerAppName = "other-worker"; expect(releaseModule.canonicalizeManagedAzureReleaseIntentV1(alias).deploymentId).toBe(DEPLOYMENT_ID);
+    delete sibling.azure.workerAppName; let getterReads = 0; let inheritedResult;
+    Object.defineProperty(Object.prototype, "workerAppName", { configurable: true, get() { getterReads += 1; throw new Error("private-credential-canary"); } });
+    try { inheritedResult = releaseModule.canonicalizeManagedAzureReleaseIntentV1(alias); } finally { delete Object.prototype.workerAppName; }
+    expect(inheritedResult.deploymentId).toBe(DEPLOYMENT_ID); expect(getterReads).toBe(0);
     for (const deploymentId of [DEPLOYMENT_ID.toUpperCase(), ` ${DEPLOYMENT_ID}`]) {
       const candidate = input(); const row = structuredClone(target); row.deploymentId = deploymentId; candidate.deployments.push(row);
       expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
@@ -122,7 +121,6 @@ describe("managed Azure release intent primitives", () => {
     Object.defineProperty(accessor, "gitSha", { enumerable: true, get() { reads += 1; return SHA; } });
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(accessor));
     expect(reads).toBe(0);
-
     const cases = [];
     const extra = input(); extra.credential = "private-credential-canary"; cases.push(extra);
     const symbol = input(); symbol[Symbol("private-credential-canary")] = true; cases.push(symbol);
@@ -142,7 +140,6 @@ describe("managed Azure release intent primitives", () => {
     cases.push([]); cases.push({ deployments: [], gitSha: SHA, manifests: {} });
     for (const candidate of cases) expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
     expect(traps).toBe(0);
-
     const proxy = new Proxy(input(), { ownKeys() { throw new Error("private-credential-canary"); } });
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(proxy));
     Object.defineProperty(Object.prototype, "credential", { configurable: true, enumerable: true, value: "private-credential-canary" });
@@ -170,6 +167,10 @@ describe("managed Azure release intent primitives", () => {
     expectInvalid(() => releaseModule.canonicalizeManagedAzureImportRequestValueV1(accessor));
     expectInvalid(() => releaseModule.canonicalizeManagedAzureImportRequestValueV1(new Proxy(request, {})));
     expectInvalid(() => releaseModule.canonicalizeManagedAzureImportRequestValueV1({ intent, role: "web" }));
+    const nullRecord = (value) => Object.assign(Object.create(null), value); const nullRequest = nullRecord({ ...request, target: nullRecord({ ...request.target }), binding: nullRecord({ ...request.binding }) });
+    Object.defineProperty(Object.prototype, "credential", { configurable: true, enumerable: true, value: "private-credential-canary" });
+    let pollutedRequestError; try { releaseModule.canonicalizeManagedAzureImportRequestValueV1(nullRequest); } catch (error) { pollutedRequestError = error; } finally { delete Object.prototype.credential; }
+    expect(pollutedRequestError?.message).toBe("MANAGED_AZURE_RELEASE_INPUT_INVALID"); expect(pollutedRequestError?.message).not.toContain("private-credential-canary");
   });
   test("returns only ABSENT, MATCH, or CONFLICT with an exact digest-pinned image", () => {
     const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(input());
