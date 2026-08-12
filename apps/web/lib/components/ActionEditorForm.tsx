@@ -1,7 +1,8 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
+import { WorkItemEditForm, type WorkItemEditAction } from "@/lib/components/WorkItemEditForm";
 import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
 export type ActionEditorMemberOption = WorkItemMemberOption;
@@ -36,9 +37,11 @@ export function ActionEditorForm({
   members,
   labels,
   cancelHref,
+  expectedVersion,
+  currentHref,
   children,
 }: {
-  action: (formData: FormData) => void | Promise<void>;
+  action: ((formData: FormData) => void | Promise<void>) | WorkItemEditAction;
   workspaceId: string;
   actionId?: string;
   title?: string;
@@ -49,10 +52,12 @@ export function ActionEditorForm({
   members: ActionEditorMemberOption[];
   labels: ActionEditorLabels;
   cancelHref?: string;
+  expectedVersion?: number;
+  currentHref?: string;
   children?: ReactNode;
 }) {
-  return (
-    <form action={action} className="stack nr-form-section nr-action-editor-form">
+  const fields = (
+    <>
       <input type="hidden" name="workspaceId" value={workspaceId} />
       {actionId && <input type="hidden" name="actionId" value={actionId} />}
       <label>
@@ -76,6 +81,30 @@ export function ActionEditorForm({
         <input name="dueAt" type="date" defaultValue={dateInputValue(dueAt)} />
       </label>
       {children}
+    </>
+  );
+
+  if (expectedVersion !== undefined && currentHref) {
+    return (
+      <WorkItemEditForm
+        action={action as WorkItemEditAction}
+        expectedVersion={expectedVersion}
+        currentHref={currentHref}
+        submitLabel={labels.submit}
+        className="stack nr-form-section nr-action-editor-form"
+      >
+        {fields}
+        {cancelHref && <a className="link-button secondary" href={cancelHref}>{labels.cancel}</a>}
+      </WorkItemEditForm>
+    );
+  }
+
+  return (
+    <form
+      action={action as (formData: FormData) => void | Promise<void>}
+      className="stack nr-form-section nr-action-editor-form"
+    >
+      {fields}
       <div className="actions-inline">
         <button type="submit">{labels.submit}</button>
         {cancelHref && <a className="link-button secondary" href={cancelHref}>{labels.cancel}</a>}
