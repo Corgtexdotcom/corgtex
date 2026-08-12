@@ -1,0 +1,35 @@
+name: Managed Azure Release Observation (Synthetic)
+
+on:
+  repository_dispatch:
+    types: [managed-azure-observation-synthetic-v1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-azure-observation-00000000-0000-4000-8000-000000000001
+  cancel-in-progress: false
+
+jobs:
+  synthetic-observation:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Verify synthetic managed Azure observation
+        env:
+          RELEASE_SHA: ${{ github.event.client_payload.release_sha }}
+          WINDOW_MINUTES: ${{ github.event.client_payload.window_minutes }}
+        run: >-
+          node scripts/release/managed-azure-observation.mjs
+          --synthetic --dry-run
+          --deployment-id 00000000-0000-4000-8000-000000000001
+          --release-sha "$RELEASE_SHA"
+          --window-minutes "$WINDOW_MINUTES"
