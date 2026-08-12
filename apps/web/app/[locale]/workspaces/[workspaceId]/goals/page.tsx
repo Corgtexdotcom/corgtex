@@ -19,11 +19,13 @@ import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { SegmentedControl, WorkspaceEmptyState, WorkspacePageHeader } from "@/lib/components/ControlPrimitives";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
+import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import {
   addKeyResultFormAction,
   archiveGoalFormAction,
   createGoalFormAction,
+  editGoalFormAction,
   returnGoalToDraftFormAction,
   updateGoalFormAction,
 } from "./actions";
@@ -550,7 +552,13 @@ function GoalNodeInner({
                     <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "8px 10px", borderRadius: 8, fontSize: "0.88rem", fontWeight: 500 }}>
                       {t("btnEdit")}
                     </summary>
-                    <form action={updateGoalFormAction} className="action-menu-form">
+                    <WorkItemEditForm
+                      action={editGoalFormAction}
+                      expectedVersion={goal.version}
+                      currentHref={`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goal.id)}`}
+                      submitLabel={goal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}
+                      className="action-menu-form"
+                    >
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="goalId" value={goal.id} />
                       <label>
@@ -618,8 +626,7 @@ function GoalNodeInner({
                           </select>
                         </label>
                       </div>
-                      <button type="submit" className="secondary small">{goal.status === "DRAFT" ? t("btnSaveDraft") : tCommon("save")}</button>
-                    </form>
+                    </WorkItemEditForm>
                   </details>
                 )}
                 {canEditContent && (
