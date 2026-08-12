@@ -1587,7 +1587,7 @@ describe("runDailyDigest", () => {
       id: "lead-1",
       workspaceId: "workspace-1",
       email: "lead@example.com",
-      convertedContactId: "contact-1",
+      convertedContactId: null,
       welcomeEmailSentAt: null,
       workspace: { name: "Corgtex" },
     });
@@ -1618,7 +1618,7 @@ describe("runDailyDigest", () => {
     expect(recordDemoWelcomeCrmActivityMock).toHaveBeenCalledWith({
       workspaceId: "workspace-1",
       demoLeadId: "lead-1",
-      expectedContactId: "contact-1",
+      expectedContactId: null,
     });
     expect(txMock.newspaperDelivery.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -1638,7 +1638,7 @@ describe("runDailyDigest", () => {
       id: "lead-1",
       workspaceId: "workspace-1",
       email: "lead@example.com",
-      convertedContactId: "contact-1",
+      convertedContactId: null,
       welcomeEmailSentAt: new Date("2026-04-30T12:00:00.000Z"),
       workspace: { name: "Corgtex" },
     });
@@ -1652,6 +1652,6 @@ describe("runDailyDigest", () => {
     expect(sendEmailMock).not.toHaveBeenCalled();
     expect(txMock.demoLead.update).not.toHaveBeenCalled();
     expect(recordDemoWelcomeCrmActivityMock).toHaveBeenCalledWith({ workspaceId: "workspace-1",
-      demoLeadId: "lead-1", expectedContactId: "contact-1" });
+      demoLeadId: "lead-1", expectedContactId: null });
   });
 });

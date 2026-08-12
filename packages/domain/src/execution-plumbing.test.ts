@@ -1059,6 +1059,32 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
   });
 
+  it("rolls back CRM writeback when the terminal request write fails", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "IN_PROGRESS",
+      writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1",
+      allowedScopes: ["execution:read", "execution:write", "relationships:write"] }));
+    prismaMock.executionRequest.update.mockImplementationOnce(async ({ data }) => {
+      expect(data.status).toBe("COMPLETED"); throw new Error("terminal write failed");
+    });
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, { workspaceId: "workspace-1", requestId: "request-1",
+      idempotencyKey: "crm-terminal-failure", output: {} })).rejects.toThrow("terminal write failed");
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(markCommunicationSuggestionSent).toHaveBeenCalledWith(expect.anything(), expect.anything(), prismaMock);
+    expect(prismaMock.executionResult.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      status: "ACCEPTED", writebackEntityType: "CrmCommunicationSuggestion", writebackEntityId: "suggestion-1" }) }));
+    expect(prismaMock.executionResult.update).not.toHaveBeenCalled();
+  });
+
+  it("fails closed instead of returning a partial CRM idempotency result", async () => {
+    prismaMock.executionResult.findUnique.mockResolvedValueOnce({ id: "result-partial", executionRequestId: "request-1",
+      status: "SUBMITTED", targetType: "CRM_COMMUNICATION" });
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, { workspaceId: "workspace-1", requestId: "request-1",
+      idempotencyKey: "crm-partial", output: {} })).rejects.toThrow("CRM execution result is incomplete");
+    expect(markCommunicationSuggestionSent).not.toHaveBeenCalled();
+  });
+
   it("accepts failure results without write-back targets", async () => {
     prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({
       writebackTargetType: null,

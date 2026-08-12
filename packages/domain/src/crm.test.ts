@@ -1404,6 +1404,24 @@ describe("CRM domain", () => {
       expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(tx, "CrmContact", "contact-1");
       expect(upsert).not.toHaveBeenCalled();
     });
+    it("idempotently recovers a captured lead welcome activity by canonical email", async () => {
+      const { prisma } = await import("@corgtex/shared"), { recordDemoWelcomeCrmActivity } = await import("./crm");
+      const upsert = vi.fn().mockResolvedValue({ id: "activity-1" });
+      const tx = {
+        demoLead: { findFirst: vi.fn(({ select }) => select?.email
+          ? { email: "lead@example.com", convertedContactId: null } : { id: "lead-1" }) },
+        crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: null }),
+          findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: null }]),
+          findFirst: vi.fn().mockResolvedValue({ id: "contact-1", accountId: null }) },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([]) },
+        crmActivity: { findMany: vi.fn().mockResolvedValue([]), upsert },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      const params = { workspaceId: "ws-1", demoLeadId: "lead-1", expectedContactId: null };
+      await expect(recordDemoWelcomeCrmActivity(params)).resolves.toEqual({ created: true, activityId: "activity-1" });
+      await recordDemoWelcomeCrmActivity(params);
+      expect(upsert).toHaveBeenCalledTimes(2);
+    });
     it("creates a due reminder task with validated owner and source metadata", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { createActivity } = await import("./crm");

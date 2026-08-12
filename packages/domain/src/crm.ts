@@ -2071,17 +2071,22 @@ export async function recordDemoWelcomeCrmActivity(params: {
   demoLeadId: string;
   expectedContactId: string | null;
 }) {
-  if (!params.expectedContactId) return { created: false };
-  const expectedContactId = params.expectedContactId;
   return prisma.$transaction(async (tx) => {
-    const contactLinks = await tx.crmContact.findUnique({ where: { id: expectedContactId },
+    const leadIdentity = await tx.demoLead.findFirst({ where: { id: params.demoLeadId, workspaceId: params.workspaceId },
+      select: { email: true, convertedContactId: true } });
+    if (!leadIdentity) return { created: false };
+    const expectedContactId = params.expectedContactId ?? leadIdentity.convertedContactId;
+    const resolvedByEmail = !expectedContactId;
+    const contactLinks = await tx.crmContact.findUnique({ where: expectedContactId ? { id: expectedContactId }
+      : { workspaceId_email: { workspaceId: params.workspaceId, email: leadIdentity.email } },
       select: { id: true, workspaceId: true, accountId: true } });
     if (!contactLinks || contactLinks.workspaceId !== params.workspaceId) return { created: false };
     await lockCrmLinkClosure(tx, params.workspaceId, { contactId: contactLinks.id, accountId: contactLinks.accountId });
     const [lead, contact] = await Promise.all([
       tx.demoLead.findFirst({ where: { id: params.demoLeadId, workspaceId: params.workspaceId,
-        convertedContactId: expectedContactId }, select: { id: true } }),
-      tx.crmContact.findFirst({ where: { id: expectedContactId, workspaceId: params.workspaceId,
+        email: leadIdentity.email, convertedContactId: resolvedByEmail ? null : contactLinks.id }, select: { id: true } }),
+      tx.crmContact.findFirst({ where: { id: contactLinks.id, workspaceId: params.workspaceId,
+        ...(resolvedByEmail ? { email: leadIdentity.email } : {}),
         ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) }, select: { id: true, accountId: true } }),
     ]);
     if (!lead || !contact || contact.accountId !== contactLinks.accountId) return { created: false };

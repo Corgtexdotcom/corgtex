@@ -428,6 +428,12 @@ function serializeExecutionResult(result: {
   };
 }
 
+function serializeIdempotentExecutionResult(result: Parameters<typeof serializeExecutionResult>[0]) {
+  invariant(!(result.targetType === "CRM_COMMUNICATION" && result.status === "SUBMITTED"), 409, "CONFLICT",
+    "CRM execution result is incomplete and requires repair.");
+  return serializeExecutionResult(result);
+}
+
 function serializeExecutionRequest(request: NonNullable<ExecutionRequestRecord>) {
   return {
     id: request.id,
@@ -1257,7 +1263,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
   const existing = await prisma.executionResult.findUnique({
     where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
   });
-  if (existing) return serializeExecutionResult(existing);
+  if (existing) return serializeIdempotentExecutionResult(existing);
 
   invariant(["PENDING", "IN_PROGRESS"].includes(request.status), 400, "INVALID_STATE", "Execution request is not accepting new results.");
 
@@ -1289,31 +1295,38 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
   }
 
   let resultShell: Awaited<ReturnType<typeof prisma.executionResult.create>>;
-  let crmWriteback: Awaited<ReturnType<typeof createCrmCommunicationWriteback>> | null = null;
   try {
-    const shell = await prisma.$transaction(async (tx) => {
+    resultShell = await prisma.$transaction(async (tx) => {
       const atomicWriteback = targetType === "CRM_COMMUNICATION" && targetId
         ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
           requestCreatedByUserId: request.createdByUserId, transaction: tx }) : null;
+      const atomicCrm = targetType === "CRM_COMMUNICATION";
+      const finalizedAt = atomicCrm ? new Date() : null;
       const created = await tx.executionResult.create({
         data: {
           workspaceId: params.workspaceId,
           executionRequestId: request.id,
           submittedByUserId: actor.kind === "user" ? actor.user.id : null,
           agentCredentialId: actorCredentialId(actor),
-          status: "SUBMITTED",
+          status: atomicCrm ? (errorMessage ? "REJECTED" : "ACCEPTED") : "SUBMITTED",
           idempotencyKey,
           targetType,
           targetId: targetId ?? null,
           outputJson: jsonInput(params.output ?? null),
           artifactJson: jsonInput(params.artifacts ?? null),
           errorMessage,
+          writebackEntityType: atomicWriteback?.entityType ?? null,
+          writebackEntityId: atomicWriteback?.entityId ?? null,
+          acceptedAt: atomicCrm && !errorMessage ? finalizedAt : null,
+          rejectedAt: atomicCrm && errorMessage ? finalizedAt : null,
         },
       });
 
       await tx.executionRequest.update({
         where: { id: request.id },
-        data: { status: "RESULT_SUBMITTED" },
+        data: atomicCrm ? { status: errorMessage ? "FAILED" : "COMPLETED",
+          completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null }
+          : { status: "RESULT_SUBMITTED" },
       });
 
       await recordAudit(tx, actor, {
@@ -1333,22 +1346,23 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
         },
       });
 
-      return { created, atomicWriteback };
+      if (atomicCrm) await recordAudit(tx, actor, { workspaceId: params.workspaceId,
+        action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
+        meta: { resultId: created.id, targetType, targetId, status: created.status,
+          writebackEntityType: created.writebackEntityType, writebackEntityId: created.writebackEntityId } });
+      return created;
     });
-    resultShell = shell.created;
-    crmWriteback = shell.atomicWriteback;
   } catch (error) {
     if (!isPrismaUniqueError(error)) throw error;
     const duplicate = await prisma.executionResult.findUnique({
       where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
     });
     invariant(duplicate, 409, "CONFLICT", "Execution result idempotency conflict.");
-    return serializeExecutionResult(duplicate);
+    return serializeIdempotentExecutionResult(duplicate);
   }
 
-  const writeback = crmWriteback ?? (errorMessage || !targetType || targetType === "CRM_COMMUNICATION"
-      ? null
-      : await createNativeWriteback(actor, {
+  if (targetType === "CRM_COMMUNICATION") return serializeExecutionResult(resultShell);
+  const writeback = errorMessage || !targetType ? null : await createNativeWriteback(actor, {
       workspaceId: params.workspaceId,
       type: targetType,
       targetId: targetId ?? null,
@@ -1356,7 +1370,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
       requestId: request.id,
       resultId: resultShell.id,
       requestCreatedByUserId: request.createdByUserId,
-    }));
+    });
 
   const result = await prisma.$transaction(async (tx) => {
     const updated = await tx.executionResult.update({
