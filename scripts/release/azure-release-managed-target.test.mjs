@@ -4,12 +4,12 @@ import * as releaseModule from "./azure-release-managed-target.mjs";
 const SHA = "a".repeat(40);
 const WEB_DIGEST = `sha256:${"b".repeat(64)}`;
 const WORKER_DIGEST = `sha256:${"c".repeat(64)}`;
-const DEPLOYMENT_ID = "00000000-0000-4000-8000-000000000101";
+const DEPLOYMENT_ID = "aaaaaaaa-aaaa-faaa-0aaa-aaaaaaaa0101";
 const target = {
   deploymentId: DEPLOYMENT_ID, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production",
   deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure",
   group: "managed-customers", workload: "managed-customers",
-  azure: { subscriptionId: "00000000-0000-4000-8000-000000000102", resourceGroup: "rg-managed",
+  azure: { subscriptionId: "bbbbbbbb-bbbb-0bbb-fbbb-bbbbbbbb0102", resourceGroup: "rg-managed",
     acrName: "acrmanaged", acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
 };
 
@@ -86,6 +86,10 @@ describe("managed Azure release intent primitives", () => {
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(duplicate));
     const missing = input(); missing.deploymentId = "00000000-0000-4000-8000-000000000199";
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(missing));
+    for (const deploymentId of [DEPLOYMENT_ID.toUpperCase(), ` ${DEPLOYMENT_ID}`]) {
+      const candidate = input(); const row = structuredClone(target); row.deploymentId = deploymentId; candidate.deployments.push(row);
+      expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
+    }
     for (const [path, value] of [
       ["deploymentKind", "SHARED_WORKSPACE"], ["cloudProvider", "RAILWAY"], ["environment", "staging"],
       ["deploymentStatus", "SUSPENDED"], ["provisioningStatus", "inactive"], ["releaseEligible", false],
@@ -126,8 +130,13 @@ describe("managed Azure release intent primitives", () => {
     const nonEnumerable = input(); Object.defineProperty(nonEnumerable, "credential", { value: "private-credential-canary" }); cases.push(nonEnumerable);
     const sparse = input(); sparse.deployments.length = 2; cases.push(sparse);
     const cyclic = input(); cyclic.manifests.web = cyclic; cases.push(cyclic);
+    const unselectedCycle = input(); const cyclicRow = structuredClone(target); cyclicRow.deploymentId = "00000000-0000-4000-8000-000000000199";
+    cyclicRow.azure = { nested: null }; cyclicRow.azure.nested = cyclicRow.azure; unselectedCycle.deployments.push(cyclicRow); cases.push(unselectedCycle);
+    let traps = 0; const unselectedProxy = input(); const proxyRow = structuredClone(target); proxyRow.deploymentId = "00000000-0000-4000-8000-000000000199";
+    proxyRow.azure = new Proxy({}, { ownKeys() { traps += 1; throw new Error("private-credential-canary"); } }); unselectedProxy.deployments.push(proxyRow); cases.push(unselectedProxy);
     cases.push([]); cases.push({ deployments: [], gitSha: SHA, manifests: {} });
     for (const candidate of cases) expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
+    expect(traps).toBe(0);
 
     const proxy = new Proxy(input(), { ownKeys() { throw new Error("private-credential-canary"); } });
     expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(proxy));
@@ -165,5 +174,15 @@ describe("managed Azure release intent primitives", () => {
     const drifted = structuredClone(request); drifted.binding.destinationTag = "corgtex/web:latest";
     expectInvalid(() => releaseModule.compareManagedAzureDestinationDigestV1({ expectedRequest: request, observedRequest: drifted, destinationDigest: null }));
     expectInvalid(() => compare(WEB_DIGEST.toUpperCase()));
+    const workerRequest = releaseModule.canonicalizeManagedAzureImportRequestV1({ intent, role: "worker" });
+    const originalToJSON = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON"); let toJSONCalls = 0;
+    try {
+      Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value() { return "same"; } });
+      expectInvalid(() => releaseModule.compareManagedAzureDestinationDigestV1({ expectedRequest: request, observedRequest: workerRequest, destinationDigest: WEB_DIGEST }));
+      Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value() { toJSONCalls += 1; throw new Error("private-credential-canary"); } });
+      expect(compare(WEB_DIGEST).state).toBe("MATCH"); expect(toJSONCalls).toBe(0);
+    } finally {
+      if (originalToJSON) Object.defineProperty(Object.prototype, "toJSON", originalToJSON); else delete Object.prototype.toJSON;
+    }
   });
 });

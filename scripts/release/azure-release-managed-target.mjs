@@ -1,7 +1,5 @@
-import { types as nodeTypes } from "node:util";
-function invalid() {
-  throw new Error("MANAGED_AZURE_RELEASE_INPUT_INVALID");
-}
+import { isDeepStrictEqual, types as nodeTypes } from "node:util";
+function invalid() { throw new Error("MANAGED_AZURE_RELEASE_INPUT_INVALID"); }
 function objectValue(value) {
   try {
     if (nodeTypes.isProxy(value) || value === null || typeof value !== "object" || Array.isArray(value)) invalid();
@@ -40,11 +38,25 @@ function exactArray(value) {
     invalid();
   }
 }
+function safeTopology(value, ancestors = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))) return;
+  const object = objectValue(value);
+  if (ancestors.has(object)) invalid();
+  ancestors.add(object);
+  const descriptors = Object.getOwnPropertyDescriptors(object);
+  for (const key of Reflect.ownKeys(object)) {
+    const descriptor = descriptors[key];
+    if (typeof key !== "string" || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) invalid();
+    safeTopology(descriptor.value, ancestors);
+  }
+  ancestors.delete(object);
+}
 function text(value, expression, maxLength) {
   if (typeof value !== "string" || value.length > maxLength || !expression.test(value)) invalid();
   return value;
 }
-function uuid(value) { return text(value, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 36); }
+function uuid(value) { return text(value, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/, 36); }
 function sha(value) { return text(value, /^[0-9a-f]{40}$/, 40); }
 function digest(value) { return text(value, /^sha256:[0-9a-f]{64}$/, 71); }
 function deepFreeze(value) {
@@ -72,10 +84,13 @@ function targetProjection(value) {
   return target;
 }
 function deployment(value) {
-  return exactRecord(value, [
+  const row = exactRecord(value, [
     "deploymentId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
     "provisioningStatus", "releaseEligible", "provider", "group", "workload", "azure",
   ]);
+  uuid(row.deploymentId);
+  safeTopology(row.azure);
+  return row;
 }
 function targetFromDeployment(row, deploymentId) {
   if (uuid(row.deploymentId) !== deploymentId || row.deploymentKind !== "REMOTE_MANAGED"
@@ -165,7 +180,7 @@ export function compareManagedAzureDestinationDigestV1(input) {
   const raw = exactRecord(input, ["expectedRequest", "observedRequest", "destinationDigest"]);
   const request = canonicalizeManagedAzureImportRequestValueV1(raw.expectedRequest);
   const observed = canonicalizeManagedAzureImportRequestValueV1(raw.observedRequest);
-  if (JSON.stringify(request) !== JSON.stringify(observed)) invalid();
+  if (!isDeepStrictEqual(request, observed)) invalid();
   const destinationDigest = raw.destinationDigest === null ? null : digest(raw.destinationDigest);
   const state = destinationDigest === null ? "ABSENT" : destinationDigest === request.binding.sourceDigest ? "MATCH" : "CONFLICT";
   return deepFreeze({ schemaVersion: 1, request, state, destinationDigest,
