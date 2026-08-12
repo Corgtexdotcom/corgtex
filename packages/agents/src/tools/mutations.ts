@@ -58,11 +58,12 @@ export const updateTensionTool: ModelTool = {
   type: "function",
   function: {
     name: "update_tension",
-    description: "Update an existing tension (e.g. resolve it with a note, change assignee, or update body).",
+    description: "Update an existing tension (e.g. resolve it with a note, change assignee, or update body). You MUST take expectedVersion from the preceding query result and never invent/reuse it.",
     parameters: {
       type: "object",
       properties: {
         tensionId: { type: "string", description: "The UUID of the tension to update" },
+        expectedVersion: { type: "integer", minimum: 1, description: "Pass the exact version from the preceding query result. Never invent or reuse this value." },
         status: { type: "string", description: "DRAFT, OPEN, or RESOLVED" },
         resolvedVia: { type: "string", description: "Required when setting status to RESOLVED" },
         title: { type: "string" },
@@ -70,7 +71,7 @@ export const updateTensionTool: ModelTool = {
         assigneeMemberId: { type: "string", description: "Set or clear the assigned member UUID" },
         raisedByMemberId: { type: "string", description: "Set or clear the member who raised this tension" },
       },
-      required: ["tensionId"],
+      required: ["tensionId", "expectedVersion"],
     },
   },
 };
@@ -99,18 +100,19 @@ export const updateActionTool: ModelTool = {
   type: "function",
   function: {
     name: "update_action",
-    description: "Update an existing action. When setting status to COMPLETED, include completedVia with a note explaining how it was completed.",
+    description: "Update an existing action. When setting status to COMPLETED, include completedVia with a note explaining how it was completed. You MUST take expectedVersion from the preceding query result and never invent/reuse it.",
     parameters: {
       type: "object",
       properties: {
         actionId: { type: "string" },
+        expectedVersion: { type: "integer", minimum: 1, description: "Pass the exact version from the preceding query result. Never invent or reuse this value." },
         status: { type: "string", description: "DRAFT, OPEN, IN_PROGRESS, or COMPLETED" },
         completedVia: { type: "string", description: "Required when setting status to COMPLETED" },
         title: { type: "string" },
         bodyMd: { type: "string" },
         assigneeMemberId: { type: "string" },
       },
-      required: ["actionId"],
+      required: ["actionId", "expectedVersion"],
     },
   },
 };
@@ -245,33 +247,49 @@ export async function createTensionAction(actor: AppActor, ctx: any, args: any) 
   } catch (error) {
     return duplicateGuardToolResponse(error);
   }
-  
+
   await appendAuditMeta("Tension", result.id, "tension.created", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
   }, writeStartedAt);
-  
+
   return { success: true, tensionId: result.id };
 }
 
 export async function updateTensionAction(actor: AppActor, ctx: any, args: any) {
-  const result = await updateTension(actor, {
-    workspaceId: ctx.workspaceId,
-    tensionId: args.tensionId,
-    status: args.status as TensionStatus,
-    title: args.title,
-    bodyMd: args.bodyMd,
-    assigneeMemberId: args.assigneeMemberId,
-    raisedByMemberId: args.raisedByMemberId,
-    resolvedVia: args.resolvedVia,
-  });
+  if (typeof args.expectedVersion !== "number" || !Number.isInteger(args.expectedVersion) || args.expectedVersion < 1) {
+    return { success: false, status: "INVALID_ARGUMENT", instruction: "expectedVersion must be a positive integer" };
+  }
+
+  let result;
+  try {
+    result = await updateTension(actor, {
+      workspaceId: ctx.workspaceId,
+      tensionId: args.tensionId,
+      expectedVersion: args.expectedVersion,
+      status: args.status as TensionStatus,
+      title: args.title,
+      bodyMd: args.bodyMd,
+      assigneeMemberId: args.assigneeMemberId,
+      raisedByMemberId: args.raisedByMemberId,
+      resolvedVia: args.resolvedVia,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      return {
+        status: "VERSION_CONFLICT",
+        instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
+      };
+    }
+    throw error;
+  }
 
   await appendAuditMeta("Tension", result.id, "tension.updated", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
   });
-  
-  return { success: true, tensionId: result.id };
+
+  return { success: true, tensionId: result.id, version: result.version };
 }
 
 export async function createActionItemAction(actor: AppActor, ctx: any, args: any) {
@@ -300,22 +318,38 @@ export async function createActionItemAction(actor: AppActor, ctx: any, args: an
 }
 
 export async function updateActionItemAction(actor: AppActor, ctx: any, args: any) {
-  const result = await updateAction(actor, {
-    workspaceId: ctx.workspaceId,
-    actionId: args.actionId,
-    status: args.status as ActionStatus,
-    title: args.title,
-    bodyMd: args.bodyMd,
-    assigneeMemberId: args.assigneeMemberId,
-    completedVia: args.completedVia,
-  });
+  if (typeof args.expectedVersion !== "number" || !Number.isInteger(args.expectedVersion) || args.expectedVersion < 1) {
+    return { success: false, status: "INVALID_ARGUMENT", instruction: "expectedVersion must be a positive integer" };
+  }
+
+  let result;
+  try {
+    result = await updateAction(actor, {
+      workspaceId: ctx.workspaceId,
+      actionId: args.actionId,
+      expectedVersion: args.expectedVersion,
+      status: args.status as ActionStatus,
+      title: args.title,
+      bodyMd: args.bodyMd,
+      assigneeMemberId: args.assigneeMemberId,
+      completedVia: args.completedVia,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      return {
+        status: "VERSION_CONFLICT",
+        instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
+      };
+    }
+    throw error;
+  }
 
   await appendAuditMeta("Action", result.id, "action.updated", {
     conversationSessionId: ctx.sessionId,
     toolCallInput: args,
   });
 
-  return { success: true, actionId: result.id };
+  return { success: true, actionId: result.id, version: result.version };
 }
 
 export async function createProposalAction(actor: AppActor, ctx: any, args: any) {

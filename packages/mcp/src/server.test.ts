@@ -3359,4 +3359,83 @@ describe("createCorgtexMcpServer", () => {
       openWorldHint: true,
     });
   });
+
+  describe("MCP update tools version requirements", () => {
+    const updateCases = [
+      { name: "update_proposal", toolId: "update_proposal", args: { proposalId: "p-1", expectedVersion: 2, title: "Title" }, domainFn: updateProposalMock, expectedArg: { proposalId: "p-1", expectedVersion: 2, title: "Title" } },
+      { name: "update_action", toolId: "update_action", args: { actionId: "a-1", expectedVersion: 2, title: "Title" }, domainFn: updateActionMock, expectedArg: { actionId: "a-1", expectedVersion: 2, title: "Title" } },
+      { name: "update_tension", toolId: "update_tension", args: { tensionId: "t-1", expectedVersion: 2, title: "Title" }, domainFn: updateTensionMock, expectedArg: { tensionId: "t-1", expectedVersion: 2, title: "Title" } },
+      { name: "update_goal", toolId: "update_goal", args: { goalId: "g-1", expectedVersion: 2, title: "Title" }, domainFn: updateGoalMock, expectedArg: { goalId: "g-1", expectedVersion: 2, title: "Title" } },
+    ];
+
+    for (const testCase of updateCases) {
+      it(`[${testCase.name}] propagates expectedVersion, success version, and returns safe conflict without retry on VERSION_CONFLICT`, async () => {
+        const { createCorgtexMcpServer } = await import("./server");
+        const server = createCorgtexMcpServer({
+          actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } } as any,
+          workspaceId: "ws-1",
+          authKind: "oauth",
+          scopes: ["proposals:write", "actions:write", "tensions:write", "goals:write"],
+        } as any);
+
+        const toolDef = (server as any)._registeredTools[testCase.toolId];
+        const shape = toolDef.inputSchema.shape.expectedVersion;
+        expect(shape).toBeDefined();
+        expect(toolDef.description.toLowerCase()).toContain("read");
+
+        testCase.domainFn.mockClear();
+        testCase.domainFn.mockResolvedValueOnce({ id: "id-1", version: 3 });
+
+        const response = await toolDef.handler(testCase.args);
+        expect(testCase.domainFn).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining(testCase.expectedArg)
+        );
+        expect(JSON.parse(response.content[0].text)).toMatchObject({ version: 3 });
+
+        const { AppError } = await import("@corgtex/domain");
+        testCase.domainFn.mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "Conflict"));
+
+        const conflictResponse = await toolDef.handler(testCase.args);
+        const conflictPayload = JSON.parse(conflictResponse.content[0].text);
+        expect(conflictPayload).toEqual({
+          status: "VERSION_CONFLICT",
+          instruction: expect.stringContaining("Read the latest version and apply your changes again."),
+        });
+
+        expect(testCase.domainFn).toHaveBeenCalledTimes(2);
+      });
+
+      it(`[${testCase.name}] rejects missing or invalid expectedVersion schema`, async () => {
+        const { createCorgtexMcpServer } = await import("./server");
+        const server = createCorgtexMcpServer({
+          actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } } as any,
+          workspaceId: "ws-1",
+          authKind: "oauth",
+          scopes: ["proposals:write", "actions:write", "tensions:write", "goals:write"],
+        } as any);
+        const toolDef = (server as any)._registeredTools[testCase.toolId];
+        const schema = toolDef.inputSchema;
+
+        expect(schema.safeParse({ ...testCase.args, expectedVersion: undefined }).success).toBe(false);
+        expect(schema.safeParse({ ...testCase.args, expectedVersion: 0 }).success).toBe(false);
+        expect(schema.safeParse({ ...testCase.args, expectedVersion: -1 }).success).toBe(false);
+        expect(schema.safeParse({ ...testCase.args, expectedVersion: 1.5 }).success).toBe(false);
+      });
+    }
+
+    it("leaves complete_action unchanged without expectedVersion requirements", async () => {
+      const { createCorgtexMcpServer } = await import("./server");
+      const server = createCorgtexMcpServer({
+        actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } } as any,
+        workspaceId: "ws-1",
+        authKind: "oauth",
+        scopes: ["actions:write"],
+      } as any);
+
+      const completeTool = (server as any)._registeredTools["complete_action"];
+      expect(completeTool).toBeDefined();
+      expect(completeTool.inputSchema.shape?.expectedVersion).toBeUndefined();
+    });
+  });
 });

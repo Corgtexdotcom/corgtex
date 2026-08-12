@@ -20,7 +20,7 @@ export const queryTensionsTool: ModelTool = {
   type: "function",
   function: {
     name: "query_tensions",
-    description: "List tensions in the workspace. Returns up to 20 tensions with their title, status, assignee, and a body preview.",
+    description: "List tensions in the workspace. Returns up to 20 tensions with their title, status, assignee, body preview, and version. The version must be passed to update_tension to prevent conflicting edits.",
     parameters: {
       type: "object",
       properties: {
@@ -35,7 +35,7 @@ export const queryActionsTool: ModelTool = {
   type: "function",
   function: {
     name: "query_actions",
-    description: "List action items in the workspace. Returns up to 20 actions with title, status, assignee, and due date.",
+    description: "List action items in the workspace. Returns up to 20 actions with title, status, assignee, due date, and version. The version must be passed to update_action to prevent conflicting edits.",
     parameters: {
       type: "object",
       properties: {
@@ -119,6 +119,7 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
 
   return tensions.map(t => ({
     id: t.id,
+    version: t.version,
     title: t.title,
     status: t.status,
     priority: t.priority,
@@ -144,6 +145,7 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
 
   return actions.map(a => ({
     id: a.id,
+    version: a.version,
     title: a.title,
     status: a.status,
     author: a.author.displayName,
