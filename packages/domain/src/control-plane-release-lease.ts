@@ -11,7 +11,7 @@ const MAX_INT = 2_147_483_647;
 const TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PHASES = ["RESERVED", "MUTATING", "RECOVERY_REQUIRED"] as const;
 const ROLLBACK_ENVELOPE_KEYS = new Set(["version", "deploymentId", "leaseId", "fence", "expectedImageTag", "incomingImageTag", "incomingVersion", "payload"]);
-type LockedDeployment = CustomerDeployment & { databaseNow: Date };
+type LockedDeployment = CustomerDeployment & { databaseNow: Date; rollbackRecordPresent: boolean };
 type LeaseHandle = { deploymentId: string; leaseId: string; capability: string; fence: number };
 function reject(code: string, status = 409): never {
   throw new AppError(status, code, "Managed release lease request was rejected.");
@@ -48,7 +48,7 @@ function storedRollbackPayload(row: CustomerDeployment) {
   return payload;
 }
 async function lock(tx: Prisma.TransactionClient, deploymentId: string) {
-  const [row] = await tx.$queryRaw<CustomerDeployment[]>`SELECT * FROM "CustomerDeployment" WHERE "id" = ${deploymentId} FOR UPDATE`;
+  const [row] = await tx.$queryRaw<LockedDeployment[]>`SELECT *, ("releaseLeaseRollbackRecord" IS NOT NULL) AS "rollbackRecordPresent" FROM "CustomerDeployment" WHERE "id" = ${deploymentId} FOR UPDATE`;
   if (!row) reject("MANAGED_RELEASE_DEPLOYMENT_NOT_FOUND", 404);
   const [clock] = await tx.$queryRaw<Array<{ databaseNow: Date }>>`SELECT clock_timestamp() AS "databaseNow"`;
   return { ...row, ...clock };
@@ -147,7 +147,7 @@ export async function recordManagedReleaseRollbackRecord(handle: LeaseHandle, pa
     if (!rollbackTargetMatches(row, canonicalPayload)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const envelope = { version: 1, deploymentId: row.id, leaseId: row.releaseLeaseId!, fence: row.releaseLeaseFence,
       expectedImageTag: row.releaseLeaseExpectedImageTag!, incomingImageTag: row.releaseLeaseIncomingImageTag!, incomingVersion: row.releaseLeaseIncomingVersion!, payload: canonicalPayload };
-    if (row.releaseLeaseRollbackRecord) {
+    if (row.rollbackRecordPresent) {
       if (!isDeepStrictEqual(storedRollbackPayload(row), canonicalPayload)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
       return { ...view(row), rollbackRecorded: true };
     }
@@ -164,7 +164,7 @@ export async function beginManagedReleaseMutation(handle: LeaseHandle) {
     if (row.releaseLeasePhase === "MUTATING") { storedRollbackPayload(row); return view(row); }
     if (row.releaseLeasePhase !== "RESERVED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     if (row.releaseImageTag !== row.releaseLeaseExpectedImageTag) reject("MANAGED_RELEASE_BASELINE_CONFLICT");
-    if (!row.releaseLeaseRollbackRecord) reject("MANAGED_RELEASE_ROLLBACK_RECORD_REQUIRED");
+    if (!row.rollbackRecordPresent) reject("MANAGED_RELEASE_ROLLBACK_RECORD_REQUIRED");
     storedRollbackPayload(row);
     const expiresAt = new Date(row.databaseNow.getTime() + TTL_MS);
     const updated = await tx.customerDeployment.update({ where: { id: row.id }, data: { releaseLeasePhase: "MUTATING", releaseLeaseHeartbeatAt: row.databaseNow, releaseLeaseExpiresAt: expiresAt } }) as LockedDeployment;

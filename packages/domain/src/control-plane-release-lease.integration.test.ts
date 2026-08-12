@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { PrismaClient, type Prisma } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
@@ -138,6 +138,11 @@ describe("managed release lease CAS", () => {
     const corrupt = await deployment(); const corruptHandle = await acquire(corrupt.id); await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } });
     await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    for (const malformed of [false, 0, "", Prisma.JsonNull]) {
+      await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: malformed } });
+      await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+      await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    }
   });
   it("permits safe expired-reservation abort and clears the slot without resetting its fence or baseline", async () => {
     const target = await deployment();
