@@ -429,7 +429,7 @@ async function syncCrmAccountLinksForContact(tx: any, params: {
   activityIds?: string[];
   locksHeld?: boolean;
 }) {
-  const activityIds = params.activityIds ?? await tx.crmActivity.findMany({
+  const activityIds: string[] = params.activityIds ?? await tx.crmActivity.findMany({
     where: { workspaceId: params.workspaceId, contactId: params.contactId, accountId: null, archivedAt: null },
     select: { id: true }, orderBy: { id: "asc" },
   }).then((rows: Array<{ id: string }>) => rows.map(({ id }) => id));

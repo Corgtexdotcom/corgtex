@@ -1225,9 +1225,10 @@ describe("CRM domain", () => {
       await crm.listContacts(dummyActor, "ws-1", { archiveFilter: "archived" });
       const recoveryCounts = (vi.mocked(prisma.crmContact.findMany).mock.calls[1]![0] as any).include._count.select;
       for (const relation of ["deals", "activities"]) expect(recoveryCounts[relation].where).toEqual({ archivedAt: null });
-      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[0]![0]!.where).toMatchObject({ archivedAt: null,
+      const activityWhere = vi.mocked(prisma.crmActivity.findMany).mock.calls[0]![0]!.where!;
+      expect(activityWhere).toMatchObject({ archivedAt: null,
         AND: expect.arrayContaining([{ OR: [{ accountId: null }, { account: { archivedAt: null } }] }]) });
-      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[0]![0]!.where.AND).toEqual(expect.arrayContaining([
+      expect(activityWhere.AND).toEqual(expect.arrayContaining([
         { OR: [{ dealId: null }, { deal: { archivedAt: null, contact: { archivedAt: null },
           OR: [{ accountId: null }, { account: { archivedAt: null } }] } }] },
       ]));
