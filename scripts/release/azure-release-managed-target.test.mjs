@@ -148,6 +148,8 @@ describe("managed Azure release intent primitives", () => {
     Object.defineProperty(Object.prototype, "credential", { configurable: true, enumerable: true, value: "private-credential-canary" });
     let pollutedError; try { releaseModule.canonicalizeManagedAzureReleaseIntentV1(input()); } catch (error) { pollutedError = error; } finally { delete Object.prototype.credential; }
     expect(pollutedError?.message).toBe("MANAGED_AZURE_RELEASE_INPUT_INVALID");
+    Object.defineProperty(Array.prototype, "credential", { configurable: true, enumerable: true, value: "private-credential-canary" });
+    try { expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(input())); } finally { delete Array.prototype.credential; }
   });
   test("request value canonicalizer rejects every mutation and builder input", () => {
     const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(input());

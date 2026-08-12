@@ -28,6 +28,8 @@ function exactRecord(value, keys) {
 function exactArray(value) {
   try {
     if (nodeTypes.isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > 1_024) invalid();
+    const inherited = Object.getOwnPropertyDescriptors(Array.prototype);
+    if (Reflect.ownKeys(inherited).some((key) => inherited[key].enumerable)) invalid();
     const names = Reflect.ownKeys(value);
     const descriptors = Object.getOwnPropertyDescriptors(value);
     if (names.length !== value.length + 1 || names[value.length] !== "length") invalid();
