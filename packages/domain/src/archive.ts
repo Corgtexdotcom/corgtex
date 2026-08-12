@@ -125,6 +125,9 @@ async function requireActiveCrmRestoreParents(tx: Prisma.TransactionClient, reco
     await lockWorkspaceArchiveArtifact(tx, entityType, parentId);
     const parent = await (tx[delegateName] as any).findFirst({ where: {
       id: parentId, workspaceId: record.workspaceId, archivedAt: null,
+      ...(entityType === "CrmDeal" ? {
+        contact: { archivedAt: null }, OR: [{ accountId: null }, { account: { archivedAt: null } }],
+      } : {}),
     }, select: { id: true } });
     invariant(parent, 409, "ARCHIVED_PARENT", `Restore the linked ${entityType} before restoring this record.`);
   }

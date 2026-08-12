@@ -246,13 +246,15 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
   relationshipType?: string | null;
   lifecycleStage?: string | null;
   tags?: string[];
-}) {
+}, lockedAccountIds: readonly string[] = []) {
   const candidate = crmAccountCandidate(params);
   if (!candidate) return null;
   const tags = normalizeCrmTags(params.tags);
 
-  const existing = await findExistingCrmAccount(tx, workspaceId, candidate);
+  let existing = await findExistingCrmAccount(tx, workspaceId, candidate);
   if (existing) {
+    if (!lockedAccountIds.includes(existing.id)) await lockCrmLinks(tx, { accountId: existing.id });
+    existing = await requireCrmAccount(tx, workspaceId, existing.id);
     const mergedTags = mergeCrmTags(existing.tags, tags);
     const data: Record<string, unknown> = {};
     if (!existing.domain && candidate.domain) {
@@ -270,8 +272,11 @@ async function ensureCrmAccount(tx: any, workspaceId: string, params: {
     return existing;
   }
 
+  const id = randomUUID();
+  await lockCrmLinks(tx, { accountId: id });
   return tx.crmAccount.create({
     data: {
+      id,
       workspaceId,
       ...candidate,
       tags,
@@ -400,13 +405,35 @@ async function recordDealStageTransition(tx: any, params: {
   });
 }
 
-async function syncCrmAccountLinksForContact(tx: any, params: { workspaceId: string; contactId: string; email?: string | null; accountId: string }) {
+async function prepareCrmAccountLinkSync(tx: any, params: {
+  workspaceId: string;
+  contacts: Array<{ id: string; accountId?: string | null }>;
+  accountIds?: Array<string | null | undefined>;
+}) {
   const activityIds = await tx.crmActivity.findMany({
-    where: { workspaceId: params.workspaceId, contactId: params.contactId, accountId: null, archivedAt: null },
+    where: { workspaceId: params.workspaceId, contactId: { in: params.contacts.map(({ id }) => id) }, accountId: null, archivedAt: null },
     select: { id: true },
     orderBy: { id: "asc" },
   });
   await lockCrmLinks(tx, ...activityIds.map((activity: { id: string }) => ({ activityId: activity.id })),
+    ...params.contacts.map(({ id, accountId }) => ({ contactId: id, accountId })),
+    ...(params.accountIds ?? []).map((accountId) => ({ accountId })));
+  return activityIds.map((activity: { id: string }) => activity.id);
+}
+
+async function syncCrmAccountLinksForContact(tx: any, params: {
+  workspaceId: string;
+  contactId: string;
+  email?: string | null;
+  accountId: string;
+  activityIds?: string[];
+  locksHeld?: boolean;
+}) {
+  const activityIds = params.activityIds ?? await tx.crmActivity.findMany({
+    where: { workspaceId: params.workspaceId, contactId: params.contactId, accountId: null, archivedAt: null },
+    select: { id: true }, orderBy: { id: "asc" },
+  }).then((rows: Array<{ id: string }>) => rows.map(({ id }) => id));
+  if (!params.locksHeld) await lockCrmLinks(tx, ...activityIds.map((activityId) => ({ activityId })),
     { contactId: params.contactId, accountId: params.accountId });
   const contact = await tx.crmContact.findFirst({ where: { id: params.contactId, workspaceId: params.workspaceId,
     archivedAt: null, accountId: params.accountId, account: { archivedAt: null } }, select: { id: true } });
@@ -419,7 +446,7 @@ async function syncCrmAccountLinksForContact(tx: any, params: { workspaceId: str
     }),
     tx.crmActivity.updateMany({
       where: {
-        id: { in: activityIds.map((activity: { id: string }) => activity.id) },
+        id: { in: activityIds },
         workspaceId: params.workspaceId,
         contactId: params.contactId,
         accountId: null,
@@ -502,31 +529,34 @@ export async function captureDemoLead(params: {
       },
     });
 
+    const contactLinks = await tx.crmContact.findUnique({ where: { workspaceId_email: { workspaceId: workspace.id, email } } });
+    const candidate = crmAccountCandidate({ email, source });
+    const matchedAccount = candidate ? await findExistingCrmAccount(tx, workspace.id, candidate) : null;
+    if (contactLinks || matchedAccount) await lockCrmLinks(tx,
+      { contactId: contactLinks?.id, accountId: contactLinks?.accountId }, { accountId: matchedAccount?.id });
+    const existingContact = contactLinks ? await tx.crmContact.findFirst({ where: {
+      id: contactLinks.id, workspaceId: workspace.id, ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]),
+    } }) : null;
+    invariant(!contactLinks || existingContact, 409, "ARCHIVED_PARENT", "Restore the matching contact and account before capturing this lead.");
+
     const account = await ensureCrmAccount(tx, workspace.id, {
       email,
       source,
-    });
+    }, [contactLinks?.accountId, matchedAccount?.id].filter((id): id is string => Boolean(id)));
 
-    const contact = await tx.crmContact.upsert({
-      where: {
-        workspaceId_email: {
-          workspaceId: workspace.id,
-          email,
-        },
-      },
-      update: {
+    const contact = existingContact
+      ? await tx.crmContact.update({ where: { id: existingContact.id }, data: {
         lastSeenAt: new Date(),
         ...(account ? { accountId: account.id } : {}),
-      },
-      create: {
+      } })
+      : await tx.crmContact.create({ data: {
         workspaceId: workspace.id,
         accountId: account?.id ?? null,
         email,
         name,
         company: domainPart,
         source,
-      },
-    });
+      } });
 
     if (!demoLead.welcomeEmailSentAt) {
       await appendEvents(tx, [
@@ -771,9 +801,16 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
         },
       },
     });
+    const candidate = crmAccountCandidate({ email, company: params.company, website: params.website, source,
+      relationshipType: persona === "PARTNER" ? "PARTNER" : persona === "INVESTOR" ? "INVESTOR" : "PROSPECT",
+      lifecycleStage: "DISCOVERY" });
+    const matchedAccount = candidate ? await findExistingCrmAccount(tx, workspace.id, candidate) : null;
     invariant(!existingContact?.archivedAt, 409, "ARCHIVED_PARENT", "Restore the matching contact before capturing this inquiry.");
+    if (existingContact || matchedAccount) {
+      await lockCrmLinks(tx, { contactId: existingContact?.id, accountId: existingContact?.accountId },
+        { accountId: matchedAccount?.id });
+    }
     if (existingContact) {
-      await lockCrmLinks(tx, { contactId: existingContact.id, accountId: existingContact.accountId });
       existingContact = await tx.crmContact.findFirst({ where: { id: existingContact.id, workspaceId: workspace.id,
         ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } });
       invariant(existingContact, 409, "ARCHIVED_PARENT", "Restore the matching contact and account before capturing this inquiry.");
@@ -787,7 +824,7 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
       relationshipType: persona === "PARTNER" ? "PARTNER" : persona === "INVESTOR" ? "INVESTOR" : "PROSPECT",
       lifecycleStage: "DISCOVERY",
       tags,
-    });
+    }, matchedAccount ? [matchedAccount.id] : []);
 
     const contactBaseData = {
       accountId: account?.id ?? existingContact?.accountId ?? null,
@@ -1287,79 +1324,58 @@ export async function backfillCrmAccountsForWorkspace(actor: AppActor, params: {
 
   const take = params.take ?? 1000;
 
-  return prisma.$transaction(async (tx) => {
-    const contacts = await tx.crmContact.findMany({
-      where: {
-        workspaceId: params.workspaceId,
-        archivedAt: null,
-        accountId: null,
-      },
-      orderBy: { createdAt: "asc" },
-      take,
-      select: {
-        id: true,
-        email: true,
-        company: true,
-        source: true,
-      },
-    });
+  const contacts = await prisma.crmContact.findMany({ where: { workspaceId: params.workspaceId, archivedAt: null, accountId: null },
+    orderBy: { createdAt: "asc" }, take, select: { id: true, email: true, company: true, source: true } });
+  const summary = { scanned: contacts.length, accountsCreated: 0, contactsLinked: 0, dealsLinked: 0,
+    activitiesLinked: 0, conversationsLinked: 0, prospectWorkspacesLinked: 0, skipped: 0 };
 
-    const summary = {
-      scanned: contacts.length,
-      accountsCreated: 0,
-      contactsLinked: 0,
-      dealsLinked: 0,
-      activitiesLinked: 0,
-      conversationsLinked: 0,
-      prospectWorkspacesLinked: 0,
-      skipped: 0,
-    };
-
-    for (const contact of contacts) {
+  for (const contact of contacts) {
+    const result = await prisma.$transaction(async (tx) => {
       const candidate = crmAccountCandidate({
         email: contact.email,
         company: contact.company,
         source: contact.source,
       });
-      if (!candidate) {
-        summary.skipped += 1;
-        continue;
-      }
+      if (!candidate) return null;
 
       const beforeAccount = await findExistingCrmAccount(tx, params.workspaceId, candidate);
+      const activityIds = await prepareCrmAccountLinkSync(tx, {
+        workspaceId: params.workspaceId, contacts: [{ id: contact.id }], accountIds: [beforeAccount?.id],
+      });
+      const activeContact = await tx.crmContact.findFirst({ where: {
+        id: contact.id, workspaceId: params.workspaceId, archivedAt: null, accountId: null,
+      } });
+      if (!activeContact) return null;
       const account = await ensureCrmAccount(tx, params.workspaceId, {
         email: contact.email,
         company: contact.company,
         source: contact.source,
-      });
-      if (!account) {
-        summary.skipped += 1;
-        continue;
-      }
-      if (!beforeAccount) {
-        summary.accountsCreated += 1;
-      }
+      }, beforeAccount ? [beforeAccount.id] : []);
+      if (!account) return null;
 
       await tx.crmContact.update({
         where: { id: contact.id },
         data: { accountId: account.id },
       });
-      summary.contactsLinked += 1;
-
       const linked = await syncCrmAccountLinksForContact(tx, {
         workspaceId: params.workspaceId,
         contactId: contact.id,
         email: contact.email,
         accountId: account.id,
+        activityIds,
+        locksHeld: true,
       });
-      summary.dealsLinked += linked.deals;
-      summary.activitiesLinked += linked.activities;
-      summary.conversationsLinked += linked.conversations;
-      summary.prospectWorkspacesLinked += linked.prospectWorkspaces;
-    }
-
-    return summary;
-  });
+      return { linked, created: !beforeAccount };
+    });
+    if (!result) { summary.skipped += 1; continue; }
+    summary.accountsCreated += Number(result.created);
+    summary.contactsLinked += 1;
+    summary.dealsLinked += result.linked.deals;
+    summary.activitiesLinked += result.linked.activities;
+    summary.conversationsLinked += result.linked.conversations;
+    summary.prospectWorkspacesLinked += result.linked.prospectWorkspaces;
+  }
+  return summary;
 }
 
 // --- CONTACTS ---
@@ -1462,6 +1478,7 @@ export async function createContact(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     let account = null;
     if (params.accountId !== undefined) {
+      if (params.accountId) await lockCrmLinks(tx, { accountId: params.accountId });
       account = params.accountId ? await requireCrmAccount(tx, params.workspaceId, params.accountId) : null;
     } else {
       account = await ensureCrmAccount(tx, params.workspaceId, {
@@ -1526,7 +1543,7 @@ export async function updateContact(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
-    const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
+    let contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
     invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
 
     const data: any = {};
@@ -1540,6 +1557,14 @@ export async function updateContact(actor: AppActor, params: {
     if (params.title !== undefined) data.title = params.title?.trim() || null;
     if (params.phone !== undefined) data.phone = params.phone?.trim() || null;
     if (params.tags !== undefined) data.tags = params.tags;
+    const replacementAccountId = params.accountId !== undefined ? params.accountId : contact.accountId;
+    const activityIds = await prepareCrmAccountLinkSync(tx, {
+      workspaceId: params.workspaceId, contacts: [contact], accountIds: [replacementAccountId],
+    });
+    contact = await tx.crmContact.findFirst({ where: {
+      id: params.contactId, workspaceId: params.workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]),
+    } });
+    invariant(contact, 404, "NOT_FOUND", "Contact not found.");
     if (params.accountId !== undefined) {
       data.accountId = params.accountId ? (await requireCrmAccount(tx, params.workspaceId, params.accountId)).id : null;
     }
@@ -1555,6 +1580,8 @@ export async function updateContact(actor: AppActor, params: {
         contactId: updated.id,
         email: updated.email,
         accountId: updated.accountId,
+        activityIds,
+        locksHeld: true,
       });
     }
 
@@ -2639,23 +2666,27 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
       },
     });
 
-    const account = await ensureCrmAccount(tx, params.workspaceId, {
-      email: qual.demoLead.email,
-      company: qual.companyName,
-      website: qual.website,
-      source: "qualification",
+    const accountParams = { email: qual.demoLead.email, company: qual.companyName,
+      website: qual.website, source: "qualification" };
+    const candidate = crmAccountCandidate(accountParams);
+    const beforeAccount = candidate ? await findExistingCrmAccount(tx, params.workspaceId, candidate) : null;
+    const contacts = qual.companyName || candidate ? await tx.crmContact.findMany({
+        where: { workspaceId: params.workspaceId, email: qual.demoLead.email,
+          ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
+        select: { id: true, email: true, accountId: true },
+      }) : [];
+    const activityIds = await prepareCrmAccountLinkSync(tx, {
+      workspaceId: params.workspaceId, contacts, accountIds: [beforeAccount?.id],
     });
+    const account = await ensureCrmAccount(tx, params.workspaceId, accountParams, beforeAccount ? [beforeAccount.id] : []);
 
     if (qual.companyName || account) {
-      const contacts = await tx.crmContact.findMany({
-        where: { workspaceId: params.workspaceId, email: qual.demoLead.email, archivedAt: null },
-        select: { id: true, email: true },
-      });
       const contactData: any = {};
       if (qual.companyName) contactData.company = qual.companyName;
       if (account) contactData.accountId = account.id;
       await tx.crmContact.updateMany({
-        where: { workspaceId: params.workspaceId, email: qual.demoLead.email, archivedAt: null },
+        where: { workspaceId: params.workspaceId, email: qual.demoLead.email,
+          ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
         data: contactData,
       });
 
@@ -2668,12 +2699,10 @@ export async function approveQualification(actor: AppActor, params: { workspaceI
           where: { crmWorkspaceId: params.workspaceId, demoLeadId: qual.demoLead.id, accountId: null },
           data: { accountId: account.id },
         });
-        await Promise.all(contacts.map((contact) => syncCrmAccountLinksForContact(tx, {
-          workspaceId: params.workspaceId,
-          contactId: contact.id,
-          email: contact.email,
-          accountId: account.id,
-        })));
+        for (const contact of contacts) await syncCrmAccountLinksForContact(tx, {
+          workspaceId: params.workspaceId, contactId: contact.id, email: contact.email, accountId: account.id,
+          activityIds, locksHeld: true,
+        });
       }
     }
 
@@ -2911,19 +2940,24 @@ export async function provisionProspectWorkspace(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.crmWorkspaceId });
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only human users can provision prospect workspaces.");
 
-  const lead = await prisma.demoLead.findUnique({ where: { id: params.demoLeadId } });
-  invariant(lead && lead.workspaceId === params.crmWorkspaceId, 404, "NOT_FOUND", "Demo lead not found");
-  const contact = await prisma.crmContact.findFirst({
-    where: { workspaceId: params.crmWorkspaceId, email: lead.email, ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-    select: { accountId: true },
-  });
-
-  const existing = await prisma.crmProspectWorkspace.findFirst({
-    where: { demoLeadId: lead.id, crmWorkspaceId: params.crmWorkspaceId },
-  });
-  if (existing) return existing;
-
   return prisma.$transaction(async (tx) => {
+    const lead = await tx.demoLead.findUnique({ where: { id: params.demoLeadId } });
+    invariant(lead && lead.workspaceId === params.crmWorkspaceId, 404, "NOT_FOUND", "Demo lead not found");
+    const existing = await tx.crmProspectWorkspace.findFirst({
+      where: { demoLeadId: lead.id, crmWorkspaceId: params.crmWorkspaceId },
+    });
+    if (existing) return existing;
+    const contactLinks = await tx.crmContact.findFirst({
+      where: { workspaceId: params.crmWorkspaceId, email: lead.email,
+        ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
+      select: { id: true, accountId: true },
+    });
+    if (contactLinks) await lockCrmLinks(tx, { contactId: contactLinks.id, accountId: contactLinks.accountId });
+    const contact = contactLinks ? await tx.crmContact.findFirst({ where: {
+      id: contactLinks.id, workspaceId: params.crmWorkspaceId,
+      ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]),
+    }, select: { accountId: true } }) : null;
+    invariant(!contactLinks || contact, 409, "ARCHIVED_PARENT", "Restore the matching contact and account before provisioning.");
     const newWorkspaceName = `Demo Workspace (${lead.email})`;
     const newWorkspaceSlug = `demo-${Date.now()}`;
     const targetWorkspace = await tx.workspace.create({

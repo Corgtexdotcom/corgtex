@@ -15,6 +15,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       delete: vi.fn(),
     },
     crmActivity: { findFirst: vi.fn(), update: vi.fn(), delete: vi.fn() }, crmAccount: { findFirst: vi.fn() },
+    crmDeal: { findFirst: vi.fn() },
     goal: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
@@ -183,6 +184,17 @@ describe("workspace archive domain", () => {
       .rejects.toMatchObject({ code: "ARCHIVED_PARENT" });
     expect(prismaMock.crmActivity.update).not.toHaveBeenCalled();
     expect(prismaMock.workspaceArchiveRecord.update).not.toHaveBeenCalled();
+  });
+  it("rejects activity restore when a linked deal has an archived required contact", async () => {
+    prismaMock.crmActivity.findFirst.mockResolvedValue({ id: "activity-1", workspaceId: "workspace-1", dealId: "deal-1", archivedAt: new Date() });
+    prismaMock.crmDeal.findFirst.mockResolvedValue(null);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-activity-1", previousState: {} });
+    const { restoreWorkspaceArtifact } = await import("./archive");
+    await expect(restoreWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType: "CrmActivity", entityId: "activity-1" }))
+      .rejects.toMatchObject({ code: "ARCHIVED_PARENT" });
+    expect(prismaMock.crmDeal.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      contact: { archivedAt: null }, OR: [{ accountId: null }, { account: { archivedAt: null } }],
+    }) }));
   });
   it("rejects unsupported archive entity types", async () => {
     const { archiveWorkspaceArtifact } = await import("./archive");

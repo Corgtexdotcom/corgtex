@@ -7,9 +7,12 @@ const CRM_LOCK_FIELDS = [["CrmActivity", "activityId"], ["CrmDeal", "dealId"], [
 
 export function activeCrmParentWhere(parents: readonly CrmArchiveParent[], filter: ArchiveFilter = "active", required: readonly CrmArchiveParent[] = []) {
   if (filter !== "active") return {};
+  const activeParent = (parent: CrmArchiveParent) => parent === "deal"
+    ? { archivedAt: null, contact: { archivedAt: null }, OR: [{ accountId: null }, { account: { archivedAt: null } }] }
+    : { archivedAt: null };
   return { AND: parents.map((parent) => required.includes(parent)
-    ? { [parent]: { archivedAt: null } }
-    : { OR: [{ [`${parent}Id`]: null }, { [parent]: { archivedAt: null } }] }) };
+    ? { [parent]: activeParent(parent) }
+    : { OR: [{ [`${parent}Id`]: null }, { [parent]: activeParent(parent) }] }) };
 }
 
 export async function lockCrmLinks(tx: Prisma.TransactionClient, ...links: CrmLinks[]) {
