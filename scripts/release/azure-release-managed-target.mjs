@@ -88,8 +88,8 @@ function deployment(value) {
     "deploymentId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
     "provisioningStatus", "releaseEligible", "provider", "group", "workload", "azure",
   ]);
+  safeTopology(row);
   uuid(row.deploymentId);
-  safeTopology(row.azure);
   return row;
 }
 function targetFromDeployment(row, deploymentId) {

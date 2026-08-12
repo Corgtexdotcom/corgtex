@@ -134,6 +134,10 @@ describe("managed Azure release intent primitives", () => {
     cyclicRow.azure = { nested: null }; cyclicRow.azure.nested = cyclicRow.azure; unselectedCycle.deployments.push(cyclicRow); cases.push(unselectedCycle);
     let traps = 0; const unselectedProxy = input(); const proxyRow = structuredClone(target); proxyRow.deploymentId = "00000000-0000-4000-8000-000000000199";
     proxyRow.azure = new Proxy({}, { ownKeys() { traps += 1; throw new Error("private-credential-canary"); } }); unselectedProxy.deployments.push(proxyRow); cases.push(unselectedProxy);
+    const hiddenCycle = input(); const cyclicFieldRow = structuredClone(target); cyclicFieldRow.deploymentId = "00000000-0000-4000-8000-000000000199";
+    cyclicFieldRow.provider = {}; cyclicFieldRow.provider.self = cyclicFieldRow.provider; hiddenCycle.deployments.push(cyclicFieldRow); cases.push(hiddenCycle);
+    const hiddenProxy = input(); const proxyFieldRow = structuredClone(target); proxyFieldRow.deploymentId = "00000000-0000-4000-8000-000000000199";
+    proxyFieldRow.group = new Proxy({}, { ownKeys() { traps += 1; throw new Error("private-credential-canary"); } }); hiddenProxy.deployments.push(proxyFieldRow); cases.push(hiddenProxy);
     cases.push([]); cases.push({ deployments: [], gitSha: SHA, manifests: {} });
     for (const candidate of cases) expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
     expect(traps).toBe(0);
