@@ -129,6 +129,7 @@ export async function heartbeatManagedReleaseLease(handle: LeaseHandle) {
     const row = await owned(tx, handle);
     if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
     if (!row.releaseLeasePhase || !ACTIVE_PHASES.includes(row.releaseLeasePhase)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (row.rollbackRecordPresent) storedRollbackPayload(row);
     const expiresAt = new Date(row.databaseNow.getTime() + TTL_MS);
     const result = await tx.customerDeployment.updateMany({ where: {
       id: row.id, releaseLeaseId: handle.leaseId, releaseLeaseTokenHash: sha256(handle.capability), releaseLeaseFence: handle.fence,

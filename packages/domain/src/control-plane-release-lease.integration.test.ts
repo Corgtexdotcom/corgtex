@@ -136,9 +136,9 @@ describe("managed release lease CAS", () => {
     expect(JSON.stringify(events)).not.toContain(handle.capability);
     expect(JSON.stringify(events)).not.toContain("web--old");
     const corrupt = await deployment(); const corruptHandle = await acquire(corrupt.id); await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } });
-    await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
-    await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     for (const malformed of [false, 0, "", Prisma.JsonNull]) { await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: malformed } }); await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); }
+    for (const phase of ["RESERVED", "MUTATING"] as const) { const drifted = await deployment(); const driftedHandle = await acquire(drifted.id); await recordManagedReleaseRollbackRecord(driftedHandle, rollbackPayload()); if (phase === "MUTATING") await beginManagedReleaseMutation(driftedHandle); await prisma.customerDeployment.update({ where: { id: drifted.id }, data: phase === "RESERVED" ? { releaseVersion: "release-drift" } : { providerWebServiceId: "web-drift" } }); const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } }); await expectCode(heartbeatManagedReleaseLease(driftedHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } })).toEqual(before); }
   });
   it("permits safe expired-reservation abort and clears the slot without resetting its fence or baseline", async () => {
     const target = await deployment();
