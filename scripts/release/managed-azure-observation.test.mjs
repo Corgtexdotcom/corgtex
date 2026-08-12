@@ -94,10 +94,11 @@ describe("managed Azure observation verifier", () => {
     for (const changed of [[...args.slice(0, 3), uuidAt(999), ...args.slice(4)], args.map((value, index) => index === 5 ? SHA.toUpperCase() : value), args.map((value, index) => index === 7 ? "31" : value), args.filter((value) => value !== "--dry-run")]) { const blocked = spawnSync(process.execPath, [script, ...changed], { encoding: "utf8" }); expect(blocked.status).not.toBe(0); expect(blocked.stdout).toBe(""); }
   });
 
-  it("locks the workflow to manual sentinel-only synthetic least-privilege execution", () => {
+  it("locks the workflow to default-branch-sourced sentinel-only synthetic execution", () => {
     const workflow = readFileSync(new URL("../../.github/workflows/managed-azure-release.yml", import.meta.url), "utf8");
-    expect(workflow.match(/workflow_dispatch:/g)).toHaveLength(1); expect(workflow.match(/uses: [^\n]+/g)).toEqual(["uses: actions/checkout@v5", "uses: actions/setup-node@v5"]); expect(workflow.match(/00000000-0000-4000-8000-000000000001/g)).toHaveLength(2); expect(workflow).toContain("node-version: 22.22.0");
-    expect(workflow).toContain("permissions:\n  contents: read\n"); expect(workflow).toContain("cancel-in-progress: false"); expect(workflow).toContain("--synthetic --dry-run"); expect(workflow).toContain('type: choice\n        default: "5"');
-    expect(workflow).not.toMatch(/workflow_call:|\n\s+push:|pull_request:|schedule:|repository_dispatch:|workflow_run:|deployment_id:|subscription_id:|resource_group:|app_name:|environment:|secrets\.|vars\.|id-token:|azure\/login|\baz\s|artifact|telemetry|fleet-release-runner|verified.release/i);
+    expect(workflow.match(/repository_dispatch:/g)).toHaveLength(1); expect(workflow.match(/managed-azure-observation-synthetic-v1/g)).toHaveLength(1); expect(workflow.match(/uses: [^\n]+/g)).toEqual(["uses: actions/checkout@v5", "uses: actions/setup-node@v5"]); expect(workflow.match(/00000000-0000-4000-8000-000000000001/g)).toHaveLength(2); expect(workflow).toContain("node-version: 22.22.0");
+    expect(workflow).toContain("if: github.ref == 'refs/heads/main'"); expect(workflow).toContain("ref: ${{ github.sha }}\n          persist-credentials: false"); expect(workflow).toContain("github.event.client_payload.release_sha"); expect(workflow).toContain("github.event.client_payload.window_minutes");
+    expect(workflow).toContain("permissions:\n  contents: read\n"); expect(workflow).toContain("cancel-in-progress: false"); expect(workflow).toContain("--synthetic --dry-run"); expect(workflow).toContain("types: [managed-azure-observation-synthetic-v1]");
+    expect(workflow).not.toMatch(/workflow_call:|workflow_dispatch:|\n\s+push:|pull_request:|schedule:|workflow_run:|deployment_id:|subscription_id:|resource_group:|app_name:|environment:|secrets\.|vars\.|id-token:|azure\/login|\baz\s|artifact|telemetry|fleet-release-runner|verified.release/i);
   });
 });
