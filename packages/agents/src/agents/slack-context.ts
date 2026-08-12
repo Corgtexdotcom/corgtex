@@ -300,7 +300,7 @@ function hasExplicitActionCreateRequest(text: string) {
     || /\bturn\b[^.!?\n]{0,30}\binto\b[^.!?\n]{0,20}\b(?:an?\s+)?(?:corgtex\s+action|action item|work item)\b/i.test(text);
 }
 
-function hasActionCreationNegation(text: string) { return /\b(?:do not|don['’]t|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text) || /\bnot an? action item\b/i.test(text) || /\bno\s+(?:need\s+for\s+(?:an?\s+)?(?:corgtex\s+action|action item|work item)|(?:corgtex\s+action|action item|work item)\s+(?:is\s+)?needed)\b/i.test(text); }
+function hasActionCreationNegation(text: string) { return /\b(?:do not|don['’]t|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text) || /\bnot an? action item\b/i.test(text) || /\bno\s+(?:need\s+for\s+(?:an?\s+)?(?:corgtex\s+action|action item|work item)|(?:corgtex\s+action|action item|work item)\s+(?:is\s+)?needed)\b/i.test(text) || /\b(?:an?\s+)?(?:corgtex\s+action|action item|work item)\s+(?:(?:is\s+)?not|isn['’]?t)\s+needed\b/i.test(text); }
 
 function evidenceIsGrounded(evidence: string, threadMessages: SlackCandidateMessage[]) { return evidence.trim().length >= 2 && threadMessages.map((message) => message.text ?? "").join("\n").toLowerCase().includes(evidence.toLowerCase()); }
 
@@ -372,11 +372,13 @@ async function fetchHumanThreadMessages(params: {
       isDeleted: false,
       OR: [{ externalMessageId: threadTs }, { threadExternalId: threadTs }],
     },
-    orderBy: { messageTs: "asc" },
+    orderBy: [{ messageTs: "desc" }, { externalMessageId: "desc" }, { id: "desc" }],
     take: 40,
   });
 
-  return messages.length > 0 ? messages as SlackCandidateMessage[] : [params.source];
+  const ordered = (messages as SlackCandidateMessage[]).sort((left, right) => (left.messageTs?.getTime() ?? 0) - (right.messageTs?.getTime() ?? 0) || left.externalMessageId.localeCompare(right.externalMessageId) || left.id.localeCompare(right.id));
+  if (ordered.length === 0) return [params.source];
+  return ordered.some((message) => message.id === params.source.id) ? ordered : [params.source, ...ordered.slice(-39)];
 }
 
 async function reviewThreadForAction(params: {
@@ -457,6 +459,15 @@ async function recordProactiveMarker(params: {
     return;
   }
   await prisma.communicationEntityLink.create({ data });
+}
+
+async function claimProcessedReply(params: { workspaceId: string; installationId: string; message: SlackCandidateMessage; claimKey: string }) {
+  try {
+    return await prisma.communicationEntityLink.create({
+      data: { installationId: params.installationId, workspaceId: params.workspaceId, provider: "SLACK", messageId: params.message.id, externalUserId: params.message.externalUserId, entityType: "CommunicationMessage", entityId: params.message.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: params.claimKey },
+      select: { id: true },
+    });
+  } catch (error) { if (isUniqueConstraintError(error)) return null; throw error; }
 }
 
 function isSlackInvalidAuthError(error: unknown) {
@@ -756,14 +767,21 @@ export async function runSlackProactiveScan(params: {
     if (linkedAction) {
       const updateMd = parsed.updateMd || parsed.bodyMd;
       const shouldPostUpdate = parsed.intent === "update_existing_action" || parsed.intent === "wait_existing_action";
+      const processedClaim = await claimProcessedReply({ workspaceId: params.workspaceId, installationId: params.installationId, message: latestThreadMessage, claimKey: processedReplyClaimKey });
+      if (!processedClaim) continue;
       if (shouldPostUpdate && parsed.linkedConfidence >= config.proactiveConfidenceThreshold && updateMd) {
-        await postDeliberationEntry(agentActor, {
-          workspaceId: params.workspaceId,
-          parentType: "ACTION",
-          parentId: linkedAction.entityId,
-          entryType: "REACTION",
-          bodyMd: updateMd,
-        });
+        try {
+          await postDeliberationEntry(agentActor, {
+            workspaceId: params.workspaceId,
+            parentType: "ACTION",
+            parentId: linkedAction.entityId,
+            entryType: "REACTION",
+            bodyMd: updateMd,
+          });
+        } catch (error) {
+          await prisma.communicationEntityLink.deleteMany({ where: { id: processedClaim.id, workspaceId: params.workspaceId, claimKey: processedReplyClaimKey } });
+          throw error;
+        }
 
         await recordProactiveMarker({
           installationId: params.installationId,
@@ -777,7 +795,6 @@ export async function runSlackProactiveScan(params: {
             : PROACTIVE_EXISTING_ACTION_UPDATE,
         });
       }
-      await recordProactiveMarker({ installationId: params.installationId, workspaceId: params.workspaceId, messageId: latestThreadMessage.id, externalUserId: latestThreadMessage.externalUserId, entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey });
       continue;
     }
 
