@@ -368,6 +368,41 @@ describe("CRM domain", () => {
 
       expect(appendEvents).not.toHaveBeenCalled();
     });
+
+    it("retries contact account-link drift and returns a controlled conflict without downstream writes", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { appendEvents } = await import("./events");
+      const { captureDemoLead } = await import("./crm");
+      const txFor = (beforeAccountId: string, afterAccountId: string) => ({
+        workspace: { upsert: vi.fn().mockResolvedValue({ id: "ws-1" }) },
+        demoLead: { upsert: vi.fn().mockResolvedValue({ id: "lead-1", welcomeEmailSentAt: null }) },
+        crmAccount: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn(), update: vi.fn() },
+        crmContact: {
+          findUnique: vi.fn()
+            .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: beforeAccountId, archivedAt: null })
+            .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: afterAccountId, archivedAt: null }),
+          findFirst: vi.fn(), create: vi.fn(), update: vi.fn(),
+        },
+      });
+      const first = txFor("account-1", "account-2");
+      const second = txFor("account-2", "account-3");
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn(first)) as any)
+        .mockImplementationOnce((async (fn: any) => fn(second)) as any);
+
+      await expect(captureDemoLead({ email: "demo@example.com" })).rejects.toMatchObject({
+        code: "CRM_LINK_CLOSURE_CHANGED",
+      });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      for (const tx of [first, second]) {
+        expect(tx.crmContact.findFirst).not.toHaveBeenCalled();
+        expect(tx.crmContact.create).not.toHaveBeenCalled();
+        expect(tx.crmContact.update).not.toHaveBeenCalled();
+        expect(tx.crmAccount.create).not.toHaveBeenCalled();
+      }
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
   });
 
   describe("captureCrmInquiry", () => {
@@ -667,6 +702,37 @@ describe("CRM domain", () => {
       for (const delegate of [tx.crmAccount, tx.crmContact, tx.crmConversation, tx.crmActivity, tx.crmDeal]) {
         expect(delegate.create).not.toHaveBeenCalled();
       }
+    });
+
+    it("retries contact account-link drift and creates no inquiry children after the bounded conflict", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { appendEvents } = await import("./events");
+      const { captureCrmInquiry } = await import("./crm");
+      const driftTx = (beforeAccountId: string, afterAccountId: string) => {
+        const tx = inquiryTx();
+        tx.crmContact.findUnique
+          .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: beforeAccountId, archivedAt: null })
+          .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: afterAccountId, archivedAt: null });
+        return tx;
+      };
+      const first = driftTx("account-1", "account-2");
+      const second = driftTx("account-2", "account-3");
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn(first)) as any)
+        .mockImplementationOnce((async (fn: any) => fn(second)) as any);
+
+      await expect(captureCrmInquiry(inquiryInput())).rejects.toMatchObject({ code: "CRM_LINK_CLOSURE_CHANGED" });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      for (const tx of [first, second]) {
+        expect(tx.crmAccount.create).not.toHaveBeenCalled();
+        expect(tx.crmContact.create).not.toHaveBeenCalled();
+        expect(tx.crmContact.update).not.toHaveBeenCalled();
+        expect(tx.crmConversation.create).not.toHaveBeenCalled();
+        expect(tx.crmActivity.create).not.toHaveBeenCalled();
+        expect(tx.crmDeal.create).not.toHaveBeenCalled();
+      }
+      expect(appendEvents).not.toHaveBeenCalled();
     });
     it("accepts connector-style sources through the same service", async () => {
       const { prisma } = await import("@corgtex/shared");
@@ -2051,11 +2117,42 @@ describe("CRM domain", () => {
       const { prisma } = await import("@corgtex/shared");
       const { updateDeal } = await import("./crm");
       const update = vi.fn();
-      const tx = { crmDeal: { findUnique: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", archivedAt: null,
-        accountId: "account-1", contactId: "contact-1" }), findFirst: vi.fn().mockResolvedValue(null), update } };
+      const tx = {
+        crmDeal: { findUnique: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", archivedAt: null,
+          accountId: "account-1", contactId: "contact-1" }), findMany: vi.fn().mockResolvedValue([{
+          id: "deal-1", accountId: "account-1", contactId: "contact-1",
+        }]), findFirst: vi.fn().mockResolvedValue(null), update },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "account-1" }]) },
+      };
       vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
       await expect(updateDeal(dummyActor, { workspaceId: "ws-1", dealId: "deal-1", title: "Blocked" })).rejects.toThrow("Deal not found.");
       expect(tx.crmDeal.findFirst).toHaveBeenCalledWith({ where: expect.objectContaining({ AND: expect.any(Array) }) });
+      expect(update).not.toHaveBeenCalled();
+    });
+    it("locks the required contact account before rejecting a deal hidden by that archived transitive parent", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+      const update = vi.fn();
+      const tx = {
+        crmDeal: {
+          findUnique: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", archivedAt: null,
+            accountId: "z-account", contactId: "contact-1" }),
+          findMany: vi.fn().mockResolvedValue([{ id: "deal-1", accountId: "z-account", contactId: "contact-1" }]),
+          findFirst: vi.fn().mockResolvedValue(null), update,
+        },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "a-account" }]) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(updateDeal(dummyActor, { workspaceId: "ws-1", dealId: "deal-1", title: "Blocked" }))
+        .rejects.toThrow("Deal not found.");
+
+      expect(lockWorkspaceArchiveArtifact.mock.calls.map(([, type, id]) => [type, id])).toEqual([
+        ["CrmDeal", "deal-1"],
+        ["CrmContact", "contact-1"],
+        ["CrmAccount", "a-account"],
+        ["CrmAccount", "z-account"],
+      ]);
       expect(update).not.toHaveBeenCalled();
     });
     it("records an initial stage transition when creating a deal", async () => {
@@ -2133,6 +2230,7 @@ describe("CRM domain", () => {
             stage: "NEGOTIATION",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn().mockResolvedValue({
             id: "deal-1",
             workspaceId: "ws-1",
@@ -2183,6 +2281,7 @@ describe("CRM domain", () => {
             stage: "CLOSED_WON",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn().mockResolvedValue({
             id: "deal-1",
             workspaceId: "ws-1",
@@ -2230,6 +2329,7 @@ describe("CRM domain", () => {
             stage: "PROPOSAL",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn(),
         },
         crmDealStageTransition: {
@@ -2263,6 +2363,7 @@ describe("CRM domain", () => {
             stage: "LEAD",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn(),
         },
         crmDealStageTransition: {

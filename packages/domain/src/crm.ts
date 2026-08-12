@@ -535,7 +535,7 @@ export async function captureDemoLead(params: {
   const [localPart, domainPart] = email.split("@");
   const name = localPart.replace(/[^a-zA-Z0-9]/g, " ");
 
-  return prisma.$transaction(async (tx) => {
+  return withCrmLinkSyncRetry(async (tx) => {
     const workspace = await tx.workspace.upsert({
       where: { slug: workspaceSlug },
       update: {},
@@ -572,6 +572,10 @@ export async function captureDemoLead(params: {
     await lockCrmLinks(tx,
       { contactId: contactLinks?.id, accountId: contactLinks?.accountId },
       { accountId: matchedAccount?.id }, { accountId: allocatedAccountId });
+    const reloadedContact = contactLinks ? await tx.crmContact.findUnique({ where: { id: contactLinks.id } }) : null;
+    invariant(!contactLinks || reloadedContact?.workspaceId === workspace.id
+      && reloadedContact.accountId === contactLinks.accountId, 409, "CRM_LINK_CLOSURE_CHANGED",
+    "CRM contact account link changed concurrently; retry the operation.");
     const existingContact = contactLinks ? await tx.crmContact.findFirst({ where: {
       id: contactLinks.id, workspaceId: workspace.id, ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]),
     } }) : null;
@@ -785,7 +789,7 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
   const name = trimOptionalText(params.name);
   invariant(name, 400, "INVALID_INPUT", "Name is required.");
 
-  return prisma.$transaction(async (tx) => {
+  return withCrmLinkSyncRetry(async (tx) => {
     const workspace = await tx.workspace.findUnique({
       where: { slug: workspaceSlug },
       select: { id: true, slug: true },
@@ -849,6 +853,11 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
     await lockCrmLinks(tx, { contactId: existingContact?.id, accountId: existingContact?.accountId },
       { accountId: matchedAccount?.id }, { accountId: allocatedAccountId });
     if (existingContact) {
+      const lockedContactId = existingContact.id;
+      const lockedAccountId = existingContact.accountId;
+      const reloadedContact = await tx.crmContact.findUnique({ where: { id: lockedContactId } });
+      invariant(reloadedContact?.workspaceId === workspace.id && reloadedContact.accountId === lockedAccountId,
+        409, "CRM_LINK_CLOSURE_CHANGED", "CRM contact account link changed concurrently; retry the operation.");
       existingContact = await tx.crmContact.findFirst({ where: { id: existingContact.id, workspaceId: workspace.id,
         ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } });
       invariant(existingContact, 409, "ARCHIVED_PARENT", "Restore the matching contact and account before capturing this inquiry.");
@@ -1834,7 +1843,8 @@ export async function updateDeal(actor: AppActor, params: {
   return prisma.$transaction(async (tx) => {
     const links = await tx.crmDeal.findUnique({ where: { id: params.dealId } });
     invariant(links && links.workspaceId === params.workspaceId && !links.archivedAt, 404, "NOT_FOUND", "Deal not found.");
-    await lockCrmLinks(tx, { dealId: links.id, contactId: links.contactId, accountId: links.accountId }, { accountId: params.accountId });
+    await lockCrmLinkClosure(tx, params.workspaceId,
+      { dealId: links.id, contactId: links.contactId, accountId: links.accountId }, { accountId: params.accountId });
     const deal = tx.crmDeal.findFirst ? await tx.crmDeal.findFirst({ where: {
       id: params.dealId, workspaceId: params.workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"]),
     } }) : links;
