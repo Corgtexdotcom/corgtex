@@ -429,8 +429,8 @@ function serializeExecutionResult(result: {
 }
 
 function serializeIdempotentExecutionResult(result: Parameters<typeof serializeExecutionResult>[0]) {
-  invariant(!(result.targetType === "CRM_COMMUNICATION" && result.status === "SUBMITTED"), 409, "CONFLICT",
-    "CRM execution result is incomplete and requires repair.");
+  invariant(["ACCEPTED", "REJECTED"].includes(result.status), 409, "CONFLICT",
+    "Execution result is incomplete and requires repair.");
   return serializeExecutionResult(result);
 }
 
@@ -464,6 +464,7 @@ async function validateWritebackTarget(
   targetId?: string | null,
   actor?: AppActor,
   membership?: MembershipSummary | null,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
 ) {
   if (!type) return null;
   if (!targetId) {
@@ -479,7 +480,7 @@ async function validateWritebackTarget(
 
   switch (type) {
     case "ACTION": {
-      const item = await prisma.action.findFirst({
+      const item = await client.action.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
         select: { id: true, title: true, status: true },
       });
@@ -487,7 +488,7 @@ async function validateWritebackTarget(
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/actions/${item.id}` };
     }
     case "TENSION": {
-      const item = await prisma.tension.findFirst({
+      const item = await client.tension.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
         select: { id: true, title: true, status: true },
       });
@@ -495,7 +496,7 @@ async function validateWritebackTarget(
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/tensions/${item.id}` };
     }
     case "PROPOSAL": {
-      const item = await prisma.proposal.findFirst({
+      const item = await client.proposal.findFirst({
         where: { id: targetId, workspaceId, archivedAt: null, ...(actor ? privacyFilter(actor, membership) : {}) },
         select: { id: true, title: true, status: true },
       });
@@ -503,12 +504,12 @@ async function validateWritebackTarget(
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/proposals/${item.id}` };
     }
     case "MEETING": {
-      const item = await prisma.meeting.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
+      const item = await client.meeting.findFirst({ where: { id: targetId, workspaceId, archivedAt: null }, select: { id: true, title: true, status: true } });
       invariant(item, 404, "NOT_FOUND", "Meeting write-back target not found.");
       return { type, id: item.id, title: item.title ?? "Untitled meeting", status: item.status, webPath: `/meetings/${item.id}` };
     }
     case "BRAIN_ARTICLE": {
-      const item = await prisma.brainArticle.findFirst({
+      const item = await client.brainArticle.findFirst({
         where: {
           AND: [
             { id: targetId, workspaceId, archivedAt: null },
@@ -521,12 +522,12 @@ async function validateWritebackTarget(
       return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}` };
     }
     case "BUILD_ARTIFACT": {
-      const item = await prisma.buildArtifact.findFirst({ where: { id: targetId, workspaceId }, select: { id: true, title: true, status: true } });
+      const item = await client.buildArtifact.findFirst({ where: { id: targetId, workspaceId }, select: { id: true, title: true, status: true } });
       invariant(item, 404, "NOT_FOUND", "Build artifact write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}` };
     }
     case "CRM_COMMUNICATION": {
-      const item = await prisma.crmCommunicationSuggestion.findFirst({
+      const item = await client.crmCommunicationSuggestion.findFirst({
         where: { id: targetId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) },
         select: {
           id: true,
@@ -1047,13 +1048,14 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   return { items: items.slice(0, take * 6) };
 }
 
-async function validateCrmCommunicationResultOutput(workspaceId: string, targetId: string | null, output: JsonRecord) {
+async function validateCrmCommunicationResultOutput(workspaceId: string, targetId: string | null, output: JsonRecord,
+  client: Prisma.TransactionClient | typeof prisma = prisma) {
   invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
   optionalDate(output.sentAt);
 
   const conversationId = optionalString(output.conversationId);
   if (conversationId) {
-    const conversation = await prisma.crmConversation.findFirst({
+    const conversation = await client.crmConversation.findFirst({
       where: { id: conversationId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]) },
       select: { id: true },
     });
@@ -1259,51 +1261,63 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
 
   const idempotencyKey = params.idempotencyKey.trim();
   invariant(idempotencyKey.length > 0, 400, "INVALID_INPUT", "Result idempotency key is required.");
-  const request = await loadExecutionRequest(actor, params.workspaceId, params.requestId);
-  const existing = await prisma.executionResult.findUnique({
-    where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
-  });
-  if (existing) return serializeIdempotentExecutionResult(existing);
-
-  invariant(["PENDING", "IN_PROGRESS"].includes(request.status), 400, "INVALID_STATE", "Execution request is not accepting new results.");
-
-  const targetType = normalizeExecutionTargetType(params.targetType) ?? request.writebackTargetType;
-  const targetId = optionalString(params.targetId) ?? request.writebackTargetId;
-  if (request.writebackTargetType) {
-    invariant(targetType === request.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
-  }
-  if (request.writebackTargetId) {
-    invariant(targetId === request.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
-  }
 
   const output = objectInput(params.output);
   const errorMessage = optionalString(params.errorMessage);
-  if (targetType === "CRM_COMMUNICATION") {
-    invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
-    const writeScope = targetWriteScope(targetType);
-    requireExecutionScope(actor, writeScope);
-    invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-    await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
-    await validateCrmCommunicationResultOutput(params.workspaceId, targetId, output);
-  } else if (!errorMessage) {
-    invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
-    const writeScope = targetWriteScope(targetType);
-    requireExecutionScope(actor, writeScope);
-    invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
-    await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership);
-    validateNativeWritebackOutput(targetType, targetId ?? null, output);
-  }
+  const transactionResult = await prisma.$transaction(async (tx) => {
+    const claim = await tx.executionRequest.updateMany({
+      where: { ...executionRequestAccessWhere(actor, params.workspaceId, params.requestId),
+        status: { in: ["PENDING", "IN_PROGRESS"] } },
+      data: { status: "RESULT_SUBMITTED" },
+    });
+    if (claim.count !== 1) {
+      const current = await tx.executionRequest.findFirst({ where:
+        executionRequestAccessWhere(actor, params.workspaceId, params.requestId) });
+      invariant(current, 404, "NOT_FOUND", "Execution request not found.");
+      const existing = await tx.executionResult.findUnique({
+        where: { executionRequestId_idempotencyKey: { executionRequestId: current.id, idempotencyKey } },
+      });
+      invariant(["COMPLETED", "FAILED"].includes(current.status) && existing
+        && ["ACCEPTED", "REJECTED"].includes(existing.status), 409, "CONFLICT",
+      "Execution request already has a different or incomplete result.");
+      return { kind: "complete" as const, result: existing };
+    }
 
-  let resultShell: Awaited<ReturnType<typeof prisma.executionResult.create>>;
-  try {
-    resultShell = await prisma.$transaction(async (tx) => {
-      const atomicWriteback = targetType === "CRM_COMMUNICATION" && targetId
-        ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
-          requestCreatedByUserId: request.createdByUserId, transaction: tx }) : null;
-      const atomicCrm = targetType === "CRM_COMMUNICATION";
-      const finalizedAt = atomicCrm ? new Date() : null;
-      const created = await tx.executionResult.create({
-        data: {
+    const request = await tx.executionRequest.findFirst({ where:
+      executionRequestAccessWhere(actor, params.workspaceId, params.requestId) });
+    invariant(request, 404, "NOT_FOUND", "Execution request not found.");
+    const targetType = normalizeExecutionTargetType(params.targetType) ?? request.writebackTargetType;
+    const targetId = optionalString(params.targetId) ?? request.writebackTargetId;
+    if (request.writebackTargetType) {
+      invariant(targetType === request.writebackTargetType, 400, "INVALID_INPUT", "Result target type does not match the execution request.");
+    }
+    if (request.writebackTargetId) {
+      invariant(targetId === request.writebackTargetId, 400, "INVALID_INPUT", "Result target id does not match the execution request.");
+    }
+
+    if (targetType === "CRM_COMMUNICATION") {
+      invariant(targetId, 400, "INVALID_INPUT", "CRM communication result target id is required.");
+      const writeScope = targetWriteScope(targetType);
+      requireExecutionScope(actor, writeScope);
+      invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+      await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
+      await validateCrmCommunicationResultOutput(params.workspaceId, targetId, output, tx);
+    } else if (!errorMessage) {
+      invariant(targetType, 400, "INVALID_INPUT", "Result target type is required.");
+      const writeScope = targetWriteScope(targetType);
+      requireExecutionScope(actor, writeScope);
+      invariant(request.allowedScopes.includes(writeScope), 403, "FORBIDDEN", `Execution request does not allow the required scope: ${writeScope}.`);
+      await validateWritebackTarget(params.workspaceId, targetType, targetId, actor, membership, tx);
+      validateNativeWritebackOutput(targetType, targetId ?? null, output);
+    }
+
+    const atomicWriteback = targetType === "CRM_COMMUNICATION" && targetId
+      ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
+        requestCreatedByUserId: request.createdByUserId, transaction: tx }) : null;
+    const atomicCrm = targetType === "CRM_COMMUNICATION";
+    const finalizedAt = atomicCrm ? new Date() : null;
+    const created = await tx.executionResult.create({
+      data: {
           workspaceId: params.workspaceId,
           executionRequestId: request.id,
           submittedByUserId: actor.kind === "user" ? actor.user.id : null,
@@ -1319,17 +1333,17 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
           writebackEntityId: atomicWriteback?.entityId ?? null,
           acceptedAt: atomicCrm && !errorMessage ? finalizedAt : null,
           rejectedAt: atomicCrm && errorMessage ? finalizedAt : null,
-        },
-      });
+      },
+    });
 
-      await tx.executionRequest.update({
-        where: { id: request.id },
-        data: atomicCrm ? { status: errorMessage ? "FAILED" : "COMPLETED",
-          completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null }
-          : { status: "RESULT_SUBMITTED" },
-      });
+    await tx.executionRequest.update({
+      where: { id: request.id },
+      data: atomicCrm ? { status: errorMessage ? "FAILED" : "COMPLETED",
+        completedAt: errorMessage ? null : finalizedAt, failedAt: errorMessage ? finalizedAt : null }
+        : { status: "RESULT_SUBMITTED" },
+    });
 
-      await recordAudit(tx, actor, {
+    await recordAudit(tx, actor, {
         workspaceId: params.workspaceId,
         action: "execution_result.received",
         entityType: "ExecutionRequest",
@@ -1344,24 +1358,19 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
             hasError: Boolean(errorMessage),
           }),
         },
-      });
-
-      if (atomicCrm) await recordAudit(tx, actor, { workspaceId: params.workspaceId,
-        action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
-        meta: { resultId: created.id, targetType, targetId, status: created.status,
-          writebackEntityType: created.writebackEntityType, writebackEntityId: created.writebackEntityId } });
-      return created;
     });
-  } catch (error) {
-    if (!isPrismaUniqueError(error)) throw error;
-    const duplicate = await prisma.executionResult.findUnique({
-      where: { executionRequestId_idempotencyKey: { executionRequestId: request.id, idempotencyKey } },
-    });
-    invariant(duplicate, 409, "CONFLICT", "Execution result idempotency conflict.");
-    return serializeIdempotentExecutionResult(duplicate);
-  }
 
-  if (targetType === "CRM_COMMUNICATION") return serializeExecutionResult(resultShell);
+    if (atomicCrm) await recordAudit(tx, actor, { workspaceId: params.workspaceId,
+      action: "execution_result.submitted", entityType: "ExecutionRequest", entityId: request.id,
+      meta: { resultId: created.id, targetType, targetId, status: created.status,
+        writebackEntityType: created.writebackEntityType, writebackEntityId: created.writebackEntityId } });
+    return atomicCrm
+      ? { kind: "complete" as const, result: created }
+      : { kind: "native" as const, result: created, request, targetType, targetId };
+  });
+
+  if (transactionResult.kind === "complete") return serializeIdempotentExecutionResult(transactionResult.result);
+  const { result: resultShell, request, targetType, targetId } = transactionResult;
   const writeback = errorMessage || !targetType ? null : await createNativeWriteback(actor, {
       workspaceId: params.workspaceId,
       type: targetType,
