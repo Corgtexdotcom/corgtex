@@ -1,0 +1,45 @@
+name: Managed Azure Release Observation (Synthetic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: "Exact synthetic 40-character release SHA."
+        required: true
+        type: string
+      window_minutes:
+        description: "Bounded synthetic observation window."
+        required: true
+        type: choice
+        default: "5"
+        options:
+          - "5"
+          - "10"
+          - "20"
+          - "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-azure-observation-00000000-0000-4000-8000-000000000001
+  cancel-in-progress: false
+
+jobs:
+  synthetic-observation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Verify synthetic managed Azure observation
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          WINDOW_MINUTES: ${{ inputs.window_minutes }}
+        run: >-
+          node scripts/release/managed-azure-observation.mjs
+          --synthetic --dry-run
+          --deployment-id 00000000-0000-4000-8000-000000000001
+          --release-sha "$RELEASE_SHA"
+          --window-minutes "$WINDOW_MINUTES"
