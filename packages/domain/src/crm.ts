@@ -2085,12 +2085,18 @@ export async function recordDemoWelcomeCrmActivity(params: {
         ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) }, select: { id: true, accountId: true } }),
     ]);
     if (!lead || !contact || contact.accountId !== contactLinks.accountId) return { created: false };
-    const activity = await tx.crmActivity.create({ data: {
+    const activity = await tx.crmActivity.upsert({
+      where: { workspaceId_source_sourceExternalId: { workspaceId: params.workspaceId,
+        source: "demo_welcome_newspaper", sourceExternalId: params.demoLeadId } },
+      update: {},
+      create: {
       workspaceId: params.workspaceId,
       accountId: contact.accountId,
       contactId: contact.id,
       type: "EMAIL",
       title: "Sent welcome newspaper",
+      source: "demo_welcome_newspaper",
+      sourceExternalId: params.demoLeadId,
       bodyMd: [
         "Sent the Corgtex welcome newspaper.",
         "",
@@ -2509,10 +2515,10 @@ export async function markCommunicationSuggestionSent(actor: AppActor, params: {
   workspaceId: string;
   suggestionId: string;
   sentAt?: Date | null;
-}) {
+}, transaction?: Prisma.TransactionClient) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  return prisma.$transaction(async (tx) => {
+  const operation = async (tx: Prisma.TransactionClient) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
     if (suggestion.status === "SENT") {
       return tx.crmCommunicationSuggestion.findUnique({
@@ -2561,7 +2567,8 @@ export async function markCommunicationSuggestionSent(actor: AppActor, params: {
     });
 
     return updated;
-  });
+  };
+  return transaction ? operation(transaction) : prisma.$transaction(operation);
 }
 
 export async function declineCommunicationSuggestion(actor: AppActor, params: {
@@ -2605,10 +2612,10 @@ export async function failCommunicationSuggestion(actor: AppActor, params: {
   workspaceId: string;
   suggestionId: string;
   failureReason?: string | null;
-}) {
+}, transaction?: Prisma.TransactionClient) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  return prisma.$transaction(async (tx) => {
+  const operation = async (tx: Prisma.TransactionClient) => {
     const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
     invariant(suggestion.status !== "SENT" && suggestion.status !== "DECLINED", 400, "INVALID_STATE", "Finalized suggestions cannot be failed.");
     const updated = await tx.crmCommunicationSuggestion.update({
@@ -2630,7 +2637,8 @@ export async function failCommunicationSuggestion(actor: AppActor, params: {
       },
     });
     return updated;
-  });
+  };
+  return transaction ? operation(transaction) : prisma.$transaction(operation);
 }
 
 // --- QUALIFICATIONS ---
@@ -2916,10 +2924,10 @@ export async function createConversationMessage(actor: AppActor, params: {
   bodyMd: string;
   senderType: "LEAD" | "ADMIN" | "SYSTEM";
   senderEmail?: string;
-}) {
+}, transaction?: Prisma.TransactionClient) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  return prisma.$transaction(async (tx) => {
+  const operation = async (tx: Prisma.TransactionClient) => {
     const links = await tx.crmConversation.findUnique({ where: { id: params.conversationId } });
     invariant(links && links.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
     const conversation = await lockAndFindActiveCrmConversation(tx, params.workspaceId, links);
@@ -2941,7 +2949,8 @@ export async function createConversationMessage(actor: AppActor, params: {
     });
 
     return message;
-  });
+  };
+  return transaction ? operation(transaction) : prisma.$transaction(operation);
 }
 
 export async function getCrmConversation(actor: AppActor, params: { workspaceId: string; conversationId: string }) {

@@ -1389,20 +1389,20 @@ describe("CRM domain", () => {
     });
     it("omits the welcome activity when the converted contact changes account under lock", async () => {
       const { prisma } = await import("@corgtex/shared"), { recordDemoWelcomeCrmActivity } = await import("./crm");
-      const create = vi.fn(), tx = {
+      const upsert = vi.fn(), tx = {
         crmContact: {
           findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1" }),
           findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "account-1" }]),
           findFirst: vi.fn().mockResolvedValue({ id: "contact-1", accountId: "account-2" }),
         }, crmAccount: { findMany: vi.fn().mockResolvedValue([{ id: "account-1", archivedAt: null }]) },
-        crmDeal: { findMany: vi.fn().mockResolvedValue([]) }, crmActivity: { findMany: vi.fn().mockResolvedValue([]), create },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([]) }, crmActivity: { findMany: vi.fn().mockResolvedValue([]), upsert },
         demoLead: { findFirst: vi.fn().mockResolvedValue({ id: "lead-1" }) },
       };
       vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
       await expect(recordDemoWelcomeCrmActivity({ workspaceId: "ws-1", demoLeadId: "lead-1",
         expectedContactId: "contact-1" })).resolves.toEqual({ created: false });
       expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(tx, "CrmContact", "contact-1");
-      expect(create).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
     });
     it("creates a due reminder task with validated owner and source metadata", async () => {
       const { prisma } = await import("@corgtex/shared");

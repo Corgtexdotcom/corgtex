@@ -147,17 +147,18 @@ async function requireActiveCrmRestoreParents(tx: Prisma.TransactionClient, reco
     "Restore the linked CrmAccount before restoring this record.");
 }
 
-async function requireNoActiveActivityOrphan(tx: Prisma.TransactionClient, record: any, entityType: "CrmContact" | "CrmDeal") {
+async function requireNoActivityOrphan(tx: Prisma.TransactionClient, record: any, entityType: "CrmAccount" | "CrmContact" | "CrmDeal") {
   if (entityType === "CrmDeal") await tx.$queryRaw`SELECT "id" FROM "CrmDeal" WHERE "id" = ${record.id} FOR UPDATE`;
-  else await tx.$queryRaw`SELECT "id" FROM "CrmContact" WHERE "id" = ${record.id} FOR UPDATE`;
+  else if (entityType === "CrmContact") await tx.$queryRaw`SELECT "id" FROM "CrmContact" WHERE "id" = ${record.id} FOR UPDATE`;
+  else await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${record.id} FOR UPDATE`;
   const where = entityType === "CrmDeal"
-    ? { workspaceId: record.workspaceId, archivedAt: null, accountId: null, contactId: null, dealId: record.id }
-    : { workspaceId: record.workspaceId, archivedAt: null, accountId: null, OR: [
+    ? { workspaceId: record.workspaceId, accountId: null, contactId: null, dealId: record.id }
+    : entityType === "CrmContact" ? { workspaceId: record.workspaceId, accountId: null, OR: [
       { contactId: record.id, OR: [{ dealId: null }, { deal: { contactId: record.id } }] },
       { contactId: null, deal: { contactId: record.id } },
-    ] };
+    ] } : { workspaceId: record.workspaceId, accountId: record.id, contactId: null, dealId: null };
   const activity = await tx.crmActivity.findFirst({ where, select: { id: true } });
-  invariant(!activity, 409, "CRM_ACTIVITY_ORPHAN", "Archive the active solely linked CRM activities before purging this record.");
+  invariant(!activity, 409, "CRM_ACTIVITY_ORPHAN", "Relink or purge solely linked CRM activities before purging this record.");
 }
 
 const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
@@ -219,6 +220,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "crmAccount",
     findWhere: directWorkspace,
     label: titleOrName,
+    canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmAccount"),
   },
   CrmActivity: {
     entityType: "CrmActivity", delegate: "crmActivity", findWhere: directWorkspace, label: titleOrName,
@@ -232,7 +234,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     findWhere: directWorkspace,
     label: titleOrName,
     canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [["CrmAccount", "crmAccount", "accountId"]]),
-    canPurge: (tx, record) => requireNoActiveActivityOrphan(tx, record, "CrmContact"),
+    canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmContact"),
   },
   CrmDeal: {
     entityType: "CrmDeal",
@@ -242,7 +244,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [
       ["CrmAccount", "crmAccount", "accountId"], ["CrmContact", "crmContact", "contactId"],
     ]),
-    canPurge: (tx, record) => requireNoActiveActivityOrphan(tx, record, "CrmDeal"),
+    canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmDeal"),
   },
   Document: {
     entityType: "Document",

@@ -1048,7 +1048,7 @@ async function validateCrmCommunicationResultOutput(workspaceId: string, targetI
   const conversationId = optionalString(output.conversationId);
   if (conversationId) {
     const conversation = await prisma.crmConversation.findFirst({
-      where: { id: conversationId, workspaceId },
+      where: { id: conversationId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]) },
       select: { id: true },
     });
     invariant(conversation, 404, "NOT_FOUND", "CRM conversation write-back target not found.");
@@ -1061,14 +1061,26 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
   output: JsonRecord;
   errorMessage: string | null;
   requestCreatedByUserId: string | null;
+  transaction?: Prisma.TransactionClient;
 }) {
   const writebackActor = requestOwnerActor({ createdByUserId: params.requestCreatedByUserId }, actor);
+  const conversationId = optionalString(params.output.conversationId);
+  if (!params.errorMessage && params.transaction) {
+    const conversation = conversationId ? await params.transaction.crmConversation.findUnique({ where: { id: conversationId } }) : null;
+    invariant(!conversationId || conversation?.workspaceId === params.workspaceId, 404, "NOT_FOUND",
+      "CRM conversation write-back target not found.");
+    await lockActiveCommunicationSuggestion(params.transaction, { workspaceId: params.workspaceId,
+      suggestionId: params.targetId, replacements: conversation ?? {} });
+    if (conversation) invariant(await params.transaction.crmConversation.findFirst({ where: { id: conversation.id,
+      workspaceId: params.workspaceId, ...activeCrmParentWhere(["account", "contact", "deal"]) }, select: { id: true } }),
+    404, "NOT_FOUND", "CRM conversation write-back target not found.");
+  }
   if (params.errorMessage) {
     const suggestion = await failCommunicationSuggestion(writebackActor, {
       workspaceId: params.workspaceId,
       suggestionId: params.targetId,
       failureReason: params.errorMessage,
-    });
+    }, params.transaction);
     return { entityType: "CrmCommunicationSuggestion", entityId: suggestion?.id ?? params.targetId };
   }
 
@@ -1076,9 +1088,8 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
     workspaceId: params.workspaceId,
     suggestionId: params.targetId,
     sentAt: optionalDate(params.output.sentAt),
-  });
+  }, params.transaction);
 
-  const conversationId = optionalString(params.output.conversationId);
   if (conversationId) {
     await createConversationMessage(writebackActor, {
       workspaceId: params.workspaceId,
@@ -1090,7 +1101,7 @@ async function createCrmCommunicationWriteback(actor: AppActor, params: {
         ?? optionalString(params.output.bodyMd)
         ?? optionalString(params.output.body)
         ?? "External communication was marked sent.",
-    });
+    }, params.transaction);
   }
 
   return { entityType: "CrmCommunicationSuggestion", entityId: suggestion?.id ?? params.targetId };
@@ -1278,8 +1289,12 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
   }
 
   let resultShell: Awaited<ReturnType<typeof prisma.executionResult.create>>;
+  let crmWriteback: Awaited<ReturnType<typeof createCrmCommunicationWriteback>> | null = null;
   try {
-    resultShell = await prisma.$transaction(async (tx) => {
+    const shell = await prisma.$transaction(async (tx) => {
+      const atomicWriteback = targetType === "CRM_COMMUNICATION" && targetId
+        ? await createCrmCommunicationWriteback(actor, { workspaceId: params.workspaceId, targetId, output, errorMessage,
+          requestCreatedByUserId: request.createdByUserId, transaction: tx }) : null;
       const created = await tx.executionResult.create({
         data: {
           workspaceId: params.workspaceId,
@@ -1318,8 +1333,10 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
         },
       });
 
-      return created;
+      return { created, atomicWriteback };
     });
+    resultShell = shell.created;
+    crmWriteback = shell.atomicWriteback;
   } catch (error) {
     if (!isPrismaUniqueError(error)) throw error;
     const duplicate = await prisma.executionResult.findUnique({
@@ -1329,15 +1346,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
     return serializeExecutionResult(duplicate);
   }
 
-  const writeback = targetType === "CRM_COMMUNICATION" && targetId
-    ? await createCrmCommunicationWriteback(actor, {
-      workspaceId: params.workspaceId,
-      targetId,
-      output,
-      errorMessage,
-      requestCreatedByUserId: request.createdByUserId,
-    })
-    : errorMessage || !targetType
+  const writeback = crmWriteback ?? (errorMessage || !targetType || targetType === "CRM_COMMUNICATION"
       ? null
       : await createNativeWriteback(actor, {
       workspaceId: params.workspaceId,
@@ -1347,7 +1356,7 @@ export async function submitExecutionResult(actor: AppActor, params: SubmitExecu
       requestId: request.id,
       resultId: resultShell.id,
       requestCreatedByUserId: request.createdByUserId,
-    });
+    }));
 
   const result = await prisma.$transaction(async (tx) => {
     const updated = await tx.executionResult.update({

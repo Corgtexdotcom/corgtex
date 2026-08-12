@@ -1633,11 +1633,12 @@ describe("runDailyDigest", () => {
       .toBeLessThan(recordDemoWelcomeCrmActivityMock.mock.invocationCallOrder[0]!);
   });
 
-  it("does not resend the demo welcome newspaper when it already has a sent timestamp", async () => {
+  it("repairs the CRM activity without resending when the welcome timestamp already exists", async () => {
     prismaMock.demoLead.findFirst.mockResolvedValue({
       id: "lead-1",
       workspaceId: "workspace-1",
       email: "lead@example.com",
+      convertedContactId: "contact-1",
       welcomeEmailSentAt: new Date("2026-04-30T12:00:00.000Z"),
       workspace: { name: "Corgtex" },
     });
@@ -1650,5 +1651,7 @@ describe("runDailyDigest", () => {
 
     expect(sendEmailMock).not.toHaveBeenCalled();
     expect(txMock.demoLead.update).not.toHaveBeenCalled();
+    expect(recordDemoWelcomeCrmActivityMock).toHaveBeenCalledWith({ workspaceId: "workspace-1",
+      demoLeadId: "lead-1", expectedContactId: "contact-1" });
   });
 });

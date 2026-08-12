@@ -15,7 +15,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       delete: vi.fn(),
     },
     crmActivity: { findFirst: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    crmAccount: { findFirst: vi.fn(), findMany: vi.fn() }, crmContact: { findMany: vi.fn() }, crmDeal: { findFirst: vi.fn(), findMany: vi.fn() },
+    crmAccount: { findFirst: vi.fn(), findMany: vi.fn() }, crmContact: { findFirst: vi.fn(), findMany: vi.fn() }, crmDeal: { findFirst: vi.fn(), findMany: vi.fn() },
     goal: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
@@ -65,6 +65,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
       findFirst: vi.fn(),
     },
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
   };
   return { prismaMock: prisma, storageDeleteMock: vi.fn() };
 });
@@ -117,6 +118,7 @@ describe("workspace archive domain", () => {
     prismaMock.crmContact.findMany.mockResolvedValue([]);
     prismaMock.crmDeal.findMany.mockResolvedValue([]);
     prismaMock.$executeRaw.mockResolvedValue(1);
+    prismaMock.$queryRaw.mockResolvedValue([]);
     storageDeleteMock.mockResolvedValue(undefined);
   });
 
@@ -187,6 +189,21 @@ describe("workspace archive domain", () => {
       .rejects.toMatchObject({ code: "ARCHIVED_PARENT" });
     expect(prismaMock.crmActivity.update).not.toHaveBeenCalled();
     expect(prismaMock.workspaceArchiveRecord.update).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["CrmAccount", "crmAccount", { accountId: "parent-1", contactId: null, dealId: null, archivedAt: null }],
+    ["CrmContact", "crmContact", { accountId: null, contactId: "parent-1", dealId: null, archivedAt: new Date() }],
+    ["CrmDeal", "crmDeal", { accountId: null, contactId: null, dealId: "parent-1", archivedAt: new Date() }],
+  ] as const)("blocks %s purge when it would orphan an active or restorable activity", async (entityType, delegate, activity) => {
+    prismaMock[delegate].findFirst.mockResolvedValue({ id: "parent-1", workspaceId: "workspace-1", archivedAt: new Date() });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-parent" });
+    prismaMock.crmActivity.findFirst.mockResolvedValue({ id: "activity-1", ...activity });
+    const { purgeWorkspaceArtifact } = await import("./archive");
+    await expect(purgeWorkspaceArtifact(actor, { workspaceId: "workspace-1", entityType,
+      entityId: "parent-1", reason: "cleanup" })).rejects.toMatchObject({ code: "CRM_ACTIVITY_ORPHAN" });
+    const where = prismaMock.crmActivity.findFirst.mock.calls.at(-1)?.[0].where;
+    expect(where).not.toHaveProperty("archivedAt");
+    expect(JSON.stringify(where)).toContain("parent-1");
   });
   it("rejects activity restore when a linked deal has an archived required contact", async () => {
     prismaMock.crmActivity.findFirst.mockResolvedValue({ id: "activity-1", workspaceId: "workspace-1", dealId: "deal-1", archivedAt: new Date() });

@@ -1851,6 +1851,11 @@ export async function sendDemoWelcomeNewspaper(params: {
   }
 
   if (lead.welcomeEmailSentAt) {
+    await recordDemoWelcomeCrmActivity({
+      workspaceId: params.workspaceId,
+      demoLeadId: lead.id,
+      expectedContactId: lead.convertedContactId,
+    });
     return { success: true, skipped: true, message: "Welcome newspaper already sent." };
   }
 
