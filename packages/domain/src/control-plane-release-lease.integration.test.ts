@@ -138,7 +138,7 @@ describe("managed release lease CAS", () => {
     const corrupt = await deployment(); const corruptHandle = await acquire(corrupt.id); await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } });
     await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     for (const malformed of [false, 0, "", Prisma.JsonNull]) { await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: malformed } }); await expectCode(recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload()), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); await expectCode(beginManagedReleaseMutation(corruptHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); }
-    for (const phase of ["RESERVED", "MUTATING"] as const) { const drifted = await deployment(); const driftedHandle = await acquire(drifted.id); await recordManagedReleaseRollbackRecord(driftedHandle, rollbackPayload()); if (phase === "MUTATING") await beginManagedReleaseMutation(driftedHandle); await prisma.customerDeployment.update({ where: { id: drifted.id }, data: phase === "RESERVED" ? { releaseVersion: "release-drift" } : { providerWebServiceId: "web-drift" } }); const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } }); await expectCode(heartbeatManagedReleaseLease(driftedHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } })).toEqual(before); }
+    for (const phase of ["RESERVED", "MUTATING"] as const) { const drifted = await deployment(); const driftedHandle = await acquire(drifted.id); await recordManagedReleaseRollbackRecord(driftedHandle, rollbackPayload()); if (phase === "MUTATING") await beginManagedReleaseMutation(driftedHandle); const envelope = structuredClone((await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } })).releaseLeaseRollbackRecord) as { payload: ReturnType<typeof rollbackPayload> }; if (phase === "RESERVED") envelope.payload.previous.releaseVersion = "release-drift"; else { envelope.payload.target.webAppName = "web-drift"; envelope.payload.previous.web.readyRevision = "web-drift--rev-1"; } await prisma.customerDeployment.update({ where: { id: drifted.id }, data: { releaseLeaseRollbackRecord: envelope as Prisma.InputJsonValue } }); const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } }); await expectCode(heartbeatManagedReleaseLease(driftedHandle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: drifted.id } })).toEqual(before); }
   });
   it("permits safe expired-reservation abort and clears the slot without resetting its fence or baseline", async () => {
     const target = await deployment();
@@ -164,7 +164,7 @@ describe("managed release lease CAS", () => {
       await beginManagedReleaseMutation(handle);
       const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
       const failure = await prisma.customerDeployment.update({ where: { id: target.id }, data }).catch((error: unknown) => error);
-      expect(failure).toMatchObject({ message: expect.stringContaining("CustomerDeployment_release_lease_eligibility_check") });
+      expect(failure).toMatchObject({ message: expect.stringContaining("MANAGED_RELEASE_LEASE_UPDATE_CONFLICT") });
       expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
     }
   });
@@ -180,10 +180,8 @@ describe("managed release lease CAS", () => {
       expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
     }
     await expect(prisma.customerDeployment.delete({ where: { id: target.id } })).rejects.toThrow("MANAGED_RELEASE_LEASE_DELETE_CONFLICT"); expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } })).toEqual(before);
-    await prisma.customerDeployment.update({ where: { id: target.id }, data: { releaseLeaseFence: 2_147_483_647,
-      releaseLeaseId: null, releaseLeaseTokenHash: null, releaseLeaseOwner: null, releaseLeaseExpectedImageTag: null, releaseLeaseIncomingImageTag: null,
-      releaseLeaseIncomingVersion: null, releaseLeasePhase: null, releaseLeaseAcquiredAt: null, releaseLeaseHeartbeatAt: null, releaseLeaseExpiresAt: null,
-    } });
+    await abortManagedReleaseLease(handle);
+    await prisma.customerDeployment.update({ where: { id: target.id }, data: { releaseLeaseFence: 2_147_483_647 } });
     await expectCode(acquire(target.id), "MANAGED_RELEASE_LEASE_CONFLICT");
     expect(handle.fence).toBe(1);
   });
