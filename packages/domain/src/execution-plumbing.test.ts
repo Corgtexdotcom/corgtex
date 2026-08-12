@@ -562,6 +562,21 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
   });
 
+  it("filters archived-parent CRM suggestions from direct and search target resolution", async () => {
+    prismaMock.crmCommunicationSuggestion.findFirst.mockResolvedValueOnce(null);
+    const { createExecutionRequest, listWritebackTargets } = await import("./execution-plumbing");
+    await expect(createExecutionRequest(actor, { workspaceId: "workspace-1", provider: "openwork", goal: "Send",
+      writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1" }))
+      .rejects.toThrow("CRM communication write-back target not found.");
+    await listWritebackTargets(agentActor, { workspaceId: "workspace-1", targetTypes: ["CRM_COMMUNICATION"] });
+    for (const call of [prismaMock.crmCommunicationSuggestion.findFirst.mock.calls[0],
+      prismaMock.crmCommunicationSuggestion.findMany.mock.calls.at(-1)]) {
+      expect(call?.[0]?.where).toMatchObject({ AND: expect.arrayContaining([
+        { OR: [{ accountId: null }, { account: { archivedAt: null } }] },
+      ]) });
+    }
+  });
+
   it("applies visibility filters when listing write-back targets", async () => {
     requireWorkspaceMembership.mockResolvedValueOnce({ id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "MEMBER", isActive: true });
     prismaMock.action.findMany.mockResolvedValueOnce([]);

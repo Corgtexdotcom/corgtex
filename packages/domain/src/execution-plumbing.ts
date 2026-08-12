@@ -19,6 +19,7 @@ import { createMeeting } from "./meetings";
 import { createProposal } from "./proposals";
 import { createTension } from "./tensions";
 import { createConversationMessage, failCommunicationSuggestion, markCommunicationSuggestionSent } from "./crm";
+import { activeCrmParentWhere } from "./crm-archive-guards";
 import { recordAudit } from "./audit-trail";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
@@ -519,7 +520,7 @@ async function validateWritebackTarget(
     }
     case "CRM_COMMUNICATION": {
       const item = await prisma.crmCommunicationSuggestion.findFirst({
-        where: { id: targetId, workspaceId },
+        where: { id: targetId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]) },
         select: {
           id: true,
           status: true,
@@ -990,6 +991,7 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
     const records = await prisma.crmCommunicationSuggestion.findMany({
       where: {
         workspaceId: params.workspaceId,
+        ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
         ...(title
           ? {
             OR: [

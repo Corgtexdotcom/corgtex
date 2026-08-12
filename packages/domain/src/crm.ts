@@ -6,9 +6,9 @@ import { requireGlobalOperator, requireWorkspaceMembership } from "./auth";
 import {
   archiveFilterWhere,
   archiveWorkspaceArtifact,
-  lockWorkspaceArchiveArtifact,
   type ArchiveFilter,
 } from "./archive";
+import { activeCrmParentWhere, lockCrmLinkClosure, lockCrmLinks, type CrmLinks } from "./crm-archive-guards";
 import { invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
 import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
@@ -80,28 +80,6 @@ const CLOSED_CRM_DEAL_STAGES = new Set<CrmDealStage>([
   CrmDealStage.CLOSED_WON,
   CrmDealStage.CLOSED_LOST,
 ]);
-
-type CrmArchiveParent = "account" | "contact" | "deal" | "activity";
-type CrmLinks = { accountId?: string | null; contactId?: string | null; dealId?: string | null; activityId?: string | null };
-const CRM_LOCK_FIELDS = [["CrmActivity", "activityId"], ["CrmDeal", "dealId"], ["CrmContact", "contactId"], ["CrmAccount", "accountId"]] as const;
-
-function activeCrmParentWhere(parents: readonly CrmArchiveParent[], filter: ArchiveFilter = "active", required: readonly CrmArchiveParent[] = []) {
-  if (filter !== "active") return {};
-  return {
-    AND: parents.map((parent) => required.includes(parent)
-      ? { [parent]: { archivedAt: null } }
-      : { OR: [{ [`${parent}Id`]: null }, { [parent]: { archivedAt: null } }] }),
-  };
-}
-
-async function lockCrmLinks(tx: any, ...links: CrmLinks[]) {
-  const linked = links.flatMap((link) => CRM_LOCK_FIELDS.map(([type, field]) => [type, link[field]] as const))
-    .filter((entry): entry is readonly ["CrmActivity" | "CrmDeal" | "CrmContact" | "CrmAccount", string] => Boolean(entry[1]));
-  const unique = [...new Map(linked.map(([type, id]) => [`${type}:${id}`, [type, id] as const])).values()]
-    .sort(([leftType, leftId], [rightType, rightId]) => CRM_LOCK_FIELDS.findIndex(([type]) => type === leftType)
-      - CRM_LOCK_FIELDS.findIndex(([type]) => type === rightType) || leftId.localeCompare(rightId));
-  for (const [entityType, id] of unique) await lockWorkspaceArchiveArtifact(tx, entityType, id);
-}
 
 function normalizeCrmCode(value: string | null | undefined, fallback: string, label: string) {
   const normalized = (value?.trim() || fallback)
@@ -322,22 +300,27 @@ async function resolveCrmActivityLinks(tx: any, params: {
   accountId?: string | null;
   contactId?: string | null;
   dealId?: string | null;
-}, existing?: { accountId: string | null; contactId: string | null; dealId: string | null }) {
+}, existing?: { accountId: string | null; contactId: string | null; dealId: string | null }, locksHeld = false) {
   let accountId = params.accountId !== undefined ? params.accountId : existing?.accountId ?? null;
   const contactId = params.contactId !== undefined ? params.contactId : existing?.contactId ?? null;
   const dealId = params.dealId !== undefined ? params.dealId : existing?.dealId ?? null;
+  if (!locksHeld) await lockCrmLinkClosure(tx, params.workspaceId, { accountId, contactId, dealId });
 
   if (contactId) {
-    const contact = await tx.crmContact.findUnique({ where: { id: contactId } });
-    invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
+    const contact = await tx.crmContact.findFirst({ where: {
+      id: contactId, workspaceId: params.workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]),
+    } });
+    invariant(contact, 404, "NOT_FOUND", "Contact not found.");
     if (accountId && contact.accountId) {
       invariant(accountId === contact.accountId, 400, "INVALID_INPUT", "Activity account must match the linked contact.");
     }
     accountId = accountId || contact.accountId || null;
   }
   if (dealId) {
-    const deal = await tx.crmDeal.findUnique({ where: { id: dealId } });
-    invariant(deal && deal.workspaceId === params.workspaceId && !deal.archivedAt, 404, "NOT_FOUND", "Deal not found.");
+    const deal = await tx.crmDeal.findFirst({ where: {
+      id: dealId, workspaceId: params.workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact"], "active", ["contact"]),
+    } });
+    invariant(deal, 404, "NOT_FOUND", "Deal not found.");
     if (accountId && deal.accountId) {
       invariant(accountId === deal.accountId, 400, "INVALID_INPUT", "Activity account must match the linked deal.");
     }
@@ -365,7 +348,10 @@ async function resolveCommunicationSuggestionLinks(tx: any, params: {
   const activityId = params.activityId !== undefined ? params.activityId : existing?.activityId ?? null;
 
   if (activityId) {
-    const activity = await requireActiveCrmActivity(tx, params.workspaceId, activityId);
+    const activity = await tx.crmActivity.findFirst({ where: {
+      id: activityId, workspaceId: params.workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]),
+    } });
+    invariant(activity, 404, "NOT_FOUND", "Activity not found.");
     if (accountId && activity.accountId) {
       invariant(accountId === activity.accountId, 400, "INVALID_INPUT", "Suggestion account must match the linked activity.");
     }
@@ -385,7 +371,7 @@ async function resolveCommunicationSuggestionLinks(tx: any, params: {
     accountId,
     contactId,
     dealId,
-  });
+  }, undefined, true);
 
   return { ...links, activityId };
 }
@@ -420,9 +406,11 @@ async function syncCrmAccountLinksForContact(tx: any, params: { workspaceId: str
     select: { id: true },
     orderBy: { id: "asc" },
   });
-  for (const activity of activityIds) {
-    await lockWorkspaceArchiveArtifact(tx, "CrmActivity", activity.id);
-  }
+  await lockCrmLinks(tx, ...activityIds.map((activity: { id: string }) => ({ activityId: activity.id })),
+    { contactId: params.contactId, accountId: params.accountId });
+  const contact = await tx.crmContact.findFirst({ where: { id: params.contactId, workspaceId: params.workspaceId,
+    archivedAt: null, accountId: params.accountId, account: { archivedAt: null } }, select: { id: true } });
+  invariant(contact, 404, "NOT_FOUND", "Contact not found.");
 
   const [deals, activities, conversations] = await Promise.all([
     tx.crmDeal.updateMany({
@@ -775,7 +763,7 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
     }
 
     const tags = crmInquiryTags(source, persona);
-    const existingContact = await tx.crmContact.findUnique({
+    let existingContact = await tx.crmContact.findUnique({
       where: {
         workspaceId_email: {
           workspaceId: workspace.id,
@@ -784,6 +772,12 @@ export async function captureCrmInquiry(params: CaptureCrmInquiryInput): Promise
       },
     });
     invariant(!existingContact?.archivedAt, 409, "ARCHIVED_PARENT", "Restore the matching contact before capturing this inquiry.");
+    if (existingContact) {
+      await lockCrmLinks(tx, { contactId: existingContact.id, accountId: existingContact.accountId });
+      existingContact = await tx.crmContact.findFirst({ where: { id: existingContact.id, workspaceId: workspace.id,
+        ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } });
+      invariant(existingContact, 409, "ARCHIVED_PARENT", "Restore the matching contact and account before capturing this inquiry.");
+    }
 
     const account = await ensureCrmAccount(tx, workspace.id, {
       email,
@@ -1697,10 +1691,10 @@ export async function createDeal(actor: AppActor, params: {
   invariant(title.length > 0, 400, "INVALID_INPUT", "Deal title is required.");
 
   return prisma.$transaction(async (tx) => {
-    await lockWorkspaceArchiveArtifact(tx, "CrmContact", params.contactId);
-    const contact = await tx.crmContact.findUnique({ where: { id: params.contactId } });
-    invariant(contact && contact.workspaceId === params.workspaceId && !contact.archivedAt, 404, "NOT_FOUND", "Contact not found.");
-    await lockCrmLinks(tx, contact);
+    await lockCrmLinkClosure(tx, params.workspaceId, { contactId: params.contactId, accountId: params.accountId });
+    const contact = await tx.crmContact.findFirst({ where: { id: params.contactId, workspaceId: params.workspaceId,
+      ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } });
+    invariant(contact, 404, "NOT_FOUND", "Contact not found.");
     let accountId = contact.accountId ? (await requireCrmAccount(tx, params.workspaceId, contact.accountId)).id : null;
     if (params.accountId !== undefined) {
       accountId = params.accountId ? (await requireCrmAccount(tx, params.workspaceId, params.accountId)).id : null;
@@ -1931,14 +1925,9 @@ export async function listCrmActivities(actor: AppActor, workspaceId: string, op
 }
 
 async function requireActiveCrmActivity(tx: any, workspaceId: string, activityId: string, replacements: CrmLinks = {}) {
-  await lockWorkspaceArchiveArtifact(tx, "CrmActivity", activityId);
   const links = await tx.crmActivity.findUnique({ where: { id: activityId } });
   invariant(links && links.workspaceId === workspaceId && !links.archivedAt, 404, "NOT_FOUND", "Activity not found.");
-  await lockCrmLinks(tx, { dealId: links.dealId, contactId: links.contactId }, { dealId: replacements.dealId, contactId: replacements.contactId });
-  const [contact, deal] = await Promise.all([replacements.contactId ? tx.crmContact.findUnique({ where: { id: replacements.contactId } }) : null,
-    replacements.dealId ? tx.crmDeal.findUnique({ where: { id: replacements.dealId } }) : null]);
-  await lockCrmLinks(tx, { accountId: links.accountId }, { accountId: replacements.accountId },
-    { accountId: contact?.accountId }, { accountId: deal?.accountId });
+  await lockCrmLinkClosure(tx, workspaceId, { ...links, activityId }, replacements);
   const activity = tx.crmActivity.findFirst ? await tx.crmActivity.findFirst({ where: {
     id: activityId, workspaceId, ...archiveFilterWhere(), ...activeCrmParentWhere(["account", "contact", "deal"]),
   } }) : links;
@@ -2043,7 +2032,7 @@ export async function updateActivity(actor: AppActor, params: {
         accountId: activity.accountId,
         contactId: activity.contactId,
         dealId: activity.dealId,
-      });
+      }, true);
       data.accountId = links.accountId;
       data.contactId = links.contactId;
       data.dealId = links.dealId;
@@ -2142,10 +2131,10 @@ function suggestionTimestampData(status: CrmCommunicationSuggestionStatus, now: 
   return { requestedAt: null, sentAt: null, declinedAt: null, failedAt: null, failureReason: null };
 }
 
-async function requireCommunicationSuggestion(tx: any, workspaceId: string, suggestionId: string) {
+async function requireCommunicationSuggestion(tx: any, workspaceId: string, suggestionId: string, replacements: CrmLinks = {}) {
   const links = await tx.crmCommunicationSuggestion.findUnique({ where: { id: suggestionId } });
   invariant(links && links.workspaceId === workspaceId, 404, "NOT_FOUND", "Communication suggestion not found.");
-  await lockCrmLinks(tx, links);
+  await lockCrmLinkClosure(tx, workspaceId, links, replacements);
   const suggestion = tx.crmCommunicationSuggestion.findFirst ? await tx.crmCommunicationSuggestion.findFirst({ where: {
     id: suggestionId, workspaceId, ...activeCrmParentWhere(["account", "contact", "deal", "activity"]),
   } }) : links;
@@ -2218,6 +2207,7 @@ export async function createCommunicationSuggestion(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     await requireCrmActivityOwner(tx, params.workspaceId, ownerUserId);
+    await lockCrmLinkClosure(tx, params.workspaceId, params);
     const links = await resolveCommunicationSuggestionLinks(tx, {
       workspaceId: params.workspaceId,
       accountId: params.accountId ?? null,
@@ -2286,7 +2276,9 @@ export async function updateCommunicationSuggestion(actor: AppActor, params: {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   return prisma.$transaction(async (tx) => {
-    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId);
+    const replacementLinks = { accountId: params.accountId, contactId: params.contactId,
+      dealId: params.dealId, activityId: params.activityId };
+    const suggestion = await requireCommunicationSuggestion(tx, params.workspaceId, params.suggestionId, replacementLinks);
     assertSuggestionEditable(suggestion);
 
     const data: any = {};
@@ -2751,56 +2743,39 @@ export async function sendSchedulingLinkEmail(qualificationId: string) {
 
 // --- CONVERSATIONS ---
 
+async function lockAndFindActiveCrmConversation(tx: any, workspaceId: string, conversation: CrmLinks & { id: string }) {
+  await lockCrmLinkClosure(tx, workspaceId, conversation);
+  return tx.crmConversation.findFirst({ where: { id: conversation.id, workspaceId,
+    ...activeCrmParentWhere(["account", "contact", "deal"]) }, include: { account: true, contact: true, demoLead: true } });
+}
+
 export async function syncEmailReplyToConversation(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
 }) {
   const email = params.fromEmail.trim().toLowerCase();
-  
-  const lead = await prisma.demoLead.findFirst({
-    where: { email },
-    orderBy: { createdAt: 'desc' },
+  return prisma.$transaction(async (tx) => {
+    const lead = await tx.demoLead.findFirst({ where: { email }, orderBy: { createdAt: "desc" } });
+    if (!lead) return null;
+    const existing = await tx.crmConversation.findFirst({ where: { workspaceId: lead.workspaceId, demoLeadId: lead.id } });
+    let conversation = existing ? await lockAndFindActiveCrmConversation(tx, lead.workspaceId, existing) : null;
+    if (existing && !conversation) return null;
+    if (!conversation) {
+      const contactLinks = await tx.crmContact.findUnique({ where: { workspaceId_email: { workspaceId: lead.workspaceId, email } } });
+      if (!contactLinks) return null;
+      await lockCrmLinkClosure(tx, lead.workspaceId, { contactId: contactLinks.id, accountId: contactLinks.accountId });
+      const contact = await tx.crmContact.findFirst({ where: { id: contactLinks.id, workspaceId: lead.workspaceId,
+        ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) } });
+      if (!contact) return null;
+      conversation = await tx.crmConversation.create({ data: { workspaceId: lead.workspaceId, accountId: contact.accountId ?? null,
+        demoLeadId: lead.id, contactId: contact.id, subject: params.subject.trim() } });
+    }
+    const message = await tx.crmConversationMessage.create({ data: { conversationId: conversation.id, senderType: "LEAD",
+      senderEmail: email, bodyMd: params.bodyText.trim() } });
+    await tx.crmConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
+    return message;
   });
-  
-  if (!lead) return null;
-
-  let conversation = await prisma.crmConversation.findFirst({
-    where: { workspaceId: lead.workspaceId, demoLeadId: lead.id, ...activeCrmParentWhere(["account", "contact", "deal"]) },
-  });
-
-  if (!conversation) {
-    const contact = await prisma.crmContact.findFirst({
-      where: { workspaceId: lead.workspaceId, email, ...archiveFilterWhere(), ...activeCrmParentWhere(["account"]) },
-    });
-    if (!contact) return null;
-
-    conversation = await prisma.crmConversation.create({
-      data: {
-        workspaceId: lead.workspaceId,
-        accountId: contact.accountId ?? null,
-        demoLeadId: lead.id,
-        contactId: contact.id,
-        subject: params.subject.trim(),
-      },
-    });
-  }
-
-  const message = await prisma.crmConversationMessage.create({
-    data: {
-      conversationId: conversation.id,
-      senderType: "LEAD",
-      senderEmail: email,
-      bodyMd: params.bodyText.trim(),
-    },
-  });
-
-  await prisma.crmConversation.update({
-    where: { id: conversation.id },
-    data: { updatedAt: new Date() },
-  });
-
-  return message;
 }
 
 export async function createConversationMessage(actor: AppActor, params: {
@@ -2812,17 +2787,11 @@ export async function createConversationMessage(actor: AppActor, params: {
 }) {
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
-  const conversation = await prisma.crmConversation.findFirst({
-    where: {
-      id: params.conversationId,
-      workspaceId: params.workspaceId,
-      ...activeCrmParentWhere(["account", "contact", "deal"]),
-    },
-    include: { account: true, contact: true, demoLead: true },
-  });
-  invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
-
   return prisma.$transaction(async (tx) => {
+    const links = await tx.crmConversation.findUnique({ where: { id: params.conversationId } });
+    invariant(links && links.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Conversation not found.");
+    const conversation = await lockAndFindActiveCrmConversation(tx, params.workspaceId, links);
+    invariant(conversation, 404, "NOT_FOUND", "Conversation not found.");
     const message = await tx.crmConversationMessage.create({
       data: {
         conversationId: conversation.id,

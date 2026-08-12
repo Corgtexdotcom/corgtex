@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { CrmActivityType, type MeetingInsight, type OAuthProvider, type Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
-import { lockWorkspaceArchiveArtifact } from "./archive";
+import { lockCrmLinks } from "./crm-archive-guards";
 import { invariant } from "./errors";
 
 const CRM_EMAIL_SOURCE = "oauth_email";
@@ -221,6 +221,13 @@ function calendarActivityBody(event: CalendarTouchpoint) {
   ].filter(Boolean).join("\n");
 }
 
+async function existingActivityBatch(tx: Prisma.TransactionClient, workspaceId: string, source: string, externalIds: string[]) {
+  const activities = await tx.crmActivity.findMany({ where: { workspaceId, source, sourceExternalId: { in: [...new Set(externalIds)] } },
+    select: { id: true, sourceExternalId: true }, orderBy: { id: "asc" } });
+  await lockCrmLinks(tx, ...activities.map((activity) => ({ activityId: activity.id })));
+  return new Map(activities.map((activity) => [activity.sourceExternalId, activity]));
+}
+
 export async function materializeCrmEmailTouchpoints(params: {
   workspaceId: string;
   connectionId: string;
@@ -238,6 +245,9 @@ export async function materializeCrmEmailTouchpoints(params: {
   };
 
   await prisma.$transaction(async (tx) => {
+    const externalIds = params.messages.filter((message) => safeFilters.has(message.filter.trim().toLowerCase()))
+      .map((message) => sourceExternalId("oauth-email", params.connectionId, message.provider, message.id));
+    const existingActivities = await existingActivityBatch(tx, params.workspaceId, CRM_EMAIL_SOURCE, externalIds);
     for (const message of params.messages) {
       if (!safeFilters.has(message.filter.trim().toLowerCase())) {
         summary.skippedUnsafeFilter += 1;
@@ -252,16 +262,7 @@ export async function materializeCrmEmailTouchpoints(params: {
 
       const externalId = sourceExternalId("oauth-email", params.connectionId, message.provider, message.id);
       const occurredAt = validDate(message.receivedAt);
-      const existingActivity = await tx.crmActivity.findUnique({
-        where: {
-          workspaceId_source_sourceExternalId: {
-            workspaceId: params.workspaceId,
-            source: CRM_EMAIL_SOURCE,
-            sourceExternalId: externalId,
-          },
-        },
-        select: { id: true },
-      });
+      const existingActivity = existingActivities.get(externalId);
       const activityData = {
         accountId: match.accountId,
         contactId: match.contactId,
@@ -272,14 +273,13 @@ export async function materializeCrmEmailTouchpoints(params: {
         sourceOccurredAt: occurredAt,
       };
       if (existingActivity) {
-        await lockWorkspaceArchiveArtifact(tx, "CrmActivity", existingActivity.id);
         const updated = await tx.crmActivity.updateMany({
           where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
           data: activityData,
         });
         summary.activitiesUpdated += updated.count;
       } else {
-        await tx.crmActivity.create({
+        const created = await tx.crmActivity.create({
           data: {
             workspaceId: params.workspaceId,
             ...activityData,
@@ -287,6 +287,7 @@ export async function materializeCrmEmailTouchpoints(params: {
             sourceExternalId: externalId,
           },
         });
+        existingActivities.set(externalId, created);
         summary.activitiesCreated += 1;
       }
 
@@ -349,6 +350,9 @@ export async function materializeCrmCalendarTouchpoints(params: {
   };
 
   await prisma.$transaction(async (tx) => {
+    const externalIds = params.events.filter((event) => event.status?.toLowerCase() !== "cancelled")
+      .map((event) => sourceExternalId("oauth-calendar", params.connectionId, event.provider, event.id));
+    const existingActivities = await existingActivityBatch(tx, params.workspaceId, CRM_CALENDAR_SOURCE, externalIds);
     for (const event of params.events) {
       if (event.status?.toLowerCase() === "cancelled") {
         summary.skippedCancelled += 1;
@@ -366,16 +370,7 @@ export async function materializeCrmCalendarTouchpoints(params: {
       }
 
       const externalId = sourceExternalId("oauth-calendar", params.connectionId, event.provider, event.id);
-      const existingActivity = await tx.crmActivity.findUnique({
-        where: {
-          workspaceId_source_sourceExternalId: {
-            workspaceId: params.workspaceId,
-            source: CRM_CALENDAR_SOURCE,
-            sourceExternalId: externalId,
-          },
-        },
-        select: { id: true },
-      });
+      const existingActivity = existingActivities.get(externalId);
       const activityData = {
         accountId: match.accountId,
         contactId: match.contactId,
@@ -386,14 +381,13 @@ export async function materializeCrmCalendarTouchpoints(params: {
         sourceOccurredAt: event.startTime,
       };
       if (existingActivity) {
-        await lockWorkspaceArchiveArtifact(tx, "CrmActivity", existingActivity.id);
         const updated = await tx.crmActivity.updateMany({
           where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
           data: activityData,
         });
         summary.activitiesUpdated += updated.count;
       } else {
-        await tx.crmActivity.create({
+        const created = await tx.crmActivity.create({
           data: {
             workspaceId: params.workspaceId,
             ...activityData,
@@ -401,6 +395,7 @@ export async function materializeCrmCalendarTouchpoints(params: {
             sourceExternalId: externalId,
           },
         });
+        existingActivities.set(externalId, created);
         summary.activitiesCreated += 1;
       }
     }
