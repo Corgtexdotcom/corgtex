@@ -6,6 +6,10 @@ import { handleRouteError, validateBody } from "@/lib/http";
 import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
 
 type Params = { params: Promise<{ workspaceId: string; actionId: string }> };
+const actionDueAtSchema = z.string().refine(
+  (value) => Number.isFinite(new Date(value).getTime()),
+  { message: "Invalid due date." },
+);
 const updateActionSchema = z.object({
   title: z.string().trim().min(1).optional(),
   bodyMd: z.string().optional().nullable(),
@@ -14,7 +18,7 @@ const updateActionSchema = z.object({
   assigneeMemberId: z.string().optional().nullable(),
   priority: z.union([z.number().int(), z.string()]).optional().nullable(),
   priorityLabel: z.string().optional().nullable(),
-  dueAt: z.string().datetime().optional().nullable(),
+  dueAt: actionDueAtSchema.optional().nullable(),
   expectedVersion: z.number().int().positive(),
 }).strict();
 

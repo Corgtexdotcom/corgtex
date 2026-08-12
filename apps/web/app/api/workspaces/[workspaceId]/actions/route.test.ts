@@ -331,6 +331,24 @@ describe("PATCH /api/workspaces/[workspaceId]/actions/[actionId]", () => {
     });
   });
 
+  it("preserves date-only due date updates", async () => {
+    const { PATCH } = await import("./[actionId]/route");
+    const response = await PATCH(actionPatchRequest({
+      dueAt: "2026-08-12",
+      expectedVersion: 2,
+    }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", actionId: "action-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      dueAt: new Date("2026-08-12"),
+      expectedVersion: 2,
+    }));
+  });
+
   it.each([
     ["missing", { title: "Updated action" }],
     ["zero", { title: "Updated action", expectedVersion: 0 }],
