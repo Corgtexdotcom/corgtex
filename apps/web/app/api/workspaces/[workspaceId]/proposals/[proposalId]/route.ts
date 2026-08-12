@@ -14,7 +14,8 @@ const updateProposalSchema = z.object({
   ownerMemberId: z.string().optional().nullable(),
   priority: z.union([z.number().int(), z.string()]).optional().nullable(),
   priorityLabel: z.string().optional().nullable(),
-});
+  expectedVersion: z.number().int().positive(),
+}).strict();
 
 export async function PATCH(request: NextRequest, { params }: Params) {
   try {
@@ -30,6 +31,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       circleId: body.circleId !== undefined ? body.circleId : undefined,
       ownerMemberId: body.ownerMemberId !== undefined ? body.ownerMemberId : undefined,
       priority: workItemPriorityFromBody(body),
+      expectedVersion: body.expectedVersion,
     });
     const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, proposal.id) ?? proposal;
     return NextResponse.json({ proposal: serializeProposalWorkItem(proposalForResponse) });
