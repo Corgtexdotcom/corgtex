@@ -287,7 +287,7 @@ function hasDeterministicNegativeCategory(text: string, concreteNextStep: string
   const completionText = text.replace(/\b(?:not\s+(?:yet\s+)?(?:done|sent|handled|finished|completed|resolved)|(?:must|should|will|needs? to|please ensure(?: that)?)[^.!?\n]{0,80}\b(?:be|is|are)\s+(?:done|sent|handled|finished|completed|resolved))\b/gi, "");
   const [rawVerb = "", ...deliverableWords] = concreteNextStep.match(/[a-z0-9]+/gi) ?? [], deliverableVerb = rawVerb.toLowerCase(), completedVerbs = ({ send: ["sent"], do: ["did", "done"], pay: ["paid"], write: ["wrote", "written"], make: ["made"], submit: ["submitted"] } as Record<string, string[]>)[deliverableVerb] ?? [`${deliverableVerb}${deliverableVerb.endsWith("e") ? "d" : "ed"}`];
   const scopedSentences = completionText.split(/[.!?\n]+/).filter((sentence) => deliverableWords.filter((word) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => token.toLowerCase() === word.toLowerCase())).length >= Math.min(2, deliverableWords.length)), completionScope = scopedSentences.filter((sentence) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => completedVerbs.includes(token.toLowerCase()))).join("\n"), deliverableScope = scopedSentences.filter((sentence) => (sentence.match(/[a-z0-9]+/gi) ?? []).some((token) => token.toLowerCase() === deliverableVerb || completedVerbs.includes(token.toLowerCase()))).join("\n");
-  return /(?:^|[.!?\n]\s*)(?:(?:(?:this is|just|only)\s+(?:a\s+)?(?:(?:smoke|routing)\s+test(?:\s+[^.!?\n]+)?|test\s+of\s+routing|test(?: message)?(?=\s*(?:[.!?:]|$)))|smoke\s+testing(?:\s+[^.!?\n]+)?|(?:smoke\s+|routing\s+)?test(?:ing)?(?: message)?(?=\s*(?:[.!?:]|$))|dry run|routing check|checking (?:the )?routing))\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
+  return /(?:^|[.!?\n]\s*)(?:(?:(?:this is(?:\s+(?:just|only))?|just|only)\s+(?:a\s+)?(?:(?:smoke|routing)\s+test(?:\s+[^.!?\n]+)?|test\s+of\s+routing|test(?: message)?(?=\s*(?:[.!?:]|$)))|smoke\s+testing(?:\s+[^.!?\n]+)?|(?:smoke\s+|routing\s+)?test(?:ing)?(?: message)?(?=\s*(?:[.!?:]|$))|dry run|routing check|checking (?:the )?routing))\b/im.test(completionText) || /(?:^|\n)\s*(?:(?:quick|just)\s+)?(?:fyi|for your information|heads[- ]?up)\b/im.test(completionText)
     || /^\s*(?:ack(?:nowledged)?|got it|sounds good|thank you|thanks)[.!]?\s*$/i.test(completionText)
     || Boolean(completionScope) || /(?:^|[.!?]\s*)done\b/i.test(completionText) || /\b(?:never|cannot|(?:(?:will|would|can|could|should|must|do|does|did|is|are)\s+not|won['’]t|wouldn['’]t|can['’]t|couldn['’]t|shouldn['’]t|mustn['’]t|don['’]t|doesn['’]t|didn['’]t|isn['’]t|aren['’]t))\b/i.test(deliverableScope);
 }
@@ -300,7 +300,7 @@ function hasExplicitActionCreateRequest(text: string) {
     || /\bturn\b[^.!?\n]{0,30}\binto\b[^.!?\n]{0,20}\b(?:an?\s+)?(?:corgtex\s+action|action item|work item)\b/i.test(text);
 }
 
-function hasActionCreationNegation(text: string) { return /\b(?:do not|don['’]t|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text) || /\bnot an? action item\b/i.test(text); }
+function hasActionCreationNegation(text: string) { return /\b(?:do not|don['’]t|dont|cannot|can't|cant|never|must not|mustn't|no need to|should not|shouldn't)\b[^.!?\n]{0,50}\b(?:create|make|open|add|assign|turn)\b[^.!?\n]{0,40}\baction(?: item)?\b/i.test(text) || /\bnot an? action item\b/i.test(text) || /\bno\s+(?:need\s+for\s+(?:an?\s+)?(?:corgtex\s+action|action item|work item)|(?:corgtex\s+action|action item|work item)\s+(?:is\s+)?needed)\b/i.test(text); }
 
 function evidenceIsGrounded(evidence: string, threadMessages: SlackCandidateMessage[]) { return evidence.trim().length >= 2 && threadMessages.map((message) => message.text ?? "").join("\n").toLowerCase().includes(evidence.toLowerCase()); }
 
@@ -734,7 +734,7 @@ export async function runSlackProactiveScan(params: {
           installationId: params.installationId,
           provider: "SLACK",
           messageId: latestThreadMessage.id,
-          OR: [{ entityType: "Action", entityId: linkedAction.entityId, action: { in: [PROACTIVE_EXISTING_ACTION_UPDATE, PROACTIVE_ACTION_WAITING_UPDATE] } }, ...(scannerCreatedAction ? [{ entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey }] : [])],
+          OR: [{ entityType: "Action", entityId: linkedAction.entityId, action: { in: [PROACTIVE_EXISTING_ACTION_UPDATE, PROACTIVE_ACTION_WAITING_UPDATE] } }, { entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey }],
         },
         select: { id: true },
       });
@@ -777,6 +777,7 @@ export async function runSlackProactiveScan(params: {
             : PROACTIVE_EXISTING_ACTION_UPDATE,
         });
       }
+      await recordProactiveMarker({ installationId: params.installationId, workspaceId: params.workspaceId, messageId: latestThreadMessage.id, externalUserId: latestThreadMessage.externalUserId, entityType: "CommunicationMessage", entityId: latestThreadMessage.id, action: PROACTIVE_ACTION_PROCESSED_REPLY, claimKey: processedReplyClaimKey });
       continue;
     }
 
