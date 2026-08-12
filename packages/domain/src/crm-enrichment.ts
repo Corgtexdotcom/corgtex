@@ -1,4 +1,5 @@
 import { prisma } from "@corgtex/shared";
+import { activeCrmParentWhere, lockCrmLinkClosure } from "./crm-archive-guards";
 import { invariant } from "./errors";
 
 export async function applyEnrichmentResult(
@@ -11,57 +12,22 @@ export async function applyEnrichmentResult(
     confidence: number;
   },
 ) {
-  const contact = await prisma.crmContact.findFirst({
-    where: {
-      id: contactId,
-      workspaceId,
-    },
+  return prisma.$transaction(async (tx) => {
+    const links = await tx.crmContact.findUnique({ where: { id: contactId } });
+    invariant(links && links.workspaceId === workspaceId && !links.archivedAt, 404, "NOT_FOUND", "Contact not found.");
+    await lockCrmLinkClosure(tx, workspaceId, { contactId, accountId: links.accountId });
+    const contact = await tx.crmContact.findFirst({ where: { id: contactId, workspaceId, archivedAt: null,
+      ...activeCrmParentWhere(["account"]) } });
+    invariant(contact, 404, "NOT_FOUND", "Contact not found.");
+    if (enrichedData.confidence >= 0.7) {
+      const tags = new Set(contact.tags || []);
+      if (enrichedData.industry) tags.add(enrichedData.industry);
+      if (enrichedData.headquarters) tags.add(enrichedData.headquarters);
+      await tx.crmContact.update({ where: { id: contact.id }, data: { tags: Array.from(tags) } });
+    }
+    await tx.crmActivity.create({ data: { workspaceId, type: "NOTE", accountId: contact.accountId ?? null, contactId,
+      title: enrichedData.confidence >= 0.7 ? "Applied Enrichment Data" : "Low-Confidence Enrichment Found",
+      bodyMd: `${enrichedData.confidence >= 0.7 ? "Applied high-confidence enrichment data" : `Low-confidence enrichment data found (score: ${enrichedData.confidence}). Please review`}: ${JSON.stringify({
+        industry: enrichedData.industry, headquarters: enrichedData.headquarters, description: enrichedData.description })}` } });
   });
-
-  invariant(contact && contact.workspaceId === workspaceId, 404, "NOT_FOUND", "Contact not found.");
-
-  if (enrichedData.confidence >= 0.7) {
-    // Only update fields that are currently null to avoid overwriting existing data.
-    const tags = new Set(contact.tags || []);
-    if (enrichedData.industry) tags.add(enrichedData.industry);
-    if (enrichedData.headquarters) tags.add(enrichedData.headquarters);
-
-    await prisma.crmContact.update({
-      where: { id: contact.id },
-      data: {
-        tags: Array.from(tags),
-      },
-    });
-
-    await prisma.crmActivity.create({
-      data: {
-        workspaceId,
-        type: "NOTE",
-        accountId: contact.accountId ?? null,
-        contactId,
-        title: "Applied Enrichment Data",
-        bodyMd: `Applied high-confidence enrichment data: ${JSON.stringify({
-          industry: enrichedData.industry,
-          headquarters: enrichedData.headquarters,
-          description: enrichedData.description,
-        })}`,
-      },
-    });
-  } else {
-    // Log low confidence findings for human review
-    await prisma.crmActivity.create({
-      data: {
-        workspaceId,
-        type: "NOTE",
-        accountId: contact.accountId ?? null,
-        contactId,
-        title: "Low-Confidence Enrichment Found",
-        bodyMd: `Low-confidence enrichment data found (score: ${enrichedData.confidence}). Please review: ${JSON.stringify({
-          industry: enrichedData.industry,
-          headquarters: enrichedData.headquarters,
-          description: enrichedData.description,
-        })}`,
-      },
-    });
-  }
 }
