@@ -2,6 +2,7 @@ import { requirePageActor } from "@/lib/auth";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import type { WorkItemViewMode } from "@/lib/work-item-view";
 import { listCrmAccounts, listCrmActivities, listDeals, requireWorkspaceMembership } from "@corgtex/domain";
@@ -19,7 +20,7 @@ import {
 import {
   CRM_LIFECYCLE_OPTIONS,
   CRM_RELATIONSHIP_OPTIONS,
-  accountHref,
+  accountNavigationState,
   activePipelineValueCents,
   labelFromCrmCode,
   relationshipDashboardHref,
@@ -226,12 +227,17 @@ export default async function RelationshipAccountsPage({
     const accountDeals = dealsByAccountId.get(account.id) ?? [];
     const pipelineValue = activePipelineValueCents(accountDeals);
     const lastActivity = lastActivityByAccountId.get(account.id);
+    const accountNav = accountNavigationState(workspaceId, account);
     return {
       id: account.id,
       cells: {
         account: (
           <>
-            <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
+            {accountNav.isArchived ? (
+              <span className="nr-work-item-table-title muted">{account.name}</span>
+            ) : (
+              <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-work-item-table-title">{account.name}</a>
+            )}
             <div className="nr-work-item-table-meta">{account.domain || t("noDomain")}</div>
           </>
         ),
@@ -251,17 +257,19 @@ export default async function RelationshipAccountsPage({
         actions: (
           <div className="row" style={{ justifyContent: "flex-end", gap: 6 }}>
             <a
-              href={accountHref(workspaceId, account.id)}
+              href={accountNav.href ?? accountNav.fallbackHref}
               className="nr-icon-link nr-table-action"
               aria-label={t("openDetail")}
               title={t("openDetail")}
             >
               <ExternalLink size={15} aria-hidden="true" />
             </a>
-            <form action={archiveCrmAccountAction}>
+            <form action={archiveCrmAccountAction} style={{ whiteSpace: "nowrap" }}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
               <input type="hidden" name="accountId" value={account.id} />
-              <button type="submit" className="danger small" style={{ whiteSpace: "nowrap" }}>{t("btnArchiveAccount")}</button>
+              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                {t("btnArchiveAccount")}
+              </ConfirmSubmitButton>
             </form>
           </div>
         ),
@@ -367,12 +375,17 @@ export default async function RelationshipAccountsPage({
               const accountDeals = dealsByAccountId.get(account.id) ?? [];
               const pipelineValue = activePipelineValueCents(accountDeals);
               const lastActivity = lastActivityByAccountId.get(account.id);
+              const accountNav = accountNavigationState(workspaceId, account);
               return (
                 <div key={account.id} className="item" style={{ display: "grid", gap: 10 }}>
                   <div className="row" style={{ alignItems: "flex-start", gap: 10 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
-                      <div className="muted" style={{ fontSize: "0.84rem", marginTop: 4 }}>{account.domain || t("noDomain")}</div>
+                    <div className="stack" style={{ gap: 4 }}>
+                      {accountNav.isArchived ? (
+                        <span className="nr-work-item-table-title muted">{account.name}</span>
+                      ) : (
+                        <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-work-item-table-title">{account.name}</a>
+                      )}
+                      <div className="row muted" style={{ gap: 8, fontSize: "0.8rem", flexWrap: "wrap" }}>{account.domain || t("noDomain")}</div>
                     </div>
                     <span className="tag-sm" style={{ marginLeft: "auto" }}>{formatCurrency(pipelineValue)}</span>
                   </div>
@@ -385,12 +398,14 @@ export default async function RelationshipAccountsPage({
                   <div className="muted" style={{ fontSize: "0.82rem" }}>
                     {lastActivity ? t("accountLastActivity", { title: lastActivity.title, age: formatDate(lastActivity.createdAt) }) : formatDate(account.updatedAt)}
                   </div>
-                  <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
-                    <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>
+                  <div className="row" style={{ marginTop: "auto", gap: 6, flexWrap: "wrap" }}>
+                    <a href={accountNav.href ?? accountNav.fallbackHref} className="link-button small">{t("openDetail")}</a>
                     <form action={archiveCrmAccountAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="accountId" value={account.id} />
-                      <button type="submit" className="danger small">{t("btnArchiveAccount")}</button>
+                      <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                        {t("btnArchiveAccount")}
+                      </ConfirmSubmitButton>
                     </form>
                   </div>
                 </div>

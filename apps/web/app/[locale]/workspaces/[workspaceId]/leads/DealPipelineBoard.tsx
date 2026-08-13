@@ -1,5 +1,5 @@
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
-import { updateDealAction } from "../actions";
+import { archiveDealAction, updateDealAction } from "./actions";
 import { DealStageSelect } from "./DealStageSelect";
 import {
   dealPipelineSort,
@@ -9,7 +9,8 @@ import {
   nextDealFollowUp,
   type DealPipelineDeal,
 } from "./deal-pipeline";
-import { CRM_CREATABLE_DEAL_STAGES, CRM_DEAL_STAGES, accountHref, labelFromCrmCode } from "./view-model";
+import { CRM_CREATABLE_DEAL_STAGES, CRM_DEAL_STAGES, accountNavigationState, labelFromCrmCode } from "./view-model";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 
 type PipelineMember = {
   user: {
@@ -82,6 +83,8 @@ export function DealPipelineBoard({
     stageAgeToday: string;
     stageAgeYesterday: string;
     stageAgeDays: (days: number) => string;
+    archiveDeal?: string;
+    confirmArchiveDeal?: string;
   };
   workItemLabels: WorkItemLabels;
   accountFallback?: PipelineAccount | null;
@@ -153,13 +156,12 @@ export function DealPipelineBoard({
               <div style={{ display: "grid", gap: 6, marginTop: 10, fontSize: "0.82rem" }}>
                 <div>
                   <span className="muted">{labels.account}: </span>
-                  {account ? (
-                    account.archivedAt ? (
-                      <span className="muted">{account.name}</span>
-                    ) : (
-                      <a href={accountHref(workspaceId, account.id)}>{account.name}</a>
-                    )
-                  ) : <span className="muted">{labels.noAccount}</span>}
+                  {(() => {
+                    const nav = accountNavigationState(workspaceId, account);
+                    if (nav.isMissing) return <span className="muted">{labels.noAccount}</span>;
+                    if (nav.isArchived) return <span className="muted">{account?.name}</span>;
+                    return <a href={nav.href ?? nav.fallbackHref}>{account?.name}</a>;
+                  })()}
                 </div>
                 <div>
                   <span className="muted">{labels.contact}: </span>
@@ -175,8 +177,15 @@ export function DealPipelineBoard({
                   ? `${followUp.title}${followUp.dueAt ? ` (${formatDate(followUp.dueAt)})` : ""}`
                   : labels.noNextFollowUp}
               </div>
-              <div style={{ marginTop: 12, display: "flex", gap: 4 }}>
+              <div style={{ marginTop: 12, display: "flex", gap: 4, alignItems: "center" }}>
                 <DealStageSelect workspaceId={workspaceId} dealId={deal.id} currentStage={deal.stage} />
+                <form action={archiveDealAction}>
+                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                  <input type="hidden" name="dealId" value={deal.id} />
+                  <ConfirmSubmitButton className="danger small" confirmMessage={labels.confirmArchiveDeal || "Archive deal?"}>
+                    {labels.archiveDeal || "Archive"}
+                  </ConfirmSubmitButton>
+                </form>
               </div>
               <div aria-hidden="true" style={{ display: "none" }}>
                 {CRM_DEAL_STAGES.filter((targetStage) => targetStage !== deal.stage).map((targetStage) => (

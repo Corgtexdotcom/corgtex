@@ -3,8 +3,10 @@ import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
-import { getCrmAccount, listCommunicationSuggestions, listMembers, requireWorkspaceMembership } from "@corgtex/domain";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
+import { getCrmAccount, listCommunicationSuggestions, listMembers, requireWorkspaceMembership, AppError } from "@corgtex/domain";
 import { getTranslations } from "next-intl/server";
+import { notFound } from "next/navigation";
 
 import {
   archiveContactAction,
@@ -77,8 +79,12 @@ export default async function AccountDetailPage({
     stage,
     `/workspaces/${workspaceId}/add?kind=deal&stage=${stage}&returnTo=${encodeURIComponent(pipelineReturnTo)}`,
   ]));
+  const accountPromise = getCrmAccount(actor, { workspaceId, accountId }).catch((error) => {
+    if (error instanceof AppError && error.code === "NOT_FOUND") notFound();
+    throw error;
+  });
   const [account, communicationSuggestionResult, members] = await Promise.all([
-    getCrmAccount(actor, { workspaceId, accountId }),
+    accountPromise,
     listCommunicationSuggestions(actor, workspaceId, { accountId, take: 100 }),
     listMembers(workspaceId),
   ]);
@@ -468,7 +474,9 @@ export default async function AccountDetailPage({
               <form action={archiveCrmAccountAction} style={{ marginTop: 12 }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
                 <input type="hidden" name="accountId" value={account.id} />
-                <button type="submit" className="danger small">{t("btnArchiveAccount")}</button>
+                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                  {t("btnArchiveAccount")}
+                </ConfirmSubmitButton>
               </form>
             </details>
           </div>
@@ -493,7 +501,9 @@ export default async function AccountDetailPage({
                     <form action={archiveContactAction}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="contactId" value={contact.id} />
-                      <button type="submit" className="danger small">{t("btnArchiveContact")}</button>
+                      <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveContact")}>
+                        {t("btnArchiveContact")}
+                      </ConfirmSubmitButton>
                     </form>
                   </div>
                 </div>
@@ -527,6 +537,8 @@ export default async function AccountDetailPage({
                 stageAgeToday: t("pipelineStageAgeToday"),
                 stageAgeYesterday: t("pipelineStageAgeYesterday"),
                 stageAgeDays: (days) => t("pipelineStageAgeDays", { days }),
+                archiveDeal: t("btnArchiveDeal"),
+                confirmArchiveDeal: t("confirmArchiveDeal"),
               }}
               workItemLabels={{
                 settingsLabel: tWork("columnSettings"),
