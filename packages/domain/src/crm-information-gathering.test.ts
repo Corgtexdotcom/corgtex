@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const lockCrmLinkClosure = vi.hoisted(() => vi.fn().mockResolvedValue({ activities: [], deals: [], contacts: [], accountIds: [] }));
 const prismaMock = vi.hoisted(() => {
   const mock = {
     $transaction: vi.fn(),
@@ -8,8 +9,9 @@ const prismaMock = vi.hoisted(() => {
     },
     crmActivity: {
       create: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
-      update: vi.fn(),
+      updateMany: vi.fn(),
     },
     crmContact: {
       findFirst: vi.fn(),
@@ -35,6 +37,7 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
 }));
 
+vi.mock("./crm-archive-guards", () => ({ lockCrmLinkClosure }));
 import {
   createCrmMeetingReviewInsights,
   materializeCrmCalendarTouchpoints,
@@ -49,8 +52,9 @@ describe("crm information gathering", () => {
     prismaMock.crmContact.findFirst.mockResolvedValue(null);
     prismaMock.crmAccount.findFirst.mockResolvedValue(null);
     prismaMock.crmActivity.findUnique.mockResolvedValue(null);
+    prismaMock.crmActivity.findMany.mockResolvedValue([]);
     prismaMock.crmActivity.create.mockResolvedValue({ id: "activity-1" });
-    prismaMock.crmActivity.update.mockResolvedValue({ id: "activity-1" });
+    prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.crmConversation.findUnique.mockResolvedValue(null);
     prismaMock.crmConversation.create.mockResolvedValue({ id: "conversation-1" });
     prismaMock.crmConversation.update.mockResolvedValue({ id: "conversation-1" });
@@ -84,9 +88,9 @@ describe("crm information gathering", () => {
       company: "Example",
       account: { id: "account-1", name: "Example", domain: "example.test" },
     });
-    prismaMock.crmActivity.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "activity-1" });
+    prismaMock.crmActivity.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "activity-1", sourceExternalId: "oauth-email:conn-1:google:msg-1" }]);
     prismaMock.crmConversation.findUnique
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ id: "conversation-1" });
@@ -114,6 +118,9 @@ describe("crm information gathering", () => {
 
     expect(first).toMatchObject({ activitiesCreated: 1, conversationsCreated: 1 });
     expect(second).toMatchObject({ activitiesUpdated: 1, conversationsUpdated: 1 });
+    expect(prismaMock.crmContact.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      archivedAt: null, OR: [{ accountId: null }, { account: { archivedAt: null } }],
+    }) }));
     expect(prismaMock.crmConversation.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.crmConversation.update).toHaveBeenCalledTimes(1);
   });
@@ -138,6 +145,20 @@ describe("crm information gathering", () => {
     expect(prismaMock.crmConversation.create).not.toHaveBeenCalled();
   });
 
+  it("locks and skips an archived activity during repeated email materialization", async () => {
+    prismaMock.crmContact.findFirst.mockResolvedValue({ id: "contact-1", name: "Buyer", email: "buyer@example.test", company: "Example",
+      account: { id: "account-1", name: "Example", domain: "example.test" } });
+    prismaMock.crmActivity.findMany.mockResolvedValue([{ id: "activity-1", sourceExternalId: "oauth-email:conn-1:google:msg-1" }]);
+    prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 0 });
+    const result = await materializeCrmEmailTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", messages: [{
+      id: "msg-1", provider: "GOOGLE", subject: "Archived", from: "buyer@example.test",
+      receivedAt: null, webUrl: null, snippet: "Do not overwrite.", filter: "from:buyer@example.test",
+    }] });
+    expect(lockCrmLinkClosure).toHaveBeenCalledWith(prismaMock, "workspace-1", { activityId: "activity-1" },
+      { contactId: "contact-1", accountId: "account-1" });
+    expect(prismaMock.crmActivity.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ archivedAt: null }) }));
+    expect(result.activitiesUpdated).toBe(0);
+  });
   it("matches calendar events by existing business-domain accounts", async () => {
     prismaMock.crmContact.findFirst.mockResolvedValue(null);
     prismaMock.crmAccount.findFirst.mockResolvedValue({ id: "account-1", name: "Example", domain: "example.test" });
@@ -171,6 +192,72 @@ describe("crm information gathering", () => {
     }));
   });
 
+  it("locks and skips an archived activity during repeated calendar materialization", async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: "account-1", name: "Example", domain: "example.test" });
+    prismaMock.crmActivity.findMany.mockResolvedValue([{ id: "activity-1", sourceExternalId: "oauth-calendar:conn-1:google:event-1" }]);
+    prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 0 });
+    const result = await materializeCrmCalendarTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", events: [{
+      id: "event-1", provider: "GOOGLE", title: "Archived", description: null, startTime: new Date("2026-06-18T10:00:00.000Z"),
+      endTime: new Date("2026-06-18T10:30:00.000Z"), attendees: ["buyer@example.test"], organizerEmail: null,
+      meetingUrl: null, htmlLink: null, status: null,
+    }] });
+    expect(lockCrmLinkClosure).toHaveBeenCalledWith(prismaMock, "workspace-1", { activityId: "activity-1" },
+      { contactId: null, accountId: "account-1" });
+    expect(result.activitiesUpdated).toBe(0);
+  });
+  it("locks the deduplicated existing activity batch before the first mutation", async () => {
+    prismaMock.crmContact.findFirst.mockResolvedValue({ id: "contact-1", name: "Buyer", email: "buyer@example.test", company: "Example",
+      account: { id: "account-1", name: "Example", domain: "example.test" } });
+    prismaMock.crmActivity.findMany.mockResolvedValue([
+      { id: "z-activity", sourceExternalId: "oauth-email:conn-1:google:z" },
+      { id: "a-activity", sourceExternalId: "oauth-email:conn-1:google:a" },
+    ]);
+    await materializeCrmEmailTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", messages: ["z", "a", "z"].map((id) => ({
+      id, provider: "GOOGLE" as const, subject: id, from: "buyer@example.test", receivedAt: null, webUrl: null,
+      snippet: id, filter: "from:buyer@example.test",
+    })) });
+    expect(prismaMock.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      sourceExternalId: { in: ["oauth-email:conn-1:google:z", "oauth-email:conn-1:google:a"] },
+    }) }));
+    expect(lockCrmLinkClosure).toHaveBeenCalledTimes(1);
+    expect(lockCrmLinkClosure.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.crmActivity.updateMany.mock.invocationCallOrder[0]!);
+  });
+  it("locks all matched parents once and skips a match archived after discovery", async () => {
+    prismaMock.crmContact.findFirst
+      .mockResolvedValueOnce({ id: "z-contact", email: "z@example.test", account: { id: "z-account" } })
+      .mockResolvedValueOnce({ id: "a-contact", email: "a@example.test", account: { id: "a-account" } })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "a-contact" });
+    const result = await materializeCrmEmailTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1",
+      messages: ["z", "a"].map((id) => ({ id, provider: "GOOGLE" as const, subject: id, from: `${id}@example.test`,
+        receivedAt: null, webUrl: null, snippet: id, filter: `from:${id}@example.test` })) });
+    expect(lockCrmLinkClosure).toHaveBeenCalledTimes(1);
+    expect(lockCrmLinkClosure).toHaveBeenCalledWith(prismaMock, "workspace-1",
+      { contactId: "z-contact", accountId: "z-account" }, { contactId: "a-contact", accountId: "a-account" });
+    expect(result).toMatchObject({ skippedUnmatched: 1, activitiesCreated: 1 });
+  });
+  it("revalidates the exact email identity after locking", async () => {
+    prismaMock.crmContact.findFirst
+      .mockResolvedValueOnce({ id: "contact-1", email: "buyer@example.test", account: { id: "account-1", domain: "example.test" } })
+      .mockResolvedValueOnce(null);
+    const result = await materializeCrmEmailTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", messages: [{
+      id: "msg-1", provider: "GOOGLE", subject: "Stale", from: "buyer@example.test", receivedAt: null,
+      webUrl: null, snippet: "Do not write.", filter: "from:buyer@example.test",
+    }] });
+    expect(result).toMatchObject({ skippedUnmatched: 1, activitiesCreated: 0 });
+    expect(prismaMock.crmActivity.create).not.toHaveBeenCalled();
+  });
+  it("revalidates the exact account domain after locking", async () => {
+    prismaMock.crmAccount.findFirst
+      .mockResolvedValueOnce({ id: "account-1", name: "Example", domain: "example.test" })
+      .mockResolvedValueOnce(null);
+    const result = await materializeCrmCalendarTouchpoints({ workspaceId: "workspace-1", connectionId: "conn-1", events: [{
+      id: "event-1", provider: "GOOGLE", title: "Stale", description: null, startTime: new Date(), endTime: new Date(),
+      attendees: ["buyer@example.test"], organizerEmail: null, meetingUrl: null, htmlLink: null, status: null,
+    }] });
+    expect(result).toMatchObject({ skippedUnmatched: 1, activitiesCreated: 0 });
+    expect(prismaMock.crmActivity.create).not.toHaveBeenCalled();
+  });
   it("creates reviewable CRM meeting suggestions from matched meeting participants", async () => {
     prismaMock.meeting.findFirst.mockResolvedValue({
       id: "meeting-1",

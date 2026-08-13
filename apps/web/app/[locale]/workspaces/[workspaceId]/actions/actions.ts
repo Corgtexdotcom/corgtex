@@ -4,6 +4,7 @@ import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
+  AppError,
   createAction,
   createActionChecklistItem,
   createAdviceRequest,
@@ -19,6 +20,7 @@ import {
   upsertWorkspaceExternalResourceFromUrl
 } from "@corgtex/domain";
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
+import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
 
 function asStringArray(formData: FormData, key: string) {
@@ -28,6 +30,18 @@ function asStringArray(formData: FormData, key: string) {
 function asOptionalDate(formData: FormData, key: string) {
   const value = asOptional(formData, key);
   return value ? new Date(value) : null;
+}
+
+function expectedVersionFromForm(formData: FormData) {
+  const value = asString(formData, "expectedVersion");
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  const expectedVersion = Number(value);
+  if (!Number.isSafeInteger(expectedVersion)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  return expectedVersion;
 }
 
 export async function createActionAction(formData: FormData) {
@@ -80,6 +94,36 @@ export async function updateActionAction(formData: FormData) {
     evidenceDocumentIds,
   });
   refresh(workspaceId);
+}
+
+export async function editActionAction(
+  _state: WorkItemEditActionState,
+  formData: FormData,
+): Promise<WorkItemEditActionState> {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  try {
+    await updateAction(actor, {
+      workspaceId,
+      actionId: asString(formData, "actionId"),
+      expectedVersion: expectedVersionFromForm(formData),
+      title: asOptional(formData, "title") ?? undefined,
+      bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
+      assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
+      dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
+      priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      return { status: "conflict" };
+    }
+    throw error;
+  }
+  refresh(workspaceId);
+  return { status: "success" };
 }
 
 export async function attachActionExternalResourceAction(formData: FormData) {

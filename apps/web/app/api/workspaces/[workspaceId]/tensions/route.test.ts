@@ -82,14 +82,28 @@ vi.mock("@corgtex/domain", async () => {
 });
 
 vi.mock("@corgtex/shared", () => ({
+  captureErrorTelemetry: vi.fn(),
   env: {
     APP_URL: "https://app.corgtex.com",
   },
+  isDatabaseUnavailableError: vi.fn(() => false),
   prisma,
 }));
 
 function context(workspaceId = "workspace-1") {
   return { params: Promise.resolve({ workspaceId }) };
+}
+
+function tensionPatchRequest(body: unknown) {
+  return new NextRequest("http://localhost/api/workspaces/workspace-1/tensions/tension-1", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function routeError(status: number, code: string, message: string) {
+  return Object.assign(new Error(message), { status, code });
 }
 
 afterEach(() => {
@@ -198,12 +212,14 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
       status: "OPEN",
       priority: 2,
       assigneeMemberId: "member-responsible",
+      version: 3,
     });
     prisma.tension.findFirst.mockResolvedValue({
       id: "tension-1",
       status: "OPEN",
       priority: 2,
       assigneeMemberId: "member-responsible",
+      version: 3,
       assigneeMember: { id: "member-responsible", user: { displayName: "Responsible", email: "responsible@example.test" } },
     });
     loadAdviceRequestCountSummaries.mockResolvedValueOnce(new Map([
@@ -217,13 +233,10 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
 
     const { PATCH } = await import("./[tensionId]/route");
     const response = await PATCH(
-      new NextRequest("http://localhost/api/workspaces/workspace-1/tensions/tension-1", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          assigneeMemberId: "member-responsible",
-          priority: "Important",
-        }),
+      tensionPatchRequest({
+        assigneeMemberId: "member-responsible",
+        priority: "Important",
+        expectedVersion: 2,
       }),
       { params: Promise.resolve({ workspaceId: "workspace-1", tensionId: "tension-1" }) },
     );
@@ -233,6 +246,7 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
       tensionId: "tension-1",
       assigneeMemberId: "member-responsible",
       priority: 2,
+      expectedVersion: 2,
     }));
     await expect(response.json()).resolves.toMatchObject({
       tension: {
@@ -243,7 +257,75 @@ describe("PATCH /api/workspaces/[workspaceId]/tensions/[tensionId]", () => {
         responsibleMemberId: "member-responsible",
         responsibleMemberName: "Responsible",
         responsiblePerson: "Responsible",
+        version: 3,
       },
     });
+  });
+
+  it.each([
+    ["missing", { title: "Updated tension" }],
+    ["zero", { title: "Updated tension", expectedVersion: 0 }],
+    ["negative", { title: "Updated tension", expectedVersion: -1 }],
+    ["fractional", { title: "Updated tension", expectedVersion: 1.5 }],
+    ["non-numeric", { title: "Updated tension", expectedVersion: "2" }],
+  ])("rejects a %s expectedVersion before mutation", async (_label, body) => {
+    const { PATCH } = await import("./[tensionId]/route");
+    const response = await PATCH(tensionPatchRequest(body), {
+      params: Promise.resolve({ workspaceId: "workspace-1", tensionId: "tension-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(updateTension).not.toHaveBeenCalled();
+  });
+
+  it("returns the shared safe conflict response for a stale edit", async () => {
+    updateTension.mockRejectedValueOnce(routeError(
+      409,
+      "VERSION_CONFLICT",
+      "The record changed before this update could be applied. Please refresh and try again.",
+    ));
+    const { PATCH } = await import("./[tensionId]/route");
+    const response = await PATCH(tensionPatchRequest({ title: "Stale title", expectedVersion: 1 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", tensionId: "tension-1" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "VERSION_CONFLICT",
+        message: "The record changed before this update could be applied. Please refresh and try again.",
+      },
+    });
+  });
+
+  it("preserves unauthenticated behavior before domain mutation", async () => {
+    resolveRequestActor.mockRejectedValueOnce(routeError(401, "UNAUTHENTICATED", "Authentication required."));
+    const { PATCH } = await import("./[tensionId]/route");
+    const response = await PATCH(tensionPatchRequest({ title: "Updated", expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", tensionId: "tension-1" }),
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "UNAUTHENTICATED", message: "Authentication required." },
+    });
+    expect(updateTension).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["wrong-workspace, deleted, or missing records", 404, "NOT_FOUND", "Tension not found."],
+    ["unauthorized or private records", 403, "FORBIDDEN", "You do not have permission to edit this tension."],
+    ["archived records", 400, "INVALID_STATE", "Archived tensions cannot be edited."],
+    ["terminal lifecycle states", 400, "INVALID_STATE", "Only draft or open tensions can be edited."],
+  ])("preserves %s errors", async (_label, status, code, message) => {
+    updateTension.mockRejectedValueOnce(routeError(status as number, code as string, message as string));
+    const { PATCH } = await import("./[tensionId]/route");
+    const response = await PATCH(tensionPatchRequest({ title: "Updated", expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", tensionId: "tension-1" }),
+    });
+
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code, message } });
   });
 });

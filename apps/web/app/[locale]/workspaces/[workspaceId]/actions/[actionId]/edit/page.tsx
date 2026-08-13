@@ -1,10 +1,9 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { AppError, getAction, getWorkspaceArchiveRecord, listHumanMembers, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { ActionEditorForm } from "@/lib/components/ActionEditorForm";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
-import { updateActionAction } from "../../../actions";
+import { editActionAction } from "../../../actions";
 import { getTranslations } from "next-intl/server";
 import type { WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
@@ -68,12 +67,6 @@ export default async function ActionEditPage({
     0: tWork("priorityLow"),
   } satisfies WorkItemPriorityLabels;
 
-  async function updateActionAndReturn(formData: FormData) {
-    "use server";
-    await updateActionAction(formData);
-    redirect(detailHref);
-  }
-
   const labels = {
     title: t("formTitle"),
     notes: t("formNotes"),
@@ -103,9 +96,11 @@ export default async function ActionEditPage({
       <section className="ws-section">
         {canEditContent ? (
           <ActionEditorForm
-            action={updateActionAndReturn}
+            action={editActionAction}
             workspaceId={workspaceId}
             actionId={action.id}
+            expectedVersion={action.version}
+            currentHref={detailHref}
             title={action.title}
             bodyMd={action.bodyMd}
             priority={action.priority}

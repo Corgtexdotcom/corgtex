@@ -4629,18 +4629,22 @@ model CrmActivity {
   sourceOccurredAt  DateTime?
   dueAt             DateTime?
   completedAt       DateTime?
+  archivedAt        DateTime?
+  archivedByUserId  String?
+  archiveReason     String?
   createdAt         DateTime        @default(now())
 
   workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   account                  CrmAccount?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: SetNull)
   communicationSuggestions CrmCommunicationSuggestion[]
 
   @@unique([workspaceId, source, sourceExternalId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, type, dueAt])
   @@index([workspaceId, completedAt])
+  @@index([workspaceId, archivedAt])
   @@index([workspaceId, ownerUserId, dueAt])
   @@index([workspaceId, source, sourceOccurredAt])
   @@index([accountId])

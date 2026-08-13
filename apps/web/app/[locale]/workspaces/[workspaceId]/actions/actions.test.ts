@@ -10,6 +10,16 @@ const actor = {
   },
 };
 
+class MockAppError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 const createAdviceRequest = vi.fn();
 const createAction = vi.fn();
 const createActionChecklistItem = vi.fn();
@@ -24,6 +34,7 @@ const returnActionToDraft = vi.fn();
 const updateAction = vi.fn();
 const updateActionChecklistItem = vi.fn();
 const updateDeliberationEntry = vi.fn();
+const revalidatePath = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -34,6 +45,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  AppError: MockAppError,
   createAdviceRequest,
   createAction,
   createActionChecklistItem,
@@ -49,7 +61,7 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 vi.mock("next/cache", () => ({
-  revalidatePath: vi.fn(),
+  revalidatePath,
 }));
 
 function buildCreateFormData() {
@@ -60,6 +72,19 @@ function buildCreateFormData() {
   formData.set("priority", "4");
   formData.set("assigneeMemberId", "member-2");
   formData.set("dueAt", "2030-01-02");
+  return formData;
+}
+
+function buildEditFormData(expectedVersion = "9") {
+  const formData = new FormData();
+  formData.set("workspaceId", "workspace-1");
+  formData.set("actionId", "action-1");
+  formData.set("expectedVersion", expectedVersion);
+  formData.set("title", "Close the concurrency loop");
+  formData.set("bodyMd", "Preserved local Action draft");
+  formData.set("priority", "3");
+  formData.set("assigneeMemberId", "member-3");
+  formData.set("dueAt", "2030-02-03");
   return formData;
 }
 
@@ -109,6 +134,69 @@ describe("action item server actions", () => {
       assigneeMemberId: "member-3",
       dueAt: new Date("2030-02-03"),
     }));
+  });
+
+  it("passes the exact rendered version and reports edit success only after revalidation", async () => {
+    const { editActionAction } = await import("./actions");
+
+    const result = await editActionAction({ status: "idle" }, buildEditFormData());
+
+    expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+      expectedVersion: 9,
+      title: "Close the concurrency loop",
+      bodyMd: "Preserved local Action draft",
+      priority: 3,
+      assigneeMemberId: "member-3",
+      dueAt: new Date("2030-02-03"),
+    }));
+    expect(revalidatePath).toHaveBeenCalled();
+    expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(revalidatePath.mock.invocationCallOrder[0]);
+    expect(result).toEqual({ status: "success" });
+  });
+
+  it.each(["", "0", "-1", "1.5", "9x", "9007199254740992"])(
+    "rejects invalid Action edit version %j without calling the writer",
+    async (expectedVersion) => {
+      const { editActionAction } = await import("./actions");
+
+      await expect(editActionAction({ status: "idle" }, buildEditFormData(expectedVersion))).rejects.toMatchObject({
+        status: 400,
+        code: "INVALID_INPUT",
+      });
+      expect(updateAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns safe conflict state for a stale Action edit without revalidation", async () => {
+    updateAction.mockRejectedValueOnce(new MockAppError(409, "VERSION_CONFLICT", "internal detail"));
+    const { editActionAction } = await import("./actions");
+
+    await expect(editActionAction({ status: "idle" }, buildEditFormData())).resolves.toEqual({ status: "conflict" });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("does not swallow Action edit permission errors", async () => {
+    const error = new MockAppError(403, "FORBIDDEN", "No access");
+    updateAction.mockRejectedValueOnce(error);
+    const { editActionAction } = await import("./actions");
+
+    await expect(editActionAction({ status: "idle" }, buildEditFormData())).rejects.toBe(error);
+  });
+
+  it("keeps lifecycle-only Action updates version-optional", async () => {
+    const { updateActionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("actionId", "action-1");
+    formData.set("status", "IN_PROGRESS");
+
+    await updateActionAction(formData);
+
+    const payload = updateAction.mock.calls[0]?.[1];
+    expect(payload).toMatchObject({ workspaceId: "workspace-1", actionId: "action-1", status: "IN_PROGRESS" });
+    expect(payload).not.toHaveProperty("expectedVersion");
   });
 
   it("creates action checklist items", async () => {

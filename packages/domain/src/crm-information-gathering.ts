@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { CrmActivityType, type MeetingInsight, type OAuthProvider, type Prisma } from "@prisma/client";
 import { prisma } from "@corgtex/shared";
+import { lockCrmLinkClosure } from "./crm-archive-guards";
 import { invariant } from "./errors";
 
 const CRM_EMAIL_SOURCE = "oauth_email";
@@ -154,7 +155,12 @@ async function findRelationshipMatch(
   const domain = emailDomain(email);
 
   const contact = await tx.crmContact.findFirst({
-    where: { workspaceId, email, archivedAt: null },
+    where: {
+      workspaceId,
+      email,
+      archivedAt: null,
+      OR: [{ accountId: null }, { account: { archivedAt: null } }],
+    },
     select: {
       id: true,
       name: true,
@@ -215,6 +221,22 @@ function calendarActivityBody(event: CalendarTouchpoint) {
   ].filter(Boolean).join("\n");
 }
 
+async function existingActivityBatch(tx: Prisma.TransactionClient, workspaceId: string, source: string, externalIds: string[]) {
+  const activities = await tx.crmActivity.findMany({ where: { workspaceId, source, sourceExternalId: { in: [...new Set(externalIds)] } },
+    select: { id: true, sourceExternalId: true }, orderBy: { id: "asc" } });
+  return new Map(activities.map((activity) => [activity.sourceExternalId, activity]));
+}
+
+async function isActiveRelationshipMatch(tx: Prisma.TransactionClient, workspaceId: string, match: RelationshipMatch) {
+  if (match.contactId) return Boolean(await tx.crmContact.findFirst({ where: {
+    id: match.contactId, workspaceId, email: match.email, archivedAt: null,
+    ...(match.accountId ? { accountId: match.accountId, account: { archivedAt: null } } : { accountId: null }),
+  }, select: { id: true } }));
+  return Boolean(match.accountId && await tx.crmAccount.findFirst({
+    where: { id: match.accountId, workspaceId, domain: match.domain, archivedAt: null }, select: { id: true },
+  }));
+}
+
 export async function materializeCrmEmailTouchpoints(params: {
   workspaceId: string;
   connectionId: string;
@@ -232,6 +254,10 @@ export async function materializeCrmEmailTouchpoints(params: {
   };
 
   await prisma.$transaction(async (tx) => {
+    const externalIds = params.messages.filter((message) => safeFilters.has(message.filter.trim().toLowerCase()))
+      .map((message) => sourceExternalId("oauth-email", params.connectionId, message.provider, message.id));
+    const existingActivities = await existingActivityBatch(tx, params.workspaceId, CRM_EMAIL_SOURCE, externalIds);
+    const matched: Array<{ message: EmailTouchpoint; fromEmail: string; match: RelationshipMatch; externalId: string }> = [];
     for (const message of params.messages) {
       if (!safeFilters.has(message.filter.trim().toLowerCase())) {
         summary.skippedUnsafeFilter += 1;
@@ -243,19 +269,18 @@ export async function materializeCrmEmailTouchpoints(params: {
         summary.skippedUnmatched += 1;
         continue;
       }
-
       const externalId = sourceExternalId("oauth-email", params.connectionId, message.provider, message.id);
+      matched.push({ message, fromEmail, match, externalId });
+    }
+    await lockCrmLinkClosure(tx, params.workspaceId, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
+      ...matched.map(({ match }) => ({ contactId: match.contactId, accountId: match.accountId })));
+    for (const { message, fromEmail, match, externalId } of matched) {
+      if (!await isActiveRelationshipMatch(tx, params.workspaceId, match)) {
+        summary.skippedUnmatched += 1;
+        continue;
+      }
       const occurredAt = validDate(message.receivedAt);
-      const existingActivity = await tx.crmActivity.findUnique({
-        where: {
-          workspaceId_source_sourceExternalId: {
-            workspaceId: params.workspaceId,
-            source: CRM_EMAIL_SOURCE,
-            sourceExternalId: externalId,
-          },
-        },
-        select: { id: true },
-      });
+      const existingActivity = existingActivities.get(externalId);
       const activityData = {
         accountId: match.accountId,
         contactId: match.contactId,
@@ -266,10 +291,13 @@ export async function materializeCrmEmailTouchpoints(params: {
         sourceOccurredAt: occurredAt,
       };
       if (existingActivity) {
-        await tx.crmActivity.update({ where: { id: existingActivity.id }, data: activityData });
-        summary.activitiesUpdated += 1;
+        const updated = await tx.crmActivity.updateMany({
+          where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
+          data: activityData,
+        });
+        summary.activitiesUpdated += updated.count;
       } else {
-        await tx.crmActivity.create({
+        const created = await tx.crmActivity.create({
           data: {
             workspaceId: params.workspaceId,
             ...activityData,
@@ -277,6 +305,7 @@ export async function materializeCrmEmailTouchpoints(params: {
             sourceExternalId: externalId,
           },
         });
+        existingActivities.set(externalId, created);
         summary.activitiesCreated += 1;
       }
 
@@ -339,6 +368,10 @@ export async function materializeCrmCalendarTouchpoints(params: {
   };
 
   await prisma.$transaction(async (tx) => {
+    const externalIds = params.events.filter((event) => event.status?.toLowerCase() !== "cancelled")
+      .map((event) => sourceExternalId("oauth-calendar", params.connectionId, event.provider, event.id));
+    const existingActivities = await existingActivityBatch(tx, params.workspaceId, CRM_CALENDAR_SOURCE, externalIds);
+    const matched: Array<{ event: CalendarTouchpoint; match: RelationshipMatch; externalId: string }> = [];
     for (const event of params.events) {
       if (event.status?.toLowerCase() === "cancelled") {
         summary.skippedCancelled += 1;
@@ -354,18 +387,17 @@ export async function materializeCrmCalendarTouchpoints(params: {
         summary.skippedUnmatched += 1;
         continue;
       }
-
       const externalId = sourceExternalId("oauth-calendar", params.connectionId, event.provider, event.id);
-      const existingActivity = await tx.crmActivity.findUnique({
-        where: {
-          workspaceId_source_sourceExternalId: {
-            workspaceId: params.workspaceId,
-            source: CRM_CALENDAR_SOURCE,
-            sourceExternalId: externalId,
-          },
-        },
-        select: { id: true },
-      });
+      matched.push({ event, match, externalId });
+    }
+    await lockCrmLinkClosure(tx, params.workspaceId, ...[...existingActivities.values()].map(({ id }) => ({ activityId: id })),
+      ...matched.map(({ match }) => ({ contactId: match.contactId, accountId: match.accountId })));
+    for (const { event, match, externalId } of matched) {
+      if (!await isActiveRelationshipMatch(tx, params.workspaceId, match)) {
+        summary.skippedUnmatched += 1;
+        continue;
+      }
+      const existingActivity = existingActivities.get(externalId);
       const activityData = {
         accountId: match.accountId,
         contactId: match.contactId,
@@ -376,10 +408,13 @@ export async function materializeCrmCalendarTouchpoints(params: {
         sourceOccurredAt: event.startTime,
       };
       if (existingActivity) {
-        await tx.crmActivity.update({ where: { id: existingActivity.id }, data: activityData });
-        summary.activitiesUpdated += 1;
+        const updated = await tx.crmActivity.updateMany({
+          where: { id: existingActivity.id, workspaceId: params.workspaceId, archivedAt: null },
+          data: activityData,
+        });
+        summary.activitiesUpdated += updated.count;
       } else {
-        await tx.crmActivity.create({
+        const created = await tx.crmActivity.create({
           data: {
             workspaceId: params.workspaceId,
             ...activityData,
@@ -387,6 +422,7 @@ export async function materializeCrmCalendarTouchpoints(params: {
             sourceExternalId: externalId,
           },
         });
+        existingActivities.set(externalId, created);
         summary.activitiesCreated += 1;
       }
     }
