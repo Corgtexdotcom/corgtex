@@ -162,9 +162,11 @@ describe("review snapshot integrity merge group", () => {
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
   const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, headCommit: { oid: prHead }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
   const queuePr = (number) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
-  it("disables setup-node automatic package-manager caching", () => {
-    const workflow = readFileSync(new URL("../.github/workflows/review-snapshot-integrity-merge-group.yml", import.meta.url), "utf8");
-    expect(workflow).toContain("package-manager-cache: false");
+  it("disables setup-node automatic package-manager caching in both RSI workflows", () => {
+    for (const name of ["review-snapshot-integrity-pr.yml", "review-snapshot-integrity-merge-group.yml"]) {
+      const workflow = readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), "utf8");
+      expect(workflow).toContain("package-manager-cache: false");
+    }
   });
   const stub = (entries, { truncateFiles = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
     const seen = [];

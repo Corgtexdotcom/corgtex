@@ -20,8 +20,9 @@ stale approval can never merge mutated content.
   deliberately distinct from the explicit context. The job has job-local `contents: read`,
   `pull-requests: write`, `statuses: write` only, uses the ephemeral
   `GITHUB_TOKEN`, checks out only the trusted base SHA without persisted
-  credentials, installs nothing, and never checks out, interpolates, or
-  executes PR-controlled content. PR metadata is read only through the API.
+  credentials, installs nothing, explicitly disables setup-node's automatic
+  package-manager cache, and never checks out, interpolates, or executes
+  PR-controlled content. PR metadata is read only through the API.
 - `.github/workflows/review-snapshot-integrity-merge-group.yml` — shadow-mode
   `merge_group` `checks_requested` workflow for `main`. GitHub attaches its
   native job/check name `Review Snapshot Integrity` to the immutable synthetic
