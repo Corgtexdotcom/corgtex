@@ -77,6 +77,27 @@ describe("serializeCustomerIssuePublication", () => {
     expect(serializeCustomerIssuePublication(source)).toBeNull();
   });
 
+  it("does not read public fields for an unauthorized audience", () => {
+    const source = new Proxy(validSource({ audience: "INTERNAL_ONLY" }), {
+      get(target, property, receiver) {
+        if (property === "publicSlug") throw new Error("must not be read");
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(serializeCustomerIssuePublication(source)).toBeNull();
+  });
+
+  it("rejects inherited publication fields", () => {
+    expect(serializeCustomerIssuePublication(Object.create(VALID_SOURCE))).toBeNull();
+  });
+
+  it("keeps the public status allowlist immutable", () => {
+    expect(Object.isFrozen(CUSTOMER_ISSUE_PUBLIC_STATUSES)).toBe(true);
+    expect(() => Array.prototype.push.call(
+      CUSTOMER_ISSUE_PUBLIC_STATUSES, "PRIVATE",
+    )).toThrow();
+  });
+
   it("accepts every allowed public status", () => {
     for (const status of CUSTOMER_ISSUE_PUBLIC_STATUSES) {
       const result = serializeCustomerIssuePublication(
@@ -130,17 +151,8 @@ describe("serializeCustomerIssuePublication", () => {
   );
 
   it.each([
-    "Upper-Case",
-    "-leading",
-    "trailing-",
-    "double--hyphen",
-    "white space",
-    "path/segment",
-    "query?x=1",
-    "fragment#x",
-    "",
-    "a".repeat(121),
-    42,
+    "Upper-Case", "-leading", "trailing-", "double--hyphen", "white space",
+    "path/segment", "query?x=1", "fragment#x", "", "a".repeat(121), 42,
     undefined,
   ])("returns null for publicSlug %j", (publicSlug) => {
     expect(
@@ -148,33 +160,21 @@ describe("serializeCustomerIssuePublication", () => {
     ).toBeNull();
   });
 
-  it.each([
-    " leading",
-    "trailing ",
-    "   ",
-    "",
-    "t".repeat(161),
-    42,
-    undefined,
-  ])("returns null for publicTitle %j", (publicTitle) => {
+  it.each([" leading", "trailing ", "   ", "", "t".repeat(161), 42, undefined])(
+    "returns null for publicTitle %j", (publicTitle) => {
     expect(
       serializeCustomerIssuePublication(validSource({ publicTitle })),
     ).toBeNull();
-  });
+    },
+  );
 
-  it.each([
-    " leading",
-    "trailing ",
-    "   ",
-    "",
-    "s".repeat(2001),
-    42,
-    undefined,
-  ])("returns null for publicSummary %j", (publicSummary) => {
+  it.each([" leading", "trailing ", "   ", "", "s".repeat(2001), 42, undefined])(
+    "returns null for publicSummary %j", (publicSummary) => {
     expect(
       serializeCustomerIssuePublication(validSource({ publicSummary })),
     ).toBeNull();
-  });
+    },
+  );
 
   it.each(["OPEN", "investigating", "", undefined])(
     "returns null for publicStatus %j",
@@ -186,14 +186,8 @@ describe("serializeCustomerIssuePublication", () => {
   );
 
   it.each([
-    0,
-    -1,
-    1.5,
-    Number.POSITIVE_INFINITY,
-    Number.NaN,
-    Number.MAX_SAFE_INTEGER + 1,
-    "2",
-    undefined,
+    0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN,
+    Number.MAX_SAFE_INTEGER + 1, "2", undefined,
   ])("returns null for revision %j", (revision) => {
     expect(
       serializeCustomerIssuePublication(validSource({ revision })),
@@ -201,13 +195,9 @@ describe("serializeCustomerIssuePublication", () => {
   });
 
   it.each([
-    "2026-01-02T03:04:05.006+01:00",
-    "2026-01-02T03:04:05Z",
-    "2026-01-02 03:04:05",
-    "not-a-date",
-    "9999-99-99T99:99:99.999Z",
-    1772684645006,
-    undefined,
+    "2026-01-02T03:04:05.006+01:00", "2026-01-02T03:04:05Z",
+    "2026-01-02 03:04:05", "not-a-date", "9999-99-99T99:99:99.999Z",
+    1772684645006, undefined,
   ])("returns null for publishedAt %j", (publishedAt) => {
     expect(
       serializeCustomerIssuePublication(validSource({ publishedAt })),
@@ -245,22 +235,10 @@ describe("serializeCustomerIssuePublication", () => {
     ]);
     const serialized = JSON.stringify(projection);
     for (const sentinel of [
-      "actionBody",
-      "reporterId",
-      "reporterEmail",
-      "workspaceId",
-      "customerName",
-      "evidence",
-      "comments",
-      "assigneeId",
-      "internalId",
-      "sourceActionVersion",
-      "actorId",
-      "auditTrail",
-      "operationalMetadata",
-      "publicationState",
-      "Acme Corp",
-      "reporter@example.com",
+      "actionBody", "reporterId", "reporterEmail", "workspaceId",
+      "customerName", "evidence", "comments", "assigneeId", "internalId",
+      "sourceActionVersion", "actorId", "auditTrail", "operationalMetadata",
+      "publicationState", "Acme Corp", "reporter@example.com",
     ]) {
       expect(serialized).not.toContain(sentinel);
     }

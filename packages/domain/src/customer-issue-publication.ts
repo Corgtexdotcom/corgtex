@@ -13,13 +13,13 @@ export const CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS = "ALL_CUSTOMERS" as const;
 
 export type CustomerIssueAudience = typeof CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS;
 
-export const CUSTOMER_ISSUE_PUBLIC_STATUSES = [
+export const CUSTOMER_ISSUE_PUBLIC_STATUSES = Object.freeze([
   "INVESTIGATING",
   "PLANNED",
   "IN_PROGRESS",
   "MONITORING",
   "RESOLVED",
-] as const;
+] as const);
 
 export type CustomerIssuePublicStatus =
   (typeof CUSTOMER_ISSUE_PUBLIC_STATUSES)[number];
@@ -40,6 +40,10 @@ const PUBLIC_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PUBLIC_SLUG_MAX_LENGTH = 120;
 const PUBLIC_TITLE_MAX_LENGTH = 160;
 const PUBLIC_SUMMARY_MAX_LENGTH = 2000;
+const REQUIRED_PUBLIC_FIELDS = [
+  "publicSlug", "publicTitle", "publicSummary", "publicStatus", "revision",
+  "publishedAt",
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -88,43 +92,30 @@ export function serializeCustomerIssuePublication(
   if (!isRecord(value)) {
     return null;
   }
-  const { publicationState } = value;
-  if (publicationState !== PUBLICATION_STATE_PUBLISHED) {
+  try {
+    if (!Object.hasOwn(value, "publicationState")) return null;
+    const { publicationState } = value;
+    if (publicationState !== PUBLICATION_STATE_PUBLISHED) return null;
+    if (!Object.hasOwn(value, "audience")) return null;
+    const { audience } = value;
+    if (audience !== CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS) return null;
+    if (!REQUIRED_PUBLIC_FIELDS.every((field) => Object.hasOwn(value, field))) {
+      return null;
+    }
+    const {
+      publicSlug, publicTitle, publicSummary, publicStatus, revision, publishedAt,
+    } = value;
+    if (!isCanonicalSlug(publicSlug)) return null;
+    if (!isTrimmedBoundedText(publicTitle, PUBLIC_TITLE_MAX_LENGTH)) return null;
+    if (!isTrimmedBoundedText(publicSummary, PUBLIC_SUMMARY_MAX_LENGTH)) return null;
+    if (!isPublicStatus(publicStatus)) return null;
+    if (!isValidRevision(revision)) return null;
+    if (!isCanonicalUtcIsoInstant(publishedAt)) return null;
+    return {
+      slug: publicSlug, title: publicTitle, summary: publicSummary,
+      status: publicStatus, audience, revision, publishedAt,
+    };
+  } catch {
     return null;
   }
-  const {
-    publicSlug, publicTitle, publicSummary, publicStatus, audience, revision,
-    publishedAt,
-  } = value;
-  if (audience !== CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS) {
-    return null;
-  }
-  if (!isCanonicalSlug(publicSlug)) {
-    return null;
-  }
-  if (!isTrimmedBoundedText(publicTitle, PUBLIC_TITLE_MAX_LENGTH)) {
-    return null;
-  }
-  if (!isTrimmedBoundedText(publicSummary, PUBLIC_SUMMARY_MAX_LENGTH)) {
-    return null;
-  }
-  if (!isPublicStatus(publicStatus)) {
-    return null;
-  }
-  if (!isValidRevision(revision)) {
-    return null;
-  }
-  if (!isCanonicalUtcIsoInstant(publishedAt)) {
-    return null;
-  }
-
-  return {
-    slug: publicSlug,
-    title: publicTitle,
-    summary: publicSummary,
-    status: publicStatus,
-    audience: CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS,
-    revision,
-    publishedAt,
-  };
 }
