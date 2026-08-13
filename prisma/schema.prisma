@@ -711,6 +711,27 @@ enum CustomerReleaseTargetStatus {
   ROLLED_BACK
 }
 
+enum TenantPurgeRunMode {
+  ACCOUNT_WORKSPACE
+  SELF_SERVE_TRIAL_WORKSPACE
+}
+
+enum TenantPurgeRunStatus {
+  PLANNED
+  DRY_RUN_COMPLETE
+  BACKUP_COMPLETE
+  RESTORE_VERIFIED
+  APPROVED
+  EXECUTING
+  CLEANUP_PENDING
+  VERIFYING
+  COMPLETED
+  RESTORING
+  RESTORED
+  CANCELLED
+  FAILED
+}
+
 model Workspace {
   id                             String                                @id @default(uuid())
   slug                           String                                @unique
@@ -5614,6 +5635,52 @@ model CrmProspectWorkspace {
   @@index([accountId])
   @@index([demoLeadId])
   @@index([targetWorkspaceId])
+}
+
+/// Durable append-only evidence for protected tenant purge workflows.
+/// Target and actor identifiers intentionally have no relations so history survives deletion.
+model TenantPurgeRun {
+  id                           String               @id @default(uuid())
+  mode                         TenantPurgeRunMode
+  status                       TenantPurgeRunStatus @default(PLANNED)
+  targetAccountId              String?
+  targetDeploymentId           String
+  targetWorkspaceId            String
+  targetTrialId                String?
+  canonicalTargetKey           String
+  activeTargetKey              String?              @unique(map: "TenantPurgeRun_activeTargetKey_key")
+  capabilitySha                String
+  manifestDigest               String?
+  backupDigest                 String?
+  restoreDigest                String?
+  manifestEvidenceRef          String?
+  backupEvidenceRef            String?
+  restoreEvidenceRef           String?
+  executionEvidenceRef         String?
+  terminalEvidenceRef          String?
+  requestedByUserId            String
+  approvedByUserId             String?
+  reason                       String
+  requestedAt                  DateTime             @default(now())
+  manifestCapturedAt           DateTime?
+  backupCompletedAt            DateTime?
+  restoreVerifiedAt            DateTime?
+  approvedAt                   DateTime?
+  approvalExpiresAt            DateTime?
+  executionStartedAt           DateTime?
+  terminalAt                   DateTime?
+  failureCode                  String?
+  resultDatabaseRowsDeleted    Int?
+  resultBlobObjectsDeleted     Int?
+  resultSearchDocumentsDeleted Int?
+  resultCacheKeysCleared       Int?
+  resultTargetRecordsRemaining Int?
+  createdAt                    DateTime             @default(now())
+  updatedAt                    DateTime             @default(now()) @updatedAt
+
+  @@index([canonicalTargetKey, createdAt], map: "TenantPurgeRun_canonicalTargetKey_createdAt_idx")
+  @@index([status, createdAt], map: "TenantPurgeRun_status_createdAt_idx")
+  @@index([requestedByUserId, createdAt], map: "TenantPurgeRun_requestedByUserId_createdAt_idx")
 }
 
 model CustomerAccount {
