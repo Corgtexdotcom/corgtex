@@ -45,8 +45,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function readOwn(record: Record<string, unknown>, key: string): [boolean, unknown] {
-  if (!Object.hasOwn(record, key)) return [false, undefined];
-  return [true, record[key]];
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (!descriptor || !("value" in descriptor)) return [false, undefined];
+  return [true, descriptor.value];
 }
 
 function isCanonicalSlug(value: unknown): value is string {

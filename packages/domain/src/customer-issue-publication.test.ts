@@ -37,13 +37,8 @@ describe("serializeCustomerIssuePublication", () => {
       publishedAt: "2026-01-02T03:04:05.006Z",
     });
     expect(Object.keys(result as object).sort()).toEqual([
-      "audience",
-      "publishedAt",
-      "revision",
-      "slug",
-      "status",
-      "summary",
-      "title",
+      "audience", "publishedAt", "revision", "slug",
+      "status", "summary", "title",
     ]);
   });
 
@@ -55,9 +50,9 @@ describe("serializeCustomerIssuePublication", () => {
   it("reads each approved source field exactly once", () => {
     const reads = new Map<PropertyKey, number>();
     const source = new Proxy(VALID_SOURCE, {
-      get(target, property, receiver) {
+      getOwnPropertyDescriptor(target, property) {
         reads.set(property, (reads.get(property) ?? 0) + 1);
-        return Reflect.get(target, property, receiver);
+        return Reflect.getOwnPropertyDescriptor(target, property);
       },
     });
     expect(serializeCustomerIssuePublication(source)).not.toBeNull();
@@ -95,6 +90,15 @@ describe("serializeCustomerIssuePublication", () => {
       return VALID_SOURCE.publicSlug;
     } });
     expect(serializeCustomerIssuePublication(source)).toBeNull();
+  });
+  it("never falls through to an inherited value after an own snapshot", () => {
+    const target = Object.assign(Object.create({ publicTitle: "Inherited" }), VALID_SOURCE);
+    const source = new Proxy(target, { getOwnPropertyDescriptor(current, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(current, property);
+      if (property === "publicTitle") delete current.publicTitle;
+      return descriptor;
+    } });
+    expect(serializeCustomerIssuePublication(source)?.title).toBe(VALID_SOURCE.publicTitle);
   });
   it("keeps the public status allowlist immutable", () => {
     expect(Object.isFrozen(CUSTOMER_ISSUE_PUBLIC_STATUSES)).toBe(true);
@@ -254,13 +258,8 @@ describe("serializeCustomerIssuePublication", () => {
     expect(result).not.toBeNull();
     const projection = result as CustomerIssuePublicProjection;
     expect(Object.keys(projection).sort()).toEqual([
-      "audience",
-      "publishedAt",
-      "revision",
-      "slug",
-      "status",
-      "summary",
-      "title",
+      "audience", "publishedAt", "revision", "slug",
+      "status", "summary", "title",
     ]);
     const serialized = JSON.stringify(projection);
     for (const sentinel of [
