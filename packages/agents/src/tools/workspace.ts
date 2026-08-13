@@ -24,6 +24,7 @@ export const queryTensionsTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
+        tensionId: { type: "string", description: "Filter by exact tension ID to read its version" },
         status: { type: "string", description: "Filter by status: DRAFT, OPEN, RESOLVED" },
         assigneeId: { type: "string", description: "Filter by assigned member ID" },
       },
@@ -39,6 +40,7 @@ export const queryActionsTool: ModelTool = {
     parameters: {
       type: "object",
       properties: {
+        actionId: { type: "string", description: "Filter by exact action ID to read its version" },
         status: { type: "string", description: "Filter by status: DRAFT, OPEN, IN_PROGRESS, COMPLETED" },
         assigneeId: { type: "string", description: "Filter by assigned member ID" },
       },
@@ -101,8 +103,9 @@ export async function getWorkspaceOverview(workspaceId: string) {
   return { memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals };
 }
 
-export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string) {
+export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string) {
   const where: any = { workspaceId };
+  if (tensionId) where.id = tensionId;
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
@@ -131,8 +134,9 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
   }));
 }
 
-export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string) {
+export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string) {
   const where: any = { workspaceId };
+  if (actionId) where.id = actionId;
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 

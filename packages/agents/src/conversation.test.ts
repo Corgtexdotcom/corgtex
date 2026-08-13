@@ -72,6 +72,12 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
+    tension: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    action: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     conversationPendingOperation: {
       create: conversationPendingOperationCreateMock,
       count: conversationPendingOperationCountMock,
@@ -2417,6 +2423,58 @@ describe("processConversationTurn", () => {
     expect(conversationPendingOperationCreateMock).not.toHaveBeenCalled();
     expect(createActivityMock).not.toHaveBeenCalled();
     expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the activity.");
+  });
+
+  it("forwards exact tensionId and actionId filters to query tools", async () => {
+    const actor = {
+      kind: "user" as const,
+      user: { id: "user-1", email: "user@example.com", displayName: "User" },
+    };
+
+    chatMock
+      .mockResolvedValueOnce({
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            function: {
+              name: "query_tensions",
+              arguments: JSON.stringify({ status: "OPEN", tensionId: "t-123" }),
+            },
+          },
+          {
+            id: "call-2",
+            function: {
+              name: "query_actions",
+              arguments: JSON.stringify({ status: "DRAFT", assigneeId: "mem-1", actionId: "a-456" }),
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ content: "Here are your items." });
+
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1",
+      sessionId: "session-1",
+      userId: "user-1",
+      agentKey: "assistant",
+      userMessage: "What are my items?",
+      actor,
+    });
+
+    const { prisma } = await import("@corgtex/shared");
+    expect(prisma.tension.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "t-123", status: "OPEN" }),
+      }),
+    );
+    expect(prisma.action.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "a-456", status: "DRAFT", assigneeMemberId: "mem-1" }),
+      }),
+    );
+    expect(result.assistantMessage).toBe("Here are your items.");
   });
 
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {

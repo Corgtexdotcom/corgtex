@@ -111,4 +111,27 @@ describe("agent query tools version requirements", () => {
     const actions = await queryActions("ws-1");
     expect(actions[0]).toEqual(expect.objectContaining({ id: "a-1", version: 5 }));
   });
+
+  it("exposes tensionId and actionId in schemas and filters by exact ID", async () => {
+    const { queryTensionsTool, queryActionsTool, queryTensions, queryActions } = await import("./workspace");
+
+    expect((queryTensionsTool.function.parameters.properties as any).tensionId).toBeDefined();
+    expect((queryActionsTool.function.parameters.properties as any).actionId).toBeDefined();
+
+    findManyTensionsMock.mockClear();
+    await queryTensions("ws-1", undefined, undefined, "t-99");
+    expect(findManyTensionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "t-99" }),
+      }),
+    );
+
+    findManyActionsMock.mockClear();
+    await queryActions("ws-1", undefined, undefined, "a-99");
+    expect(findManyActionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "a-99" }),
+      }),
+    );
+  });
 });
