@@ -71,11 +71,7 @@ function isPublicStatus(value: unknown): value is CustomerIssuePublicStatus {
 }
 
 function isValidRevision(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 1
-  );
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 function isCanonicalUtcIsoInstant(value: unknown): value is string {
@@ -92,13 +88,14 @@ export function serializeCustomerIssuePublication(
   if (!isRecord(value)) {
     return null;
   }
-  const {
-    publicationState, publicSlug, publicTitle, publicSummary, publicStatus,
-    audience, revision, publishedAt,
-  } = value;
+  const { publicationState } = value;
   if (publicationState !== PUBLICATION_STATE_PUBLISHED) {
     return null;
   }
+  const {
+    publicSlug, publicTitle, publicSummary, publicStatus, audience, revision,
+    publishedAt,
+  } = value;
   if (audience !== CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS) {
     return null;
   }

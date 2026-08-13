@@ -65,6 +65,18 @@ describe("serializeCustomerIssuePublication", () => {
     }
   });
 
+  it("does not read public fields for an unpublished source", () => {
+    const source = new Proxy(validSource({ publicationState: "DRAFT" }), {
+      get(target, property, receiver) {
+        if (property === "publicSlug") {
+          throw new Error("publicSlug must not be read");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(serializeCustomerIssuePublication(source)).toBeNull();
+  });
+
   it("accepts every allowed public status", () => {
     for (const status of CUSTOMER_ISSUE_PUBLIC_STATUSES) {
       const result = serializeCustomerIssuePublication(
