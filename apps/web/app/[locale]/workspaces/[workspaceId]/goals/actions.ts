@@ -2,6 +2,7 @@
 
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import {
+  AppError,
   createGoal,
   updateGoal,
   returnGoalToDraft,
@@ -15,6 +16,7 @@ import { requirePageActor } from "@/lib/auth";
 import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asOptional, asOptionalInt, asString, duplicateGuardFromFormData, refresh } from "../action-utils";
+import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 
 type GoalKeyResultInput = {
   title: string;
@@ -37,6 +39,18 @@ function optionalDate(formData: FormData, key: string) {
 function optionalNumber(value: FormDataEntryValue | null) {
   const raw = String(value ?? "").trim();
   return raw.length > 0 ? Number(raw) : null;
+}
+
+function expectedVersionFromForm(formData: FormData) {
+  const value = asString(formData, "expectedVersion");
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  const expectedVersion = Number(value);
+  if (!Number.isSafeInteger(expectedVersion)) {
+    throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
+  }
+  return expectedVersion;
 }
 
 function keyResultsFromForm(formData: FormData): GoalKeyResultInput[] {
@@ -109,6 +123,40 @@ export async function updateGoalFormAction(formData: FormData) {
     ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
   });
   refresh(workspaceId);
+}
+
+export async function editGoalFormAction(
+  _state: WorkItemEditActionState,
+  formData: FormData,
+): Promise<WorkItemEditActionState> {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  try {
+    await updateGoal(actor, {
+      workspaceId,
+      goalId: asString(formData, "goalId"),
+      expectedVersion: expectedVersionFromForm(formData),
+      title: formData.has("title") ? asOptional(formData, "title") ?? undefined : undefined,
+      descriptionMd: formData.has("descriptionMd") ? asOptional(formData, "descriptionMd") : undefined,
+      level: formData.has("level") ? asString(formData, "level") as GoalLevel : undefined,
+      cadence: formData.has("cadence") ? asString(formData, "cadence") as GoalCadence : undefined,
+      startDate: formData.has("startDate") ? optionalDate(formData, "startDate") : undefined,
+      targetDate: formData.has("targetDate") ? optionalDate(formData, "targetDate") : undefined,
+      parentGoalId: formData.has("parentGoalId") ? asOptional(formData, "parentGoalId") : undefined,
+      circleId: formData.has("circleId") ? asOptional(formData, "circleId") : undefined,
+      ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      return { status: "conflict" };
+    }
+    throw error;
+  }
+  refresh(workspaceId);
+  return { status: "success" };
 }
 
 export async function returnGoalToDraftFormAction(formData: FormData) {

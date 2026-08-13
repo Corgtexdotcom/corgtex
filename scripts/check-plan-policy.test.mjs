@@ -20,6 +20,7 @@ describe("check-plan size policy", () => {
     "prisma/migrations/20260731_example/migration.sql",
     "packages/domain/src/auth.ts",
     "scripts/check-plan.mjs",
+    "scripts/review-snapshot-integrity.mjs",
     "AGENTS.md",
     ".codex/ops/reviewer.md",
     ".github/pull_request_template.md",

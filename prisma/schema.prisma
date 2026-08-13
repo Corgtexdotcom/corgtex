@@ -97,6 +97,11 @@ enum ProposalResolutionOutcome {
   WITHDRAWN
 }
 
+enum ConstitutionSourceKind {
+  PROPOSAL
+  TENSION
+}
+
 enum ApprovalMode {
   SINGLE
   MAJORITY
@@ -632,6 +637,12 @@ enum CustomerDeploymentCloudProvider {
   UNKNOWN
 }
 
+enum CustomerDeploymentReleaseLeasePhase {
+  RESERVED
+  MUTATING
+  RECOVERY_REQUIRED
+}
+
 enum ProviderCutoverStatus {
   PLANNED
   SHADOW
@@ -727,6 +738,7 @@ model Workspace {
   workItemEvidence               WorkItemEvidence[]
   policyCorpus                   PolicyCorpus[]
   constitutions                  Constitution[]
+  constitutionSourceReferences  ConstitutionSourceReference[]        @relation("ConstitutionSourceWorkspace")
   governanceScores               GovernanceScore[]
   auditLogs                      AuditLog[]
   productAnalyticsEvents         ProductAnalyticsEvent[]
@@ -1497,6 +1509,7 @@ model CommunicationEntityLink {
   provider       CommunicationProvider
   messageId      String?
   externalUserId String?
+  claimKey       String?               @db.VarChar(191)
   entityType     String
   entityId       String
   action         String
@@ -1508,6 +1521,7 @@ model CommunicationEntityLink {
 
   @@index([workspaceId, entityType, entityId])
   @@index([installationId, action])
+  @@unique([workspaceId, claimKey])
 }
 
 model User {
@@ -2386,7 +2400,6 @@ model Tension {
   raisedByMember Member?         @relation("TensionRaisedBy", fields: [raisedByMemberId], references: [id], onDelete: SetNull)
   meeting        Meeting?        @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   upvotes        TensionUpvote[]
-
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, publishedAt])
@@ -2428,7 +2441,6 @@ model Proposal {
   actions       Action[]
   tensions      Tension[]
   adviceProcess AdviceProcess?
-
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, priority])
@@ -3077,7 +3089,6 @@ model PolicyCorpus {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   proposal  Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
   circle    Circle?   @relation(fields: [circleId], references: [id], onDelete: SetNull)
-
   @@index([workspaceId])
 }
 
@@ -3094,10 +3105,38 @@ model Constitution {
   completionTokens Int?
   createdAt        DateTime @default(now())
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace        Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceReferences ConstitutionSourceReference[] @relation("ConstitutionSourceConstitution")
 
   @@unique([workspaceId, version])
+  @@unique([id, workspaceId])
   @@index([workspaceId, createdAt])
+}
+
+model ConstitutionSourceReference {
+  id                 String                 @id @default(uuid())
+  workspaceId        String
+  constitutionId     String
+  pointKey           String
+  pointOrder         Int
+  sourceOrder        Int
+  policyCorpusId     String
+  sourceKind         ConstitutionSourceKind
+  proposalId         String?
+  tensionId          String?
+  labelSnapshot      String
+  acceptedAtSnapshot DateTime
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  workspace    Workspace    @relation("ConstitutionSourceWorkspace", fields: [workspaceId], references: [id], onDelete: Cascade)
+  constitution Constitution @relation("ConstitutionSourceConstitution", fields: [constitutionId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([constitutionId, pointOrder, sourceOrder], map: "ConstitutionSource_constitution_point_source_key")
+  @@index([workspaceId, constitutionId, pointOrder, sourceOrder], map: "ConstitutionSource_workspace_constitution_order_idx")
+  @@index([policyCorpusId], map: "ConstitutionSource_policy_idx")
+  @@index([proposalId], map: "ConstitutionSource_proposal_idx")
+  @@index([tensionId], map: "ConstitutionSource_tension_idx")
 }
 
 model GovernanceScore {
@@ -4590,18 +4629,22 @@ model CrmActivity {
   sourceOccurredAt  DateTime?
   dueAt             DateTime?
   completedAt       DateTime?
+  archivedAt        DateTime?
+  archivedByUserId  String?
+  archiveReason     String?
   createdAt         DateTime        @default(now())
 
   workspace                Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   account                  CrmAccount?                  @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact                  CrmContact?                  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  deal                     CrmDeal?                     @relation(fields: [dealId], references: [id], onDelete: SetNull)
   communicationSuggestions CrmCommunicationSuggestion[]
 
   @@unique([workspaceId, source, sourceExternalId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, type, dueAt])
   @@index([workspaceId, completedAt])
+  @@index([workspaceId, archivedAt])
   @@index([workspaceId, ownerUserId, dueAt])
   @@index([workspaceId, source, sourceOccurredAt])
   @@index([accountId])
@@ -5619,6 +5662,20 @@ model CustomerDeployment {
   bootstrapStatus              String                          @default("not_started")
   releaseVersion               String?
   releaseImageTag              String?
+  releaseLeaseFence            Int                             @default(0)
+  releaseLeaseId               String?                         @unique
+  releaseLeaseTokenHash        String?                         @unique
+  releaseLeaseOwner            String?
+  releaseLeaseExpectedImageTag String?
+  releaseLeaseIncomingImageTag String?
+  releaseLeaseIncomingVersion  String?
+  releaseLeasePhase            CustomerDeploymentReleaseLeasePhase?
+  releaseLeaseAcquiredAt       DateTime?
+  releaseLeaseHeartbeatAt      DateTime?
+  releaseLeaseExpiresAt        DateTime?
+  releaseLeaseRollbackRecord   Json?
+  releaseLeaseRecoveryEvidence Json?
+  releaseLeaseError            String?
   railwayProjectId             String?
   railwayEnvironmentId         String?
   railwayWebServiceId          String?
@@ -5685,6 +5742,7 @@ model CustomerDeployment {
   @@index([deploymentStatus])
   @@index([cloudProvider])
   @@index([cloudProvider, deploymentStatus])
+  @@index([releaseLeasePhase, releaseLeaseExpiresAt])
   @@index([provisioningStatus])
   @@index([bootstrapStatus])
   @@index([region])

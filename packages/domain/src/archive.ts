@@ -6,6 +6,7 @@ import { requireWorkspaceMembership } from "./auth";
 import { invariant } from "./errors";
 import { defaultStorage } from "@corgtex/storage";
 import { withdrawActiveApprovalFlowForSubject } from "./approvals";
+import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
 import { lockFinanceImportArtifactOwnership } from "./finance-import-artifact-ownership";
 import {
   ensureWorkspacePermalink,
@@ -35,6 +36,7 @@ type ArchiveEntityType =
   | "BrainSource"
   | "Circle"
   | "CrmAccount"
+  | "CrmActivity"
   | "CrmContact"
   | "CrmDeal"
   | "Document"
@@ -64,6 +66,7 @@ type ArchiveConfig = {
     actor: AppActor;
     membership: MembershipSummary | null;
   }) => Promise<void>;
+  canRestore?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   canPurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   beforePurge?: (tx: Prisma.TransactionClient, record: any) => Promise<void>;
   afterPurge?: (record: any) => Promise<void>;
@@ -111,6 +114,52 @@ const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
   "Proposal",
   "Tension",
 ]);
+const CRM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>(["CrmAccount", "CrmActivity", "CrmContact", "CrmDeal"]);
+type CrmParentSpec = readonly [ArchiveEntityType, "crmAccount" | "crmContact" | "crmDeal", "accountId" | "contactId" | "dealId"];
+
+async function requireActiveCrmRestoreParents(tx: Prisma.TransactionClient, record: any, parents: readonly CrmParentSpec[]) {
+  const ids = (type: ArchiveEntityType) => parents.flatMap(([entityType, , field]) =>
+    entityType === type && record[field] ? [record[field] as string] : []);
+  const dealIds = [...new Set(ids("CrmDeal"))].sort();
+  for (const id of dealIds) await lockWorkspaceArchiveArtifact(tx, "CrmDeal", id);
+  const deals = dealIds.length ? await tx.crmDeal.findMany({ where: { id: { in: dealIds }, workspaceId: record.workspaceId },
+    select: { id: true, archivedAt: true, contactId: true, accountId: true } }) : [];
+  const contactIds = [...new Set([...ids("CrmContact"), ...deals.map((deal) => deal.contactId)])].sort();
+  for (const id of contactIds) await lockWorkspaceArchiveArtifact(tx, "CrmContact", id);
+  const contacts = contactIds.length ? await tx.crmContact.findMany({ where: { id: { in: contactIds }, workspaceId: record.workspaceId },
+    select: { id: true, archivedAt: true, accountId: true } }) : [];
+  const accountIds = [...new Set([...ids("CrmAccount"), ...deals.flatMap((deal) => deal.accountId ? [deal.accountId] : []),
+    ...contacts.flatMap((contact) => contact.accountId ? [contact.accountId] : [])])].sort();
+  for (const id of accountIds) await lockWorkspaceArchiveArtifact(tx, "CrmAccount", id);
+  const accounts = accountIds.length ? await tx.crmAccount.findMany({ where: { id: { in: accountIds }, workspaceId: record.workspaceId },
+    select: { id: true, archivedAt: true } }) : [];
+  const activeDeals = new Set(deals.filter((deal) => !deal.archivedAt).map((deal) => deal.id));
+  const activeContacts = new Set(contacts.filter((contact) => !contact.archivedAt).map((contact) => contact.id));
+  const activeAccounts = new Set(accounts.filter((account) => !account.archivedAt).map((account) => account.id));
+  const contactById = new Map(contacts.map((contact) => [contact.id, contact]));
+  invariant(dealIds.every((id) => { const deal = deals.find((item) => item.id === id); return deal && activeDeals.has(id)
+    && activeContacts.has(deal.contactId) && (!deal.accountId || activeAccounts.has(deal.accountId)); }),
+  409, "ARCHIVED_PARENT", "Restore the linked CrmDeal and its parents before restoring this record.");
+  invariant(contactIds.every((id) => { const contact = contactById.get(id); return contact && activeContacts.has(id)
+    && (!contact.accountId || activeAccounts.has(contact.accountId)); }),
+  409, "ARCHIVED_PARENT", "Restore the linked CrmContact and its account before restoring this record.");
+  invariant(ids("CrmAccount").every((id) => activeAccounts.has(id)), 409, "ARCHIVED_PARENT",
+    "Restore the linked CrmAccount before restoring this record.");
+}
+
+async function requireNoActivityOrphan(tx: Prisma.TransactionClient, record: any, entityType: "CrmAccount" | "CrmContact" | "CrmDeal") {
+  if (entityType === "CrmDeal") await tx.$queryRaw`SELECT "id" FROM "CrmDeal" WHERE "id" = ${record.id} FOR UPDATE`;
+  else if (entityType === "CrmContact") await tx.$queryRaw`SELECT "id" FROM "CrmContact" WHERE "id" = ${record.id} FOR UPDATE`;
+  else await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${record.id} FOR UPDATE`;
+  const where = entityType === "CrmDeal"
+    ? { workspaceId: record.workspaceId, accountId: null, contactId: null, dealId: record.id }
+    : entityType === "CrmContact" ? { workspaceId: record.workspaceId, accountId: null, OR: [
+      { contactId: record.id, OR: [{ dealId: null }, { deal: { contactId: record.id } }] },
+      { contactId: null, deal: { contactId: record.id } },
+    ] } : { workspaceId: record.workspaceId, accountId: record.id, contactId: null, dealId: null };
+  const activity = await tx.crmActivity.findFirst({ where, select: { id: true } });
+  invariant(!activity, 409, "CRM_ACTIVITY_ORPHAN", "Relink or purge solely linked CRM activities before purging this record.");
+}
 
 const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
   Action: {
@@ -171,18 +220,31 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "crmAccount",
     findWhere: directWorkspace,
     label: titleOrName,
+    canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmAccount"),
+  },
+  CrmActivity: {
+    entityType: "CrmActivity", delegate: "crmActivity", findWhere: directWorkspace, label: titleOrName,
+    canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [
+      ["CrmAccount", "crmAccount", "accountId"], ["CrmContact", "crmContact", "contactId"], ["CrmDeal", "crmDeal", "dealId"],
+    ]),
   },
   CrmContact: {
     entityType: "CrmContact",
     delegate: "crmContact",
     findWhere: directWorkspace,
     label: titleOrName,
+    canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [["CrmAccount", "crmAccount", "accountId"]]),
+    canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmContact"),
   },
   CrmDeal: {
     entityType: "CrmDeal",
     delegate: "crmDeal",
     findWhere: directWorkspace,
     label: titleOrName,
+    canRestore: (tx, record) => requireActiveCrmRestoreParents(tx, record, [
+      ["CrmAccount", "crmAccount", "accountId"], ["CrmContact", "crmContact", "contactId"],
+    ]),
+    canPurge: (tx, record) => requireNoActivityOrphan(tx, record, "CrmDeal"),
   },
   Document: {
     entityType: "Document",
@@ -335,13 +397,17 @@ function isPrismaNotFoundError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2025";
 }
 
-async function lockArchiveWorkItem(
+export async function lockWorkspaceArchiveArtifact(
   tx: Prisma.TransactionClient,
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (!WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) return;
-  await acquireWorkItemAdvisoryLock(tx, entityType as WorkItemEntityType, entityId);
+  if (CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
+  }
+  if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+    await acquireWorkItemAdvisoryLock(tx, entityType as WorkItemEntityType, entityId);
+  }
 }
 
 async function recomputeGoalProgressInTransaction(
@@ -489,7 +555,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   const reason = params.reason?.trim() || null;
 
   return prisma.$transaction(async (tx) => {
-    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
+    await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
     if (record.archivedAt) {
@@ -572,9 +638,10 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
   const config = configFor(params.entityType);
 
   return prisma.$transaction(async (tx) => {
-    await lockArchiveWorkItem(tx, config.entityType, params.entityId);
+    await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", `${config.entityType} is not archived.`);
+    await config.canRestore?.(tx, record);
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);
     const previousState = archiveRecord?.previousState && typeof archiveRecord.previousState === "object"
       ? archiveRecord.previousState as Record<string, unknown>
@@ -631,6 +698,10 @@ export async function purgeWorkspaceArtifact(actor: AppActor, params: {
   invariant(reason.length > 0, 400, "INVALID_INPUT", "Purge reason is required.");
 
   const purged = await prisma.$transaction(async (tx) => {
+    await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
+    if (config.entityType === "Proposal") {
+      await acquireConstitutionCorpusAdvisoryLock(tx, params.workspaceId);
+    }
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     invariant(record.archivedAt, 400, "INVALID_STATE", "Archive the artifact before purging it.");
     const archiveRecord = await activeArchiveRecord(tx, params.workspaceId, config.entityType, record.id);

@@ -22,6 +22,7 @@ const PIPELINE_POLICY_PATHS = [
   /^docs\/contributing\/agent-pipeline\.mdx$/,
   /^docs\/contributing\/pull-requests\.mdx$/,
   /^scripts\/check-plan(?:-policy(?:\.test)?)?\.mjs$/,
+  /^scripts\/review-snapshot-integrity\.mjs$/,
 ];
 
 export function sizePolicyForFiles(riskTier, files) {

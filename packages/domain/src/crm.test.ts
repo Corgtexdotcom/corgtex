@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 // ---------- mocks ----------
 
 const archiveWorkspaceArtifact = vi.fn().mockResolvedValue({ id: "archive-1" });
+const lockWorkspaceArchiveArtifact = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@corgtex/shared", () => {
   return {
@@ -106,6 +107,7 @@ vi.mock("@corgtex/shared", () => {
       },
       $transaction: vi.fn((fn: any) =>
         fn({
+          $executeRaw: vi.fn().mockResolvedValue(0),
           crmQualification: {
             create: vi.fn().mockResolvedValue({ id: "qual-1", workspaceId: "ws-1", status: "PENDING_REVIEW" }),
             update: vi.fn().mockResolvedValue({ id: "qual-1", status: "APPROVED" }),
@@ -130,6 +132,7 @@ vi.mock("@corgtex/shared", () => {
               email: "demo@example.com",
               welcomeEmailSentAt: null,
             }),
+            findUnique: vi.fn().mockResolvedValue({ id: "lead-1", email: "demo@example.com", workspaceId: "ws-1" }),
             findFirst: vi.fn().mockResolvedValue(null),
             update: vi.fn().mockResolvedValue({ id: "lead-1" }),
           },
@@ -171,6 +174,13 @@ vi.mock("@corgtex/shared", () => {
               accountId: "account-1",
               archivedAt: null,
             }),
+            findFirst: vi.fn().mockResolvedValue({
+              id: "contact-1",
+              workspaceId: "ws-1",
+              accountId: "account-1",
+              archivedAt: null,
+              tags: ["existing"],
+            }),
             findMany: vi.fn().mockResolvedValue([]),
             update: vi.fn().mockResolvedValue({
               id: "contact-1",
@@ -195,6 +205,7 @@ vi.mock("@corgtex/shared", () => {
               stage: "LEAD",
               archivedAt: null,
             }),
+            findMany: vi.fn().mockResolvedValue([]),
             update: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", stage: "QUALIFIED" }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
@@ -202,7 +213,7 @@ vi.mock("@corgtex/shared", () => {
             create: vi.fn().mockResolvedValue({ id: "transition-1" }),
           },
           crmActivity: {
-            findMany: vi.fn(),
+            findMany: vi.fn().mockResolvedValue([]),
             count: vi.fn(),
             findUnique: vi.fn().mockResolvedValue({
               id: "activity-1",
@@ -254,6 +265,9 @@ vi.mock("@corgtex/shared", () => {
             create: vi.fn().mockResolvedValue({ id: "msg-1", conversationId: "conv-1" }),
           },
           crmConversation: {
+            findFirst: vi.fn().mockResolvedValue(null),
+            findUnique: vi.fn().mockResolvedValue(null),
+            create: vi.fn().mockResolvedValue({ id: "conv-1" }),
             update: vi.fn(),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
@@ -261,6 +275,7 @@ vi.mock("@corgtex/shared", () => {
             findMany: vi.fn(),
             count: vi.fn(),
             findUnique: vi.fn(),
+            findFirst: vi.fn().mockResolvedValue(null),
             create: vi.fn().mockResolvedValue({ id: "pw-1", crmWorkspaceId: "ws-1", targetWorkspaceId: "ws-new" }),
             updateMany: vi.fn().mockResolvedValue({ count: 0 }),
           },
@@ -281,6 +296,7 @@ vi.mock("./events", () => ({
 
 vi.mock("./archive", () => ({
   archiveWorkspaceArtifact,
+  lockWorkspaceArchiveArtifact,
   archiveFilterWhere: vi.fn((filter = "active") => {
     if (filter === "all") return {};
     if (filter === "archived") return { archivedAt: { not: null } };
@@ -343,12 +359,48 @@ describe("CRM domain", () => {
             create: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", domain: "example.com" }),
           },
           crmContact: {
-            upsert: vi.fn().mockResolvedValue({ id: "contact-1" }),
+            findUnique: vi.fn().mockResolvedValue(null),
+            create: vi.fn().mockResolvedValue({ id: "contact-1" }),
           },
         })) as any);
 
       await captureDemoLead({ email: "demo@example.com" });
 
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
+    it("retries contact account-link drift and returns a controlled conflict without downstream writes", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { appendEvents } = await import("./events");
+      const { captureDemoLead } = await import("./crm");
+      const txFor = (beforeAccountId: string, afterAccountId: string) => ({
+        workspace: { upsert: vi.fn().mockResolvedValue({ id: "ws-1" }) },
+        demoLead: { upsert: vi.fn().mockResolvedValue({ id: "lead-1", welcomeEmailSentAt: null }) },
+        crmAccount: { findFirst: vi.fn().mockResolvedValue(null), create: vi.fn(), update: vi.fn() },
+        crmContact: {
+          findUnique: vi.fn()
+            .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: beforeAccountId, archivedAt: null })
+            .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: afterAccountId, archivedAt: null }),
+          findFirst: vi.fn(), create: vi.fn(), update: vi.fn(),
+        },
+      });
+      const first = txFor("account-1", "account-2");
+      const second = txFor("account-2", "account-3");
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn(first)) as any)
+        .mockImplementationOnce((async (fn: any) => fn(second)) as any);
+
+      await expect(captureDemoLead({ email: "demo@example.com" })).rejects.toMatchObject({
+        code: "CRM_LINK_CLOSURE_CHANGED",
+      });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      for (const tx of [first, second]) {
+        expect(tx.crmContact.findFirst).not.toHaveBeenCalled();
+        expect(tx.crmContact.create).not.toHaveBeenCalled();
+        expect(tx.crmContact.update).not.toHaveBeenCalled();
+        expect(tx.crmAccount.create).not.toHaveBeenCalled();
+      }
       expect(appendEvents).not.toHaveBeenCalled();
     });
   });
@@ -634,6 +686,54 @@ describe("CRM domain", () => {
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
+    it("rejects a matching contact whose account becomes archived before creating inquiry children", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { captureCrmInquiry } = await import("./crm");
+      const tx = inquiryTx({
+        crmContact: {
+          findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null }),
+          findFirst: vi.fn().mockResolvedValue(null),
+          create: vi.fn(),
+          update: vi.fn(),
+        },
+      });
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(captureCrmInquiry(inquiryInput())).rejects.toMatchObject({ code: "ARCHIVED_PARENT" });
+      for (const delegate of [tx.crmAccount, tx.crmContact, tx.crmConversation, tx.crmActivity, tx.crmDeal]) {
+        expect(delegate.create).not.toHaveBeenCalled();
+      }
+    });
+
+    it("retries contact account-link drift and creates no inquiry children after the bounded conflict", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { appendEvents } = await import("./events");
+      const { captureCrmInquiry } = await import("./crm");
+      const driftTx = (beforeAccountId: string, afterAccountId: string) => {
+        const tx = inquiryTx();
+        tx.crmContact.findUnique
+          .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: beforeAccountId, archivedAt: null })
+          .mockResolvedValueOnce({ id: "contact-1", workspaceId: "ws-1", accountId: afterAccountId, archivedAt: null });
+        return tx;
+      };
+      const first = driftTx("account-1", "account-2");
+      const second = driftTx("account-2", "account-3");
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn(first)) as any)
+        .mockImplementationOnce((async (fn: any) => fn(second)) as any);
+
+      await expect(captureCrmInquiry(inquiryInput())).rejects.toMatchObject({ code: "CRM_LINK_CLOSURE_CHANGED" });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      for (const tx of [first, second]) {
+        expect(tx.crmAccount.create).not.toHaveBeenCalled();
+        expect(tx.crmContact.create).not.toHaveBeenCalled();
+        expect(tx.crmContact.update).not.toHaveBeenCalled();
+        expect(tx.crmConversation.create).not.toHaveBeenCalled();
+        expect(tx.crmActivity.create).not.toHaveBeenCalled();
+        expect(tx.crmDeal.create).not.toHaveBeenCalled();
+      }
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
     it("accepts connector-style sources through the same service", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { captureCrmInquiry } = await import("./crm");
@@ -756,6 +856,26 @@ describe("CRM domain", () => {
       expect(result.total).toBe(1);
     });
 
+    it("keeps related counts visible when listing archived accounts for recovery", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { listCrmAccounts } = await import("./crm");
+      vi.mocked(prisma.crmAccount.findMany).mockResolvedValue([]);
+      vi.mocked(prisma.crmAccount.count).mockResolvedValue(0);
+      await listCrmAccounts(dummyActor, "ws-1", { archiveFilter: "archived" });
+      const counts = (vi.mocked(prisma.crmAccount.findMany).mock.calls.at(-1)?.[0] as any).include._count.select;
+      for (const relation of ["contacts", "deals", "activities"]) expect(counts[relation].where).toEqual({ archivedAt: null });
+      expect(counts.crmConversations.where).toEqual({});
+    });
+    it("hides a direct conversation read when any linked CRM parent is archived", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { getCrmConversation } = await import("./crm");
+      vi.mocked(prisma.crmConversation.findFirst).mockResolvedValue(null);
+      await expect(getCrmConversation(dummyActor, { workspaceId: "ws-1", conversationId: "conversation-1" }))
+        .rejects.toThrow("Conversation not found.");
+      expect(prisma.crmConversation.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ workspaceId: "ws-1", AND: expect.any(Array) }),
+      }));
+    });
     it("archives accounts through the shared archive system without cascading to linked CRM records", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { requireWorkspaceMembership } = await import("./auth");
@@ -870,6 +990,50 @@ describe("CRM domain", () => {
       });
     });
 
+    it("locks a contact closure before updating its account link", async () => {
+      const { prisma } = await import("@corgtex/shared"), { updateContact } = await import("./crm");
+      const update = vi.fn().mockResolvedValue({ id: "contact-1", email: "buyer@example.test", accountId: "new-account" });
+      const tx = { crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1",
+        accountId: "old-account", archivedAt: null }), findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "old-account" }]),
+        findFirst: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "old-account", archivedAt: null }), update },
+        crmActivity: { findMany: vi.fn().mockResolvedValue([{ id: "activity-1" }]), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        crmAccount: { findUnique: vi.fn().mockResolvedValue({ id: "new-account", workspaceId: "ws-1", archivedAt: null }) },
+        crmDeal: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) }, crmConversation: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        crmProspectWorkspace: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) }, demoLead: { findFirst: vi.fn().mockResolvedValue(null) },
+        auditLog: { create: vi.fn() } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await updateContact(dummyActor, { workspaceId: "ws-1", contactId: "contact-1", accountId: "new-account" });
+      expect(lockWorkspaceArchiveArtifact.mock.calls.map(([, type, id]) => [type, id])).toEqual([
+        ["CrmActivity", "activity-1"], ["CrmContact", "contact-1"], ["CrmAccount", "new-account"], ["CrmAccount", "old-account"]]);
+      expect(lockWorkspaceArchiveArtifact.mock.invocationCallOrder[0]).toBeLessThan(update.mock.invocationCallOrder[0]!);
+    });
+
+    it("retries account-link synchronization after an under-lock activity rescan changes", async () => {
+      const { prisma } = await import("@corgtex/shared"), { updateContact } = await import("./crm");
+      const activity = (id: string) => ({ id, accountId: null, contactId: "contact-1", dealId: null });
+      const update = vi.fn().mockResolvedValue({ id: "contact-1", email: "buyer@example.test", accountId: "account-1" });
+      const tx = { crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: null,
+          archivedAt: null }), findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: null }]),
+          findFirst: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1" }), update },
+        crmActivity: { findMany: vi.fn()
+          .mockResolvedValueOnce([activity("activity-1")]).mockResolvedValueOnce([activity("activity-1")])
+          .mockResolvedValueOnce([activity("activity-1"), activity("activity-2")])
+          .mockResolvedValueOnce([activity("activity-1"), activity("activity-2")])
+          .mockResolvedValueOnce([activity("activity-1"), activity("activity-2")])
+          .mockResolvedValueOnce([activity("activity-1"), activity("activity-2")]), updateMany: vi.fn().mockResolvedValue({ count: 2 }) },
+        crmAccount: { findUnique: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: null }) },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        crmConversation: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        crmProspectWorkspace: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+        demoLead: { findFirst: vi.fn().mockResolvedValue(null) }, auditLog: { create: vi.fn() } };
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn(tx)) as any)
+        .mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await updateContact(dummyActor, { workspaceId: "ws-1", contactId: "contact-1", accountId: "account-1" });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
     it("rejects contact links to accounts from another workspace", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { createContact } = await import("./crm");
@@ -945,6 +1109,7 @@ describe("CRM domain", () => {
       const { createDeal } = await import("./crm");
 
       const tx = {
+        crmAccount: { findUnique: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: null }) },
         crmContact: {
           findUnique: vi.fn().mockResolvedValue({
             id: "contact-1",
@@ -952,6 +1117,10 @@ describe("CRM domain", () => {
             accountId: "account-1",
             archivedAt: null,
           }),
+          findFirst: vi.fn().mockResolvedValue({
+            id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null,
+          }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]),
         },
         crmDeal: {
           create: vi.fn().mockResolvedValue({
@@ -993,24 +1162,22 @@ describe("CRM domain", () => {
           actorUserId: "u-1",
         }),
       });
+
+      tx.crmAccount.findUnique.mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: new Date() });
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(createDeal(dummyActor, {
+        workspaceId: "ws-1", contactId: "contact-1", title: "Hidden deal",
+      })).rejects.toThrow("Account not found.");
     });
 
     it("backfills accounts and related CRM records idempotently", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { backfillCrmAccountsForWorkspace } = await import("./crm");
 
+      vi.mocked(prisma.crmContact.findMany).mockResolvedValueOnce([{ id: "contact-1", email: "founder@acme.com",
+        company: "Acme Corp", source: "import" }] as any);
+
       const tx = {
-        crmContact: {
-          findMany: vi.fn().mockResolvedValue([
-            {
-              id: "contact-1",
-              email: "founder@acme.com",
-              company: "Acme Corp",
-              source: "import",
-            },
-          ]),
-          update: vi.fn().mockResolvedValue({ id: "contact-1", accountId: "account-1" }),
-        },
         crmAccount: {
           findFirst: vi.fn()
             .mockResolvedValueOnce(null)
@@ -1024,7 +1191,13 @@ describe("CRM domain", () => {
           }),
         },
         crmDeal: { updateMany: vi.fn().mockResolvedValue({ count: 2 }) },
-        crmActivity: { updateMany: vi.fn().mockResolvedValue({ count: 3 }) },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: null }]),
+          findFirst: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1", account: { archivedAt: null } }),
+          update: vi.fn().mockResolvedValue({ id: "contact-1", accountId: "account-1" }) },
+        crmActivity: {
+          findMany: vi.fn().mockResolvedValue([{ id: "activity-1" }, { id: "activity-2" }, { id: "activity-3" }]),
+          updateMany: vi.fn().mockResolvedValue({ count: 3 }),
+        },
         crmConversation: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
         crmProspectWorkspace: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
         demoLead: { findFirst: vi.fn().mockResolvedValue(null) },
@@ -1043,17 +1216,24 @@ describe("CRM domain", () => {
         activitiesLinked: 3,
         conversationsLinked: 1,
       }));
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledTimes(5);
+      expect(lockWorkspaceArchiveArtifact.mock.calls.map(([, type, id]) => [type, id])).toEqual([
+        ["CrmActivity", "activity-1"], ["CrmActivity", "activity-2"], ["CrmActivity", "activity-3"],
+        ["CrmContact", "contact-1"], ["CrmAccount", expect.any(String)],
+      ]);
+      expect(tx.crmContact.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+        accountId: "account-1", account: { archivedAt: null },
+      }) }));
+      expect(tx.crmActivity.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ archivedAt: null }),
+      }));
       expect(tx.crmContact.update).toHaveBeenCalledWith({
         where: { id: "contact-1" },
         data: { accountId: "account-1" },
       });
+      expect(lockWorkspaceArchiveArtifact.mock.invocationCallOrder[0]).toBeLessThan(tx.crmContact.update.mock.invocationCallOrder[0]!);
 
-      const emptyTx = {
-        crmContact: {
-          findMany: vi.fn().mockResolvedValue([]),
-        },
-      };
-      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(emptyTx)) as any);
+      vi.mocked(prisma.crmContact.findMany).mockResolvedValueOnce([] as any);
 
       await expect(backfillCrmAccountsForWorkspace(dummyActor, {
         workspaceId: "ws-1",
@@ -1081,7 +1261,7 @@ describe("CRM domain", () => {
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmActivity.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { workspaceId: "ws-1", accountId: "account-1" },
+        where: expect.objectContaining({ workspaceId: "ws-1", accountId: "account-1" }),
         take: 10,
       }));
       expect(result.total).toBe(1);
@@ -1120,6 +1300,128 @@ describe("CRM domain", () => {
       }));
     });
 
+    it("shares nullable-safe active-parent predicates across relationship lists and counts", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const crm = await import("./crm");
+      const cases: [Function, any][] = [[crm.listContacts, prisma.crmContact], [crm.listDeals, prisma.crmDeal], [crm.listCrmActivities, prisma.crmActivity],
+        [crm.listCommunicationSuggestions, prisma.crmCommunicationSuggestion], [crm.listCrmConversations, prisma.crmConversation],
+        [crm.listCrmProspectWorkspaces, prisma.crmProspectWorkspace]];
+      for (const [list, delegate] of cases) {
+        vi.mocked(delegate.findMany).mockResolvedValue([] as never);
+        vi.mocked(delegate.count).mockResolvedValue(0);
+        await list(dummyActor, "ws-1");
+        expect(delegate.count).toHaveBeenCalledWith({ where: vi.mocked(delegate.findMany).mock.calls[0]![0]!.where });
+      }
+      await crm.listContacts(dummyActor, "ws-1", { archiveFilter: "archived" });
+      const recoveryCounts = (vi.mocked(prisma.crmContact.findMany).mock.calls[1]![0] as any).include._count.select;
+      for (const relation of ["deals", "activities"]) expect(recoveryCounts[relation].where).toEqual({ archivedAt: null });
+      const activityWhere = vi.mocked(prisma.crmActivity.findMany).mock.calls[0]![0]!.where!;
+      expect(activityWhere).toMatchObject({ archivedAt: null,
+        AND: expect.arrayContaining([{ OR: [{ accountId: null }, { account: { archivedAt: null } }] }]) });
+      expect(activityWhere.AND).toEqual(expect.arrayContaining([
+        { OR: [{ dealId: null }, { deal: { archivedAt: null, contact: { archivedAt: null,
+          OR: [{ accountId: null }, { account: { archivedAt: null } }] },
+          OR: [{ accountId: null }, { account: { archivedAt: null } }] } }] },
+      ]));
+      await crm.listCrmActivities(dummyActor, "ws-1", { archiveFilter: "archived" });
+      await crm.listCrmActivities(dummyActor, "ws-1", { archiveFilter: "all" });
+      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[1]![0]!.where).toEqual({ workspaceId: "ws-1", archivedAt: { not: null } });
+      expect(vi.mocked(prisma.crmActivity.findMany).mock.calls[2]![0]!.where).toEqual({ workspaceId: "ws-1" });
+    });
+    it("archives named CRM records and fails closed on archived activity writes", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { archiveCrmActivity, archiveCrmDeal, completeActivity, updateActivity } = await import("./crm");
+      await archiveCrmDeal(dummyActor, { workspaceId: "ws-1", dealId: "deal-1" });
+      await archiveCrmActivity(dummyActor, { workspaceId: "ws-1", activityId: "activity-1" });
+      expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(dummyActor, expect.objectContaining({ entityType: "CrmDeal" }));
+      expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(dummyActor, expect.objectContaining({ entityType: "CrmActivity" }));
+      const updates = vi.fn();
+      const activity = { id: "activity-1", workspaceId: "ws-1", archivedAt: new Date(), completedAt: null };
+      vi.mocked(prisma.$transaction)
+        .mockImplementationOnce((async (fn: any) => fn({ crmActivity: { findUnique: vi.fn().mockResolvedValue(activity), update: updates } })) as any)
+        .mockImplementationOnce((async (fn: any) => fn({ crmActivity: { findUnique: vi.fn().mockResolvedValue({ ...activity, archivedAt: null }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: null, contactId: null, dealId: null }]),
+          findFirst: vi.fn().mockResolvedValue(null), update: updates } })) as any);
+      await expect(updateActivity(dummyActor, { workspaceId: "ws-1", activityId: "activity-1", title: "Changed" })).rejects.toThrow("Activity not found");
+      await expect(completeActivity(dummyActor, { workspaceId: "ws-1", activityId: "activity-1" })).rejects.toThrow("Activity not found");
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledTimes(1);
+      expect(updates).not.toHaveBeenCalled();
+    });
+    it("locks activity relinks in canonical type and lexical id order", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateActivity } = await import("./crm");
+      const activity = { id: "activity-1", workspaceId: "ws-1", archivedAt: null, accountId: "z-account", contactId: "z-contact", dealId: "z-deal" };
+      const tx = { crmActivity: { findUnique: vi.fn().mockResolvedValue(activity), findFirst: vi.fn().mockResolvedValue(activity),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "z-account", contactId: "z-contact", dealId: "z-deal" }]),
+          update: vi.fn().mockResolvedValue(activity) },
+        crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "a-contact", workspaceId: "ws-1", archivedAt: null, accountId: "a-account" }),
+          findFirst: vi.fn().mockResolvedValue({ id: "a-contact", workspaceId: "ws-1", archivedAt: null, accountId: "a-account" }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "a-account" }, { accountId: "z-account" }]) },
+        crmDeal: { findUnique: vi.fn().mockResolvedValue({ id: "a-deal", workspaceId: "ws-1", archivedAt: null, accountId: "a-account" }),
+          findFirst: vi.fn().mockResolvedValue({ id: "a-deal", workspaceId: "ws-1", archivedAt: null, accountId: "a-account" }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "a-account", contactId: "a-contact" },
+            { accountId: "z-account", contactId: "z-contact" }]) },
+        crmAccount: { findUnique: vi.fn().mockResolvedValue({ id: "a-account", workspaceId: "ws-1", archivedAt: null }) },
+        auditLog: { create: vi.fn() } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await updateActivity(dummyActor, { workspaceId: "ws-1", activityId: "activity-1", accountId: "a-account", contactId: "a-contact", dealId: "a-deal" });
+      expect(lockWorkspaceArchiveArtifact.mock.calls.map(([, type, id]) => [type, id])).toEqual([
+        ["CrmActivity", "activity-1"], ["CrmDeal", "a-deal"], ["CrmDeal", "z-deal"], ["CrmContact", "a-contact"],
+        ["CrmContact", "z-contact"], ["CrmAccount", "a-account"], ["CrmAccount", "z-account"]]);
+    });
+    it("locks the full current and replacement suggestion closure canonically", async () => {
+      const { lockCrmLinkClosure } = await import("./crm-archive-guards");
+      const tx = {
+        crmActivity: { findMany: vi.fn().mockResolvedValue([
+          { accountId: "z-account", contactId: "z-contact", dealId: "z-deal" },
+          { accountId: "a-account", contactId: "a-contact", dealId: "a-deal" },
+        ]) },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([
+          { accountId: "z-account", contactId: "z-contact" }, { accountId: "a-account", contactId: "a-contact" },
+        ]) },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ accountId: "z-account" }, { accountId: "a-account" }]) },
+      };
+      await lockCrmLinkClosure(tx as any, "ws-1", { activityId: "z-activity" }, { activityId: "a-activity" });
+      expect(lockWorkspaceArchiveArtifact.mock.calls.map(([, type, id]) => [type, id])).toEqual([
+        ["CrmActivity", "a-activity"], ["CrmActivity", "z-activity"], ["CrmDeal", "a-deal"], ["CrmDeal", "z-deal"],
+        ["CrmContact", "a-contact"], ["CrmContact", "z-contact"], ["CrmAccount", "a-account"], ["CrmAccount", "z-account"],
+      ]);
+    });
+    it("omits the welcome activity when the converted contact changes account under lock", async () => {
+      const { prisma } = await import("@corgtex/shared"), { recordDemoWelcomeCrmActivity } = await import("./crm");
+      const upsert = vi.fn(), tx = {
+        crmContact: {
+          findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1" }),
+          findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "account-1" }]),
+          findFirst: vi.fn().mockResolvedValue({ id: "contact-1", accountId: "account-2" }),
+        }, crmAccount: { findMany: vi.fn().mockResolvedValue([{ id: "account-1", archivedAt: null }]) },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([]) }, crmActivity: { findMany: vi.fn().mockResolvedValue([]), upsert },
+        demoLead: { findFirst: vi.fn().mockResolvedValue({ id: "lead-1" }) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(recordDemoWelcomeCrmActivity({ workspaceId: "ws-1", demoLeadId: "lead-1",
+        expectedContactId: "contact-1" })).resolves.toEqual({ created: false });
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(tx, "CrmContact", "contact-1");
+      expect(upsert).not.toHaveBeenCalled();
+    });
+    it("idempotently recovers a captured lead welcome activity by canonical email", async () => {
+      const { prisma } = await import("@corgtex/shared"), { recordDemoWelcomeCrmActivity } = await import("./crm");
+      const upsert = vi.fn().mockResolvedValue({ id: "activity-1" });
+      const tx = {
+        demoLead: { findFirst: vi.fn(({ select }) => select?.email
+          ? { email: "lead@example.com", convertedContactId: null } : { id: "lead-1" }) },
+        crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: null }),
+          findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: null }]),
+          findFirst: vi.fn().mockResolvedValue({ id: "contact-1", accountId: null }) },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([]) },
+        crmActivity: { findMany: vi.fn().mockResolvedValue([]), upsert },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      const params = { workspaceId: "ws-1", demoLeadId: "lead-1", expectedContactId: null };
+      await expect(recordDemoWelcomeCrmActivity(params)).resolves.toEqual({ created: true, activityId: "activity-1" });
+      await recordDemoWelcomeCrmActivity(params);
+      expect(upsert).toHaveBeenCalledTimes(2);
+    });
     it("creates a due reminder task with validated owner and source metadata", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { createActivity } = await import("./crm");
@@ -1191,6 +1493,22 @@ describe("CRM domain", () => {
         ownerUserId: "u-other",
       })).rejects.toThrow("Activity owner not found.");
     });
+    it("rejects activity links when the deal contact is archived", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createActivity } = await import("./crm");
+      const create = vi.fn();
+      const tx = {
+        member: { findFirst: vi.fn() },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([{ accountId: "account-1", contactId: "contact-1" }]),
+          findFirst: vi.fn().mockResolvedValue(null) },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]) },
+        crmActivity: { create },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(createActivity(dummyActor, { workspaceId: "ws-1", dealId: "deal-1", title: "Blocked" }))
+        .rejects.toThrow("Deal not found.");
+      expect(create).not.toHaveBeenCalled();
+    });
 
     it("updates reminder due date and owner after validating workspace links", async () => {
       const { prisma } = await import("@corgtex/shared");
@@ -1208,6 +1526,7 @@ describe("CRM domain", () => {
             source: "manual",
             completedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "account-1", contactId: null, dealId: null }]),
           update: vi.fn().mockResolvedValue({ id: "activity-1" }),
         },
         member: {
@@ -1256,6 +1575,7 @@ describe("CRM domain", () => {
             source: "manual",
             completedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: null, contactId: null, dealId: null }]),
           update: vi.fn().mockResolvedValue({ id: "activity-1", completedAt }),
         },
         auditLog: {
@@ -1324,7 +1644,7 @@ describe("CRM domain", () => {
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmProspectWorkspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" },
+        where: expect.objectContaining({ crmWorkspaceId: "ws-1", accountId: "account-1", status: "ACTIVE" }),
         take: 5,
       }));
       expect(result.total).toBe(1);
@@ -1419,7 +1739,7 @@ describe("CRM domain", () => {
 
       expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor: dummyActor, workspaceId: "ws-1" });
       expect(prisma.crmCommunicationSuggestion.findMany).toHaveBeenCalledWith(expect.objectContaining({
-        where: { workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } },
+        where: expect.objectContaining({ workspaceId: "ws-1", ownerUserId: "u-1", status: { in: ["REQUESTED", "SENT"] } }),
         take: 10,
       }));
       expect(result.total).toBe(1);
@@ -1443,6 +1763,10 @@ describe("CRM domain", () => {
             name: "Ava Chen",
             archivedAt: null,
           }),
+          findFirst: vi.fn().mockResolvedValue({
+            id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null,
+          }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]),
         },
         crmDeal: { findUnique: vi.fn() },
         crmActivity: { findUnique: vi.fn() },
@@ -1490,6 +1814,20 @@ describe("CRM domain", () => {
       });
     });
 
+    it("locks and rejects an archived activity when creating a suggestion", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createCommunicationSuggestion } = await import("./crm");
+      const tx = { member: { findFirst: vi.fn() }, crmActivity: {
+        findMany: vi.fn().mockResolvedValue([{ accountId: null, contactId: null, dealId: null }]),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findUnique: vi.fn().mockResolvedValue({ id: "activity-1", workspaceId: "ws-1", archivedAt: new Date() }),
+      }, crmCommunicationSuggestion: { create: vi.fn() } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(createCommunicationSuggestion(dummyActor, { workspaceId: "ws-1", activityId: "activity-1",
+        title: "Do not link", bodyMd: "Archived context" })).rejects.toThrow("Activity not found.");
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(tx, "CrmActivity", "activity-1");
+      expect(tx.crmCommunicationSuggestion.create).not.toHaveBeenCalled();
+    });
     it("edits draft content without changing finalized suggestions", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { updateCommunicationSuggestion } = await import("./crm");
@@ -1511,6 +1849,7 @@ describe("CRM domain", () => {
             status: "FAILED",
           }),
         },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]) },
         auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
       };
       vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
@@ -1628,6 +1967,8 @@ describe("CRM domain", () => {
         crmActivity: {
           create: vi.fn().mockResolvedValue({ id: "activity-1" }),
         },
+        crmDeal: { findMany: vi.fn().mockResolvedValue([{ accountId: "account-1", contactId: "contact-1" }]) },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]) },
         auditLog: { create: vi.fn().mockResolvedValue({ id: "audit-1" }) },
       };
       vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
@@ -1775,14 +2116,69 @@ describe("CRM domain", () => {
       })).rejects.toThrow("Communication suggestion not found.");
       expect(tx.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
     });
+
+    it("rejects mutations when a suggestion is hidden by an archived parent", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { markCommunicationSuggestionSent } = await import("./crm");
+      const create = vi.fn();
+      const tx = { crmCommunicationSuggestion: { findUnique: vi.fn().mockResolvedValue({
+        id: "suggestion-1", workspaceId: "ws-1", accountId: "account-1" }), findFirst: vi.fn().mockResolvedValue(null) }, crmActivity: { create } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(markCommunicationSuggestionSent(dummyActor, { workspaceId: "ws-1", suggestionId: "suggestion-1" }))
+        .rejects.toThrow("Communication suggestion not found.");
+      expect(create).not.toHaveBeenCalled();
+    });
   });
 
   describe("deal stage transitions", () => {
+    it("rejects deals hidden by an archived account or contact", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+      const update = vi.fn();
+      const tx = {
+        crmDeal: { findUnique: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", archivedAt: null,
+          accountId: "account-1", contactId: "contact-1" }), findMany: vi.fn().mockResolvedValue([{
+          id: "deal-1", accountId: "account-1", contactId: "contact-1",
+        }]), findFirst: vi.fn().mockResolvedValue(null), update },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "account-1" }]) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(updateDeal(dummyActor, { workspaceId: "ws-1", dealId: "deal-1", title: "Blocked" })).rejects.toThrow("Deal not found.");
+      expect(tx.crmDeal.findFirst).toHaveBeenCalledWith({ where: expect.objectContaining({ AND: expect.any(Array) }) });
+      expect(update).not.toHaveBeenCalled();
+    });
+    it("locks the required contact account before rejecting a deal hidden by that archived transitive parent", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { updateDeal } = await import("./crm");
+      const update = vi.fn();
+      const tx = {
+        crmDeal: {
+          findUnique: vi.fn().mockResolvedValue({ id: "deal-1", workspaceId: "ws-1", archivedAt: null,
+            accountId: "z-account", contactId: "contact-1" }),
+          findMany: vi.fn().mockResolvedValue([{ id: "deal-1", accountId: "z-account", contactId: "contact-1" }]),
+          findFirst: vi.fn().mockResolvedValue(null), update,
+        },
+        crmContact: { findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "a-account" }]) },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+
+      await expect(updateDeal(dummyActor, { workspaceId: "ws-1", dealId: "deal-1", title: "Blocked" }))
+        .rejects.toThrow("Deal not found.");
+
+      expect(lockWorkspaceArchiveArtifact.mock.calls.map(([, type, id]) => [type, id])).toEqual([
+        ["CrmDeal", "deal-1"],
+        ["CrmContact", "contact-1"],
+        ["CrmAccount", "a-account"],
+        ["CrmAccount", "z-account"],
+      ]);
+      expect(update).not.toHaveBeenCalled();
+    });
     it("records an initial stage transition when creating a deal", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { createDeal } = await import("./crm");
 
       const tx = {
+        crmAccount: { findUnique: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: null }) },
         crmContact: {
           findUnique: vi.fn().mockResolvedValue({
             id: "contact-1",
@@ -1790,6 +2186,10 @@ describe("CRM domain", () => {
             accountId: "account-1",
             archivedAt: null,
           }),
+          findFirst: vi.fn().mockResolvedValue({
+            id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null,
+          }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]),
         },
         crmDeal: {
           create: vi.fn().mockResolvedValue({
@@ -1848,6 +2248,7 @@ describe("CRM domain", () => {
             stage: "NEGOTIATION",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn().mockResolvedValue({
             id: "deal-1",
             workspaceId: "ws-1",
@@ -1898,6 +2299,7 @@ describe("CRM domain", () => {
             stage: "CLOSED_WON",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn().mockResolvedValue({
             id: "deal-1",
             workspaceId: "ws-1",
@@ -1945,6 +2347,7 @@ describe("CRM domain", () => {
             stage: "PROPOSAL",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn(),
         },
         crmDealStageTransition: {
@@ -1978,6 +2381,7 @@ describe("CRM domain", () => {
             stage: "LEAD",
             archivedAt: null,
           }),
+          findMany: vi.fn().mockResolvedValue([]),
           update: vi.fn(),
         },
         crmDealStageTransition: {
@@ -2089,6 +2493,18 @@ describe("CRM domain", () => {
 
   // --- approveQualification ---
   describe("approveQualification", () => {
+    it("excludes archived contacts from qualification relinking", async () => {
+      const { prisma } = await import("@corgtex/shared"), { approveQualification } = await import("./crm");
+      vi.mocked(prisma.crmQualification.findUnique).mockResolvedValue({ id: "qual-1", workspaceId: "ws-1", status: "PENDING_REVIEW", companyName: "Acme", website: "acme.com", demoLead: { id: "lead-1", email: "demo@acme.com" } } as any);
+      const findMany = vi.fn().mockResolvedValue([]), updateMany = vi.fn(), tx = { crmQualification: { update: vi.fn() },
+        crmAccount: { findFirst: vi.fn().mockResolvedValue({ id: "account-1", domain: "acme.com", tags: [] }),
+          findUnique: vi.fn().mockResolvedValue({ id: "account-1", workspaceId: "ws-1", archivedAt: null, tags: [] }),
+          update: vi.fn().mockResolvedValue({ id: "account-1" }) },
+        crmContact: { findMany, updateMany }, crmActivity: { findMany: vi.fn().mockResolvedValue([]) },
+        crmConversation: { updateMany: vi.fn() }, crmProspectWorkspace: { updateMany: vi.fn() } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any); await approveQualification(dummyActor, { workspaceId: "ws-1", qualificationId: "qual-1" });
+      for (const query of [findMany, updateMany]) expect(query).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ archivedAt: null }) }));
+    });
     it("transitions a pending qualification to APPROVED", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { approveQualification } = await import("./crm");
@@ -2190,6 +2606,38 @@ describe("CRM domain", () => {
 
       expect(result).toBeNull();
     });
+    it("does not append inbound replies through archived CRM parents", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { syncEmailReplyToConversation } = await import("./crm");
+      const create = vi.fn();
+      const rawConversation = { id: "conv-1", workspaceId: "ws-1", accountId: "account-1", contactId: null, dealId: null };
+      const tx = {
+        demoLead: { findFirst: vi.fn().mockResolvedValue({ id: "lead-1", workspaceId: "ws-1" }) },
+        crmConversation: { findFirst: vi.fn().mockResolvedValueOnce(rawConversation).mockResolvedValueOnce(null), create: vi.fn(), update: vi.fn() },
+        crmContact: { findUnique: vi.fn().mockResolvedValue(null), findFirst: vi.fn().mockResolvedValue(null) },
+        crmConversationMessage: { create },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(syncEmailReplyToConversation({ fromEmail: "buyer@example.test", subject: "Reply", bodyText: "Interested" })).resolves.toBeNull();
+      expect(tx.crmConversation.findFirst).toHaveBeenNthCalledWith(2, expect.objectContaining({ where: expect.objectContaining({
+        id: "conv-1", AND: expect.any(Array),
+      }) }));
+      expect(create).not.toHaveBeenCalled();
+    });
+    it("rechecks direct conversation parents after locking before inserting", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { createConversationMessage } = await import("./crm");
+      const create = vi.fn();
+      const tx = { crmConversation: {
+        findUnique: vi.fn().mockResolvedValue({ id: "conv-1", workspaceId: "ws-1", accountId: "account-1" }),
+        findFirst: vi.fn().mockResolvedValue(null), update: vi.fn(),
+      }, crmConversationMessage: { create } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(createConversationMessage(dummyActor, { workspaceId: "ws-1", conversationId: "conv-1",
+        bodyMd: "Blocked", senderType: "ADMIN" })).rejects.toThrow("Conversation not found.");
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(tx, "CrmAccount", "account-1");
+      expect(create).not.toHaveBeenCalled();
+    });
   });
 
   // --- provisionProspectWorkspace ---
@@ -2198,23 +2646,13 @@ describe("CRM domain", () => {
       const { prisma } = await import("@corgtex/shared");
       const { provisionProspectWorkspace } = await import("./crm");
 
-      vi.mocked(prisma.demoLead.findUnique).mockResolvedValue({
-        id: "lead-1",
-        email: "demo@acme.com",
-        workspaceId: "ws-1",
-      } as any);
-
-      vi.mocked(prisma.crmProspectWorkspace.findFirst).mockResolvedValue(null);
-
       const result = await provisionProspectWorkspace(dummyActor, {
         demoLeadId: "lead-1",
         adminEmail: "admin@acme.com",
         crmWorkspaceId: "ws-1",
       });
 
-      expect(prisma.demoLead.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: "lead-1" } })
-      );
+      expect(prisma.$transaction).toHaveBeenCalled();
       expect(result).toBeDefined();
     });
 
@@ -2222,20 +2660,17 @@ describe("CRM domain", () => {
       const { prisma } = await import("@corgtex/shared");
       const { provisionProspectWorkspace } = await import("./crm");
 
-      vi.mocked(prisma.demoLead.findUnique).mockResolvedValue({
-        id: "lead-1",
-        email: "demo@acme.com",
-        workspaceId: "ws-1",
-      } as any);
-      vi.mocked(prisma.crmProspectWorkspace.findFirst).mockResolvedValue(null);
-
       const customerAccountUpsert = vi.fn();
       const customerDeploymentUpsert = vi.fn();
       const tx = {
+        $executeRaw: vi.fn().mockResolvedValue(0),
+        demoLead: { findUnique: vi.fn().mockResolvedValue({ id: "lead-1", email: "demo@acme.com", workspaceId: "ws-1" }) },
+        crmContact: { findFirst: vi.fn().mockResolvedValue(null) },
         workspace: {
           create: vi.fn().mockResolvedValue({ id: "ws-new", name: "Demo Workspace", slug: "demo-123" }),
         },
         crmProspectWorkspace: {
+          findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockResolvedValue({ id: "pw-1", crmWorkspaceId: "ws-1", targetWorkspaceId: "ws-new" }),
         },
         customerAccount: {
@@ -2269,14 +2704,11 @@ describe("CRM domain", () => {
       const { prisma } = await import("@corgtex/shared");
       const { provisionProspectWorkspace } = await import("./crm");
 
-      vi.mocked(prisma.demoLead.findUnique).mockResolvedValue({
-        id: "lead-1",
-        email: "demo@acme.com",
-        workspaceId: "ws-1",
-      } as any);
-
       const existing = { id: "pw-existing", crmWorkspaceId: "ws-1", demoLeadId: "lead-1" };
-      vi.mocked(prisma.crmProspectWorkspace.findFirst).mockResolvedValue(existing as any);
+      const tx = { $executeRaw: vi.fn().mockResolvedValue(0),
+        demoLead: { findUnique: vi.fn().mockResolvedValue({ id: "lead-1", email: "demo@acme.com", workspaceId: "ws-1" }) },
+        crmProspectWorkspace: { findFirst: vi.fn().mockResolvedValue(existing) } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
 
       const result = await provisionProspectWorkspace(dummyActor, {
         demoLeadId: "lead-1",
@@ -2285,7 +2717,25 @@ describe("CRM domain", () => {
       });
 
       expect(result).toEqual(existing);
-      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.crmProspectWorkspace.findFirst).toHaveBeenCalled();
+      expect(tx.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.crmProspectWorkspace.findFirst.mock.invocationCallOrder[0]!);
+    });
+
+    it("revalidates the matched contact under lock before creating a workspace", async () => {
+      const { prisma } = await import("@corgtex/shared"), { provisionProspectWorkspace } = await import("./crm");
+      const create = vi.fn(), tx = {
+        $executeRaw: vi.fn().mockResolvedValue(0),
+        demoLead: { findUnique: vi.fn().mockResolvedValue({ id: "lead-1", email: "demo@acme.com", workspaceId: "ws-1" }) },
+        crmProspectWorkspace: { findFirst: vi.fn().mockResolvedValue(null) },
+        crmContact: { findFirst: vi.fn().mockResolvedValueOnce({ id: "contact-1", accountId: "account-1" }).mockResolvedValueOnce(null),
+          findMany: vi.fn().mockResolvedValue([{ id: "contact-1", accountId: "account-1" }]) },
+        workspace: { create },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(provisionProspectWorkspace(dummyActor, { demoLeadId: "lead-1", adminEmail: "admin@acme.com",
+        crmWorkspaceId: "ws-1" })).rejects.toMatchObject({ code: "ARCHIVED_PARENT" });
+      expect(lockWorkspaceArchiveArtifact).toHaveBeenCalledWith(tx, "CrmContact", "contact-1");
+      expect(create).not.toHaveBeenCalled();
     });
 
     it("rejects non-user actors", async () => {
@@ -2485,12 +2935,12 @@ describe("CRM domain", () => {
     it("adds high-confidence enrichment as tags and records an activity", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { applyEnrichmentResult } = await import("./crm-enrichment");
-
-      vi.mocked(prisma.crmContact.findFirst).mockResolvedValue({
-        id: "contact-1",
-        workspaceId: "ws-1",
-        tags: ["existing"],
-      } as any);
+      const contact = { id: "contact-1", workspaceId: "ws-1", accountId: null, archivedAt: null, tags: ["existing"] };
+      const tx = { crmContact: {
+        findUnique: vi.fn().mockResolvedValue(contact), findMany: vi.fn().mockResolvedValue([{ accountId: null }]),
+        findFirst: vi.fn().mockResolvedValue(contact), update: vi.fn(),
+      }, crmActivity: { create: vi.fn() } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
 
       await applyEnrichmentResult("ws-1", "contact-1", {
         industry: "Healthcare",
@@ -2499,17 +2949,14 @@ describe("CRM domain", () => {
         confidence: 0.91,
       });
 
-      expect(prisma.crmContact.findFirst).toHaveBeenCalledWith({
-        where: {
-          id: "contact-1",
-          workspaceId: "ws-1",
-        },
-      });
-      expect(prisma.crmContact.update).toHaveBeenCalledWith({
+      expect(tx.crmContact.findFirst).toHaveBeenCalledWith({ where: expect.objectContaining({
+        id: "contact-1", workspaceId: "ws-1", archivedAt: null,
+      }) });
+      expect(tx.crmContact.update).toHaveBeenCalledWith({
         where: { id: "contact-1" },
         data: { tags: ["existing", "Healthcare", "New York"] },
       });
-      expect(prisma.crmActivity.create).toHaveBeenCalledWith(
+      expect(tx.crmActivity.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             workspaceId: "ws-1",
@@ -2519,29 +2966,62 @@ describe("CRM domain", () => {
         }),
       );
     });
+    it("does not write enrichment after a linked parent is archived under lock", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { applyEnrichmentResult } = await import("./crm-enrichment");
+      const update = vi.fn(); const create = vi.fn();
+      const tx = { crmContact: {
+        findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null }),
+        findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]), findFirst: vi.fn().mockResolvedValue(null), update,
+      }, crmActivity: { create } };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(applyEnrichmentResult("ws-1", "contact-1", { confidence: 0.9 })).rejects.toThrow("Contact not found.");
+      expect(update).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+    });
   });
 
   describe("recordDripFollowUp", () => {
     it("scopes the lead lookup to the workspace before recording the follow-up", async () => {
       const { prisma } = await import("@corgtex/shared");
       const { recordDripFollowUp } = await import("./crm-drip");
-
-      vi.mocked(prisma.demoLead.findFirst).mockResolvedValue({
+      const lead = {
         id: "lead-1",
         workspaceId: "ws-1",
         followUpCount: 1,
         convertedContactId: "contact-1",
-      } as any);
+      };
+      const contact = { id: "contact-1", workspaceId: "ws-1", accountId: null, archivedAt: null };
+      const tx = {
+        demoLead: { findFirst: vi.fn().mockResolvedValue(lead), update: vi.fn() },
+        crmContact: { findUnique: vi.fn().mockResolvedValue(contact), findMany: vi.fn().mockResolvedValue([{ accountId: null }]),
+          findFirst: vi.fn().mockResolvedValue(contact) },
+        crmActivity: { create: vi.fn() },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
 
       await recordDripFollowUp("ws-1", "lead-1", "Checking in.");
 
-      expect(prisma.demoLead.findFirst).toHaveBeenCalledWith({
+      expect(tx.demoLead.findFirst).toHaveBeenCalledWith({
         where: {
           id: "lead-1",
           workspaceId: "ws-1",
         },
       });
       expect(prisma.$transaction).toHaveBeenCalled();
+    });
+    it("does not advance drip state after a converted contact parent is archived under lock", async () => {
+      const { prisma } = await import("@corgtex/shared");
+      const { recordDripFollowUp } = await import("./crm-drip");
+      const update = vi.fn(); const create = vi.fn();
+      const tx = {
+        demoLead: { findFirst: vi.fn().mockResolvedValue({ id: "lead-1", workspaceId: "ws-1", convertedContactId: "contact-1" }), update },
+        crmContact: { findUnique: vi.fn().mockResolvedValue({ id: "contact-1", workspaceId: "ws-1", accountId: "account-1", archivedAt: null }),
+          findMany: vi.fn().mockResolvedValue([{ accountId: "account-1" }]), findFirst: vi.fn().mockResolvedValue(null) },
+        crmActivity: { create },
+      };
+      vi.mocked(prisma.$transaction).mockImplementationOnce((async (fn: any) => fn(tx)) as any);
+      await expect(recordDripFollowUp("ws-1", "lead-1", "Blocked")).rejects.toThrow("Contact not found.");
+      expect(update).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
     });
   });
 });

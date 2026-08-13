@@ -84,14 +84,28 @@ vi.mock("@corgtex/domain", async () => {
 });
 
 vi.mock("@corgtex/shared", () => ({
+  captureErrorTelemetry: vi.fn(),
   env: {
     APP_URL: "https://app.corgtex.com",
   },
+  isDatabaseUnavailableError: vi.fn(() => false),
   prisma,
 }));
 
 function context(workspaceId = "workspace-1") {
   return { params: Promise.resolve({ workspaceId }) };
+}
+
+function proposalPatchRequest(body: unknown) {
+  return new NextRequest("http://localhost/api/workspaces/workspace-1/proposals/proposal-1", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function routeError(status: number, code: string, message: string) {
+  return Object.assign(new Error(message), { status, code });
 }
 
 afterEach(() => {
@@ -326,24 +340,23 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       status: "DRAFT",
       priority: 1,
       ownerMemberId: "member-owner",
+      version: 3,
     });
     prisma.proposal.findFirst.mockResolvedValue({
       id: "proposal-1",
       status: "DRAFT",
       priority: 1,
       ownerMemberId: "member-owner",
+      version: 3,
       ownerMember: { id: "member-owner", user: { displayName: "Owner", email: "owner@example.test" } },
     });
 
     const { PATCH } = await import("./[proposalId]/route");
     const response = await PATCH(
-      new NextRequest("http://localhost/api/workspaces/workspace-1/proposals/proposal-1", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ownerMemberId: "member-owner",
-          priorityLabel: "Medium",
-        }),
+      proposalPatchRequest({
+        ownerMemberId: "member-owner",
+        priorityLabel: "Medium",
+        expectedVersion: 2,
       }),
       { params: Promise.resolve({ workspaceId: "workspace-1", proposalId: "proposal-1" }) },
     );
@@ -353,6 +366,7 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
       proposalId: "proposal-1",
       ownerMemberId: "member-owner",
       priority: 1,
+      expectedVersion: 2,
     }));
     expect(prisma.proposal.findFirst).toHaveBeenCalledWith(expect.objectContaining({
       include: expect.objectContaining({
@@ -373,7 +387,75 @@ describe("PATCH /api/workspaces/[workspaceId]/proposals/[proposalId]", () => {
         owner: "Owner",
         priority: 1,
         priorityLabel: "Medium",
+        version: 3,
       },
     });
+  });
+
+  it.each([
+    ["missing", { title: "Updated proposal" }],
+    ["zero", { title: "Updated proposal", expectedVersion: 0 }],
+    ["negative", { title: "Updated proposal", expectedVersion: -1 }],
+    ["fractional", { title: "Updated proposal", expectedVersion: 1.5 }],
+    ["non-numeric", { title: "Updated proposal", expectedVersion: "2" }],
+  ])("rejects a %s expectedVersion before mutation", async (_label, body) => {
+    const { PATCH } = await import("./[proposalId]/route");
+    const response = await PATCH(proposalPatchRequest(body), {
+      params: Promise.resolve({ workspaceId: "workspace-1", proposalId: "proposal-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(updateProposal).not.toHaveBeenCalled();
+  });
+
+  it("returns the shared safe conflict response for a stale edit", async () => {
+    updateProposal.mockRejectedValueOnce(routeError(
+      409,
+      "VERSION_CONFLICT",
+      "The record changed before this update could be applied. Please refresh and try again.",
+    ));
+    const { PATCH } = await import("./[proposalId]/route");
+    const response = await PATCH(proposalPatchRequest({ title: "Stale title", expectedVersion: 1 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", proposalId: "proposal-1" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "VERSION_CONFLICT",
+        message: "The record changed before this update could be applied. Please refresh and try again.",
+      },
+    });
+  });
+
+  it("preserves unauthenticated behavior before domain mutation", async () => {
+    resolveRequestActor.mockRejectedValueOnce(routeError(401, "UNAUTHENTICATED", "Authentication required."));
+    const { PATCH } = await import("./[proposalId]/route");
+    const response = await PATCH(proposalPatchRequest({ title: "Updated", expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", proposalId: "proposal-1" }),
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "UNAUTHENTICATED", message: "Authentication required." },
+    });
+    expect(updateProposal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["wrong-workspace, deleted, or missing records", 404, "NOT_FOUND", "Proposal not found."],
+    ["unauthorized or private records", 403, "FORBIDDEN", "You do not have permission to edit this proposal."],
+    ["archived records", 400, "INVALID_STATE", "Archived proposals cannot be edited."],
+    ["terminal lifecycle states", 400, "INVALID_STATE", "Only draft or open proposals can be edited."],
+  ])("preserves %s errors", async (_label, status, code, message) => {
+    updateProposal.mockRejectedValueOnce(routeError(status as number, code as string, message as string));
+    const { PATCH } = await import("./[proposalId]/route");
+    const response = await PATCH(proposalPatchRequest({ title: "Updated", expectedVersion: 2 }), {
+      params: Promise.resolve({ workspaceId: "workspace-1", proposalId: "proposal-1" }),
+    });
+
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toEqual({ error: { code, message } });
   });
 });

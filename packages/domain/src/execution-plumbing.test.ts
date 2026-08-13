@@ -51,6 +51,7 @@ const { prismaMock } = vi.hoisted(() => ({
     },
     crmConversation: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
     },
   },
 }));
@@ -67,6 +68,7 @@ const upsertBuildArtifact = vi.fn();
 const markCommunicationSuggestionSent = vi.fn();
 const failCommunicationSuggestion = vi.fn();
 const createConversationMessage = vi.fn();
+const lockActiveCommunicationSuggestion = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -91,6 +93,7 @@ vi.mock("./crm", () => ({
   markCommunicationSuggestionSent,
   failCommunicationSuggestion,
   createConversationMessage,
+  lockActiveCommunicationSuggestion,
 }));
 
 const actor: AppActor = {
@@ -137,6 +140,10 @@ function communicationSuggestionFixture(overrides: Record<string, unknown> = {})
     recipientEmail: "buyer@example.com",
     recipientName: "Buyer",
     source: "agent_suggestion",
+    accountId: "account-1",
+    contactId: "contact-1",
+    dealId: "deal-1",
+    activityId: "activity-1",
     account: {
       id: "account-1",
       name: "Acme Buyers",
@@ -267,9 +274,12 @@ describe("execution plumbing domain", () => {
       ...data,
     }));
     prismaMock.crmConversation.findFirst.mockResolvedValue({ id: "conversation-1" });
+    prismaMock.crmConversation.findUnique.mockResolvedValue({ id: "conversation-1", workspaceId: "workspace-1",
+      accountId: "account-1", contactId: "contact-1", dealId: "deal-1" });
     markCommunicationSuggestionSent.mockResolvedValue({ id: "suggestion-1", status: "SENT", accountId: "account-1" });
     failCommunicationSuggestion.mockResolvedValue({ id: "suggestion-1", status: "FAILED", accountId: "account-1" });
     createConversationMessage.mockResolvedValue({ id: "message-1" });
+    lockActiveCommunicationSuggestion.mockResolvedValue(communicationSuggestionFixture());
   });
 
   it("normalizes write-back target aliases", async () => {
@@ -384,11 +394,28 @@ describe("execution plumbing domain", () => {
         failureReason: null,
       }),
     }));
+    expect(lockActiveCommunicationSuggestion).toHaveBeenCalledWith(prismaMock, {
+      workspaceId: "workspace-1",
+      suggestionId: "suggestion-1",
+      expectedLinks: { accountId: "account-1", contactId: "contact-1", dealId: "deal-1", activityId: "activity-1" },
+    });
+    expect(lockActiveCommunicationSuggestion.mock.invocationCallOrder[0])
+      .toBeLessThan(prismaMock.executionRequest.create.mock.invocationCallOrder[0]!);
     expect(recordAudit).toHaveBeenCalledWith(expect.anything(), agentActor, expect.objectContaining({
       action: "crm.communication_suggestion.requested",
       entityType: "CrmCommunicationSuggestion",
       entityId: "suggestion-1",
     }));
+  });
+
+  it("does not write an execution request when the suggestion closure changes under lock", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(null);
+    lockActiveCommunicationSuggestion.mockRejectedValueOnce(Object.assign(new Error("changed"), { code: "CRM_LINK_CLOSURE_CHANGED" }));
+    const { createExecutionRequest } = await import("./execution-plumbing");
+    await expect(createExecutionRequest(agentActor, { workspaceId: "workspace-1", goal: "Send", provider: "openwork",
+      writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1" })).rejects.toMatchObject({ code: "CRM_LINK_CLOSURE_CHANGED" });
+    expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
+    expect(prismaMock.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
   });
 
   it("returns an existing execution request on concurrent idempotency create races", async () => {
@@ -461,7 +488,9 @@ describe("execution plumbing domain", () => {
     }));
   });
 
-  it("returns an existing result for duplicate idempotency keys without writing again", async () => {
+  it("returns a same-key terminal result after losing the request claim", async () => {
+    prismaMock.executionRequest.updateMany.mockResolvedValueOnce({ count: 0 });
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "COMPLETED" }));
     prismaMock.executionResult.findUnique.mockResolvedValueOnce({
       id: "result-existing",
       executionRequestId: "request-1",
@@ -497,9 +526,11 @@ describe("execution plumbing domain", () => {
     }));
     expect(createAction).not.toHaveBeenCalled();
     expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
   });
 
   it("does not return duplicate results before workspace-scoped request authorization", async () => {
+    prismaMock.executionRequest.updateMany.mockResolvedValueOnce({ count: 0 });
     prismaMock.executionRequest.findFirst.mockResolvedValueOnce(null);
     prismaMock.executionResult.findUnique.mockResolvedValueOnce({
       id: "result-other",
@@ -560,6 +591,21 @@ describe("execution plumbing domain", () => {
 
     expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
     expect(prismaMock.crmCommunicationSuggestion.update).not.toHaveBeenCalled();
+  });
+
+  it("filters archived-parent CRM suggestions from direct and search target resolution", async () => {
+    prismaMock.crmCommunicationSuggestion.findFirst.mockResolvedValueOnce(null);
+    const { createExecutionRequest, listWritebackTargets } = await import("./execution-plumbing");
+    await expect(createExecutionRequest(actor, { workspaceId: "workspace-1", provider: "openwork", goal: "Send",
+      writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1" }))
+      .rejects.toThrow("CRM communication write-back target not found.");
+    await listWritebackTargets(agentActor, { workspaceId: "workspace-1", targetTypes: ["CRM_COMMUNICATION"] });
+    for (const call of [prismaMock.crmCommunicationSuggestion.findFirst.mock.calls[0],
+      prismaMock.crmCommunicationSuggestion.findMany.mock.calls.at(-1)]) {
+      expect(call?.[0]?.where).toMatchObject({ AND: expect.arrayContaining([
+        { OR: [{ accountId: null }, { account: { archivedAt: null } }] },
+      ]) });
+    }
   });
 
   it("applies visibility filters when listing write-back targets", async () => {
@@ -926,7 +972,7 @@ describe("execution plumbing domain", () => {
       workspaceId: "workspace-1",
       suggestionId: "suggestion-1",
       sentAt: new Date("2026-06-02T10:30:00.000Z"),
-    });
+    }, prismaMock);
     expect(createConversationMessage).toHaveBeenCalledWith(expect.objectContaining({
       kind: "user",
       user: expect.objectContaining({ id: "user-1" }),
@@ -936,11 +982,13 @@ describe("execution plumbing domain", () => {
       senderType: "ADMIN",
       senderEmail: undefined,
       bodyMd: "Sent externally via OpenWork.",
-    });
+    }, prismaMock);
     expect(result).toMatchObject({
       status: "ACCEPTED",
       writeback: { entityType: "CrmCommunicationSuggestion", entityId: "suggestion-1" },
     });
+    expect(prismaMock.executionRequest.updateMany.mock.invocationCallOrder[0])
+      .toBeLessThan(markCommunicationSuggestionSent.mock.invocationCallOrder[0]!);
   });
 
   it("marks CRM communication suggestions failed when external execution fails", async () => {
@@ -967,7 +1015,7 @@ describe("execution plumbing domain", () => {
       workspaceId: "workspace-1",
       suggestionId: "suggestion-1",
       failureReason: "External client could not send the email",
-    });
+    }, prismaMock);
     expect(markCommunicationSuggestionSent).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       status: "REJECTED",
@@ -998,6 +1046,53 @@ describe("execution plumbing domain", () => {
     expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
     expect(markCommunicationSuggestionSent).not.toHaveBeenCalled();
     expect(createConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it("rolls back CRM execution writeback before execution writes when conversation closure changes", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "IN_PROGRESS",
+      writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1",
+      allowedScopes: ["execution:read", "execution:write", "relationships:write"] }));
+    createConversationMessage.mockRejectedValueOnce(new Error("Conversation not found."));
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, { workspaceId: "workspace-1", requestId: "request-1",
+      idempotencyKey: "crm-closure-drift", output: { conversationId: "conversation-1" } }))
+      .rejects.toThrow("Conversation not found.");
+    expect(markCommunicationSuggestionSent).toHaveBeenCalledWith(expect.anything(), expect.anything(), prismaMock);
+    expect(lockActiveCommunicationSuggestion.mock.invocationCallOrder[0])
+      .toBeLessThan(markCommunicationSuggestionSent.mock.invocationCallOrder[0]!);
+    expect(createConversationMessage).toHaveBeenCalledWith(expect.anything(), expect.anything(), prismaMock);
+    expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
+  });
+
+  it("rolls back CRM writeback when the terminal request write fails", async () => {
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "IN_PROGRESS",
+      writebackTargetType: "CRM_COMMUNICATION", writebackTargetId: "suggestion-1",
+      allowedScopes: ["execution:read", "execution:write", "relationships:write"] }));
+    prismaMock.executionRequest.update.mockImplementationOnce(async ({ data }) => {
+      expect(data.status).toBe("COMPLETED"); throw new Error("terminal write failed");
+    });
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, { workspaceId: "workspace-1", requestId: "request-1",
+      idempotencyKey: "crm-terminal-failure", output: {} })).rejects.toThrow("terminal write failed");
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.executionRequest.updateMany.mock.invocationCallOrder[0])
+      .toBeLessThan(markCommunicationSuggestionSent.mock.invocationCallOrder[0]!);
+    expect(markCommunicationSuggestionSent).toHaveBeenCalledWith(expect.anything(), expect.anything(), prismaMock);
+    expect(prismaMock.executionResult.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      status: "ACCEPTED", writebackEntityType: "CrmCommunicationSuggestion", writebackEntityId: "suggestion-1" }) }));
+    expect(prismaMock.executionResult.update).not.toHaveBeenCalled();
+  });
+
+  it("fails closed instead of returning a partial CRM idempotency result", async () => {
+    prismaMock.executionRequest.updateMany.mockResolvedValueOnce({ count: 0 });
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "RESULT_SUBMITTED" }));
+    prismaMock.executionResult.findUnique.mockResolvedValueOnce({ id: "result-partial", executionRequestId: "request-1",
+      status: "SUBMITTED", targetType: "CRM_COMMUNICATION" });
+    const { submitExecutionResult } = await import("./execution-plumbing");
+    await expect(submitExecutionResult(agentActor, { workspaceId: "workspace-1", requestId: "request-1",
+      idempotencyKey: "crm-partial", output: {} })).rejects.toThrow("different or incomplete result");
+    expect(markCommunicationSuggestionSent).not.toHaveBeenCalled();
   });
 
   it("accepts failure results without write-back targets", async () => {
@@ -1035,7 +1130,8 @@ describe("execution plumbing domain", () => {
     expect(createAction).not.toHaveBeenCalled();
   });
 
-  it("rejects new result submissions after a result is already submitted", async () => {
+  it("rejects a stale different-key claim loser without any result or CRM writes", async () => {
+    prismaMock.executionRequest.updateMany.mockResolvedValueOnce({ count: 0 });
     prismaMock.executionRequest.findFirst.mockResolvedValueOnce(requestFixture({ status: "RESULT_SUBMITTED" }));
 
     const { submitExecutionResult } = await import("./execution-plumbing");
@@ -1044,10 +1140,15 @@ describe("execution plumbing domain", () => {
       requestId: "request-1",
       idempotencyKey: "new-result-key",
       output: { title: "Follow up" },
-    })).rejects.toThrow("Execution request is not accepting new results.");
+    })).rejects.toThrow("different or incomplete result");
 
     expect(prismaMock.executionResult.create).not.toHaveBeenCalled();
+    expect(prismaMock.executionResult.update).not.toHaveBeenCalled();
+    expect(prismaMock.executionRequest.update).not.toHaveBeenCalled();
     expect(createAction).not.toHaveBeenCalled();
+    expect(markCommunicationSuggestionSent).not.toHaveBeenCalled();
+    expect(createConversationMessage).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 
   it("persists comment write-backs as durable execution results", async () => {

@@ -1,4 +1,5 @@
 import { prisma } from "@corgtex/shared";
+import { activeCrmParentWhere, lockCrmLinkClosure } from "./crm-archive-guards";
 import { invariant } from "./errors";
 
 export async function recordDripFollowUp(
@@ -6,22 +7,15 @@ export async function recordDripFollowUp(
   demoLeadId: string,
   emailContent: string,
 ) {
-  const lead = await prisma.demoLead.findFirst({
-    where: {
-      id: demoLeadId,
-      workspaceId,
-    },
-  });
-
-  invariant(lead && lead.workspaceId === workspaceId, 404, "NOT_FOUND", "DemoLead not found.");
-
-  await prisma.$transaction(async (tx) => {
-    const contact = lead.convertedContactId
-      ? await tx.crmContact.findUnique({
-        where: { id: lead.convertedContactId },
-        select: { accountId: true },
-      })
-      : null;
+  return prisma.$transaction(async (tx) => {
+    const lead = await tx.demoLead.findFirst({ where: { id: demoLeadId, workspaceId } });
+    invariant(lead, 404, "NOT_FOUND", "DemoLead not found.");
+    const links = lead.convertedContactId ? await tx.crmContact.findUnique({ where: { id: lead.convertedContactId } }) : null;
+    if (lead.convertedContactId) invariant(links && links.workspaceId === workspaceId && !links.archivedAt, 404, "NOT_FOUND", "Contact not found.");
+    if (links) await lockCrmLinkClosure(tx, workspaceId, { contactId: links.id, accountId: links.accountId });
+    const contact = links ? await tx.crmContact.findFirst({ where: { id: links.id, workspaceId, archivedAt: null,
+      ...activeCrmParentWhere(["account"]) } }) : null;
+    if (links) invariant(contact, 404, "NOT_FOUND", "Contact not found.");
 
     await tx.demoLead.update({
       where: { id: demoLeadId },
@@ -39,9 +33,7 @@ export async function recordDripFollowUp(
         type: "EMAIL",
         title: `Sent follow-up #${lead.followUpCount + 1}`,
         bodyMd: emailContent,
-        // If the lead was already converted, we can attach the activity to the contact.
-        // Otherwise, it just stays as a workspace-level log.
-        contactId: lead.convertedContactId,
+        contactId: contact?.id ?? null,
       },
     });
   });

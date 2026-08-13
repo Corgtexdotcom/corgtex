@@ -6,9 +6,11 @@ single source of truth for how agents collaborate on Corgtex.
 
 Corgtex uses a fully autonomous three-agent pipeline:
 
-- **Planner** (Claude) writes plans.
-- **Executor** (Gemini in Antigravity) implements and opens the PR.
+- **Planner** (Claude Opus or Codex Sol) writes plans.
+- **Executor** (Gemini in Antigravity or Kimi K3) implements and opens the PR.
 - **Reviewer** (Codex) approves or rejects the PR.
+
+Kimi and Gemini may support analysis and execution, but never own the first planning pass.
 
 A human prompts each stage and can intervene via labels. No human
 reviews code line-by-line. The full specification lives in
@@ -105,7 +107,7 @@ reviews code line-by-line. The full specification lives in
 
 ---
 
-## For Planners (Claude)
+## For Planners (Claude Opus or Codex Sol)
 
 Your job is to produce a PR-body plan contract and nothing else. Do not write
 implementation code.
@@ -125,7 +127,7 @@ Stop there. Hand off to the Executor.
 
 ---
 
-## For Executors (Gemini in Antigravity)
+## For Executors (Gemini in Antigravity or Kimi K3)
 
 Your job is to implement the plan. You do not plan, and you do not
 merge.
