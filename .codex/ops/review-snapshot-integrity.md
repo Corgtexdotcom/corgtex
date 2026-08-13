@@ -95,10 +95,13 @@ activation if the complementary native or merge-group gate is absent.
   rerun it while shadow-only. If observed after activation, remove the
   required context first as described below.
 - Merge-group membership is resolved by traversing the event's immutable
-  synthetic two-parent merge-commit chain back to its exact base SHA, then
-  matching each second-parent PR head to one unique, increasing-position entry
-  in the ordered `main` merge queue. Each queue entry's PR head and live PR
-  head/base SHAs must still match those immutable inputs.
+  synthetic two-parent merge-commit chain back to its exact base SHA. Each
+  chain step is then bound to one unique, increasing-position entry in the
+  ordered `main` merge queue: the entry base/head commits must equal the
+  step's first parent and cumulative synthetic commit, while the entry PR head
+  must equal the step's second parent. The GraphQL entry `headCommit` is the
+  cumulative queue commit, not the PR branch head. Each queue entry's PR head
+  and live PR head/base SHAs must still match those immutable inputs.
   Empty, duplicate, non-open, malformed, ambiguous, disconnected, or paginated
   queues (more than 100 entries) fail closed. Before success, one concurrent
   final wave rechecks membership plus every included PR's complete files and
