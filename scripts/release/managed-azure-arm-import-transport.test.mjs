@@ -137,7 +137,7 @@ describe("managed Azure ARM import transport", () => {
   });
 
   test("fails closed on credentials, Retry-After, clock, timeout, exhaustion, and abort races", async () => {
-    for (const overrides of [{ getAzureAccessToken: async () => "bad token" }, { getSourceCredentials: async () => ({ username: "x" }) },
+    for (const overrides of [{ getAzureAccessToken: async () => "bad token" }, { getAzureAccessToken: () => new Promise(() => {}), sleep: async () => {} }, { getSourceCredentials: async () => ({ username: "x" }) },
       { getSourceCredentials: async () => { throw new Error("ghcr-password-canary"); } }]) {
       const { result, fixture } = await outcome([], overrides); expect(result.reason).toBe("POST_TRANSPORT_AMBIGUITY");
       expect(fixture.calls).toHaveLength(0); expect(JSON.stringify(result)).not.toMatch(/ghcr-password|bad token/);
