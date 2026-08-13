@@ -882,7 +882,9 @@ function versionedUpdateFailure(executed: ExecutedConversationToolResult[], fail
   const instruction = executed.flatMap(({ toolName, result }) => (
     isVersionedUpdateTool(toolName) && isRecord(result) && typeof result.instruction === "string" ? [result.instruction] : []
   )).at(-1);
-  return instruction ?? (failed.some(({ toolName }) => isVersionedUpdateTool(toolName)) ? VERSIONED_UPDATE_FAILED : null);
+  const guidance = instruction ?? (failed.some(({ toolName }) => isVersionedUpdateTool(toolName)) ? VERSIONED_UPDATE_FAILED : null);
+  const partialSuccess = executed.some(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true);
+  return guidance && partialSuccess ? `Some requested updates succeeded; at least one failed. ${guidance}` : guidance;
 }
 
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
@@ -1368,11 +1370,11 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         firstResult = value;
         break;
       }
-      yield value;
       finalMessage += value;
     }
   } catch (error) {
     firstResult = null;
+    if (finalMessage) yield finalMessage;
     throwIfConversationCanceled(ctx, error);
   } finally {
     if (!firstStreamDone) {
@@ -1381,6 +1383,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   throwIfConversationCanceled(ctx);
+  if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
+  else if (finalMessage) yield finalMessage;
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
@@ -1474,13 +1478,16 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
             workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
             taskType: "AGENT", messages, signal: ctx.signal,
           })) {
-            yield chunk;
-            finalMessage += chunk;
             followupMessage += chunk;
           }
         } catch (error) {
+          followupMessage = "";
           throwIfConversationCanceled(ctx, error);
         }
+      }
+      if (postToolModelRan && followupMessage) {
+        yield followupMessage;
+        finalMessage += followupMessage;
       }
       if (!postToolModelRan || !followupMessage) {
         followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
