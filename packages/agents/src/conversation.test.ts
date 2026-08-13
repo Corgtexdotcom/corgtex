@@ -140,6 +140,7 @@ vi.mock("@corgtex/domain", () => ({
   ingestConversationOnDemand: vi.fn(),
   listCrmActivities: listCrmActivitiesMock,
   listExternalMcpConnections: listExternalMcpConnectionsMock,
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "membership-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true }),
   listGoals: listGoalsMock,
   listMembersEnriched: vi.fn(),
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,

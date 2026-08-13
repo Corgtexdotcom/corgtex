@@ -3371,6 +3371,7 @@ describe("createCorgtexMcpServer", () => {
     for (const testCase of updateCases) {
       it(`[${testCase.name}] propagates expectedVersion, success version, and returns safe conflict without retry on VERSION_CONFLICT`, async () => {
         const { createCorgtexMcpServer } = await import("./server");
+        const { requireScope } = await import("./auth");
         const server = createCorgtexMcpServer({
           actor: { kind: "user", user: { id: "user-1", email: "user@example.com", displayName: "User" } } as any,
           workspaceId: "ws-1",
@@ -3387,10 +3388,15 @@ describe("createCorgtexMcpServer", () => {
         testCase.domainFn.mockResolvedValueOnce({ id: "id-1", version: 3 });
 
         recordAuditMock.mockClear();
+        vi.mocked(requireScope).mockClear();
         const response = await toolDef.handler(testCase.args);
         expect(testCase.domainFn).toHaveBeenCalledWith(
           expect.anything(),
           expect.objectContaining(testCase.expectedArg)
+        );
+        expect(vi.mocked(requireScope)).toHaveBeenCalledWith(
+          expect.anything(),
+          `${testCase.name.replace("update_", "")}s:read`
         );
         expect(JSON.parse(response.content[0].text)).toMatchObject({ version: 3 });
         expect(recordAuditMock).toHaveBeenCalledWith(

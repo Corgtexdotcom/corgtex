@@ -16,8 +16,11 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   listGoals: listGoalsMock,
-  privacyFilter: (a: any) =>
-    a?.kind === "user"
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ role: "MEMBER" }),
+  privacyFilter: (a: any, m?: any) =>
+    m?.role === "ADMIN"
+      ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT" }] }
+      : a?.kind === "user"
       ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: a.user.id }] }
       : { isPrivate: false },
 }));
@@ -141,6 +144,7 @@ describe("agent query tools version requirements", () => {
 
   it("denies private reads by exact ID when actor is missing and allows when actor matches", async () => {
     const { queryTensions, queryActions } = await import("./workspace");
+    const { requireWorkspaceMembership } = await import("@corgtex/domain");
     const actor: import("@corgtex/shared").AppActor = {
       kind: "user",
       user: { id: "u-1", email: "test@example.com", displayName: "Test", globalRole: "USER" },
@@ -150,6 +154,9 @@ describe("agent query tools version requirements", () => {
         { isPrivate: false },
         { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
       ],
+    };
+    const expectedAdminPrivacy = {
+      OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT" }],
     };
 
     findManyTensionsMock.mockClear();
@@ -172,14 +179,6 @@ describe("agent query tools version requirements", () => {
     );
 
     findManyActionsMock.mockClear();
-    await queryActions("ws-1", undefined, undefined, "a-99");
-    expect(findManyActionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: "a-99", isPrivate: false }),
-      }),
-    );
-
-    findManyActionsMock.mockClear();
     await queryActions("ws-1", undefined, undefined, "a-99", actor);
     expect(findManyActionsMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -188,6 +187,28 @@ describe("agent query tools version requirements", () => {
           ...expectedCanonicalPrivacy,
         }),
       }),
+    );
+
+    const adminMembership: import("@corgtex/shared").MembershipSummary = {
+      id: "membership-1",
+      workspaceId: "ws-1",
+      userId: "u-1",
+      role: "ADMIN" as const,
+      isActive: true,
+    };
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(adminMembership);
+    findManyTensionsMock.mockClear();
+    await queryTensions("ws-1", undefined, undefined, "t-99", actor);
+    expect(findManyTensionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: "t-99", ...expectedAdminPrivacy }) })
+    );
+
+    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(adminMembership);
+    findManyActionsMock.mockClear();
+    await queryActions("ws-1", undefined, undefined, "a-99", actor);
+    expect(findManyActionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: "a-99", ...expectedAdminPrivacy }) })
     );
   });
 });

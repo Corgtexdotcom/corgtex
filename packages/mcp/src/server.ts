@@ -2572,6 +2572,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async (params: { proposalId: string; expectedVersion: number; title?: string; bodyMd?: string; summary?: string; circleId?: string; ownerMemberId?: string | null; priority?: number | string }) => {
       requireScope(sessionCtx, "proposals:write");
+      requireWorkItemVersionReadScope("PROPOSAL");
       let updated;
       try {
         updated = await updateProposal(actor, {
@@ -2852,6 +2853,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       completedVia?: string;
     }) => {
       requireScope(sessionCtx, "actions:write");
+      requireWorkItemVersionReadScope("ACTION");
       let updated;
       try {
         updated = await updateAction(actor, {
@@ -3083,6 +3085,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       resolvedVia?: string;
     }) => {
       requireScope(sessionCtx, "tensions:write");
+      requireWorkItemVersionReadScope("TENSION");
       let updated;
       try {
         updated = await updateTension(actor, {
@@ -3436,6 +3439,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       ownerMemberId?: string | null;
     }) => {
       requireScope(sessionCtx, "goals:write");
+      requireWorkItemVersionReadScope("GOAL");
       let updated;
       try {
         updated = await updateGoal(actor, {

@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { listGoals, privacyFilter } from "@corgtex/domain";
+import { listGoals, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
@@ -108,7 +108,8 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
   if (tensionId) {
     where.id = tensionId;
     if (actor) {
-      Object.assign(where, privacyFilter(actor, undefined));
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      Object.assign(where, privacyFilter(actor, membership));
     } else {
       where.isPrivate = false;
     }
@@ -146,7 +147,8 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
   if (actionId) {
     where.id = actionId;
     if (actor) {
-      Object.assign(where, privacyFilter(actor, undefined));
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      Object.assign(where, privacyFilter(actor, membership));
     } else {
       where.isPrivate = false;
     }
