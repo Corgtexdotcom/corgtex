@@ -83,8 +83,8 @@ export function DealPipelineBoard({
     stageAgeToday: string;
     stageAgeYesterday: string;
     stageAgeDays: (days: number) => string;
-    archiveDeal?: string;
-    confirmArchiveDeal?: string;
+    archiveDeal: string;
+    confirmArchiveDeal: string;
   };
   workItemLabels: WorkItemLabels;
   accountFallback?: PipelineAccount | null;
@@ -182,8 +182,8 @@ export function DealPipelineBoard({
                 <form action={archiveDealAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="dealId" value={deal.id} />
-                  <ConfirmSubmitButton className="danger small" confirmMessage={labels.confirmArchiveDeal || "Archive deal?"}>
-                    {labels.archiveDeal || "Archive"}
+                  <ConfirmSubmitButton className="danger small" confirmMessage={labels.confirmArchiveDeal}>
+                    {labels.archiveDeal}
                   </ConfirmSubmitButton>
                 </form>
               </div>
