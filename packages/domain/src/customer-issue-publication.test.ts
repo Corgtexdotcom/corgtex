@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS,
@@ -21,6 +21,8 @@ const VALID_SOURCE = {
 function validSource(overrides: Record<string, unknown> = {}) {
   return { ...VALID_SOURCE, ...overrides };
 }
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("serializeCustomerIssuePublication", () => {
   it("serializes a valid PUBLISHED ALL_CUSTOMERS source to exactly seven keys", () => {
@@ -47,8 +49,7 @@ describe("serializeCustomerIssuePublication", () => {
 
   it("returns a newly constructed object that does not alias the source", () => {
     const source = validSource();
-    const result = serializeCustomerIssuePublication(source);
-    expect(result).not.toBe(source);
+    expect(serializeCustomerIssuePublication(source)).not.toBe(source);
   });
 
   it("reads each approved source field exactly once", () => {
@@ -64,7 +65,6 @@ describe("serializeCustomerIssuePublication", () => {
       expect(reads.get(property)).toBe(1);
     }
   });
-
   it("does not read public fields for an unpublished source", () => {
     const source = new Proxy(validSource({ publicationState: "DRAFT" }), {
       get(target, property, receiver) {
@@ -76,7 +76,6 @@ describe("serializeCustomerIssuePublication", () => {
     });
     expect(serializeCustomerIssuePublication(source)).toBeNull();
   });
-
   it("does not read public fields for an unauthorized audience", () => {
     const source = new Proxy(validSource({ audience: "INTERNAL_ONLY" }), {
       get(target, property, receiver) {
@@ -86,11 +85,9 @@ describe("serializeCustomerIssuePublication", () => {
     });
     expect(serializeCustomerIssuePublication(source)).toBeNull();
   });
-
   it("rejects inherited publication fields", () => {
     expect(serializeCustomerIssuePublication(Object.create(VALID_SOURCE))).toBeNull();
   });
-
   it("binds each field read to its own-property check", () => {
     const source = Object.assign(Object.create({ publicTitle: "Inherited" }), VALID_SOURCE);
     Object.defineProperty(source, "publicSlug", { get() {
@@ -99,7 +96,6 @@ describe("serializeCustomerIssuePublication", () => {
     } });
     expect(serializeCustomerIssuePublication(source)).toBeNull();
   });
-
   it("keeps the public status allowlist immutable", () => {
     expect(Object.isFrozen(CUSTOMER_ISSUE_PUBLIC_STATUSES)).toBe(true);
     expect(() => Array.prototype.push.call(
@@ -126,6 +122,24 @@ describe("serializeCustomerIssuePublication", () => {
       }),
     );
     expect(result).not.toBeNull();
+  });
+
+  it("stops reading oversized text after each code-point limit", () => {
+    const original = String.prototype[Symbol.iterator];
+    const oversized = "𐐷".repeat(5000);
+    let reads = 0;
+    vi.spyOn(String.prototype, Symbol.iterator).mockImplementation(function* (this: string): Generator<string, undefined, unknown> {
+      for (const character of original.call(this)) {
+        if (String(this) === oversized) reads += 1;
+        yield character;
+      }
+      return undefined;
+    });
+    expect(serializeCustomerIssuePublication(validSource({ publicTitle: oversized }))).toBeNull();
+    expect(reads).toBe(161);
+    reads = 0;
+    expect(serializeCustomerIssuePublication(validSource({ publicSummary: oversized }))).toBeNull();
+    expect(reads).toBe(2001);
   });
 
   it("accepts large positive safe-integer revisions", () => {

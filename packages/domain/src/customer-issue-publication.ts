@@ -58,11 +58,18 @@ function isCanonicalSlug(value: unknown): value is string {
   );
 }
 
+function hasBoundedCodePointLength(value: string, maxLength: number): boolean {
+  let length = 0;
+  for (const _character of value) {
+    if (++length > maxLength) return false;
+  }
+  return length > 0;
+}
+
 function isTrimmedBoundedText(value: unknown, maxLength: number): value is string {
   return (
     typeof value === "string" &&
-    Array.from(value).length >= 1 &&
-    Array.from(value).length <= maxLength &&
+    hasBoundedCodePointLength(value, maxLength) &&
     value.trim() === value
   );
 }
