@@ -71,16 +71,18 @@ export function isSnapshotMutatingEvent(action, changes) {
   if (action === "edited") return Boolean(changes && (changes.body || changes.base));
   return MUTATING_EVENTS.has(action);
 }
-export function resolveMergeGroupMembers(mergeGroup, connection, groupHeadShas) {
+export function resolveMergeGroupMembers(mergeGroup, connection, groupSteps) {
   const entries = connection?.nodes;
-  invariant(/^[0-9a-f]{40}$/.test(mergeGroup?.head_sha) && /^[0-9a-f]{40}$/.test(mergeGroup?.base_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false && Array.isArray(groupHeadShas) && groupHeadShas.length > 0 && groupHeadShas.length <= 100 && groupHeadShas.every((sha) => /^[0-9a-f]{40}$/.test(sha)) && new Set(groupHeadShas).size === groupHeadShas.length, "missing authoritative merge-group membership");
-  invariant(entries.every((e) => Number.isSafeInteger(e?.position) && e.position >= 0 && /^[0-9a-f]{40}$/.test(e.headCommit?.oid) && Number.isSafeInteger(e.pullRequest?.number) && e.pullRequest.number > 0 && e.pullRequest.state === "OPEN" && e.pullRequest.headRefOid === e.headCommit.oid && e.pullRequest.baseRefOid === mergeGroup.base_sha) && new Set(entries.map((e) => e.position)).size === entries.length && new Set(entries.map((e) => e.headCommit.oid)).size === entries.length && new Set(entries.map((e) => e.pullRequest.number)).size === entries.length, "ambiguous authoritative merge-group membership");
-  const members = groupHeadShas.map((sha) => entries.filter((entry) => entry.headCommit.oid === sha));
+  const isSha = (value) => /^[0-9a-f]{40}$/.test(value);
+  invariant(isSha(mergeGroup?.head_sha) && isSha(mergeGroup?.base_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false && Array.isArray(groupSteps) && groupSteps.length > 0 && groupSteps.length <= 100 && groupSteps.every((step) => isSha(step?.baseSha) && isSha(step?.headSha) && isSha(step?.prHeadSha)), "missing authoritative merge-group membership");
+  invariant(groupSteps[0].baseSha === mergeGroup.base_sha && groupSteps.at(-1).headSha === mergeGroup.head_sha && groupSteps.every((step, index) => index === 0 || step.baseSha === groupSteps[index - 1].headSha) && new Set(groupSteps.map((step) => step.headSha)).size === groupSteps.length, "ambiguous authoritative merge-group membership");
+  invariant(entries.every((e) => Number.isSafeInteger(e?.position) && e.position >= 0 && isSha(e.baseCommit?.oid) && isSha(e.headCommit?.oid) && Number.isSafeInteger(e.pullRequest?.number) && e.pullRequest.number > 0 && e.pullRequest.state === "OPEN" && isSha(e.pullRequest.headRefOid) && isSha(e.pullRequest.baseRefOid)) && new Set(entries.map((e) => e.position)).size === entries.length && new Set(entries.map((e) => e.headCommit.oid)).size === entries.length && new Set(entries.map((e) => e.pullRequest.number)).size === entries.length, "ambiguous authoritative merge-group membership");
+  const members = groupSteps.map((step) => entries.filter((entry) => entry.baseCommit.oid === step.baseSha && entry.headCommit.oid === step.headSha && entry.pullRequest.headRefOid === step.prHeadSha && entry.pullRequest.baseRefOid === mergeGroup.base_sha));
   invariant(members.every((matches) => matches.length === 1) && members.every((matches, index) => index === 0 || matches[0].position > members[index - 1][0].position), "ambiguous authoritative merge-group membership");
   const resolved = members.map(([entry]) => ({ number: entry.pullRequest.number, headSha: entry.pullRequest.headRefOid }));
   return resolved;
 }
-export function resolveMergeGroupPrNumbers(mergeGroup, connection, groupHeadShas) { return resolveMergeGroupMembers(mergeGroup, connection, groupHeadShas).map((member) => member.number); }
+export function resolveMergeGroupPrNumbers(mergeGroup, connection, groupSteps) { return resolveMergeGroupMembers(mergeGroup, connection, groupSteps).map((member) => member.number); }
 function planSection(planText, title) {
   const out = [];
   let inside = false;
@@ -333,11 +335,11 @@ async function readMergeGroupMembers(repo, group) {
   let last;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const [repository, groupHeadShas] = await Promise.all([
-        graphql("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){mergeQueue(branch:\"main\"){entries(first:100){nodes{position headCommit{oid} pullRequest{number state headRefOid baseRefOid}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name }, "repository"),
-        readMergeGroupHeadShas(repo, group),
+      const [repository, groupSteps] = await Promise.all([
+        graphql("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){mergeQueue(branch:\"main\"){entries(first:100){nodes{position baseCommit{oid} headCommit{oid} pullRequest{number state headRefOid baseRefOid}}pageInfo{hasPreviousPage hasNextPage}}}}}", { owner, name }, "repository"),
+        readMergeGroupSteps(repo, group),
       ]);
-      return resolveMergeGroupMembers(group, repository?.mergeQueue?.entries, groupHeadShas);
+      return resolveMergeGroupMembers(group, repository?.mergeQueue?.entries, groupSteps);
     }
     catch (err) {
       if (!/authoritative merge-group membership/.test(err.message) || attempt === 2) throw err;
@@ -347,16 +349,16 @@ async function readMergeGroupMembers(repo, group) {
   }
   throw last;
 }
-async function readMergeGroupHeadShas(repo, group) {
+async function readMergeGroupSteps(repo, group) {
   const reversed = [];
   let current = group.head_sha;
   for (let depth = 0; depth < 100; depth++) {
     const commit = await api(`/repos/${repo}/git/commits/${current}`);
     invariant(commit?.sha === current && Array.isArray(commit.parents) && commit.parents.length === 2 && commit.parents.every((parent) => /^[0-9a-f]{40}$/.test(parent?.sha)), "missing authoritative merge-group membership");
-    reversed.push(commit.parents[1].sha);
+    reversed.push({ baseSha: commit.parents[0].sha, headSha: current, prHeadSha: commit.parents[1].sha });
     current = commit.parents[0].sha;
     if (current === group.base_sha) return reversed.reverse();
-    invariant(!reversed.includes(current), "ambiguous authoritative merge-group membership");
+    invariant(!reversed.some((step) => step.headSha === current), "ambiguous authoritative merge-group membership");
   }
   throw new Error("missing authoritative merge-group membership");
 }
