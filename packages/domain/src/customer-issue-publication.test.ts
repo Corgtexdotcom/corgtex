@@ -51,6 +51,20 @@ describe("serializeCustomerIssuePublication", () => {
     expect(result).not.toBe(source);
   });
 
+  it("reads each approved source field exactly once", () => {
+    const reads = new Map<PropertyKey, number>();
+    const source = new Proxy(VALID_SOURCE, {
+      get(target, property, receiver) {
+        reads.set(property, (reads.get(property) ?? 0) + 1);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(serializeCustomerIssuePublication(source)).not.toBeNull();
+    for (const property of Object.keys(VALID_SOURCE)) {
+      expect(reads.get(property)).toBe(1);
+    }
+  });
+
   it("accepts every allowed public status", () => {
     for (const status of CUSTOMER_ISSUE_PUBLIC_STATUSES) {
       const result = serializeCustomerIssuePublication(

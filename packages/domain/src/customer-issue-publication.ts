@@ -92,38 +92,42 @@ export function serializeCustomerIssuePublication(
   if (!isRecord(value)) {
     return null;
   }
-  if (value.publicationState !== PUBLICATION_STATE_PUBLISHED) {
+  const {
+    publicationState, publicSlug, publicTitle, publicSummary, publicStatus,
+    audience, revision, publishedAt,
+  } = value;
+  if (publicationState !== PUBLICATION_STATE_PUBLISHED) {
     return null;
   }
-  if (value.audience !== CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS) {
+  if (audience !== CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS) {
     return null;
   }
-  if (!isCanonicalSlug(value.publicSlug)) {
+  if (!isCanonicalSlug(publicSlug)) {
     return null;
   }
-  if (!isTrimmedBoundedText(value.publicTitle, PUBLIC_TITLE_MAX_LENGTH)) {
+  if (!isTrimmedBoundedText(publicTitle, PUBLIC_TITLE_MAX_LENGTH)) {
     return null;
   }
-  if (!isTrimmedBoundedText(value.publicSummary, PUBLIC_SUMMARY_MAX_LENGTH)) {
+  if (!isTrimmedBoundedText(publicSummary, PUBLIC_SUMMARY_MAX_LENGTH)) {
     return null;
   }
-  if (!isPublicStatus(value.publicStatus)) {
+  if (!isPublicStatus(publicStatus)) {
     return null;
   }
-  if (!isValidRevision(value.revision)) {
+  if (!isValidRevision(revision)) {
     return null;
   }
-  if (!isCanonicalUtcIsoInstant(value.publishedAt)) {
+  if (!isCanonicalUtcIsoInstant(publishedAt)) {
     return null;
   }
 
   return {
-    slug: value.publicSlug,
-    title: value.publicTitle,
-    summary: value.publicSummary,
-    status: value.publicStatus,
+    slug: publicSlug,
+    title: publicTitle,
+    summary: publicSummary,
+    status: publicStatus,
     audience: CUSTOMER_ISSUE_AUDIENCE_ALL_CUSTOMERS,
-    revision: value.revision,
-    publishedAt: value.publishedAt,
+    revision,
+    publishedAt,
   };
 }
