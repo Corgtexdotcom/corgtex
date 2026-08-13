@@ -116,6 +116,20 @@ describe("review snapshot integrity", () => {
     const unrelated = { position: 3, baseCommit: { oid: "e".repeat(40) }, headCommit: { oid: "f".repeat(40) }, pullRequest: { number: 3, state: "OPEN", headRefOid: "0".repeat(40), baseRefOid: "9".repeat(40) } };
     expect(resolveMergeGroupPrNumbers(group, { ...good, nodes: [...good.nodes, unrelated] }, steps)).toEqual([1, 2]);
   });
+  it("allows an unrelated queue PR to share a selected member's PR head commit", () => {
+    const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
+    const step = { baseSha: group.base_sha, headSha: group.head_sha, prHeadSha: "c".repeat(40) };
+    const selected = { position: 1, baseCommit: { oid: step.baseSha }, headCommit: { oid: step.headSha }, pullRequest: { number: 1, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: group.base_sha } };
+    const unrelated = { position: 2, baseCommit: { oid: "d".repeat(40) }, headCommit: { oid: "e".repeat(40) }, pullRequest: { number: 2, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: "f".repeat(40) } };
+    expect(resolveMergeGroupMembers(group, { nodes: [selected, unrelated], pageInfo: { hasPreviousPage: false, hasNextPage: false } }, [step])).toEqual([{ number: 1, headSha: step.prHeadSha }]);
+  });
+  it("allows distinct selected queue PRs to share a PR head commit", () => {
+    const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
+    const sharedPrHead = "c".repeat(40);
+    const steps = [{ baseSha: group.base_sha, headSha: "d".repeat(40), prHeadSha: sharedPrHead }, { baseSha: "d".repeat(40), headSha: group.head_sha, prHeadSha: sharedPrHead }];
+    const nodes = steps.map((step, index) => ({ position: index + 1, baseCommit: { oid: step.baseSha }, headCommit: { oid: step.headSha }, pullRequest: { number: index + 1, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: group.base_sha } }));
+    expect(resolveMergeGroupPrNumbers(group, { nodes, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, steps)).toEqual([1, 2]);
+  });
   it("fails on halt-agents and force-merge labels", () => {
     expect(decide(state({}, { labels: [{ name: "halt-agents" }] })).pass).toBe(false);
     expect(decide(state({}, { labels: [{ name: "force-merge" }] })).pass).toBe(false);
