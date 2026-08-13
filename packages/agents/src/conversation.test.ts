@@ -115,6 +115,10 @@ vi.mock("@corgtex/domain", () => ({
       super(message);
     }
   },
+  privacyFilter: (a: any) =>
+    a?.kind === "user"
+      ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: a.user.id }] }
+      : { isPrivate: false },
   archiveWorkspaceToolLink: vi.fn(),
   applyContextGraphProposedDiff: applyContextGraphProposedDiffMock,
   assignRole: vi.fn(),
@@ -2464,14 +2468,21 @@ describe("processConversationTurn", () => {
     });
 
     const { prisma } = await import("@corgtex/shared");
+    const expectedCanonicalPrivacy = {
+      OR: [
+        { isPrivate: false },
+        { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
+      ],
+    };
+
     expect(prisma.tension.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: "t-123", status: "OPEN" }),
+        where: expect.objectContaining({ id: "t-123", status: "OPEN", ...expectedCanonicalPrivacy }),
       }),
     );
     expect(prisma.action.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: "a-456", status: "DRAFT", assigneeMemberId: "mem-1" }),
+        where: expect.objectContaining({ id: "a-456", status: "DRAFT", assigneeMemberId: "mem-1", ...expectedCanonicalPrivacy }),
       }),
     );
     expect(result.assistantMessage).toBe("Here are your items.");

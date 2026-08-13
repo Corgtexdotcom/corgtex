@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { listGoals } from "@corgtex/domain";
+import { listGoals, privacyFilter } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
@@ -103,9 +103,16 @@ export async function getWorkspaceOverview(workspaceId: string) {
   return { memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals };
 }
 
-export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string) {
+export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string, actor?: AppActor) {
   const where: any = { workspaceId };
-  if (tensionId) where.id = tensionId;
+  if (tensionId) {
+    where.id = tensionId;
+    if (actor) {
+      Object.assign(where, privacyFilter(actor, undefined));
+    } else {
+      where.isPrivate = false;
+    }
+  }
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
@@ -134,9 +141,16 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
   }));
 }
 
-export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string) {
+export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string, actor?: AppActor) {
   const where: any = { workspaceId };
-  if (actionId) where.id = actionId;
+  if (actionId) {
+    where.id = actionId;
+    if (actor) {
+      Object.assign(where, privacyFilter(actor, undefined));
+    } else {
+      where.isPrivate = false;
+    }
+  }
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 

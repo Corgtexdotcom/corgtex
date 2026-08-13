@@ -3386,15 +3386,22 @@ describe("createCorgtexMcpServer", () => {
         testCase.domainFn.mockClear();
         testCase.domainFn.mockResolvedValueOnce({ id: "id-1", version: 3 });
 
+        recordAuditMock.mockClear();
         const response = await toolDef.handler(testCase.args);
         expect(testCase.domainFn).toHaveBeenCalledWith(
           expect.anything(),
           expect.objectContaining(testCase.expectedArg)
         );
         expect(JSON.parse(response.content[0].text)).toMatchObject({ version: 3 });
+        expect(recordAuditMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ meta: expect.objectContaining({ error: null }) })
+        );
 
         const { AppError } = await import("@corgtex/domain");
         testCase.domainFn.mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "Conflict"));
+        recordAuditMock.mockClear();
 
         const conflictResponse = await toolDef.handler(testCase.args);
         const conflictPayload = JSON.parse(conflictResponse.content[0].text);
@@ -3403,7 +3410,23 @@ describe("createCorgtexMcpServer", () => {
           instruction: expect.stringContaining("Read the latest version and apply your changes again."),
         });
 
-        expect(testCase.domainFn).toHaveBeenCalledTimes(2);
+        expect(recordAuditMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ meta: expect.objectContaining({ error: "VERSION_CONFLICT" }) })
+        );
+        expect(recordAuditMock).toHaveBeenCalledTimes(1);
+
+        testCase.domainFn.mockResolvedValueOnce({ content: [{ type: "text", text: "invalid { json" }] });
+        recordAuditMock.mockClear();
+        await toolDef.handler(testCase.args);
+        expect(recordAuditMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.objectContaining({ meta: expect.objectContaining({ error: null }) })
+        );
+
+        expect(testCase.domainFn).toHaveBeenCalledTimes(3);
       });
 
       it(`[${testCase.name}] rejects missing or invalid expectedVersion schema`, async () => {

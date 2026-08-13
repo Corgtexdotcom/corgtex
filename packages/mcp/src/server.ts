@@ -460,6 +460,19 @@ function structuredJsonResult(value: Record<string, unknown>) {
   };
 }
 
+function isVersionConflictResult(result: unknown): boolean {
+  try {
+    const res = result as { content?: { type?: string; text?: string }[] };
+    if (res?.content?.[0]?.type === "text" && typeof res.content[0].text === "string") {
+      const parsed = JSON.parse(res.content[0].text) as { status?: string };
+      return parsed?.status === "VERSION_CONFLICT";
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 function duplicateGuardOptionsFromParams(params: {
   duplicateResolution?: "use_existing" | "update_existing" | "create_new";
   duplicateTargetEntityId?: string;
@@ -722,7 +735,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         requireToolCapability(name);
         try {
           const result = await handler(...args);
-          await auditToolExecution(name, args[0], result);
+          if (isVersionConflictResult(result)) {
+            await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
+          } else {
+            await auditToolExecution(name, args[0], result);
+          }
           return result;
         } catch (error) {
           await auditToolExecution(name, args[0], null, error);

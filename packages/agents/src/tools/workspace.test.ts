@@ -16,6 +16,10 @@ vi.mock("@corgtex/shared", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   listGoals: listGoalsMock,
+  privacyFilter: (a: any) =>
+    a?.kind === "user"
+      ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: a.user.id }] }
+      : { isPrivate: false },
 }));
 
 const actor: AppActor = {
@@ -122,7 +126,7 @@ describe("agent query tools version requirements", () => {
     await queryTensions("ws-1", undefined, undefined, "t-99");
     expect(findManyTensionsMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: "t-99" }),
+        where: expect.objectContaining({ id: "t-99", isPrivate: false }),
       }),
     );
 
@@ -130,7 +134,59 @@ describe("agent query tools version requirements", () => {
     await queryActions("ws-1", undefined, undefined, "a-99");
     expect(findManyActionsMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: "a-99" }),
+        where: expect.objectContaining({ id: "a-99", isPrivate: false }),
+      }),
+    );
+  });
+
+  it("denies private reads by exact ID when actor is missing and allows when actor matches", async () => {
+    const { queryTensions, queryActions } = await import("./workspace");
+    const actor: import("@corgtex/shared").AppActor = {
+      kind: "user",
+      user: { id: "u-1", email: "test@example.com", displayName: "Test", globalRole: "USER" },
+    };
+    const expectedCanonicalPrivacy = {
+      OR: [
+        { isPrivate: false },
+        { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+      ],
+    };
+
+    findManyTensionsMock.mockClear();
+    await queryTensions("ws-1", undefined, undefined, "t-99");
+    expect(findManyTensionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "t-99", isPrivate: false }),
+      }),
+    );
+
+    findManyTensionsMock.mockClear();
+    await queryTensions("ws-1", undefined, undefined, "t-99", actor);
+    expect(findManyTensionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "t-99",
+          ...expectedCanonicalPrivacy,
+        }),
+      }),
+    );
+
+    findManyActionsMock.mockClear();
+    await queryActions("ws-1", undefined, undefined, "a-99");
+    expect(findManyActionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "a-99", isPrivate: false }),
+      }),
+    );
+
+    findManyActionsMock.mockClear();
+    await queryActions("ws-1", undefined, undefined, "a-99", actor);
+    expect(findManyActionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "a-99",
+          ...expectedCanonicalPrivacy,
+        }),
       }),
     );
   });
