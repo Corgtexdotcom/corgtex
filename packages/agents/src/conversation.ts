@@ -223,6 +223,10 @@ const BASE_TOOLS = [
   ...crmTools,
 ];
 
+function isVersionedUpdateTool(toolName: string) {
+  return toolName === "update_tension" || toolName === "update_action";
+}
+
 async function toolsForContext(ctx: ConversationContext) {
   if (await isContextMapAiAvailable(ctx.workspaceId)) {
     return [...BASE_TOOLS, ...contextMapTools];
@@ -797,6 +801,9 @@ async function executeConversationToolCall({
   handler: (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>;
 }) {
   const args = rawArguments ? JSON.parse(rawArguments) : {};
+  if (isVersionedUpdateTool(toolName)) {
+    throw new Error("Versioned updates require a preceding query result from this turn.");
+  }
   if (isCrmWriteTool(toolName)) {
     const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
     validateCrmWriteToolArgs(toolName, normalizedArgs);
@@ -830,6 +837,7 @@ async function executeVersionedFollowupTools(
 ) {
   const calls = response.tool_calls ?? [];
   if (!calls.length) return "none" as const;
+  if (!calls.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) return "none" as const;
   const observed = new Map<string, number>();
   if (!executed.some(({ toolName }) => toolName === "update_action" || toolName === "update_tension")) {
     for (const read of executed) {
@@ -854,11 +862,9 @@ async function executeVersionedFollowupTools(
     const toolName = call.function.name;
     const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
     try {
-      const outcome = await executeConversationToolCall({
-        actor, ctx, toolName, rawArguments: call.function.arguments, handler: TOOL_HANDLERS[toolName]!,
-      });
-      executed.push({ toolName, args, result: outcome.result });
-      messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: toolName, tool_call_id: call.id });
+      const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args);
+      executed.push({ toolName, args, result });
+      messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       failed.push({ toolName, args, error });
@@ -870,6 +876,14 @@ async function executeVersionedFollowupTools(
 
 const UNSAFE_VERSIONED_FOLLOWUP = "I could not safely apply that update because the tool sequence did not use a matching observed version.";
 const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.";
+const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying.";
+
+function versionedUpdateFailure(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
+  const instruction = executed.flatMap(({ toolName, result }) => (
+    isVersionedUpdateTool(toolName) && isRecord(result) && typeof result.instruction === "string" ? [result.instruction] : []
+  )).at(-1);
+  return instruction ?? (failed.some(({ toolName }) => isVersionedUpdateTool(toolName)) ? VERSIONED_UPDATE_FAILED : null);
+}
 
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
   if (typeof iterator.return !== "function") return;
@@ -1054,7 +1068,8 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   // Add current user message
   messages.push({ role: "user", content: ctx.userMessage });
-  const tools = await toolsForContext(ctx);
+  const followupTools = await toolsForContext(ctx);
+  const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
   const response = await defaultModelGateway.chat({
     workspaceId: ctx.workspaceId,
@@ -1119,7 +1134,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         model: env.MODEL_CHAT_CONVERSATION,
         taskType: "AGENT",
         messages,
-        tools,
+        tools: followupTools,
         signal: ctx.signal,
       });
       throwIfConversationCanceled(ctx);
@@ -1131,8 +1146,9 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         followupMessage = UNSAFE_VERSIONED_FOLLOWUP;
         finalMessage = followupMessage;
       } else if (followupState === "executed") {
-        followupMessage = VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
-        if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+        const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+        followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+        if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
           try {
             const completed = await defaultModelGateway.chat({
               workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
@@ -1322,7 +1338,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   messages.push({ role: "user", content: ctx.userMessage });
-  const tools = await toolsForContext(ctx);
+  const followupTools = await toolsForContext(ctx);
+  const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
   let finalMessage = "";
   let mapGraphChanged = false;
@@ -1411,7 +1428,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         model: env.MODEL_CHAT_CONVERSATION,
         taskType: "AGENT",
         messages,
-        tools,
+        tools: followupTools,
         signal: ctx.signal,
       })[Symbol.asyncIterator]();
 
@@ -1446,9 +1463,12 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       yield followupMessage;
       finalMessage += followupMessage;
     } else if (followupState === "executed") {
-      followupMessage = VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
-      if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+      followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+      let postToolModelRan = false;
+      if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
         try {
+          postToolModelRan = true;
           followupMessage = "";
           for await (const chunk of defaultModelGateway.chatStream({
             workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
@@ -1462,8 +1482,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
           throwIfConversationCanceled(ctx, error);
         }
       }
-      if (!followupMessage) {
-        followupMessage = VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+      if (!postToolModelRan || !followupMessage) {
+        followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
         yield followupMessage;
         finalMessage += followupMessage;
       }
