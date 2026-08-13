@@ -71,6 +71,8 @@ describe("managed Azure source manifest resolver", () => {
       JSON.stringify({ digest: DIGESTS.web.toUpperCase() }), `{"digest":"${DIGESTS.web}","digest":"${DIGESTS.web}"}`,
       `{"di\\u0067est":"${DIGESTS.web}","digest":"${DIGESTS.web}"}`, `${manifest("web")} trailing`, ` ${manifest("web")}`,
       `${manifest("web")}\n\n`, `${manifest("web")}\r\n`, `{"digest":"${DIGESTS.web}","x":"\\u000a"}`,
+      `{"digest":"${DIGESTS.web}","x\\u000a":"value"}`, `{"digest":"${DIGESTS.web}","x\\ud800":"value"}`,
+      JSON.stringify({ digest: DIGESTS.web, ["x\u0085"]: "value" }),
       JSON.stringify({ digest: DIGESTS.web, x: "\u0085" }), `{"digest":"${DIGESTS.web}","x":"\ud800"}`,
       JSON.stringify({ digest: DIGESTS.web, padding: "é".repeat(8_200) })];
     for (const stdout of malformed) { const { resolver } = harness([processResult(stdout)]); await rejects(resolver.resolveManagedAzureSourceManifests({ gitSha: SHA })); }

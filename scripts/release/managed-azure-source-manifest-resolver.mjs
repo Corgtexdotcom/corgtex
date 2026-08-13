@@ -40,6 +40,9 @@ function wellFormed(value) {
   }
   return true;
 }
+function safeText(value) {
+  return wellFormed(value) && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+}
 function countTopLevelDigestKeys(source) {
   let depth = 0; let quote = -1; let escaped = false; let count = 0;
   for (let index = 0; index < source.length; index += 1) {
@@ -64,7 +67,7 @@ function validateJsonValues(root) {
   while (stack.length > 0) {
     const value = stack.pop();
     if (typeof value === "string") {
-      if (!wellFormed(value) || /[\u0000-\u001f\u007f-\u009f]/.test(value)) fail();
+      if (!safeText(value)) fail();
       continue;
     }
     if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) continue;
@@ -77,7 +80,8 @@ function validateJsonValues(root) {
     for (const key of Reflect.ownKeys(descriptors)) {
       if (array && key === "length") continue;
       const descriptor = descriptors[key];
-      if (typeof key !== "string" || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) fail();
+      if (typeof key !== "string" || !safeText(key)
+        || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) fail();
       stack.push(descriptor.value);
     }
   }
