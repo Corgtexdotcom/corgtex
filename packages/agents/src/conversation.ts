@@ -835,12 +835,10 @@ async function executeVersionedFollowupTools(
     for (const read of executed) {
       const updateName = read.toolName === "query_actions" ? "update_action"
         : read.toolName === "query_tensions" ? "update_tension" : null;
-      const idKey = updateName === "update_action" ? "actionId" : "tensionId";
-      const id = updateName && read.args[idKey];
-      const item = Array.isArray(read.result) && typeof id === "string"
-        ? read.result.find((candidate) => candidate?.id === id) : null;
-      if (updateName && Number.isInteger(item?.version) && item.version > 0) {
-        observed.set(`${updateName}:${id}`, item.version);
+      for (const item of Array.isArray(read.result) ? read.result : []) {
+        if (updateName && typeof item?.id === "string" && Number.isInteger(item.version) && item.version > 0) {
+          observed.set(`${updateName}:${item.id}`, item.version);
+        }
       }
     }
   }

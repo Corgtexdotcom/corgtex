@@ -2431,7 +2431,7 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the activity.");
   });
 
-  it("reads exact action and tension versions before executing follow-up updates", async () => {
+  it("uses normal action lists and filtered tension lists for versioned follow-up updates", async () => {
     const actor = testUserActor();
     const { prisma } = await import("@corgtex/shared");
     const { updateAction, updateTension } = await import("@corgtex/domain");
@@ -2451,8 +2451,8 @@ describe("processConversationTurn", () => {
       .mockResolvedValueOnce({
         content: "",
         tool_calls: [
-          { id: "read-t", function: { name: "query_tensions", arguments: JSON.stringify({ tensionId: "t-123" }) } },
-          { id: "read-a", function: { name: "query_actions", arguments: JSON.stringify({ actionId: "a-456" }) } },
+          { id: "read-t", function: { name: "query_tensions", arguments: JSON.stringify({ status: "OPEN" }) } },
+          { id: "read-a", function: { name: "query_actions", arguments: "{}" } },
         ],
       })
       .mockResolvedValueOnce({ content: "", tool_calls: [
@@ -2469,8 +2469,8 @@ describe("processConversationTurn", () => {
       userMessage: "Update both items.",
       actor,
     });
-    expect(prisma.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "t-123" }) }));
-    expect(prisma.action.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "a-456" }) }));
+    expect(prisma.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: "OPEN" }) }));
+    expect(prisma.action.findMany).toHaveBeenCalled();
     expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({ tensionId: "t-123", expectedVersion: 4 }));
     expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({ actionId: "a-456", expectedVersion: 7 }));
     expect(chatMock).toHaveBeenCalledTimes(2);
