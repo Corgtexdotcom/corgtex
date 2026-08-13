@@ -867,7 +867,7 @@ async function executeVersionedFollowupTools(
       messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      failed.push({ toolName, args, error });
+      failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" });
       messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id });
     }
   }
@@ -879,12 +879,13 @@ const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed
 const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying.";
 
 function versionedUpdateFailure(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
-  const instruction = executed.flatMap(({ toolName, result }) => (
-    isVersionedUpdateTool(toolName) && isRecord(result) && typeof result.instruction === "string" ? [result.instruction] : []
-  )).at(-1);
+  const instruction = [...executed.flatMap(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && typeof result.instruction === "string" ? [result.instruction] : []),
+    ...failed.flatMap(({ toolName, error }) => isVersionedUpdateTool(toolName) && error ? [error] : [])].at(-1);
   const guidance = instruction ?? (failed.some(({ toolName }) => isVersionedUpdateTool(toolName)) ? VERSIONED_UPDATE_FAILED : null);
-  const partialSuccess = executed.some(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true);
-  return guidance && partialSuccess ? `Some requested updates succeeded; at least one failed. ${guidance}` : guidance;
+  const id = ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => `${toolName === "update_action" ? "action" : "tension"} ${String(args[toolName === "update_action" ? "actionId" : "tensionId"])}`;
+  const succeeded = executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true).map(id);
+  const failedIds = [...executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success !== true), ...failed.filter(({ toolName }) => isVersionedUpdateTool(toolName))].map(id);
+  return guidance && succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedIds.join(", ")}. ${guidance}` : guidance;
 }
 
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
@@ -1384,7 +1385,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   throwIfConversationCanceled(ctx);
   if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
-  else if (finalMessage) yield finalMessage;
+  else if (finalMessage && firstStreamDone) yield finalMessage;
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
