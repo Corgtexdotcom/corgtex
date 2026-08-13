@@ -91,6 +91,15 @@ describe("serializeCustomerIssuePublication", () => {
     expect(serializeCustomerIssuePublication(Object.create(VALID_SOURCE))).toBeNull();
   });
 
+  it("binds each field read to its own-property check", () => {
+    const source = Object.assign(Object.create({ publicTitle: "Inherited" }), VALID_SOURCE);
+    Object.defineProperty(source, "publicSlug", { get() {
+      delete source.publicTitle;
+      return VALID_SOURCE.publicSlug;
+    } });
+    expect(serializeCustomerIssuePublication(source)).toBeNull();
+  });
+
   it("keeps the public status allowlist immutable", () => {
     expect(Object.isFrozen(CUSTOMER_ISSUE_PUBLIC_STATUSES)).toBe(true);
     expect(() => Array.prototype.push.call(
@@ -112,8 +121,8 @@ describe("serializeCustomerIssuePublication", () => {
     const result = serializeCustomerIssuePublication(
       validSource({
         publicSlug: "a".repeat(120),
-        publicTitle: "t".repeat(160),
-        publicSummary: "s".repeat(2000),
+        publicTitle: "𐐷".repeat(160),
+        publicSummary: "𐐷".repeat(2000),
       }),
     );
     expect(result).not.toBeNull();
