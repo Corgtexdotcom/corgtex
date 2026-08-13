@@ -129,3 +129,4 @@ export * from "./deliberation";
 export * from "./user-profile";
 export * from "./avatar";
 export * from "./provider-cutover";
+export * from "./customer-issue-publication";
