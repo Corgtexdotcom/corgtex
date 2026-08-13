@@ -127,6 +127,7 @@ describe("canonicalizeManagedReleaseTerminationEvidenceV1", () => {
   it("measures the maximum legal ASCII graph beneath the defensive 4 KiB cap", () => {
     const input = sample(); const acr = "a".repeat(50);
     input.execution.runId = "e".repeat(128); input.workflow.runId = "w".repeat(128);
+    input.workflow.outcome = "TIMED_OUT";
     input.priorFence = 2_147_483_647; input.execution.attempt = 2_147_483_647; input.workflow.attempt = 2_147_483_647;
     input.execution.terminalAtUnixMs = Number.MAX_SAFE_INTEGER - 4; input.workflow.terminalAtUnixMs = Number.MAX_SAFE_INTEGER - 3;
     input.providerRoles.web.command.terminalAtUnixMs = Number.MAX_SAFE_INTEGER - 2; input.providerRoles.worker.command.terminalAtUnixMs = Number.MAX_SAFE_INTEGER - 2;
@@ -139,7 +140,7 @@ describe("canonicalizeManagedReleaseTerminationEvidenceV1", () => {
     input.providerRoles.web.provider.image = `${acr}.azurecr.io/corgtex/web@sha256:${digest}`;
     input.providerRoles.worker.provider.image = `${acr}.azurecr.io/corgtex/worker@sha256:${digest}`;
     const bytes = new TextEncoder().encode(JSON.stringify(canonicalizeManagedReleaseTerminationEvidenceV1(input)));
-    expect(bytes.byteLength).toBe(1_643); expect(bytes.byteLength).toBeLessThan(4_096);
+    expect(bytes.byteLength).toBe(1_646); expect(bytes.byteLength).toBeLessThan(4_096);
   });
 
   it("returns one sanitized error and has the required inert import/export boundary", () => {
