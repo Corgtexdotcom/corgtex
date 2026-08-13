@@ -2476,16 +2476,14 @@ describe("processConversationTurn", () => {
     const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe("Resolution note is required."); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Resolution note is required.");
   });
 
-  it("rejects guessed first-call version 1 updates for actions and tensions in both response paths", async () => {
-    const actor = testUserActor();
-    const { prisma } = await import("@corgtex/shared");
-    const { updateAction, updateTension } = await import("@corgtex/domain");
-    chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("a1", "update_action", { actionId: "a-1", expectedVersion: 1 })] })
-      .mockResolvedValueOnce({ content: "", tool_calls: [toolCall("a2", "update_action", { actionId: "a-1", expectedVersion: 1 })] });
+  it("rejects guessed first-call updates without preserving claims in either response path", async () => {
+    const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { updateAction, updateTension } = await import("@corgtex/domain");
+    chatMock.mockResolvedValueOnce({ content: "Updated.", tool_calls: [toolCall("a1", "update_action", { actionId: "a-1", expectedVersion: 1 })] })
+      .mockResolvedValueOnce({ content: "" });
     const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
     const result = await processConversationTurn(turnContext(actor));
     expect(updateAction).not.toHaveBeenCalled();
-    expect(result.assistantMessage).toContain("could not safely apply");
+    expect(result.assistantMessage).toBe("The assistant did not return a natural-language response. Please retry or ask for a more specific summary.");
     expect(chatMock.mock.calls[0][0].tools.map((tool: any) => tool.function.name)).not.toEqual(expect.arrayContaining(["update_action", "update_tension"]));
     expect(chatMock.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["update_action", "update_tension"]));
     chatStreamMock.mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t1", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] }))

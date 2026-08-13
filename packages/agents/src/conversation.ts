@@ -1085,7 +1085,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   });
   throwIfConversationCanceled(ctx);
 
-  const initialMessage = response.content;
+  const initialMessage = response.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name)) ? "" : response.content;
   let finalMessage = initialMessage;
   let mapGraphChanged = false;
   const pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord> = [];
