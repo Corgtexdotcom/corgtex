@@ -59,13 +59,36 @@ function countTopLevelDigestKeys(source) {
   }
   return count;
 }
+function validateJsonValues(root) {
+  const stack = [root]; let count = 0;
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (typeof value === "string") {
+      if (!wellFormed(value) || /[\u0000-\u001f\u007f-\u009f]/.test(value)) fail();
+      continue;
+    }
+    if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) continue;
+    if (typeof value !== "object" || count >= MAX_STDOUT_BYTES) fail();
+    count += 1;
+    const array = Array.isArray(value); const prototype = Object.getPrototypeOf(value);
+    if ((array ? prototype !== Array.prototype : prototype !== Object.prototype)
+      || hasEnumerable(Object.prototype) || hasEnumerable(Array.prototype)) fail();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (array && key === "length") continue;
+      const descriptor = descriptors[key];
+      if (typeof key !== "string" || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) fail();
+      stack.push(descriptor.value);
+    }
+  }
+}
 function manifestRaw(stdout) {
   if (typeof stdout !== "string" || !wellFormed(stdout) || Buffer.byteLength(stdout, "utf8") > MAX_STDOUT_BYTES) fail();
   const source = stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
-  if (source.length === 0 || source !== source.trim() || /[\u0000-\u001f\u007f-\u009f]/.test(source)
-    || hasEnumerable(Object.prototype) || hasEnumerable(Array.prototype)) fail();
+  if (source.length === 0 || source !== source.trim() || hasEnumerable(Object.prototype) || hasEnumerable(Array.prototype)) fail();
   let parsed;
   try { parsed = JSON.parse(source); } catch { fail(); }
+  validateJsonValues(parsed);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)
     || Object.getPrototypeOf(parsed) !== Object.prototype || countTopLevelDigestKeys(source) !== 1) fail();
   const descriptor = Object.getOwnPropertyDescriptor(parsed, "digest");

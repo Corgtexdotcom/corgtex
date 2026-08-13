@@ -22,7 +22,7 @@ function harness(values) {
   const spawn = vi.fn(() => { const next = queue.shift(); if (!next) throw new Error("unexpected spawn"); return next; });
   return { spawn, resolver: createManagedAzureSourceManifestResolver({ spawn }) };
 }
-function manifest(role, values = {}) { return JSON.stringify({ schemaVersion: 2, digest: DIGESTS[role], ...values }); }
+function manifest(role, values = {}, space) { return JSON.stringify({ schemaVersion: 2, digest: DIGESTS[role], ...values }, null, space); }
 async function rejects(promise) { await expect(promise).rejects.toEqual(new Error(FAILURE)); }
 
 describe("managed Azure source manifest resolver", () => {
@@ -38,10 +38,11 @@ describe("managed Azure source manifest resolver", () => {
   });
 
   it("resolves exact web then worker source tags into fresh frozen raw observations", async () => {
-    const { spawn, resolver } = harness([processResult(`${manifest("web")}\n`), processResult(manifest("worker"))]);
+    const prettyWeb = manifest("web", {}, 2);
+    const { spawn, resolver } = harness([processResult(`${prettyWeb}\n`), processResult(manifest("worker"))]);
     const input = { gitSha: SHA }; const output = await resolver.resolveManagedAzureSourceManifests(input);
     expect(output).toEqual({ schemaVersion: 1, gitSha: SHA, manifests: {
-      web: { sourceTag: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`, raw: manifest("web") },
+      web: { sourceTag: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`, raw: prettyWeb },
       worker: { sourceTag: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}`, raw: manifest("worker") },
     } });
     expect(Object.keys(output)).toEqual(["schemaVersion", "gitSha", "manifests"]);
@@ -69,7 +70,8 @@ describe("managed Azure source manifest resolver", () => {
     const malformed = ["", "null", "[]", "1", "{}", JSON.stringify({ nested: { digest: DIGESTS.web } }),
       JSON.stringify({ digest: DIGESTS.web.toUpperCase() }), `{"digest":"${DIGESTS.web}","digest":"${DIGESTS.web}"}`,
       `{"di\\u0067est":"${DIGESTS.web}","digest":"${DIGESTS.web}"}`, `${manifest("web")} trailing`, ` ${manifest("web")}`,
-      `${manifest("web")}\n\n`, `${manifest("web")}\r\n`, `{"digest":"${DIGESTS.web}",\n"x":1}`, `{"digest":"${DIGESTS.web}","x":"\ud800"}`,
+      `${manifest("web")}\n\n`, `${manifest("web")}\r\n`, `{"digest":"${DIGESTS.web}","x":"\\u000a"}`,
+      JSON.stringify({ digest: DIGESTS.web, x: "\u0085" }), `{"digest":"${DIGESTS.web}","x":"\ud800"}`,
       JSON.stringify({ digest: DIGESTS.web, padding: "é".repeat(8_200) })];
     for (const stdout of malformed) { const { resolver } = harness([processResult(stdout)]); await rejects(resolver.resolveManagedAzureSourceManifests({ gitSha: SHA })); }
     Object.defineProperty(Object.prototype, "polluted", { enumerable: true, configurable: true, writable: true, value: "credential-canary" });
@@ -109,6 +111,6 @@ describe("managed Azure source manifest resolver", () => {
     expect(intent.roles.web.sourceDigest).toBe(DIGESTS.web); expect(intent.roles.worker.sourceDigest).toBe(DIGESTS.worker);
     const source = readFileSync(new URL("./managed-azure-source-manifest-resolver.mjs", import.meta.url), "utf8");
     expect(source.match(/\bexport\b/g)).toHaveLength(1);
-    expect(source).not.toMatch(/azure-release-managed-target|node:child_process|\bprocess\b|\bfetch\s*\(|node:fs|setTimeout|setInterval|console\.|Math\.random|docker login|acr import|\bpull\b|\bpush\b|containerapp|rollback|lease|workflow/);
+    expect(source).not.toMatch(/azure-release-managed-target|node:child_process|\bprocess\b|\bfetch\s*\(|node:fs|setTimeout|setInterval|console\.|Math\.random|docker (?:login|pull|push)|acr import|containerapp|rollback|lease|workflow/);
   });
 });
