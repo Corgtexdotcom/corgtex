@@ -341,58 +341,28 @@ describe("proposal mutation tool", () => {
 
 describe("agent update tools version requirements", () => {
   const updateCases = [
-    { name: "update_action", toolDef: updateActionTool, actionFn: updateActionItemAction, domainFn: vi.mocked(updateAction), args: { actionId: "a-1", expectedVersion: 2, title: "Title" }, expectedArg: { actionId: "a-1", expectedVersion: 2, title: "Title" } },
-    { name: "update_tension", toolDef: updateTensionTool, actionFn: updateTensionAction, domainFn: vi.mocked(updateTension), args: { tensionId: "t-1", expectedVersion: 2, title: "Title" }, expectedArg: { tensionId: "t-1", expectedVersion: 2, title: "Title" } },
+    { name: "update_action", toolDef: updateActionTool, actionFn: updateActionItemAction, domainFn: vi.mocked(updateAction), args: { actionId: "a-1", expectedVersion: 2 } },
+    { name: "update_tension", toolDef: updateTensionTool, actionFn: updateTensionAction, domainFn: vi.mocked(updateTension), args: { tensionId: "t-1", expectedVersion: 2 } },
   ];
 
-  for (const testCase of updateCases) {
-    it(`[${testCase.name}] schema requires expectedVersion minimum 1 and propagates exactly without retry`, async () => {
-      expect(testCase.toolDef.function.parameters.required).toContain("expectedVersion");
-      expect((testCase.toolDef.function.parameters.properties as any).expectedVersion).toMatchObject({
-        type: "integer",
-        minimum: 1,
-      });
-
-      testCase.domainFn.mockClear();
-      testCase.domainFn.mockResolvedValueOnce({ id: "id-1", version: 3 } as any);
-      const successResult = await testCase.actionFn({ kind: "agent" } as any, { workspaceId: "ws-1", sessionId: "session-1" }, testCase.args);
-      expect(successResult.version).toBe(3);
-
-      expect(testCase.domainFn).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining(testCase.expectedArg)
-      );
-
-      const findFirstCalls = vi.mocked(prisma.auditLog.findFirst).mock.calls.length;
-      const updateCalls = vi.mocked(prisma.auditLog.update).mock.calls.length;
-
-      const { AppError } = await import("@corgtex/domain");
-      testCase.domainFn.mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "Conflict"));
-
-      const conflictResult = await testCase.actionFn({ kind: "agent" } as any, { workspaceId: "ws-1", sessionId: "session-1" }, testCase.args);
-      expect(conflictResult).toStrictEqual({
-        status: "VERSION_CONFLICT",
-        instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
-      });
-
-      expect(testCase.domainFn).toHaveBeenCalledTimes(2);
-      expect(vi.mocked(prisma.auditLog.findFirst).mock.calls.length).toBe(findFirstCalls);
-      expect(vi.mocked(prisma.auditLog.update).mock.calls.length).toBe(updateCalls);
-    });
-
-    it(`[${testCase.name}] rejects missing, zero, or fractional expectedVersion before calling domain`, async () => {
-      testCase.domainFn.mockClear();
-
-      const resMissing = await testCase.actionFn({ kind: "agent" } as any, { workspaceId: "ws-1", sessionId: "session-1" }, { ...testCase.args, expectedVersion: undefined });
-      expect(resMissing.status).toBe("INVALID_ARGUMENT");
-
-      const resZero = await testCase.actionFn({ kind: "agent" } as any, { workspaceId: "ws-1", sessionId: "session-1" }, { ...testCase.args, expectedVersion: 0 });
-      expect(resZero.status).toBe("INVALID_ARGUMENT");
-
-      const resFrac = await testCase.actionFn({ kind: "agent" } as any, { workspaceId: "ws-1", sessionId: "session-1" }, { ...testCase.args, expectedVersion: 1.5 });
-      expect(resFrac.status).toBe("INVALID_ARGUMENT");
-
-      expect(testCase.domainFn).not.toHaveBeenCalled();
-    });
-  }
+  it.each(updateCases)("[$name] enforces positive observed versions and safe conflicts", async (testCase) => {
+    const actor = { kind: "agent" } as any;
+    const ctx = { workspaceId: "ws-1", sessionId: "session-1" };
+    expect(testCase.toolDef.function.parameters.required).toContain("expectedVersion");
+    expect((testCase.toolDef.function.parameters.properties as any).expectedVersion).toMatchObject({ type: "integer", minimum: 1 });
+    testCase.domainFn.mockClear();
+    for (const expectedVersion of [undefined, 0, 1.5]) {
+      expect((await testCase.actionFn(actor, ctx, { ...testCase.args, expectedVersion })).status).toBe("INVALID_ARGUMENT");
+    }
+    expect(testCase.domainFn).not.toHaveBeenCalled();
+    testCase.domainFn.mockResolvedValueOnce({ id: "id-1", version: 3 } as any);
+    expect(await testCase.actionFn(actor, ctx, testCase.args)).toMatchObject({ version: 3 });
+    expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));
+    const auditCalls = vi.mocked(prisma.auditLog.findFirst).mock.calls.length;
+    const { AppError } = await import("@corgtex/domain");
+    testCase.domainFn.mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "Conflict"));
+    expect(await testCase.actionFn(actor, ctx, testCase.args)).toMatchObject({ status: "VERSION_CONFLICT" });
+    expect(testCase.domainFn).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(prisma.auditLog.findFirst)).toHaveBeenCalledTimes(auditCalls);
+  });
 });

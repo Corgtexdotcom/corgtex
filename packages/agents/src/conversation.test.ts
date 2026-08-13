@@ -2443,6 +2443,10 @@ describe("processConversationTurn", () => {
     ]);
     vi.mocked(updateTension).mockResolvedValueOnce({ id: "t-123", version: 5 } as any);
     vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-456", version: 8 } as any);
+    checkBudgetMock
+      .mockResolvedValueOnce({ allowed: true })
+      .mockResolvedValueOnce({ allowed: true })
+      .mockResolvedValueOnce({ allowed: false });
     chatMock
       .mockResolvedValueOnce({
         content: "",
@@ -2454,8 +2458,7 @@ describe("processConversationTurn", () => {
       .mockResolvedValueOnce({ content: "", tool_calls: [
         { id: "write-t", function: { name: "update_tension", arguments: JSON.stringify({ tensionId: "t-123", expectedVersion: 4, title: "Updated tension" }) } },
         { id: "write-a", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-456", expectedVersion: 7, title: "Updated action" }) } },
-      ] })
-      .mockResolvedValueOnce({ content: "Both items were updated." });
+      ] });
 
     const { processConversationTurn } = await import("./conversation");
     const result = await processConversationTurn({
@@ -2470,7 +2473,8 @@ describe("processConversationTurn", () => {
     expect(prisma.action.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "a-456" }) }));
     expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({ tensionId: "t-123", expectedVersion: 4 }));
     expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({ actionId: "a-456", expectedVersion: 7 }));
-    expect(result.assistantMessage).toBe("Both items were updated.");
+    expect(chatMock).toHaveBeenCalledTimes(2);
+    expect(result.assistantMessage).toContain("Read the current item version before retrying");
   });
 
   it("streams a final response after a read-then-versioned-update tool sequence", async () => {
@@ -2498,6 +2502,48 @@ describe("processConversationTurn", () => {
     expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({ actionId: "a-456", expectedVersion: 7 }));
     expect(chunks.join("")).toBe("Action updated.");
     expect(result.assistantMessage).toBe("Action updated.");
+  });
+
+  it("does not execute a second update after an initial non-streaming update", async () => {
+    const actor = testUserActor();
+    const { updateAction } = await import("@corgtex/domain");
+    vi.mocked(updateAction).mockResolvedValue({ id: "a-1", version: 3 } as any);
+    chatMock
+      .mockResolvedValueOnce({ content: "", tool_calls: [
+        { id: "first", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-1", expectedVersion: 2 }) } },
+      ] })
+      .mockResolvedValueOnce({ content: "", tool_calls: [
+        { id: "second", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-1", expectedVersion: 3 }) } },
+      ] });
+    const { processConversationTurn } = await import("./conversation");
+    const result = await processConversationTurn({
+      workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor,
+    });
+    expect(updateAction).toHaveBeenCalledTimes(1);
+    expect(result.assistantMessage).toContain("could not safely apply");
+  });
+
+  it("rejects a mixed streaming follow-up without leaking its preamble or repeating an initial update", async () => {
+    const actor = testUserActor();
+    const { prisma } = await import("@corgtex/shared");
+    const { updateAction } = await import("@corgtex/domain");
+    vi.mocked(updateAction).mockResolvedValue({ id: "a-1", version: 3 } as any);
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [
+        { id: "first", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-1", expectedVersion: 2 }) } },
+      ] }))
+      .mockReturnValueOnce(streamResponse(["Unverified success."], { content: "Unverified success.", tool_calls: [
+        { id: "second", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-1", expectedVersion: 3 }) } },
+        { id: "mixed", function: { name: "query_actions", arguments: JSON.stringify({ actionId: "a-1" }) } },
+      ] }));
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor,
+    }));
+    expect(updateAction).toHaveBeenCalledTimes(1);
+    expect(prisma.action.findMany).not.toHaveBeenCalled();
+    expect(chunks.join("")).not.toContain("Unverified success");
+    expect(chunks.join("")).toContain("could not safely apply");
   });
 
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {

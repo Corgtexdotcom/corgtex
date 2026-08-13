@@ -733,13 +733,14 @@ function isBudgetExceededError(err: unknown) {
 
 async function canRunFollowupModelAfterTools(
   ctx: ConversationContext,
-  pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord>
+  pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord>,
+  allowBudgetFallback = false,
 ) {
   try {
     await assertWorkspaceModelBudget(ctx.workspaceId);
     return true;
   } catch (err) {
-    if (pendingCrmOperations.length > 0 && isBudgetExceededError(err)) {
+    if ((allowBudgetFallback || pendingCrmOperations.length > 0) && isBudgetExceededError(err)) {
       return false;
     }
     throw err;
@@ -827,10 +828,29 @@ async function executeVersionedFollowupTools(
   executed: ExecutedConversationToolResult[],
   failed: FailedConversationToolResult[],
 ) {
-  const calls = response.tool_calls?.filter(({ function: tool }) =>
-    tool.name === "update_action" || tool.name === "update_tension"
-  );
-  if (!calls?.length) return false;
+  const calls = response.tool_calls ?? [];
+  if (!calls.length) return "none" as const;
+  const observed = new Map<string, number>();
+  if (!executed.some(({ toolName }) => toolName === "update_action" || toolName === "update_tension")) {
+    for (const read of executed) {
+      const updateName = read.toolName === "query_actions" ? "update_action"
+        : read.toolName === "query_tensions" ? "update_tension" : null;
+      const idKey = updateName === "update_action" ? "actionId" : "tensionId";
+      const id = updateName && read.args[idKey];
+      const item = Array.isArray(read.result) && typeof id === "string"
+        ? read.result.find((candidate) => candidate?.id === id) : null;
+      if (updateName && Number.isInteger(item?.version) && item.version > 0) {
+        observed.set(`${updateName}:${id}`, item.version);
+      }
+    }
+  }
+  const valid = calls.every(({ function: tool }) => {
+    const args = parseToolArgs(tool.arguments);
+    const id = tool.name === "update_action" ? args.actionId
+      : tool.name === "update_tension" ? args.tensionId : null;
+    return typeof id === "string" && observed.get(`${tool.name}:${id}`) === args.expectedVersion;
+  });
+  if (!valid || observed.size === 0) return "rejected" as const;
   messages.push({ role: "assistant", content: response.content || "", tool_calls: calls });
   for (const call of calls) {
     const toolName = call.function.name;
@@ -847,8 +867,11 @@ async function executeVersionedFollowupTools(
       messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id });
     }
   }
-  return true;
+  return "executed" as const;
 }
+
+const UNSAFE_VERSIONED_FOLLOWUP = "I could not safely apply that update because the tool sequence did not use a matching observed version.";
+const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.";
 
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
   if (typeof iterator.return !== "function") return;
@@ -1105,16 +1128,25 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
       followupMessage = followup.content;
       finalMessage = followupMessage;
-      if (await executeVersionedFollowupTools(followup, actor, ctx, messages, executedToolResults, failedToolResults)) {
-        if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
-          const completed = await defaultModelGateway.chat({
-            workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
-            taskType: "AGENT", messages, signal: ctx.signal,
-          });
-          throwIfConversationCanceled(ctx);
-          followupMessage = completed.content;
-          finalMessage = followupMessage;
+      const followupState = await executeVersionedFollowupTools(followup, actor, ctx, messages, executedToolResults, failedToolResults);
+      if (followupState === "rejected") {
+        followupMessage = UNSAFE_VERSIONED_FOLLOWUP;
+        finalMessage = followupMessage;
+      } else if (followupState === "executed") {
+        followupMessage = VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+        if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+          try {
+            const completed = await defaultModelGateway.chat({
+              workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
+              taskType: "AGENT", messages, signal: ctx.signal,
+            });
+            throwIfConversationCanceled(ctx);
+            followupMessage = completed.content || followupMessage;
+          } catch (error) {
+            throwIfConversationCanceled(ctx, error);
+          }
         }
+        finalMessage = followupMessage;
       }
     }
     if (!followupMessage.trim()) {
@@ -1394,8 +1426,6 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
             followupResult = value;
             break;
           }
-          yield value;
-          finalMessage += value;
           followupMessage += value;
         }
       } catch (error) {
@@ -1407,18 +1437,37 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         }
       }
     }
-    if (followupResult && await executeVersionedFollowupTools(
+    const followupState = followupResult ? await executeVersionedFollowupTools(
       followupResult, actor, ctx, messages, executedToolResults, failedToolResults,
-    ) && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
-      const completed = defaultModelGateway.chatStream({
-        workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
-        taskType: "AGENT", messages, signal: ctx.signal,
-      });
-      followupMessage = "";
-      for await (const chunk of completed) {
-        yield chunk;
-        finalMessage += chunk;
-        followupMessage += chunk;
+    ) : "none";
+    if (followupState === "none" && !followupStreamFailed && followupMessage) {
+      yield followupMessage;
+      finalMessage += followupMessage;
+    } else if (followupState === "rejected") {
+      followupMessage = UNSAFE_VERSIONED_FOLLOWUP;
+      yield followupMessage;
+      finalMessage += followupMessage;
+    } else if (followupState === "executed") {
+      followupMessage = VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+      if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+        try {
+          followupMessage = "";
+          for await (const chunk of defaultModelGateway.chatStream({
+            workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
+            taskType: "AGENT", messages, signal: ctx.signal,
+          })) {
+            yield chunk;
+            finalMessage += chunk;
+            followupMessage += chunk;
+          }
+        } catch (error) {
+          throwIfConversationCanceled(ctx, error);
+        }
+      }
+      if (!followupMessage) {
+        followupMessage = VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+        yield followupMessage;
+        finalMessage += followupMessage;
       }
       throwIfConversationCanceled(ctx);
     }
