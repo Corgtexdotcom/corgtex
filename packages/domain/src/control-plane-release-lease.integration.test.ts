@@ -3,10 +3,11 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { abortManagedReleaseLease, acquireManagedReleaseLease, beginManagedReleaseMutation, heartbeatManagedReleaseLease, recordManagedReleaseRollbackRecord } from "./control-plane-release-lease";
+import { abortManagedReleaseLease, acquireManagedReleaseLease, beginManagedReleaseMutation, getManagedReleaseLeaseTarget, heartbeatManagedReleaseLease, recordManagedReleaseRollbackRecord } from "./control-plane-release-lease";
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
 const SUBSCRIPTION = "123e4567-e89b-12d3-a456-426614174000"; const [RG, WEB, WORKER, ACR] = ["rg.Safe_1", "web-app", "worker-app", "acr12.azurecr.io"];
+const ACR_IDENTITY = { acrName: "acr12", acrServer: ACR };
 const DIGESTS = ["1", "2", "3", "4"].map((value) => `sha256:${value.repeat(64)}`);
 function rollbackPayload() {
   return {
@@ -28,8 +29,24 @@ async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedC
     providerResourceGroup: RG, providerWebServiceId: WEB, providerWorkerServiceId: WORKER, ...overrides,
   } });
 }
-function acquire(deploymentId: string, overrides = {}) {
-  return acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test", ...overrides });
+async function acquire(deploymentId: string, overrides = {}) {
+  const result = await acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test", ...overrides });
+  return { deploymentId: result.deploymentId, leaseId: result.leaseId, capability: result.capability, fence: result.fence };
+}
+async function seededLease(overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput> = {}) {
+  const capability = `synthetic-${randomUUID()}`; const leaseId = randomUUID(); const now = new Date();
+  const row = await deployment({ releaseLeaseFence: 7, releaseLeaseId: leaseId, releaseLeaseTokenHash: sha256(capability), releaseLeaseOwner: "fleet:test",
+    releaseLeaseExpectedImageTag: BASE, releaseLeaseIncomingImageTag: NEXT, releaseLeaseIncomingVersion: "release-2", releaseLeasePhase: "RESERVED",
+    releaseLeaseAcquiredAt: now, releaseLeaseHeartbeatAt: now, releaseLeaseExpiresAt: new Date(now.getTime() + 300_000), ...overrides });
+  return { row, handle: { deploymentId: row.id, leaseId, capability, fence: 7 } };
+}
+async function releaseState(deploymentId: string) {
+  return {
+    deployment: await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deploymentId } }),
+    events: await prisma.customerDeploymentEvent.findMany({ where: { deploymentId }, orderBy: { id: "asc" } }),
+    snapshots: await prisma.fleetHealthSnapshot.findMany({ where: { deploymentId }, orderBy: { id: "asc" } }),
+    targets: await prisma.customerReleaseTarget.findMany({ where: { deploymentId }, orderBy: { id: "asc" } }),
+  };
 }
 async function expectCode(value: Promise<unknown>, code: string, status = 409, message = "Managed release lease request was rejected.") {
   await expect(value).rejects.toMatchObject({ code, status, message });
@@ -152,6 +169,94 @@ describe("managed release lease CAS", () => {
     const cleared = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
     expect(Object.entries(cleared).filter(([key]) => key.startsWith("releaseLease") && key !== "releaseLeaseFence").every(([, value]) => value === null)).toBe(true);
     expect(cleared.releaseLeaseFence).toBe(handle.fence); expect(cleared.releaseImageTag).toBe(BASE);
+  });
+  it("projects one exact frozen forward target without changing durable release state", async () => {
+    const target = await deployment(); const handle = await acquire(target.id);
+    const nullHandle = Object.assign(Object.create(null), handle); const nullAcr = Object.assign(Object.create(null), ACR_IDENTITY);
+    const before = await releaseState(target.id); const projected = await getManagedReleaseLeaseTarget(nullHandle, nullAcr);
+    expect(projected).toEqual({ deploymentId: target.id, leaseId: handle.leaseId, fence: handle.fence, phase: "RESERVED",
+      release: { baselineImageTag: BASE, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: NEXT, version: "release-2" } },
+      origin: target.url, target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER } });
+    expect(Object.keys(projected)).toEqual(["deploymentId", "leaseId", "fence", "phase", "release", "origin", "target"]);
+    expect(Object.keys(projected.release)).toEqual(["baselineImageTag", "baselineVersion", "target"]);
+    expect(Object.keys(projected.target)).toEqual(["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
+    expect([projected, projected.release, projected.release.target, projected.target].every(Object.isFrozen)).toBe(true);
+    expect(JSON.stringify(projected)).not.toContain(handle.capability); expect(JSON.stringify(projected)).not.toContain(sha256(handle.capability));
+    const replay = await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY); expect(replay).toEqual(projected); expect(replay).not.toBe(projected);
+    expect(await releaseState(target.id)).toEqual(before);
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+    const recorded = await releaseState(target.id);
+    await expectCode(getManagedReleaseLeaseTarget(handle, { acrName: "other12", acrServer: "other12.azurecr.io" }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    expect(await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).toMatchObject({ phase: "RESERVED", release: { target: { kind: "FORWARD" } } });
+    expect(await releaseState(target.id)).toEqual(recorded);
+    await beginManagedReleaseMutation(handle); const mutating = await releaseState(target.id);
+    expect(await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).toMatchObject({ phase: "MUTATING" }); expect(await releaseState(target.id)).toEqual(mutating);
+    await prisma.customerDeployment.update({ where: { id: target.id }, data: { releaseLeasePhase: "RECOVERY_REQUIRED" } });
+    const recovering = await releaseState(target.id); expect(await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).toMatchObject({ phase: "RECOVERY_REQUIRED" });
+    expect(await releaseState(target.id)).toEqual(recovering);
+  });
+  it("keeps an exact rollback reservation distinct from nullable release versions and binds its recorded ACR", async () => {
+    const archiveId = randomUUID(); const { row, handle } = await seededLease({ releaseVersion: null, releaseLeaseIncomingVersion: `rollback-archive:${archiveId}` });
+    const before = await releaseState(row.id); const reserved = await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY);
+    expect(reserved.release).toEqual({ baselineImageTag: BASE, baselineVersion: null, target: { kind: "ROLLBACK", imageTag: NEXT, rollbackArchiveId: archiveId } });
+    expect(reserved.release.target).not.toHaveProperty("version"); expect(await releaseState(row.id)).toEqual(before);
+    const payload = rollbackPayload(); Object.assign(payload.previous, { releaseVersion: null }); await recordManagedReleaseRollbackRecord(handle, payload);
+    const stored = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } });
+    expect((stored.releaseLeaseRollbackRecord as { payload: ReturnType<typeof rollbackPayload> }).payload.previous).toMatchObject({ releaseVersion: null,
+      web: { containerName: "web--old" }, worker: { containerName: "worker--old" } });
+    const recorded = await releaseState(row.id);
+    await expectCode(getManagedReleaseLeaseTarget(handle, { acrName: "other12", acrServer: "other12.azurecr.io" }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    expect(await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).toMatchObject({ release: { baselineVersion: null, target: { kind: "ROLLBACK", rollbackArchiveId: archiveId } } });
+    expect(await releaseState(row.id)).toEqual(recorded);
+    await beginManagedReleaseMutation(handle); await prisma.customerDeployment.update({ where: { id: row.id }, data: { releaseLeasePhase: "RECOVERY_REQUIRED" } });
+    const recovering = await releaseState(row.id); expect(await getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).toMatchObject({ phase: "RECOVERY_REQUIRED" });
+    expect(await releaseState(row.id)).toEqual(recovering);
+  });
+  it("rejects non-closed target inputs before they can change or disclose the leased row", async () => {
+    const target = await deployment(); const handle = await acquire(target.id); const before = await releaseState(target.id); let getterCalls = 0;
+    const accessor = { ...handle } as Record<string, unknown>; Object.defineProperty(accessor, "capability", { enumerable: true, get: () => { getterCalls += 1; return handle.capability; } });
+    const hidden = { ...handle }; Object.defineProperty(hidden, "fence", { enumerable: false, value: handle.fence });
+    const symbol = { ...handle } as Record<PropertyKey, unknown>; symbol[Symbol("private")] = "private";
+    const invalidHandles = [null, [], { ...handle, extra: true }, { deploymentId: handle.deploymentId }, Object.create(handle), accessor, hidden, symbol,
+      new Proxy({ ...handle }, {}), { ...handle, deploymentId: handle.deploymentId.toUpperCase() }, { ...handle, fence: 0 }, { ...handle, capability: 7 }];
+    for (const value of invalidHandles) await expectCode(getManagedReleaseLeaseTarget(value as never, ACR_IDENTITY), "MANAGED_RELEASE_INVALID_INPUT", 400);
+    const acrAccessor = { acrName: "acr12" } as Record<string, unknown>; Object.defineProperty(acrAccessor, "acrServer", { enumerable: true, get: () => { getterCalls += 1; return ACR; } });
+    const invalidAcr = [null, [], { ...ACR_IDENTITY, extra: true }, Object.create(ACR_IDENTITY), acrAccessor, new Proxy({ ...ACR_IDENTITY }, {}),
+      { acrName: "ACR12", acrServer: ACR }, { acrName: "acr12", acrServer: "other12.azurecr.io" }];
+    for (const value of invalidAcr) await expectCode(getManagedReleaseLeaseTarget(handle, value as never), "MANAGED_RELEASE_INVALID_INPUT", 400);
+    for (const prototype of [Object.prototype, Array.prototype]) {
+      const key = Symbol("private"); Object.defineProperty(prototype, key, { configurable: true, enumerable: true, value: "private" });
+      try { await expectCode(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY), "MANAGED_RELEASE_INVALID_INPUT", 400); } finally { Reflect.deleteProperty(prototype, key); }
+    }
+    expect(getterCalls).toBe(0); expect(await releaseState(target.id)).toEqual(before);
+  });
+  it("fails closed on stale ownership, expiry, ineligible rows, unsafe target state, and envelope drift", async () => {
+    const missing = { deploymentId: randomUUID(), leaseId: randomUUID(), capability: "synthetic", fence: 1 };
+    await expectCode(getManagedReleaseLeaseTarget(missing, ACR_IDENTITY), "MANAGED_RELEASE_DEPLOYMENT_NOT_FOUND", 404);
+    const target = await deployment(); const handle = await acquire(target.id); const before = await releaseState(target.id);
+    for (const stale of [{ ...handle, leaseId: randomUUID() }, { ...handle, capability: "wrong" }, { ...handle, fence: handle.fence + 1 }])
+      await expectCode(getManagedReleaseLeaseTarget(stale, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_CONFLICT");
+    expect(await releaseState(target.id)).toEqual(before); await expire(target.id); const expired = await releaseState(target.id);
+    await expectCode(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_EXPIRED"); expect(await releaseState(target.id)).toEqual(expired);
+    const ineligible = await deployment({ cloudProvider: "RAILWAY" }); const ineligibleBefore = await releaseState(ineligible.id);
+    await expectCode(getManagedReleaseLeaseTarget({ deploymentId: ineligible.id, leaseId: randomUUID(), capability: "synthetic", fence: 1 }, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_CONFLICT");
+    expect(await releaseState(ineligible.id)).toEqual(ineligibleBefore);
+    const unsafeRows = [
+      await deployment({ url: "https://Upper.example.test" }), await deployment({ url: "https://path.example.test/private" }),
+      await deployment({ providerSubscriptionId: SUBSCRIPTION.toUpperCase() }), await deployment({ providerResourceGroup: "bad." }),
+      await deployment({ providerWebServiceId: "Web-app" }), await deployment({ providerWorkerServiceId: WEB }),
+      await deployment({ releaseVersion: "bad/version" }), await deployment(),
+    ];
+    const unsafeVersions = [undefined, undefined, undefined, undefined, undefined, undefined, undefined, "bad/version"];
+    for (let index = 0; index < unsafeRows.length; index += 1) {
+      const unsafeHandle = await acquire(unsafeRows[index]!.id, unsafeVersions[index] ? { incomingVersion: unsafeVersions[index] } : {});
+      const unsafeBefore = await releaseState(unsafeRows[index]!.id);
+      await expectCode(getManagedReleaseLeaseTarget(unsafeHandle, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+      expect(await releaseState(unsafeRows[index]!.id)).toEqual(unsafeBefore);
+    }
+    const corrupt = await deployment(); const corruptHandle = await acquire(corrupt.id); await recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload());
+    await prisma.customerDeployment.update({ where: { id: corrupt.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } }); const corruptBefore = await releaseState(corrupt.id);
+    await expectCode(getManagedReleaseLeaseTarget(corruptHandle, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT"); expect(await releaseState(corrupt.id)).toEqual(corruptBefore);
   });
   it("rejects every eligibility drift after mutation begins and leaves the row unchanged", async () => {
     const drifts: Prisma.CustomerDeploymentUncheckedUpdateInput[] = [
