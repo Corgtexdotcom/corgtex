@@ -819,6 +819,37 @@ async function executeConversationToolCall({
   };
 }
 
+async function executeVersionedFollowupTools(
+  response: import("@corgtex/models").ChatCompletionResponse,
+  actor: AppActor,
+  ctx: ConversationContext,
+  messages: ChatMessage[],
+  executed: ExecutedConversationToolResult[],
+  failed: FailedConversationToolResult[],
+) {
+  const calls = response.tool_calls?.filter(({ function: tool }) =>
+    tool.name === "update_action" || tool.name === "update_tension"
+  );
+  if (!calls?.length) return false;
+  messages.push({ role: "assistant", content: response.content || "", tool_calls: calls });
+  for (const call of calls) {
+    const toolName = call.function.name;
+    const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
+    try {
+      const outcome = await executeConversationToolCall({
+        actor, ctx, toolName, rawArguments: call.function.arguments, handler: TOOL_HANDLERS[toolName]!,
+      });
+      executed.push({ toolName, args, result: outcome.result });
+      messages.push({ role: "tool", content: JSON.stringify(outcome.result), name: toolName, tool_call_id: call.id });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      failed.push({ toolName, args, error });
+      messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id });
+    }
+  }
+  return true;
+}
+
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
   if (typeof iterator.return !== "function") return;
   try {
@@ -1074,6 +1105,17 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
       followupMessage = followup.content;
       finalMessage = followupMessage;
+      if (await executeVersionedFollowupTools(followup, actor, ctx, messages, executedToolResults, failedToolResults)) {
+        if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+          const completed = await defaultModelGateway.chat({
+            workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
+            taskType: "AGENT", messages, signal: ctx.signal,
+          });
+          throwIfConversationCanceled(ctx);
+          followupMessage = completed.content;
+          finalMessage = followupMessage;
+        }
+      }
     }
     if (!followupMessage.trim()) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
@@ -1331,6 +1373,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
     let followupMessage = "";
     let followupStreamFailed = false;
+    let followupResult: import("@corgtex/models").ChatCompletionResponse | null = null;
     if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
       const followupIterator = defaultModelGateway.chatStream({
         workspaceId: ctx.workspaceId,
@@ -1348,6 +1391,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
           const { done, value } = await followupIterator.next();
           if (done) {
             followupStreamDone = true;
+            followupResult = value;
             break;
           }
           yield value;
@@ -1362,6 +1406,21 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
           await closeAsyncIterator(followupIterator);
         }
       }
+    }
+    if (followupResult && await executeVersionedFollowupTools(
+      followupResult, actor, ctx, messages, executedToolResults, failedToolResults,
+    ) && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+      const completed = defaultModelGateway.chatStream({
+        workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
+        taskType: "AGENT", messages, signal: ctx.signal,
+      });
+      followupMessage = "";
+      for await (const chunk of completed) {
+        yield chunk;
+        finalMessage += chunk;
+        followupMessage += chunk;
+      }
+      throwIfConversationCanceled(ctx);
     }
     if (!followupMessage.trim() || followupStreamFailed) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)

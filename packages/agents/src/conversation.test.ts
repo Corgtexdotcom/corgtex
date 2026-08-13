@@ -72,6 +72,7 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
+    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() },
     tension: {
       findMany: vi.fn().mockResolvedValue([]),
     },
@@ -2430,33 +2431,31 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the activity.");
   });
 
-  it("forwards exact tensionId and actionId filters to query tools", async () => {
-    const actor = {
-      kind: "user" as const,
-      user: { id: "user-1", email: "user@example.com", displayName: "User" },
-    };
-
+  it("reads exact action and tension versions before executing follow-up updates", async () => {
+    const actor = testUserActor();
+    const { prisma } = await import("@corgtex/shared");
+    const { updateAction, updateTension } = await import("@corgtex/domain");
+    vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([
+      { id: "t-123", version: 4, title: "Tension", status: "OPEN", priority: "MEDIUM", author: { displayName: "User" } } as any,
+    ]);
+    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([
+      { id: "a-456", version: 7, title: "Action", status: "OPEN", author: { displayName: "User" } } as any,
+    ]);
+    vi.mocked(updateTension).mockResolvedValueOnce({ id: "t-123", version: 5 } as any);
+    vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-456", version: 8 } as any);
     chatMock
       .mockResolvedValueOnce({
         content: "",
         tool_calls: [
-          {
-            id: "call-1",
-            function: {
-              name: "query_tensions",
-              arguments: JSON.stringify({ status: "OPEN", tensionId: "t-123" }),
-            },
-          },
-          {
-            id: "call-2",
-            function: {
-              name: "query_actions",
-              arguments: JSON.stringify({ status: "DRAFT", assigneeId: "mem-1", actionId: "a-456" }),
-            },
-          },
+          { id: "read-t", function: { name: "query_tensions", arguments: JSON.stringify({ tensionId: "t-123" }) } },
+          { id: "read-a", function: { name: "query_actions", arguments: JSON.stringify({ actionId: "a-456" }) } },
         ],
       })
-      .mockResolvedValueOnce({ content: "Here are your items." });
+      .mockResolvedValueOnce({ content: "", tool_calls: [
+        { id: "write-t", function: { name: "update_tension", arguments: JSON.stringify({ tensionId: "t-123", expectedVersion: 4, title: "Updated tension" }) } },
+        { id: "write-a", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-456", expectedVersion: 7, title: "Updated action" }) } },
+      ] })
+      .mockResolvedValueOnce({ content: "Both items were updated." });
 
     const { processConversationTurn } = await import("./conversation");
     const result = await processConversationTurn({
@@ -2464,29 +2463,41 @@ describe("processConversationTurn", () => {
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
-      userMessage: "What are my items?",
+      userMessage: "Update both items.",
       actor,
     });
+    expect(prisma.tension.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "t-123" }) }));
+    expect(prisma.action.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "a-456" }) }));
+    expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({ tensionId: "t-123", expectedVersion: 4 }));
+    expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({ actionId: "a-456", expectedVersion: 7 }));
+    expect(result.assistantMessage).toBe("Both items were updated.");
+  });
 
+  it("streams a final response after a read-then-versioned-update tool sequence", async () => {
+    const actor = testUserActor();
     const { prisma } = await import("@corgtex/shared");
-    const expectedCanonicalPrivacy = {
-      OR: [
-        { isPrivate: false },
-        { isPrivate: true, status: "DRAFT", authorUserId: "user-1" },
-      ],
-    };
+    const { updateAction } = await import("@corgtex/domain");
+    vi.mocked(prisma.action.findMany).mockResolvedValueOnce([
+      { id: "a-456", version: 7, title: "Action", status: "OPEN", author: { displayName: "User" } } as any,
+    ]);
+    vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-456", version: 8 } as any);
+    chatStreamMock
+      .mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [
+        { id: "read", function: { name: "query_actions", arguments: JSON.stringify({ actionId: "a-456" }) } },
+      ] }))
+      .mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [
+        { id: "write", function: { name: "update_action", arguments: JSON.stringify({ actionId: "a-456", expectedVersion: 7, title: "Updated" }) } },
+      ] }))
+      .mockReturnValueOnce(streamResponse(["Action updated."], { content: "Action updated." }));
 
-    expect(prisma.tension.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: "t-123", status: "OPEN", ...expectedCanonicalPrivacy }),
-      }),
-    );
-    expect(prisma.action.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: "a-456", status: "DRAFT", assigneeMemberId: "mem-1", ...expectedCanonicalPrivacy }),
-      }),
-    );
-    expect(result.assistantMessage).toBe("Here are your items.");
+    const { processConversationTurnStream } = await import("./conversation");
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({
+      workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant",
+      userMessage: "Update the action.", actor,
+    }));
+    expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({ actionId: "a-456", expectedVersion: 7 }));
+    expect(chunks.join("")).toBe("Action updated.");
+    expect(result.assistantMessage).toBe("Action updated.");
   });
 
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {

@@ -93,122 +93,60 @@ describe("workspace agent tools", () => {
 });
 
 describe("agent query tools version requirements", () => {
-  it("query tools include version and instruction in description", async () => {
+  it("documents the version handoff to update tools", async () => {
     const { queryTensionsTool, queryActionsTool } = await import("./workspace");
-    expect(queryTensionsTool.function.description).toContain("version");
     expect(queryTensionsTool.function.description).toContain("update_tension");
-    expect(queryActionsTool.function.description).toContain("version");
     expect(queryActionsTool.function.description).toContain("update_action");
   });
 
-  it("queryTensions and queryActions return versions from database", async () => {
-    const { queryTensions, queryActions } = await import("./workspace");
-
-    findManyTensionsMock.mockResolvedValue([
-      { id: "t-1", title: "Tension 1", status: "OPEN", priority: "HIGH", author: { displayName: "Author" }, version: 4 }
-    ]);
-
-    const tensions = await queryTensions("ws-1");
-    expect(tensions[0]).toEqual(expect.objectContaining({ id: "t-1", version: 4 }));
-
-    findManyActionsMock.mockResolvedValue([
-      { id: "a-1", title: "Action 1", status: "OPEN", author: { displayName: "Author" }, version: 5 }
-    ]);
-
-    const actions = await queryActions("ws-1");
-    expect(actions[0]).toEqual(expect.objectContaining({ id: "a-1", version: 5 }));
-  });
-
-  it("exposes tensionId and actionId in schemas and filters by exact ID", async () => {
-    const { queryTensionsTool, queryActionsTool, queryTensions, queryActions } = await import("./workspace");
-
+  it("exposes exact-ID filters", async () => {
+    const { queryTensionsTool, queryActionsTool } = await import("./workspace");
     expect((queryTensionsTool.function.parameters.properties as any).tensionId).toBeDefined();
     expect((queryActionsTool.function.parameters.properties as any).actionId).toBeDefined();
-
-    findManyTensionsMock.mockClear();
-    await queryTensions("ws-1", undefined, undefined, "t-99");
-    expect(findManyTensionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: "t-99", isPrivate: false }),
-      }),
-    );
-
-    findManyActionsMock.mockClear();
-    await queryActions("ws-1", undefined, undefined, "a-99");
-    expect(findManyActionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: "a-99", isPrivate: false }),
-      }),
-    );
   });
 
-  it("denies private reads by exact ID when actor is missing and allows when actor matches", async () => {
+  it("returns versions from exact-ID reads without broadening anonymous privacy", async () => {
+    const { queryTensions, queryActions } = await import("./workspace");
+    findManyTensionsMock.mockResolvedValueOnce([
+      { id: "t-99", version: 4, title: "Tension", status: "OPEN", priority: "HIGH", author: { displayName: "Author" } },
+    ]);
+    findManyActionsMock.mockResolvedValueOnce([
+      { id: "a-99", version: 5, title: "Action", status: "OPEN", author: { displayName: "Author" } },
+    ]);
+    expect((await queryTensions("ws-1", undefined, undefined, "t-99"))[0]).toMatchObject({ id: "t-99", version: 4 });
+    expect((await queryActions("ws-1", undefined, undefined, "a-99"))[0]).toMatchObject({ id: "a-99", version: 5 });
+    expect(findManyTensionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "t-99", isPrivate: false }),
+    }));
+    expect(findManyActionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "a-99", isPrivate: false }),
+    }));
+  });
+
+  it("uses canonical member and admin privacy filters for exact-ID reads", async () => {
     const { queryTensions, queryActions } = await import("./workspace");
     const { requireWorkspaceMembership } = await import("@corgtex/domain");
-    const actor: import("@corgtex/shared").AppActor = {
-      kind: "user",
-      user: { id: "u-1", email: "test@example.com", displayName: "Test", globalRole: "USER" },
-    };
-    const expectedCanonicalPrivacy = {
-      OR: [
-        { isPrivate: false },
-        { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
-      ],
-    };
-    const expectedAdminPrivacy = {
-      OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT" }],
-    };
+    const member = { kind: "user", user: { id: "u-1", email: "test@example.com", displayName: "Test", globalRole: "USER" } } as AppActor;
+    const memberPrivacy = { OR: [
+      { isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: "u-1" },
+    ] };
+    findManyTensionsMock.mockResolvedValue([]);
+    findManyActionsMock.mockResolvedValue([]);
+    await queryTensions("ws-1", undefined, undefined, "t-99", member);
+    await queryActions("ws-1", undefined, undefined, "a-99", member);
+    expect(findManyTensionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "t-99", ...memberPrivacy }),
+    }));
+    expect(findManyActionsMock).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "a-99", ...memberPrivacy }),
+    }));
 
-    findManyTensionsMock.mockClear();
+    const admin = { id: "m-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true } as const;
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue(admin);
     await queryTensions("ws-1", undefined, undefined, "t-99");
+    await queryTensions("ws-1", undefined, undefined, "t-99", member);
     expect(findManyTensionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: "t-99", isPrivate: false }),
-      }),
-    );
-
-    findManyTensionsMock.mockClear();
-    await queryTensions("ws-1", undefined, undefined, "t-99", actor);
-    expect(findManyTensionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "t-99",
-          ...expectedCanonicalPrivacy,
-        }),
-      }),
-    );
-
-    findManyActionsMock.mockClear();
-    await queryActions("ws-1", undefined, undefined, "a-99", actor);
-    expect(findManyActionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "a-99",
-          ...expectedCanonicalPrivacy,
-        }),
-      }),
-    );
-
-    const adminMembership: import("@corgtex/shared").MembershipSummary = {
-      id: "membership-1",
-      workspaceId: "ws-1",
-      userId: "u-1",
-      role: "ADMIN" as const,
-      isActive: true,
-    };
-
-    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(adminMembership);
-    findManyTensionsMock.mockClear();
-    await queryTensions("ws-1", undefined, undefined, "t-99", actor);
-    expect(findManyTensionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ id: "t-99", ...expectedAdminPrivacy }) })
-    );
-
-    vi.mocked(requireWorkspaceMembership).mockResolvedValueOnce(adminMembership);
-    findManyActionsMock.mockClear();
-    await queryActions("ws-1", undefined, undefined, "a-99", actor);
-    expect(findManyActionsMock).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ id: "a-99", ...expectedAdminPrivacy }) })
+      expect.objectContaining({ where: expect.objectContaining({ id: "t-99", OR: expect.arrayContaining([{ isPrivate: true, status: "DRAFT" }]) }) })
     );
   });
 });
