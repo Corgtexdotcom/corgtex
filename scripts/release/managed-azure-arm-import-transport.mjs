@@ -103,7 +103,7 @@ export function createManagedAzureArmImportTransport(dependencies) {
       lastTime = current; return current; };
     const timed = async (task, milliseconds) => {
       const timer = new AbortController(); const timeout = Promise.resolve().then(() => sleep(milliseconds, timer.signal)).then(() => TIMED_OUT, () => FAILED);
-      const settled = await Promise.race([task, timeout, abortGate]); timer.abort(); await timeout; return settled;
+      const settled = await Promise.race([task, timeout, abortGate]); timer.abort(); await timeout; return aborted ? ABORTED : settled;
     };
     const invoke = async (provider, validator, milliseconds = REQUEST_TIMEOUT_MS) => {
       const settled = await timed(Promise.resolve().then(provider).then((result) => ({ result }), () => FAILED), milliseconds);

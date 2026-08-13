@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { canonicalizeManagedAzureImportRequestValueV1 } from "./azure-release-managed-target.mjs";
 import * as transportModule from "./managed-azure-arm-import-transport.mjs";
-
 const SHA = "a".repeat(40); const DIGEST = `sha256:${"b".repeat(64)}`;
 const DEPLOYMENT_ID = "aaaaaaaa-aaaa-faaa-0aaa-aaaaaaaa0101";
 const SUBSCRIPTION_ID = "bbbbbbbb-bbbb-0bbb-fbbb-bbbbbbbb0102";
@@ -47,7 +46,6 @@ function expectInvalid(operation, canary = "private-provider-canary") {
 async function outcome(specs, overrides) {
   const fixture = rig(specs, overrides); return { result: await fixture.transport.startManagedAzureImport(structuredClone(request())).completion, fixture };
 }
-
 describe("managed Azure ARM import transport", () => {
   test("exports only the inert fixed factory and rejects unsafe dependency topology", () => {
     expect(Object.keys(transportModule)).toStrictEqual(["createManagedAzureArmImportTransport"]);
@@ -156,5 +154,7 @@ describe("managed Azure ARM import transport", () => {
     const firstAbort = operation.abort(); const secondAbort = operation.abort(); const aborted = await firstAbort;
     expect(aborted.reason).toBe("LOCAL_ABORT"); expect(await secondAbort).toBe(aborted); expect(abortFixture.calls[0].options.signal.aborted).toBe(true);
     late.resolve(response({ status: 200 }, abortFixture.calls[0].url)); await Promise.resolve(); expect(await operation.completion).toBe(aborted); expect(abortFixture.calls).toHaveLength(1);
+    const cleanup = deferred(); let timeoutCalls = 0; let cleanupStarted = false; const raceFixture = rig([{ status: 202, headers: { Location: pollUrl(), "Retry-After": "0" } }, { status: 200 }], { sleep: (milliseconds, signal) => { if (milliseconds !== 15_000) return Promise.resolve(); const call = ++timeoutCalls; if (call === 4) { signal.addEventListener("abort", () => { cleanupStarted = true; }, { once: true }); return cleanup.promise; } return new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true })); } }); const raceOperation = raceFixture.transport.startManagedAzureImport(request());
+    for (let turn = 0; turn < 64 && !cleanupStarted; turn += 1) await Promise.resolve(); expect(cleanupStarted).toBe(true); const raceAbort = raceOperation.abort(); cleanup.resolve(); expect((await raceAbort).reason).toBe("LOCAL_ABORT"); expect(raceFixture.calls).toHaveLength(1);
   });
 });
