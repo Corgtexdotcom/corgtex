@@ -89,10 +89,8 @@ function isCanonicalUtcIsoInstant(value: unknown): value is string {
 export function serializeCustomerIssuePublication(
   value: unknown,
 ): CustomerIssuePublicProjection | null {
-  if (!isRecord(value)) {
-    return null;
-  }
   try {
+    if (!isRecord(value)) return null;
     if (!Object.hasOwn(value, "publicationState")) return null;
     const { publicationState } = value;
     if (publicationState !== PUBLICATION_STATE_PUBLISHED) return null;

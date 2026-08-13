@@ -134,6 +134,12 @@ describe("serializeCustomerIssuePublication", () => {
     },
   );
 
+  it("returns null for a revoked Proxy", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(serializeCustomerIssuePublication(proxy)).toBeNull();
+  });
+
   it.each(["DRAFT", "WITHDRAWN", "published", "", undefined])(
     "returns null for publicationState %j",
     (publicationState) => {
