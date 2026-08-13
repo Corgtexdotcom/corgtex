@@ -1,6 +1,5 @@
 import { types as nodeTypes } from "node:util";
 import { canonicalizeManagedAzureImportRequestValueV1 } from "./azure-release-managed-target.mjs";
-
 const REQUEST_TIMEOUT_MS = 15_000;
 const DEADLINE_MS = 120_000;
 const MAX_POLLS = 12;
@@ -9,7 +8,6 @@ const MAX_RETRY_AFTER_MS = 30_000;
 const ABORTED = Object.freeze({ kind: "ABORTED" });
 const FAILED = Object.freeze({ kind: "FAILED" });
 const TIMED_OUT = Object.freeze({ kind: "TIMED_OUT" });
-
 function invalid() { throw new Error("MANAGED_AZURE_ARM_IMPORT_TRANSPORT_INPUT_INVALID"); }
 function exactRecord(value, keys) {
   try {
@@ -91,7 +89,6 @@ function pollMapping(status) {
   if (status === 408 || status === 429 || status >= 500) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
   return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
 }
-
 export function createManagedAzureArmImportTransport(dependencies) {
   const raw = exactRecord(dependencies, ["fetchImpl", "getAzureAccessToken", "getSourceCredentials", "clock", "sleep"]);
   if (Object.values(raw).some((value) => typeof value !== "function")) invalid();
@@ -104,23 +101,22 @@ export function createManagedAzureArmImportTransport(dependencies) {
     const now = () => { const current = clock();
       if (!Number.isSafeInteger(current) || current < 0 || current < lastTime) throw FAILED;
       lastTime = current; return current; };
-    const invoke = async (provider, validator) => {
-      const task = Promise.resolve().then(provider).then((result) => ({ result }), () => FAILED);
-      const timeout = Promise.resolve().then(() => sleep(REQUEST_TIMEOUT_MS)).then(() => TIMED_OUT, () => FAILED);
-      const settled = await Promise.race([task, timeout, abortGate]);
-      if (settled === ABORTED || settled === FAILED || settled === TIMED_OUT) return settled === ABORTED ? ABORTED : FAILED;
-      try { return { result: validator(settled.result) }; } catch { return FAILED; }
+    const timed = async (task, milliseconds) => {
+      const timer = new AbortController(); const timeout = Promise.resolve().then(() => sleep(milliseconds, timer.signal)).then(() => TIMED_OUT, () => FAILED);
+      const settled = await Promise.race([task, timeout, abortGate]); timer.abort(); await timeout; return settled;
+    };
+    const invoke = async (provider, validator, milliseconds = REQUEST_TIMEOUT_MS) => {
+      const settled = await timed(Promise.resolve().then(provider).then((result) => ({ result }), () => FAILED), milliseconds);
+      if (settled === ABORTED || settled === FAILED || settled === TIMED_OUT) return settled; try { return { result: validator(settled.result) }; } catch { return FAILED; }
     };
     const wait = async (milliseconds) => {
-      const task = Promise.resolve().then(() => sleep(milliseconds)).then(() => null, () => FAILED);
-      return Promise.race([task, abortGate]);
+      const timer = new AbortController(); const task = Promise.resolve().then(() => sleep(milliseconds, timer.signal)).then(() => null, () => FAILED);
+      const settled = await Promise.race([task, abortGate]); timer.abort(); await task; return settled;
     };
-    const send = async (url, options) => {
+    const send = async (url, options, milliseconds = REQUEST_TIMEOUT_MS) => {
       const task = Promise.resolve().then(() => fetchImpl(url, options)).then((response) => ({ response }), () => FAILED);
-      const timeout = Promise.resolve().then(() => sleep(REQUEST_TIMEOUT_MS)).then(() => TIMED_OUT, () => FAILED);
-      const settled = await Promise.race([task, timeout, abortGate]);
-      if (settled === TIMED_OUT) controller.abort();
-      return settled;
+      const settled = await timed(task, milliseconds);
+      if (settled === TIMED_OUT) controller.abort(); return settled;
     };
     const finish = ([outcome, reason]) => {
       if (terminal) return terminal;
@@ -134,10 +130,10 @@ export function createManagedAzureArmImportTransport(dependencies) {
       let startedAt;
       try { startedAt = now(); } catch { return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY"); }
       if (aborted) return pair("UNVERIFIED", "LOCAL_ABORT");
-      const azure = await invoke(getAzureAccessToken, bearer); if (azure === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT"); if (azure === FAILED) return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY");
+      const azure = await invoke(getAzureAccessToken, bearer); if (azure === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT"); if (azure === FAILED || azure === TIMED_OUT) return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY");
       const source = await invoke(getSourceCredentials, credentials);
       if (source === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT");
-      if (source === FAILED) return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY");
+      if (source === FAILED || source === TIMED_OUT) return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY");
       const url = `https://management.azure.com/subscriptions/${request.target.subscriptionId}/resourceGroups/${request.target.resourceGroup}/providers/Microsoft.ContainerRegistry/registries/${request.target.acrName}/importImage?api-version=2025-11-01`;
       let body;
       try { body = postBody(request, source.result); } catch { return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY"); }
@@ -160,18 +156,22 @@ export function createManagedAzureArmImportTransport(dependencies) {
         const paused = await wait(delay); if (paused === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT");
         if (paused === FAILED) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
         try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
-        if (current - startedAt >= DEADLINE_MS || REQUEST_TIMEOUT_MS > DEADLINE_MS - (current - startedAt)) return pair("UNVERIFIED", "POLL_EXHAUSTION");
+        if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
         let details;
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          const token = await invoke(getAzureAccessToken, bearer);
-          if (token === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT");
-          if (token === FAILED) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
-          const polled = await send(location, { method: "GET", headers: nullRecord({ Authorization: `Bearer ${token.result}` }), redirect: "manual", signal: controller.signal });
-          if (polled === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT");
+          let remaining = DEADLINE_MS - (current - startedAt);
+          if (REQUEST_TIMEOUT_MS * 2 > remaining) return pair("UNVERIFIED", "POLL_EXHAUSTION");
+          const token = await invoke(getAzureAccessToken, bearer, Math.min(REQUEST_TIMEOUT_MS, remaining));
+          if (token === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT"); try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
+          if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
+          if (token === FAILED || token === TIMED_OUT) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
+          remaining = DEADLINE_MS - (current - startedAt);
+          const polled = await send(location, { method: "GET", headers: nullRecord({ Authorization: `Bearer ${token.result}` }), redirect: "manual", signal: controller.signal }, Math.min(REQUEST_TIMEOUT_MS, remaining));
+          if (polled === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT"); try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
+          if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
           if (polled === FAILED || polled === TIMED_OUT) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
           details = responseDetails(polled.response, location);
-          try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); } if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
-          if (!details || details.location !== null || details.asyncUrl !== null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
+          if (!details || (details.location !== null && details.location !== location) || details.asyncUrl !== null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
           if (details.status !== 401 || refreshed || attempt === 1) break;
           refreshed = true;
         }

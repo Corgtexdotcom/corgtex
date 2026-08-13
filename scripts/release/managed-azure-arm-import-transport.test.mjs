@@ -31,8 +31,8 @@ function rig(items = [{ status: 200 }], overrides = {}) {
     getAzureAccessToken: async () => `azure-token-canary-${++tokenCalls}`,
     getSourceCredentials: async () => { sourceCalls += 1; return { ...SOURCE_CREDENTIALS }; },
     clock: () => now,
-    sleep: async (milliseconds) => { sleeps.push(milliseconds);
-      if (milliseconds === 15_000) return new Promise(() => {}); now += milliseconds; },
+    sleep: async (milliseconds, signal) => { sleeps.push(milliseconds);
+      if (milliseconds === 15_000) return new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true })); now += milliseconds; },
     ...overrides,
   };
   return { transport: transportModule.createManagedAzureArmImportTransport(dependencies), calls, sleeps,
@@ -78,7 +78,7 @@ describe("managed Azure ARM import transport", () => {
   });
 
   test("sends the one exact credential-confined POST and returns a fresh frozen success", async () => {
-    const canonical = request(); const fixture = rig([{ status: 200 }]); const operation = fixture.transport.startManagedAzureImport(structuredClone(canonical));
+    let liveTimeouts = 0; const canonical = request(); const fixture = rig([{ status: 200 }], { sleep: (milliseconds, signal) => new Promise((resolve) => { liveTimeouts += 1; signal.addEventListener("abort", () => { liveTimeouts -= 1; resolve(); }, { once: true }); }) }); const operation = fixture.transport.startManagedAzureImport(structuredClone(canonical));
     expect(Object.keys(fixture.transport)).toStrictEqual(["startManagedAzureImport"]); expect(Object.isFrozen(fixture.transport)).toBe(true);
     expect(Object.keys(operation)).toStrictEqual(["completion", "abort"]); expect(Object.isFrozen(operation)).toBe(true);
     const result = await operation.completion; const call = fixture.calls[0]; const body = JSON.parse(call.options.body);
@@ -90,7 +90,7 @@ describe("managed Azure ARM import transport", () => {
     expect(result).toMatchObject({ schemaVersion: 1, outcome: "CONFIRMED_SUCCESS", reason: "ARM_COMPLETED", completedAtMs: 0 });
     expect(result.request).toStrictEqual(canonical); expect(result.request).not.toBe(canonical); expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.request.target)).toBe(true); expect(JSON.stringify(result)).not.toMatch(/azure-token|ghcr-user|ghcr-password/);
-    expect(await operation.abort()).toBe(result); expect(await operation.abort()).toBe(result); expect(fixture.calls).toHaveLength(1);
+    expect(await operation.abort()).toBe(result); expect(await operation.abort()).toBe(result); expect(fixture.calls).toHaveLength(1); expect(liveTimeouts).toBe(0);
   });
 
   test("maps every initial response class without reading or echoing response bodies", async () => {
@@ -116,7 +116,7 @@ describe("managed Azure ARM import transport", () => {
 
   test("polls only the immutable URL with fresh tokens, bounded delay, and one 401 refresh", async () => {
     const location = pollUrl(); const fixture = rig([{ status: 202, headers: { Location: location, "Retry-After": "2" } },
-      { status: 202, headers: { "Retry-After": "0" } }, { status: 401 }, { status: 200 }]);
+      { status: 202, headers: { Location: location, "Retry-After": "0" } }, { status: 401 }, { status: 200 }]);
     const result = await fixture.transport.startManagedAzureImport(request()).completion;
     expect(result).toMatchObject({ outcome: "CONFIRMED_SUCCESS", reason: "ARM_COMPLETED", completedAtMs: 2_000 });
     expect(fixture.calls).toHaveLength(4); expect(fixture.calls.slice(1).every((call) => call.url === location && call.options.method === "GET"
@@ -131,7 +131,7 @@ describe("managed Azure ARM import transport", () => {
     const cases = [[{ status: 400 }, "POLL_REJECTION"], [{ status: 401 }, "POLL_REJECTION"], [{ status: 408 }, "POLL_TRANSPORT_AMBIGUITY"],
       [{ status: 429 }, "POLL_TRANSPORT_AMBIGUITY"], [{ status: 500 }, "POLL_TRANSPORT_AMBIGUITY"],
       [new Error("private-provider-canary"), "POLL_TRANSPORT_AMBIGUITY"], [{ status: 201 }, "PROTOCOL_LOCATION_VIOLATION"],
-      [{ status: 302 }, "PROTOCOL_LOCATION_VIOLATION"], [{ status: 202, headers: { Location: pollUrl() } }, "PROTOCOL_LOCATION_VIOLATION"]];
+      [{ status: 302 }, "PROTOCOL_LOCATION_VIOLATION"], [{ status: 202, headers: { Location: pollUrl((value) => value.replace("eastus", "westus")) } }, "PROTOCOL_LOCATION_VIOLATION"]];
     for (const [spec, reason] of cases) { const { result, fixture } = await outcome([initial, spec, spec]);
       expect(result).toMatchObject({ outcome: "UNVERIFIED", reason }); expect(fixture.calls.filter((call) => call.options.method === "POST")).toHaveLength(1); }
   });
@@ -146,8 +146,8 @@ describe("managed Azure ARM import transport", () => {
     for (const clock of [() => -1, (() => { let value = 1; return () => value--; })()]) expect((await outcome([{ status: 200 }], { clock })).result.reason).toBe("POST_TRANSPORT_AMBIGUITY");
     const repeated = Array.from({ length: 13 }, (_, index) => index === 0 ? { status: 202, headers: { Location: pollUrl(), "Retry-After": "0" } } : { status: 202, headers: { "Retry-After": "0" } });
     const exhausted = await outcome(repeated); expect(exhausted.result.reason).toBe("POLL_EXHAUSTION"); expect(exhausted.fixture.calls).toHaveLength(13);
-    const deadline = await outcome(Array.from({ length: 5 }, (_, index) => ({ status: 202, headers: { ...(index === 0 ? { Location: pollUrl() } : {}), "Retry-After": "30" } })));
-    expect(deadline.result).toMatchObject({ reason: "POLL_EXHAUSTION", completedAtMs: 120_000 }); expect(deadline.fixture.calls).toHaveLength(4);
+    const deadline = await outcome(Array.from({ length: 5 }, (_, index) => ({ status: 202, headers: { ...(index === 0 ? { Location: pollUrl() } : {}), "Retry-After": "30" } }))); let stagedClock = 0; const staged = await outcome([(url) => { stagedClock = 91_000; return response({ status: 202, headers: { Location: pollUrl(), "Retry-After": "0" } }, url); }], { clock: () => stagedClock });
+    expect(deadline.result).toMatchObject({ reason: "POLL_EXHAUSTION", completedAtMs: 120_000 }); expect(deadline.fixture.calls).toHaveLength(4); expect(staged.result).toMatchObject({ reason: "POLL_EXHAUSTION", completedAtMs: 91_000 }); expect(staged.fixture.calls).toHaveLength(1);
     const hanging = deferred(); let timeoutSignal; const timed = await outcome([(url, options) => { timeoutSignal = options.signal; return hanging.promise; }],
       { sleep: async (milliseconds) => { if (milliseconds === 15_000) return; return new Promise(() => {}); } });
     expect(timed.result.reason).toBe("POST_TRANSPORT_AMBIGUITY"); expect(timeoutSignal.aborted).toBe(true);
