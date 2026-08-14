@@ -995,10 +995,10 @@ async function* completeChatEventStream(
             content += delta.content;
             yield { type: "content_delta", content: delta.content };
           }
-          if (Array.isArray(delta?.tool_calls)) {
-            for (const tool of delta.tool_calls) {
+          const toolCalls = delta?.tool_calls;
+          if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
+          if (Array.isArray(toolCalls)) for (const tool of toolCalls) {
               yield appendToolCallDelta(toolCallParts, tool);
-            }
           }
           if (data.usage) usageDetailsObj = data.usage;
         }

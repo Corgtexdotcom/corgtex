@@ -53,4 +53,7 @@ describe("model route stream contract smoke", () => {
     await expect(runContractSmoke({ source: { ...source, MODEL_API_KEY: "" }, argv: ["--out=.artifacts/model-route-stream-contract/preflight.json"], fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed");
     expect(writeEvidence.mock.calls[0]?.[1]).toEqual({ schemaVersion: "model-route-stream-contract/v1", status: "fail", errorCode: "PROVIDER_CONFIGURATION_UNSAFE", failurePhase: "provider_preflight", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled();
   });
+  it("rejects customer workspaces even when the generic escape hatch is set", async () => {
+    const writeEvidence = vi.fn(); const fetchImpl = vi.fn(); vi.stubEnv("PRODUCTION_VALIDATION_ALLOW_CUSTOMER_WRITES", "1"); await expect(runContractSmoke({ source, argv: ["--out=.artifacts/model-route-stream-contract/customer.json"], findWorkspace: async () => ({ id: "customer", slug: "customer" }), fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed"); expect(writeEvidence.mock.calls[0]?.[1]).toMatchObject({ status: "fail", failurePhase: "workspace_validation", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled(); vi.unstubAllEnvs();
+  });
 });

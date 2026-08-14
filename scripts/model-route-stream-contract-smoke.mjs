@@ -54,7 +54,7 @@ export async function runContractSmoke({
   failurePhase = "workspace_validation";
   const workspace = await findWorkspace(config.workspaceId);
   assert(workspace, "Approved validation workspace was not found.");
-  requireInternalValidationWorkspace(workspace, { purpose: "model route stream contract smoke" });
+  requireInternalValidationWorkspace(workspace, { env: {}, purpose: "model route stream contract smoke" });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = guard.guarded;
   let next;

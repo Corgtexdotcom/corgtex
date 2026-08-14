@@ -1505,14 +1505,12 @@ describe("openAICompatibleModelGateway", () => {
     await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
   });
-  it("rejects malformed JSON between tool argument fragments", async () => {
+  it.each([["malformed JSON", 'data: {"choices":BROKEN}'], ["a non-array tool-call container", `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0 } } }] })}`]])("rejects %s between tool argument fragments", async (_label, middle) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
-    const first = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: '{"x":' } }] } }] };
-    const last = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(first)}\n\ndata: {"choices":BROKEN}\n\ndata: ${JSON.stringify(last)}\n\ndata: [DONE]\n\n`, { status: 200 })));
+    const first = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: '{"x":' } }] } }] }; const last = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(first)}\n\n${middle}\n\ndata: ${JSON.stringify(last)}\n\ndata: [DONE]\n\n`, { status: 200 })));
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
-    const consume = async () => { for await (const _ of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } };
-    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
+    const consume = async () => { for await (const _ of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } }; await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
   });
   it("treats nullable optional tool continuation fields as absent", async () => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
@@ -1521,7 +1519,7 @@ describe("openAICompatibleModelGateway", () => {
       { index: 0, id: null, type: null, function: null },
       { index: 0, id: null, type: null, function: { name: null, arguments: "1}" } },
     ];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`${tools.map((tool) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [tool] } }] })}\n\n`).join("")}data: [DONE]\n\n`, { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`${tools.map((tool) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [tool] } }] })}\n\n`).join("")}data: ${JSON.stringify({ choices: [{ delta: { tool_calls: null } }] })}\n\ndata: [DONE]\n\n`, { status: 200 })));
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
     const stream = openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
     let next = await stream.next();

@@ -15,16 +15,12 @@ export class IncrementalJsonStringDecoder {
   private emit(value: string) {
     if (this.role === "key") this.text += value;
     if (this.role === "target") { this.targetValue += value; this.delta += value; } }
-  private flushHigh() { if (this.high !== null) this.emit(String.fromCharCode(this.high)); this.high = null; }
+  private flushHigh() { if (this.high !== null) this.fail(); this.high = null; }
   private emitUnit(unit: number) {
-    if (this.high !== null && unit >= 0xdc00 && unit <= 0xdfff) {
-      this.emit(String.fromCodePoint(0x10000 + ((this.high - 0xd800) << 10) + unit - 0xdc00));
-      this.high = null;
-    } else {
-      this.flushHigh();
-      if (unit >= 0xd800 && unit <= 0xdbff) this.high = unit;
-      else this.emit(String.fromCharCode(unit));
-    }
+    if (this.high !== null && unit >= 0xdc00 && unit <= 0xdfff) { this.emit(String.fromCodePoint(0x10000 + ((this.high - 0xd800) << 10) + unit - 0xdc00)); this.high = null; return; }
+    this.flushHigh();
+    if (unit >= 0xd800 && unit <= 0xdbff) this.high = unit;
+    else if (unit >= 0xdc00 && unit <= 0xdfff) this.fail(); else this.emit(String.fromCharCode(unit));
   }
   private closeString() {
     this.flushHigh();
@@ -45,7 +41,7 @@ export class IncrementalJsonStringDecoder {
     } else if (character === "\\") this.escaped = true;
     else if (character === "\"") this.closeString();
     else if (character.charCodeAt(0) < 0x20) this.fail();
-    else { this.flushHigh(); this.emit(character); }
+    else this.emitUnit(character.charCodeAt(0));
   }
   private scanNested(character: string) {
     if (this.nestedUnicode > 0) {
@@ -92,10 +88,8 @@ export class IncrementalJsonStringDecoder {
     }
     return this.failed ? { delta: "", state: "malformed" } : { delta: this.delta, state: this.targetComplete ? "complete" : "incomplete" };
   }
-  finish(): IncrementalJsonStringResult { if (this.failed) return { delta: "", state: "malformed" };
-    if (!this.targetComplete) return { delta: "", state: this.phase === "done" ? "malformed" : "incomplete" };
-    try { const parsed = JSON.parse(this.fragments.join("")) as Record<string, unknown>;
-      if (this.phase !== "done" || !parsed || Array.isArray(parsed) || parsed[this.field] !== this.targetValue) throw new Error(); return { delta: "", state: "complete" };
-    } catch { return { delta: "", state: "malformed" }; }
-  }
+  finish(): IncrementalJsonStringResult { if (this.failed || this.high !== null) return { delta: "", state: "malformed" };
+    if (!this.targetComplete) return { delta: "", state: this.phase === "done" ? "malformed" : "incomplete" }; try {
+      const parsed = JSON.parse(this.fragments.join("")) as Record<string, unknown>; if (this.phase !== "done" || !parsed || Array.isArray(parsed) || parsed[this.field] !== this.targetValue) throw new Error(); return { delta: "", state: "complete" };
+    } catch { return { delta: "", state: "malformed" }; } }
 }
