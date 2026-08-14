@@ -9,6 +9,7 @@ import {
   TENANT_PURGE_SELECTOR_KINDS,
   TENANT_PURGE_TARGET_DIMENSIONS,
   TENANT_PURGE_TARGET_MODES,
+  TENANT_PURGE_WRITER_EVIDENCE_FILES,
   assertTenantPurgeDerivedSelectorRegistry,
   assertTenantPurgeWriterEvidence,
   decodeTenantPurgeDerivedSelectors,
@@ -32,7 +33,7 @@ const writerPaths = {
 const writers = Object.fromEntries(Object.entries(writerPaths).map(([key, path]) => [key, readFileSync(new URL(path, repository), "utf8")])) as Record<keyof typeof writerPaths, string>;
 
 function cloneModels() {
-  return structuredClone(schemaModels);
+  return schemaModels.map((model) => ({ ...model, fields: model.fields.map((field) => ({ ...field })) }));
 }
 
 function selectorsWithout(predicate: (selector: TenantPurgeDerivedSelector) => boolean) {
@@ -41,15 +42,15 @@ function selectorsWithout(predicate: (selector: TenantPurgeDerivedSelector) => b
 
 function effectiveTargets(model: Prisma.ModelName) {
   const direct = TENANT_PURGE_DIRECT_RELATIONS.filter((relation) => relation.model === model).flatMap((relation) => relation.fields.map((field) => ({ token: field, target: ({ Workspace: "WORKSPACE", CustomerDeployment: "DEPLOYMENT", CustomerAccount: "ACCOUNT", ProcurementTrial: "TRIAL" } as const)[relation.target] })));
-  const derived = TENANT_PURGE_DERIVED_SELECTORS.filter((selector) => selector.model === model && selector.kind !== "NO_SELECTOR_PRESERVE").map((selector) => ({
+  const derived = TENANT_PURGE_DERIVED_SELECTORS.flatMap((selector) => selector.model === model && selector.kind !== "NO_SELECTOR_PRESERVE" ? [{
     token: selector.kind === "DERIVED_UNIQUE_JOIN" ? `${selector.sourceField}>${selector.joinedModel}.${selector.uniqueField}>${selector.terminalField}` : selector.path.join("."), target: selector.target,
-  }));
+  }] : []);
   return [...direct, ...derived];
 }
 
 describe("tenant purge derived selector registry", () => {
   it("decodes a closed, immutable, non-authorizing selector grammar", () => {
-    for (const value of [TENANT_PURGE_DERIVED_SELECTORS, TENANT_PURGE_DERIVED_EVIDENCE_KINDS, TENANT_PURGE_INDIRECT_MODELS, TENANT_PURGE_SELECTOR_KINDS, TENANT_PURGE_TARGET_DIMENSIONS, TENANT_PURGE_TARGET_MODES]) expect(Object.isFrozen(value)).toBe(true);
+    for (const value of [TENANT_PURGE_DERIVED_SELECTORS, TENANT_PURGE_DERIVED_EVIDENCE_KINDS, TENANT_PURGE_INDIRECT_MODELS, TENANT_PURGE_SELECTOR_KINDS, TENANT_PURGE_TARGET_DIMENSIONS, TENANT_PURGE_TARGET_MODES, TENANT_PURGE_WRITER_EVIDENCE_FILES]) expect(Object.isFrozen(value)).toBe(true);
     expect(TENANT_PURGE_DERIVED_SELECTORS.every((selector) => Object.isFrozen(selector) && selector.authorizesRoot === false && (selector.kind === "NO_SELECTOR_PRESERVE" || Object.isFrozen(selector.modes)) && (!("path" in selector) || Object.isFrozen(selector.path)))).toBe(true);
     expect(() => decodeTenantPurgeDerivedSelectors("X|EmailDelivery|workspaceId|WORKSPACE|B|")).toThrow(/Invalid tenant purge selector/);
     expect(() => decodeTenantPurgeDerivedSelectors("D|FutureModel|workspaceId|WORKSPACE|B|")).toThrow(/Invalid tenant purge selector/);
@@ -60,6 +61,7 @@ describe("tenant purge derived selector registry", () => {
     expect(() => decodeTenantPurgeDerivedSelectors("N|StripeWebhookEvent|field|||")).toThrow(/no-selector/);
     expect(() => decodeTenantPurgeDerivedSelectors("D|EmailDelivery|workspaceId|WORKSPACE|B|;D|EmailDelivery|workspaceId|WORKSPACE|B|")).toThrow(/Duplicate/);
     expect(() => decodeTenantPurgeDerivedSelectors("N|StripeWebhookEvent||||;N|StripeWebhookEvent||||")).toThrow(/Duplicate/);
+    expect(() => decodeTenantPurgeDerivedSelectors("S|User|memberships.workspace|WORKSPACE|B|;R|User|memberships.workspace|WORKSPACE|B|")).toThrow(/Duplicate|preserve/);
   });
 
   it("resolves every path and join against schema and fails on omission or drift", () => {
@@ -72,7 +74,7 @@ describe("tenant purge derived selector registry", () => {
       ExternalDataSyncLog: ["source.workspace"], GoalLink: ["goal.workspace"], GoalUpdate: ["authorMember.workspace", "goal.workspace"], KeyResult: ["goal.workspace"], MemberExpertise: ["expertiseTag.workspace", "member.workspace"], Objection: ["flow.workspace"],
       Role: ["circle.workspace"], RoleAssignment: ["member.workspace", "role.circle.workspace"], TensionUpvote: ["tension.workspace"], WebhookDelivery: ["endpoint.workspace"], WorkspaceToolLinkCircleTag: ["circle.workspace", "toolLink.workspace"],
     };
-    for (const [model, paths] of Object.entries(expectedIndirect)) expect(TENANT_PURGE_DERIVED_SELECTORS.filter((selector) => selector.kind === "RELATION_PATH" && selector.model === model).map((selector) => selector.path.join(".")).sort()).toEqual(paths);
+    for (const [model, paths] of Object.entries(expectedIndirect)) expect(TENANT_PURGE_DERIVED_SELECTORS.flatMap((selector) => selector.kind === "RELATION_PATH" && selector.model === model ? [selector.path.join(".")] : []).sort()).toEqual(paths);
 
     const brokenHop = cloneModels();
     brokenHop.find((model) => model.name === "AgentRun")!.fields.find((field) => field.name === "workspace")!.name = "renamedWorkspace";
@@ -91,10 +93,12 @@ describe("tenant purge derived selector registry", () => {
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, selectorsWithout((selector) => selector.kind === "SHARED_PRESERVE" && selector.model === "User"))).toThrow(/shared=User/);
     const invalidPreserve = [...TENANT_PURGE_DERIVED_SELECTORS, { kind: "SHARED_PRESERVE", model: "AdviceRequestRecipient", path: ["request", "workspace"], target: "WORKSPACE", modes: ["ACCOUNT_WORKSPACE", "SELF_SERVE_TRIAL_WORKSPACE"], authorizesRoot: false }] as TenantPurgeDerivedSelector[];
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, invalidPreserve)).toThrow(/preserve=AdviceRequestRecipient/);
+    const mixedPreserve = [...TENANT_PURGE_DERIVED_SELECTORS, { kind: "RELATION_PATH", model: "User", path: ["memberships", "workspace"], target: "WORKSPACE", modes: ["ACCOUNT_WORKSPACE", "SELF_SERVE_TRIAL_WORKSPACE"], authorizesRoot: false }] as TenantPurgeDerivedSelector[];
+    expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, mixedPreserve)).toThrow(/preserve=User/);
   });
 
   it("composes all exceptional unions without confusing CRM or target modes", () => {
-    const scalarTokens = TENANT_PURGE_DERIVED_SELECTORS.filter((selector) => selector.kind === "DIRECT_SCALAR").map((selector) => `${selector.model}.${selector.path[0]}:${selector.target}:${selector.modes.length === 2 ? "B" : selector.modes[0] === "ACCOUNT_WORKSPACE" ? "A" : "T"}`).sort();
+    const scalarTokens = TENANT_PURGE_DERIVED_SELECTORS.flatMap((selector) => selector.kind === "DIRECT_SCALAR" ? [`${selector.model}.${selector.path[0]}:${selector.target}:${selector.modes.length === 2 ? "B" : selector.modes[0] === "ACCOUNT_WORKSPACE" ? "A" : "T"}`] : []).sort();
     expect(scalarTokens).toEqual([
       "EmailDelivery.workspaceId:WORKSPACE:B", "FinanceImportCandidate.workspaceId:WORKSPACE:B", "FinanceReportFact.workspaceId:WORKSPACE:B", "OAuthAccessToken.workspaceId:WORKSPACE:B", "OAuthAuthorizationCode.workspaceId:WORKSPACE:B", "ProcurementIdempotencyKey.workspaceId:WORKSPACE:B",
       "SelfServeEmailCapture.procurementTrialId:TRIAL:T", "SelfServeEmailCapture.workspaceId:WORKSPACE:B", "SelfServeSmokeRun.deploymentId:DEPLOYMENT:B", "SelfServeSmokeRun.procurementTrialId:TRIAL:T", "SelfServeSmokeRun.workspaceId:WORKSPACE:B",
@@ -131,6 +135,8 @@ describe("tenant purge derived selector registry", () => {
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, resend: writers.resend.replace("prisma.emailDelivery.findUnique", "prisma.emailDelivery.findMany") })).toThrow(/writer evidence/);
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, bootstrap: writers.bootstrap.replace("workspace?.slug !== body.customerSlug", "workspace?.slug === body.customerSlug") })).toThrow(/writer evidence/);
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: `${writers.procurement}\nsetupSessionId: futureSession.id` })).toThrow(/writer inventory/);
+    expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace("requestHash: params.idemRequestHash,\n          workspaceId: workspace.id,\n          responseJson", "requestHash: params.idemRequestHash,\n          responseJson") })).toThrow(/writer evidence/);
+    expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace("workspaceId: null,", "workspaceId: workspace.id,") })).toThrow(/writer evidence/);
   });
 
   it("keeps shared and retained rows preserve-only and exports no evidence values", () => {
@@ -141,7 +147,7 @@ describe("tenant purge derived selector registry", () => {
       NotificationPreference: ["user.customerDeploymentAccess.deployment", "user.memberships.workspace", "user.onboardingStates.workspace"], PasswordResetToken: ["user.customerDeploymentAccess.deployment", "user.memberships.workspace", "user.onboardingStates.workspace"],
       Session: ["user.customerDeploymentAccess.deployment", "user.memberships.workspace", "user.onboardingStates.workspace"], User: ["customerDeploymentAccess.deployment", "memberships.workspace", "onboardingStates.workspace"], UserSsoIdentity: ["user.customerDeploymentAccess.deployment", "user.memberships.workspace", "user.onboardingStates.workspace"],
     };
-    for (const [model, paths] of Object.entries(expectedShared)) expect(TENANT_PURGE_DERIVED_SELECTORS.filter((selector) => selector.model === model && selector.kind === "SHARED_PRESERVE").map((selector) => selector.path.join(".")).sort()).toEqual(paths);
+    for (const [model, paths] of Object.entries(expectedShared)) expect(TENANT_PURGE_DERIVED_SELECTORS.flatMap((selector) => selector.model === model && selector.kind === "SHARED_PRESERVE" ? [selector.path.join(".")] : []).sort()).toEqual(paths);
     expect(TENANT_PURGE_DERIVED_SELECTORS).toContainEqual({ kind: "NO_SELECTOR_PRESERVE", model: "StripeWebhookEvent", authorizesRoot: false });
     expect(effectiveTargets("TenantPurgeRun").map((entry) => entry.target).sort()).toEqual(["ACCOUNT", "DEPLOYMENT", "TRIAL", "WORKSPACE"]);
     expect(JSON.stringify(TENANT_PURGE_DERIVED_SELECTORS)).not.toMatch(/bundleUri|tokenHash|payload|toEmail|failureReason|rawLastEvent/);

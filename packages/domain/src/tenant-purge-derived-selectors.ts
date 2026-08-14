@@ -67,7 +67,7 @@ export function decodeTenantPurgeDerivedSelectors(dsl: string): readonly TenantP
     const kind = CODE_TO_KIND[code as keyof typeof CODE_TO_KIND];
     const model = rawModel as Prisma.ModelName;
     if (!kind || !Object.values(Prisma.ModelName).includes(model) || extra.length) throw new Error(`Invalid tenant purge selector row: ${row}`);
-    const key = `${kind}:${model}:${payload}:${rawTarget}`;
+    const key = `${model}:${payload}:${rawTarget}`;
     if (seen.has(key)) throw new Error(`Duplicate tenant purge selector: ${key}`);
     seen.add(key);
     if (kind === "NO_SELECTOR_PRESERVE") {
@@ -89,6 +89,8 @@ export function decodeTenantPurgeDerivedSelectors(dsl: string): readonly TenantP
     }
     return Object.freeze(selector);
   });
+  const preserveModels = new Set(selectors.filter((selector) => selector.kind === "SHARED_PRESERVE" || selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
+  if (selectors.some((selector) => preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE")) throw new Error("Invalid mixed preserve selector disposition.");
   return Object.freeze(selectors);
 }
 
@@ -100,9 +102,9 @@ export interface TenantPurgeSchemaModel { name: string; fields: readonly TenantP
 
 export function assertTenantPurgeDerivedSelectorRegistry(models: readonly TenantPurgeSchemaModel[], selectors: readonly TenantPurgeDerivedSelector[] = TENANT_PURGE_DERIVED_SELECTORS) {
   const modelMap = new Map(models.map((model) => [model.name, model]));
-  const directFields = new Set(TENANT_PURGE_DIRECT_RELATIONS.flatMap((relation) => relation.fields.map((field) => `${relation.model}.${field}`)));
+  const directFields = new Set<string>(TENANT_PURGE_DIRECT_RELATIONS.flatMap((relation) => relation.fields.map((field) => `${relation.model}.${field}`)));
   const directModels = new Set(TENANT_PURGE_DIRECT_RELATIONS.map((relation) => relation.model));
-  const scalarTargets = new Map(selectors.filter((selector) => selector.kind === "DIRECT_SCALAR").map((selector) => [`${selector.model}.${selector.path[0]}`, selector.target]));
+  const scalarTargets = new Map<string, TenantPurgeTargetDimension>(selectors.flatMap((selector) => selector.kind === "DIRECT_SCALAR" ? [[`${selector.model}.${selector.path[0]}`, selector.target] as const] : []));
   const field = (model: string, name: string) => modelMap.get(model)?.fields.find((candidate) => candidate.name === name);
   for (const selector of selectors) {
     if (selector.kind === "NO_SELECTOR_PRESERVE") continue;
@@ -133,21 +135,24 @@ export function assertTenantPurgeDerivedSelectorRegistry(models: readonly Tenant
   const classified = Object.values(TENANT_PURGE_MODEL_DISPOSITIONS).flat();
   const missing = classified.filter((model) => !covered.has(model) || !modelMap.has(model));
   const sharedMissing = TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.filter((model) => !directModels.has(model) && !selectors.some((selector) => selector.model === model && selector.kind === "SHARED_PRESERVE"));
-  const invalidPreserve = selectors.filter((selector) => (selector.kind === "SHARED_PRESERVE" && !TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.includes(selector.model as never)) || (selector.kind === "NO_SELECTOR_PRESERVE" && ![...TENANT_PURGE_MODEL_DISPOSITIONS.RETAIN, ...TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE].includes(selector.model as never)));
+  const preserveModels = new Set(selectors.filter((selector) => selector.kind === "SHARED_PRESERVE" || selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
+  const invalidPreserve = selectors.filter((selector) => (selector.kind === "SHARED_PRESERVE" && !TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.includes(selector.model as never)) || (selector.kind === "NO_SELECTOR_PRESERVE" && ![...TENANT_PURGE_MODEL_DISPOSITIONS.RETAIN, ...TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE].includes(selector.model as never)) || (preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE"));
   const indirect = [...new Set(selectors.filter((selector) => selector.kind === "RELATION_PATH" && TENANT_PURGE_MODEL_DISPOSITIONS.CASCADE.includes(selector.model as never) && !directModels.has(selector.model)).map((selector) => selector.model))].sort();
   const targetScalars = models.flatMap((model) => model.fields.filter((candidate) => candidate.kind === "scalar" && candidate.type === "String" && /(?:workspace|deployment|customerAccount|procurementTrial|targetAccount|targetDeployment|targetWorkspace|targetTrial)Id$/i.test(candidate.name)).map((candidate) => `${model.name}.${candidate.name}`));
-  const externalIds = ["CustomerDeployment.remoteWorkspaceId", "WorkspaceIntegrationBinding.externalWorkspaceId", "CommunicationInstallation.externalWorkspaceId"];
-  const uncoveredScalars = targetScalars.filter((key) => !externalIds.includes(key) && !directFields.has(key) && !scalarTargets.has(key));
+  const externalIds = new Set<string>(["CustomerDeployment.remoteWorkspaceId", "WorkspaceIntegrationBinding.externalWorkspaceId", "CommunicationInstallation.externalWorkspaceId"]);
+  const uncoveredScalars = targetScalars.filter((key) => !externalIds.has(key) && !directFields.has(key) && !scalarTargets.has(key));
   if (missing.length || sharedMissing.length || invalidPreserve.length || JSON.stringify(indirect) !== JSON.stringify([...TENANT_PURGE_INDIRECT_MODELS].sort()) || uncoveredScalars.length) throw new Error(`Tenant purge derived selector drift: missing=${missing} shared=${sharedMissing} preserve=${invalidPreserve.map((entry) => entry.model)} indirect=${indirect} scalar=${uncoveredScalars}`);
 }
 
-export const TENANT_PURGE_WRITER_EVIDENCE_FILES = ["resend", "bootstrap", "selfServe", "procurement", "meetingRecorders", "controlPlane"] as const;
+export const TENANT_PURGE_WRITER_EVIDENCE_FILES = Object.freeze(["resend", "bootstrap", "selfServe", "procurement", "meetingRecorders", "controlPlane"] as const);
 export function assertTenantPurgeWriterEvidence(writers: Record<string, string>) {
   if (JSON.stringify(Object.keys(writers).sort()) !== JSON.stringify([...TENANT_PURGE_WRITER_EVIDENCE_FILES].sort()) || Object.values(writers).some((source) => source.includes("setupSessionId"))) throw new Error("Tenant purge writer inventory drift.");
   const resendLookup = writers.resend.indexOf("prisma.emailDelivery.findUnique");
   const resendEvent = writers.resend.indexOf("prisma.emailDeliveryEvent.upsert");
   const bootstrapEquality = writers.bootstrap.indexOf("workspace?.slug !== body.customerSlug");
   const bootstrapSeed = writers.bootstrap.indexOf("await runStableClientSeed", bootstrapEquality);
-  const checks = [resendLookup >= 0 && resendEvent > resendLookup && /emailDeliveryEvent\.upsert[\s\S]*create:[\s\S]*providerMessageId/.test(writers.resend.slice(resendEvent)) && writers.resend.slice(resendLookup, resendEvent).includes("where: { providerMessageId }"), writers.bootstrap.includes("customerSlug_bundleChecksum") && bootstrapEquality >= 0 && bootstrapSeed > bootstrapEquality, /selfServeEmailCapture\.create[\s\S]*workspaceId:[\s\S]*procurementTrialId:/.test(writers.selfServe) && /selfServeSmokeRun\.upsert/.test(writers.selfServe) && /selfServeSupportSession\.create[\s\S]*deploymentId:[\s\S]*workspaceId:/.test(writers.selfServe), /procurementIdempotencyKey\.create[\s\S]*workspaceId: workspace\.id/.test(writers.procurement), /meetingRecorderSmokeRun\.create[\s\S]*workspaceId: params\.workspaceId[\s\S]*deploymentId: params\.deploymentId/.test(writers.meetingRecorders), /clientMigrationRun/.test(writers.controlPlane) && /supportOperation\.create[\s\S]*deploymentId:[\s\S]*workspaceId:/.test(writers.controlPlane)];
+  const procurementCreates = [...writers.procurement.matchAll(/procurementIdempotencyKey\.create\(\{\s*data:\s*\{([^{}]*)\}\s*,?\s*\}\)/g)].map((match) => match[1]);
+  const procurementEvidence = procurementCreates.length === 2 && procurementCreates.filter((body) => !body.includes("workspaceId:")).length === 1 && procurementCreates.filter((body) => body.includes("workspaceId: workspace.id")).length === 1 && /procurementIdempotencyKey\.updateMany\(\{\s*where:\s*\{[^{}]*workspaceId:\s*null[^{}]*\}\s*,?\s*data:\s*\{[^{}]*workspaceId:\s*workspace\.id/.test(writers.procurement);
+  const checks = [resendLookup >= 0 && resendEvent > resendLookup && /emailDeliveryEvent\.upsert[\s\S]*create:[\s\S]*providerMessageId/.test(writers.resend.slice(resendEvent)) && writers.resend.slice(resendLookup, resendEvent).includes("where: { providerMessageId }"), writers.bootstrap.includes("customerSlug_bundleChecksum") && bootstrapEquality >= 0 && bootstrapSeed > bootstrapEquality, /selfServeEmailCapture\.create[\s\S]*workspaceId:[\s\S]*procurementTrialId:/.test(writers.selfServe) && /selfServeSmokeRun\.upsert/.test(writers.selfServe) && /selfServeSupportSession\.create[\s\S]*deploymentId:[\s\S]*workspaceId:/.test(writers.selfServe), procurementEvidence, /meetingRecorderSmokeRun\.create[\s\S]*workspaceId: params\.workspaceId[\s\S]*deploymentId: params\.deploymentId/.test(writers.meetingRecorders), /clientMigrationRun/.test(writers.controlPlane) && /supportOperation\.create[\s\S]*deploymentId:[\s\S]*workspaceId:/.test(writers.controlPlane)];
   if (checks.some((check) => !check)) throw new Error("Tenant purge writer evidence drift.");
 }
