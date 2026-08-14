@@ -61,14 +61,17 @@ function invalid(message: string): never {
   throw new AppError(400, "TENANT_PURGE_CONTRACT_INVALID", message);
 }
 
-function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+function exactRecord(value: unknown, keys: readonly string[] | ((snapshot: Record<string, unknown>) => readonly string[]), label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) invalid(`Invalid tenant purge ${label}.`);
   const prototype = Object.getPrototypeOf(value);
-  const ownKeys = Reflect.ownKeys(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(descriptors);
   if ((prototype !== Object.prototype && prototype !== null) || ownKeys.some((key) => typeof key !== "string")
-    || JSON.stringify([...ownKeys].sort()) !== JSON.stringify([...keys].sort())
-    || ownKeys.some((key) => !("value" in Object.getOwnPropertyDescriptor(value, key)!))) invalid(`Invalid tenant purge ${label}.`);
-  return value as Record<string, unknown>;
+    || ownKeys.some((key) => !("value" in descriptors[key as string]!))) invalid(`Invalid tenant purge ${label}.`);
+  const snapshot = Object.fromEntries(ownKeys.map((key) => [key, descriptors[key as string]!.value]));
+  const expected = typeof keys === "function" ? keys(snapshot) : keys;
+  if (JSON.stringify([...ownKeys].sort()) !== JSON.stringify([...expected].sort())) invalid(`Invalid tenant purge ${label}.`);
+  return snapshot;
 }
 
 function uuid(value: unknown, label: string): string {
@@ -80,8 +83,14 @@ function uuidOrNull(value: unknown, label: string): string | null {
   return value === null ? null : uuid(value, label);
 }
 
+function isDenseArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value)) return false;
+  for (let index = 0; index < value.length; index += 1) if (!Object.hasOwn(value, index)) return false;
+  return true;
+}
+
 function uuidList(value: unknown, label: string): string[] {
-  if (!Array.isArray(value)) invalid(`Invalid tenant purge ${label}.`);
+  if (!isDenseArray(value)) invalid(`Invalid tenant purge ${label}.`);
   const result = value.map((item) => uuid(item, label));
   if (new Set(result).size !== result.length) invalid(`Invalid tenant purge ${label}.`);
   return result;
@@ -106,7 +115,7 @@ function freezeDeep<T>(value: T): T {
 }
 
 function targetSnapshot(value: unknown): TenantPurgeTarget {
-  const raw = exactRecord(value, value && typeof value === "object" && (value as { mode?: unknown }).mode === "ACCOUNT_WORKSPACE"
+  const raw = exactRecord(value, (snapshot) => snapshot.mode === "ACCOUNT_WORKSPACE"
     ? ["mode", "accountId", "deploymentId", "workspaceId"] : ["mode", "trialId", "deploymentId", "workspaceId"], "target");
   if (!TENANT_PURGE_TARGET_MODES.includes(raw.mode as never)) invalid("Invalid tenant purge target mode.");
   const common = { deploymentId: uuid(raw.deploymentId, "deployment ID"), workspaceId: uuid(raw.workspaceId, "workspace ID") };
@@ -138,7 +147,7 @@ function topologySnapshot(value: unknown) {
   const deployment = raw.deployment === null ? null : exactRecord(raw.deployment, ["id", "managedWorkspaceId", "accountId", "primaryAccountIds", "sharedResourceAmbiguous", "hasManagedReleaseLease", "hasProviderCutover", "hasClientMigration"], "deployment topology");
   const account = raw.account === null ? null : exactRecord(raw.account, ["id", "deploymentIds", "primaryDeploymentId"], "account topology");
   const trial = raw.trial === null ? null : exactRecord(raw.trial, ["id", "workspaceId", "expired"], "trial topology");
-  if (!Array.isArray(raw.blockers) || new Set(raw.blockers).size !== raw.blockers.length
+  if (!isDenseArray(raw.blockers) || new Set(raw.blockers).size !== raw.blockers.length
     || raw.blockers.some((code) => !TENANT_PURGE_BLOCKER_CODES.includes(code as never))) invalid("Invalid tenant purge blockers.");
   return freezeDeep({
     capturedAt: raw.capturedAt.toISOString(),
@@ -178,16 +187,19 @@ export async function captureTenantPurgeManifestContract(input: {
   target: TenantPurgeTarget; capabilitySha: string; redactionKey: Uint8Array; privateAuthority: boolean;
   reader: TenantPurgeContractReader; policies: TenantPurgeManifestPolicies;
 }): Promise<TenantPurgeManifestContract> {
-  if (input.privateAuthority !== true) throw new AppError(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
-  const target = targetSnapshot(input.target);
-  if (typeof input.capabilitySha !== "string" || !SHA.test(input.capabilitySha)) invalid("Invalid tenant purge capability SHA.");
-  if (!(input.redactionKey instanceof Uint8Array) || input.redactionKey.byteLength < 32) invalid("Invalid tenant purge redaction key.");
-  const capabilitySha = input.capabilitySha;
-  const redactionKeyBytes = Object.freeze(Array.from(Uint8Array.from(input.redactionKey)));
-  const policies = policySnapshot(input.policies);
-  if (typeof input.reader?.isTargetAuthorized !== "function" || typeof input.reader?.readTopology !== "function") invalid("Invalid tenant purge reader.");
-  const isTargetAuthorized = input.reader.isTargetAuthorized.bind(input.reader);
-  const readTopology = input.reader.readTopology.bind(input.reader);
+  const { target: targetValue, capabilitySha, redactionKey, privateAuthority, reader, policies: policyValue } = input;
+  if (privateAuthority !== true) throw new AppError(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
+  const target = targetSnapshot(targetValue);
+  if (typeof capabilitySha !== "string" || !SHA.test(capabilitySha)) invalid("Invalid tenant purge capability SHA.");
+  if (!(redactionKey instanceof Uint8Array) || redactionKey.byteLength < 32) invalid("Invalid tenant purge redaction key.");
+  const redactionKeyBytes = Object.freeze(Array.from(Uint8Array.from(redactionKey)));
+  const policies = policySnapshot(policyValue);
+  if ((typeof reader !== "object" && typeof reader !== "function") || reader === null) invalid("Invalid tenant purge reader.");
+  const isTargetAuthorizedMethod = reader.isTargetAuthorized;
+  const readTopologyMethod = reader.readTopology;
+  if (typeof isTargetAuthorizedMethod !== "function" || typeof readTopologyMethod !== "function") invalid("Invalid tenant purge reader.");
+  const isTargetAuthorized = isTargetAuthorizedMethod.bind(reader);
+  const readTopology = readTopologyMethod.bind(reader);
   if (await isTargetAuthorized(target) !== true) throw new AppError(403, "TENANT_PURGE_TARGET_FORBIDDEN", "Tenant purge target is not authorized.");
   const topology = topologySnapshot(await readTopology(target));
   const blockers = Object.freeze(topologyBlockers(target, topology));

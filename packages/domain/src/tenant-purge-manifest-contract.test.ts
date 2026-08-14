@@ -107,6 +107,25 @@ describe("tenant purge manifest contract", () => {
     expect(result.topology.capturedAt).toBe("2026-08-14T12:00:00.000Z");
   });
 
+  it("reads top-level accessors, reader methods, and target Proxy descriptors exactly once", async () => {
+    const reads: Record<string, number> = {};
+    const once = <T>(name: string, value: T) => ({ enumerable: true, get() { reads[name] = (reads[name] ?? 0) + 1; if (reads[name] > 1) throw new Error(`re-read ${name}`); return value; } });
+    let modeDescriptors = 0;
+    const proxiedTarget = new Proxy({ ...accountTarget }, { get() { throw new Error("target value re-read"); }, getOwnPropertyDescriptor(source, key) { const descriptor = Reflect.getOwnPropertyDescriptor(source, key)!; return key === "mode" ? { ...descriptor, value: ++modeDescriptors === 1 ? "ACCOUNT_WORKSPACE" : "UNKNOWN" } : descriptor; } });
+    const accessorReader = Object.defineProperties({}, {
+      isTargetAuthorized: once("authorizeMethod", async () => true),
+      readTopology: once("topologyMethod", async () => topology(accountTarget)),
+    }) as TenantPurgeContractReader;
+    const accessorInput = Object.defineProperties({}, {
+      target: once("target", proxiedTarget), capabilitySha: once("sha", SHA), redactionKey: once("key", KEY),
+      privateAuthority: once("authority", true), reader: once("reader", accessorReader), policies: once("policies", POLICIES),
+    }) as Parameters<typeof captureTenantPurgeManifestContract>[0];
+    const result = await captureTenantPurgeManifestContract(accessorInput);
+    expect(result).toMatchObject({ target: accountTarget, capabilitySha: SHA, redactionKeyBytes: [...KEY] });
+    expect(reads).toEqual({ target: 1, sha: 1, key: 1, authority: 1, reader: 1, policies: 1, authorizeMethod: 1, topologyMethod: 1 });
+    expect(modeDescriptors).toBe(1);
+  });
+
   it("deep-clones and recursively freezes topology and the final result", async () => {
     const source = topology(accountTarget);
     const result = await capture({ reader: reader(accountTarget, source) });
@@ -136,13 +155,21 @@ describe("tenant purge manifest contract", () => {
   });
 
   it("fails closed on malformed topology, unknown blockers, and tuple mismatch", async () => {
+    const sparse = (id: string) => { const value = [id]; value.length = 2; return value; };
     const invalid = [
       { ...topology(accountTarget), capturedAt: new Date("invalid") },
       { ...topology(accountTarget), blockers: ["UNKNOWN"] },
       { ...topology(accountTarget), blockers: ["LEGAL_HOLD", "LEGAL_HOLD"] },
+      { ...topology(accountTarget), blockers: sparse("LEGAL_HOLD") },
       { ...topology(accountTarget), workspace: { ...topology(accountTarget).workspace!, extra: true } },
       { ...topology(accountTarget), deployment: { ...topology(accountTarget).deployment!, hasProviderCutover: 1 } },
     ];
+    for (const mutate of [
+      (value: TenantPurgeTopologyInput) => { value.workspace!.managedDeploymentIds = sparse(DEPLOYMENT); },
+      (value: TenantPurgeTopologyInput) => { value.workspace!.trialIds = sparse(TRIAL); },
+      (value: TenantPurgeTopologyInput) => { value.deployment!.primaryAccountIds = sparse(ACCOUNT); },
+      (value: TenantPurgeTopologyInput) => { value.account!.deploymentIds = sparse(DEPLOYMENT); },
+    ]) { const supplied = topology(accountTarget); mutate(supplied); invalid.push(supplied); }
     for (const supplied of invalid) await expectCode(capture({ reader: reader(accountTarget, supplied as never) }), 400, "TENANT_PURGE_CONTRACT_INVALID");
     const mismatched = topology(accountTarget);
     mismatched.workspace!.id = OTHER;
