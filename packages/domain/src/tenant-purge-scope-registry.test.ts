@@ -97,11 +97,12 @@ describe("tenant purge scope registry", () => {
       "@relation(\n    name: \"NamedWorkspace\",\n    fields: [workspaceId],\n    references: [id]\n  ) // valid trailing comment",
     );
     expect(parseTenantPurgeDirectRelations(decorated)[0]).toMatchObject({ relationName: "NamedWorkspace", fields: ["workspaceId"] });
+    expect(parseTenantPurgeDirectRelations(syntheticSchema().replace("@relation(", "@relation(\"onDelete: SetNull\", "))[0]).toMatchObject({ relationName: "onDelete: SetNull", onDelete: "Restrict", onDeleteSource: "POSTGRESQL_DEFAULT" });
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ provider: "mysql" }))).toThrow(/connector default policy/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ onDelete: "FutureAction" }))).toThrow(/Unsupported Prisma onDelete/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema().replace("references: [id])", "references: [id], onDelete: )"))).toThrow(/Malformed Prisma onDelete/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ references: false }))).toThrow(/Malformed direct target relation/);
-    expect(() => parseTenantPurgeDirectRelations(syntheticSchema().replace("Workspace @relation", "Workspace @ignore @relation"))).toThrow(/Unparsed direct target relation/);
+    expect(() => parseTenantPurgeDirectRelations(syntheticSchema().replace("@relation(", "@relation @ignore("))).toThrow(/Unparsed direct target relation/);
   });
 
   it("fails on action, default-source, optionality, and new target-relation drift", () => {
@@ -111,7 +112,7 @@ describe("tenant purge scope registry", () => {
       .replace("model Workspace {", "model Workspace {\n  shadowFeatures WorkspaceFeatureFlag[] @relation(\"ShadowWorkspace\")")
       .replace(
         "model WorkspaceFeatureFlag {",
-        "model WorkspaceFeatureFlag {\n  shadowWorkspaceId String?\n  shadowWorkspace Workspace? @relation(name: \"ShadowWorkspace\", fields: [shadowWorkspaceId], references: [id], onDelete: SetNull) // valid trailing comment",
+        "model WorkspaceFeatureFlag {\n  shadowWorkspaceId String?\n  shadowWorkspace Workspace?\n    @ignore\n    @relation(name: \"ShadowWorkspace\", fields: [shadowWorkspaceId], references: [id], onDelete: SetNull) // valid trailing comment",
       );
     expect(parseTenantPurgeDirectRelations(optionalDrift)).toContainEqual(expect.objectContaining({ model: "WorkspaceFeatureFlag", relationField: "shadowWorkspace", relationName: "ShadowWorkspace" }));
     expect(() => assertTenantPurgeScopeRegistry(optionalDrift)).toThrow(/relation registry drift/);

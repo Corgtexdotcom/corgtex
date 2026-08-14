@@ -134,12 +134,13 @@ function stripPrismaComments(schema: string) {
 }
 
 function directRelationDeclarations(body: string) {
-  const candidate = /^\s*\w+\s+(?:Workspace|CustomerDeployment|CustomerAccount|ProcurementTrial)\??\s+[^\n]*@relation\b/gm;
-  const candidates = [...body.matchAll(candidate)];
-  const start = /^\s*(\w+)\s+(Workspace|CustomerDeployment|CustomerAccount|ProcurementTrial)(\?)?\s+@relation\s*\(/gm;
+  const start = /^\s*(\w+)\s+(Workspace|CustomerDeployment|CustomerAccount|ProcurementTrial)(\?)?\s/gm;
   const declarations: Array<{ field: string; target: TenantPurgeTargetModel; optional: boolean; args: string }> = [];
   for (const match of body.matchAll(start)) {
-    const open = match.index + match[0].lastIndexOf("(");
+    const tail = body.slice(match.index + match[0].length); const nextField = tail.search(/^\s*\w+\s+\S+/m);
+    const declaration = tail.slice(0, nextField < 0 ? undefined : nextField); if (!/@relation\b/.test(declaration)) continue; const relation = declaration.match(/@relation\s*\(/);
+    if (!relation) throw new Error(`Unparsed direct target relation: ${match[1]}`);
+    const open = match.index + match[0].length + relation.index! + relation[0].length - 1;
     let depth = 1;
     let quoted = false;
     let end = open + 1;
@@ -151,14 +152,28 @@ function directRelationDeclarations(body: string) {
     if (depth) throw new Error(`Malformed direct target relation: ${match[1]}`);
     declarations.push({ field: match[1], target: match[2] as TenantPurgeTargetModel, optional: Boolean(match[3]), args: body.slice(open + 1, end - 1) });
   }
-  if (declarations.length !== candidates.length) throw new Error("Unparsed direct target relation candidate.");
   return declarations;
 }
 
-function parseAction(args: string, key: "onDelete" | "onUpdate", relationOptional: boolean): [PrismaReferentialAction, ReferentialActionSource] {
-  const explicit = args.match(new RegExp(`${key}:\\s*(\\w+)`))?.[1];
-  if (!explicit && args.includes(`${key}:`)) throw new Error(`Malformed Prisma ${key} action.`);
-  if (explicit) {
+function relationArguments(args: string) {
+  const argumentsList: string[] = []; let quoted = false, depth = 0, start = 0;
+  for (let index = 0; index <= args.length; index += 1) {
+    if (args[index] === '"' && args[index - 1] !== "\\") quoted = !quoted;
+    else if (!quoted && "[(".includes(args[index])) depth += 1;
+    else if (!quoted && "])".includes(args[index])) depth -= 1;
+    if (index === args.length || (!quoted && !depth && args[index] === ",")) { argumentsList.push(args.slice(start, index).trim()); start = index + 1; }
+  }
+  return argumentsList;
+}
+
+function argumentValue(args: readonly string[], key: string) {
+  return args.find((value) => new RegExp(`^${key}\\s*:`).test(value))?.replace(/^[^:]+:/, "").trim();
+}
+
+function parseAction(args: readonly string[], key: "onDelete" | "onUpdate", relationOptional: boolean): [PrismaReferentialAction, ReferentialActionSource] {
+  const explicit = argumentValue(args, key);
+  if (explicit !== undefined) {
+    if (!/^\w+$/.test(explicit)) throw new Error(`Malformed Prisma ${key} action.`);
     if (!PRISMA_REFERENTIAL_ACTIONS.includes(explicit as PrismaReferentialAction)) throw new Error(`Unsupported Prisma ${key} action: ${explicit}`);
     return [explicit as PrismaReferentialAction, "EXPLICIT"];
   }
@@ -179,19 +194,19 @@ export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDire
       if (field) fieldOptional.set(field[1], Boolean(field[2]));
     }
     for (const relation of directRelationDeclarations(body)) {
-      const args = relation.args;
-      const fieldsMatch = args.match(/fields:\s*\[([^\]]+)\]/);
-      if (!fieldsMatch) continue;
-      const referencesMatch = args.match(/references:\s*\[([^\]]+)\]/);
+      const args = relationArguments(relation.args);
+      const fieldsValue = argumentValue(args, "fields"); const fieldsMatch = fieldsValue?.match(/^\[([^\]]+)\]$/);
+      if (!fieldsMatch) { if (fieldsValue !== undefined) throw new Error(`Malformed direct target relation: ${model}.${relation.field}`); continue; }
+      const referencesMatch = argumentValue(args, "references")?.match(/^\[([^\]]+)\]$/);
       if (!referencesMatch) throw new Error(`Malformed direct target relation: ${model}.${relation.field}`);
       const fields = fieldsMatch[1].split(",").map((field) => field.trim());
       if (fields.some((field) => !fieldOptional.has(field))) throw new Error(`Unknown direct target field: ${model}.${relation.field}`);
       const relationOptional = relation.optional;
       const [onDelete, onDeleteSource] = parseAction(args, "onDelete", relationOptional);
       const [onUpdate, onUpdateSource] = parseAction(args, "onUpdate", relationOptional);
-      const positionalName = args.match(/^\s*"([^"]+)"/)?.[1];
-      const namedName = args.match(/(?:^|,)\s*name:\s*"([^"]+)"/)?.[1];
-      if (args.includes("name:") && !namedName) throw new Error(`Malformed direct target relation name: ${model}.${relation.field}`);
+      const positionalName = args[0]?.match(/^"((?:\\.|[^"])*)"$/)?.[1];
+      const namedValue = argumentValue(args, "name"); const namedName = namedValue?.match(/^"((?:\\.|[^"])*)"$/)?.[1];
+      if (namedValue !== undefined && !namedName) throw new Error(`Malformed direct target relation name: ${model}.${relation.field}`);
       relations.push({
         model, relationField: relation.field, target: relation.target,
         relationName: namedName ?? positionalName ?? null, fields,
