@@ -188,7 +188,7 @@ export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDire
   const provider = schema.match(/datasource\s+db\s*\{[\s\S]*?provider\s*=\s*"([^"]+)"[\s\S]*?\}/)?.[1];
   if (provider !== "postgresql") throw new Error(`Unsupported Prisma connector default policy: ${provider ?? "missing"}`);
   const relations: TenantPurgeDirectRelation[] = [];
-  for (const modelMatch of schema.matchAll(/^[ \t]*model\s+(\w+)\s*\{([\s\S]*?)^[ \t]*\}/gm)) {
+  for (const modelMatch of schema.matchAll(/^[ \t]*(?:model|view)\s+(\w+)\s*\{([\s\S]*?)^[ \t]*\}/gm)) {
     const model = modelMatch[1] as Prisma.ModelName;
     const body = modelMatch[2];
     const fieldOptional = new Map<string, boolean>();

@@ -98,6 +98,8 @@ describe("tenant purge scope registry", () => {
     expect(() => decodeDirectRelations("WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Restrict|Cascade", "1")).toThrow(/source encoding/);
     const indented = syntheticSchema().replace("\nmodel Synthetic {", "\n  model Synthetic {").replace("\n}\n", "\n  }\n");
     expect(parseTenantPurgeDirectRelations(indented)).toHaveLength(1);
+    const view = syntheticSchema().replace("model Synthetic {\n  id String @id", "view Synthetic {\n  id String @unique");
+    expect(parseTenantPurgeDirectRelations(view)).toHaveLength(1); expect(() => assertTenantPurgeScopeRegistry(view)).toThrow(/relation registry drift/);
     const decorated = syntheticSchema().replace(
       "@relation(fields: [workspaceId], references: [id])",
       "@relation(\n    name: \"NamedWorkspace\",\n    fields: [workspaceId],\n    references: [id]\n  ) // valid trailing comment",
