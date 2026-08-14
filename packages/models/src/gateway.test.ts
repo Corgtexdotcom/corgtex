@@ -1505,7 +1505,7 @@ describe("openAICompatibleModelGateway", () => {
     await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
   });
-  it.each([["malformed JSON", 'data: {"choices":BROKEN}'], ["a non-array tool-call container", `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0 } } }] })}`]])("rejects %s between tool argument fragments", async (_label, middle) => {
+  it.each([["malformed JSON", 'data: {"choices":BROKEN}'], ["a non-array tool-call container", `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0 } } }] })}`], ["non-string content", `data: ${JSON.stringify({ choices: [{ delta: { content: 7 } }] })}`]])("rejects %s between tool argument fragments", async (_label, middle) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
     const first = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: '{"x":' } }] } }] }; const last = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(first)}\n\n${middle}\n\ndata: ${JSON.stringify(last)}\n\ndata: [DONE]\n\n`, { status: 200 })));
@@ -1654,14 +1654,7 @@ describe("openAICompatibleModelGateway", () => {
     const toolDelta = JSON.stringify({
       choices: [{
         delta: {
-          tool_calls: [{
-            index: 0,
-            id: "call_lookup",
-            function: {
-              name: "lookup_customer",
-              arguments: streamedArguments,
-            },
-          }],
+          tool_calls: [0, 1].map((index) => ({ index, id: `call_${index}`, function: { name: "lookup_customer", arguments: streamedArguments } })),
         },
       }],
     });
@@ -1677,7 +1670,7 @@ describe("openAICompatibleModelGateway", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
-    const stream = openAICompatibleModelGateway.chatStream({
+    const stream = openAICompatibleModelGateway.chatEventStream({
       workspaceId: "ws-1",
       taskType: "CHAT",
       model: "corgtex-kimi-k25",
@@ -1699,7 +1692,7 @@ describe("openAICompatibleModelGateway", () => {
     });
 
     const first = await stream.next();
-    expect(first.value).toBe("Foundry");
+    expect(first.value).toMatchObject({ type: "tool_call_delta", index: 0 });
 
     await stream.return({
       content: "",
@@ -1722,7 +1715,7 @@ describe("openAICompatibleModelGateway", () => {
       model: "corgtex-kimi-k25",
     });
     expect(recordedUsage?.inputTokens).toBeGreaterThan(1000);
-    expect(recordedUsage?.outputTokens).toBeGreaterThan(1000);
+    expect(recordedUsage?.outputTokens).toBeGreaterThan(2000);
     expect(Number(recordedUsage?.rawProviderCostUsd)).toBeGreaterThan(0.003);
   });
 

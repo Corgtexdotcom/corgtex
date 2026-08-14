@@ -1,10 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
-import { guardOneProviderRequest, runContractSmoke, smokeConfig } from "./model-route-stream-contract-smoke.mjs";
+import { describe, expect, it, vi } from "vitest"; import { guardOneProviderRequest, runContractSmoke, smokeConfig } from "./model-route-stream-contract-smoke.mjs";
 const source = {
-  MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST: "1",
-  MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID: "ws-validation",
+  MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST: "1", MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID: "ws-validation",
   MODEL_PROVIDER: "openrouter", MODEL_CHAT_CONVERSATION: "test-model", MODEL_API_KEY: "test-key",
 };
+const workspace = { id: "ws-validation", slug: "corgtex-validation", plan: "ENTERPRISE_MANAGED", modelUsageBudget: null };
 describe("model route stream contract smoke", () => {
   it("requires explicit paid, workspace, and artifact gates", () => {
     expect(() => smokeConfig({}, [])).toThrow(/acknowledgement/);
@@ -27,7 +26,7 @@ describe("model route stream contract smoke", () => {
     } };
     const evidence = await runContractSmoke({
       source, argv: ["--out=.artifacts/model-route-stream-contract/test.json"], gateway,
-      findWorkspace: async () => ({ id: "ws-validation", slug: "corgtex-validation" }),
+      findWorkspace: async () => workspace,
       fetchImpl: vi.fn().mockResolvedValue(new Response("ok")), writeEvidence,
     });
     expect(evidence).toMatchObject({ status: "pass", providerRequestCount: 1, terminalArgumentsValid: true });
@@ -41,7 +40,7 @@ describe("model route stream contract smoke", () => {
     const writeEvidence = vi.fn();
     await expect(runContractSmoke({
       source, argv: ["--out=.artifacts/model-route-stream-contract/fail.json"], gateway,
-      findWorkspace: async () => ({ id: "ws-validation", slug: "corgtex-validation" }),
+      findWorkspace: async () => workspace,
       fetchImpl: vi.fn().mockResolvedValue(new Response("ok")), writeEvidence,
     })).rejects.toThrow("contract smoke failed");
     const diagnostic = writeEvidence.mock.calls[0]?.[1];
@@ -53,7 +52,13 @@ describe("model route stream contract smoke", () => {
     await expect(runContractSmoke({ source: { ...source, MODEL_API_KEY: "" }, argv: ["--out=.artifacts/model-route-stream-contract/preflight.json"], fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed");
     expect(writeEvidence.mock.calls[0]?.[1]).toEqual({ schemaVersion: "model-route-stream-contract/v1", status: "fail", errorCode: "PROVIDER_CONFIGURATION_UNSAFE", failurePhase: "provider_preflight", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled();
   });
-  it("rejects customer workspaces even when the generic escape hatch is set", async () => {
-    const writeEvidence = vi.fn(); const fetchImpl = vi.fn(); vi.stubEnv("PRODUCTION_VALIDATION_ALLOW_CUSTOMER_WRITES", "1"); await expect(runContractSmoke({ source, argv: ["--out=.artifacts/model-route-stream-contract/customer.json"], findWorkspace: async () => ({ id: "customer", slug: "customer" }), fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed"); expect(writeEvidence.mock.calls[0]?.[1]).toMatchObject({ status: "fail", failurePhase: "workspace_validation", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled(); vi.unstubAllEnvs();
+  it("uses one local preflight boundary without provider or usage residue", async () => {
+    const writeEvidence = vi.fn(); const fetchImpl = vi.fn(); const countResidue = vi.fn().mockResolvedValue([0, 0]);
+    const gateway = { async *chatEventStream() { const response = await fetch("https://model.test/chat/completions", {}); if (!response.ok) throw new Error("expected local refusal"); return undefined; } };
+    const evidence = await runContractSmoke({ source: { ...source, MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST: undefined }, argv: ["--preflight-only", "--out=.artifacts/model-route-stream-contract/preflight.json"], gateway, findWorkspace: async () => workspace, countResidue, fetchImpl, writeEvidence });
+    expect(evidence).toEqual({ schemaVersion: "model-route-stream-contract/v1", status: "pass", mode: "preflight-only", providerRequestCount: 0, localFetchBoundaryCount: 1, usageRowCount: 0, ledgerRowCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled(); expect(countResidue).toHaveBeenCalledTimes(2); expect(JSON.stringify(evidence)).not.toMatch(/ws-validation|test-key|test-model/);
+  });
+  it.each([[{ id: "customer", slug: "customer", plan: "ENTERPRISE_MANAGED", modelUsageBudget: null }, "customer"], [{ ...workspace, plan: "PAYG_AI" }, "non-enterprise"], [{ ...workspace, modelUsageBudget: { id: "cap" } }, "budgeted"]])("rejects an unsafe %s workspace before fetch", async (unsafeWorkspace) => {
+    const writeEvidence = vi.fn(); const fetchImpl = vi.fn(); vi.stubEnv("PRODUCTION_VALIDATION_ALLOW_CUSTOMER_WRITES", "1"); await expect(runContractSmoke({ source, argv: ["--out=.artifacts/model-route-stream-contract/customer.json"], findWorkspace: async () => unsafeWorkspace, fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed"); expect(writeEvidence.mock.calls[0]?.[1]).toMatchObject({ status: "fail", failurePhase: "workspace_validation", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled(); vi.unstubAllEnvs();
   });
 });

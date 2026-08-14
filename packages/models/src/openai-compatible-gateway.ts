@@ -991,15 +991,15 @@ async function* completeChatEventStream(
             throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
           }
           const delta = data.choices?.[0]?.delta;
+          if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
           if (typeof delta?.content === "string" && delta.content) {
             content += delta.content;
             yield { type: "content_delta", content: delta.content };
           }
           const toolCalls = delta?.tool_calls;
           if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
-          if (Array.isArray(toolCalls)) for (const tool of toolCalls) {
-              yield appendToolCallDelta(toolCallParts, tool);
-          }
+          const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(toolCallParts, tool)) : [];
+          for (const event of toolEvents) yield event;
           if (data.usage) usageDetailsObj = data.usage;
         }
       }
