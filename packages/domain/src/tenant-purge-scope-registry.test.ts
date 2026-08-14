@@ -70,9 +70,10 @@ describe("tenant purge scope registry", () => {
     expect(TENANT_PURGE_DIRECT_RELATIONS).toHaveLength(157);
     const cutovers = TENANT_PURGE_DIRECT_RELATIONS.filter((entry) => entry.model === "ProviderCutover");
     expect(cutovers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ relationField: "sourceDeployment", relationName: "SourceDeployment", fields: ["sourceDeploymentId", "customerAccountId"], references: ["id", "customerAccountId"], fieldOptional: [false, false], onDelete: "Restrict", onUpdate: "Restrict" }),
+      expect.objectContaining({ relationField: "sourceDeployment", relationName: "SourceDeployment", fields: ["sourceDeploymentId", "customerAccountId"], references: ["id", "customerAccountId"], fieldOptional: [false, false], onDelete: "Restrict", onUpdate: "Restrict", onUpdateSource: "EXPLICIT" }),
       expect.objectContaining({ relationField: "destinationDeployment", relationName: "DestinationDeployment", fields: ["destinationDeploymentId", "customerAccountId"], fieldOptional: [true, false], relationOptional: true }),
     ]));
+    expect(TENANT_PURGE_DIRECT_RELATIONS.find((entry) => entry.model === "WorkspaceFeatureFlag")).toMatchObject({ onUpdate: "Cascade", onUpdateSource: "POSTGRESQL_DEFAULT" });
     expect(TENANT_PURGE_DIRECT_RELATIONS.filter((entry) => entry.model === "CrmProspectWorkspace").map((entry) => entry.relationField).sort()).toEqual(["crmWorkspace", "targetWorkspace"]);
     expect(TENANT_PURGE_DIRECT_RELATIONS.find((entry) => entry.model === "ConstitutionSourceReference")).toMatchObject({ relationName: "ConstitutionSourceWorkspace" });
   });
@@ -91,19 +92,28 @@ describe("tenant purge scope registry", () => {
     expect(parseTenantPurgeDirectRelations(syntheticSchema({ optional: true }))[0]).toMatchObject({
       relationOptional: true, fieldOptional: [true], onDelete: "SetNull", onUpdate: "Cascade",
     });
+    const decorated = syntheticSchema().replace(
+      "@relation(fields: [workspaceId], references: [id])",
+      "@relation(\n    name: \"NamedWorkspace\",\n    fields: [workspaceId],\n    references: [id]\n  ) // valid trailing comment",
+    );
+    expect(parseTenantPurgeDirectRelations(decorated)[0]).toMatchObject({ relationName: "NamedWorkspace", fields: ["workspaceId"] });
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ provider: "mysql" }))).toThrow(/connector default policy/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ onDelete: "FutureAction" }))).toThrow(/Unsupported Prisma onDelete/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema().replace("references: [id])", "references: [id], onDelete: )"))).toThrow(/Malformed Prisma onDelete/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ references: false }))).toThrow(/Malformed direct target relation/);
+    expect(() => parseTenantPurgeDirectRelations(syntheticSchema().replace("Workspace @relation", "Workspace @ignore @relation"))).toThrow(/Unparsed direct target relation/);
   });
 
   it("fails on action, default-source, optionality, and new target-relation drift", () => {
     expect(() => assertTenantPurgeScopeRegistry(schema.replace("onDelete: Cascade)", "onDelete: SetNull)"))).toThrow(/relation registry drift/);
     expect(() => assertTenantPurgeScopeRegistry(schema.replace("onDelete: Cascade)", "onDelete: Cascade, onUpdate: Cascade)"))).toThrow(/relation registry drift/);
-    const optionalDrift = schema.replace(
-      "model WorkspaceFeatureFlag {",
-      "model WorkspaceFeatureFlag {\n  shadowWorkspaceId String?\n  shadowWorkspace Workspace? @relation(\"ShadowWorkspace\", fields: [shadowWorkspaceId], references: [id], onDelete: SetNull)",
-    );
+    const optionalDrift = schema
+      .replace("model Workspace {", "model Workspace {\n  shadowFeatures WorkspaceFeatureFlag[] @relation(\"ShadowWorkspace\")")
+      .replace(
+        "model WorkspaceFeatureFlag {",
+        "model WorkspaceFeatureFlag {\n  shadowWorkspaceId String?\n  shadowWorkspace Workspace? @relation(name: \"ShadowWorkspace\", fields: [shadowWorkspaceId], references: [id], onDelete: SetNull) // valid trailing comment",
+      );
+    expect(parseTenantPurgeDirectRelations(optionalDrift)).toContainEqual(expect.objectContaining({ model: "WorkspaceFeatureFlag", relationField: "shadowWorkspace", relationName: "ShadowWorkspace" }));
     expect(() => assertTenantPurgeScopeRegistry(optionalDrift)).toThrow(/relation registry drift/);
     const fieldDrift = schema.replace("  workspaceId String\n", "  workspaceId String?\n").replace("  workspace Workspace @relation(fields: [workspaceId]", "  workspace Workspace? @relation(fields: [workspaceId]");
     expect(() => assertTenantPurgeScopeRegistry(fieldDrift)).toThrow(/relation registry drift/);

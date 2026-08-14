@@ -107,18 +107,53 @@ ProviderCutover|destinationDeployment|CustomerDeployment|DestinationDeployment|d
 `;
 
 function decodeDirectRelations(dsl: string): TenantPurgeDirectRelation[] {
+  const explicitUpdates = new Set(["ProviderCutover.account", "ProviderCutover.sourceDeployment", "ProviderCutover.destinationDeployment"]);
   return dsl.trim().split(/[;\n]+/).filter(Boolean).map((row) => {
     const [model, relationField, target, relationName, fieldList, referenceList, relationOptional, optionalBits, onDelete, onUpdate] = row.split("|");
     return {
       model: model as Prisma.ModelName, relationField, target: target as TenantPurgeTargetModel, relationName: relationName || null,
       fields: fieldList.split(","), references: referenceList.split(","), relationOptional: relationOptional === "1",
       fieldOptional: [...optionalBits].map((bit) => bit === "1"), onDelete: onDelete as PrismaReferentialAction, onDeleteSource: "EXPLICIT",
-      onUpdate: onUpdate as PrismaReferentialAction, onUpdateSource: onUpdate === "Cascade" ? "POSTGRESQL_DEFAULT" : "EXPLICIT",
+      onUpdate: onUpdate as PrismaReferentialAction, onUpdateSource: explicitUpdates.has(`${model}.${relationField}`) ? "EXPLICIT" : "POSTGRESQL_DEFAULT",
     };
   });
 }
 
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL);
+
+function stripPrismaComments(schema: string) {
+  let quoted = false;
+  return schema.split("\n").map((line) => {
+    for (let index = 0; index < line.length - 1; index += 1) {
+      if (line[index] === '"' && line[index - 1] !== "\\") quoted = !quoted;
+      if (!quoted && line.slice(index, index + 2) === "//") return line.slice(0, index);
+    }
+    quoted = false;
+    return line;
+  }).join("\n");
+}
+
+function directRelationDeclarations(body: string) {
+  const candidate = /^\s*\w+\s+(?:Workspace|CustomerDeployment|CustomerAccount|ProcurementTrial)\??\s+[^\n]*@relation\b/gm;
+  const candidates = [...body.matchAll(candidate)];
+  const start = /^\s*(\w+)\s+(Workspace|CustomerDeployment|CustomerAccount|ProcurementTrial)(\?)?\s+@relation\s*\(/gm;
+  const declarations: Array<{ field: string; target: TenantPurgeTargetModel; optional: boolean; args: string }> = [];
+  for (const match of body.matchAll(start)) {
+    const open = match.index + match[0].lastIndexOf("(");
+    let depth = 1;
+    let quoted = false;
+    let end = open + 1;
+    for (; end < body.length && depth; end += 1) {
+      if (body[end] === '"' && body[end - 1] !== "\\") quoted = !quoted;
+      else if (!quoted && body[end] === "(") depth += 1;
+      else if (!quoted && body[end] === ")") depth -= 1;
+    }
+    if (depth) throw new Error(`Malformed direct target relation: ${match[1]}`);
+    declarations.push({ field: match[1], target: match[2] as TenantPurgeTargetModel, optional: Boolean(match[3]), args: body.slice(open + 1, end - 1) });
+  }
+  if (declarations.length !== candidates.length) throw new Error("Unparsed direct target relation candidate.");
+  return declarations;
+}
 
 function parseAction(args: string, key: "onDelete" | "onUpdate", relationOptional: boolean): [PrismaReferentialAction, ReferentialActionSource] {
   const explicit = args.match(new RegExp(`${key}:\\s*(\\w+)`))?.[1];
@@ -131,6 +166,7 @@ function parseAction(args: string, key: "onDelete" | "onUpdate", relationOptiona
 }
 
 export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDirectRelation[] {
+  schema = stripPrismaComments(schema);
   const provider = schema.match(/datasource\s+db\s*\{[\s\S]*?provider\s*=\s*"([^"]+)"[\s\S]*?\}/)?.[1];
   if (provider !== "postgresql") throw new Error(`Unsupported Prisma connector default policy: ${provider ?? "missing"}`);
   const relations: TenantPurgeDirectRelation[] = [];
@@ -142,22 +178,23 @@ export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDire
       const field = line.match(/^\s*(\w+)\s+[\w.]+(\?)?/);
       if (field) fieldOptional.set(field[1], Boolean(field[2]));
     }
-    for (const line of body.split("\n")) {
-      const relation = line.match(/^\s*(\w+)\s+(Workspace|CustomerDeployment|CustomerAccount|ProcurementTrial)(\?)?\s+@relation\((.*)\)\s*$/);
-      if (!relation) continue;
-      const args = relation[4];
+    for (const relation of directRelationDeclarations(body)) {
+      const args = relation.args;
       const fieldsMatch = args.match(/fields:\s*\[([^\]]+)\]/);
       if (!fieldsMatch) continue;
       const referencesMatch = args.match(/references:\s*\[([^\]]+)\]/);
-      if (!referencesMatch) throw new Error(`Malformed direct target relation: ${model}.${relation[1]}`);
+      if (!referencesMatch) throw new Error(`Malformed direct target relation: ${model}.${relation.field}`);
       const fields = fieldsMatch[1].split(",").map((field) => field.trim());
-      if (fields.some((field) => !fieldOptional.has(field))) throw new Error(`Unknown direct target field: ${model}.${relation[1]}`);
-      const relationOptional = Boolean(relation[3]);
+      if (fields.some((field) => !fieldOptional.has(field))) throw new Error(`Unknown direct target field: ${model}.${relation.field}`);
+      const relationOptional = relation.optional;
       const [onDelete, onDeleteSource] = parseAction(args, "onDelete", relationOptional);
       const [onUpdate, onUpdateSource] = parseAction(args, "onUpdate", relationOptional);
+      const positionalName = args.match(/^\s*"([^"]+)"/)?.[1];
+      const namedName = args.match(/(?:^|,)\s*name:\s*"([^"]+)"/)?.[1];
+      if (args.includes("name:") && !namedName) throw new Error(`Malformed direct target relation name: ${model}.${relation.field}`);
       relations.push({
-        model, relationField: relation[1], target: relation[2] as TenantPurgeTargetModel,
-        relationName: args.match(/^\s*"([^"]+)"/)?.[1] ?? null, fields,
+        model, relationField: relation.field, target: relation.target,
+        relationName: namedName ?? positionalName ?? null, fields,
         references: referencesMatch[1].split(",").map((field) => field.trim()), relationOptional,
         fieldOptional: fields.map((field) => fieldOptional.get(field)!), onDelete, onDeleteSource, onUpdate, onUpdateSource,
       });
