@@ -5,14 +5,11 @@ import { pathToFileURL } from "node:url";
 import { env, prisma } from "@corgtex/shared";
 import { openAICompatibleModelGateway } from "@corgtex/models";
 import { requireInternalValidationWorkspace } from "./lib/validation-workspace.mjs";
-
 const TOOL_NAME = "respond_route_stream_contract";
 const EXPECTED_ANSWER = "route-stream-contract-ok";
-
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
-
 export function smokeConfig(source, argv = []) {
   assert(source.MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST === "1", "Paid-request acknowledgement is required.");
   const workspaceId = source.MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID?.trim();
@@ -23,7 +20,6 @@ export function smokeConfig(source, argv = []) {
   assert(resolvedOut.startsWith(`${artifactRoot}${path.sep}`), "Output must stay under the approved artifact directory.");
   return { workspaceId, out: resolvedOut };
 }
-
 export function guardOneProviderRequest(fetchImpl) {
   let count = 0;
   const guarded = async (input, init) => {
@@ -36,7 +32,6 @@ export function guardOneProviderRequest(fetchImpl) {
   };
   return { guarded, count: () => count };
 }
-
 export async function runContractSmoke({
   source = process.env,
   argv = process.argv.slice(2),
@@ -49,16 +44,24 @@ export async function runContractSmoke({
   },
 } = {}) {
   const config = smokeConfig(source, argv);
+  const guard = guardOneProviderRequest(fetchImpl);
+  let failurePhase = "provider_preflight";
+  try {
+  const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : [];
+  const route = routes.find((entry) => entry?.model === (source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION));
+  const provider = String(route?.provider ?? source.MODEL_PROVIDER ?? env.MODEL_PROVIDER).toLowerCase();
+  assert(["openrouter", "openai", "azure-openai", "azure-foundry"].includes(provider), "Configured provider is not live-compatible.");
+  failurePhase = "workspace_validation";
   const workspace = await findWorkspace(config.workspaceId);
   assert(workspace, "Approved validation workspace was not found.");
   requireInternalValidationWorkspace(workspace, { purpose: "model route stream contract smoke" });
-  const guard = guardOneProviderRequest(fetchImpl);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = guard.guarded;
   let next;
   const deltas = new Map();
   let toolDeltaCount = 0;
   try {
+    failurePhase = "provider_stream";
     const stream = gateway.chatEventStream({
       workspaceId: workspace.id,
       taskType: "AGENT",
@@ -88,6 +91,7 @@ export async function runContractSmoke({
   const terminal = next?.value;
   const tool = terminal?.tool_calls?.[0];
   const streamed = deltas.get(0);
+  failurePhase = "contract_validation";
   let args;
   try { args = JSON.parse(tool?.function.arguments ?? ""); } catch { throw new Error("Terminal wrapper arguments were not JSON."); }
   assert(guard.count() === 1, "Exactly one provider request was required.");
@@ -104,10 +108,18 @@ export async function runContractSmoke({
     terminalArgumentsValid: true,
     usagePresent: true,
   };
+  failurePhase = "evidence_write";
   await writeEvidence(config.out, evidence);
   return evidence;
+  } catch {
+    if (failurePhase !== "evidence_write") await writeEvidence(config.out, {
+      schemaVersion: "model-route-stream-contract/v1", status: "fail",
+      errorCode: failurePhase === "provider_preflight" ? "PROVIDER_CONFIGURATION_UNSAFE" : "CONTRACT_SMOKE_FAILED",
+      failurePhase, providerRequestCount: guard.count(),
+    });
+    throw new Error("Model route stream contract smoke failed.");
+  }
 }
-
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   runContractSmoke().then(() => console.log("Model route stream contract smoke: PASS (sanitized evidence written)."), () => {
     console.error("Model route stream contract smoke: FAIL (details suppressed).");

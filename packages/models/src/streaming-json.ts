@@ -2,21 +2,17 @@ export type IncrementalJsonStringResult = {
   delta: string;
   state: "incomplete" | "complete" | "malformed";
 };
-
 type ScanResult = {
   state: IncrementalJsonStringResult["state"];
   value: string;
   next: number;
 };
-
 function incomplete(value = "", next = 0): ScanResult {
   return { state: "incomplete", value, next };
 }
-
 function malformed(value = "", next = 0): ScanResult {
   return { state: "malformed", value, next };
 }
-
 function scanString(input: string, start: number): ScanResult {
   if (input[start] !== "\"") return malformed("", start);
   let value = "";
@@ -63,13 +59,11 @@ function scanString(input: string, start: number): ScanResult {
   }
   return incomplete(value, index);
 }
-
 function skipWhitespace(input: string, start: number) {
   let index = start;
   while (/\s/.test(input[index] ?? "")) index += 1;
   return index;
 }
-
 function skipValue(input: string, start: number): ScanResult {
   const index = skipWhitespace(input, start);
   if (index >= input.length) return incomplete("", index);
@@ -105,7 +99,6 @@ function skipValue(input: string, start: number): ScanResult {
     return malformed("", index);
   }
 }
-
 function findStringField(input: string, field: string): ScanResult {
   let index = skipWhitespace(input, 0);
   if (index >= input.length) return incomplete();
@@ -135,16 +128,13 @@ function findStringField(input: string, field: string): ScanResult {
     return malformed();
   }
 }
-
 export class IncrementalJsonStringDecoder {
   private input = "";
   private emitted = "";
   private failed = false;
-
   constructor(private readonly field: string) {
     if (!field) throw new Error("JSON string field is required.");
   }
-
   push(fragment: string): IncrementalJsonStringResult {
     if (this.failed) return { delta: "", state: "malformed" };
     this.input += fragment;
@@ -157,7 +147,6 @@ export class IncrementalJsonStringDecoder {
     this.emitted = result.value;
     return { delta, state: result.state };
   }
-
   finish(): IncrementalJsonStringResult {
     if (this.failed) return { delta: "", state: "malformed" };
     const scanned = findStringField(this.input, this.field);
