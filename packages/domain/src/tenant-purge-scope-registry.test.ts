@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { Prisma } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 import {
@@ -13,7 +13,7 @@ import {
   type TenantPurgeDisposition,
 } from "./tenant-purge-scope-registry";
 
-const schema = readFileSync(new URL("../../../prisma/schema.prisma", import.meta.url), "utf8");
+const schema = (() => { const repository = new URL("../../../", import.meta.url); const prismaDirectory = new URL("prisma/", repository); const packageJson = JSON.parse(readFileSync(new URL("package.json", repository), "utf8")); const files = readdirSync(prismaDirectory, { recursive: true, encoding: "utf8" }).filter((file) => file.endsWith(".prisma")).sort(); if (!files.length || packageJson.prisma?.schema || readdirSync(repository).some((file) => /^prisma\.config\./.test(file))) throw new Error("Unsupported or missing Prisma schema layout."); return files.map((file) => readFileSync(new URL(file, prismaDirectory), "utf8")).join("\n"); })();
 
 function syntheticSchema(options: {
   provider?: string;
@@ -112,6 +112,8 @@ describe("tenant purge scope registry", () => {
     );
     expect(parseTenantPurgeDirectRelations(decorated)[0]).toMatchObject({ relationName: "NamedWorkspace", fields: ["workspaceId"] });
     expect(parseTenantPurgeDirectRelations(syntheticSchema().replace("@relation(", "@relation(\"onDelete: SetNull\", "))[0]).toMatchObject({ relationName: "onDelete: SetNull", onDelete: "Restrict", onDeleteSource: "POSTGRESQL_DEFAULT" });
+    const blockCommented = syntheticSchema().replace("synthetic Synthetic[]", "/* synthetic Synthetic[] */").replace("workspace Workspace @relation", "/* workspace Workspace @relation").replace("references: [id])", "references: [id]) */");
+    expect(parseTenantPurgeDirectRelations(blockCommented)).toHaveLength(0);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ provider: "mysql" }))).toThrow(/connector default policy/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema({ onDelete: "FutureAction" }))).toThrow(/Unsupported Prisma onDelete/);
     expect(() => parseTenantPurgeDirectRelations(syntheticSchema().replace("references: [id])", "references: [id], onDelete: )"))).toThrow(/Malformed Prisma onDelete/);

@@ -125,15 +125,9 @@ const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {
-  let quoted = false;
-  return schema.split("\n").map((line) => {
-    for (let index = 0; index < line.length - 1; index += 1) {
-      if (line[index] === '"' && line[index - 1] !== "\\") quoted = !quoted;
-      if (!quoted && line.slice(index, index + 2) === "//") return line.slice(0, index);
-    }
-    quoted = false;
-    return line;
-  }).join("\n");
+  const stringsOrComments = /"(?:\\.|[^"\\])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g; const stripped = schema.replace(stringsOrComments, (token) => token.startsWith('"') ? token : token.replace(/[^\n]/g, ""));
+  const structural = stripped.replace(/"(?:\\.|[^"\\])*"/g, ""); if (structural.includes('"') || /\/(?:\/|\*)/.test(structural)) throw new Error("Malformed Prisma comment or string.");
+  return stripped;
 }
 
 function directRelationDeclarations(body: string) {
