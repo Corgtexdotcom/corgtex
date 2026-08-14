@@ -331,6 +331,7 @@ describe("processConversationTurn", () => {
 
   function turnContext(actor = testUserActor()) { return { workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor }; }
   function toolCall(id: string, name: string, args: Record<string, unknown> = {}) { return { id, function: { name, arguments: JSON.stringify(args) } }; }
+  function routeCall(id: string, calls: Array<{ name: string; arguments?: Record<string, unknown> }> = []) { return toolCall(id, "route_conversation", { calls: calls.map((call) => ({ ...call, arguments: call.arguments ?? {} })) }); }
   function streamResponse(chunks: string[], result: Record<string, any>) {
     return (async function* () {
       for (const chunk of chunks) {
@@ -1720,7 +1721,7 @@ describe("processConversationTurn", () => {
     }));
 
     const streamedMessage = chunks.join("");
-    expect(streamedMessage).toContain("I'll check that.");
+    expect(streamedMessage).not.toContain("I'll check that.");
     expect(streamedMessage).toContain("First follow up");
     expect(streamedMessage).toContain("I could not complete the CRM relationship-work request for CRM account account-2");
     expect(streamedMessage).toContain("The CRM request could not be completed");
@@ -2437,7 +2438,7 @@ describe("processConversationTurn", () => {
     const { processConversationTurnStream } = await import("./conversation"); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Partial update result — succeeded: tension t-2; failed: action a-2. The record was modified by another request. Read the latest version and apply your changes again.");
     vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-2", version: 1, status: "OPEN", author: {} } as any]);
     vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-2", version: 2 } as any);
-    chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
     const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
     expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying."); expect(chunks.join("").match(/Updated\./g)).toHaveLength(1); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-3", version: 1, status: "OPEN", author: {} } as any]); chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("fr", "query_actions")] })).mockReturnValueOnce(throwingStream(["Still working."])); const failed = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(failed.result.assistantMessage).toBe(failed.chunks.join("")); expect(failed.chunks.join("")).not.toMatch(/Updated|Still working/);
   });
@@ -2470,7 +2471,7 @@ describe("processConversationTurn", () => {
     expect(updateAction).not.toHaveBeenCalled(); expect(result.assistantMessage).toBe("The assistant did not return a natural-language response. Please retry or ask for a more specific summary.");
     expect(chatMock.mock.calls[0][0].tools.map((tool: any) => tool.function.name)).not.toEqual(expect.arrayContaining(["update_action", "update_tension"]));
     expect(chatMock.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["update_action", "update_tension"]));
-    chatStreamMock.mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t1", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] })).mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t2", "update_tension", { tensionId: "t-1", expectedVersion: 1 }), toolCall("mixed", "query_tensions")] })); const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
+    chatStreamMock.mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t1", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] })); const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
     expect(updateTension).not.toHaveBeenCalled(); expect(prisma.tension.findMany).not.toHaveBeenCalled(); expect(chunks.join("")).toContain("could not safely apply"); expect(chunks.join("")).not.toContain("Unverified");
   });
 
@@ -2480,12 +2481,13 @@ describe("processConversationTurn", () => {
       .mockResolvedValueOnce({ content: "Useful list response.", tool_calls: [toolCall("q1", "query_actions")] });
     const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
     expect((await processConversationTurn({ ...turnContext(actor), userMessage: "Show actions." })).assistantMessage).toBe("Useful list response.");
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("s2", "search_brain", { query: "actions" })] }))
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [routeCall("route-tools", [{ name: "search_brain", arguments: { query: "actions" } }])] }))
       .mockReturnValueOnce(streamResponse(["Useful streamed response."], { content: "Useful streamed response.", tool_calls: [toolCall("q2", "query_actions")] }));
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({ ...turnContext(actor), userMessage: "Show actions." }));
     expect(chunks.join("")).toBe("Useful streamed response.");
     expect(result.assistantMessage).toBe("Useful streamed response.");
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" })).mockReturnValueOnce(throwingStream(["Partial response."])); const partial = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(partial.chunks.join("")).toBe("Partial response."); expect(partial.result.assistantMessage).toBe(partial.chunks.join("")); chatStreamMock.mockReturnValueOnce(streamResponse(["Ignored draft."], { content: "Ignored draft." })).mockReturnValueOnce(streamResponse(["Hello", " world."], { content: "Hello world." })); const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } }); expect(chatStreamMock.mock.calls.at(-1)?.[0].tools).toBeUndefined();
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [routeCall("route-partial")] })).mockReturnValueOnce(throwingStream(["Partial response."])); const partial = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(partial.chunks.join("")).toBe("Partial response."); expect(partial.result.assistantMessage).toBe(partial.chunks.join("")); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [routeCall("route-chat")] })).mockReturnValueOnce(streamResponse(["Hello", " world."], { content: "Hello world." })); const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } }); expect(chatStreamMock).toHaveBeenNthCalledWith(chatStreamMock.mock.calls.length - 1, expect.objectContaining({ tool_choice: { type: "function", function: { name: "route_conversation" } } })); expect(chatStreamMock.mock.calls.at(-1)?.[0].tools).toBeUndefined();
+    checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false }); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [routeCall("route-budget")] })); const budget = await collectConversationStream(processConversationTurnStream({ ...turnContext(), userMessage: "Explain it." })); expect(budget.chunks.join("")).toMatch(/budget/i); expect(budget.result.assistantMessage).toBe(budget.chunks.join("")); expect(chatStreamMock).toHaveBeenCalledTimes(7);
   });
 
   it.each(["Revise this action's title.", "Adjust the assignee.", "The other one too."])("keeps versioned follow-up tools for contextual wording: %s", async (userMessage) => {
