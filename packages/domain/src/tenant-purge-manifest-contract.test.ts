@@ -156,6 +156,15 @@ describe("tenant purge manifest contract", () => {
 
   it("fails closed on malformed topology, unknown blockers, and tuple mismatch", async () => {
     const sparse = (id: string) => { const value = [id]; value.length = 2; return value; };
+    let getterCalls = 0;
+    const accessorTopology = topology(accountTarget);
+    Object.defineProperty(accessorTopology, "workspace", { enumerable: true, get() { getterCalls += 1; return topology(accountTarget).workspace; } });
+    const accessorArrayTopology = topology(accountTarget);
+    Object.defineProperty(accessorArrayTopology.workspace!.managedDeploymentIds, 0, { get() { getterCalls += 1; return DEPLOYMENT; } });
+    const hiddenTopology = topology(accountTarget);
+    Object.defineProperty(hiddenTopology.workspace!, "hiddenExtra", { value: true });
+    const symbolTopology = topology(accountTarget);
+    Object.defineProperty(symbolTopology, Symbol("extra"), { value: true });
     const invalid = [
       { ...topology(accountTarget), capturedAt: new Date("invalid") },
       { ...topology(accountTarget), blockers: ["UNKNOWN"] },
@@ -163,6 +172,7 @@ describe("tenant purge manifest contract", () => {
       { ...topology(accountTarget), blockers: sparse("LEGAL_HOLD") },
       { ...topology(accountTarget), workspace: { ...topology(accountTarget).workspace!, extra: true } },
       { ...topology(accountTarget), deployment: { ...topology(accountTarget).deployment!, hasProviderCutover: 1 } },
+      accessorTopology, accessorArrayTopology, hiddenTopology, symbolTopology,
     ];
     for (const mutate of [
       (value: TenantPurgeTopologyInput) => { value.workspace!.managedDeploymentIds = sparse(DEPLOYMENT); },
@@ -171,6 +181,7 @@ describe("tenant purge manifest contract", () => {
       (value: TenantPurgeTopologyInput) => { value.account!.deploymentIds = sparse(DEPLOYMENT); },
     ]) { const supplied = topology(accountTarget); mutate(supplied); invalid.push(supplied); }
     for (const supplied of invalid) await expectCode(capture({ reader: reader(accountTarget, supplied as never) }), 400, "TENANT_PURGE_CONTRACT_INVALID");
+    expect(getterCalls).toBe(0);
     const mismatched = topology(accountTarget);
     mismatched.workspace!.id = OTHER;
     expect((await capture({ reader: reader(accountTarget, mismatched) })).blockers).toContain("TARGET_TUPLE_MISMATCH");

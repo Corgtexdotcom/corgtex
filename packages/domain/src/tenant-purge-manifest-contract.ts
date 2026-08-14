@@ -83,15 +83,19 @@ function uuidOrNull(value: unknown, label: string): string | null {
   return value === null ? null : uuid(value, label);
 }
 
-function isDenseArray(value: unknown): value is unknown[] {
-  if (!Array.isArray(value)) return false;
-  for (let index = 0; index < value.length; index += 1) if (!Object.hasOwn(value, index)) return false;
-  return true;
+function exactArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) invalid(`Invalid tenant purge ${label}.`);
+  const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
+  const length = descriptors.length?.value;
+  const expected = Number.isInteger(length) && length >= 0 ? ["length", ...Array.from({ length }, (_, index) => String(index))] : [];
+  const ownKeys = Reflect.ownKeys(descriptors);
+  if (ownKeys.some((key) => typeof key !== "string") || ownKeys.length !== expected.length
+    || expected.some((key) => !Object.hasOwn(descriptors, key) || !("value" in descriptors[key]!))) invalid(`Invalid tenant purge ${label}.`);
+  return expected.slice(1).map((key) => descriptors[key]!.value);
 }
 
 function uuidList(value: unknown, label: string): string[] {
-  if (!isDenseArray(value)) invalid(`Invalid tenant purge ${label}.`);
-  const result = value.map((item) => uuid(item, label));
+  const result = exactArray(value, label).map((item) => uuid(item, label));
   if (new Set(result).size !== result.length) invalid(`Invalid tenant purge ${label}.`);
   return result;
 }
@@ -135,27 +139,25 @@ function policySnapshot(value: unknown): TenantPurgeManifestPolicies {
 }
 
 function topologySnapshot(value: unknown) {
-  let raw: Record<string, unknown>;
-  try {
-    raw = exactRecord(structuredClone(value), ["capturedAt", "workspace", "deployment", "account", "trial", "blockers"], "topology");
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    return invalid("Invalid tenant purge topology.");
-  }
-  if (!(raw.capturedAt instanceof Date) || Number.isNaN(raw.capturedAt.getTime())) invalid("Invalid tenant purge capture time.");
+  const raw = exactRecord(value, ["capturedAt", "workspace", "deployment", "account", "trial", "blockers"], "topology");
+  if (!(raw.capturedAt instanceof Date) || Object.getPrototypeOf(raw.capturedAt) !== Date.prototype
+    || Reflect.ownKeys(Object.getOwnPropertyDescriptors(raw.capturedAt)).length) invalid("Invalid tenant purge capture time.");
+  const capturedAt = Date.prototype.getTime.call(raw.capturedAt);
+  if (Number.isNaN(capturedAt)) invalid("Invalid tenant purge capture time.");
   const workspace = raw.workspace === null ? null : exactRecord(raw.workspace, ["id", "managedDeploymentIds", "trialIds"], "workspace topology");
   const deployment = raw.deployment === null ? null : exactRecord(raw.deployment, ["id", "managedWorkspaceId", "accountId", "primaryAccountIds", "sharedResourceAmbiguous", "hasManagedReleaseLease", "hasProviderCutover", "hasClientMigration"], "deployment topology");
   const account = raw.account === null ? null : exactRecord(raw.account, ["id", "deploymentIds", "primaryDeploymentId"], "account topology");
   const trial = raw.trial === null ? null : exactRecord(raw.trial, ["id", "workspaceId", "expired"], "trial topology");
-  if (!isDenseArray(raw.blockers) || new Set(raw.blockers).size !== raw.blockers.length
-    || raw.blockers.some((code) => !TENANT_PURGE_BLOCKER_CODES.includes(code as never))) invalid("Invalid tenant purge blockers.");
+  const suppliedBlockers = exactArray(raw.blockers, "blockers");
+  if (new Set(suppliedBlockers).size !== suppliedBlockers.length
+    || suppliedBlockers.some((code) => !TENANT_PURGE_BLOCKER_CODES.includes(code as never))) invalid("Invalid tenant purge blockers.");
   return freezeDeep({
-    capturedAt: raw.capturedAt.toISOString(),
+    capturedAt: new Date(capturedAt).toISOString(),
     workspace: workspace && { id: uuid(workspace.id, "workspace topology ID"), managedDeploymentIds: uuidList(workspace.managedDeploymentIds, "workspace deployment IDs"), trialIds: uuidList(workspace.trialIds, "workspace trial IDs") },
     deployment: deployment && { id: uuid(deployment.id, "deployment topology ID"), managedWorkspaceId: uuidOrNull(deployment.managedWorkspaceId, "managed workspace ID"), accountId: uuidOrNull(deployment.accountId, "deployment account ID"), primaryAccountIds: uuidList(deployment.primaryAccountIds, "primary account IDs"), sharedResourceAmbiguous: exactBoolean(deployment.sharedResourceAmbiguous, "shared resource flag"), hasManagedReleaseLease: exactBoolean(deployment.hasManagedReleaseLease, "release lease flag"), hasProviderCutover: exactBoolean(deployment.hasProviderCutover, "provider cutover flag"), hasClientMigration: exactBoolean(deployment.hasClientMigration, "client migration flag") },
     account: account && { id: uuid(account.id, "account topology ID"), deploymentIds: uuidList(account.deploymentIds, "account deployment IDs"), primaryDeploymentId: uuidOrNull(account.primaryDeploymentId, "primary deployment ID") },
     trial: trial && { id: uuid(trial.id, "trial topology ID"), workspaceId: uuidOrNull(trial.workspaceId, "trial workspace ID"), expired: exactBoolean(trial.expired, "expired trial flag") },
-    suppliedBlockers: [...raw.blockers] as TenantPurgeBlockerCode[],
+    suppliedBlockers: suppliedBlockers as TenantPurgeBlockerCode[],
   });
 }
 
