@@ -240,5 +240,6 @@ export function assertTenantPurgeDispositionCoverage(
   const duplicates = dispositions.filter((model, index) => dispositions.indexOf(model) !== index);
   const missing = modelNames.filter((model) => !dispositions.includes(model));
   const unknown = dispositions.filter((model) => !modelNames.includes(model));
-  if (duplicates.length || missing.length || unknown.length) throw new Error(`Tenant purge disposition drift: duplicate=${duplicates} missing=${missing} unknown=${unknown}`);
+  const targetDrift = JSON.stringify([...registry.TARGET].sort()) !== JSON.stringify([...TENANT_PURGE_TARGET_MODELS].sort());
+  if (duplicates.length || missing.length || unknown.length || targetDrift) throw new Error(`Tenant purge disposition drift: duplicate=${duplicates} missing=${missing} unknown=${unknown} target=${registry.TARGET}`);
 }

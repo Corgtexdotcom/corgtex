@@ -64,6 +64,10 @@ describe("tenant purge scope registry", () => {
     const unknown = dispositionFixture();
     unknown.RETAIN.push("FutureTenantModel" as Prisma.ModelName);
     expect(() => assertTenantPurgeDispositionCoverage(unknown)).toThrow(/unknown=/);
+
+    const movedRoot = dispositionFixture();
+    movedRoot.RETAIN.push(movedRoot.TARGET.shift()!);
+    expect(() => assertTenantPurgeDispositionCoverage(movedRoot)).toThrow(/target=/);
   });
 
   it("matches every current owning direct target relation and preserves named composite selectors", () => {
