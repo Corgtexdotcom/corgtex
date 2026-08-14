@@ -82,6 +82,12 @@ describe("fakeModelGateway", () => {
     expect(reranked.results).toHaveLength(1);
     expect(reranked.results[0]?.index).toBe(0);
     expect(transcription.text).toContain("Fake transcript for meeting.m4a");
+
+    const stream = fakeModelGateway.chatEventStream({
+      workspaceId: "ws-1", taskType: "CHAT", messages: [{ role: "user", content: "Hello" }],
+    });
+    expect(await stream.next()).toMatchObject({ value: { type: "content_delta" } });
+    await stream.return(undefined as never);
   });
 });
 
@@ -1430,6 +1436,83 @@ describe("openAICompatibleModelGateway", () => {
       rawProviderCostUsd: "0.002100",
       estimatedCostUsd: "0.004200",
     });
+  });
+
+  it("streams ordered content and split indexed tool-call events from one required request", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key",
+      MODEL_BASE_URL: "https://openrouter.ai/api/v1", APP_URL: "https://corgtex.example.test",
+      MODEL_CHAT_DEFAULT: "qwen/qwen3-32b",
+    });
+    const frames = [
+      { choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_", function: { name: "respond_", arguments: '{"a":"' } }] } }] },
+      { choices: [{ delta: { content: "café 漢" } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 1, id: "call_b", function: { name: "other", arguments: '"2"}' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "conversation", arguments: 'ok"}' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "" } }] } }] },
+      { choices: [], usage: { prompt_tokens: 12, completion_tokens: 7 } },
+    ];
+    const bytes = new TextEncoder().encode(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\ndata: {"truncated"`);
+    const body = new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const stream = openAICompatibleModelGateway.chatEventStream({
+      workspaceId: "ws-1", taskType: "AGENT", messages: [{ role: "user", content: "route" }],
+      tools: [{ type: "function", function: { name: "respond_conversation", description: "route", parameters: {} } }],
+      tool_choice: "required",
+    });
+    const events = [];
+    let next = await stream.next();
+    while (!next.done) { events.push(next.value); next = await stream.next(); }
+    expect(events).toContainEqual({ type: "content_delta", content: "café 漢" });
+    expect(events[0]).toMatchObject({ type: "tool_call_delta", index: 1, argumentsDelta: '{"b":' });
+    expect(next.value.tool_calls).toEqual([
+      { id: "call_a", type: "function", function: { name: "respond_conversation", arguments: '{"a":"ok"}' } },
+      { id: "call_b", type: "function", function: { name: "other", arguments: '{"b":"2"}' } },
+    ]);
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({ tool_choice: "required" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves bounded pre-stream retries for event consumers", async () => {
+    restoreEnv();
+    Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("retry", { status: 429 }))
+      .mockResolvedValueOnce(new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const events = [];
+    for await (const event of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) events.push(event);
+    expect(events).toEqual([{ type: "content_delta", content: "ok" }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["an invalid index", { index: -1, id: "call_a", function: { name: "tool", arguments: "{}" } }],
+    ["an invalid id fragment", { index: 0, id: 7, function: { name: "tool", arguments: "{}" } }],
+    ["an invalid name fragment", { index: 0, id: "call_a", function: { name: 7, arguments: "{}" } }],
+    ["an incomplete identity", { index: 0, function: { arguments: "{}" } }],
+  ])("fails closed on %s and records accepted-request usage once", async (_label, tool) => {
+    restoreEnv();
+    Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const payload = `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [tool] } }] })}\n\ndata: [DONE]\n\n`;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(payload, { status: 200 })));
+    const usageModule = await import("./usage");
+    vi.mocked(usageModule.recordModelUsage).mockClear();
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const consume = async () => { for await (const _ of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } };
+    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
+    expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
   });
 
   it("records estimated Azure Foundry streaming usage when the consumer closes early", async () => {

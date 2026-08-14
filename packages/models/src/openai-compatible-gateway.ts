@@ -2,6 +2,8 @@ import { env, cosineSimilarity } from "@corgtex/shared";
 import { DefaultAzureCredential } from "@azure/identity";
 import type {
   ChatCompletionRequest,
+  ChatCompletionResponse,
+  ChatStreamEvent,
   EmbeddingRequest,
   ExtractionRequest,
   ModelGateway,
@@ -783,12 +785,82 @@ async function completeChat(
   return { content, tool_calls, usage };
 }
 
-async function* completeChatStream(
+class ChatStreamProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatStreamProtocolError";
+  }
+}
+
+type PartialToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unknown): ChatStreamEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ChatStreamProtocolError("Streamed tool call delta must be an object.");
+  }
+  const tool = value as Record<string, unknown>;
+  const index = tool.index;
+  if (!Number.isInteger(index) || (index as number) < 0) {
+    throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative integer.");
+  }
+  if (tool.type !== undefined && tool.type !== "function") {
+    throw new ChatStreamProtocolError("Streamed tool call type must be function.");
+  }
+  if (tool.id !== undefined && typeof tool.id !== "string") {
+    throw new ChatStreamProtocolError("Streamed tool call id fragment must be a string.");
+  }
+  if (tool.function !== undefined && (!tool.function || typeof tool.function !== "object" || Array.isArray(tool.function))) {
+    throw new ChatStreamProtocolError("Streamed tool call function delta must be an object.");
+  }
+  const fn = (tool.function ?? {}) as Record<string, unknown>;
+  if (fn.name !== undefined && typeof fn.name !== "string") {
+    throw new ChatStreamProtocolError("Streamed tool call name fragment must be a string.");
+  }
+  if (fn.arguments !== undefined && typeof fn.arguments !== "string") {
+    throw new ChatStreamProtocolError("Streamed tool call arguments fragment must be a string.");
+  }
+  const idDelta = tool.id as string | undefined;
+  const nameDelta = fn.name as string | undefined;
+  const argumentsDelta = (fn.arguments as string | undefined) ?? "";
+  const partial = toolCalls.get(index as number) ?? { id: "", name: "", arguments: "" };
+  partial.id += idDelta ?? "";
+  partial.name += nameDelta ?? "";
+  partial.arguments += argumentsDelta;
+  toolCalls.set(index as number, partial);
+  return {
+    type: "tool_call_delta",
+    index: index as number,
+    ...(idDelta !== undefined ? { idDelta } : {}),
+    ...(nameDelta !== undefined ? { nameDelta } : {}),
+    argumentsDelta,
+  };
+}
+
+function completeToolCalls(toolCalls: Map<number, PartialToolCall>) {
+  return [...toolCalls.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, tool]) => {
+      if (!tool.id || !tool.name) {
+        throw new ChatStreamProtocolError("Streamed tool call ended without a complete id and function name.");
+      }
+      return {
+        id: tool.id,
+        type: "function" as const,
+        function: { name: tool.name, arguments: tool.arguments },
+      };
+    });
+}
+
+async function* completeChatEventStream(
   request: ChatCompletionRequest,
   taskType: ModelUsageInput["taskType"],
   modelOverride?: string,
   bodyExtras?: Record<string, unknown>,
-): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
+): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse> {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
   const route = providerRouteForModel(model);
@@ -858,7 +930,7 @@ async function* completeChatStream(
 
   const decoder = new TextDecoder();
   let content = "";
-  let tool_calls: any[] = [];
+  const toolCallParts = new Map<number, PartialToolCall>();
   let usageDetailsObj: any = null;
   let buffer = "";
   let streamCompleted = false;
@@ -872,7 +944,12 @@ async function* completeChatStream(
 
     const latencyMs = Date.now() - startedAt;
     const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateTextTokens(payload);
-    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
+    const estimatedToolCalls = [...toolCallParts.values()].map((tool) => ({
+      id: tool.id,
+      type: "function" as const,
+      function: { name: tool.name, arguments: tool.arguments },
+    }));
+    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, estimatedToolCalls);
     usage = await recordUsage({
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
@@ -905,36 +982,23 @@ async function* completeChatStream(
         buffer = buffer.slice(newlineIndex + 1);
 
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
+          let data: any;
           try {
-            const data = JSON.parse(line.slice(6));
-            const delta = data.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              content += delta.content;
-              yield delta.content;
-            }
-
-            if (delta?.tool_calls) {
-              for (const tool of delta.tool_calls) {
-                const index = tool.index;
-                if (tool_calls[index]) {
-                  tool_calls[index].function.arguments += tool.function?.arguments || "";
-                } else {
-                  tool_calls[index] = {
-                    id: tool.id,
-                    type: "function",
-                    function: {
-                      name: tool.function?.name || "",
-                      arguments: tool.function?.arguments || "",
-                    }
-                  };
-                }
-              }
-            }
-            if (data.usage) usageDetailsObj = data.usage;
-          } catch (e) {
-            // ignore
+            data = JSON.parse(line.slice(6));
+          } catch {
+            continue;
           }
+          const delta = data.choices?.[0]?.delta;
+          if (typeof delta?.content === "string" && delta.content) {
+            content += delta.content;
+            yield { type: "content_delta", content: delta.content };
+          }
+          if (Array.isArray(delta?.tool_calls)) {
+            for (const tool of delta.tool_calls) {
+              yield appendToolCallDelta(toolCallParts, tool);
+            }
+          }
+          if (data.usage) usageDetailsObj = data.usage;
         }
       }
     }
@@ -949,10 +1013,34 @@ async function* completeChatStream(
     }
   }
   
-  const finalTools: import("./contracts").ToolCall[] = tool_calls.filter(Boolean);
   const finalUsage = await finalizeUsage();
+  const finalTools = completeToolCalls(toolCallParts);
 
   return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage: finalUsage };
+}
+
+async function* completeChatStream(
+  request: ChatCompletionRequest,
+  taskType: ModelUsageInput["taskType"],
+): AsyncGenerator<string, ChatCompletionResponse> {
+  const events = completeChatEventStream(request, taskType);
+  let completed = false;
+  try {
+    while (true) {
+      const next = await events.next();
+      if (next.done) {
+        completed = true;
+        return next.value;
+      }
+      if (next.value.type === "content_delta") {
+        yield next.value.content;
+      }
+    }
+  } finally {
+    if (!completed) {
+      await events.return(undefined as never);
+    }
+  }
 }
 
 async function repairExtractionObject(request: ExtractionRequest, raw: string) {
@@ -1102,6 +1190,10 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
 export const openAICompatibleModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     return completeChat(request, request.taskType);
+  },
+
+  async *chatEventStream(request: ChatCompletionRequest) {
+    return yield* completeChatEventStream(request, request.taskType);
   },
 
   async *chatStream(request: ChatCompletionRequest) {

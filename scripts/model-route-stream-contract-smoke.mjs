@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { env, prisma } from "@corgtex/shared";
+import { openAICompatibleModelGateway } from "@corgtex/models";
+import { requireInternalValidationWorkspace } from "./lib/validation-workspace.mjs";
+
+const TOOL_NAME = "respond_route_stream_contract";
+const EXPECTED_ANSWER = "route-stream-contract-ok";
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+export function smokeConfig(source, argv = []) {
+  assert(source.MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST === "1", "Paid-request acknowledgement is required.");
+  const workspaceId = source.MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID?.trim();
+  assert(workspaceId, "Approved internal-validation workspace id is required.");
+  const out = argv.find((value) => value.startsWith("--out="))?.slice(6);
+  const artifactRoot = path.resolve(".artifacts/model-route-stream-contract");
+  const resolvedOut = path.resolve(out ?? "");
+  assert(resolvedOut.startsWith(`${artifactRoot}${path.sep}`), "Output must stay under the approved artifact directory.");
+  return { workspaceId, out: resolvedOut };
+}
+
+export function guardOneProviderRequest(fetchImpl) {
+  let count = 0;
+  const guarded = async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.includes("/chat/completions")) {
+      count += 1;
+      assert(count === 1, "Provider request limit exceeded.");
+    }
+    return fetchImpl(input, init);
+  };
+  return { guarded, count: () => count };
+}
+
+export async function runContractSmoke({
+  source = process.env,
+  argv = process.argv.slice(2),
+  gateway = openAICompatibleModelGateway,
+  findWorkspace = (id) => prisma.workspace.findUnique({ where: { id }, select: { id: true, slug: true } }),
+  fetchImpl = globalThis.fetch,
+  writeEvidence = async (out, evidence) => {
+    await mkdir(path.dirname(out), { recursive: true });
+    await writeFile(out, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+  },
+} = {}) {
+  const config = smokeConfig(source, argv);
+  const workspace = await findWorkspace(config.workspaceId);
+  assert(workspace, "Approved validation workspace was not found.");
+  requireInternalValidationWorkspace(workspace, { purpose: "model route stream contract smoke" });
+  const guard = guardOneProviderRequest(fetchImpl);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = guard.guarded;
+  let next;
+  const deltas = new Map();
+  let toolDeltaCount = 0;
+  try {
+    const stream = gateway.chatEventStream({
+      workspaceId: workspace.id,
+      taskType: "AGENT",
+      model: env.MODEL_CHAT_CONVERSATION,
+      messages: [{ role: "user", content: `Call the required function with answer ${EXPECTED_ANSWER}.` }],
+      tools: [{ type: "function", function: {
+        name: TOOL_NAME,
+        description: "Return the fixed synthetic route-stream contract answer.",
+        parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+      } }],
+      tool_choice: "required",
+    });
+    next = await stream.next();
+    while (!next.done) {
+      if (next.value.type === "tool_call_delta") {
+        toolDeltaCount += 1;
+        const current = deltas.get(next.value.index) ?? { name: "", arguments: "" };
+        current.name += next.value.nameDelta ?? "";
+        current.arguments += next.value.argumentsDelta;
+        deltas.set(next.value.index, current);
+      }
+      next = await stream.next();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const terminal = next?.value;
+  const tool = terminal?.tool_calls?.[0];
+  const streamed = deltas.get(0);
+  let args;
+  try { args = JSON.parse(tool?.function.arguments ?? ""); } catch { throw new Error("Terminal wrapper arguments were not JSON."); }
+  assert(guard.count() === 1, "Exactly one provider request was required.");
+  assert(terminal?.tool_calls?.length === 1 && tool?.function.name === TOOL_NAME, "Required wrapper tool was not returned.");
+  assert(streamed?.name === TOOL_NAME && streamed.arguments === tool.function.arguments, "Tool name/arguments were not fully streamed.");
+  assert(toolDeltaCount > 0 && args?.answer === EXPECTED_ANSWER && terminal?.usage, "Wrapper or usage contract failed.");
+  const evidence = {
+    schemaVersion: "model-route-stream-contract/v1",
+    status: "pass",
+    providerRequestCount: 1,
+    toolDeltaCount,
+    streamedName: true,
+    streamedArguments: true,
+    terminalArgumentsValid: true,
+    usagePresent: true,
+  };
+  await writeEvidence(config.out, evidence);
+  return evidence;
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  runContractSmoke().then(() => console.log("Model route stream contract smoke: PASS (sanitized evidence written)."), () => {
+    console.error("Model route stream contract smoke: FAIL (details suppressed).");
+    process.exitCode = 1;
+  });
+}

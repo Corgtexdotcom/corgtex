@@ -1,6 +1,8 @@
 import { env, cosineSimilarity } from "@corgtex/shared";
 import type {
   ChatCompletionRequest,
+  ChatCompletionResponse,
+  ChatStreamEvent,
   EmbeddingRequest,
   ExtractionRequest,
   ModelGateway,
@@ -111,6 +113,37 @@ async function recordUsage(input: ModelUsageInput) {
   return usageDetails(input);
 }
 
+async function* fakeChatEventStream(
+  request: ChatCompletionRequest,
+): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse> {
+  const response = await fakeModelGateway.chat(request);
+  for (const word of response.content.split(" ")) {
+    throwIfAborted(request.signal);
+    yield { type: "content_delta", content: word + " " };
+    await delay(10, request.signal);
+  }
+  return response;
+}
+
+async function* fakeChatStream(
+  request: ChatCompletionRequest,
+): AsyncGenerator<string, ChatCompletionResponse> {
+  const events = fakeChatEventStream(request);
+  let completed = false;
+  try {
+    while (true) {
+      const next = await events.next();
+      if (next.done) {
+        completed = true;
+        return next.value;
+      }
+      if (next.value.type === "content_delta") yield next.value.content;
+    }
+  } finally {
+    if (!completed) await events.return(undefined as never);
+  }
+}
+
 export const fakeModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     const startedAt = Date.now();
@@ -141,15 +174,12 @@ export const fakeModelGateway: ModelGateway = {
     return { content, usage };
   },
 
-  async *chatStream(request: ChatCompletionRequest): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
-    const response = await this.chat(request);
-    const words = response.content.split(" ");
-    for (const word of words) {
-      throwIfAborted(request.signal);
-      yield word + " ";
-      await delay(10, request.signal);
-    }
-    return response;
+  async *chatEventStream(request: ChatCompletionRequest) {
+    return yield* fakeChatEventStream(request);
+  },
+
+  async *chatStream(request: ChatCompletionRequest) {
+    return yield* fakeChatStream(request);
   },
 
   async extract(request: ExtractionRequest) {
