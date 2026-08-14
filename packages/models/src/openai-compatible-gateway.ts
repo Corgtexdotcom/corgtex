@@ -820,7 +820,7 @@ function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unk
   if (fn.name != null && typeof fn.name !== "string") {
     throw new ChatStreamProtocolError("Streamed tool call name fragment must be a string.");
   }
-  if (fn.arguments !== undefined && typeof fn.arguments !== "string") {
+  if (fn.arguments != null && typeof fn.arguments !== "string") {
     throw new ChatStreamProtocolError("Streamed tool call arguments fragment must be a string.");
   }
   const idDelta = (tool.id ?? undefined) as string | undefined;
@@ -986,12 +986,12 @@ async function* completeChatEventStream(
           if (!data || typeof data !== "object" || Array.isArray(data)) throw new ChatStreamProtocolError("Streamed provider data must be an object.");
           const record = data as Record<string, unknown>; const choices = record.choices;
           if (choices !== undefined && !Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array when present.");
-          if (Array.isArray(choices)) for (const choice of choices) {
-            if (!choice || typeof choice !== "object" || Array.isArray(choice)) throw new ChatStreamProtocolError("Streamed choices must contain objects.");
-            const candidate = choice as Record<string, unknown>;
-            if (candidate.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
-          }
-          const delta = (Array.isArray(choices) ? (choices[0] as Record<string, unknown> | undefined)?.delta : undefined) as Record<string, unknown> | undefined;
+          if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
+          if (Array.isArray(choices) && choices.length === 0 && (!record.usage || typeof record.usage !== "object" || Array.isArray(record.usage))) throw new ChatStreamProtocolError("Empty streamed choices require a usage object.");
+          const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
+          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects.");
+          if (candidate?.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
+          const delta = candidate?.delta as Record<string, unknown> | undefined;
           if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
           const contentDelta = typeof delta?.content === "string" ? delta.content : "";
           const toolCalls = delta?.tool_calls;
