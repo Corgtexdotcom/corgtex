@@ -50,7 +50,6 @@ describe("model route stream contract smoke", () => {
   it("rejects unsafe provider configuration before any fetch", async () => {
     const writeEvidence = vi.fn(); const fetchImpl = vi.fn();
     await expect(runContractSmoke({ source: { ...source, MODEL_PROVIDER: "fake" }, argv: ["--out=.artifacts/model-route-stream-contract/preflight.json"], fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed");
-    expect(writeEvidence.mock.calls[0]?.[1]).toEqual({ schemaVersion: "model-route-stream-contract/v1", status: "fail", errorCode: "PROVIDER_CONFIGURATION_UNSAFE", failurePhase: "provider_preflight", providerRequestCount: 0 });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(writeEvidence.mock.calls[0]?.[1]).toEqual({ schemaVersion: "model-route-stream-contract/v1", status: "fail", errorCode: "PROVIDER_CONFIGURATION_UNSAFE", failurePhase: "provider_preflight", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
