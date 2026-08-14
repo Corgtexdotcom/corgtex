@@ -83,7 +83,7 @@ describe("tenant purge manifest contract", () => {
 
   it("snapshots target, SHA, key, policies, and bound reader methods before awaiting", async () => {
     const mutableTarget = { ...accountTarget } as { mode: "ACCOUNT_WORKSPACE"; accountId: string; deploymentId: string; workspaceId: string };
-    const mutableKey = Uint8Array.from(KEY);
+    const mutableKey = Uint8Array.from(KEY); Object.defineProperty(mutableKey, Symbol.iterator, { value: function* () { yield 1; } });
     const mutablePolicies = { ...POLICIES } as TenantPurgeManifestPolicies;
     const stableTopology = topology(accountTarget);
     let input: Parameters<typeof captureTenantPurgeManifestContract>[0];
@@ -169,7 +169,7 @@ describe("tenant purge manifest contract", () => {
       { ...topology(accountTarget), capturedAt: new Date("invalid") },
       { ...topology(accountTarget), blockers: ["UNKNOWN"] },
       { ...topology(accountTarget), blockers: ["LEGAL_HOLD", "LEGAL_HOLD"] },
-      { ...topology(accountTarget), blockers: sparse("LEGAL_HOLD") },
+      { ...topology(accountTarget), blockers: sparse("LEGAL_HOLD") }, { ...topology(accountTarget), blockers: new Array(2 ** 32 - 1) },
       { ...topology(accountTarget), workspace: { ...topology(accountTarget).workspace!, extra: true } },
       { ...topology(accountTarget), deployment: { ...topology(accountTarget).deployment!, hasProviderCutover: 1 } },
       accessorTopology, accessorArrayTopology, hiddenTopology, symbolTopology,

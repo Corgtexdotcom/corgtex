@@ -87,11 +87,10 @@ function exactArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) invalid(`Invalid tenant purge ${label}.`);
   const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
   const length = descriptors.length?.value;
-  const expected = Number.isInteger(length) && length >= 0 ? ["length", ...Array.from({ length }, (_, index) => String(index))] : [];
   const ownKeys = Reflect.ownKeys(descriptors);
-  if (ownKeys.some((key) => typeof key !== "string") || ownKeys.length !== expected.length
-    || expected.some((key) => !Object.hasOwn(descriptors, key) || !("value" in descriptors[key]!))) invalid(`Invalid tenant purge ${label}.`);
-  return expected.slice(1).map((key) => descriptors[key]!.value);
+  if (!Number.isInteger(length) || length < 0 || length > 100_000 || ownKeys.length !== length + 1
+    || ownKeys.some((key) => typeof key !== "string")) invalid(`Invalid tenant purge ${label}.`);
+  return Array.from({ length }, (_, index) => { const descriptor = descriptors[String(index)]; if (!descriptor || !("value" in descriptor)) invalid(`Invalid tenant purge ${label}.`); return descriptor.value; });
 }
 
 function uuidList(value: unknown, label: string): string[] {
@@ -193,8 +192,9 @@ export async function captureTenantPurgeManifestContract(input: {
   if (privateAuthority !== true) throw new AppError(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
   const target = targetSnapshot(targetValue);
   if (typeof capabilitySha !== "string" || !SHA.test(capabilitySha)) invalid("Invalid tenant purge capability SHA.");
-  if (!(redactionKey instanceof Uint8Array) || redactionKey.byteLength < 32) invalid("Invalid tenant purge redaction key.");
-  const redactionKeyBytes = Object.freeze(Array.from(Uint8Array.from(redactionKey)));
+  if (!(redactionKey instanceof Uint8Array)) invalid("Invalid tenant purge redaction key.");
+  const redactionKeyBytes = Object.freeze(Array.from(Uint8Array.prototype.values.call(redactionKey)));
+  if (redactionKeyBytes.length < 32) invalid("Invalid tenant purge redaction key.");
   const policies = policySnapshot(policyValue);
   if ((typeof reader !== "object" && typeof reader !== "function") || reader === null) invalid("Invalid tenant purge reader.");
   const isTargetAuthorizedMethod = reader.isTargetAuthorized;
