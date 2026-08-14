@@ -331,7 +331,6 @@ describe("processConversationTurn", () => {
 
   function turnContext(actor = testUserActor()) { return { workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor }; }
   function toolCall(id: string, name: string, args: Record<string, unknown> = {}) { return { id, function: { name, arguments: JSON.stringify(args) } }; }
-
   function streamResponse(chunks: string[], result: Record<string, any>) {
     return (async function* () {
       for (const chunk of chunks) {
@@ -1090,9 +1089,8 @@ describe("processConversationTurn", () => {
 
   it("does not bypass the model for compound CRM account requests", async () => {
     const actor = testUserActor();
-    chatStreamMock.mockReturnValueOnce(streamResponse(["I can help with both requests."], {
-      content: "I can help with both requests.",
-    }));
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }))
+      .mockReturnValueOnce(streamResponse(["I can help with both requests."], { content: "I can help with both requests." }));
 
     const { processConversationTurnStream } = await import("./conversation");
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({
@@ -1110,7 +1108,7 @@ describe("processConversationTurn", () => {
     expect(chatStreamMock).toHaveBeenCalled();
   });
 
-  it("closes the first model stream when the conversation stream is canceled", async () => {
+  it("closes the ordinary response stream when the conversation stream is canceled", async () => {
     const actor = testUserActor();
     let firstModelStreamClosed = false;
 
@@ -1122,7 +1120,7 @@ describe("processConversationTurn", () => {
       }
     }
 
-    chatStreamMock.mockReturnValueOnce(cancellableModelStream());
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" })).mockReturnValueOnce(cancellableModelStream());
 
     const { processConversationTurnStream } = await import("./conversation");
     const stream = processConversationTurnStream({
@@ -1163,7 +1161,7 @@ describe("processConversationTurn", () => {
       throw cancellationError;
     }
 
-    chatStreamMock.mockReturnValueOnce(canceledModelStream());
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" })).mockReturnValueOnce(canceledModelStream());
 
     const { processConversationTurnStream } = await import("./conversation");
     const stream = processConversationTurnStream({
@@ -1289,7 +1287,7 @@ describe("processConversationTurn", () => {
 
   it("streams a grounded CRM page-context fallback when the model returns empty text", async () => {
     const actor = testUserActor();
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" })).mockReturnValueOnce(streamResponse([], { content: "" }));
 
     const { processConversationTurnStream } = await import("./conversation");
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({
@@ -2441,7 +2439,7 @@ describe("processConversationTurn", () => {
     vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-2", version: 2 } as any);
     chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
     const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
-    expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying."); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-3", version: 1, status: "OPEN", author: {} } as any]); chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("fr", "query_actions")] })).mockReturnValueOnce(throwingStream(["Still working."])); const failed = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(failed.result.assistantMessage).toBe(failed.chunks.join("")); expect(failed.chunks.join("")).not.toMatch(/Updated|Still working/);
+    expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying."); expect(chunks.join("").match(/Updated\./g)).toHaveLength(1); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-3", version: 1, status: "OPEN", author: {} } as any]); chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("fr", "query_actions")] })).mockReturnValueOnce(throwingStream(["Still working."])); const failed = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(failed.result.assistantMessage).toBe(failed.chunks.join("")); expect(failed.chunks.join("")).not.toMatch(/Updated|Still working/);
   });
 
   it("associates mixed failures with safe guidance in both response paths", async () => {
@@ -2452,21 +2450,11 @@ describe("processConversationTurn", () => {
   });
 
   it.each([["VERSION_CONFLICT", "The record was modified by another request. Read the latest version and apply your changes again."], ["INVALID_INPUT", "Completion note is required."], ["OTHER", "The versioned update could not be completed. Read the current item version before retrying."]])(
-    "streams deterministic %s guidance instead of false success",
-    async (failureCode, expected) => {
-      const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction } = await import("@corgtex/domain");
-      vi.mocked(prisma.action.findMany).mockResolvedValue([{ id: "a-1", version: 1, status: "OPEN", author: {} } as any]);
-      vi.mocked(updateAction).mockRejectedValue(failureCode === "VERSION_CONFLICT" ? new AppError(409, failureCode, "conflict") : failureCode === "INVALID_INPUT" ? new AppError(400, failureCode, expected) : new Error("private failure"));
-      chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nr", "query_actions")] })
-        .mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nw", "update_action", { actionId: "a-1", expectedVersion: 1 })] });
-      chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] }))
-        .mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-1", expectedVersion: 1 })] }));
-      const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
-      expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe(expected);
-      const { chunks, result } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
-      expect(chunks.join("")).toBe(expected);
-      expect(result.assistantMessage).toBe(expected);
-      expect(result.assistantMessage).not.toContain("private failure");
+    "streams deterministic %s guidance instead of false success", async (failureCode, expected) => {
+      const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction } = await import("@corgtex/domain"); vi.mocked(prisma.action.findMany).mockResolvedValue([{ id: "a-1", version: 1, status: "OPEN", author: {} } as any]);
+      vi.mocked(updateAction).mockRejectedValue(failureCode === "VERSION_CONFLICT" ? new AppError(409, failureCode, "conflict") : failureCode === "INVALID_INPUT" ? new AppError(400, failureCode, expected) : new Error("private failure")); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nr", "query_actions")] }).mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nw", "update_action", { actionId: "a-1", expectedVersion: 1 })] });
+      chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-1", expectedVersion: 1 })] })); const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
+      expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe(expected); const { chunks, result } = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(chunks.join("")).toBe(expected); expect(result.assistantMessage).toBe(expected); expect(result.assistantMessage).not.toContain("private failure");
     },
   );
 
@@ -2478,21 +2466,12 @@ describe("processConversationTurn", () => {
 
   it("rejects guessed first-call updates without preserving claims in either response path", async () => {
     const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { updateAction, updateTension } = await import("@corgtex/domain");
-    chatMock.mockResolvedValueOnce({ content: "Updated.", tool_calls: [toolCall("a1", "update_action", { actionId: "a-1", expectedVersion: 1 })] })
-      .mockResolvedValueOnce({ content: "" });
-    const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
-    const result = await processConversationTurn(turnContext(actor));
-    expect(updateAction).not.toHaveBeenCalled();
-    expect(result.assistantMessage).toBe("The assistant did not return a natural-language response. Please retry or ask for a more specific summary.");
+    chatMock.mockResolvedValueOnce({ content: "Updated.", tool_calls: [toolCall("a1", "update_action", { actionId: "a-1", expectedVersion: 1 })] }).mockResolvedValueOnce({ content: "" }); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); const result = await processConversationTurn(turnContext(actor));
+    expect(updateAction).not.toHaveBeenCalled(); expect(result.assistantMessage).toBe("The assistant did not return a natural-language response. Please retry or ask for a more specific summary.");
     expect(chatMock.mock.calls[0][0].tools.map((tool: any) => tool.function.name)).not.toEqual(expect.arrayContaining(["update_action", "update_tension"]));
     expect(chatMock.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["update_action", "update_tension"]));
-    chatStreamMock.mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t1", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] }))
-      .mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t2", "update_tension", { tensionId: "t-1", expectedVersion: 1 }), toolCall("mixed", "query_tensions")] }));
-    const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
-    expect(updateTension).not.toHaveBeenCalled();
-    expect(prisma.tension.findMany).not.toHaveBeenCalled();
-    expect(chunks.join("")).toContain("could not safely apply");
-    expect(chunks.join("")).not.toContain("Unverified");
+    chatStreamMock.mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t1", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] })).mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t2", "update_tension", { tensionId: "t-1", expectedVersion: 1 }), toolCall("mixed", "query_tensions")] })); const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
+    expect(updateTension).not.toHaveBeenCalled(); expect(prisma.tension.findMany).not.toHaveBeenCalled(); expect(chunks.join("")).toContain("could not safely apply"); expect(chunks.join("")).not.toContain("Unverified");
   });
 
   it("preserves ordinary follow-ups and incrementally streams no-tool chat", async () => {
@@ -2506,7 +2485,12 @@ describe("processConversationTurn", () => {
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({ ...turnContext(actor), userMessage: "Show actions." }));
     expect(chunks.join("")).toBe("Useful streamed response.");
     expect(result.assistantMessage).toBe("Useful streamed response.");
-    chatStreamMock.mockReturnValueOnce(throwingStream(["Partial response."])); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Partial response."); chatStreamMock.mockReturnValueOnce(streamResponse(["Hello", " world."], { content: "Hello world." })); const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } });
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" })).mockReturnValueOnce(throwingStream(["Partial response."])); const partial = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(partial.chunks.join("")).toBe("Partial response."); expect(partial.result.assistantMessage).toBe(partial.chunks.join("")); chatStreamMock.mockReturnValueOnce(streamResponse(["Ignored draft."], { content: "Ignored draft." })).mockReturnValueOnce(streamResponse(["Hello", " world."], { content: "Hello world." })); const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } }); expect(chatStreamMock.mock.calls.at(-1)?.[0].tools).toBeUndefined();
+  });
+
+  it.each(["Revise this action's title.", "Adjust the assignee.", "The other one too."])("keeps versioned follow-up tools for contextual wording: %s", async (userMessage) => {
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse(["Current action."], { content: "Current action." })); const { processConversationTurnStream } = await import("./conversation"); await collectConversationStream(processConversationTurnStream({ ...turnContext(), userMessage }));
+    expect(chatStreamMock.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["update_action", "update_tension"]));
   });
 
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {

@@ -888,6 +888,13 @@ function versionedUpdateFailure(executed: ExecutedConversationToolResult[], fail
   const failedSummary = failures.sort((left, right) => left.id.localeCompare(right.id)).map(({ id: failedId, guidance }) => `${failedId} — ${guidance}`).join("; "); return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedSummary}` : `Failed update result — ${failedSummary}`;
 }
 
+async function collectChatStream(stream: AsyncGenerator<string, import("@corgtex/models").ChatCompletionResponse>) {
+  const iterator = stream[Symbol.asyncIterator](); let message = ""; let completed = false;
+  try { while (true) { const next = await iterator.next(); if (next.done) { completed = true; return { message, response: next.value, error: null }; } message += next.value; } }
+  catch (error) { return { message, response: null, error }; }
+  finally { if (!completed) await closeAsyncIterator(iterator); }
+}
+
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
   if (typeof iterator.return !== "function") return;
   try {
@@ -1341,7 +1348,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   messages.push({ role: "user", content: ctx.userMessage });
-  const versionedUpdateRequested = /\b(?:update|edit|change|modify|fix|rename|assign|reassign|unassign|complete|finish|resolve|open|reopen|close|cancel|defer|postpone|move|shift|set|mark|make|apply|save|start|begin|resume|pause|draft|clear|claim|take|yes|confirm|okay|ok|proceed|do it|go ahead)\b/i.test(ctx.userMessage); const followupTools = (await toolsForContext(ctx)).filter(({ function: tool }) => versionedUpdateRequested || !isVersionedUpdateTool(tool.name));
+  const followupTools = await toolsForContext(ctx);
   const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
   let finalMessage = "";
@@ -1363,6 +1370,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
 
   let firstResult: import("@corgtex/models").ChatCompletionResponse | null = null;
   let firstStreamDone = false;
+  let firstMessage = "";
   try {
     while (true) {
       const { done, value } = await iterator.next();
@@ -1371,11 +1379,10 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         firstResult = value;
         break;
       }
-      finalMessage += value; if (!versionedUpdateRequested) yield value;
+      firstMessage += value;
     }
   } catch (error) {
     firstResult = null;
-    if (finalMessage && versionedUpdateRequested) yield finalMessage;
     throwIfConversationCanceled(ctx, error);
   } finally {
     if (!firstStreamDone) {
@@ -1384,13 +1391,22 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   throwIfConversationCanceled(ctx);
-  const versionReadPending = versionedUpdateRequested && firstResult?.tool_calls?.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions"); if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
-  else if (finalMessage && firstStreamDone && versionedUpdateRequested && !versionReadPending) yield finalMessage;
-
-  if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
+  if (firstResult && !firstResult.tool_calls?.length) {
+    const iterator = defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
+      model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT",
+      messages: [...messages, { role: "system", content: "Respond with natural language only. Do not claim that a work item was changed; no tools are available in this response." }],
+      signal: ctx.signal })[Symbol.asyncIterator]();
+    let completed = false;
+    try { while (true) { const next = await iterator.next(); if (next.done) { completed = true; break; } finalMessage += next.value; yield next.value; } }
+    catch (error) { throwIfConversationCanceled(ctx, error); }
+    finally { if (!completed) await closeAsyncIterator(iterator); }
+  } else if (firstResult?.tool_calls?.length) {
     toolExecutionAttempted = true;
     messages.push({ role: "assistant", content: firstResult.content || "", tool_calls: firstResult.tool_calls });
     const actor = requireConversationToolActor(ctx);
+    const versionReadPending = firstResult.tool_calls.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions");
+    const initialMutationRejected = firstResult.tool_calls.some(({ function: tool }) => isVersionedUpdateTool(tool.name));
+    finalMessage = versionReadPending || initialMutationRejected ? "" : firstMessage;
 
     for (const call of firstResult.tool_calls) {
       const handler = TOOL_HANDLERS[call.function.name];
@@ -1446,7 +1462,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
             followupResult = value;
             break;
           }
-          followupMessage += value; if (!versionedUpdateRequested) yield value;
+          followupMessage += value;
         }
       } catch (error) {
         followupStreamFailed = true;
@@ -1457,43 +1473,25 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         }
       }
     }
-    const followupState = followupResult ? await executeVersionedFollowupTools(followupResult, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
-    if (followupStreamFailed && versionReadPending) finalMessage = ""; else if (!versionedUpdateRequested) finalMessage += followupMessage;
-    if (followupState === "none" && !followupStreamFailed && followupMessage) { if (versionedUpdateRequested) { followupMessage = (versionReadPending ? finalMessage : "") + followupMessage; yield followupMessage; finalMessage = followupMessage; } } else if (followupState === "rejected") {
-      followupMessage = UNSAFE_VERSIONED_FOLLOWUP;
-      yield followupMessage;
-      finalMessage = followupMessage;
-    } else if (followupState === "executed") {
-      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults); if (updateFailure) finalMessage = ""; else if (finalMessage) yield finalMessage;
-      followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
-      let postToolModelRan = false;
+    const followupState = initialMutationRejected ? "rejected"
+      : followupResult ? await executeVersionedFollowupTools(followupResult, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
+    if (followupStreamFailed && versionReadPending) finalMessage = "";
+    if (followupState === "none") { if (!followupStreamFailed) finalMessage = (versionReadPending ? "" : finalMessage) + followupMessage; if (finalMessage) yield finalMessage; }
+    else if (followupState === "rejected") { finalMessage = UNSAFE_VERSIONED_FOLLOWUP; yield finalMessage; }
+    else if (followupState === "executed") {
+      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+      if (updateFailure) { finalMessage = updateFailure; yield finalMessage; }
+      else { finalMessage = firstMessage + followupMessage; if (finalMessage) yield finalMessage; }
+      let summary = "";
       if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
-        try {
-          postToolModelRan = true;
-          followupMessage = "";
-          for await (const chunk of defaultModelGateway.chatStream({
-            workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION,
-            taskType: "AGENT", messages, signal: ctx.signal,
-          })) {
-            followupMessage += chunk;
-          }
-        } catch (error) {
-          followupMessage = "";
-          throwIfConversationCanceled(ctx, error);
-        }
+        const completed = await collectChatStream(defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
+          model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }));
+        throwIfConversationCanceled(ctx, completed.error); summary = completed.error ? "" : completed.message;
       }
-      if (postToolModelRan && followupMessage) {
-        yield followupMessage;
-        finalMessage += followupMessage;
-      }
-      if (!postToolModelRan || !followupMessage) {
-        followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
-        yield followupMessage;
-        finalMessage += followupMessage;
-      }
+      if (!updateFailure) { summary ||= VERSIONED_UPDATE_SUMMARY_UNAVAILABLE; yield summary; finalMessage += summary; }
       throwIfConversationCanceled(ctx);
     }
-    if (!followupMessage.trim() || followupStreamFailed) {
+    if (followupState === "none" && (!followupMessage.trim() || followupStreamFailed)) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
         ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
       if (toolFallback) {
