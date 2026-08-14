@@ -93,6 +93,8 @@ describe("tenant purge derived selector registry", () => {
     const addedParent = cloneModels();
     addedParent.find((model) => model.name === "AgentStep")!.fields.push({ name: "alternateAgentRun", kind: "object", type: "AgentRun", relationFromFields: ["alternateAgentRunId"] });
     expect(() => assertTenantPurgeDerivedSelectorRegistry(addedParent)).toThrow(/paths=AgentStep/);
+    addedParent.find((model) => model.name === "AgentStep")!.fields.splice(-1, 1, { name: "alternateRuntime", kind: "object", type: "AppRuntime", relationFromFields: ["alternateRuntimeId"] });
+    expect(() => assertTenantPurgeDerivedSelectorRegistry(addedParent)).toThrow(/paths=AgentStep/);
 
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, selectorsWithout((selector) => selector.model === "AgentStep"))).toThrow(/missing=AgentStep/);
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, selectorsWithout((selector) => selector.kind === "SHARED_PRESERVE" && selector.model === "User"))).toThrow(/shared=User/);

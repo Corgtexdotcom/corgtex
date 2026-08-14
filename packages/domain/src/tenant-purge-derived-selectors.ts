@@ -150,7 +150,8 @@ export function assertTenantPurgeDerivedSelectorRegistry(models: readonly Tenant
       for (const relation of modelMap.get(model)?.fields ?? []) if (relation.kind === "object" && relation.relationFromFields?.length) {
         const nextPath = [...path, relation.name];
         if (TENANT_PURGE_TARGET_MODELS.includes(relation.type as TenantPurgeTargetModel)) found.add(nextPath.join("."));
-        else if (!preserveModelsToSkip.has(relation.type)) if (terminalFields.has(relation.type)) for (const terminal of terminalFields.get(relation.type)!) found.add([...nextPath, terminal].join(".")); else if (!seen.has(relation.type)) walk(relation.type, nextPath, new Set([...seen, relation.type]));
+        else if (terminalFields.has(relation.type)) for (const terminal of terminalFields.get(relation.type)!) found.add([...nextPath, terminal].join("."));
+        else if (!preserveModelsToSkip.has(relation.type) && !seen.has(relation.type)) walk(relation.type, nextPath, new Set([...seen, relation.type]));
       }
     };
     walk(start, [], new Set([start]));
