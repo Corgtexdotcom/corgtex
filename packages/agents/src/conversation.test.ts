@@ -72,9 +72,7 @@ vi.mock("@corgtex/shared", () => ({
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
-    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() },
-    tension: { findMany: vi.fn().mockResolvedValue([]) },
-    action: { findMany: vi.fn().mockResolvedValue([]) },
+    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() }, tension: { findMany: vi.fn().mockResolvedValue([]) }, action: { findMany: vi.fn().mockResolvedValue([]) },
     conversationPendingOperation: {
       create: conversationPendingOperationCreateMock,
       count: conversationPendingOperationCountMock,
@@ -331,13 +329,8 @@ describe("processConversationTurn", () => {
     };
   }
 
-  function turnContext(actor = testUserActor()) {
-    return { workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor };
-  }
-
-  function toolCall(id: string, name: string, args: Record<string, unknown> = {}) {
-    return { id, function: { name, arguments: JSON.stringify(args) } };
-  }
+  function turnContext(actor = testUserActor()) { return { workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor }; }
+  function toolCall(id: string, name: string, args: Record<string, unknown> = {}) { return { id, function: { name, arguments: JSON.stringify(args) } }; }
 
   function streamResponse(chunks: string[], result: Record<string, any>) {
     return (async function* () {
@@ -2449,6 +2442,13 @@ describe("processConversationTurn", () => {
     chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
     const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
     expect(chunks.join("")).toBe("The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.");
+  });
+
+  it("associates mixed failures with safe guidance in both response paths", async () => {
+    const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction, updateTension } = await import("@corgtex/domain");
+    vi.mocked(prisma.action.findMany).mockResolvedValue([{ id: "a-mixed", version: 2, status: "OPEN", author: {} } as any]); vi.mocked(prisma.tension.findMany).mockResolvedValue([{ id: "t-mixed", version: 3, status: "OPEN", author: {} } as any]); vi.mocked(updateAction).mockRejectedValue(new AppError(400, "INVALID_INPUT", "Completion note is required.")); vi.mocked(updateTension).mockRejectedValue(new AppError(409, "VERSION_CONFLICT", "conflict"));
+    const reads = [toolCall("ra", "query_actions"), toolCall("rt", "query_tensions")]; const writes = [toolCall("wa", "update_action", { actionId: "a-mixed", expectedVersion: 2 }), toolCall("wt", "update_tension", { tensionId: "t-mixed", expectedVersion: 3 })]; chatMock.mockResolvedValueOnce({ content: "", tool_calls: reads }).mockResolvedValueOnce({ content: "", tool_calls: writes }); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: reads })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: writes }));
+    const expected = "Failed update result — action a-mixed — Completion note is required.; tension t-mixed — The record was modified by another request. Read the latest version and apply your changes again."; const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe(expected); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe(expected);
   });
 
   it.each([["VERSION_CONFLICT", "The record was modified by another request. Read the latest version and apply your changes again."], ["INVALID_INPUT", "Completion note is required."], ["OTHER", "The versioned update could not be completed. Read the current item version before retrying."]])(

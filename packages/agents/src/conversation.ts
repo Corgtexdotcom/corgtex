@@ -879,13 +879,13 @@ const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed
 const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying.";
 
 function versionedUpdateFailure(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
-  const instruction = [...executed.flatMap(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && typeof result.instruction === "string" ? [result.instruction] : []),
-    ...failed.flatMap(({ toolName, error }) => isVersionedUpdateTool(toolName) && error ? [error] : [])].at(-1);
-  const guidance = instruction ?? (failed.some(({ toolName }) => isVersionedUpdateTool(toolName)) ? VERSIONED_UPDATE_FAILED : null);
   const id = ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => `${toolName === "update_action" ? "action" : "tension"} ${String(args[toolName === "update_action" ? "actionId" : "tensionId"])}`;
-  const succeeded = executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true).map(id);
-  const failedIds = [...executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success !== true), ...failed.filter(({ toolName }) => isVersionedUpdateTool(toolName))].map(id);
-  return guidance && succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedIds.join(", ")}. ${guidance}` : guidance;
+  const failures = [...executed.flatMap((item) => isVersionedUpdateTool(item.toolName) && isRecord(item.result) && item.result.success !== true ? [{ id: id(item), guidance: typeof item.result.instruction === "string" ? item.result.instruction : VERSIONED_UPDATE_FAILED }] : []),
+    ...failed.flatMap((item) => isVersionedUpdateTool(item.toolName) ? [{ id: id(item), guidance: item.error || VERSIONED_UPDATE_FAILED }] : [])];
+  if (!failures.length) return null;
+  const succeeded = executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true).map(id); const [only] = failures;
+  if (only && failures.length === 1) return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${only.id}. ${only.guidance}` : only.guidance;
+  const failedSummary = failures.sort((left, right) => left.id.localeCompare(right.id)).map(({ id: failedId, guidance }) => `${failedId} — ${guidance}`).join("; "); return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedSummary}` : `Failed update result — ${failedSummary}`;
 }
 
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
