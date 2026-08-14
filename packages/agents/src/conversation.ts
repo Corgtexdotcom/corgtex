@@ -1384,8 +1384,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   throwIfConversationCanceled(ctx);
-  if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
-  else if (finalMessage && firstStreamDone) yield finalMessage;
+  const versionReadPending = firstResult?.tool_calls?.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions"); if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
+  else if (finalMessage && firstStreamDone && !versionReadPending) yield finalMessage;
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
@@ -1461,14 +1461,14 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       followupResult, actor, ctx, messages, executedToolResults, failedToolResults,
     ) : "none";
     if (followupState === "none" && !followupStreamFailed && followupMessage) {
-      yield followupMessage;
-      finalMessage += followupMessage;
+      followupMessage = (versionReadPending ? finalMessage : "") + followupMessage; yield followupMessage;
+      finalMessage = followupMessage;
     } else if (followupState === "rejected") {
       followupMessage = UNSAFE_VERSIONED_FOLLOWUP;
       yield followupMessage;
-      finalMessage += followupMessage;
+      finalMessage = followupMessage;
     } else if (followupState === "executed") {
-      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults); if (updateFailure) finalMessage = ""; else if (finalMessage) yield finalMessage;
       followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
       let postToolModelRan = false;
       if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {

@@ -2439,9 +2439,9 @@ describe("processConversationTurn", () => {
     const { processConversationTurnStream } = await import("./conversation"); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Partial update result — succeeded: tension t-2; failed: action a-2. The record was modified by another request. Read the latest version and apply your changes again.");
     vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-2", version: 1, status: "OPEN", author: {} } as any]);
     vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-2", version: 2 } as any);
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
+    chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
     const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
-    expect(chunks.join("")).toBe("The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.");
+    expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.");
   });
 
   it("associates mixed failures with safe guidance in both response paths", async () => {
@@ -2459,7 +2459,7 @@ describe("processConversationTurn", () => {
       vi.mocked(updateAction).mockRejectedValue(failureCode === "VERSION_CONFLICT" ? new AppError(409, failureCode, "conflict") : failureCode === "INVALID_INPUT" ? new AppError(400, failureCode, expected) : new Error("private failure"));
       chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nr", "query_actions")] })
         .mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nw", "update_action", { actionId: "a-1", expectedVersion: 1 })] });
-      chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] }))
+      chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] }))
         .mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-1", expectedVersion: 1 })] }));
       const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
       expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe(expected);
