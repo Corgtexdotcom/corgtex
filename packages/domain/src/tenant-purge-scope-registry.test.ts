@@ -97,6 +97,8 @@ describe("tenant purge scope registry", () => {
     expect(parseTenantPurgeDirectRelations(syntheticSchema({ optional: true }))[0]).toMatchObject({
       relationOptional: true, fieldOptional: [true], onDelete: "SetNull", onUpdate: "Cascade",
     });
+    const mixed = syntheticSchema({ optional: true }).replace("model Workspace { id String @id synthetic Synthetic[] }", "model Workspace {\n  id String @id\n  id2 String @unique\n  synthetic Synthetic[]\n}").replace("workspaceId String?", "workspaceId String?\n  requiredId String").replace("fields: [workspaceId]", "fields: [workspaceId, requiredId]").replace("references: [id]", "references: [id, id2]");
+    expect(parseTenantPurgeDirectRelations(mixed)[0]).toMatchObject({ relationOptional: true, fieldOptional: [true, false], onDelete: "Restrict", onDeleteSource: "POSTGRESQL_DEFAULT" });
     const decoded = decodeDirectRelations("WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Restrict|Cascade;WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|1|1|SetNull|Cascade", "0100");
     expect(decoded).toMatchObject([{ onDeleteSource: "POSTGRESQL_DEFAULT", onUpdateSource: "EXPLICIT" }, { onDeleteSource: "POSTGRESQL_DEFAULT", onUpdateSource: "POSTGRESQL_DEFAULT" }]);
     expect(() => decodeDirectRelations("WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Restrict|Cascade", "1")).toThrow(/source encoding/);

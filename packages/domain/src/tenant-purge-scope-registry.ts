@@ -173,14 +173,14 @@ function argumentValue(args: readonly string[], key: string) {
   return args.find((value) => new RegExp(`^${key}\\s*:`).test(value))?.replace(/^[^:]+:/, "").trim();
 }
 
-function parseAction(args: readonly string[], key: "onDelete" | "onUpdate", relationOptional: boolean): [PrismaReferentialAction, ReferentialActionSource] {
+function parseAction(args: readonly string[], key: "onDelete" | "onUpdate", fieldOptional: readonly boolean[]): [PrismaReferentialAction, ReferentialActionSource] {
   const explicit = argumentValue(args, key);
   if (explicit !== undefined) {
     if (!/^\w+$/.test(explicit)) throw new Error(`Malformed Prisma ${key} action.`);
     if (!PRISMA_REFERENTIAL_ACTIONS.includes(explicit as PrismaReferentialAction)) throw new Error(`Unsupported Prisma ${key} action: ${explicit}`);
     return [explicit as PrismaReferentialAction, "EXPLICIT"];
   }
-  return [key === "onUpdate" ? "Cascade" : relationOptional ? "SetNull" : "Restrict", "POSTGRESQL_DEFAULT"];
+  return [key === "onUpdate" ? "Cascade" : fieldOptional.every(Boolean) ? "SetNull" : "Restrict", "POSTGRESQL_DEFAULT"];
 }
 
 export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDirectRelation[] {
@@ -205,8 +205,9 @@ export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDire
       const fields = fieldsMatch[1].split(",").map((field) => field.trim());
       if (fields.some((field) => !fieldOptional.has(field))) throw new Error(`Unknown direct target field: ${model}.${relation.field}`);
       const relationOptional = relation.optional;
-      const [onDelete, onDeleteSource] = parseAction(args, "onDelete", relationOptional);
-      const [onUpdate, onUpdateSource] = parseAction(args, "onUpdate", relationOptional);
+      const optionalFields = fields.map((field) => fieldOptional.get(field)!);
+      const [onDelete, onDeleteSource] = parseAction(args, "onDelete", optionalFields);
+      const [onUpdate, onUpdateSource] = parseAction(args, "onUpdate", optionalFields);
       const positionalName = args[0]?.match(/^"((?:\\.|[^"])*)"$/)?.[1];
       const namedValue = argumentValue(args, "name"); const namedName = namedValue?.match(/^"((?:\\.|[^"])*)"$/)?.[1];
       if (namedValue !== undefined && !namedName) throw new Error(`Malformed direct target relation name: ${model}.${relation.field}`);
@@ -214,7 +215,7 @@ export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDire
         model, relationField: relation.field, target: relation.target,
         relationName: namedName ?? positionalName ?? null, fields,
         references: referencesMatch[1].split(",").map((field) => field.trim()), relationOptional,
-        fieldOptional: fields.map((field) => fieldOptional.get(field)!), onDelete, onDeleteSource, onUpdate, onUpdateSource,
+        fieldOptional: optionalFields, onDelete, onDeleteSource, onUpdate, onUpdateSource,
       });
     }
   }
