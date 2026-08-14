@@ -1439,12 +1439,7 @@ describe("openAICompatibleModelGateway", () => {
   });
 
   it("streams ordered content and split indexed tool-call events from one required request", async () => {
-    restoreEnv();
-    Object.assign(process.env, {
-      MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key",
-      MODEL_BASE_URL: "https://openrouter.ai/api/v1", APP_URL: "https://corgtex.example.test",
-      MODEL_CHAT_DEFAULT: "qwen/qwen3-32b",
-    });
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", APP_URL: "https://corgtex.example.test", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
     const frames = [
       { choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_", function: { name: "respond_", arguments: '{"a":"' } }] } }] },
@@ -1458,23 +1453,14 @@ describe("openAICompatibleModelGateway", () => {
     const body = new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } });
     const fetchMock = vi.fn().mockResolvedValue(new Response(body, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
-    const usageModule = await import("./usage");
-    vi.mocked(usageModule.recordModelUsage).mockClear();
+    const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear();
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
-    const stream = openAICompatibleModelGateway.chatEventStream({
-      workspaceId: "ws-1", taskType: "AGENT", messages: [{ role: "user", content: "route" }],
-      tools: [{ type: "function", function: { name: "respond_conversation", description: "route", parameters: {} } }],
-      tool_choice: "required",
-    });
-    const events = [];
-    let next = await stream.next();
+    const stream = openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "AGENT", messages: [{ role: "user", content: "route" }], tools: [{ type: "function", function: { name: "respond_conversation", description: "route", parameters: {} } }], tool_choice: "required" });
+    const events = []; let next = await stream.next();
     while (!next.done) { events.push(next.value); next = await stream.next(); }
     expect(events).toContainEqual({ type: "content_delta", content: "café 漢" });
     expect(events[0]).toMatchObject({ type: "tool_call_delta", index: 1, argumentsDelta: '{"b":' });
-    expect(next.value.tool_calls).toEqual([
-      { id: "call_a", type: "function", function: { name: "respond_conversation", arguments: '{"a":"ok"}' } },
-      { id: "call_b", type: "function", function: { name: "other", arguments: '{"b":"2"}' } },
-    ]);
+    expect(next.value.tool_calls).toEqual([{ id: "call_a", type: "function", function: { name: "respond_conversation", arguments: '{"a":"ok"}' } }, { id: "call_b", type: "function", function: { name: "other", arguments: '{"b":"2"}' } }]);
     expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toMatchObject({ tool_choice: "required" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
@@ -1505,12 +1491,19 @@ describe("openAICompatibleModelGateway", () => {
     await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
   });
-  it.each([["malformed JSON", 'data: {"choices":BROKEN}'], ["a non-array tool-call container", `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0 } } }] })}`], ["non-string content", `data: ${JSON.stringify({ choices: [{ delta: { content: 7 } }] })}`]])("rejects %s between tool argument fragments", async (_label, middle) => {
+  it.each([["malformed JSON", 'data: {"choices":BROKEN}'], ["a non-array choices container", 'data: {"choices":{}}'], ["a non-object choice", 'data: {"choices":[7]}'], ["a non-object delta", 'data: {"choices":[{"delta":7]}'], ["a non-array tool-call container", `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0 } } }] })}`], ["non-string content", `data: ${JSON.stringify({ choices: [{ delta: { content: 7 } }] })}`]])("rejects %s between tool argument fragments", async (_label, middle) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
     const first = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: '{"x":' } }] } }] }; const last = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(first)}\n\n${middle}\n\ndata: ${JSON.stringify(last)}\n\ndata: [DONE]\n\n`, { status: 200 })));
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
     const consume = async () => { for await (const _ of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } }; await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
+  });
+  it("validates a complete mixed frame before yielding any event", async () => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const frame = { choices: [{ delta: { content: "must-not-leak", tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: "{}" } }, { index: -1, id: "call_b", function: { name: "tool", arguments: "{}" } }] } }] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`, { status: 200 })));
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const stream = openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
+    await expect(stream.next()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
   });
   it("treats nullable optional tool continuation fields as absent", async () => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
@@ -1526,7 +1519,6 @@ describe("openAICompatibleModelGateway", () => {
     while (!next.done) next = await stream.next();
     expect(next.value.tool_calls?.[0]).toMatchObject({ id: "call_a", function: { name: "tool", arguments: '{"x":1}' } });
   });
-
   it.each([
     ["an invalid index", { index: -1, id: "call_a", function: { name: "tool", arguments: "{}" } }],
     ["an invalid id fragment", { index: 0, id: 7, function: { name: "tool", arguments: "{}" } }],
@@ -1534,6 +1526,7 @@ describe("openAICompatibleModelGateway", () => {
     ["an invalid non-null type", { index: 0, id: "call_a", type: 7, function: { name: "tool", arguments: "{}" } }],
     ["an invalid non-null function", { index: 0, id: "call_a", function: 7 }],
     ["an incomplete identity", { index: 0, function: { arguments: "{}" } }],
+    ["a sparse completed index", { index: 1, id: "call_b", function: { name: "tool", arguments: "{}" } }],
   ])("fails closed on %s and records accepted-request usage once", async (_label, tool) => {
     restoreEnv();
     Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
@@ -1654,14 +1647,14 @@ describe("openAICompatibleModelGateway", () => {
     const toolDelta = JSON.stringify({
       choices: [{
         delta: {
+          content: "Foundry",
           tool_calls: [0, 1].map((index) => ({ index, id: `call_${index}`, function: { name: "lookup_customer", arguments: streamedArguments } })),
         },
       }],
     });
-    const contentDelta = JSON.stringify({ choices: [{ delta: { content: "Foundry" } }] });
     const streamBody = new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode(`data: ${toolDelta}\n\ndata: ${contentDelta}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${toolDelta}\n\n`));
       },
       cancel: cancelMock,
     });
@@ -1692,7 +1685,7 @@ describe("openAICompatibleModelGateway", () => {
     });
 
     const first = await stream.next();
-    expect(first.value).toMatchObject({ type: "tool_call_delta", index: 0 });
+    expect(first.value).toEqual({ type: "content_delta", content: "Foundry" });
 
     await stream.return({
       content: "",

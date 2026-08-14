@@ -26,7 +26,7 @@ export async function runContractSmoke({
   source = process.env, argv = process.argv.slice(2),
   gateway = openAICompatibleModelGateway,
   findWorkspace = (id) => prisma.workspace.findUnique({ where: { id }, select: { id: true, slug: true, plan: true, modelUsageBudget: { select: { id: true } } } }),
-  countResidue = (id) => Promise.all([prisma.modelUsage.count({ where: { workspaceId: id } }), prisma.aiUsageLedgerEntry.count({ where: { workspaceId: id } })]),
+  countResidue = (id) => Promise.all([prisma.workspace.count({ where: { id } }), prisma.modelUsage.count({ where: { workspaceId: id } }), prisma.aiUsageLedgerEntry.count({ where: { workspaceId: id } })]),
   fetchImpl = globalThis.fetch,
   writeEvidence = async (out, evidence) => { await mkdir(path.dirname(out), { recursive: true }); await writeFile(out, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 }); },
 } = {}) {
@@ -92,8 +92,9 @@ export async function runContractSmoke({
   } catch {
     if (config.preflightOnly && failurePhase === "provider_stream" && guard.count() === 1) {
       const residueAfter = await countResidue(config.workspaceId);
-      if (residueBefore?.every((count) => count === 0) && residueAfter.every((count) => count === 0)) {
-        const evidence = { schemaVersion: "model-route-stream-contract/v1", status: "pass", mode: "preflight-only", providerRequestCount: 0, localFetchBoundaryCount: 1, usageRowCount: 0, ledgerRowCount: 0 };
+      const residueDelta = residueAfter.map((count, index) => count - (residueBefore?.[index] ?? Number.NaN));
+      if (residueDelta.length === 3 && residueDelta.every((count) => count === 0)) {
+        const evidence = { schemaVersion: "model-route-stream-contract/v1", status: "pass", mode: "preflight-only", providerRequestCount: 0, localFetchBoundaryCount: 1, workspaceRowDelta: 0, usageRowDelta: 0, ledgerRowDelta: 0 };
         await writeEvidence(config.out, evidence); return evidence;
       }
     }

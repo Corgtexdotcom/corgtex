@@ -841,18 +841,11 @@ function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unk
 }
 
 function completeToolCalls(toolCalls: Map<number, PartialToolCall>) {
-  return [...toolCalls.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([, tool]) => {
-      if (!tool.id || !tool.name) {
-        throw new ChatStreamProtocolError("Streamed tool call ended without a complete id and function name.");
-      }
-      return {
-        id: tool.id,
-        type: "function" as const,
-        function: { name: tool.name, arguments: tool.arguments },
-      };
-    });
+  return [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([index, tool], position) => {
+    if (index !== position) throw new ChatStreamProtocolError("Streamed tool call indexes must be contiguous from zero.");
+    if (!tool.id || !tool.name) throw new ChatStreamProtocolError("Streamed tool call ended without a complete id and function name.");
+    return { id: tool.id, type: "function" as const, function: { name: tool.name, arguments: tool.arguments } };
+  });
 }
 
 async function* completeChatEventStream(
@@ -930,7 +923,7 @@ async function* completeChatEventStream(
 
   const decoder = new TextDecoder();
   let content = "";
-  const toolCallParts = new Map<number, PartialToolCall>();
+  let toolCallParts = new Map<number, PartialToolCall>();
   let usageDetailsObj: any = null;
   let buffer = "";
   let streamCompleted = false;
@@ -984,23 +977,31 @@ async function* completeChatEventStream(
           break;
         }
         if (line.startsWith("data: ")) {
-          let data: any;
+          let data: unknown;
           try {
             data = JSON.parse(line.slice(6));
           } catch {
             throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
           }
-          const delta = data.choices?.[0]?.delta;
-          if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
-          if (typeof delta?.content === "string" && delta.content) {
-            content += delta.content;
-            yield { type: "content_delta", content: delta.content };
+          if (!data || typeof data !== "object" || Array.isArray(data)) throw new ChatStreamProtocolError("Streamed provider data must be an object.");
+          const record = data as Record<string, unknown>; const choices = record.choices;
+          if (choices !== undefined && !Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array when present.");
+          if (Array.isArray(choices)) for (const choice of choices) {
+            if (!choice || typeof choice !== "object" || Array.isArray(choice)) throw new ChatStreamProtocolError("Streamed choices must contain objects.");
+            const candidate = choice as Record<string, unknown>;
+            if (candidate.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
           }
+          const delta = (Array.isArray(choices) ? (choices[0] as Record<string, unknown> | undefined)?.delta : undefined) as Record<string, unknown> | undefined;
+          if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
+          const contentDelta = typeof delta?.content === "string" ? delta.content : "";
           const toolCalls = delta?.tool_calls;
           if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
-          const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(toolCallParts, tool)) : [];
-          for (const event of toolEvents) yield event;
-          if (data.usage) usageDetailsObj = data.usage;
+          const nextToolCallParts = new Map([...toolCallParts].map(([index, tool]) => [index, { ...tool }]));
+          const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(nextToolCallParts, tool)) : [];
+          const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents];
+          content += contentDelta; toolCallParts = nextToolCallParts;
+          if (record.usage) usageDetailsObj = record.usage;
+          for (const event of events) yield event;
         }
       }
     }
