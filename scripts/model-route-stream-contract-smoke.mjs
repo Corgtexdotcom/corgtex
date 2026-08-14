@@ -7,9 +7,7 @@ import { openAICompatibleModelGateway } from "@corgtex/models";
 import { requireInternalValidationWorkspace } from "./lib/validation-workspace.mjs";
 const TOOL_NAME = "respond_route_stream_contract";
 const EXPECTED_ANSWER = "route-stream-contract-ok";
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
-}
+function assert(condition, message) { if (!condition) throw new Error(message); }
 export function smokeConfig(source, argv = []) {
   assert(source.MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST === "1", "Paid-request acknowledgement is required.");
   const workspaceId = source.MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID?.trim();
@@ -20,12 +18,12 @@ export function smokeConfig(source, argv = []) {
   assert(resolvedOut.startsWith(`${artifactRoot}${path.sep}`), "Output must stay under the approved artifact directory.");
   return { workspaceId, out: resolvedOut };
 }
-export function guardOneProviderRequest(fetchImpl) {
+export function guardOneProviderRequest(fetchImpl, onRequest = () => {}) {
   let count = 0;
   const guarded = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url.includes("/chat/completions")) {
-      count += 1;
+      onRequest(); count += 1;
       assert(count === 1, "Provider request limit exceeded.");
     }
     return fetchImpl(input, init);
@@ -44,13 +42,15 @@ export async function runContractSmoke({
   },
 } = {}) {
   const config = smokeConfig(source, argv);
-  const guard = guardOneProviderRequest(fetchImpl);
   let failurePhase = "provider_preflight";
+  const guard = guardOneProviderRequest(fetchImpl, () => { failurePhase = "provider_stream"; });
   try {
-  const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : [];
-  const route = routes.find((entry) => entry?.model === (source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION));
+  const model = source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION; const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : [];
+  const route = routes.find((entry) => entry?.model === model);
   const provider = String(route?.provider ?? source.MODEL_PROVIDER ?? env.MODEL_PROVIDER).toLowerCase();
   assert(["openrouter", "openai", "azure-openai", "azure-foundry"].includes(provider), "Configured provider is not live-compatible.");
+  const authMode = route?.authMode ?? source.AZURE_OPENAI_AUTH_MODE ?? env.AZURE_OPENAI_AUTH_MODE; const credential = route?.apiKeyEnv ? source[route.apiKeyEnv] : provider.startsWith("azure-") ? source.AZURE_OPENAI_API_KEY ?? source.MODEL_API_KEY : source.MODEL_API_KEY;
+  assert(provider.startsWith("azure-") && authMode === "managed_identity" || Boolean(credential?.trim()), "Configured credential source is unavailable.");
   failurePhase = "workspace_validation";
   const workspace = await findWorkspace(config.workspaceId);
   assert(workspace, "Approved validation workspace was not found.");
@@ -60,12 +60,11 @@ export async function runContractSmoke({
   let next;
   const deltas = new Map();
   let toolDeltaCount = 0;
-  try {
-    failurePhase = "provider_stream";
+  failurePhase = "gateway_preparation"; try {
     const stream = gateway.chatEventStream({
       workspaceId: workspace.id,
       taskType: "AGENT",
-      model: env.MODEL_CHAT_CONVERSATION,
+      model,
       messages: [{ role: "user", content: `Call the required function with answer ${EXPECTED_ANSWER}.` }],
       tools: [{ type: "function", function: {
         name: TOOL_NAME,
@@ -114,7 +113,7 @@ export async function runContractSmoke({
   } catch {
     if (failurePhase !== "evidence_write") await writeEvidence(config.out, {
       schemaVersion: "model-route-stream-contract/v1", status: "fail",
-      errorCode: failurePhase === "provider_preflight" ? "PROVIDER_CONFIGURATION_UNSAFE" : "CONTRACT_SMOKE_FAILED",
+      errorCode: failurePhase === "provider_preflight" ? "PROVIDER_CONFIGURATION_UNSAFE" : failurePhase === "gateway_preparation" ? "GATEWAY_PREPARATION_FAILED" : "CONTRACT_SMOKE_FAILED",
       failurePhase, providerRequestCount: guard.count(),
     });
     throw new Error("Model route stream contract smoke failed.");

@@ -3,8 +3,7 @@ import { guardOneProviderRequest, runContractSmoke, smokeConfig } from "./model-
 const source = {
   MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST: "1",
   MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID: "ws-validation",
-  MODEL_PROVIDER: "openrouter",
-  MODEL_CHAT_CONVERSATION: "test-model",
+  MODEL_PROVIDER: "openrouter", MODEL_CHAT_CONVERSATION: "test-model", MODEL_API_KEY: "test-key",
 };
 describe("model route stream contract smoke", () => {
   it("requires explicit paid, workspace, and artifact gates", () => {
@@ -35,21 +34,23 @@ describe("model route stream contract smoke", () => {
     expect(JSON.stringify(evidence)).not.toMatch(/hidden|ws-validation|route-stream-contract-ok/);
     expect(writeEvidence).toHaveBeenCalledOnce();
   });
-  it("writes fixed safe failure diagnostics without raw errors", async () => {
+  it.each([
+    ["gateway_preparation", { async *chatEventStream() { throw new Error("raw-secret"); } }, 0, "GATEWAY_PREPARATION_FAILED"],
+    ["provider_stream", { async *chatEventStream() { await fetch("https://model.test/chat/completions", {}); throw new Error("raw-secret"); } }, 1, "CONTRACT_SMOKE_FAILED"],
+  ])("writes fixed safe %s diagnostics", async (failurePhase, gateway, providerRequestCount, errorCode) => {
     const writeEvidence = vi.fn();
-    const gateway = { async *chatEventStream() { await fetch("https://model.test/chat/completions", {}); throw new Error("raw-secret"); } };
     await expect(runContractSmoke({
       source, argv: ["--out=.artifacts/model-route-stream-contract/fail.json"], gateway,
       findWorkspace: async () => ({ id: "ws-validation", slug: "corgtex-validation" }),
       fetchImpl: vi.fn().mockResolvedValue(new Response("ok")), writeEvidence,
     })).rejects.toThrow("contract smoke failed");
     const diagnostic = writeEvidence.mock.calls[0]?.[1];
-    expect(diagnostic).toMatchObject({ status: "fail", errorCode: "CONTRACT_SMOKE_FAILED", failurePhase: "provider_stream", providerRequestCount: 1 });
+    expect(diagnostic).toMatchObject({ status: "fail", errorCode, failurePhase, providerRequestCount });
     expect(JSON.stringify(diagnostic)).not.toContain("raw-secret");
   });
-  it("rejects unsafe provider configuration before any fetch", async () => {
+  it("rejects a missing provider credential before any fetch", async () => {
     const writeEvidence = vi.fn(); const fetchImpl = vi.fn();
-    await expect(runContractSmoke({ source: { ...source, MODEL_PROVIDER: "fake" }, argv: ["--out=.artifacts/model-route-stream-contract/preflight.json"], fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed");
+    await expect(runContractSmoke({ source: { ...source, MODEL_API_KEY: "" }, argv: ["--out=.artifacts/model-route-stream-contract/preflight.json"], fetchImpl, writeEvidence })).rejects.toThrow("contract smoke failed");
     expect(writeEvidence.mock.calls[0]?.[1]).toEqual({ schemaVersion: "model-route-stream-contract/v1", status: "fail", errorCode: "PROVIDER_CONFIGURATION_UNSAFE", failurePhase: "provider_preflight", providerRequestCount: 0 }); expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
