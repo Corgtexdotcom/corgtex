@@ -8,6 +8,7 @@ import {
   TENANT_PURGE_MODEL_DISPOSITIONS,
   assertTenantPurgeDispositionCoverage,
   assertTenantPurgeScopeRegistry,
+  decodeDirectRelations,
   parseTenantPurgeDirectRelations,
   type TenantPurgeDisposition,
 } from "./tenant-purge-scope-registry";
@@ -92,6 +93,11 @@ describe("tenant purge scope registry", () => {
     expect(parseTenantPurgeDirectRelations(syntheticSchema({ optional: true }))[0]).toMatchObject({
       relationOptional: true, fieldOptional: [true], onDelete: "SetNull", onUpdate: "Cascade",
     });
+    const decoded = decodeDirectRelations("WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Restrict|Cascade;WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|1|1|SetNull|Cascade", "0100");
+    expect(decoded).toMatchObject([{ onDeleteSource: "POSTGRESQL_DEFAULT", onUpdateSource: "EXPLICIT" }, { onDeleteSource: "POSTGRESQL_DEFAULT", onUpdateSource: "POSTGRESQL_DEFAULT" }]);
+    expect(() => decodeDirectRelations("WorkspaceFeatureFlag|workspace|Workspace||workspaceId|id|0|0|Restrict|Cascade", "1")).toThrow(/source encoding/);
+    const indented = syntheticSchema().replace("\nmodel Synthetic {", "\n  model Synthetic {").replace("\n}\n", "\n  }\n");
+    expect(parseTenantPurgeDirectRelations(indented)).toHaveLength(1);
     const decorated = syntheticSchema().replace(
       "@relation(fields: [workspaceId], references: [id])",
       "@relation(\n    name: \"NamedWorkspace\",\n    fields: [workspaceId],\n    references: [id]\n  ) // valid trailing comment",

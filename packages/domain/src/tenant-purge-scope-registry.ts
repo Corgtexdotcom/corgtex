@@ -106,20 +106,23 @@ ProcurementBillingHandoff|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascad
 ProviderCutover|destinationDeployment|CustomerDeployment|DestinationDeployment|destinationDeploymentId,customerAccountId|id,customerAccountId|1|10|Restrict|Restrict
 `;
 
-function decodeDirectRelations(dsl: string): TenantPurgeDirectRelation[] {
-  const explicitUpdates = new Set(["ProviderCutover.account", "ProviderCutover.sourceDeployment", "ProviderCutover.destinationDeployment"]);
-  return dsl.trim().split(/[;\n]+/).filter(Boolean).map((row) => {
+export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPurgeDirectRelation[] {
+  const rows = dsl.trim().split(/[;\n]+/).filter(Boolean);
+  if (!/^[01]+$/.test(sourceBits) || sourceBits.length !== rows.length * 2) throw new Error("Malformed direct relation source encoding.");
+  return rows.map((row, index) => {
     const [model, relationField, target, relationName, fieldList, referenceList, relationOptional, optionalBits, onDelete, onUpdate] = row.split("|");
     return {
       model: model as Prisma.ModelName, relationField, target: target as TenantPurgeTargetModel, relationName: relationName || null,
       fields: fieldList.split(","), references: referenceList.split(","), relationOptional: relationOptional === "1",
-      fieldOptional: [...optionalBits].map((bit) => bit === "1"), onDelete: onDelete as PrismaReferentialAction, onDeleteSource: "EXPLICIT",
-      onUpdate: onUpdate as PrismaReferentialAction, onUpdateSource: explicitUpdates.has(`${model}.${relationField}`) ? "EXPLICIT" : "POSTGRESQL_DEFAULT",
+      fieldOptional: [...optionalBits].map((bit) => bit === "1"), onDelete: onDelete as PrismaReferentialAction, onDeleteSource: sourceBits[index * 2] === "1" ? "EXPLICIT" : "POSTGRESQL_DEFAULT",
+      onUpdate: onUpdate as PrismaReferentialAction, onUpdateSource: sourceBits[index * 2 + 1] === "1" ? "EXPLICIT" : "POSTGRESQL_DEFAULT",
     };
   });
 }
 
-export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL);
+// Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}`;
+export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {
   let quoted = false;
@@ -185,7 +188,7 @@ export function parseTenantPurgeDirectRelations(schema: string): TenantPurgeDire
   const provider = schema.match(/datasource\s+db\s*\{[\s\S]*?provider\s*=\s*"([^"]+)"[\s\S]*?\}/)?.[1];
   if (provider !== "postgresql") throw new Error(`Unsupported Prisma connector default policy: ${provider ?? "missing"}`);
   const relations: TenantPurgeDirectRelation[] = [];
-  for (const modelMatch of schema.matchAll(/^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm)) {
+  for (const modelMatch of schema.matchAll(/^[ \t]*model\s+(\w+)\s*\{([\s\S]*?)^[ \t]*\}/gm)) {
     const model = modelMatch[1] as Prisma.ModelName;
     const body = modelMatch[2];
     const fieldOptional = new Map<string, boolean>();
