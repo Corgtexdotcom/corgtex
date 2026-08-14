@@ -90,14 +90,14 @@ export function decodeTenantPurgeDerivedSelectors(dsl: string): readonly TenantP
     return Object.freeze(selector);
   });
   const preserveModels = new Set(selectors.filter((selector) => selector.kind === "SHARED_PRESERVE" || selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
-  if (selectors.some((selector) => preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE")) throw new Error("Invalid mixed preserve selector disposition.");
+  if (selectors.some((selector) => preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE") || [...preserveModels].some((model) => selectors.some((selector) => selector.model === model && selector.kind === "SHARED_PRESERVE") && selectors.some((selector) => selector.model === model && selector.kind === "NO_SELECTOR_PRESERVE"))) throw new Error("Invalid mixed preserve selector disposition.");
   return Object.freeze(selectors);
 }
 
 export const TENANT_PURGE_DERIVED_SELECTORS = decodeTenantPurgeDerivedSelectors(SELECTOR_DSL);
 export const TENANT_PURGE_INDIRECT_MODELS = Object.freeze(["AdviceRequestRecipient", "AgentStep", "AgentToolCall", "ApprovalDecision", "BrainArticleVersion", "BrainDiscussionComment", "BrainDiscussionThread", "BuildArtifactAsset", "CircleAgentAssignment", "ContextMapLayoutItem", "ConversationTurn", "CrmConversationMessage", "ExternalDataSyncLog", "GoalLink", "GoalUpdate", "KeyResult", "MemberExpertise", "Objection", "Role", "RoleAssignment", "TensionUpvote", "WebhookDelivery", "WorkspaceToolLinkCircleTag"] as const satisfies readonly Prisma.ModelName[]);
 
-export interface TenantPurgeSchemaField { name: string; kind: string; type: string; isId?: boolean; isUnique?: boolean }
+export interface TenantPurgeSchemaField { name: string; kind: string; type: string; isId?: boolean; isUnique?: boolean; relationFromFields?: readonly string[] }
 export interface TenantPurgeSchemaModel { name: string; fields: readonly TenantPurgeSchemaField[] }
 
 export function assertTenantPurgeDerivedSelectorRegistry(models: readonly TenantPurgeSchemaModel[], selectors: readonly TenantPurgeDerivedSelector[] = TENANT_PURGE_DERIVED_SELECTORS) {
@@ -136,12 +136,31 @@ export function assertTenantPurgeDerivedSelectorRegistry(models: readonly Tenant
   const missing = classified.filter((model) => !covered.has(model) || !modelMap.has(model));
   const sharedMissing = TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.filter((model) => !directModels.has(model) && !selectors.some((selector) => selector.model === model && selector.kind === "SHARED_PRESERVE"));
   const preserveModels = new Set(selectors.filter((selector) => selector.kind === "SHARED_PRESERVE" || selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
-  const invalidPreserve = selectors.filter((selector) => (selector.kind === "SHARED_PRESERVE" && !TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.includes(selector.model as never)) || (selector.kind === "NO_SELECTOR_PRESERVE" && ![...TENANT_PURGE_MODEL_DISPOSITIONS.RETAIN, ...TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE].includes(selector.model as never)) || (preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE"));
+  const noSelectorModels = new Set(selectors.filter((selector) => selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
+  const invalidPreserve = selectors.filter((selector) => (selector.kind === "SHARED_PRESERVE" && (!TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.includes(selector.model as never) || noSelectorModels.has(selector.model))) || (selector.kind === "NO_SELECTOR_PRESERVE" && ![...TENANT_PURGE_MODEL_DISPOSITIONS.RETAIN, ...TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE].includes(selector.model as never)) || (preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE"));
   const indirect = [...new Set(selectors.filter((selector) => selector.kind === "RELATION_PATH" && TENANT_PURGE_MODEL_DISPOSITIONS.CASCADE.includes(selector.model as never) && !directModels.has(selector.model)).map((selector) => selector.model))].sort();
+  const preserveModelsToSkip = new Set<string>([...TENANT_PURGE_MODEL_DISPOSITIONS.RETAIN, ...TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE]);
+  const terminalFields = new Map<string, string[]>();
+  const addTerminal = (model: string, terminal: string) => terminalFields.set(model, [...(terminalFields.get(model) ?? []), terminal]);
+  for (const model of models) for (const candidate of model.fields) if (candidate.kind === "object" && candidate.relationFromFields?.length && TENANT_PURGE_TARGET_MODELS.includes(candidate.type as TenantPurgeTargetModel)) addTerminal(model.name, candidate.name);
+  for (const selector of selectors) if (selector.kind === "DIRECT_SCALAR") addTerminal(selector.model, selector.path[0]);
+  const discoverPaths = (start: string) => {
+    const found = new Set<string>();
+    const walk = (model: string, path: readonly string[], seen: ReadonlySet<string>) => {
+      for (const relation of modelMap.get(model)?.fields ?? []) if (relation.kind === "object" && relation.relationFromFields?.length) {
+        const nextPath = [...path, relation.name];
+        if (TENANT_PURGE_TARGET_MODELS.includes(relation.type as TenantPurgeTargetModel)) found.add(nextPath.join("."));
+        else if (!preserveModelsToSkip.has(relation.type)) if (terminalFields.has(relation.type)) for (const terminal of terminalFields.get(relation.type)!) found.add([...nextPath, terminal].join(".")); else if (!seen.has(relation.type)) walk(relation.type, nextPath, new Set([...seen, relation.type]));
+      }
+    };
+    walk(start, [], new Set([start]));
+    return [...found].sort();
+  };
+  const pathDrift = TENANT_PURGE_INDIRECT_MODELS.filter((model) => JSON.stringify(discoverPaths(model)) !== JSON.stringify(selectors.flatMap((selector) => selector.kind === "RELATION_PATH" && selector.model === model ? [selector.path.join(".")] : []).sort()));
   const targetScalars = models.flatMap((model) => model.fields.filter((candidate) => candidate.kind === "scalar" && candidate.type === "String" && /(?:workspace|deployment|customerAccount|procurementTrial|targetAccount|targetDeployment|targetWorkspace|targetTrial)Id$/i.test(candidate.name)).map((candidate) => `${model.name}.${candidate.name}`));
   const externalIds = new Set<string>(["CustomerDeployment.remoteWorkspaceId", "WorkspaceIntegrationBinding.externalWorkspaceId", "CommunicationInstallation.externalWorkspaceId"]);
   const uncoveredScalars = targetScalars.filter((key) => !externalIds.has(key) && !directFields.has(key) && !scalarTargets.has(key));
-  if (missing.length || sharedMissing.length || invalidPreserve.length || JSON.stringify(indirect) !== JSON.stringify([...TENANT_PURGE_INDIRECT_MODELS].sort()) || uncoveredScalars.length) throw new Error(`Tenant purge derived selector drift: missing=${missing} shared=${sharedMissing} preserve=${invalidPreserve.map((entry) => entry.model)} indirect=${indirect} scalar=${uncoveredScalars}`);
+  if (missing.length || sharedMissing.length || invalidPreserve.length || JSON.stringify(indirect) !== JSON.stringify([...TENANT_PURGE_INDIRECT_MODELS].sort()) || pathDrift.length || uncoveredScalars.length) throw new Error(`Tenant purge derived selector drift: missing=${missing} shared=${sharedMissing} preserve=${invalidPreserve.map((entry) => entry.model)} indirect=${indirect} paths=${pathDrift} scalar=${uncoveredScalars}`);
 }
 
 export const TENANT_PURGE_WRITER_EVIDENCE_FILES = Object.freeze(["resend", "bootstrap", "selfServe", "procurement", "meetingRecorders", "controlPlane"] as const);
@@ -152,7 +171,7 @@ export function assertTenantPurgeWriterEvidence(writers: Record<string, string>)
   const bootstrapEquality = writers.bootstrap.indexOf("workspace?.slug !== body.customerSlug");
   const bootstrapSeed = writers.bootstrap.indexOf("await runStableClientSeed", bootstrapEquality);
   const procurementCreates = [...writers.procurement.matchAll(/procurementIdempotencyKey\.create\(\{\s*data:\s*\{([^{}]*)\}\s*,?\s*\}\)/g)].map((match) => match[1]);
-  const procurementEvidence = procurementCreates.length === 2 && procurementCreates.filter((body) => !body.includes("workspaceId:")).length === 1 && procurementCreates.filter((body) => body.includes("workspaceId: workspace.id")).length === 1 && /procurementIdempotencyKey\.updateMany\(\{\s*where:\s*\{[^{}]*workspaceId:\s*null[^{}]*\}\s*,?\s*data:\s*\{[^{}]*workspaceId:\s*workspace\.id/.test(writers.procurement);
+  const procurementEvidence = procurementCreates.length === 2 && procurementCreates.filter((body) => !body.includes("workspaceId:")).length === 1 && procurementCreates.filter((body) => body.includes("workspaceId: workspace.id")).length === 1 && /procurementIdempotencyKey\.updateMany\(\{\s*where:\s*\{[^{}]*scope:\s*TRIAL_IDEMPOTENCY_SCOPE[^{}]*requestHash:\s*params\.idemRequestHash[^{}]*workspaceId:\s*null[^{}]*\}\s*,?\s*data:\s*\{[^{}]*workspaceId:\s*workspace\.id/.test(writers.procurement);
   const checks = [resendLookup >= 0 && resendEvent > resendLookup && /emailDeliveryEvent\.upsert[\s\S]*create:[\s\S]*providerMessageId/.test(writers.resend.slice(resendEvent)) && writers.resend.slice(resendLookup, resendEvent).includes("where: { providerMessageId }"), writers.bootstrap.includes("customerSlug_bundleChecksum") && bootstrapEquality >= 0 && bootstrapSeed > bootstrapEquality, /selfServeEmailCapture\.create[\s\S]*workspaceId:[\s\S]*procurementTrialId:/.test(writers.selfServe) && /selfServeSmokeRun\.upsert/.test(writers.selfServe) && /selfServeSupportSession\.create[\s\S]*deploymentId:[\s\S]*workspaceId:/.test(writers.selfServe), procurementEvidence, /meetingRecorderSmokeRun\.create[\s\S]*workspaceId: params\.workspaceId[\s\S]*deploymentId: params\.deploymentId/.test(writers.meetingRecorders), /clientMigrationRun/.test(writers.controlPlane) && /supportOperation\.create[\s\S]*deploymentId:[\s\S]*workspaceId:/.test(writers.controlPlane)];
   if (checks.some((check) => !check)) throw new Error("Tenant purge writer evidence drift.");
 }

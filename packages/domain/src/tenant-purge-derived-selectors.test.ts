@@ -21,7 +21,7 @@ import { TENANT_PURGE_DIRECT_RELATIONS } from "./tenant-purge-scope-registry";
 const repository = new URL("../../../", import.meta.url);
 const prismaDirectory = new URL("prisma/", repository);
 const schema = readdirSync(prismaDirectory, { recursive: true, encoding: "utf8" }).filter((file) => file.endsWith(".prisma")).sort().map((file) => readFileSync(new URL(file, prismaDirectory), "utf8")).join("\n");
-const schemaModels: TenantPurgeSchemaModel[] = Prisma.dmmf.datamodel.models.map((model) => ({ name: model.name, fields: model.fields.map((field) => ({ name: field.name, kind: field.kind, type: field.type, isId: field.isId, isUnique: field.isUnique })) }));
+const schemaModels: TenantPurgeSchemaModel[] = Prisma.dmmf.datamodel.models.map((model) => ({ name: model.name, fields: model.fields.map((field) => ({ name: field.name, kind: field.kind, type: field.type, isId: field.isId, isUnique: field.isUnique, relationFromFields: field.relationFromFields })) }));
 const writerPaths = {
   resend: "apps/web/app/api/webhooks/resend-delivery/route.ts",
   bootstrap: "apps/web/app/api/internal/customer-deployment-bootstrap/route.ts",
@@ -62,6 +62,7 @@ describe("tenant purge derived selector registry", () => {
     expect(() => decodeTenantPurgeDerivedSelectors("D|EmailDelivery|workspaceId|WORKSPACE|B|;D|EmailDelivery|workspaceId|WORKSPACE|B|")).toThrow(/Duplicate/);
     expect(() => decodeTenantPurgeDerivedSelectors("N|StripeWebhookEvent||||;N|StripeWebhookEvent||||")).toThrow(/Duplicate/);
     expect(() => decodeTenantPurgeDerivedSelectors("S|User|memberships.workspace|WORKSPACE|B|;R|User|memberships.workspace|WORKSPACE|B|")).toThrow(/Duplicate|preserve/);
+    expect(() => decodeTenantPurgeDerivedSelectors("S|User|memberships.workspace|WORKSPACE|B|;N|User||||")).toThrow(/preserve/);
   });
 
   it("resolves every path and join against schema and fails on omission or drift", () => {
@@ -89,12 +90,17 @@ describe("tenant purge derived selector registry", () => {
     addedScalar.find((model) => model.name === "EmailDelivery")!.fields.push({ name: "shadowWorkspaceId", kind: "scalar", type: "String" });
     expect(() => assertTenantPurgeDerivedSelectorRegistry(addedScalar)).toThrow(/scalar=.*shadowWorkspaceId/);
 
+    const addedParent = cloneModels();
+    addedParent.find((model) => model.name === "AgentStep")!.fields.push({ name: "alternateAgentRun", kind: "object", type: "AgentRun", relationFromFields: ["alternateAgentRunId"] });
+    expect(() => assertTenantPurgeDerivedSelectorRegistry(addedParent)).toThrow(/paths=AgentStep/);
+
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, selectorsWithout((selector) => selector.model === "AgentStep"))).toThrow(/missing=AgentStep/);
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, selectorsWithout((selector) => selector.kind === "SHARED_PRESERVE" && selector.model === "User"))).toThrow(/shared=User/);
     const invalidPreserve = [...TENANT_PURGE_DERIVED_SELECTORS, { kind: "SHARED_PRESERVE", model: "AdviceRequestRecipient", path: ["request", "workspace"], target: "WORKSPACE", modes: ["ACCOUNT_WORKSPACE", "SELF_SERVE_TRIAL_WORKSPACE"], authorizesRoot: false }] as TenantPurgeDerivedSelector[];
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, invalidPreserve)).toThrow(/preserve=AdviceRequestRecipient/);
     const mixedPreserve = [...TENANT_PURGE_DERIVED_SELECTORS, { kind: "RELATION_PATH", model: "User", path: ["memberships", "workspace"], target: "WORKSPACE", modes: ["ACCOUNT_WORKSPACE", "SELF_SERVE_TRIAL_WORKSPACE"], authorizesRoot: false }] as TenantPurgeDerivedSelector[];
     expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, mixedPreserve)).toThrow(/preserve=User/);
+    expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, [...TENANT_PURGE_DERIVED_SELECTORS, { kind: "NO_SELECTOR_PRESERVE", model: "User", authorizesRoot: false }])).toThrow(/preserve=User/);
   });
 
   it("composes all exceptional unions without confusing CRM or target modes", () => {
@@ -137,6 +143,7 @@ describe("tenant purge derived selector registry", () => {
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: `${writers.procurement}\nsetupSessionId: futureSession.id` })).toThrow(/writer inventory/);
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace("requestHash: params.idemRequestHash,\n          workspaceId: workspace.id,\n          responseJson", "requestHash: params.idemRequestHash,\n          responseJson") })).toThrow(/writer evidence/);
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace("workspaceId: null,", "workspaceId: workspace.id,") })).toThrow(/writer evidence/);
+    expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace(/(procurementIdempotencyKey\.updateMany\(\{[\s\S]*?requestHash:) params\.idemRequestHash/, "$1 wrongRequestHash") })).toThrow(/writer evidence/);
   });
 
   it("keeps shared and retained rows preserve-only and exports no evidence values", () => {
