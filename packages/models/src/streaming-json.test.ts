@@ -51,4 +51,12 @@ describe("IncrementalJsonStringDecoder", () => {
     expect(decoder.push(',"broken":}').delta).toBe("");
     expect(decoder.finish().state).toBe("malformed");
   });
+  it("processes a long one-character stream without rescanning prior input", () => {
+    const source = `{"padding":"${"x".repeat(20_000)}","answer":"done"}`;
+    const decoder = new IncrementalJsonStringDecoder("answer");
+    let output = "";
+    for (const character of source) output += decoder.push(character).delta;
+    expect({ output, final: decoder.finish().state }).toEqual({ output: "done", final: "complete" });
+    expect(decoder.processedCharacters).toBe(source.length);
+  });
 });

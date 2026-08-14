@@ -1496,11 +1496,45 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
   });
+  it.each(["chatEventStream", "chatStream"] as const)("rejects clean EOF before [DONE] through %s and records usage once", async (method) => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', { status: 200 })));
+    const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear();
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const consume = async () => { for await (const _ of openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } };
+    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
+    expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
+  });
+  it("rejects malformed JSON between tool argument fragments", async () => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const first = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: '{"x":' } }] } }] };
+    const last = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(first)}\n\ndata: {"choices":BROKEN}\n\ndata: ${JSON.stringify(last)}\n\ndata: [DONE]\n\n`, { status: 200 })));
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const consume = async () => { for await (const _ of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } };
+    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
+  });
+  it("treats nullable optional tool continuation fields as absent", async () => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const tools = [
+      { index: 0, id: "call_a", type: "function", function: { name: "tool", arguments: '{"x":' } },
+      { index: 0, id: null, type: null, function: null },
+      { index: 0, id: null, type: null, function: { name: null, arguments: "1}" } },
+    ];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`${tools.map((tool) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [tool] } }] })}\n\n`).join("")}data: [DONE]\n\n`, { status: 200 })));
+    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const stream = openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
+    let next = await stream.next();
+    while (!next.done) next = await stream.next();
+    expect(next.value.tool_calls?.[0]).toMatchObject({ id: "call_a", function: { name: "tool", arguments: '{"x":1}' } });
+  });
 
   it.each([
     ["an invalid index", { index: -1, id: "call_a", function: { name: "tool", arguments: "{}" } }],
     ["an invalid id fragment", { index: 0, id: 7, function: { name: "tool", arguments: "{}" } }],
     ["an invalid name fragment", { index: 0, id: "call_a", function: { name: 7, arguments: "{}" } }],
+    ["an invalid non-null type", { index: 0, id: "call_a", type: 7, function: { name: "tool", arguments: "{}" } }],
+    ["an invalid non-null function", { index: 0, id: "call_a", function: 7 }],
     ["an incomplete identity", { index: 0, function: { arguments: "{}" } }],
   ])("fails closed on %s and records accepted-request usage once", async (_label, tool) => {
     restoreEnv();

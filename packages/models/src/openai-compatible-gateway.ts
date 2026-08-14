@@ -807,24 +807,24 @@ function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unk
   if (!Number.isInteger(index) || (index as number) < 0) {
     throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative integer.");
   }
-  if (tool.type !== undefined && tool.type !== "function") {
+  if (tool.type != null && tool.type !== "function") {
     throw new ChatStreamProtocolError("Streamed tool call type must be function.");
   }
-  if (tool.id !== undefined && typeof tool.id !== "string") {
+  if (tool.id != null && typeof tool.id !== "string") {
     throw new ChatStreamProtocolError("Streamed tool call id fragment must be a string.");
   }
-  if (tool.function !== undefined && (!tool.function || typeof tool.function !== "object" || Array.isArray(tool.function))) {
+  if (tool.function != null && (typeof tool.function !== "object" || Array.isArray(tool.function))) {
     throw new ChatStreamProtocolError("Streamed tool call function delta must be an object.");
   }
   const fn = (tool.function ?? {}) as Record<string, unknown>;
-  if (fn.name !== undefined && typeof fn.name !== "string") {
+  if (fn.name != null && typeof fn.name !== "string") {
     throw new ChatStreamProtocolError("Streamed tool call name fragment must be a string.");
   }
   if (fn.arguments !== undefined && typeof fn.arguments !== "string") {
     throw new ChatStreamProtocolError("Streamed tool call arguments fragment must be a string.");
   }
-  const idDelta = tool.id as string | undefined;
-  const nameDelta = fn.name as string | undefined;
+  const idDelta = (tool.id ?? undefined) as string | undefined;
+  const nameDelta = (fn.name ?? undefined) as string | undefined;
   const argumentsDelta = (fn.arguments as string | undefined) ?? "";
   const partial = toolCalls.get(index as number) ?? { id: "", name: "", arguments: "" };
   partial.id += idDelta ?? "";
@@ -970,10 +970,7 @@ async function* completeChatEventStream(
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) {
-        streamCompleted = true;
-        break;
-      }
+      if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
       let newlineIndex: number;
@@ -981,12 +978,17 @@ async function* completeChatEventStream(
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
 
-        if (line.startsWith("data: ") && line !== "data: [DONE]") {
+        if (line === "data: [DONE]") {
+          streamCompleted = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
+        if (line.startsWith("data: ")) {
           let data: any;
           try {
             data = JSON.parse(line.slice(6));
           } catch {
-            continue;
+            throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
           }
           const delta = data.choices?.[0]?.delta;
           if (typeof delta?.content === "string" && delta.content) {
@@ -1011,6 +1013,10 @@ async function* completeChatEventStream(
     } finally {
       streamSignalCleanup();
     }
+  }
+
+  if (!streamCompleted) {
+    throw new ChatStreamProtocolError("Streamed provider response ended before [DONE].");
   }
   
   const finalUsage = await finalizeUsage();

@@ -1,162 +1,101 @@
-export type IncrementalJsonStringResult = {
-  delta: string;
-  state: "incomplete" | "complete" | "malformed";
-};
-type ScanResult = {
-  state: IncrementalJsonStringResult["state"];
-  value: string;
-  next: number;
-};
-function incomplete(value = "", next = 0): ScanResult {
-  return { state: "incomplete", value, next };
-}
-function malformed(value = "", next = 0): ScanResult {
-  return { state: "malformed", value, next };
-}
-function scanString(input: string, start: number): ScanResult {
-  if (input[start] !== "\"") return malformed("", start);
-  let value = "";
-  let index = start + 1;
-  const escapes: Record<string, string> = {
-    "\"": "\"", "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t",
-  };
-  while (index < input.length) {
-    const character = input[index]!;
-    if (character === "\"") return { state: "complete", value, next: index + 1 };
-    if (character.charCodeAt(0) < 0x20) return malformed(value, index);
-    if (character !== "\\") {
-      value += character;
-      index += 1;
-      continue;
-    }
-    if (index + 1 >= input.length) return incomplete(value, index);
-    const escaped = input[index + 1]!;
-    if (escaped !== "u") {
-      if (!(escaped in escapes)) return malformed(value, index);
-      value += escapes[escaped];
-      index += 2;
-      continue;
-    }
-    if (index + 6 > input.length) return incomplete(value, index);
-    const hex = input.slice(index + 2, index + 6);
-    if (!/^[0-9a-fA-F]{4}$/.test(hex)) return malformed(value, index);
-    const unit = Number.parseInt(hex, 16);
-    index += 6;
-    if (unit >= 0xd800 && unit <= 0xdbff && index >= input.length) return incomplete(value, index);
-    if (unit >= 0xd800 && unit <= 0xdbff && input[index] === "\\" && index + 1 >= input.length) return incomplete(value, index);
-    if (unit >= 0xd800 && unit <= 0xdbff && input.slice(index, index + 2) === "\\u") {
-      if (index + 6 > input.length) return incomplete(value, index);
-      const lowHex = input.slice(index + 2, index + 6);
-      if (!/^[0-9a-fA-F]{4}$/.test(lowHex)) return malformed(value, index);
-      const low = Number.parseInt(lowHex, 16);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        value += String.fromCodePoint(0x10000 + ((unit - 0xd800) << 10) + low - 0xdc00);
-        index += 6;
-        continue;
-      }
-    }
-    value += String.fromCharCode(unit);
-  }
-  return incomplete(value, index);
-}
-function skipWhitespace(input: string, start: number) {
-  let index = start;
-  while (/\s/.test(input[index] ?? "")) index += 1;
-  return index;
-}
-function skipValue(input: string, start: number): ScanResult {
-  const index = skipWhitespace(input, start);
-  if (index >= input.length) return incomplete("", index);
-  if (input[index] === "\"") return scanString(input, index);
-  if (input[index] === "{" || input[index] === "[") {
-    const stack = [input[index] === "{" ? "}" : "]"];
-    let cursor = index + 1;
-    while (cursor < input.length) {
-      const character = input[cursor]!;
-      if (character === "\"") {
-        const string = scanString(input, cursor);
-        if (string.state !== "complete") return string;
-        cursor = string.next;
-        continue;
-      }
-      if (character === "{" || character === "[") stack.push(character === "{" ? "}" : "]");
-      else if (character === "}" || character === "]") {
-        if (stack.pop() !== character) return malformed("", cursor);
-        if (stack.length === 0) return { state: "complete", value: "", next: cursor + 1 };
-      }
-      cursor += 1;
-    }
-    return incomplete("", cursor);
-  }
-  let cursor = index;
-  while (cursor < input.length && !/[\s,}]/.test(input[cursor]!)) cursor += 1;
-  if (cursor === index) return malformed("", cursor);
-  if (cursor === input.length) return incomplete("", cursor);
-  try {
-    JSON.parse(input.slice(index, cursor));
-    return { state: "complete", value: "", next: cursor };
-  } catch {
-    return malformed("", index);
-  }
-}
-function findStringField(input: string, field: string): ScanResult {
-  let index = skipWhitespace(input, 0);
-  if (index >= input.length) return incomplete();
-  if (input[index] !== "{") return malformed();
-  index += 1;
-  while (true) {
-    index = skipWhitespace(input, index);
-    if (index >= input.length) return incomplete();
-    if (input[index] === "}") return malformed();
-    const key = scanString(input, index);
-    if (key.state !== "complete") return { ...key, value: "" };
-    index = skipWhitespace(input, key.next);
-    if (index >= input.length) return incomplete();
-    if (input[index] !== ":") return malformed();
-    index = skipWhitespace(input, index + 1);
-    if (index >= input.length) return incomplete();
-    if (key.value === field) return scanString(input, index);
-    const value = skipValue(input, index);
-    if (value.state !== "complete") return { ...value, value: "" };
-    index = skipWhitespace(input, value.next);
-    if (index >= input.length) return incomplete();
-    if (input[index] === ",") {
-      index += 1;
-      continue;
-    }
-    if (input[index] === "}") return malformed();
-    return malformed();
-  }
-}
+export type IncrementalJsonStringResult = { delta: string; state: "incomplete" | "complete" | "malformed" };
+type Phase = "start" | "key" | "colon" | "value" | "comma" | "done"; type StringRole = "key" | "target" | "skip";
+const ESCAPES: Record<string, string> = { "\"": "\"", "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+const whitespace = (value: string) => " \n\r\t".includes(value); const hex = (value: string) => /^[0-9a-f]$/i.test(value);
 export class IncrementalJsonStringDecoder {
-  private input = "";
-  private emitted = "";
-  private failed = false;
-  constructor(private readonly field: string) {
-    if (!field) throw new Error("JSON string field is required.");
+  private fragments: string[] = []; private phase: Phase = "start"; private role: StringRole | null = null;
+  private text = ""; private currentKey = ""; private targetValue = "";
+  private targetComplete = false; private escaped = false; private failed = false;
+  private unicode: string | null = null; private high: number | null = null;
+  private stack: string[] = []; private primitive: string | null = null;
+  private nestedString = false; private nestedEscape = false; private nestedUnicode = 0;
+  private delta = ""; private work = 0;
+  constructor(private readonly field: string) { if (!field) throw new Error("JSON string field is required."); }
+  get processedCharacters() { return this.work; } private fail() { this.failed = true; }
+  private emit(value: string) {
+    if (this.role === "key") this.text += value;
+    if (this.role === "target") { this.targetValue += value; this.delta += value; } }
+  private flushHigh() { if (this.high !== null) this.emit(String.fromCharCode(this.high)); this.high = null; }
+  private emitUnit(unit: number) {
+    if (this.high !== null && unit >= 0xdc00 && unit <= 0xdfff) {
+      this.emit(String.fromCodePoint(0x10000 + ((this.high - 0xd800) << 10) + unit - 0xdc00));
+      this.high = null;
+    } else {
+      this.flushHigh();
+      if (unit >= 0xd800 && unit <= 0xdbff) this.high = unit;
+      else this.emit(String.fromCharCode(unit));
+    }
+  }
+  private closeString() {
+    this.flushHigh();
+    if (this.role === "key") { this.currentKey = this.text; this.phase = "colon"; }
+    else { if (this.role === "target") this.targetComplete = true; this.phase = "comma"; }
+    this.role = null;
+  }
+  private scanString(character: string) {
+    if (this.unicode !== null) {
+      if (!hex(character)) return this.fail();
+      this.unicode += character;
+      if (this.unicode.length === 4) { this.emitUnit(Number.parseInt(this.unicode, 16)); this.unicode = null; }
+    } else if (this.escaped) {
+      this.escaped = false;
+      if (character === "u") this.unicode = "";
+      else if (character in ESCAPES) { this.flushHigh(); this.emit(ESCAPES[character]!); }
+      else this.fail();
+    } else if (character === "\\") this.escaped = true;
+    else if (character === "\"") this.closeString();
+    else if (character.charCodeAt(0) < 0x20) this.fail();
+    else { this.flushHigh(); this.emit(character); }
+  }
+  private scanNested(character: string) {
+    if (this.nestedUnicode > 0) {
+      if (!hex(character)) this.fail(); else this.nestedUnicode -= 1;
+    } else if (this.nestedEscape) {
+      this.nestedEscape = false;
+      if (character === "u") this.nestedUnicode = 4; else if (!(character in ESCAPES)) this.fail();
+    } else if (this.nestedString) {
+      if (character === "\\") this.nestedEscape = true;
+      else if (character === "\"") this.nestedString = false;
+      else if (character.charCodeAt(0) < 0x20) this.fail();
+    } else if (character === "\"") this.nestedString = true;
+    else if (character === "{" || character === "[") this.stack.push(character === "{" ? "}" : "]");
+    else if (character === "}" || character === "]") { if (this.stack.pop() !== character) this.fail(); else if (this.stack.length === 0) this.phase = "comma"; }
+  }
+  private beginValue(character: string) {
+    if (this.currentKey === this.field) { if (this.targetComplete || character !== "\"") this.fail(); else this.role = "target"; }
+    else if (character === "\"") this.role = "skip";
+    else if (character === "{" || character === "[") this.stack.push(character === "{" ? "}" : "]");
+    else this.primitive = character;
   }
   push(fragment: string): IncrementalJsonStringResult {
     if (this.failed) return { delta: "", state: "malformed" };
-    this.input += fragment;
-    const result = findStringField(this.input, this.field);
-    if (result.state === "malformed" || !result.value.startsWith(this.emitted)) {
-      this.failed = true;
-      return { delta: "", state: "malformed" };
+    this.fragments.push(fragment); this.delta = "";
+    for (let index = 0; index < fragment.length && !this.failed;) {
+      const character = fragment[index]!; this.work += 1;
+      if (this.role) this.scanString(character);
+      else if (this.stack.length > 0) this.scanNested(character);
+      else if (this.primitive !== null) {
+        if (whitespace(character) || character === "," || character === "}") {
+          try { JSON.parse(this.primitive); } catch { this.fail(); }
+          this.primitive = null; this.phase = "comma"; continue;
+        }
+        if (character === "]" || character === "{" || character === "[") this.fail(); else this.primitive += character;
+      } else if (!whitespace(character)) {
+        if (this.phase === "start") { if (character !== "{") this.fail(); else this.phase = "key"; }
+        else if (this.phase === "key") { if (character !== "\"") this.fail(); else { this.role = "key"; this.text = ""; } }
+        else if (this.phase === "colon") { if (character !== ":") this.fail(); else this.phase = "value"; }
+        else if (this.phase === "value") this.beginValue(character);
+        else if (this.phase === "comma") { if (character === ",") this.phase = "key"; else if (character === "}") this.phase = "done"; else this.fail(); }
+        else this.fail();
+      }
+      index += 1;
     }
-    const delta = result.value.slice(this.emitted.length);
-    this.emitted = result.value;
-    return { delta, state: result.state };
+    return this.failed ? { delta: "", state: "malformed" } : { delta: this.delta, state: this.targetComplete ? "complete" : "incomplete" };
   }
-  finish(): IncrementalJsonStringResult {
-    if (this.failed) return { delta: "", state: "malformed" };
-    const scanned = findStringField(this.input, this.field);
-    if (scanned.state !== "complete") return { delta: "", state: scanned.state };
-    try {
-      const parsed = JSON.parse(this.input) as Record<string, unknown>;
-      if (!parsed || Array.isArray(parsed) || parsed[this.field] !== this.emitted) throw new Error();
-      return { delta: "", state: "complete" };
-    } catch {
-      return { delta: "", state: "malformed" };
-    }
+  finish(): IncrementalJsonStringResult { if (this.failed) return { delta: "", state: "malformed" };
+    if (!this.targetComplete) return { delta: "", state: this.phase === "done" ? "malformed" : "incomplete" };
+    try { const parsed = JSON.parse(this.fragments.join("")) as Record<string, unknown>;
+      if (this.phase !== "done" || !parsed || Array.isArray(parsed) || parsed[this.field] !== this.targetValue) throw new Error(); return { delta: "", state: "complete" };
+    } catch { return { delta: "", state: "malformed" }; }
   }
 }
