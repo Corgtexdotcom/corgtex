@@ -1341,7 +1341,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   messages.push({ role: "user", content: ctx.userMessage });
-  const followupTools = await toolsForContext(ctx);
+  const versionedUpdateRequested = /\b(?:update|edit|change|modify|fix|rename|assign|reassign|unassign|complete|finish|resolve|open|reopen|close|cancel|defer|postpone|move|shift|set|mark|make|apply|save|start|begin|resume|pause|draft|clear|claim|take|yes|confirm|okay|ok|proceed|do it|go ahead)\b/i.test(ctx.userMessage); const followupTools = (await toolsForContext(ctx)).filter(({ function: tool }) => versionedUpdateRequested || !isVersionedUpdateTool(tool.name));
   const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
   let finalMessage = "";
@@ -1371,11 +1371,11 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         firstResult = value;
         break;
       }
-      finalMessage += value;
+      finalMessage += value; if (!versionedUpdateRequested) yield value;
     }
   } catch (error) {
     firstResult = null;
-    if (finalMessage) yield finalMessage;
+    if (finalMessage && versionedUpdateRequested) yield finalMessage;
     throwIfConversationCanceled(ctx, error);
   } finally {
     if (!firstStreamDone) {
@@ -1384,8 +1384,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   throwIfConversationCanceled(ctx);
-  const versionReadPending = firstResult?.tool_calls?.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions"); if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
-  else if (finalMessage && firstStreamDone && !versionReadPending) yield finalMessage;
+  const versionReadPending = versionedUpdateRequested && firstResult?.tool_calls?.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions"); if (firstResult?.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) finalMessage = "";
+  else if (finalMessage && firstStreamDone && versionedUpdateRequested && !versionReadPending) yield finalMessage;
 
   if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
     toolExecutionAttempted = true;
@@ -1446,7 +1446,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
             followupResult = value;
             break;
           }
-          followupMessage += value;
+          followupMessage += value; if (!versionedUpdateRequested) yield value;
         }
       } catch (error) {
         followupStreamFailed = true;
@@ -1457,13 +1457,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         }
       }
     }
-    const followupState = followupResult ? await executeVersionedFollowupTools(
-      followupResult, actor, ctx, messages, executedToolResults, failedToolResults,
-    ) : "none";
-    if (followupState === "none" && !followupStreamFailed && followupMessage) {
-      followupMessage = (versionReadPending ? finalMessage : "") + followupMessage; yield followupMessage;
-      finalMessage = followupMessage;
-    } else if (followupState === "rejected") {
+    const followupState = followupResult ? await executeVersionedFollowupTools(followupResult, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
+    if (followupStreamFailed && versionReadPending) finalMessage = ""; else if (!versionedUpdateRequested) finalMessage += followupMessage;
+    if (followupState === "none" && !followupStreamFailed && followupMessage) { if (versionedUpdateRequested) { followupMessage = (versionReadPending ? finalMessage : "") + followupMessage; yield followupMessage; finalMessage = followupMessage; } } else if (followupState === "rejected") {
       followupMessage = UNSAFE_VERSIONED_FOLLOWUP;
       yield followupMessage;
       finalMessage = followupMessage;

@@ -2425,7 +2425,7 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the activity.");
   });
 
-  it("maps list results, reports partial success, and falls back after a partial summary stream", async () => {
+  it("maps list results and keeps failed-stream persistence aligned with safe fallbacks", async () => {
     const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction, updateTension } = await import("@corgtex/domain");
     vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{ id: "t-1", version: 4, status: "OPEN", author: {} } as any]); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-1", version: 7, status: "OPEN", author: {} } as any]);
     vi.mocked(updateTension).mockResolvedValueOnce({ id: "t-1", version: 5 } as any); vi.mocked(updateAction).mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "conflict"));
@@ -2441,7 +2441,7 @@ describe("processConversationTurn", () => {
     vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-2", version: 2 } as any);
     chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."]));
     const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
-    expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.");
+    expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying."); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-3", version: 1, status: "OPEN", author: {} } as any]); chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("fr", "query_actions")] })).mockReturnValueOnce(throwingStream(["Still working."])); const failed = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(failed.result.assistantMessage).toBe(failed.chunks.join("")); expect(failed.chunks.join("")).not.toMatch(/Updated|Still working/);
   });
 
   it("associates mixed failures with safe guidance in both response paths", async () => {
@@ -2495,18 +2495,18 @@ describe("processConversationTurn", () => {
     expect(chunks.join("")).not.toContain("Unverified");
   });
 
-  it("preserves ordinary non-versioned follow-ups in streaming and non-streaming paths", async () => {
+  it("preserves ordinary follow-ups and incrementally streams no-tool chat", async () => {
     const actor = testUserActor();
     chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("s1", "search_brain", { query: "actions" })] })
       .mockResolvedValueOnce({ content: "Useful list response.", tool_calls: [toolCall("q1", "query_actions")] });
     const { processConversationTurn, processConversationTurnStream } = await import("./conversation");
-    expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe("Useful list response.");
+    expect((await processConversationTurn({ ...turnContext(actor), userMessage: "Show actions." })).assistantMessage).toBe("Useful list response.");
     chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("s2", "search_brain", { query: "actions" })] }))
       .mockReturnValueOnce(streamResponse(["Useful streamed response."], { content: "Useful streamed response.", tool_calls: [toolCall("q2", "query_actions")] }));
-    const { chunks, result } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
+    const { chunks, result } = await collectConversationStream(processConversationTurnStream({ ...turnContext(actor), userMessage: "Show actions." }));
     expect(chunks.join("")).toBe("Useful streamed response.");
     expect(result.assistantMessage).toBe("Useful streamed response.");
-    chatStreamMock.mockReturnValueOnce(throwingStream(["Partial response."])); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Partial response.");
+    chatStreamMock.mockReturnValueOnce(throwingStream(["Partial response."])); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Partial response."); chatStreamMock.mockReturnValueOnce(streamResponse(["Hello", " world."], { content: "Hello world." })); const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } });
   });
 
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {
