@@ -865,6 +865,7 @@ async function* completeChatEventStream(
   let response: Response | null = null;
   let lastError: unknown = null;
   let streamSignalCleanup = () => {};
+  let streamSignal: AbortSignal | undefined;
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     let keepSignalForStream = false;
@@ -890,6 +891,7 @@ async function* completeChatEventStream(
       }
       keepSignalForStream = true;
       streamSignalCleanup = fetchSignal.cleanup;
+      streamSignal = fetchSignal.signal;
       break;
     } catch (error) {
       if (request.signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
@@ -905,7 +907,7 @@ async function* completeChatEventStream(
   }
 
   if (!response) throw lastError ?? new Error("OpenAI-compatible request failed after retries.");
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let content = "";
   let toolCallParts = new Map<number, PartialToolCall>();
   let usageDetailsObj: StreamUsage | null = null;
@@ -945,10 +947,11 @@ async function* completeChatEventStream(
   }
   let reader: ReadableStreamDefaultReader<Uint8Array>;
   try { if (!response.body) throw new Error(); reader = response.body.getReader(); }
-  catch { try { await finalizeUsage(); } finally { streamSignalCleanup(); } throw new ChatStreamProtocolError("Streamed provider response body is not readable."); }
+  catch { const failure = new ChatStreamProtocolError("Streamed provider response body is not readable."); try { await finalizeUsage(); } catch { /* preserve primary */ } finally { streamSignalCleanup(); } throw failure; }
 
+  let primaryFailure: unknown;
   try {
-    while (true) {
+    try { while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -992,21 +995,20 @@ async function* completeChatEventStream(
           for (const event of events) yield event;
         }
       }
-    }
+    } if (!streamCompleted) { buffer += decoder.decode(); primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE]."); }
+    } catch (error) { primaryFailure = streamSignal?.aborted ? abortedError(streamSignal) : error instanceof ChatStreamProtocolError ? error : new ChatStreamProtocolError("Streamed provider response could not be read safely."); }
   } finally {
     try {
       if (!streamCompleted && !usageRecorded) {
         await reader.cancel().catch(() => undefined);
-        await finalizeUsage();
+        try { await finalizeUsage(); } catch (error) { if (primaryFailure === undefined) throw error; }
       }
     } finally {
       streamSignalCleanup();
     }
   }
 
-  if (!streamCompleted) {
-    throw new ChatStreamProtocolError("Streamed provider response ended before [DONE].");
-  }
+  if (primaryFailure) throw primaryFailure;
   
   const finalUsage = await finalizeUsage();
   const finalTools = completeToolCalls(toolCallParts);

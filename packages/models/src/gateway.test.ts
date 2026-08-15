@@ -1498,6 +1498,20 @@ describe("openAICompatibleModelGateway", () => {
     const consume = async () => { for await (const _ of openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [], signal: controller.signal })) { /* consume */ } };
     await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message: "Streamed provider response body is not readable." }); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
+  it.each((["chatEventStream", "chatStream"] as const).flatMap((method) => (["reader", "content", "tool", "flush"] as const).map((kind) => [method, kind] as const)))("sanitizes %s %s stream failures atomically", async (method, kind) => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const prefix = kind === "tool" ? 'data:{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"' : 'data:{"choices":[{"delta":{"content":"'; const value = kind === "flush" ? Uint8Array.of(195) : Uint8Array.from([...new TextEncoder().encode(prefix), 255]); const cancel = vi.fn().mockResolvedValue(undefined); const read = kind === "reader" ? vi.fn().mockRejectedValue(new Error("private-reader-text")) : vi.fn().mockResolvedValueOnce({ done: false, value }).mockResolvedValueOnce({ done: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => ({ read, cancel }) } } as unknown as Response)); const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear(); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const controller = new AbortController(); const remove = vi.spyOn(controller.signal, "removeEventListener"); const consume = async () => { for await (const _ of openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [], signal: controller.signal })) { /* consume */ } };
+    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message: "Streamed provider response could not be read safely." }); expect(cancel).toHaveBeenCalledOnce(); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+  it.each(["chatEventStream", "chatStream"] as const)("preserves %s primary stream failure over cancel and usage failures", async (method) => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" }); const cancel = vi.fn().mockRejectedValue(new Error("private-cancel-text")); vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => ({ read: vi.fn().mockRejectedValue(new Error("private-reader-text")), cancel }) } } as unknown as Response)); const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear().mockRejectedValueOnce(new Error("private-usage-text")); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const controller = new AbortController(); const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const consume = async () => { for await (const _ of openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [], signal: controller.signal })) { /* consume */ } }; await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message: "Streamed provider response could not be read safely." }); expect(cancel).toHaveBeenCalledOnce(); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+  it.each(["chatEventStream", "chatStream"] as const)("accounts prior %s output before a sanitized read failure", async (method) => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" }); const read = vi.fn().mockResolvedValueOnce({ done: false, value: new TextEncoder().encode('data:{"choices":[{"delta":{"content":"safe"}}]}\n\n') }).mockRejectedValueOnce(new Error("private-reader-text")); const cancel = vi.fn().mockResolvedValue(undefined); vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: { getReader: () => ({ read, cancel }) } } as unknown as Response)); const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear(); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const stream = openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
+    expect(await stream.next()).toMatchObject({ value: method === "chatStream" ? "safe" : { type: "content_delta", content: "safe" } }); await expect(stream.next()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message: "Streamed provider response could not be read safely." }); expect(cancel).toHaveBeenCalledOnce(); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledOnce(); expect(vi.mocked(usageModule.recordModelUsage).mock.calls[0]?.[0].outputTokens).toBe(1);
+  });
   it.each([["malformed JSON", 'data: {"choices":BROKEN}'], ["an empty data field", "data:"], ["a two-space separator", 'data:  {"choices":[{"delta":{"content":"bad"}}]}'], ["a tab separator", 'data:\t{"choices":[{"delta":{"content":"bad"}}]}'], ["a non-array choices container", 'data: {"choices":{}}'], ["empty choices without usage", 'data: {"choices":[]}'], ["a non-object choice", 'data: {"choices":[7]}'], ["a non-object delta", 'data: {"choices":[{"delta":7]}'], ["a non-array tool-call container", `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: { index: 0 } } }] })}`], ["non-string content", `data: ${JSON.stringify({ choices: [{ delta: { content: 7 } }] })}`]])("rejects %s between tool argument fragments", async (_label, middle) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
     const first = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: '{"x":' } }] } }] }; const last = { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] };
@@ -1826,7 +1840,7 @@ describe("openAICompatibleModelGateway", () => {
     });
   });
 
-  it("aborts a pending streaming provider read when the request signal aborts", async () => {
+  it.each(["chatEventStream", "chatStream"] as const)("aborts a pending %s provider read when the request signal aborts", async (method) => {
     restoreEnv();
     Object.assign(process.env, {
       MODEL_PROVIDER: "openrouter",
@@ -1849,9 +1863,8 @@ describe("openAICompatibleModelGateway", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
-    const controller = new AbortController();
-    const stream = openAICompatibleModelGateway.chatStream({
+    const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear(); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
+    const controller = new AbortController(); const remove = vi.spyOn(controller.signal, "removeEventListener"); const stream = openAICompatibleModelGateway[method]({
       workspaceId: "ws-1",
       taskType: "AGENT",
       messages: [{ role: "user", content: "Hello" }],
@@ -1869,6 +1882,6 @@ describe("openAICompatibleModelGateway", () => {
 
     await expect(pendingRead).rejects.toMatchObject({ name: "AbortError" });
     expect(providerSignal?.aborted).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 });

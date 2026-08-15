@@ -5,40 +5,31 @@ import { requireInternalValidationWorkspace } from "./lib/validation-workspace.m
 const TOOL_NAME = "respond_route_stream_contract"; const EXPECTED_ANSWER = "route-stream-contract-ok";
 function assert(condition, message) { if (!condition) throw new Error(message); }
 export function smokeConfig(source, argv = []) {
-  const preflightOnly = argv.includes("--preflight-only");
-  assert(preflightOnly || source.MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST === "1", "Paid-request acknowledgement is required.");
+  const preflightOnly = argv.includes("--preflight-only"); assert(preflightOnly || source.MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST === "1", "Paid-request acknowledgement is required.");
   const workspaceId = source.MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID?.trim(); assert(workspaceId, "Approved internal-validation workspace id is required.");
   const out = argv.find((value) => value.startsWith("--out="))?.slice(6); const artifactRoot = path.resolve(".artifacts/model-route-stream-contract");
-  const resolvedOut = path.resolve(out ?? "");
-  assert(resolvedOut.startsWith(`${artifactRoot}${path.sep}`), "Output must stay under the approved artifact directory.");
-  return { workspaceId, out: resolvedOut, preflightOnly };
+  const resolvedOut = path.resolve(out ?? ""); assert(resolvedOut.startsWith(`${artifactRoot}${path.sep}`), "Output must stay under the approved artifact directory."); return { workspaceId, out: resolvedOut, preflightOnly };
 }
 export function guardOneProviderRequest(fetchImpl, onRequest = () => {}) {
   let count = 0; const guarded = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input); if (url.includes("/chat/completions")) { onRequest(); count += 1; assert(count === 1, "Provider request limit exceeded."); }
-    return fetchImpl(input, init); };
-  return { guarded, count: () => count };
+    return fetchImpl(input, init); }; return { guarded, count: () => count };
 }
 export async function runContractSmoke({
-  source = process.env, argv = process.argv.slice(2),
-  gateway = openAICompatibleModelGateway,
+  source = process.env, argv = process.argv.slice(2), gateway = openAICompatibleModelGateway,
   findWorkspace = (id) => prisma.workspace.findUnique({ where: { id }, select: { id: true, slug: true, plan: true, modelUsageBudget: { select: { id: true } } } }),
   countResidue = (id) => Promise.all([prisma.workspace.count({ where: { id } }), prisma.modelUsage.count({ where: { workspaceId: id } }), prisma.aiUsageLedgerEntry.count({ where: { workspaceId: id } })]),
-  fetchImpl = globalThis.fetch,
-  writeEvidence = async (out, evidence) => { await mkdir(path.dirname(out), { recursive: true }); await writeFile(out, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 }); },
+  fetchImpl = globalThis.fetch, writeEvidence = async (out, evidence) => { await mkdir(path.dirname(out), { recursive: true }); await writeFile(out, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 }); },
 } = {}) {
   const config = smokeConfig(source, argv); let failurePhase = "provider_preflight"; let residueBefore;
   const localBoundary = async () => new Response("preflight-only", { status: 418 }); const guard = guardOneProviderRequest(config.preflightOnly ? localBoundary : fetchImpl, () => { failurePhase = "provider_stream"; });
   try {
-  const model = source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION; const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : [];
-  const route = routes.find((entry) => entry?.model === model);
+  const model = source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION; const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : []; const route = routes.find((entry) => entry?.model === model);
   const provider = String(route?.provider ?? source.MODEL_PROVIDER ?? env.MODEL_PROVIDER).toLowerCase();
   assert(["openrouter", "openai", "azure-openai", "azure-foundry"].includes(provider), "Configured provider is not live-compatible.");
   const authMode = route?.authMode ?? source.AZURE_OPENAI_AUTH_MODE ?? env.AZURE_OPENAI_AUTH_MODE; const credential = route?.apiKeyEnv ? source[route.apiKeyEnv] : provider.startsWith("azure-") ? source.AZURE_OPENAI_API_KEY ?? source.MODEL_API_KEY : source.MODEL_API_KEY;
   assert(provider.startsWith("azure-") && authMode === "managed_identity" || Boolean(credential?.trim()), "Configured credential source is unavailable.");
-  failurePhase = "workspace_validation";
-  const workspace = await findWorkspace(config.workspaceId);
-  assert(workspace, "Approved validation workspace was not found.");
+  failurePhase = "workspace_validation"; const workspace = await findWorkspace(config.workspaceId); assert(workspace, "Approved validation workspace was not found.");
   requireInternalValidationWorkspace(workspace, { env: {}, purpose: "model route stream contract smoke" });
   assert(workspace.plan === "ENTERPRISE_MANAGED" && !workspace.modelUsageBudget, "Validation workspace billing contract is unsafe.");
   if (config.preflightOnly) residueBefore = await countResidue(workspace.id);
@@ -62,11 +53,7 @@ export async function runContractSmoke({
   } finally {
     globalThis.fetch = originalFetch;
   }
-  const terminal = next?.value;
-  const tool = terminal?.tool_calls?.[0];
-  const streamed = deltas.get(0);
-  failurePhase = "contract_validation";
-  let args;
+  const terminal = next?.value; const tool = terminal?.tool_calls?.[0]; const streamed = deltas.get(0); failurePhase = "contract_validation"; let args;
   try { args = JSON.parse(tool?.function.arguments ?? ""); } catch { throw new Error("Terminal wrapper arguments were not JSON."); }
   assert(guard.count() === 1, "Exactly one provider request was required.");
   assert(terminal?.tool_calls?.length === 1 && tool?.function.name === TOOL_NAME, "Required wrapper tool was not returned.");
