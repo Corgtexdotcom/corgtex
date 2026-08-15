@@ -34,6 +34,7 @@ const returnActionToDraft = vi.fn();
 const updateAction = vi.fn();
 const updateActionChecklistItem = vi.fn();
 const updateDeliberationEntry = vi.fn();
+const uploadWorkItemEvidenceDocument = vi.fn(async () => []);
 const revalidatePath = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
@@ -62,6 +63,10 @@ vi.mock("@corgtex/domain", () => ({
 
 vi.mock("next/cache", () => ({
   revalidatePath,
+}));
+
+vi.mock("../work-item-evidence-upload", () => ({
+  uploadWorkItemEvidenceDocument,
 }));
 
 function buildCreateFormData() {
@@ -112,11 +117,12 @@ describe("action item server actions", () => {
     }));
   });
 
-  it("updates editable action metadata including priority and assignee", async () => {
+  it("forwards the exact observed version for generic Action content updates", async () => {
     const { updateActionAction } = await import("./actions");
     const formData = new FormData();
     formData.set("workspaceId", "workspace-1");
     formData.set("actionId", "action-1");
+    formData.set("expectedVersion", "12");
     formData.set("title", "Close the loop");
     formData.set("bodyMd", "Follow up with Eduardo.");
     formData.set("priority", "3");
@@ -128,6 +134,7 @@ describe("action item server actions", () => {
     expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       actionId: "action-1",
+      expectedVersion: 12,
       title: "Close the loop",
       bodyMd: "Follow up with Eduardo.",
       priority: 3,
@@ -135,6 +142,44 @@ describe("action item server actions", () => {
       dueAt: new Date("2030-02-03"),
     }));
   });
+
+  it.each(["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt", "proposalId"])(
+    "classifies Action %s as content requiring an observed version",
+    async (field) => {
+      const { updateActionAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("actionId", "action-1");
+      formData.set(field, "content-value");
+
+      await expect(updateActionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateAction).not.toHaveBeenCalled();
+      expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "", "0", "-1", "1.5", "9x", "9007199254740992"])(
+    "rejects generic Action content version %j before every side effect",
+    async (expectedVersion) => {
+      const { updateActionAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("actionId", "action-1");
+      formData.set("title", "Content edit");
+      formData.set("status", "COMPLETED");
+      if (expectedVersion !== undefined) formData.set("expectedVersion", expectedVersion);
+
+      await expect(updateActionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateAction).not.toHaveBeenCalled();
+      expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes the exact rendered version and reports edit success only after revalidation", async () => {
     const { editActionAction } = await import("./actions");

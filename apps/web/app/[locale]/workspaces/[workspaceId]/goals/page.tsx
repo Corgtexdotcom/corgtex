@@ -528,6 +528,7 @@ function GoalNodeInner({
                 <form action={updateGoalFormAction} className="actions-inline">
                   <input type="hidden" name="workspaceId" value={workspaceId} />
                   <input type="hidden" name="goalId" value={goal.id} />
+                  <input type="hidden" name="expectedVersion" value={goal.version} />
                   <select name="status" defaultValue={goal.status} style={{ width: "auto" }} aria-label={t("formStatus")}>
                     {workflowStatuses.map((status) => (
                       <option key={status} value={status}>{status}</option>

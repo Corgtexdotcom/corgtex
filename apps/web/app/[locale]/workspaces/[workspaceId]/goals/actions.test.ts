@@ -136,19 +136,75 @@ describe("goals server actions", () => {
     await expect(editGoalFormAction({ status: "idle" }, buildEditFormData())).rejects.toBe(error);
   });
 
-  it("keeps Goal lifecycle and progress updates version-optional", async () => {
+  it("forwards the exact observed version for mixed Goal status and progress updates", async () => {
     const { updateGoalFormAction } = await import("./actions");
     const formData = new FormData();
     formData.set("workspaceId", "workspace-1");
     formData.set("goalId", "goal-1");
+    formData.set("expectedVersion", "14");
     formData.set("status", "ON_TRACK");
     formData.set("progressPercent", "60");
 
     await updateGoalFormAction(formData);
 
     const payload = updateGoal.mock.calls[0]?.[1];
-    expect(payload).toMatchObject({ workspaceId: "workspace-1", goalId: "goal-1", status: "ON_TRACK", progressPercent: 60 });
-    expect(payload).not.toHaveProperty("expectedVersion");
+    expect(payload).toMatchObject({
+      workspaceId: "workspace-1",
+      goalId: "goal-1",
+      expectedVersion: 14,
+      status: "ON_TRACK",
+      progressPercent: 60,
+    });
+  });
+
+  it.each(["title", "descriptionMd", "level", "cadence", "progressPercent", "targetDate", "startDate", "parentGoalId", "circleId", "ownerMemberId"])(
+    "classifies Goal %s as content requiring an observed version",
+    async (field) => {
+      const { updateGoalFormAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("goalId", "goal-1");
+      formData.set(field, "1");
+
+      await expect(updateGoalFormAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(requireWorkspaceFeature).not.toHaveBeenCalled();
+      expect(updateGoal).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "", "0", "-1", "1.5", "6x", "9007199254740992"])(
+    "rejects generic Goal content version %j before every side effect",
+    async (expectedVersion) => {
+      const { updateGoalFormAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("goalId", "goal-1");
+      formData.set("progressPercent", "60");
+      if (expectedVersion !== undefined) formData.set("expectedVersion", expectedVersion);
+
+      await expect(updateGoalFormAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(requireWorkspaceFeature).not.toHaveBeenCalled();
+      expect(updateGoal).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps Goal status-only updates version-optional", async () => {
+    const { updateGoalFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("goalId", "goal-1");
+    formData.set("status", "ACTIVE");
+
+    await updateGoalFormAction(formData);
+
+    expect(updateGoal.mock.calls[0]?.[1]).toMatchObject({ status: "ACTIVE" });
+    expect(updateGoal.mock.calls[0]?.[1]).not.toHaveProperty("expectedVersion");
   });
 
   it("keeps legacy status submissions public when no draft/open intent is provided", async () => {

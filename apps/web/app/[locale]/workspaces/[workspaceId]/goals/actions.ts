@@ -41,6 +41,25 @@ function optionalNumber(value: FormDataEntryValue | null) {
   return raw.length > 0 ? Number(raw) : null;
 }
 
+const GOAL_CONTENT_FIELDS = [
+  "title",
+  "descriptionMd",
+  "level",
+  "cadence",
+  "progressPercent",
+  "targetDate",
+  "startDate",
+  "parentGoalId",
+  "circleId",
+  "ownerMemberId",
+] as const;
+
+function goalContentExpectedVersion(formData: FormData) {
+  return GOAL_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
+}
+
 function expectedVersionFromForm(formData: FormData) {
   const value = asString(formData, "expectedVersion");
   if (!/^[1-9]\d*$/.test(value)) {
@@ -102,6 +121,7 @@ export async function createGoalFormAction(formData: FormData) {
 }
 
 export async function updateGoalFormAction(formData: FormData) {
+  const expectedVersion = goalContentExpectedVersion(formData);
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
@@ -110,6 +130,7 @@ export async function updateGoalFormAction(formData: FormData) {
   await updateGoal(actor, {
     workspaceId,
     goalId: asString(formData, "goalId"),
+    ...(expectedVersion !== undefined ? { expectedVersion } : {}),
     title: formData.has("title") ? asOptional(formData, "title") ?? undefined : undefined,
     descriptionMd: formData.has("descriptionMd") ? asOptional(formData, "descriptionMd") : undefined,
     level: formData.has("level") ? asString(formData, "level") as GoalLevel : undefined,

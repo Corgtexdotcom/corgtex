@@ -31,6 +31,22 @@ function asOptionalDate(formData: FormData, key: string) {
   return value ? new Date(value) : null;
 }
 
+const TENSION_CONTENT_FIELDS = [
+  "title",
+  "bodyMd",
+  "circleId",
+  "assigneeMemberId",
+  "raisedByMemberId",
+  "proposalId",
+  "priority",
+] as const;
+
+function tensionContentExpectedVersion(formData: FormData) {
+  return TENSION_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
+}
+
 function expectedVersionFromForm(formData: FormData) {
   const value = asString(formData, "expectedVersion");
   if (!/^[1-9]\d*$/.test(value)) {
@@ -102,6 +118,7 @@ export async function createProposalFromTensionAction(formData: FormData) {
 }
 
 export async function updateTensionAction(formData: FormData) {
+  const expectedVersion = tensionContentExpectedVersion(formData);
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
@@ -121,6 +138,7 @@ export async function updateTensionAction(formData: FormData) {
   await updateTension(actor, {
     workspaceId,
     tensionId,
+    ...(expectedVersion !== undefined ? { expectedVersion } : {}),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     status: status ?? undefined,

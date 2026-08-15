@@ -39,6 +39,21 @@ function ownerMemberIdFromForm(formData: FormData) {
   return formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined;
 }
 
+const PROPOSAL_CONTENT_FIELDS = [
+  "title",
+  "summary",
+  "bodyMd",
+  "priority",
+  "circleId",
+  "ownerMemberId",
+] as const;
+
+function proposalContentExpectedVersion(formData: FormData) {
+  return PROPOSAL_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
+}
+
 function expectedVersionFromForm(formData: FormData) {
   const value = asString(formData, "expectedVersion");
   if (!/^[1-9]\d*$/.test(value)) {
@@ -94,6 +109,7 @@ export async function createProposalFromTensionAction(formData: FormData) {
 }
 
 export async function updateProposalAction(formData: FormData) {
+  const expectedVersion = proposalContentExpectedVersion(formData);
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
@@ -102,6 +118,7 @@ export async function updateProposalAction(formData: FormData) {
   await updateProposal(actor, {
     workspaceId,
     proposalId: asString(formData, "proposalId"),
+    ...(expectedVersion !== undefined ? { expectedVersion } : {}),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: asOptional(formData, "bodyMd") ?? undefined,
     priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,

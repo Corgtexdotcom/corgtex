@@ -32,6 +32,22 @@ function asOptionalDate(formData: FormData, key: string) {
   return value ? new Date(value) : null;
 }
 
+const ACTION_CONTENT_FIELDS = [
+  "title",
+  "bodyMd",
+  "priority",
+  "circleId",
+  "assigneeMemberId",
+  "dueAt",
+  "proposalId",
+] as const;
+
+function actionContentExpectedVersion(formData: FormData) {
+  return ACTION_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
+}
+
 function expectedVersionFromForm(formData: FormData) {
   const value = asString(formData, "expectedVersion");
   if (!/^[1-9]\d*$/.test(value)) {
@@ -65,6 +81,7 @@ export async function createActionAction(formData: FormData) {
 }
 
 export async function updateActionAction(formData: FormData) {
+  const expectedVersion = actionContentExpectedVersion(formData);
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
@@ -84,6 +101,7 @@ export async function updateActionAction(formData: FormData) {
   await updateAction(actor, {
     workspaceId,
     actionId,
+    ...(expectedVersion !== undefined ? { expectedVersion } : {}),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
