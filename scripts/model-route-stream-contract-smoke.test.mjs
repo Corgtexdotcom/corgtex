@@ -1,13 +1,9 @@
 import { describe, expect, it, vi } from "vitest"; import { guardOneProviderRequest, runContractSmoke, smokeConfig } from "./model-route-stream-contract-smoke.mjs";
-const source = {
-  MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST: "1", MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID: "ws-validation",
-  MODEL_PROVIDER: "openrouter", MODEL_CHAT_CONVERSATION: "test-model", MODEL_API_KEY: "test-key",
-};
+const source = { MODEL_ROUTE_STREAM_SMOKE_CONFIRM_ONE_PAID_REQUEST: "1", MODEL_ROUTE_STREAM_SMOKE_WORKSPACE_ID: "ws-validation", MODEL_PROVIDER: "openrouter", MODEL_CHAT_CONVERSATION: "test-model", MODEL_API_KEY: "test-key" };
 const workspace = { id: "ws-validation", slug: "corgtex-validation", plan: "ENTERPRISE_MANAGED", modelUsageBudget: null };
 describe("model route stream contract smoke", () => {
   it("requires explicit paid, workspace, and artifact gates", () => {
-    expect(() => smokeConfig({}, [])).toThrow(/acknowledgement/);
-    expect(() => smokeConfig(source, ["--out=unsafe.json"])).toThrow(/artifact directory/);
+    expect(() => smokeConfig({}, [])).toThrow(/acknowledgement/); expect(() => smokeConfig(source, ["--out=unsafe.json"])).toThrow(/artifact directory/);
   });
   it("fails before a second provider request", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("ok"));

@@ -802,7 +802,7 @@ function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unk
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ChatStreamProtocolError("Streamed tool call delta must be an object.");
   const tool = value as Record<string, unknown>;
   const index = tool.index;
-  if (!Number.isInteger(index) || (index as number) < 0) throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative integer.");
+  if (!Number.isSafeInteger(index) || (index as number) < 0) throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative safe integer.");
   if (tool.type != null && tool.type !== "function") throw new ChatStreamProtocolError("Streamed tool call type must be function.");
   if (tool.id != null && typeof tool.id !== "string") throw new ChatStreamProtocolError("Streamed tool call id fragment must be a string.");
   if (tool.function != null && (typeof tool.function !== "object" || Array.isArray(tool.function))) throw new ChatStreamProtocolError("Streamed tool call function delta must be an object.");
@@ -955,10 +955,8 @@ async function* completeChatEventStream(
       buffer += decoder.decode(value, { stream: true });
       let newlineIndex: number;
       while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-
-        const dataValue = line.startsWith("data:") ? line.slice(5).replace(/^ /, "") : null; if (dataValue === "[DONE]") {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, ""); buffer = buffer.slice(newlineIndex + 1);
+        const fieldValue = line.startsWith("data:") ? line.slice(5) : null; const dataValue = fieldValue?.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (dataValue !== null && /^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); if (dataValue === "[DONE]") {
           streamCompleted = true;
           await reader.cancel().catch(() => undefined);
           break;
@@ -976,7 +974,7 @@ async function* completeChatEventStream(
           if (choices !== undefined && !Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array when present.");
           if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
           const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
-          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && candidate.index !== 0) throw new ChatStreamProtocolError("Streamed choice index must be zero when present.");
+          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present.");
           if (candidate?.finish_reason != null && typeof candidate.finish_reason !== "string") throw new ChatStreamProtocolError("Streamed finish_reason must be a string or null.");
           if (candidate?.finish_reason === "error") throw new ChatStreamProtocolError("Streamed provider reported an error.");
           const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
