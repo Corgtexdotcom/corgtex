@@ -947,7 +947,7 @@ async function* completeChatEventStream(
   }
   let reader: ReadableStreamDefaultReader<Uint8Array>;
   try { if (!response.body) throw new Error(); reader = response.body.getReader(); }
-  catch { const failure = new ChatStreamProtocolError("Streamed provider response body is not readable."); try { await finalizeUsage(); } catch { /* preserve primary */ } finally { streamSignalCleanup(); } throw failure; }
+  catch { streamSignalCleanup(); throw new ChatStreamProtocolError("Streamed provider response body is not readable."); }
 
   let primaryFailure: unknown;
   try {

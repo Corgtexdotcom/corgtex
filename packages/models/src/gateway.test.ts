@@ -1491,12 +1491,12 @@ describe("openAICompatibleModelGateway", () => {
     await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1);
   });
-  it.each([["chatEventStream", null], ["chatStream", { getReader() { throw new Error("private-reader-text"); } }]] as const)("accounts and cleans up accepted %s body failure", async (method, body) => {
+  it.each(((["chatEventStream", "chatStream"] as const).flatMap((method) => (["null", "unreadable"] as const).map((kind) => [method, kind] as const))))("rejects pre-reader %s %s body failure without usage", async (method, kind) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(body ? { ok: true, body } as unknown as Response : new Response(null, { status: 200 })));
+    const body = kind === "unreadable" ? { getReader() { throw new Error("private-reader-text"); } } : null; vi.stubGlobal("fetch", vi.fn().mockResolvedValue(body ? { ok: true, body } as unknown as Response : new Response(null, { status: 200 })));
     const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear(); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const controller = new AbortController(); const remove = vi.spyOn(controller.signal, "removeEventListener");
     const consume = async () => { for await (const _ of openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [], signal: controller.signal })) { /* consume */ } };
-    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message: "Streamed provider response body is not readable." }); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message: "Streamed provider response body is not readable." }); expect(vi.mocked(usageModule.recordModelUsage)).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
   it.each((["chatEventStream", "chatStream"] as const).flatMap((method) => (["reader", "content", "tool", "flush"] as const).map((kind) => [method, kind] as const)))("sanitizes %s %s stream failures atomically", async (method, kind) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
