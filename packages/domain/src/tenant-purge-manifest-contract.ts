@@ -76,6 +76,7 @@ const OBJECT_IS_FROZEN = Object.isFrozen;
 const OBJECT_VALUES = Object.values;
 const GET_DESCRIPTOR = Object.getOwnPropertyDescriptor;
 const GET_PROTOTYPE = Object.getPrototypeOf;
+const SET_PROTOTYPE = Object.setPrototypeOf;
 const OWN_KEYS = Reflect.ownKeys;
 const APPLY = Reflect.apply;
 const ARRAY_IS_ARRAY = Array.isArray;
@@ -159,7 +160,7 @@ function boolean(value: unknown, label: string): boolean { if (typeof value !== 
 function integer(value: unknown, label: string, maximum: number, minimum = 1): number { if (typeof value !== "number" || !IS_INTEGER(value) || value < minimum || value > maximum) invalid(label); return value; }
 function nullableUuid(value: unknown, label: string) { return value === null ? null : uuid(value, label); }
 function uuidList(value: unknown, label: string) { const items = exactArray(value, label); const result: string[] = []; for (let index = 0; index < items.length; index += 1) append(result, uuid(items[index], label)); if (hasDuplicate(result)) invalid(label); return result; }
-function freezeDeep<T>(value: T): T { if (typeof value === "object" && value !== null && !OBJECT_IS_FROZEN(value)) { const children = OBJECT_VALUES(value); for (let index = 0; index < children.length; index += 1) freezeDeep(children[index]); OBJECT_FREEZE(value); } return value; }
+function freezeDeep<T>(value: T): T { if (typeof value === "object" && value !== null && !OBJECT_IS_FROZEN(value)) { const children = OBJECT_VALUES(value); for (let index = 0; index < children.length; index += 1) freezeDeep(children[index]); SET_PROTOTYPE(value, null); OBJECT_FREEZE(value); } return value; }
 
 function targetSnapshot(value: unknown): TenantPurgeTarget {
   const accountShape = ["mode", "accountId", "deploymentId", "workspaceId"];

@@ -32,7 +32,7 @@ function topology(target: TenantPurgeTarget): TenantPurgeTopologyInput {
 function input(overrides: Record<string, unknown> = {}) { return { target: accountTarget, capabilitySha: SHA, redactionKey: new Uint8Array(32).fill(7), privateAuthority: true, policies: POLICIES, topology: topology(accountTarget), ...overrides }; }
 function caught(operation: () => unknown): AppError { try { operation(); } catch (error) { expect(error).toBeInstanceOf(AppError); expect(Object.isFrozen(error)).toBe(true); return error as AppError; } throw new Error("expected failure"); }
 function expectError(operation: () => unknown, status = 400, code = "TENANT_PURGE_CONTRACT_INVALID") { const error = caught(operation); expect(error).toMatchObject({ status, code }); return error; }
-function expectFrozenGraph(value: unknown, seen = new Set<object>()) { if (typeof value !== "object" || value === null || seen.has(value)) return; seen.add(value); expect(Object.isFrozen(value)).toBe(true); Object.values(value).forEach((child) => expectFrozenGraph(child, seen)); }
+function expectFrozenGraph(value: unknown, seen = new Set<object>()) { if (typeof value !== "object" || value === null || seen.has(value)) return; seen.add(value); expect(Object.isFrozen(value)).toBe(true); expect(Object.getPrototypeOf(value)).toBeNull(); Object.values(value).forEach((child) => expectFrozenGraph(child, seen)); }
 
 describe("tenant purge manifest normalization", () => {
   it("accepts only closed targets, primitive identifiers, literal authority, and bounded policies", () => {
@@ -80,6 +80,9 @@ describe("tenant purge manifest normalization", () => {
     try { const hostile = new Proxy(input({ capabilitySha: "bad" }), { getOwnPropertyDescriptor(value, key) { if (key === "target") Object.setPrototypeOf(AppError, poisoned); return Reflect.getOwnPropertyDescriptor(value, key); } }); try { normalizeTenantPurgeManifestValues(hostile); } catch (error) { protectedError = error; } } finally { Object.setPrototypeOf(AppError, originalSuper); }
     expect(authorityError).toBeInstanceOf(AppError); expect(authorityError).toMatchObject({ status: 403, code: "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED" }); expect(Object.isFrozen(authorityError)).toBe(true);
     expect(protectedError).toBeInstanceOf(AppError); expect(protectedError).toMatchObject({ status: 400, code: "TENANT_PURGE_CONTRACT_INVALID" }); expect(Object.isFrozen(protectedError)).toBe(true); expect(protectedError).not.toBe(authorityError);
+    const objectToJSON = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON"); const arrayToJSON = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON"); let detached: ReturnType<typeof normalizeTenantPurgeManifestValues> | undefined;
+    try { const hostile = new Proxy(input(), { getOwnPropertyDescriptor(value, key) { if (key === "target") { Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: () => ({ owned: true }) }); Object.defineProperty(Array.prototype, "toJSON", { configurable: true, value: () => ["owned"] }); } return Reflect.getOwnPropertyDescriptor(value, key); } }); detached = normalizeTenantPurgeManifestValues(hostile); } finally { if (objectToJSON) Object.defineProperty(Object.prototype, "toJSON", objectToJSON); else delete (Object.prototype as { toJSON?: unknown }).toJSON; if (arrayToJSON) Object.defineProperty(Array.prototype, "toJSON", arrayToJSON); else delete (Array.prototype as unknown as { toJSON?: unknown }).toJSON; }
+    expect(JSON.stringify(detached)).not.toContain("owned"); expectFrozenGraph(detached);
   });
 
   it("uses exact data descriptors and one target snapshot without invoking getters", () => {
