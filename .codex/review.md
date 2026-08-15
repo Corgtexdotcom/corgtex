@@ -30,12 +30,13 @@ Reject on **any** of these:
    - `prisma/migrations/**`
    - `packages/domain/src/auth*.ts`
    - `apps/web/lib/auth.ts`
-5. **Diff exceeds risk-tier caps** without the `large-change-approved` label:
-   - `low`: > 1200 non-doc LOC or > 50 files.
-   - `standard`: > 800 non-doc LOC or > 25 files.
-   - `high`: > 700 non-doc LOC or > 15 files.
-   - `critical`: > 400 non-doc LOC or > 15 files.
-   - Forbidden-path and agent-pipeline policy changes use the critical cap unless `large-change-approved` is present.
+5. **Diff exceeds the agent review budget** without the `large-change-approved` label:
+   - `low`: > 4000 non-doc LOC or > 100 files.
+   - `standard`: > 2500 non-doc LOC or > 60 files.
+   - `high`: > 1800 non-doc LOC or > 40 files.
+   - `critical`: > 1200 non-doc LOC or > 30 files.
+   - Forbidden-path and agent-pipeline policy changes use the critical budget unless `large-change-approved` is present.
+   - A `large-change-approved` PR must include a Change cohesion section or equivalent explicit plan section with a concise subsystem/file review map, acceptance/test coverage map, and rollback boundaries. The label is a review-routing control, not a force-merge or human-bypass label. Do not demand a new goal, plan, branch, PR, release step, or split solely because a cohesive change is large. Reject a proposed split when it would land an unused API, partial safety contract, or a change that is not independently useful, safe, testable, and rollbackable.
 6. **Secrets** — gitleaks red, or any `.env` / `.env.*` file added / modified, or hardcoded credentials in the diff.
    Also reject if the PR-body plan itself contains private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
 7. **Forbidden commands / patterns** in the diff:
@@ -68,6 +69,7 @@ Approve only when **all** of:
 - Every hard rejection criterion passes.
 - The plan's "Test plan" commands match what CI actually executed.
 - The automated policy checks in `scope-check` and `diff-size` pass.
+- For a diff above 1000 non-doc LOC, above 20 files, or carrying `large-change-approved`, the complete exact-head change has been reviewed in structured passes covering scope/contracts, security and data boundaries, behavior, tests, integration, and rollback. Record findings against the complete PR; multiple read-only review passes do not require multiple PRs.
 
 The attested command in the next section is the single authoritative approval
 procedure; an un-attested approval is invalid.

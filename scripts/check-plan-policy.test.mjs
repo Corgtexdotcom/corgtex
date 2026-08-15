@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { RISK_CAPS, sizePolicyForFiles } from "./check-plan-policy.mjs";
 
 describe("check-plan size policy", () => {
-  it("allows 700 lines for normal high-risk work", () => {
+  it("allows an agent-sized cohesive high-risk change", () => {
     expect(sizePolicyForFiles("high", ["packages/workflows/src/outbox.ts"])).toEqual({
       effectiveRiskTier: "high",
-      caps: { codeLoc: 700, files: 15 },
+      caps: { codeLoc: 1800, files: 40 },
     });
   });
 
-  it("keeps an explicit critical plan at 400 lines", () => {
+  it("allows a larger independently reviewed critical change", () => {
     expect(sizePolicyForFiles("critical", ["packages/domain/src/finance-imports.ts"])).toEqual({
       effectiveRiskTier: "critical",
-      caps: { codeLoc: 400, files: 15 },
+      caps: { codeLoc: 1200, files: 30 },
     });
   });
 
@@ -25,15 +25,15 @@ describe("check-plan size policy", () => {
     ".codex/ops/reviewer.md",
     ".github/pull_request_template.md",
     "docs/contributing/pull-requests.mdx",
-  ])("forces the critical cap for protected path %s", (file) => {
+  ])("forces the critical review budget for protected path %s", (file) => {
     expect(sizePolicyForFiles("high", [file])).toEqual({
       effectiveRiskTier: "critical",
-      caps: { codeLoc: 400, files: 15 },
+      caps: { codeLoc: 1200, files: 30 },
     });
   });
 
-  it("leaves low and standard limits unchanged", () => {
-    expect(RISK_CAPS.low).toEqual({ codeLoc: 1200, files: 50 });
-    expect(RISK_CAPS.standard).toEqual({ codeLoc: 800, files: 25 });
+  it("uses larger agent-native budgets for low and standard work", () => {
+    expect(RISK_CAPS.low).toEqual({ codeLoc: 4000, files: 100 });
+    expect(RISK_CAPS.standard).toEqual({ codeLoc: 2500, files: 60 });
   });
 });

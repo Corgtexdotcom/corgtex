@@ -40,10 +40,11 @@ Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
 
 1. **Contains the full plan contract.**
 2. **States the risk tier** — `low`, `standard`, `high`, or `critical`.
-3. **Summarizes what shipped** — one or two sentences, the "walkthrough."
-4. **Describes demo exposure** for customer-visible product changes. Update `scripts/seed-jnj-demo.mjs` when safe seeded data is needed, or explain why the feature cannot be shown safely in the public demo.
-5. **Explains UX spine decisions** for workspace UI changes: name the shared primitive used or improved, and explain any local exception by user benefit rather than preference.
-6. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Prefer Corgtex Build Artifacts: capture proof under ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`, and paste the emitted markdown links into the PR body. Use PR attachments, CI-uploaded artifacts, or another private artifact link only when Build Artifacts is unavailable. Do not commit generated screenshots or recordings.
+3. **Explains change cohesion** — why the work belongs in one PR or why each split is independently useful, safe, testable, and rollbackable. For `large-change-approved`, include the subsystem/file review map, acceptance/test coverage map, and rollback boundaries.
+4. **Summarizes what shipped** — one or two sentences, the "walkthrough."
+5. **Describes demo exposure** for customer-visible product changes. Update `scripts/seed-jnj-demo.mjs` when safe seeded data is needed, or explain why the feature cannot be shown safely in the public demo.
+6. **Explains UX spine decisions** for workspace UI changes: name the shared primitive used or improved, and explain any local exception by user benefit rather than preference.
+7. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Prefer Corgtex Build Artifacts: capture proof under ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`, and paste the emitted markdown links into the PR body. Use PR attachments, CI-uploaded artifacts, or another private artifact link only when Build Artifacts is unavailable. Do not commit generated screenshots or recordings.
 
 Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
 
@@ -59,7 +60,25 @@ Every PR must pass:
 - `plan-present` — PR body contains the plan contract.
 - `scope-check` — changed files ⊆ plan allowlist and policy checks pass.
 - `gitleaks` — no secrets in the diff.
-- `diff-size` — risk-tier caps: `low` ≤ 1200 non-doc LOC / 50 files, `standard` ≤ 800 / 25, `high` ≤ 700 / 15, `critical` ≤ 400 / 15. Forbidden paths and agent-pipeline policy files always use the critical cap.
+- `diff-size` — agent review budgets: `low` ≤ 4000 non-doc LOC / 100 files, `standard` ≤ 2500 / 60, `high` ≤ 1800 / 40, `critical` ≤ 1200 / 30. Forbidden paths and agent-pipeline policy files always use the critical budget.
+
+These budgets are safeguards, not targets. Do not split a coherent change merely
+to satisfy a line or file threshold. If a larger change is safer to review as
+one unit, use `large-change-approved` with the required cohesion and review map.
+The independent reviewer may make several focused passes over the same exact
+head instead of requiring several separately deployed PRs.
+
+Default to one cohesive implementation PR per user outcome. The plan must state
+the maximum planned implementation-PR count and stop condition. Expanding an
+exact-target operational task into a reusable subsystem or PR train requires
+explicit user approval; a size threshold alone never authorizes that expansion.
+
+`large-change-approved` is a review-routing control, not a force-merge or
+human-bypass label. Keep it cheaper than fragmentation: add the concise review
+and rollback map to the existing plan, without creating another goal, plan,
+branch, PR, or release step solely because of size. The budgets are provisional
+and are recalibrated after each 20 merged agent PRs or 30 days from observed
+findings, remediation cycles, reverts/incidents, and time-to-merge.
 
 All of these are required by branch protection on `main`. The Reviewer
 cannot merge a PR whose required checks are red.
@@ -77,7 +96,7 @@ artifact links only when Build Artifacts is unavailable.
 ## Labels
 
 - `forbidden-path-approved` — justification in the plan, required for changes to `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`.
-- `large-change-approved` — override for the selected risk-tier cap.
+- `large-change-approved` — override for the selected risk-tier review budget, backed by the existing plan's concise cohesion, coverage, review, and rollback map.
 - `halt-agents` — human stop; Reviewer will not merge, Executor will not push.
 - `force-merge` — human override, logged.
 - `needs-replan` — Executor is stuck; Planner picks up.

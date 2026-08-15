@@ -42,6 +42,20 @@ Replace this section with exactly one list item whose value is `low`,
 Bullet list of things that could plausibly be bundled in but won't be.
 This is load-bearing: Reviewer uses it to reject scope creep.
 
+## Change cohesion
+
+Explain why this is one coherent PR or why the proposed split points are
+independently useful, safe, testable, and rollbackable. Do not split merely to
+fit a line/file budget, and do not land unused APIs or partial safety contracts.
+For `large-change-approved`, include a subsystem/file review map, map tests to
+acceptance criteria, and identify rollback boundaries in this existing plan.
+Do not create another goal, plan, branch, PR, or release step solely for size.
+
+State the delivery shape, maximum planned implementation-PR count, and stop
+condition. Default to one cohesive PR. A reusable subsystem or PR train for an
+exact-target operational task is material scope expansion and needs explicit
+user approval before additional planning or PRs begin.
+
 ## Files to touch
 
 Markdown list. Each item is a backtick-wrapped path or glob, one per
@@ -107,7 +121,8 @@ rule in `docs/contributing/agent-pipeline.mdx`. Common ones:
 
 - `forbidden-path-approved` — touches `deploy/**`, `.github/workflows/**`,
   `prisma/migrations/**`, or auth files. Requires justification above.
-- `large-change-approved` — diff exceeds the risk-tier cap. Requires
-  justification above.
+- `large-change-approved` — diff exceeds the risk-tier review budget. Requires
+  the concise cohesion, review-map, coverage-map, and rollback justification
+  above. It is not a force-merge or human-bypass label.
 
 Leave this section empty if none apply.

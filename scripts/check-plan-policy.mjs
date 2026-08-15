@@ -7,10 +7,10 @@ export const FORBIDDEN_UNLABELED_PATHS = [
 ];
 
 export const RISK_CAPS = {
-  low: { codeLoc: 1200, files: 50 },
-  standard: { codeLoc: 800, files: 25 },
-  high: { codeLoc: 700, files: 15 },
-  critical: { codeLoc: 400, files: 15 },
+  low: { codeLoc: 4000, files: 100 },
+  standard: { codeLoc: 2500, files: 60 },
+  high: { codeLoc: 1800, files: 40 },
+  critical: { codeLoc: 1200, files: 30 },
 };
 
 const PIPELINE_POLICY_PATHS = [

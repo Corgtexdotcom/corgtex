@@ -65,7 +65,7 @@ The Reviewer (Codex) applies the checklist in
 - `scope-check` passes (changed files ⊆ allowlist).
 - Acceptance criteria all ticked and reflected in code.
 - No forbidden-path changes without `forbidden-path-approved`.
-- Diff within risk-tier caps unless `large-change-approved`.
+- Diff within its agent review budget unless `large-change-approved`.
 - `gitleaks` green. No `db push`, no `--no-verify`, no removed `force-dynamic`.
 - Tests added when domain code changed.
 - Visual proof links present in the PR body for frontend changes. Corgtex Build Artifacts links are preferred; PR attachments, CI artifacts, or private proof links are acceptable fallbacks when Build Artifacts is unavailable.
@@ -74,15 +74,24 @@ The Reviewer (Codex) applies the checklist in
 Codex either approves (auto-merge fires) or requests changes (the
 Executor re-enters the fix loop).
 
-## Scope and caps
+## Scope and agent review budgets
 
 Mechanical, CI-enforced:
 
 - **File allowlist:** changed files ⊆ plan's "Files to touch".
-- **Risk tiers:** `low` is ≤ 1200 non-doc LOC and ≤ 50 files; `standard` is ≤ 800 non-doc LOC and ≤ 25 files; `high` is ≤ 700 non-doc LOC and ≤ 15 files; `critical` is ≤ 400 non-doc LOC and ≤ 15 files.
-- **Size override:** use `large-change-approved` only when the PR exceeds the selected risk-tier cap, with justification in the plan.
+- **Risk tiers:** `low` is ≤ 4000 non-doc LOC and ≤ 100 files; `standard` is ≤ 2500 non-doc LOC and ≤ 60 files; `high` is ≤ 1800 non-doc LOC and ≤ 40 files; `critical` is ≤ 1200 non-doc LOC and ≤ 30 files.
+- **Budgets, not targets:** these thresholds bound the default independent-review workload. They are not target sizes and must not cause artificial micro-PRs. Prefer one cohesive vertical change when its contract, implementation, tests, and rollback are safer to understand together.
+- **Valid splits:** every PR must be independently useful, safe, testable, and rollbackable. Do not land unused APIs, partial safety contracts, or disconnected test-only evidence solely to fit a threshold.
+- **Size override:** when a cohesive PR exceeds its budget, use `large-change-approved` with a concise Change cohesion section or equivalent plan section containing a subsystem/file review map, an acceptance/test coverage map, and rollback boundaries. This is a review-routing control, not a force-merge or human-bypass label. Keep it cheaper than splitting: do not create another goal, plan, branch, PR, or release step solely because of size.
+- **Large-diff review:** for a diff above 1000 non-doc LOC, above 20 files, or carrying `large-change-approved`, the independent exact-head reviewer inspects the complete PR in structured passes for scope/contracts, security and data boundaries, behavior, tests, integration, and rollback. Multiple read-only review passes are encouraged; they do not require multiple deployable PRs.
+- **Task shape:** default to one cohesive implementation PR per user outcome. The plan states the maximum planned implementation-PR count and stop condition. A reusable subsystem or PR train for an exact-target operational task is material scope expansion and requires explicit user approval. When cleanup is claimed to contain no customer data, reverify the exact targets at execution time and use the smallest supported, auditable mechanism with dry-run, backup/rollback, and cross-target checks.
 - **Forbidden paths:** `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`. Require `forbidden-path-approved` label plus justification.
-- **Critical-cap enforcement:** forbidden-path and agent-pipeline policy changes are evaluated against the critical cap unless `large-change-approved` is present. Use the critical tier for auth, permissions, cross-tenant isolation, migrations, and deploy work even when no forbidden-path pattern matches.
+- **Critical-budget enforcement:** forbidden-path and agent-pipeline policy changes are evaluated against the critical budget unless `large-change-approved` is present. Use the critical tier for auth, permissions, cross-tenant isolation, migrations, and deploy work even when no forbidden-path pattern matches.
+
+The numeric budgets are provisional repository defaults, not proven safety
+constants. Recalibrate them after each 20 merged agent PRs or 30 days using
+review findings, remediation cycles, reverts/incidents, and time-to-merge.
+Larger model context alone is not evidence that a budget should increase.
 
 ## Rollback
 

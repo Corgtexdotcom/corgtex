@@ -116,12 +116,20 @@ implementation code.
 2. Copy [.agents/plan-template.md](.agents/plan-template.md) into the draft PR body. For local checks before a PR exists, copy it to `.agents/plans/<branch>.md`; that directory is ignored and must not be committed.
 3. Fill every section, including **Risk tier** (`low`, `standard`, `high`, or `critical`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating the PR body plan.
 4. Pick the smallest honest risk tier:
-   - `low`: docs, copy, styles, or tightly scoped non-security changes. Cap: ≤ 1200 non-doc LOC and ≤ 50 files.
-   - `standard`: normal product or domain work. Cap: ≤ 800 non-doc LOC and ≤ 25 files.
-   - `high`: normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category. Cap: ≤ 700 non-doc LOC and ≤ 15 files.
-   - `critical`: auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy. Cap: ≤ 400 non-doc LOC and ≤ 15 files.
-5. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label. Forbidden paths and agent-pipeline policy files are always evaluated against the 400-line critical cap.
-6. Push the branch and open a **draft** PR whose body is the completed public-safe plan. Do not commit local plan files. Do not mark ready-for-review.
+   - `low`: docs, copy, styles, or tightly scoped non-security changes. Review budget: ≤ 4000 non-doc LOC and ≤ 100 files.
+   - `standard`: normal product or domain work. Review budget: ≤ 2500 non-doc LOC and ≤ 60 files.
+   - `high`: normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category. Review budget: ≤ 1800 non-doc LOC and ≤ 40 files.
+   - `critical`: auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy. Review budget: ≤ 1200 non-doc LOC and ≤ 30 files.
+5. Treat these as agent review budgets, not target sizes and not reasons to manufacture micro-PRs. Prefer one cohesive vertical change when its contract, implementation, tests, and rollback are safer to understand together. Split only where every PR is independently useful, safe, testable, and rollbackable; do not land unused APIs, partial safety contracts, or test-only evidence solely to fit a cap.
+6. If a cohesive change exceeds its budget, prefer the `large-change-approved` path over artificial fragmentation. This label is a review-routing control, not a force-merge or human-bypass label. Keep the exception cheaper than splitting: add a concise cohesion rationale, subsystem/file review map, acceptance/test coverage map, and rollback boundaries to the existing plan; do not create another goal, plan, branch, PR, or release step solely because of size. The independent reviewer must inspect the complete exact-head diff in structured passes for scope/contracts, security and data boundaries, behavior, tests, integration, and rollback.
+7. Default to one cohesive implementation PR per user outcome. The plan must state the delivery shape, maximum planned implementation-PR count, and stop condition. Turning an exact-target operational task into a reusable subsystem or PR train is material scope expansion and requires explicit user approval before the additional planning or PRs begin. For cleanup claimed to contain no customer data, verify that claim against the exact targets at execution time and use the smallest supported, auditable mechanism with dry-run, backup/rollback, and cross-target checks.
+8. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label. Forbidden paths and agent-pipeline policy files are always evaluated against the critical review budget.
+9. Push the branch and open a **draft** PR whose body is the completed public-safe plan. Do not commit local plan files. Do not mark ready-for-review.
+
+The numeric budgets are provisional local defaults, not research-established
+safety limits. Recalibrate them after each 20 merged agent PRs or 30 days using
+review findings, remediation cycles, reverts/incidents, and time-to-merge. Do
+not change them merely because a model has a larger context window.
 
 Stop there. Hand off to the Executor.
 
@@ -169,7 +177,7 @@ Summary:
 2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist (`scripts/check-plan.mjs` enforces).
 3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
 4. **No forbidden-path changes** without the `forbidden-path-approved` label.
-5. **Diff within risk-tier caps** unless `large-change-approved` is set.
+5. **Diff within its agent review budget** unless `large-change-approved` is set.
 6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages. `--admin` is forbidden unless the `force-merge` label is present and the PR comment trail documents the human directive.
 7. **Tests added** when `packages/domain/**` changed.
 8. **PR-body visual proof present** for any frontend-path change.

@@ -4,7 +4,7 @@
 // Modes:
 //   --mode=present   — verify the PR body contains the plan contract.
 //   --mode=scope     — verify changed files ⊆ plan's "Files to touch" allowlist.
-//   --mode=size      — verify diff is within risk-tier caps unless the PR carries
+//   --mode=size      — verify diff is within the risk-tier review budget unless the PR carries
 //                      the `large-change-approved` label.
 //   --mode=policy    — verify review blockers that should be caught before Codex.
 //
@@ -400,7 +400,7 @@ if (mode === "size") {
 
   if (files.length > caps.files) {
     fail(
-      `${files.length} files changed, ${effectiveRiskTier} risk cap is ${caps.files}. Split the PR or add "large-change-approved".`,
+      `${files.length} files changed, ${effectiveRiskTier} review budget is ${caps.files}. Add "large-change-approved" with a cohesion/review map, or split only at an independently safe boundary.`,
     );
   }
   // Count LOC of non-doc files only.
@@ -427,10 +427,10 @@ if (mode === "size") {
   }
   if (codeLoc > caps.codeLoc) {
     fail(
-      `${codeLoc} LOC of code changed, ${effectiveRiskTier} risk cap is ${caps.codeLoc}. Split the PR or add "large-change-approved".`,
+      `${codeLoc} LOC of code changed, ${effectiveRiskTier} review budget is ${caps.codeLoc}. Add "large-change-approved" with a cohesion/review map, or split only at an independently safe boundary.`,
     );
   }
-  ok(`${files.length} file(s), ${codeLoc} code LOC within ${effectiveRiskTier} risk caps`);
+  ok(`${files.length} file(s), ${codeLoc} code LOC within ${effectiveRiskTier} review budget`);
 }
 
 if (mode === "policy") {

@@ -14,6 +14,13 @@
 
 - [...]
 
+## Change cohesion
+
+[Explain why this is one coherent PR or why each split is independently useful,
+safe, testable, and rollbackable. For `large-change-approved`, include a
+concise subsystem/file review map, acceptance/test coverage map, and rollback
+boundaries in this plan; do not create another PR solely for size.]
+
 ## Files to touch
 
 - `path/to/file.ts`
