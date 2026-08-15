@@ -53,10 +53,12 @@ describe("tenant purge manifest value contract", () => {
     for (const target of [{ ...accountTarget, trialId: TRIAL }, { ...accountTarget, accountId: ACCOUNT.toUpperCase() }, { ...trialTarget, mode: "UNKNOWN" }, { ...trialTarget, accountId: ACCOUNT }]) expectCode(() => prepareTenantPurgeManifestValues(input({ target })), 400);
     for (const capabilitySha of [new String(SHA), SHA.toUpperCase(), "a".repeat(39)]) expectCode(() => prepareTenantPurgeManifestValues(input({ capabilitySha })), 400);
     for (const policies of [{ ...POLICIES, pageSize: 0 }, { ...POLICIES, cacheMaxTtlSeconds: Infinity }, { ...POLICIES, extra: 1 }]) expectCode(() => prepareTenantPurgeManifestValues(input({ policies })), 400);
-    let getterCalls = 0;
-    const denied = input({ privateAuthority: false });
-    Object.defineProperty(denied, "topology", { enumerable: true, get() { getterCalls += 1; return topology(accountTarget); } });
-    expectCode(() => prepareTenantPurgeManifestValues(denied), 403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED"); expect(getterCalls).toBe(0);
+    const trace: string[] = [];
+    const deniedSource = input({ privateAuthority: false }); Object.defineProperty(deniedSource, "topology", { enumerable: true, get() { trace.push("topology getter"); return topology(accountTarget); } });
+    const denied = new Proxy(deniedSource, { ownKeys() { trace.push("ownKeys"); throw new Error("enumerated"); }, getPrototypeOf() { trace.push("prototype"); throw new Error("prototype read"); }, getOwnPropertyDescriptor(source, key) { trace.push(`descriptor:${String(key)}`); if (key !== "privateAuthority") throw new Error("protected descriptor read"); return Reflect.getOwnPropertyDescriptor(source, key); } });
+    expectCode(() => prepareTenantPurgeManifestValues(denied), 403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED"); expect(trace).toEqual(["descriptor:privateAuthority"]);
+    let authorityReads = 0; const allowed = new Proxy(input(), { getOwnPropertyDescriptor(source, key) { if (key === "privateAuthority") authorityReads += 1; return Reflect.getOwnPropertyDescriptor(source, key); } });
+    expect(prepareTenantPurgeManifestValues(allowed).target).toEqual(accountTarget); expect(authorityReads).toBe(1);
   });
 
   it("caps and intrinsically copies redaction bytes before any user iteration", () => {
@@ -106,6 +108,9 @@ describe("tenant purge manifest value contract", () => {
     const symbol = topology(accountTarget); Object.defineProperty(symbol.deployment!.primaryAccountIds, Symbol("extra"), { value: true });
     for (const supplied of [accessor, extra, symbol, { ...topology(accountTarget), blockers: new Array(2 ** 32 - 1) }, { ...topology(accountTarget), blockers: ["UNKNOWN"] }, { ...topology(accountTarget), blockers: ["LEGAL_HOLD", "LEGAL_HOLD"] }]) expectCode(() => prepareTenantPurgeManifestValues(input({ topology: supplied })), 400);
     expect(getterCalls).toBe(0);
+    const trace: string[] = []; const oversized = new Proxy(new Array(100_001), { ownKeys() { trace.push("ownKeys"); throw new Error("enumerated"); }, getPrototypeOf() { trace.push("prototype"); throw new Error("prototype read"); }, getOwnPropertyDescriptor(source, key) { trace.push(`descriptor:${String(key)}`); if (key !== "length") throw new Error("index descriptor read"); return Reflect.getOwnPropertyDescriptor(source, key); }, get() { trace.push("index"); throw new Error("index read"); } });
+    const oversizedTopology = topology(accountTarget); oversizedTopology.blockers = oversized as never;
+    expectCode(() => prepareTenantPurgeManifestValues(input({ topology: oversizedTopology })), 400); expect(trace).toEqual(["descriptor:length"]);
   });
 
   it("normalizes exact topology primitives and fails closed on malformed values", () => {

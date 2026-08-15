@@ -71,15 +71,13 @@ function observe<T>(label: string, operation: () => T): T {
   try { return operation(); } catch (error) { if (error instanceof AppError) throw error; return invalid(`Invalid tenant purge ${label}.`); }
 }
 
-function exactRecord(value: unknown, expected: readonly string[] | ((snapshot: Record<string, unknown>) => readonly string[]), label: string,
-  beforeValues?: (descriptors: Record<string, PropertyDescriptor>) => void) {
+function exactRecord(value: unknown, expected: readonly string[] | ((snapshot: Record<string, unknown>) => readonly string[]), label: string) {
   const { prototype, descriptors } = observe(label, () => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) invalid(`Invalid tenant purge ${label}.`);
     return { prototype: Object.getPrototypeOf(value), descriptors: Object.getOwnPropertyDescriptors(value) };
   });
   const keys = Reflect.ownKeys(descriptors);
   if ((prototype !== Object.prototype && prototype !== null) || keys.some((key) => typeof key !== "string")) invalid(`Invalid tenant purge ${label}.`);
-  beforeValues?.(descriptors);
   const snapshot = Object.create(null) as Record<string, unknown>;
   for (const key of keys as string[]) {
     const descriptor = descriptors[key]!;
@@ -92,24 +90,43 @@ function exactRecord(value: unknown, expected: readonly string[] | ((snapshot: R
 }
 
 function exactArray(value: unknown, label: string): unknown[] {
-  const { prototype, descriptors } = observe(label, () => {
-    if (!Array.isArray(value)) invalid(`Invalid tenant purge ${label}.`);
-    return { prototype: Object.getPrototypeOf(value), descriptors: Object.getOwnPropertyDescriptors(value) };
-  });
-  const descriptorMap = descriptors as unknown as Record<PropertyKey, PropertyDescriptor>;
-  const keys = Reflect.ownKeys(descriptorMap);
-  const lengthDescriptor = descriptorMap.length;
+  const lengthDescriptor = observe(label, () => typeof value === "object" && value !== null
+    ? Object.getOwnPropertyDescriptor(value, "length") : undefined);
   const lengthValue = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : -1;
-  if (prototype !== Array.prototype || typeof lengthValue !== "number" || !Number.isInteger(lengthValue) || lengthValue < 0 || lengthValue > MAX_ARRAY_LENGTH
-    || keys.length !== lengthValue + 1 || keys.some((key) => typeof key !== "string")) invalid(`Invalid tenant purge ${label}.`);
+  if (typeof lengthValue !== "number" || !Number.isSafeInteger(lengthValue) || lengthValue < 0 || lengthValue > MAX_ARRAY_LENGTH
+    || lengthDescriptor?.enumerable !== false) invalid(`Invalid tenant purge ${label}.`);
+  const { prototype, keys } = observe(label, () => {
+    if (!Array.isArray(value)) invalid(`Invalid tenant purge ${label}.`);
+    return { prototype: Object.getPrototypeOf(value), keys: Reflect.ownKeys(value) };
+  });
+  if (prototype !== Array.prototype || keys.length !== lengthValue + 1 || !keys.includes("length")
+    || keys.some((key) => typeof key !== "string")) invalid(`Invalid tenant purge ${label}.`);
   const length = lengthValue;
   const result: unknown[] = [];
   for (let index = 0; index < length; index += 1) {
-    const descriptor = descriptorMap[String(index)];
+    const descriptor = observe(label, () => Object.getOwnPropertyDescriptor(value, String(index)));
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid(`Invalid tenant purge ${label}.`);
     result.push(descriptor.value);
   }
   return result;
+}
+
+function valueInputSnapshot(value: unknown) {
+  const authority = observe("value input authority", () => typeof value === "object" && value !== null
+    ? Object.getOwnPropertyDescriptor(value, "privateAuthority") : undefined);
+  if (!authority || !("value" in authority) || authority.value !== true)
+    throw new AppError(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
+  const required = ["target", "capabilitySha", "redactionKey", "privateAuthority", "policies", "topology"];
+  const { prototype, keys } = observe("value input", () => ({ prototype: Object.getPrototypeOf(value!), keys: Reflect.ownKeys(value!) }));
+  if ((prototype !== Object.prototype && prototype !== null) || !authority.enumerable || keys.length !== required.length
+    || keys.some((key) => typeof key !== "string") || required.some((key) => !keys.includes(key))) invalid("Invalid tenant purge value input.");
+  const snapshot = Object.create(null) as Record<string, unknown>; snapshot.privateAuthority = true;
+  for (const key of required) if (key !== "privateAuthority") {
+    const descriptor = observe("value input", () => Object.getOwnPropertyDescriptor(value!, key));
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid("Invalid tenant purge value input.");
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
 }
 
 function uuid(value: unknown, label: string): string {
@@ -222,10 +239,7 @@ function deriveBlockers(target: TenantPurgeTarget, normalized: ReturnType<typeof
 }
 
 export function prepareTenantPurgeManifestValues(input: TenantPurgeManifestValueInput): TenantPurgePreparedManifestValues {
-  const raw = exactRecord(input, ["target", "capabilitySha", "redactionKey", "privateAuthority", "policies", "topology"], "value input", (descriptors) => {
-    const authority = descriptors.privateAuthority;
-    if (!authority || !("value" in authority) || authority.value !== true) throw new AppError(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
-  });
+  const raw = valueInputSnapshot(input);
   const target = targetSnapshot(raw.target);
   if (typeof raw.capabilitySha !== "string" || !SHA.test(raw.capabilitySha)) invalid("Invalid tenant purge capability SHA.");
   const redactionKeyBytes = keySnapshot(raw.redactionKey);
