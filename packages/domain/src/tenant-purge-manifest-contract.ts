@@ -95,8 +95,12 @@ const TYPED_ARRAY_BYTE_LENGTH = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, "byteLengt
 const UINT8_SET = Uint8Array.prototype.set;
 const DATE_TIME = Date.prototype.getTime;
 const DATE_TO_ISO = Date.prototype.toISOString;
+const CONSTRUCT = Reflect.construct;
+const ERROR = Error;
+function StableAppError() {}
+StableAppError.prototype = AppError.prototype;
 
-function fail(status: number, code: string, message: string): never { throw OBJECT_FREEZE(new AppError(status, code, message)); }
+function fail(status: number, code: string, message: string): never { const error = CONSTRUCT(ERROR, [message], StableAppError) as AppError; DEFINE_PROPERTY(error, "status", { value: status, enumerable: true, configurable: true, writable: true }); DEFINE_PROPERTY(error, "code", { value: code, enumerable: true, configurable: true, writable: true }); throw OBJECT_FREEZE(error); }
 function invalid(label: string): never { return fail(400, "TENANT_PURGE_CONTRACT_INVALID", `Invalid tenant purge ${label}.`); }
 function malformed(): never { return fail(400, "TENANT_PURGE_CONTRACT_INVALID", "Invalid tenant purge contract input."); }
 function observe<T>(operation: () => T): T { try { return operation(); } catch { return malformed(); } }
