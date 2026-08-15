@@ -1,6 +1,6 @@
 import { prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, IncrementalJsonStringDecoder } from "@corgtex/models";
 import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage, ModelTool, ToolCall } from "@corgtex/models";
@@ -820,36 +820,33 @@ async function executeConversationToolCall({
   };
 }
 
-async function executeVersionedFollowupTools(response: import("@corgtex/models").ChatCompletionResponse, actor: AppActor, ctx: ConversationContext, messages: ChatMessage[], executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
+async function executeVersionedFollowupTools(response: import("@corgtex/models").ChatCompletionResponse, offeredTools: ModelTool[], actor: AppActor, ctx: ConversationContext, messages: ChatMessage[], executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
   const calls = response.tool_calls ?? []; if (!calls.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) return "none" as const; const observed = new Map<string, number>();
   if (!executed.some(({ toolName }) => toolName === "update_action" || toolName === "update_tension")) for (const read of executed) { const updateName = read.toolName === "query_actions" ? "update_action" : read.toolName === "query_tensions" ? "update_tension" : null; for (const item of Array.isArray(read.result) ? read.result : []) if (updateName && typeof item?.id === "string" && Number.isInteger(item.version) && item.version > 0) observed.set(`${updateName}:${item.id}`, item.version); }
-  const valid = calls.every(({ function: tool }) => {
-    const args = parseToolArgs(tool.arguments); const id = tool.name === "update_action" ? args.actionId : tool.name === "update_tension" ? args.tensionId : null; return typeof id === "string" && observed.get(`${tool.name}:${id}`) === args.expectedVersion;
-  });
+  const offered = new Map(offeredTools.map(({ function: tool }) => [tool.name, tool])); const valid = calls.every(({ function: tool }) => { const args = parseToolArgs(tool.arguments); const id = tool.name === "update_action" ? args.actionId : tool.name === "update_tension" ? args.tensionId : null; return isVersionedUpdateTool(tool.name) && matchesJsonSchema(args, offered.get(tool.name)?.parameters) && typeof id === "string" && observed.get(`${tool.name}:${id}`) === args.expectedVersion; });
   if (!valid || observed.size === 0) return "rejected" as const; messages.push({ role: "assistant", content: response.content || "", tool_calls: calls });
-  for (const call of calls) {
-    const toolName = call.function.name; const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
-    try { const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args); executed.push({ toolName, args, result }); messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id }); }
-    catch (err) { const error = err instanceof Error ? err.message : String(err); failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" }); messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id }); }
-  }
+  for (const call of calls) { const toolName = call.function.name; const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
+    try { const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args); executed.push({ toolName, args, result }); messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id }); } catch (err) { const error = err instanceof Error ? err.message : String(err); failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" }); messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id }); } }
   return "executed" as const;
 }
 const UNSAFE_VERSIONED_FOLLOWUP = "I could not safely apply that update because the tool sequence did not use a matching observed version."; const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.";
-const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying."; const ROUTED_RESPONSE_BUDGET_EXHAUSTED = "I could not generate a response because the workspace model budget was reached after routing this request.";
-const ROUTE_TOOL_NAME = "route_conversation";
-function routePreflightTool(tools: ModelTool[]): ModelTool { return { type: "function", function: { name: ROUTE_TOOL_NAME, description: "Route this turn only; never answer the user. Select up to four available tool calls, or an empty list when no tool is needed.", parameters: { type: "object", additionalProperties: false, required: ["calls"], properties: { calls: { type: "array", maxItems: 4, items: { oneOf: tools.map(({ function: tool }) => ({ type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { const: tool.name }, arguments: tool.parameters } })) } } } } } }; }
-function routedToolCalls(response: import("@corgtex/models").ChatCompletionResponse | null, tools: ModelTool[]): ToolCall[] {
-  const calls = response?.tool_calls ?? []; const route = calls.find(({ function: tool }) => tool.name === ROUTE_TOOL_NAME);
-  if (!route) return calls; const offered = new Set(tools.map(({ function: tool }) => tool.name)); const selected = parseToolArgs(route.function.arguments).calls; if (!Array.isArray(selected)) return [];
-  return selected.slice(0, 4).flatMap((call, index): ToolCall[] => isRecord(call) && typeof call.name === "string" && offered.has(call.name) && isRecord(call.arguments) ? [{ id: `${route.id}:${index}`, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] : []);
+const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying."; const ROUTE_RESPONSE_FAILED = "I could not safely complete that response. Please retry."; const MODEL_BUDGET_EXHAUSTED = "I could not generate a response because the workspace model budget was reached.";
+const ANSWER_ROUTE_NAME = "respond_conversation"; const TOOL_ROUTE_NAME = "route_conversation_tools";
+function matchesJsonSchema(value: unknown, input: unknown): boolean {
+  if (!isRecord(input)) return false; const schema = input as Record<string, any>; if ("const" in schema && value !== schema.const) return false; if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return false;
+  if (Array.isArray(schema.oneOf)) return schema.oneOf.filter((item: unknown) => matchesJsonSchema(value, item)).length === 1; const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : []; const type = value === null ? "null" : Array.isArray(value) ? "array" : Number.isInteger(value) ? "integer" : typeof value; if (types.length && !types.includes(type) && !(type === "integer" && types.includes("number"))) return false;
+  if (type === "object") { const object = value as Record<string, unknown>; const properties = isRecord(schema.properties) ? schema.properties : {}; if (Array.isArray(schema.required) && schema.required.some((key: unknown) => typeof key !== "string" || !(key in object))) return false; if (schema.additionalProperties === false && Object.keys(object).some((key) => !(key in properties))) return false; return Object.entries(object).every(([key, item]) => !(key in properties) || matchesJsonSchema(item, properties[key])); }
+  if (type === "array") return (!Number.isInteger(schema.minItems) || (value as unknown[]).length >= schema.minItems) && (!Number.isInteger(schema.maxItems) || (value as unknown[]).length <= schema.maxItems) && (!schema.items || (value as unknown[]).every((item) => matchesJsonSchema(item, schema.items))); return !(typeof value === "number" && typeof schema.minimum === "number" && value < schema.minimum);
+}
+function conversationRouteTools(tools: ModelTool[]): ModelTool[] { return [{ type: "function", function: { name: ANSWER_ROUTE_NAME, description: "Return the complete ordinary answer. Never claim a tool mutation occurred.", parameters: { type: "object", additionalProperties: false, required: ["answer"], properties: { answer: { type: "string" } } } } },
+  { type: "function", function: { name: TOOL_ROUTE_NAME, description: "Select one bounded batch of offered tools. Do not include user-facing prose.", parameters: { type: "object", additionalProperties: false, required: ["calls"], properties: { calls: { type: "array", minItems: 1, maxItems: 4, items: { oneOf: tools.map(({ function: tool }) => ({ type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { const: tool.name }, arguments: tool.parameters } })) } } } } } }]; }
+function routedToolCalls(response: import("@corgtex/models").ChatCompletionResponse, tools: ModelTool[]): ToolCall[] | null {
+  const [route] = response.tool_calls ?? []; if (response.content || response.tool_calls?.length !== 1 || route?.function.name !== TOOL_ROUTE_NAME) return null; const selected = parseToolArgs(route.function.arguments).calls; if (!Array.isArray(selected) || selected.length < 1 || selected.length > 4) return null; const offered = new Map(tools.map(({ function: tool }) => [tool.name, tool])); const calls = selected.flatMap((call, index): ToolCall[] => isRecord(call) && Object.keys(call).length === 2 && typeof call.name === "string" && isRecord(call.arguments) && matchesJsonSchema(call.arguments, offered.get(call.name)?.parameters) ? [{ id: `${route.id}:${index}`, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] : []); return calls.length === selected.length ? calls : null;
 }
 function versionedUpdateFailure(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
   const id = ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => `${toolName === "update_action" ? "action" : "tension"} ${String(args[toolName === "update_action" ? "actionId" : "tensionId"])}`;
-  const failures = [...executed.flatMap((item) => isVersionedUpdateTool(item.toolName) && isRecord(item.result) && item.result.success !== true ? [{ id: id(item), guidance: typeof item.result.instruction === "string" ? item.result.instruction : VERSIONED_UPDATE_FAILED }] : []),
-    ...failed.flatMap((item) => isVersionedUpdateTool(item.toolName) ? [{ id: id(item), guidance: item.error || VERSIONED_UPDATE_FAILED }] : [])];
-  if (!failures.length) return null; const succeeded = executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true).map(id); const [only] = failures;
-  if (only && failures.length === 1) return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${only.id}. ${only.guidance}` : only.guidance;
-  const failedSummary = failures.sort((left, right) => left.id.localeCompare(right.id)).map(({ id: failedId, guidance }) => `${failedId} — ${guidance}`).join("; "); return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedSummary}` : `Failed update result — ${failedSummary}`;
+  const failures = [...executed.flatMap((item) => isVersionedUpdateTool(item.toolName) && isRecord(item.result) && item.result.success !== true ? [{ id: id(item), guidance: typeof item.result.instruction === "string" ? item.result.instruction : VERSIONED_UPDATE_FAILED }] : []), ...failed.flatMap((item) => isVersionedUpdateTool(item.toolName) ? [{ id: id(item), guidance: item.error || VERSIONED_UPDATE_FAILED }] : [])];
+  if (!failures.length) return null; const succeeded = executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true).map(id); const [only] = failures; if (only && failures.length === 1) return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${only.id}. ${only.guidance}` : only.guidance; const failedSummary = failures.sort((left, right) => left.id.localeCompare(right.id)).map(({ id: failedId, guidance }) => `${failedId} — ${guidance}`).join("; "); return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedSummary}` : `Failed update result — ${failedSummary}`;
 }
 async function collectChatStream(stream: AsyncGenerator<string, import("@corgtex/models").ChatCompletionResponse>) { const iterator = stream[Symbol.asyncIterator](); let message = ""; let completed = false; try { while (true) { const next = await iterator.next(); if (next.done) { completed = true; return { message, response: next.value, error: null }; } message += next.value; } } catch (error) { return { message, response: null, error }; } finally { if (!completed) await closeAsyncIterator(iterator); } }
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
@@ -1108,7 +1105,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
       followupMessage = followup.content;
       finalMessage = followupMessage;
-      const followupState = await executeVersionedFollowupTools(followup, actor, ctx, messages, executedToolResults, failedToolResults);
+      const followupState = await executeVersionedFollowupTools(followup, followupTools, actor, ctx, messages, executedToolResults, failedToolResults);
       if (followupState === "rejected") followupMessage = finalMessage = UNSAFE_VERSIONED_FOLLOWUP; else if (followupState === "executed") {
         const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
         followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
@@ -1304,20 +1301,23 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   const failedToolResults: FailedConversationToolResult[] = [];
   let toolExecutionAttempted = false;
 
-  const routeTool = routePreflightTool(tools);
-  const routed = await collectChatStream(defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages: [...messages, { role: "system", content: "Select routes only through route_conversation. Do not generate user-facing prose." }], tools: [routeTool], tool_choice: { type: "function", function: { name: ROUTE_TOOL_NAME } }, signal: ctx.signal }));
-
-  throwIfConversationCanceled(ctx, routed.error);
-  const initialCalls = routedToolCalls(routed.response, tools);
-  if (routed.error) { finalMessage = isBudgetExceededError(routed.error) ? ROUTED_RESPONSE_BUDGET_EXHAUSTED : emptyAssistantFallback(); yield finalMessage; }
-  else if (!initialCalls.length) {
-    if (!await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) { finalMessage = ROUTED_RESPONSE_BUDGET_EXHAUSTED; yield finalMessage; }
-    else { const iterator = defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages: [...messages, { role: "system", content: "Respond with natural language only. Do not claim that a work item was changed; no tools are available in this response." }], signal: ctx.signal })[Symbol.asyncIterator]();
-    let completed = false;
-    try { while (true) { const next = await iterator.next(); if (next.done) { completed = true; break; } finalMessage += next.value; yield next.value; } }
-    catch (error) { throwIfConversationCanceled(ctx, error); if (!finalMessage && isBudgetExceededError(error)) { finalMessage = ROUTED_RESPONSE_BUDGET_EXHAUSTED; yield finalMessage; } }
-    finally { if (!completed) await closeAsyncIterator(iterator); } }
-  } else {
+  const routeIterator = defaultModelGateway.chatEventStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, tools: conversationRouteTools(tools), tool_choice: "required", signal: ctx.signal })[Symbol.asyncIterator]();
+  let routeResponse: import("@corgtex/models").ChatCompletionResponse | null = null; let routeError: unknown; let routeCompleted = false; let routeInvalid = false; let routeSeen = false;
+  let routeId = ""; let routeName = ""; let routeArguments = ""; let answerMessage = ""; let answerDecoder: IncrementalJsonStringDecoder | null = null;
+  try { while (true) { const next = await routeIterator.next(); if (next.done) { routeCompleted = true; routeResponse = next.value; break; } const event = next.value;
+    if (event.type === "content_delta") { routeInvalid = true; continue; } routeSeen = true; if (event.index !== 0) { routeInvalid = true; continue; }
+    routeId += event.idDelta ?? ""; routeName += event.nameDelta ?? ""; routeArguments += event.argumentsDelta;
+    if (!ANSWER_ROUTE_NAME.startsWith(routeName) && !TOOL_ROUTE_NAME.startsWith(routeName)) routeInvalid = true;
+    if (!routeInvalid && routeName === ANSWER_ROUTE_NAME) { answerDecoder ??= new IncrementalJsonStringDecoder("answer"); const decoded = answerDecoder.push(routeArguments.slice(answerDecoder.processedCharacters)); if (decoded.state === "malformed") routeInvalid = true; else if (decoded.delta) { answerMessage += decoded.delta; yield decoded.delta; } }
+  } } catch (error) { throwIfConversationCanceled(ctx, error); routeError = error; } finally { if (!routeCompleted) await closeAsyncIterator(routeIterator); }
+  throwIfConversationCanceled(ctx, routeError);
+  const [terminalRoute] = routeResponse?.tool_calls ?? []; const exactRoute = routeCompleted && !routeError && !routeInvalid && routeSeen && routeResponse?.content === "" && routeResponse.tool_calls?.length === 1 && terminalRoute?.id === routeId && terminalRoute.function.name === routeName && terminalRoute.function.arguments === routeArguments;
+  const answerArgs = exactRoute && routeName === ANSWER_ROUTE_NAME ? parseToolArgs(routeArguments) : null;
+  const answerValid = isRecord(answerArgs) && Object.keys(answerArgs).length === 1 && typeof answerArgs.answer === "string" && answerArgs.answer === answerMessage && answerDecoder?.finish().state === "complete";
+  const initialCalls = exactRoute && routeName === TOOL_ROUTE_NAME && routeResponse ? routedToolCalls(routeResponse, tools) : null;
+  if (answerValid) finalMessage = answerMessage;
+  else if (!initialCalls) { const failure = !answerMessage && isBudgetExceededError(routeError) ? MODEL_BUDGET_EXHAUSTED : ROUTE_RESPONSE_FAILED; const failedMessage = answerMessage ? `${answerMessage}\n\n${failure}` : failure; yield failedMessage.slice(answerMessage.length); finalMessage = failedMessage; }
+  else {
     toolExecutionAttempted = true;
     messages.push({ role: "assistant", content: "", tool_calls: initialCalls });
     const actor = requireConversationToolActor(ctx);
@@ -1391,9 +1391,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       }
     }
     const followupState = initialMutationRejected ? "rejected"
-      : followupResult ? await executeVersionedFollowupTools(followupResult, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
+      : followupResult ? await executeVersionedFollowupTools(followupResult, followupTools, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
     if (followupStreamFailed && versionReadPending) finalMessage = "";
-    if (followupBudgetExhausted) { finalMessage = ROUTED_RESPONSE_BUDGET_EXHAUSTED; yield finalMessage; }
+    if (followupBudgetExhausted) { finalMessage = MODEL_BUDGET_EXHAUSTED; yield finalMessage; }
     else if (followupState === "none") { if (!followupStreamFailed) finalMessage = (versionReadPending ? "" : finalMessage) + followupMessage; if (finalMessage) yield finalMessage; }
     else if (followupState === "rejected") { finalMessage = UNSAFE_VERSIONED_FOLLOWUP; yield finalMessage; }
     else if (followupState === "executed") {
