@@ -117,9 +117,9 @@ async function* fakeChatEventStream(
   request: ChatCompletionRequest,
 ): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse> {
   const response = await fakeModelGateway.chat(request);
-  for (const word of response.content.split(" ")) {
+  for (const chunk of response.content.match(/\S+\s*|\s+/g) ?? []) {
     throwIfAborted(request.signal);
-    yield { type: "content_delta", content: word + " " };
+    yield { type: "content_delta", content: chunk };
     await delay(10, request.signal);
   }
   return response;

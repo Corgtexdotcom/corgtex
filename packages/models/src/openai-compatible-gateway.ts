@@ -914,7 +914,7 @@ async function* completeChatEventStream(
   let buffer = ""; let eventData: string[] = []; let lineScanOffset = 0;
   let streamCompleted = false;
   let usage: UsageDetails | undefined;
-  let usageRecorded = false;
+  let usageRecorded = false; let choiceFinished = false;
 
   async function finalizeUsage() {
     if (usageRecorded && usage) {
@@ -975,7 +975,7 @@ async function* completeChatEventStream(
           if (!Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array.");
           if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
           const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
-          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present.");
+          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present."); if (candidate && choiceFinished) throw new ChatStreamProtocolError("Streamed choice continued after finish_reason.");
           if (candidate?.finish_reason != null && typeof candidate.finish_reason !== "string") throw new ChatStreamProtocolError("Streamed finish_reason must be a string or null.");
           if (candidate?.finish_reason === "error") throw new ChatStreamProtocolError("Streamed provider reported an error.");
           const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
@@ -987,7 +987,7 @@ async function* completeChatEventStream(
           if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
           const nextToolCallParts = new Map([...toolCallParts].map(([index, tool]) => [index, { ...tool }]));
           const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(nextToolCallParts, tool)) : [];
-          const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents];
+          const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents]; choiceFinished ||= candidate?.finish_reason != null;
           content += contentDelta; toolCallParts = nextToolCallParts;
           if (nextUsage) usageDetailsObj = nextUsage;
           for (const event of events) yield event;

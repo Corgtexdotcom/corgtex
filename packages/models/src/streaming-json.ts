@@ -98,6 +98,6 @@ export class IncrementalJsonStringDecoder {
     }
     return this.failed ? { delta: "", state: "malformed" } : { delta: this.delta, state: this.targetComplete ? "complete" : "incomplete" };
   }
-  finish(): IncrementalJsonStringResult { if (this.failed) return { delta: "", state: "malformed" };
-    if (!this.targetComplete) return { delta: "", state: this.phase === "done" ? "malformed" : "incomplete" }; const terminal = jsonPrefixState(this.fragments.join("")); return { delta: "", state: terminal === "complete" && this.phase !== "done" ? "malformed" : terminal }; }
+  finish(): IncrementalJsonStringResult { if (this.failed) return { delta: "", state: "malformed" }; const terminal = jsonPrefixState(this.fragments.join(""));
+    if (!this.targetComplete) return { delta: "", state: terminal === "incomplete" ? "incomplete" : "malformed" }; return { delta: "", state: terminal === "complete" && this.phase !== "done" ? "malformed" : terminal }; }
 }

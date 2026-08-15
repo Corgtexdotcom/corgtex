@@ -82,12 +82,10 @@ describe("fakeModelGateway", () => {
     expect(reranked.results).toHaveLength(1);
     expect(reranked.results[0]?.index).toBe(0);
     expect(transcription.text).toContain("Fake transcript for meeting.m4a");
-
-    const stream = fakeModelGateway.chatEventStream({
-      workspaceId: "ws-1", taskType: "CHAT", messages: [{ role: "user", content: "Hello" }],
-    });
-    expect(await stream.next()).toMatchObject({ value: { type: "content_delta" } });
-    await stream.return(undefined as never);
+    const stream = fakeModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [{ role: "user", content: "Hello" }] });
+    const deltas: string[] = []; let streamed = await stream.next(); while (!streamed.done) { if (streamed.value.type === "content_delta") deltas.push(streamed.value.content); streamed = await stream.next(); } expect(deltas.join("")).toBe(streamed.value.content);
+    vi.spyOn(fakeModelGateway, "chat").mockResolvedValueOnce({ content: "", usage: chat.usage }); const empty = fakeModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
+    expect(await empty.next()).toMatchObject({ done: true, value: { content: "" } });
   });
 });
 
@@ -1443,10 +1441,10 @@ describe("openAICompatibleModelGateway", () => {
     const frames = [
       { choices: [{ index: 0, delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_", function: { name: "respond_", arguments: '{"a":"' } }] } }] },
-      { error: null, choices: [{ index: 0, finish_reason: "stop", delta: { content: "café 漢" } }], usage: null },
+      { error: null, choices: [{ index: 0, finish_reason: null, delta: { content: "café 漢" } }], usage: null },
       { choices: [{ delta: { tool_calls: [{ index: 1, id: "call_b", function: { name: "other", arguments: '"2"}' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "conversation", arguments: 'ok"}' } }] } }] },
-      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "" } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "" } }] } }] }, { choices: [{ index: 0, finish_reason: "tool_calls", delta: {} }] },
       { choices: [], usage: { prompt_tokens: 12, completion_tokens: 7, provider_extension: { harmless: true } } },
     ];
     const bytes = new TextEncoder().encode(`:keepalive\r\n data:{"error":{"message":"ignore"}}\r\n\tdata:{"error":{"message":"ignore"}}\r\nunknown:ignored\r\ndatabase:{"error":{"message":"ignore"}}\r\n\r\n${frames.map((frame, index) => `data:${index % 2 ? " " : ""}${JSON.stringify(frame)}\r\n\r\n`).join("")}data:[DONE]\r\n\r\ndata: {"truncated"`);
@@ -1467,11 +1465,8 @@ describe("openAICompatibleModelGateway", () => {
   });
 
   it("preserves bounded pre-stream retries for event consumers", async () => {
-    restoreEnv();
-    Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response("retry", { status: 429 }))
-      .mockResolvedValueOnce(new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', { status: 200 }));
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("retry", { status: 429 })).mockResolvedValueOnce(new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n', { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const usageModule = await import("./usage");
     vi.mocked(usageModule.recordModelUsage).mockClear();
@@ -1549,6 +1544,9 @@ describe("openAICompatibleModelGateway", () => {
     expect(await stream.next()).toMatchObject({ value: { type: "content_delta", content: "safe" } }); await expect(stream.next()).rejects.toMatchObject({ name: "ChatStreamProtocolError", message });
     expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledTimes(1); expect(vi.mocked(usageModule.recordModelUsage).mock.calls[0]?.[0].outputTokens).toBe(1);
   });
+  it.each(["chatEventStream", "chatStream"] as const)("rejects post-finish choice deltas through %s but accepts later usage-only frames", async (method) => {
+    restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" }); const payload = ['data:{"choices":[{"finish_reason":"stop","delta":{"content":"safe"}}]}', 'data:{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}', 'data:{"choices":[{"delta":{"content":"must-not-leak"}}]}', "data:[DONE]"].join("\n\n") + "\n\n"; vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(payload, { status: 200 }))); const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear(); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const stream = openAICompatibleModelGateway[method]({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
+    expect(await stream.next()).toMatchObject({ value: method === "chatStream" ? "safe" : { type: "content_delta", content: "safe" } }); await expect(stream.next()).rejects.toMatchObject({ name: "ChatStreamProtocolError" }); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledOnce(); expect(vi.mocked(usageModule.recordModelUsage).mock.calls[0]?.[0]).toMatchObject({ inputTokens: 3, outputTokens: 4 }); });
   it("treats nullable optional tool continuation fields as absent", async () => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
     const tools = [

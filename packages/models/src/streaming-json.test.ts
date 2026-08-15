@@ -26,7 +26,7 @@ describe("IncrementalJsonStringDecoder", () => {
     expect(decoder.finish().state).toBe("complete");
     const raw = new IncrementalJsonStringDecoder("answer"); const pair = "𝄞"; expect(raw.push(`{"answer":"${pair[0]}`)).toEqual({ delta: "", state: "incomplete" }); expect(raw.push(`${pair[1]}!"}`)).toEqual({ delta: "𝄞!", state: "complete" }); expect(raw.finish().state).toBe("complete");
   });
-  it.each([['{"answer":"bad\\x"}', "malformed"], ['{"answer":42}', "malformed"], ['{"other":"value"}', "malformed"], ['{"answer":"truncated', "incomplete"], ['{"before":[1,2}', "malformed"], ['{"answer":"\ud834x"}', "malformed"], ['{"answer":"\udd1e"}', "malformed"]])("reports %s as %s", (source, state) => {
+  it.each([['{"answer":"bad\\x"}', "malformed"], ['{"answer":42}', "malformed"], ['{"other":"value"}', "malformed"], ['{"answer":"truncated', "incomplete"], ['{"before":', "incomplete"], ['{"before":tru', "incomplete"], ['{"before":}', "malformed"], ['{"before":truX', "malformed"], ['{"before":[1,2}', "malformed"], ['{"answer":"\ud834x"}', "malformed"], ['{"answer":"\udd1e"}', "malformed"]])("reports %s as %s", (source, state) => {
     const decoder = new IncrementalJsonStringDecoder("answer");
     decoder.push(source);
     expect(decoder.finish().state).toBe(state);
