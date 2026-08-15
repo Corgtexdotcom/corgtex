@@ -2,6 +2,8 @@ import { env, cosineSimilarity } from "@corgtex/shared";
 import { DefaultAzureCredential } from "@azure/identity";
 import type {
   ChatCompletionRequest,
+  ChatCompletionResponse,
+  ChatStreamEvent,
   EmbeddingRequest,
   ExtractionRequest,
   ModelGateway,
@@ -783,12 +785,62 @@ async function completeChat(
   return { content, tool_calls, usage };
 }
 
-async function* completeChatStream(
+class ChatStreamProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatStreamProtocolError";
+  }
+}
+
+type PartialToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unknown): ChatStreamEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ChatStreamProtocolError("Streamed tool call delta must be an object.");
+  const tool = value as Record<string, unknown>;
+  const index = tool.index;
+  if (!Number.isSafeInteger(index) || (index as number) < 0) throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative safe integer.");
+  if (tool.type != null && tool.type !== "function") throw new ChatStreamProtocolError("Streamed tool call type must be function.");
+  if (tool.id != null && typeof tool.id !== "string") throw new ChatStreamProtocolError("Streamed tool call id fragment must be a string.");
+  if (tool.function != null && (typeof tool.function !== "object" || Array.isArray(tool.function))) throw new ChatStreamProtocolError("Streamed tool call function delta must be an object.");
+  const fn = (tool.function ?? {}) as Record<string, unknown>;
+  if (fn.name != null && typeof fn.name !== "string") throw new ChatStreamProtocolError("Streamed tool call name fragment must be a string.");
+  if (fn.arguments != null && typeof fn.arguments !== "string") throw new ChatStreamProtocolError("Streamed tool call arguments fragment must be a string.");
+  const idDelta = (tool.id ?? undefined) as string | undefined;
+  const nameDelta = (fn.name ?? undefined) as string | undefined;
+  const argumentsDelta = (fn.arguments as string | undefined) ?? "";
+  const partial = toolCalls.get(index as number) ?? { id: "", name: "", arguments: "" };
+  partial.id += idDelta ?? "";
+  partial.name += nameDelta ?? "";
+  partial.arguments += argumentsDelta;
+  toolCalls.set(index as number, partial);
+  return { type: "tool_call_delta", index: index as number, ...(idDelta !== undefined ? { idDelta } : {}), ...(nameDelta !== undefined ? { nameDelta } : {}), argumentsDelta };
+}
+
+function completeToolCalls(toolCalls: Map<number, PartialToolCall>) {
+  return [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([index, tool], position) => {
+    if (index !== position) throw new ChatStreamProtocolError("Streamed tool call indexes must be contiguous from zero.");
+    if (!tool.id || !tool.name) throw new ChatStreamProtocolError("Streamed tool call ended without a complete id and function name.");
+    return { id: tool.id, type: "function" as const, function: { name: tool.name, arguments: tool.arguments } };
+  });
+}
+type StreamUsage = Record<string, unknown> & { prompt_tokens?: number; completion_tokens?: number };
+function validateStreamUsage(value: unknown, requireTokens: boolean) {
+  if (value == null) { if (requireTokens) throw new ChatStreamProtocolError("Usage-only frames require token counts."); return undefined; }
+  if (typeof value !== "object" || Array.isArray(value)) throw new ChatStreamProtocolError("Streamed usage must be an object when present.");
+  const usage = value as StreamUsage;
+  for (const key of ["prompt_tokens", "completion_tokens"] as const) { const tokens = usage[key]; if ((requireTokens && tokens === undefined) || (tokens !== undefined && (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 0 || tokens > 2_147_483_647))) throw new ChatStreamProtocolError("Streamed token counts must be non-negative 32-bit integers."); }
+  return usage;
+}
+async function* completeChatEventStream(
   request: ChatCompletionRequest,
   taskType: ModelUsageInput["taskType"],
   modelOverride?: string,
   bodyExtras?: Record<string, unknown>,
-): AsyncGenerator<string, import("./contracts").ChatCompletionResponse> {
+): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse> {
   const startedAt = Date.now();
   const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
   const route = providerRouteForModel(model);
@@ -813,6 +865,7 @@ async function* completeChatStream(
   let response: Response | null = null;
   let lastError: unknown = null;
   let streamSignalCleanup = () => {};
+  let streamSignal: AbortSignal | undefined;
 
   for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
     let keepSignalForStream = false;
@@ -838,6 +891,7 @@ async function* completeChatStream(
       }
       keepSignalForStream = true;
       streamSignalCleanup = fetchSignal.cleanup;
+      streamSignal = fetchSignal.signal;
       break;
     } catch (error) {
       if (request.signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
@@ -853,17 +907,14 @@ async function* completeChatStream(
   }
 
   if (!response) throw lastError ?? new Error("OpenAI-compatible request failed after retries.");
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("Response body is not readable.");
-
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let content = "";
-  let tool_calls: any[] = [];
-  let usageDetailsObj: any = null;
-  let buffer = "";
+  let toolCallParts = new Map<number, PartialToolCall>();
+  let usageDetailsObj: StreamUsage | null = null;
+  let buffer = ""; let eventData: string[] = []; let lineScanOffset = 0;
   let streamCompleted = false;
   let usage: UsageDetails | undefined;
-  let usageRecorded = false;
+  let usageRecorded = false; let choiceFinished = false;
 
   async function finalizeUsage() {
     if (usageRecorded && usage) {
@@ -872,7 +923,12 @@ async function* completeChatStream(
 
     const latencyMs = Date.now() - startedAt;
     const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateTextTokens(payload);
-    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
+    const estimatedToolCalls = [...toolCallParts.values()].map((tool) => ({
+      id: tool.id,
+      type: "function" as const,
+      function: { name: tool.name, arguments: tool.arguments },
+    }));
+    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, estimatedToolCalls);
     usage = await recordUsage({
       workspaceId: request.workspaceId,
       workflowJobId: request.workflowJobId,
@@ -889,70 +945,97 @@ async function* completeChatStream(
     usageRecorded = true;
     return usage;
   }
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try { if (!response.body) throw new Error(); reader = response.body.getReader(); }
+  catch { streamSignalCleanup(); throw new ChatStreamProtocolError("Streamed provider response body is not readable."); }
 
+  let primaryFailure: unknown;
   try {
-    while (true) {
+    try { while (true) {
       const { done, value } = await reader.read();
-      if (done) {
-        streamCompleted = true;
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-
-        if (line.startsWith("data: ") && line !== "data: [DONE]") {
-          try {
-            const data = JSON.parse(line.slice(6));
-            const delta = data.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              content += delta.content;
-              yield delta.content;
-            }
-
-            if (delta?.tool_calls) {
-              for (const tool of delta.tool_calls) {
-                const index = tool.index;
-                if (tool_calls[index]) {
-                  tool_calls[index].function.arguments += tool.function?.arguments || "";
-                } else {
-                  tool_calls[index] = {
-                    id: tool.id,
-                    type: "function",
-                    function: {
-                      name: tool.function?.name || "",
-                      arguments: tool.function?.arguments || "",
-                    }
-                  };
-                }
-              }
-            }
-            if (data.usage) usageDetailsObj = data.usage;
-          } catch (e) {
-            // ignore
-          }
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      while (true) {
+        let lineEnd = -1; for (; lineScanOffset < buffer.length; lineScanOffset += 1) { const character = buffer[lineScanOffset]; if (character === "\n") { lineEnd = lineScanOffset; break; } if (character === "\r") { if (lineScanOffset + 1 === buffer.length && !done) break; lineEnd = lineScanOffset; break; } }
+        if (lineEnd < 0) break; const terminatorLength = buffer[lineEnd] === "\r" && buffer[lineEnd + 1] === "\n" ? 2 : 1; const line = buffer.slice(0, lineEnd); buffer = buffer.slice(lineEnd + terminatorLength); lineScanOffset = 0;
+        if (line !== "") { const colon = line.indexOf(":"); const field = colon < 0 ? line : line.slice(0, colon); if (field === "data") { const fieldValue = colon < 0 ? "" : line.slice(colon + 1); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
+        if (eventData.length === 0) continue; const dataValue = eventData.join("\n"); eventData = []; if (dataValue === "[DONE]") {
+          streamCompleted = true;
+          await reader.cancel().catch(() => undefined);
+          break;
         }
+          let data: unknown;
+          try {
+            data = JSON.parse(dataValue);
+          } catch {
+            throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
+          }
+          if (!data || typeof data !== "object" || Array.isArray(data)) throw new ChatStreamProtocolError("Streamed provider data must be an object.");
+          const record = data as Record<string, unknown>; const choices = record.choices;
+          if (record.error != null) throw new ChatStreamProtocolError("Streamed provider reported an error.");
+          if (!Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array.");
+          if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
+          const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
+          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present."); if (candidate && choiceFinished) throw new ChatStreamProtocolError("Streamed choice continued after finish_reason.");
+          if (candidate?.finish_reason != null && typeof candidate.finish_reason !== "string") throw new ChatStreamProtocolError("Streamed finish_reason must be a string or null.");
+          if (candidate?.finish_reason === "error") throw new ChatStreamProtocolError("Streamed provider reported an error.");
+          const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
+          if (candidate?.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
+          const delta = candidate?.delta as Record<string, unknown> | undefined;
+          if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
+          const contentDelta = typeof delta?.content === "string" ? delta.content : "";
+          const toolCalls = delta?.tool_calls;
+          if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
+          const nextToolCallParts = new Map([...toolCallParts].map(([index, tool]) => [index, { ...tool }]));
+          const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(nextToolCallParts, tool)) : [];
+          const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents]; choiceFinished ||= candidate?.finish_reason != null;
+          content += contentDelta; toolCallParts = nextToolCallParts;
+          if (nextUsage) usageDetailsObj = nextUsage;
+          for (const event of events) yield event;
       }
-    }
+      if (done || streamCompleted) break;
+    } if (!streamCompleted) primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE].");
+    } catch (error) { primaryFailure = streamSignal?.aborted ? abortedError(streamSignal) : error instanceof ChatStreamProtocolError ? error : new ChatStreamProtocolError("Streamed provider response could not be read safely."); }
   } finally {
     try {
       if (!streamCompleted && !usageRecorded) {
         await reader.cancel().catch(() => undefined);
-        await finalizeUsage();
+        try { await finalizeUsage(); } catch (error) { if (primaryFailure === undefined) throw error; }
       }
     } finally {
       streamSignalCleanup();
     }
   }
+
+  if (primaryFailure) throw primaryFailure;
   
-  const finalTools: import("./contracts").ToolCall[] = tool_calls.filter(Boolean);
   const finalUsage = await finalizeUsage();
+  const finalTools = completeToolCalls(toolCallParts);
 
   return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage: finalUsage };
+}
+
+async function* completeChatStream(
+  request: ChatCompletionRequest,
+  taskType: ModelUsageInput["taskType"],
+): AsyncGenerator<string, ChatCompletionResponse> {
+  const events = completeChatEventStream(request, taskType);
+  let completed = false;
+  try {
+    while (true) {
+      const next = await events.next();
+      if (next.done) {
+        completed = true;
+        return next.value;
+      }
+      if (next.value.type === "content_delta") {
+        yield next.value.content;
+      }
+    }
+  } finally {
+    if (!completed) {
+      await events.return(undefined as never);
+    }
+  }
 }
 
 async function repairExtractionObject(request: ExtractionRequest, raw: string) {
@@ -1102,6 +1185,10 @@ async function transcribeAudioFile(request: AudioTranscriptionRequest) {
 export const openAICompatibleModelGateway: ModelGateway = {
   async chat(request: ChatCompletionRequest) {
     return completeChat(request, request.taskType);
+  },
+
+  async *chatEventStream(request: ChatCompletionRequest) {
+    return yield* completeChatEventStream(request, request.taskType);
   },
 
   async *chatStream(request: ChatCompletionRequest) {

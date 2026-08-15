@@ -49,7 +49,7 @@ export type ChatCompletionRequest = {
   model?: string;
   messages: ChatMessage[];
   tools?: ModelTool[];
-  tool_choice?: "auto" | "none" | { type: "function", function: { name: string } };
+  tool_choice?: "auto" | "none" | "required" | { type: "function", function: { name: string } };
   signal?: AbortSignal;
   workflowJobId?: string;
   agentRunId?: string;
@@ -62,6 +62,16 @@ export type ChatCompletionResponse = {
   tool_calls?: ToolCall[];
   usage: Omit<ModelUsageInput, "workspaceId" | "workflowJobId" | "agentRunId" | "taskType">;
 };
+
+export type ChatStreamEvent =
+  | { type: "content_delta"; content: string }
+  | {
+    type: "tool_call_delta";
+    index: number;
+    idDelta?: string;
+    nameDelta?: string;
+    argumentsDelta: string;
+  };
 
 export type ExtractionRequest = {
   workspaceId: string;
@@ -140,6 +150,7 @@ export type AudioTranscriptionResponse = {
 
 export type ModelGateway = {
   chat(request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
+  chatEventStream(request: ChatCompletionRequest): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse>;
   chatStream(request: ChatCompletionRequest): AsyncGenerator<string, ChatCompletionResponse>;
   extract(request: ExtractionRequest): Promise<ExtractionResponse>;
   embed(request: EmbeddingRequest): Promise<EmbeddingResponse>;
