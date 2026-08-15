@@ -63,12 +63,12 @@ const MAX_ARRAY_LENGTH = 100_000;
 const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength")!.get!;
 const UINT8_SET = Uint8Array.prototype.set;
 
-function invalid(message: string): never {
-  throw new AppError(400, "TENANT_PURGE_CONTRACT_INVALID", message);
-}
+const INTERNAL_ERRORS = new WeakSet<object>();
+function fail(status: number, code: string, message: string): never { const error = Object.freeze(new AppError(status, code, message)); INTERNAL_ERRORS.add(error); throw error; }
+function invalid(message: string): never { return fail(400, "TENANT_PURGE_CONTRACT_INVALID", message); }
 
 function observe<T>(label: string, operation: () => T): T {
-  try { return operation(); } catch (error) { if (error instanceof AppError) throw error; return invalid(`Invalid tenant purge ${label}.`); }
+  try { return operation(); } catch (error) { if (typeof error === "object" && error !== null && INTERNAL_ERRORS.has(error)) throw error; return invalid(`Invalid tenant purge ${label}.`); }
 }
 
 function exactRecord(value: unknown, expected: readonly string[] | ((snapshot: Record<string, unknown>) => readonly string[]), label: string) {
@@ -99,8 +99,8 @@ function exactArray(value: unknown, label: string): unknown[] {
     if (!Array.isArray(value)) invalid(`Invalid tenant purge ${label}.`);
     return { prototype: Object.getPrototypeOf(value), keys: Reflect.ownKeys(value) };
   });
-  if (prototype !== Array.prototype || keys.length !== lengthValue + 1 || !keys.includes("length")
-    || keys.some((key) => typeof key !== "string")) invalid(`Invalid tenant purge ${label}.`);
+  if (prototype !== Array.prototype || keys.length !== lengthValue + 1 || !keys.includes("length") || keys.some((key) => typeof key !== "string"
+    || (key !== "length" && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= lengthValue)))) invalid(`Invalid tenant purge ${label}.`);
   const length = lengthValue;
   const result: unknown[] = [];
   for (let index = 0; index < length; index += 1) {
@@ -114,8 +114,7 @@ function exactArray(value: unknown, label: string): unknown[] {
 function valueInputSnapshot(value: unknown) {
   const authority = observe("value input authority", () => typeof value === "object" && value !== null
     ? Object.getOwnPropertyDescriptor(value, "privateAuthority") : undefined);
-  if (!authority || !("value" in authority) || authority.value !== true)
-    throw new AppError(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
+  if (!authority || !("value" in authority) || authority.value !== true) return fail(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
   const required = ["target", "capabilitySha", "redactionKey", "privateAuthority", "policies", "topology"];
   const { prototype, keys } = observe("value input", () => ({ prototype: Object.getPrototypeOf(value!), keys: Reflect.ownKeys(value!) }));
   if ((prototype !== Object.prototype && prototype !== null) || !authority.enumerable || keys.length !== required.length

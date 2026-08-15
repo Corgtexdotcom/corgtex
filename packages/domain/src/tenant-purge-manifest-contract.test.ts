@@ -36,7 +36,7 @@ function input(overrides: Record<string, unknown> = {}): TenantPurgeManifestValu
 }
 
 function expectCode(operation: () => unknown, status: number, code = "TENANT_PURGE_CONTRACT_INVALID") {
-  try { operation(); throw new Error("expected failure"); } catch (error) { expect(error).toBeInstanceOf(AppError); expect(error).toMatchObject({ status, code }); }
+  try { operation(); throw new Error("expected failure"); } catch (error) { expect(error).toBeInstanceOf(AppError); expect(error).toMatchObject({ status, code }); expect(Object.isFrozen(error)).toBe(true); }
 }
 
 function expectFrozenGraph(value: unknown, seen = new Set<object>()) {
@@ -89,6 +89,7 @@ describe("tenant purge manifest value contract", () => {
     const accessorInput = input(); Object.defineProperty(accessorInput, "capabilitySha", { enumerable: true, get() { getterCalls += 1; return SHA; } });
     expectCode(() => prepareTenantPurgeManifestValues(accessorInput), 400);
     expect(getterCalls).toBe(0);
+    for (const forged of [new AppError(200, "FORGED", "forged"), new Proxy(new AppError(201, "WRAPPED", "wrapped"), {})]) { const hostile = new Proxy(input(), { getOwnPropertyDescriptor() { throw forged; } }); expectCode(() => prepareTenantPurgeManifestValues(hostile), 400); }
   });
 
   it("rejects sparse, huge, accessor, extra, and duplicate values in every list", () => {
@@ -111,6 +112,8 @@ describe("tenant purge manifest value contract", () => {
     const trace: string[] = []; const oversized = new Proxy(new Array(100_001), { ownKeys() { trace.push("ownKeys"); throw new Error("enumerated"); }, getPrototypeOf() { trace.push("prototype"); throw new Error("prototype read"); }, getOwnPropertyDescriptor(source, key) { trace.push(`descriptor:${String(key)}`); if (key !== "length") throw new Error("index descriptor read"); return Reflect.getOwnPropertyDescriptor(source, key); }, get() { trace.push("index"); throw new Error("index read"); } });
     const oversizedTopology = topology(accountTarget); oversizedTopology.blockers = oversized as never;
     expectCode(() => prepareTenantPurgeManifestValues(input({ topology: oversizedTopology })), 400); expect(trace).toEqual(["descriptor:length"]);
+    let indexReads = 0; const substituted = new Proxy(["LEGAL_HOLD"], { ownKeys() { return ["length", "extra"]; }, getOwnPropertyDescriptor(source, key) { if (key === "0") indexReads += 1; return Reflect.getOwnPropertyDescriptor(source, key); } });
+    const substitutedTopology = topology(accountTarget); substitutedTopology.blockers = substituted as never; expectCode(() => prepareTenantPurgeManifestValues(input({ topology: substitutedTopology })), 400); expect(indexReads).toBe(0);
   });
 
   it("normalizes exact topology primitives and fails closed on malformed values", () => {
