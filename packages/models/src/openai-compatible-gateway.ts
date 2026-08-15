@@ -911,7 +911,7 @@ async function* completeChatEventStream(
   let content = "";
   let toolCallParts = new Map<number, PartialToolCall>();
   let usageDetailsObj: StreamUsage | null = null;
-  let buffer = ""; let eventData: string[] = [];
+  let buffer = ""; let eventData: string[] = []; let lineScanOffset = 0;
   let streamCompleted = false;
   let usage: UsageDetails | undefined;
   let usageRecorded = false;
@@ -953,12 +953,10 @@ async function* completeChatEventStream(
   try {
     try { while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      let newlineIndex: number;
-      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newlineIndex).replace(/\r$/, ""); buffer = buffer.slice(newlineIndex + 1);
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      while (true) {
+        let lineEnd = -1; for (; lineScanOffset < buffer.length; lineScanOffset += 1) { const character = buffer[lineScanOffset]; if (character === "\n") { lineEnd = lineScanOffset; break; } if (character === "\r") { if (lineScanOffset + 1 === buffer.length && !done) break; lineEnd = lineScanOffset; break; } }
+        if (lineEnd < 0) break; const terminatorLength = buffer[lineEnd] === "\r" && buffer[lineEnd + 1] === "\n" ? 2 : 1; const line = buffer.slice(0, lineEnd); buffer = buffer.slice(lineEnd + terminatorLength); lineScanOffset = 0;
         if (line !== "") { const colon = line.indexOf(":"); const field = colon < 0 ? line : line.slice(0, colon); if (field === "data") { const fieldValue = colon < 0 ? "" : line.slice(colon + 1); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
         if (eventData.length === 0) continue; const dataValue = eventData.join("\n"); eventData = []; if (dataValue === "[DONE]") {
           streamCompleted = true;
@@ -994,7 +992,8 @@ async function* completeChatEventStream(
           if (nextUsage) usageDetailsObj = nextUsage;
           for (const event of events) yield event;
       }
-    } if (!streamCompleted) { buffer += decoder.decode(); primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE]."); }
+      if (done || streamCompleted) break;
+    } if (!streamCompleted) primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE].");
     } catch (error) { primaryFailure = streamSignal?.aborted ? abortedError(streamSignal) : error instanceof ChatStreamProtocolError ? error : new ChatStreamProtocolError("Streamed provider response could not be read safely."); }
   } finally {
     try {

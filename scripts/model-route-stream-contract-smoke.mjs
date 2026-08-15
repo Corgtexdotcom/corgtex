@@ -27,7 +27,7 @@ export async function runContractSmoke({
   const model = source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION; const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : []; const route = routes.find((entry) => entry?.model === model);
   const provider = String(route?.provider ?? source.MODEL_PROVIDER ?? env.MODEL_PROVIDER).toLowerCase();
   assert(["openrouter", "openai", "azure-openai", "azure-foundry"].includes(provider), "Configured provider is not live-compatible.");
-  const authMode = route?.authMode ?? source.AZURE_OPENAI_AUTH_MODE ?? env.AZURE_OPENAI_AUTH_MODE; const credential = route?.apiKeyEnv ? source[route.apiKeyEnv] : provider.startsWith("azure-") ? source.AZURE_OPENAI_API_KEY ?? source.MODEL_API_KEY : source.MODEL_API_KEY;
+  const authMode = route?.authMode ?? source.AZURE_OPENAI_AUTH_MODE ?? env.AZURE_OPENAI_AUTH_MODE; assert(!config.preflightOnly || !provider.startsWith("azure-") || authMode !== "managed_identity", "Preflight-only mode requires header-local provider authentication."); const credential = route?.apiKeyEnv ? source[route.apiKeyEnv] : provider.startsWith("azure-") ? source.AZURE_OPENAI_API_KEY ?? source.MODEL_API_KEY : source.MODEL_API_KEY;
   assert(provider.startsWith("azure-") && authMode === "managed_identity" || Boolean(credential?.trim()), "Configured credential source is unavailable.");
   failurePhase = "workspace_validation"; const workspace = await findWorkspace(config.workspaceId); assert(workspace, "Approved validation workspace was not found.");
   requireInternalValidationWorkspace(workspace, { env: {}, purpose: "model route stream contract smoke" });
