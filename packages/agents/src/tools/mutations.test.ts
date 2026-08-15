@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createAction, createGoal, createProposal, createProposalFromTension } from "@corgtex/domain";
+import { createAction, createGoal, createProposal, createProposalFromTension, createTension, updateAction, updateTension } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
-import { createActionItemAction, createActionTool, createGoalAction, createGoalTool, createProposalAction, createProposalTool } from "./mutations";
+import { createActionItemAction, createActionTool, createGoalAction, createGoalTool, createProposalAction, createProposalTool, updateActionItemAction, updateActionTool, updateTensionAction, updateTensionTool } from "./mutations";
 
 vi.mock("@corgtex/domain", () => ({
   AppError: class AppError extends Error {
@@ -336,5 +336,33 @@ describe("proposal mutation tool", () => {
 
     expect(createProposal).not.toHaveBeenCalled();
     expect(createProposalFromTension).not.toHaveBeenCalled();
+  });
+});
+
+describe("agent update tools version requirements", () => {
+  const updateCases = [
+    { name: "update_action", toolDef: updateActionTool, actionFn: updateActionItemAction, domainFn: vi.mocked(updateAction), args: { actionId: "a-1", expectedVersion: 2 } },
+    { name: "update_tension", toolDef: updateTensionTool, actionFn: updateTensionAction, domainFn: vi.mocked(updateTension), args: { tensionId: "t-1", expectedVersion: 2 } },
+  ];
+
+  it.each(updateCases)("[$name] enforces positive observed versions and safe conflicts", async (testCase) => {
+    const actor = { kind: "agent" } as any;
+    const ctx = { workspaceId: "ws-1", sessionId: "session-1" };
+    expect(testCase.toolDef.function.parameters.required).toContain("expectedVersion");
+    expect((testCase.toolDef.function.parameters.properties as any).expectedVersion).toMatchObject({ type: "integer", minimum: 1 });
+    testCase.domainFn.mockClear();
+    for (const expectedVersion of [undefined, 0, 1.5]) {
+      expect((await testCase.actionFn(actor, ctx, { ...testCase.args, expectedVersion })).status).toBe("INVALID_ARGUMENT");
+    }
+    expect(testCase.domainFn).not.toHaveBeenCalled();
+    testCase.domainFn.mockResolvedValueOnce({ id: "id-1", version: 3 } as any);
+    expect(await testCase.actionFn(actor, ctx, testCase.args)).toMatchObject({ version: 3 });
+    expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));
+    const auditCalls = vi.mocked(prisma.auditLog.findFirst).mock.calls.length;
+    const { AppError } = await import("@corgtex/domain");
+    testCase.domainFn.mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "Conflict"));
+    expect(await testCase.actionFn(actor, ctx, testCase.args)).toMatchObject({ status: "VERSION_CONFLICT" });
+    expect(testCase.domainFn).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(prisma.auditLog.findFirst)).toHaveBeenCalledTimes(auditCalls);
   });
 });

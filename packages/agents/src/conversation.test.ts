@@ -5,6 +5,7 @@ const {
   buildSelectedRegionContextMock,
   buildRoleOnboardingContextForConversationMock,
   checkBudgetMock,
+  chatEventStreamMock,
   chatMock,
   chatStreamMock,
   completeActivityMock,
@@ -36,6 +37,7 @@ const {
   buildSelectedRegionContextMock: vi.fn(),
   buildRoleOnboardingContextForConversationMock: vi.fn(),
   checkBudgetMock: vi.fn(),
+  chatEventStreamMock: vi.fn(),
   chatMock: vi.fn(),
   chatStreamMock: vi.fn(),
   completeActivityMock: vi.fn(),
@@ -67,11 +69,13 @@ const {
 vi.mock("@corgtex/shared", () => ({
   env: {
     MODEL_CHAT_CONVERSATION: "chat-model",
+    MODEL_PROVIDER: "openai_compatible",
   },
   prisma: {
     conversationTurn: {
       findMany: conversationTurnFindManyMock,
     },
+    auditLog: { findFirst: vi.fn().mockResolvedValue(null), update: vi.fn() }, tension: { findMany: vi.fn().mockResolvedValue([]) }, action: { findMany: vi.fn().mockResolvedValue([]) },
     conversationPendingOperation: {
       create: conversationPendingOperationCreateMock,
       count: conversationPendingOperationCountMock,
@@ -96,11 +100,9 @@ vi.mock("@corgtex/knowledge", () => ({
   searchIndexedKnowledge: vi.fn().mockResolvedValue([]),
 }));
 
-vi.mock("@corgtex/models", () => ({
-  defaultModelGateway: {
-    chat: chatMock,
-    chatStream: chatStreamMock,
-  },
+vi.mock("@corgtex/models", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@corgtex/models")>(),
+  defaultModelGateway: { chat: chatMock, chatEventStream: chatEventStreamMock, chatStream: chatStreamMock },
 }));
 
 vi.mock("@corgtex/domain", () => ({
@@ -109,6 +111,7 @@ vi.mock("@corgtex/domain", () => ({
       super(message);
     }
   },
+  privacyFilter: (a: any) => a?.kind === "user" ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: a.user.id }] } : { isPrivate: false },
   archiveWorkspaceToolLink: vi.fn(),
   applyContextGraphProposedDiff: applyContextGraphProposedDiffMock,
   assignRole: vi.fn(),
@@ -130,6 +133,7 @@ vi.mock("@corgtex/domain", () => ({
   ingestConversationOnDemand: vi.fn(),
   listCrmActivities: listCrmActivitiesMock,
   listExternalMcpConnections: listExternalMcpConnectionsMock,
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "membership-1", workspaceId: "ws-1", userId: "u-1", role: "MEMBER", isActive: true }),
   listGoals: listGoalsMock,
   listMembersEnriched: vi.fn(),
   listWorkspaceToolLinks: listWorkspaceToolLinksMock,
@@ -148,6 +152,7 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
+import { env } from "@corgtex/shared";
 
 function pendingOperationId(index: number) {
   return `123e4567-e89b-12d3-a456-42661417400${index}`;
@@ -184,9 +189,10 @@ function pendingOperationFixture(overrides: Record<string, any> = {}) {
 
 describe("processConversationTurn", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.clearAllMocks(); (env as any).MODEL_PROVIDER = "openai_compatible"; chatMock.mockReset(); chatStreamMock.mockReset(); chatEventStreamMock.mockReset();
+    chatEventStreamMock.mockImplementation((request: any) => (async function* () { const stream = chatStreamMock(request)[Symbol.asyncIterator](); let message = ""; let terminal: any; while (true) { const next = await stream.next(); if (next.done) { terminal = next.value; break; } message += next.value; } const calls = terminal?.tool_calls ?? []; const name = calls.length ? "route_conversation_tools" : "respond_conversation"; const args = calls.length ? { calls: calls.map((call: any) => { try { return { name: call.function.name, arguments: JSON.parse(call.function.arguments) }; } catch { return { name: call.function.name, arguments: null }; } }) } : { answer: message || terminal?.content || "" }; const wrapper = { id: "route-test", type: "function", function: { name, arguments: JSON.stringify(args) } }; yield { type: "tool_call_delta", index: 0, idDelta: wrapper.id, nameDelta: name, argumentsDelta: wrapper.function.arguments }; return { ...terminal, content: "", tool_calls: [wrapper] }; })());
     vi.mocked(searchIndexedKnowledge).mockReset().mockResolvedValue([]);
-    checkBudgetMock.mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
+    checkBudgetMock.mockReset().mockResolvedValue({ allowed: true, usedPct: 0, usedUsd: 0, capUsd: 5 });
     conversationTurnFindManyMock.mockResolvedValue([]);
     resolveKnowledgeAccessDomainsMock.mockResolvedValue(["WORKSPACE"]);
     conversationPendingOperationStore.length = 0;
@@ -326,6 +332,7 @@ describe("processConversationTurn", () => {
     };
   }
 
+  function turnContext(actor = testUserActor()) { return { workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor }; } function toolCall(id: string, name: string, args: Record<string, unknown> = {}) { return { id, function: { name, arguments: JSON.stringify(args) } }; } function answerCall(id: string, answer: string) { return toolCall(id, "respond_conversation", { answer }); } function eventResponse(events: any[], result: Record<string, any>) { return (async function* () { for (const event of events) yield event; return result; })(); }
   function streamResponse(chunks: string[], result: Record<string, any>) {
     return (async function* () {
       for (const chunk of chunks) {
@@ -1084,9 +1091,9 @@ describe("processConversationTurn", () => {
 
   it("does not bypass the model for compound CRM account requests", async () => {
     const actor = testUserActor();
-    chatStreamMock.mockReturnValueOnce(streamResponse(["I can help with both requests."], {
-      content: "I can help with both requests.",
-    }));
+    const response = answerCall("compound", "I can help with both requests."); chatEventStreamMock.mockReturnValueOnce(eventResponse([
+      { type: "tool_call_delta", index: 0, idDelta: "compound", nameDelta: "respond_conversation", argumentsDelta: response.function.arguments },
+    ], { content: "", tool_calls: [response] }));
 
     const { processConversationTurnStream } = await import("./conversation");
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({
@@ -1101,22 +1108,22 @@ describe("processConversationTurn", () => {
 
     expect(chunks.join("")).toBe("I can help with both requests.");
     expect(result.assistantMessage).toBe("I can help with both requests.");
-    expect(chatStreamMock).toHaveBeenCalled();
+    expect(chatEventStreamMock).toHaveBeenCalledOnce();
   });
 
-  it("closes the first model stream when the conversation stream is canceled", async () => {
+  it("closes the ordinary response stream when the conversation stream is canceled", async () => {
     const actor = testUserActor();
     let firstModelStreamClosed = false;
 
     async function* cancellableModelStream() {
       try {
-        yield "Partial answer";
+        yield { type: "tool_call_delta", index: 0, idDelta: "cancel", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Partial answer" };
       } finally {
         firstModelStreamClosed = true;
       }
     }
 
-    chatStreamMock.mockReturnValueOnce(cancellableModelStream());
+    chatEventStreamMock.mockReturnValueOnce(cancellableModelStream());
 
     const { processConversationTurnStream } = await import("./conversation");
     const stream = processConversationTurnStream({
@@ -1152,12 +1159,12 @@ describe("processConversationTurn", () => {
     }]);
 
     async function* canceledModelStream() {
-      yield "Partial answer";
+      yield { type: "tool_call_delta", index: 0, idDelta: "abort", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Partial answer" };
       controller.abort(cancellationError);
       throw cancellationError;
     }
 
-    chatStreamMock.mockReturnValueOnce(canceledModelStream());
+    chatEventStreamMock.mockReturnValueOnce(canceledModelStream());
 
     const { processConversationTurnStream } = await import("./conversation");
     const stream = processConversationTurnStream({
@@ -1283,7 +1290,7 @@ describe("processConversationTurn", () => {
 
   it("streams a grounded CRM page-context fallback when the model returns empty text", async () => {
     const actor = testUserActor();
-    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" }));
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "" })).mockReturnValueOnce(streamResponse([], { content: "" }));
 
     const { processConversationTurnStream } = await import("./conversation");
     const { chunks, result } = await collectConversationStream(processConversationTurnStream({
@@ -1542,7 +1549,7 @@ describe("processConversationTurn", () => {
     }));
 
     const streamedMessage = chunks.join("");
-    expect(streamedMessage).toContain("The assistant did not return a natural-language response");
+    expect(streamedMessage).toContain("could not safely complete");
     expect(result.assistantMessage).toBe(streamedMessage);
     expect(listCrmActivitiesMock).not.toHaveBeenCalled();
   });
@@ -1716,7 +1723,7 @@ describe("processConversationTurn", () => {
     }));
 
     const streamedMessage = chunks.join("");
-    expect(streamedMessage).toContain("I'll check that.");
+    expect(streamedMessage).not.toContain("I'll check that.");
     expect(streamedMessage).toContain("First follow up");
     expect(streamedMessage).toContain("I could not complete the CRM relationship-work request for CRM account account-2");
     expect(streamedMessage).toContain("The CRM request could not be completed");
@@ -2419,6 +2426,31 @@ describe("processConversationTurn", () => {
     expect(result.assistantMessage).toBe("Please select the CRM relationship before I prepare the activity.");
   });
 
+  it("maps list results and keeps failed-stream persistence aligned with safe fallbacks", async () => { const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction, updateTension } = await import("@corgtex/domain"); vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{ id: "t-1", version: 4, status: "OPEN", author: {} } as any]); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-1", version: 7, status: "OPEN", author: {} } as any]); vi.mocked(updateTension).mockResolvedValueOnce({ id: "t-1", version: 5 } as any); vi.mocked(updateAction).mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "conflict")); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("rt", "query_tensions", { status: "OPEN" }), toolCall("ra", "query_actions")] }).mockResolvedValueOnce({ content: "", tool_calls: [toolCall("wt", "update_tension", { tensionId: "t-1", expectedVersion: 4 }), toolCall("wa", "update_action", { actionId: "a-1", expectedVersion: 7 })] }); const { processConversationTurn } = await import("./conversation"); const result = await processConversationTurn(turnContext(actor)); expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({ tensionId: "t-1", expectedVersion: 4 })); expect(updateAction).toHaveBeenCalledWith(actor, expect.objectContaining({ actionId: "a-1", expectedVersion: 7 })); expect(result.assistantMessage).toBe("Partial update result — succeeded: tension t-1; failed: action a-1. The record was modified by another request. Read the latest version and apply your changes again."); vi.mocked(prisma.tension.findMany).mockResolvedValueOnce([{ id: "t-2", version: 4, status: "OPEN", author: {} } as any]); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-2", version: 7, status: "OPEN", author: {} } as any]); vi.mocked(updateTension).mockResolvedValueOnce({ id: "t-2", version: 5 } as any); vi.mocked(updateAction).mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "conflict")); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("srt", "query_tensions"), toolCall("sra", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("swt", "update_tension", { tensionId: "t-2", expectedVersion: 4 }), toolCall("swa", "update_action", { actionId: "a-2", expectedVersion: 7 })] })); const { processConversationTurnStream } = await import("./conversation"); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Partial update result — succeeded: tension t-2; failed: action a-2. The record was modified by another request. Read the latest version and apply your changes again."); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-2", version: 1, status: "OPEN", author: {} } as any]); vi.mocked(updateAction).mockResolvedValueOnce({ id: "a-2", version: 2 } as any); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("w", "update_action", { actionId: "a-2", expectedVersion: 1 })] })).mockReturnValueOnce(throwingStream(["Truncated success."])); const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(chunks.join("")).toBe("Updated.The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying."); expect(chunks.join("").match(/Updated\./g)).toHaveLength(1); vi.mocked(prisma.action.findMany).mockResolvedValueOnce([{ id: "a-3", version: 1, status: "OPEN", author: {} } as any]); chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("fr", "query_actions")] })).mockReturnValueOnce(throwingStream(["Still working."])); const failed = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(failed.result.assistantMessage).toBe(failed.chunks.join("")); expect(failed.chunks.join("")).not.toMatch(/Updated|Still working/); });
+  it("associates mixed failures with safe guidance in both response paths", async () => { const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction, updateTension } = await import("@corgtex/domain"); vi.mocked(prisma.action.findMany).mockResolvedValue([{ id: "a-mixed", version: 2, status: "OPEN", author: {} } as any]); vi.mocked(prisma.tension.findMany).mockResolvedValue([{ id: "t-mixed", version: 3, status: "OPEN", author: {} } as any]); vi.mocked(updateAction).mockRejectedValue(new AppError(400, "INVALID_INPUT", "Completion note is required.")); vi.mocked(updateTension).mockRejectedValue(new AppError(409, "VERSION_CONFLICT", "conflict")); const reads = [toolCall("ra", "query_actions"), toolCall("rt", "query_tensions")]; const writes = [toolCall("wa", "update_action", { actionId: "a-mixed", expectedVersion: 2 }), toolCall("wt", "update_tension", { tensionId: "t-mixed", expectedVersion: 3 })]; chatMock.mockResolvedValueOnce({ content: "", tool_calls: reads }).mockResolvedValueOnce({ content: "", tool_calls: writes }); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: reads })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: writes })); const expected = "Failed update result — action a-mixed — Completion note is required.; tension t-mixed — The record was modified by another request. Read the latest version and apply your changes again."; const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe(expected); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe(expected); });
+  it.each([["VERSION_CONFLICT", "The record was modified by another request. Read the latest version and apply your changes again."], ["INVALID_INPUT", "Completion note is required."], ["OTHER", "The versioned update could not be completed. Read the current item version before retrying."]])("streams deterministic %s guidance instead of false success", async (failureCode, expected) => { const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateAction } = await import("@corgtex/domain"); vi.mocked(prisma.action.findMany).mockResolvedValue([{ id: "a-1", version: 1, status: "OPEN", author: {} } as any]); vi.mocked(updateAction).mockRejectedValue(failureCode === "VERSION_CONFLICT" ? new AppError(409, failureCode, "conflict") : failureCode === "INVALID_INPUT" ? new AppError(400, failureCode, expected) : new Error("private failure")); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nr", "query_actions")] }).mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nw", "update_action", { actionId: "a-1", expectedVersion: 1 })] }); chatStreamMock.mockReturnValueOnce(streamResponse(["Updated."], { content: "Updated.", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_action", { actionId: "a-1", expectedVersion: 1 })] })); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe(expected); const { chunks, result } = await collectConversationStream(processConversationTurnStream(turnContext(actor))); expect(chunks.join("")).toBe(expected); expect(result.assistantMessage).toBe(expected); expect(result.assistantMessage).not.toContain("private failure"); });
+  it("preserves safe tension validation guidance in both response paths", async () => { const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { AppError, updateTension } = await import("@corgtex/domain"); vi.mocked(prisma.tension.findMany).mockResolvedValue([{ id: "t-1", version: 1, status: "OPEN", author: {} } as any]); vi.mocked(updateTension).mockRejectedValue(new AppError(400, "INVALID_INPUT", "Resolution note is required.")); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nr", "query_tensions")] }).mockResolvedValueOnce({ content: "", tool_calls: [toolCall("nw", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] }); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_tensions")] })).mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("w", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] })); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn(turnContext(actor))).assistantMessage).toBe("Resolution note is required."); expect((await collectConversationStream(processConversationTurnStream(turnContext(actor)))).chunks.join("")).toBe("Resolution note is required."); });
+  it("rejects guessed first-call updates without preserving claims in either response path", async () => {
+    const actor = testUserActor(); const { prisma } = await import("@corgtex/shared"); const { updateAction, updateTension } = await import("@corgtex/domain");
+    chatMock.mockResolvedValueOnce({ content: "Updated.", tool_calls: [toolCall("a1", "update_action", { actionId: "a-1", expectedVersion: 1 })] }).mockResolvedValueOnce({ content: "" }); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); const result = await processConversationTurn(turnContext(actor));
+    expect(updateAction).not.toHaveBeenCalled(); expect(result.assistantMessage).toBe("The assistant did not return a natural-language response. Please retry or ask for a more specific summary.");
+    expect(chatMock.mock.calls[0][0].tools.map((tool: any) => tool.function.name)).not.toEqual(expect.arrayContaining(["update_action", "update_tension"]));
+    expect(chatMock.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["update_action", "update_tension"]));
+    chatStreamMock.mockReturnValueOnce(streamResponse(["Unverified."], { content: "Unverified.", tool_calls: [toolCall("t1", "update_tension", { tensionId: "t-1", expectedVersion: 1 })] })); const { chunks } = await collectConversationStream(processConversationTurnStream(turnContext(actor)));
+    expect(updateTension).not.toHaveBeenCalled(); expect(prisma.tension.findMany).not.toHaveBeenCalled(); expect(chunks.join("")).toContain("could not safely complete"); expect(chunks.join("")).not.toContain("Unverified");
+  });
+  it("preserves ordinary follow-ups and incrementally streams no-tool chat", async () => {
+    const actor = testUserActor(); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("s1", "search_brain", { query: "actions" })] }).mockResolvedValueOnce({ content: "Useful list response.", tool_calls: [toolCall("q1", "query_actions")] }); const { processConversationTurn, processConversationTurnStream } = await import("./conversation"); expect((await processConversationTurn({ ...turnContext(actor), userMessage: "Show actions." })).assistantMessage).toBe("Useful list response."); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("search", "search_brain", { query: "actions" })] })).mockReturnValueOnce(streamResponse(["Useful streamed response."], { content: "Useful streamed response.", tool_calls: [toolCall("q2", "query_actions")] })); const { chunks, result } = await collectConversationStream(processConversationTurnStream({ ...turnContext(actor), userMessage: "Show actions." })); expect(chunks.join("")).toBe("Useful streamed response."); expect(result.assistantMessage).toBe("Useful streamed response.");
+    const answer = answerCall("answer", "Hello world."); chatEventStreamMock.mockReturnValueOnce(eventResponse([{ type: "tool_call_delta", index: 0, idDelta: "answer", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Hello" }, { type: "tool_call_delta", index: 0, argumentsDelta: " world.\"}" }], { content: "", tool_calls: [answer] })); const priorLegacyCalls = chatStreamMock.mock.calls.length; const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." }); await expect(stream.next()).resolves.toEqual({ done: false, value: "Hello" }); await expect(stream.next()).resolves.toEqual({ done: false, value: " world." }); await expect(stream.next()).resolves.toMatchObject({ done: true, value: { assistantMessage: "Hello world." } }); expect(chatStreamMock).toHaveBeenCalledTimes(priorLegacyCalls); expect(chatEventStreamMock).toHaveBeenLastCalledWith(expect.objectContaining({ tool_choice: "required", tools: expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: "respond_conversation" }) }), expect.objectContaining({ function: expect.objectContaining({ name: "route_conversation_tools" }) })]) }));
+    checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false }); chatEventStreamMock.mockReturnValueOnce(eventResponse([{ type: "tool_call_delta", index: 0, idDelta: "budget", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Still answered.\"}" }], { content: "", tool_calls: [answerCall("budget", "Still answered.")] })); const budget = await collectConversationStream(processConversationTurnStream({ ...turnContext(), userMessage: "Explain it." })); expect(budget.chunks.join("")).toBe("Still answered."); expect(budget.result.assistantMessage).toBe(budget.chunks.join("")); expect(checkBudgetMock).toHaveBeenCalledOnce(); checkBudgetMock.mockReset().mockResolvedValue({ allowed: true }); chatEventStreamMock.mockReturnValueOnce((async function* () { yield { type: "tool_call_delta", index: 0, idDelta: "failed", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Partial" }; throw new Error("private stream failure"); })()); const failed = await collectConversationStream(processConversationTurnStream(turnContext())); expect(failed.chunks.join("")).toBe("Partial\n\nI could not safely complete that response. Please retry."); expect(failed.result.assistantMessage).toBe(failed.chunks.join(""));
+  });
+  it("reports committed initial tools when follow-up budget is exhausted without retrying", async () => { const actor = testUserActor(); const { createAction, createGoal } = await import("@corgtex/domain"); vi.mocked(createAction).mockResolvedValue({ id: "a-committed" } as any); vi.mocked(createGoal).mockRejectedValue(new Error("private failure")); const calls = [toolCall("a", "create_action", { title: "Do it" }), toolCall("g", "create_goal", { title: "Goal" })]; checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false }); chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: calls })); const { processConversationTurnStream } = await import("./conversation"); const streamed = await collectConversationStream(processConversationTurnStream(turnContext(actor))); const partial = "Tool execution result — succeeded: create_action (action a-committed); failed: create_goal. The workspace model budget was reached before a follow-up summary could be generated. Retry only failed calls after checking current state."; expect(streamed.chunks.join("")).toBe(partial); expect(streamed.result.assistantMessage).toBe(partial); expect(createAction).toHaveBeenCalledOnce(); expect(createGoal).toHaveBeenCalledOnce(); expect(chatEventStreamMock).toHaveBeenCalledOnce(); expect(chatStreamMock).toHaveBeenCalledOnce(); vi.mocked(createAction).mockClear().mockResolvedValue({ id: "a-one" } as any); checkBudgetMock.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false }); chatMock.mockResolvedValueOnce({ content: "", tool_calls: [toolCall("only", "create_action", { title: "Once" })] }); const { processConversationTurn } = await import("./conversation"); const direct = await processConversationTurn(turnContext(actor)); expect(direct.assistantMessage).toBe("Tool execution result — succeeded: create_action (action a-one). The workspace model budget was reached before a follow-up summary could be generated. Do not retry successful calls."); expect(createAction).toHaveBeenCalledOnce(); expect(chatMock).toHaveBeenCalledOnce(); });
+  it("uses a one-call answer-only boundary for the fake provider", async () => { (env as any).MODEL_PROVIDER = "fake"; const { createAction } = await import("@corgtex/domain"); chatEventStreamMock.mockReturnValueOnce(eventResponse([{ type: "content_delta", content: "Fake " }, { type: "content_delta", content: "answer." }], { content: "Fake answer." })); const { processConversationTurnStream } = await import("./conversation"); const delivered = await collectConversationStream(processConversationTurnStream(turnContext())); expect(delivered.chunks).toEqual(["Fake ", "answer."]); expect(delivered.result.assistantMessage).toBe(delivered.chunks.join("")); expect(chatEventStreamMock).toHaveBeenCalledOnce(); expect(chatEventStreamMock).toHaveBeenCalledWith(expect.not.objectContaining({ tools: expect.anything(), tool_choice: expect.anything() })); expect(chatStreamMock).not.toHaveBeenCalled(); expect(createAction).not.toHaveBeenCalled(); });
+  it.each(["content", "duplicate", "malformed", "unoffered"])("fails closed for %s route wrappers without mutation", async (kind) => { const { updateAction } = await import("@corgtex/domain"); const answer = answerCall("a", "Draft"); const route = kind === "unoffered" ? toolCall("r", "route_conversation_tools", { calls: [{ name: "update_action", arguments: { actionId: "a-1", expectedVersion: 1 } }] }) : kind === "malformed" ? { id: "a", function: { name: "respond_conversation", arguments: "{\"answer\":\"Cut" } } : answer; const events = kind === "content" ? [{ type: "content_delta", content: "Outside" }] : kind === "duplicate" ? [{ type: "tool_call_delta", index: 0, idDelta: "a", nameDelta: "respond_conversation", argumentsDelta: answer.function.arguments }, { type: "tool_call_delta", index: 1, idDelta: "b", nameDelta: "respond_conversation", argumentsDelta: answer.function.arguments }] : [{ type: "tool_call_delta", index: 0, idDelta: route.id, nameDelta: route.function.name, argumentsDelta: route.function.arguments }]; const terminal = { content: kind === "content" ? "Outside" : "", tool_calls: kind === "duplicate" ? [answer, answerCall("b", "Draft")] : [route] }; chatEventStreamMock.mockReturnValueOnce(eventResponse(events, terminal)); const result = await collectConversationStream((await import("./conversation")).processConversationTurnStream(turnContext())); expect(result.result.assistantMessage).toBe(result.chunks.join("")); expect(result.chunks.join("")).toContain("could not safely complete"); if (kind === "content") expect(result.chunks.join("")).not.toContain("Outside"); expect(updateAction).not.toHaveBeenCalled(); }); it.each(["Revise this action's title.", "Adjust the assignee.", "The other one too."])("keeps versioned follow-up tools for contextual wording: %s", async (userMessage) => {
+    chatStreamMock.mockReturnValueOnce(streamResponse([], { content: "", tool_calls: [toolCall("r", "query_actions")] })).mockReturnValueOnce(streamResponse(["Current action."], { content: "Current action." })); const { processConversationTurnStream } = await import("./conversation"); await collectConversationStream(processConversationTurnStream({ ...turnContext(), userMessage }));
+    expect(chatStreamMock.mock.calls[1][0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["update_action", "update_tension"]));
+  });
+
   it("rejects CRM activity preparations with invalid due dates before storing a pending operation", async () => {
     const actor = {
       kind: "user" as const,
@@ -3084,7 +3116,7 @@ describe("processConversationTurn", () => {
     expect(result.contextUsed.mapGraphChanged).toBe(true);
   });
 
-  it("rechecks budget before a tool-followup model call", async () => {
+  it("reports completed reads when the tool-followup budget is exhausted", async () => {
     const actor = {
       kind: "user" as const,
       user: {
@@ -3111,17 +3143,15 @@ describe("processConversationTurn", () => {
 
     const { processConversationTurn } = await import("./conversation");
 
-    await expect(processConversationTurn({
+    const result = await processConversationTurn({
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",
       agentKey: "assistant",
       userMessage: "What tools do we have?",
       actor,
-    })).rejects.toMatchObject({
-      status: 429,
-      code: "BUDGET_EXCEEDED",
     });
+    expect(result.assistantMessage).toBe("Tool execution result — completed: list_tool_links. The workspace model budget was reached before a follow-up summary could be generated. Check current state before retrying.");
     expect(chatMock).toHaveBeenCalledTimes(1);
     expect(listWorkspaceToolLinksMock).toHaveBeenCalledWith(actor, { workspaceId: "ws-1" });
   });

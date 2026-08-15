@@ -28,4 +28,11 @@ describe("mcp-tool-capabilities", () => {
     const requiredScopes = getRequiredScopesForMcpTool("get_finance_readiness");
     expect(requiredScopes).toEqual(["finance:read"]);
   });
+
+  it.each([
+    ["update_proposal", "proposals"], ["update_action", "actions"],
+    ["update_tension", "tensions"], ["update_goal", "goals"],
+  ])("%s declares its read-before-write scopes", (tool, scope) => {
+    expect(getRequiredScopesForMcpTool(tool)).toEqual([`${scope}:read`, `${scope}:write`]);
+  });
 });

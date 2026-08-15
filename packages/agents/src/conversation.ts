@@ -1,9 +1,9 @@
 import { prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, IncrementalJsonStringDecoder } from "@corgtex/models";
 import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
-import type { ChatMessage } from "@corgtex/models";
+import type { ChatMessage, ModelTool, ToolCall } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
 import { createCorgtexScheduledMeetingTool, uploadMeetingTranscriptTool, createCorgtexScheduledMeeting, uploadMeetingTranscriptFromTool } from "./tools/meetings";
 import { getWorkspaceOverviewTool, queryTensionsTool, queryActionsTool, queryProposalsTool, queryGoalsTool, queryOrgStructureTool, getWorkspaceOverview, queryTensions, queryActions, queryProposals, queryGoals, queryOrgStructure } from "./tools/workspace";
@@ -223,6 +223,7 @@ const BASE_TOOLS = [
   ...crmTools,
 ];
 
+function isVersionedUpdateTool(toolName: string) { return toolName === "update_tension" || toolName === "update_action"; }
 async function toolsForContext(ctx: ConversationContext) {
   if (await isContextMapAiAvailable(ctx.workspaceId)) {
     return [...BASE_TOOLS, ...contextMapTools];
@@ -367,8 +368,8 @@ const TOOL_HANDLERS: Partial<Record<string, (actor: AppActor, ctx: ConversationC
   upload_meeting_transcript: async (actor, ctx, args) => uploadMeetingTranscriptFromTool(actor, ctx.workspaceId, args),
   search_brain: async (actor, ctx, args) => searchBrain(actor, ctx.workspaceId, args.query, args.limit),
   get_workspace_overview: async (actor, ctx) => getWorkspaceOverview(ctx.workspaceId),
-  query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId),
-  query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId),
+  query_tensions: async (actor, ctx, args) => queryTensions(ctx.workspaceId, args.status, args.assigneeId, args.tensionId, actor),
+  query_actions: async (actor, ctx, args) => queryActions(ctx.workspaceId, args.status, args.assigneeId, args.actionId, actor),
   query_proposals: async (actor, ctx, args) => queryProposals(ctx.workspaceId, args.status),
   query_goals: async (actor, ctx, args) => queryGoals(actor, ctx.workspaceId, args.cadence, args.level, args.status),
   query_org_structure: async (actor, ctx) => queryOrgStructure(ctx.workspaceId),
@@ -727,19 +728,18 @@ function ensureAssistantMessage(
 }
 
 function isBudgetExceededError(err: unknown) {
-  return (err as { status?: number; code?: string } | null)?.status === 429
-    && (err as { status?: number; code?: string } | null)?.code === "BUDGET_EXCEEDED";
+  const code = (err as { code?: string } | null)?.code; return code === "BUDGET_EXCEEDED" || code === "AI_BUDGET_EXCEEDED" || code === "CATALOG_MONTHLY_BUDGET_EXCEEDED";
 }
 
 async function canRunFollowupModelAfterTools(
   ctx: ConversationContext,
-  pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord>
+  pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord>, allowBudgetFallback = false,
 ) {
   try {
     await assertWorkspaceModelBudget(ctx.workspaceId);
     return true;
   } catch (err) {
-    if (pendingCrmOperations.length > 0 && isBudgetExceededError(err)) {
+    if ((allowBudgetFallback || pendingCrmOperations.length > 0) && isBudgetExceededError(err)) {
       return false;
     }
     throw err;
@@ -796,6 +796,7 @@ async function executeConversationToolCall({
   handler: (actor: AppActor, ctx: ConversationContext, args: any) => Promise<unknown>;
 }) {
   const args = rawArguments ? JSON.parse(rawArguments) : {};
+  if (isVersionedUpdateTool(toolName)) throw new Error("Versioned updates require a preceding query result from this turn.");
   if (isCrmWriteTool(toolName)) {
     const normalizedArgs = normalizeCrmWriteToolArgs(toolName, ctx, args);
     validateCrmWriteToolArgs(toolName, normalizedArgs);
@@ -819,6 +820,38 @@ async function executeConversationToolCall({
   };
 }
 
+async function executeVersionedFollowupTools(response: import("@corgtex/models").ChatCompletionResponse, offeredTools: ModelTool[], actor: AppActor, ctx: ConversationContext, messages: ChatMessage[], executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
+  const calls = response.tool_calls ?? []; if (!calls.some(({ function: tool }) => isVersionedUpdateTool(tool.name))) return "none" as const; const observed = new Map<string, number>();
+  if (!executed.some(({ toolName }) => toolName === "update_action" || toolName === "update_tension")) for (const read of executed) { const updateName = read.toolName === "query_actions" ? "update_action" : read.toolName === "query_tensions" ? "update_tension" : null; for (const item of Array.isArray(read.result) ? read.result : []) if (updateName && typeof item?.id === "string" && Number.isInteger(item.version) && item.version > 0) observed.set(`${updateName}:${item.id}`, item.version); }
+  const offered = new Map(offeredTools.map(({ function: tool }) => [tool.name, tool])); const valid = calls.every(({ function: tool }) => { const args = parseToolArgs(tool.arguments); const id = tool.name === "update_action" ? args.actionId : tool.name === "update_tension" ? args.tensionId : null; return isVersionedUpdateTool(tool.name) && matchesJsonSchema(args, offered.get(tool.name)?.parameters) && typeof id === "string" && observed.get(`${tool.name}:${id}`) === args.expectedVersion; });
+  if (!valid || observed.size === 0) return "rejected" as const; messages.push({ role: "assistant", content: response.content || "", tool_calls: calls });
+  for (const call of calls) { const toolName = call.function.name; const args = effectiveToolArgs(toolName, ctx, call.function.arguments);
+    try { const result = await TOOL_HANDLERS[toolName]!(actor, ctx, args); executed.push({ toolName, args, result }); messages.push({ role: "tool", content: JSON.stringify(result), name: toolName, tool_call_id: call.id }); } catch (err) { const error = err instanceof Error ? err.message : String(err); failed.push({ toolName, args, error: err instanceof AppError && err.status === 400 ? error : "" }); messages.push({ role: "tool", content: JSON.stringify({ error }), name: toolName, tool_call_id: call.id }); } }
+  return "executed" as const;
+}
+const UNSAFE_VERSIONED_FOLLOWUP = "I could not safely apply that update because the tool sequence did not use a matching observed version."; const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.";
+const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying."; const ROUTE_RESPONSE_FAILED = "I could not safely complete that response. Please retry."; const MODEL_BUDGET_EXHAUSTED = "I could not generate a response because the workspace model budget was reached.";
+const ANSWER_ROUTE_NAME = "respond_conversation"; const TOOL_ROUTE_NAME = "route_conversation_tools";
+function toolResultLabel({ toolName, result }: ExecutedConversationToolResult) { const value = isRecord(result) ? result : {}; const found = ([['actionId', 'action'], ['tensionId', 'tension'], ['proposalId', 'proposal'], ['goalId', 'goal'], ['seriesId', 'meeting'], ['sourceId', 'source'], ['memberId', 'member'], ['assignmentId', 'assignment'], ['toolLinkId', 'tool link']] as const).find(([key]) => typeof value[key] === "string"); return found ? `${toolName} (${found[1]} ${escapeMarkdownText(String(value[found[0]]))})` : toolName; }
+function toolResultState(result: unknown) { if (isRecord(result) && (result.success === false || typeof result.error === "string" || result.status === "VERSION_CONFLICT" || result.status === "INVALID_ARGUMENT")) return "failed"; return isRecord(result) && result.success === true ? "succeeded" : "completed"; }
+function toolBudgetFallback(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) { const states = (["succeeded", "completed", "failed"] as const).flatMap((state) => { const labels = executed.filter(({ result }) => toolResultState(result) === state).map(toolResultLabel); if (state === "failed") labels.push(...failed.map(({ toolName }) => toolName)); return labels.length ? [`${state}: ${labels.join(", ")}`] : []; }); if (!states.length) return MODEL_BUDGET_EXHAUSTED; const hasSuccess = states.some((state) => state.startsWith("succeeded:")); const hasFailure = states.some((state) => state.startsWith("failed:")); return `Tool execution result — ${states.join("; ")}. The workspace model budget was reached before a follow-up summary could be generated. ${hasSuccess ? hasFailure ? "Retry only failed calls after checking current state." : "Do not retry successful calls." : "Check current state before retrying."}`; }
+function matchesJsonSchema(value: unknown, input: unknown): boolean {
+  if (!isRecord(input)) return false; const schema = input as Record<string, any>; if ("const" in schema && value !== schema.const) return false; if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return false;
+  if (Array.isArray(schema.oneOf)) return schema.oneOf.filter((item: unknown) => matchesJsonSchema(value, item)).length === 1; const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : []; const type = value === null ? "null" : Array.isArray(value) ? "array" : Number.isInteger(value) ? "integer" : typeof value; if (types.length && !types.includes(type) && !(type === "integer" && types.includes("number"))) return false;
+  if (type === "object") { const object = value as Record<string, unknown>; const properties = isRecord(schema.properties) ? schema.properties : {}; if (Array.isArray(schema.required) && schema.required.some((key: unknown) => typeof key !== "string" || !(key in object))) return false; if (schema.additionalProperties === false && Object.keys(object).some((key) => !(key in properties))) return false; return Object.entries(object).every(([key, item]) => !(key in properties) || matchesJsonSchema(item, properties[key])); }
+  if (type === "array") return (!Number.isInteger(schema.minItems) || (value as unknown[]).length >= schema.minItems) && (!Number.isInteger(schema.maxItems) || (value as unknown[]).length <= schema.maxItems) && (!schema.items || (value as unknown[]).every((item) => matchesJsonSchema(item, schema.items))); return !(typeof value === "number" && typeof schema.minimum === "number" && value < schema.minimum);
+}
+function conversationRouteTools(tools: ModelTool[]): ModelTool[] { return [{ type: "function", function: { name: ANSWER_ROUTE_NAME, description: "Return the complete ordinary answer. Never claim a tool mutation occurred.", parameters: { type: "object", additionalProperties: false, required: ["answer"], properties: { answer: { type: "string" } } } } },
+  { type: "function", function: { name: TOOL_ROUTE_NAME, description: "Select one bounded batch of offered tools. Do not include user-facing prose.", parameters: { type: "object", additionalProperties: false, required: ["calls"], properties: { calls: { type: "array", minItems: 1, maxItems: 4, items: { oneOf: tools.map(({ function: tool }) => ({ type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { const: tool.name }, arguments: tool.parameters } })) } } } } } }]; }
+function routedToolCalls(response: import("@corgtex/models").ChatCompletionResponse, tools: ModelTool[]): ToolCall[] | null {
+  const [route] = response.tool_calls ?? []; if (response.content || response.tool_calls?.length !== 1 || route?.function.name !== TOOL_ROUTE_NAME) return null; const selected = parseToolArgs(route.function.arguments).calls; if (!Array.isArray(selected) || selected.length < 1 || selected.length > 4) return null; const offered = new Map(tools.map(({ function: tool }) => [tool.name, tool])); const calls = selected.flatMap((call, index): ToolCall[] => isRecord(call) && Object.keys(call).length === 2 && typeof call.name === "string" && isRecord(call.arguments) && matchesJsonSchema(call.arguments, offered.get(call.name)?.parameters) ? [{ id: `${route.id}:${index}`, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] : []); return calls.length === selected.length ? calls : null;
+}
+function versionedUpdateFailure(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) {
+  const id = ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => `${toolName === "update_action" ? "action" : "tension"} ${String(args[toolName === "update_action" ? "actionId" : "tensionId"])}`;
+  const failures = [...executed.flatMap((item) => isVersionedUpdateTool(item.toolName) && isRecord(item.result) && item.result.success !== true ? [{ id: id(item), guidance: typeof item.result.instruction === "string" ? item.result.instruction : VERSIONED_UPDATE_FAILED }] : []), ...failed.flatMap((item) => isVersionedUpdateTool(item.toolName) ? [{ id: id(item), guidance: item.error || VERSIONED_UPDATE_FAILED }] : [])];
+  if (!failures.length) return null; const succeeded = executed.filter(({ toolName, result }) => isVersionedUpdateTool(toolName) && isRecord(result) && result.success === true).map(id); const [only] = failures; if (only && failures.length === 1) return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${only.id}. ${only.guidance}` : only.guidance; const failedSummary = failures.sort((left, right) => left.id.localeCompare(right.id)).map(({ id: failedId, guidance }) => `${failedId} — ${guidance}`).join("; "); return succeeded.length ? `Partial update result — succeeded: ${succeeded.join(", ")}; failed: ${failedSummary}` : `Failed update result — ${failedSummary}`;
+}
+async function collectChatStream(stream: AsyncGenerator<string, import("@corgtex/models").ChatCompletionResponse>) { const iterator = stream[Symbol.asyncIterator](); let message = ""; let completed = false; try { while (true) { const next = await iterator.next(); if (next.done) { completed = true; return { message, response: next.value, error: null }; } message += next.value; } } catch (error) { return { message, response: null, error }; } finally { if (!completed) await closeAsyncIterator(iterator); } }
 async function closeAsyncIterator<T, TReturn>(iterator: AsyncIterator<T, TReturn>) {
   if (typeof iterator.return !== "function") return;
   try {
@@ -1002,7 +1035,8 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
 
   // Add current user message
   messages.push({ role: "user", content: ctx.userMessage });
-  const tools = await toolsForContext(ctx);
+  const followupTools = await toolsForContext(ctx);
+  const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
   const response = await defaultModelGateway.chat({
     workspaceId: ctx.workspaceId,
@@ -1015,7 +1049,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   });
   throwIfConversationCanceled(ctx);
 
-  const initialMessage = response.content;
+  const initialMessage = response.tool_calls?.some(({ function: tool }) => isVersionedUpdateTool(tool.name)) ? "" : response.content;
   let finalMessage = initialMessage;
   let mapGraphChanged = false;
   const pendingCrmOperations: Array<import("./pending-crm-operations").PendingOperationRecord> = [];
@@ -1060,21 +1094,31 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     }
 
     let followupMessage = "";
-    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
       const followup = await defaultModelGateway.chat({
         workspaceId: ctx.workspaceId,
         ...catalogUsageContext(ctx),
         model: env.MODEL_CHAT_CONVERSATION,
         taskType: "AGENT",
         messages,
-        tools,
+        tools: followupTools,
         signal: ctx.signal,
       });
       throwIfConversationCanceled(ctx);
 
       followupMessage = followup.content;
       finalMessage = followupMessage;
-    }
+      const followupState = await executeVersionedFollowupTools(followup, followupTools, actor, ctx, messages, executedToolResults, failedToolResults);
+      if (followupState === "rejected") followupMessage = finalMessage = UNSAFE_VERSIONED_FOLLOWUP; else if (followupState === "executed") {
+        const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+        followupMessage = updateFailure ?? VERSIONED_UPDATE_SUMMARY_UNAVAILABLE;
+        if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+          try { const completed = await defaultModelGateway.chat({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }); throwIfConversationCanceled(ctx); followupMessage = completed.content || followupMessage; }
+          catch (error) { throwIfConversationCanceled(ctx, error); }
+        }
+        finalMessage = followupMessage;
+      }
+    } else if (pendingCrmOperations.length === 0) followupMessage = finalMessage = toolBudgetFallback(executedToolResults, failedToolResults);
     if (!followupMessage.trim()) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
         ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
@@ -1250,7 +1294,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   }
 
   messages.push({ role: "user", content: ctx.userMessage });
-  const tools = await toolsForContext(ctx);
+  const followupTools = await toolsForContext(ctx);
+  const tools = followupTools.filter(({ function: tool }) => !isVersionedUpdateTool(tool.name));
 
   let finalMessage = "";
   let mapGraphChanged = false;
@@ -1259,46 +1304,31 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   const failedToolResults: FailedConversationToolResult[] = [];
   let toolExecutionAttempted = false;
 
-  const iterator = defaultModelGateway.chatStream({
-    workspaceId: ctx.workspaceId,
-    ...catalogUsageContext(ctx),
-    model: env.MODEL_CHAT_CONVERSATION,
-    taskType: "AGENT",
-    messages,
-    tools,
-    signal: ctx.signal,
-  })[Symbol.asyncIterator]();
-
-  let firstResult: import("@corgtex/models").ChatCompletionResponse | null = null;
-  let firstStreamDone = false;
-  try {
-    while (true) {
-      const { done, value } = await iterator.next();
-      if (done) {
-        firstStreamDone = true;
-        firstResult = value;
-        break;
-      }
-      yield value;
-      finalMessage += value;
-    }
-  } catch (error) {
-    firstResult = null;
-    throwIfConversationCanceled(ctx, error);
-  } finally {
-    if (!firstStreamDone) {
-      await closeAsyncIterator(iterator);
-    }
-  }
-
-  throwIfConversationCanceled(ctx);
-
-  if (firstResult?.tool_calls && firstResult.tool_calls.length > 0) {
+  const fakeAnswerOnly = env.MODEL_PROVIDER === "fake";
+  const routeIterator = defaultModelGateway.chatEventStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, ...(fakeAnswerOnly ? {} : { tools: conversationRouteTools(tools), tool_choice: "required" as const }), signal: ctx.signal })[Symbol.asyncIterator]();
+  let routeResponse: import("@corgtex/models").ChatCompletionResponse | null = null; let routeError: unknown; let routeCompleted = false; let routeInvalid = false; let routeSeen = false;
+  let routeId = ""; let routeName = ""; let routeArguments = ""; let answerMessage = ""; let answerDecoder: IncrementalJsonStringDecoder | null = null;
+  try { while (true) { const next = await routeIterator.next(); if (next.done) { routeCompleted = true; routeResponse = next.value; break; } const event = next.value;
+    if (event.type === "content_delta") { if (!fakeAnswerOnly) routeInvalid = true; else { answerMessage += event.content; yield event.content; } continue; } if (fakeAnswerOnly) { routeInvalid = true; continue; } routeSeen = true; if (event.index !== 0) { routeInvalid = true; continue; }
+    routeId += event.idDelta ?? ""; routeName += event.nameDelta ?? ""; routeArguments += event.argumentsDelta;
+    if (!ANSWER_ROUTE_NAME.startsWith(routeName) && !TOOL_ROUTE_NAME.startsWith(routeName)) routeInvalid = true;
+    if (!routeInvalid && routeName === ANSWER_ROUTE_NAME) { answerDecoder ??= new IncrementalJsonStringDecoder("answer"); const decoded = answerDecoder.push(routeArguments.slice(answerDecoder.processedCharacters)); if (decoded.state === "malformed") routeInvalid = true; else if (decoded.delta) { answerMessage += decoded.delta; yield decoded.delta; } }
+  } } catch (error) { throwIfConversationCanceled(ctx, error); routeError = error; } finally { if (!routeCompleted) await closeAsyncIterator(routeIterator); }
+  throwIfConversationCanceled(ctx, routeError);
+  const [terminalRoute] = routeResponse?.tool_calls ?? []; const exactRoute = routeCompleted && !routeError && !routeInvalid && routeSeen && routeResponse?.content === "" && routeResponse.tool_calls?.length === 1 && terminalRoute?.id === routeId && terminalRoute.function.name === routeName && terminalRoute.function.arguments === routeArguments;
+  const answerArgs = exactRoute && routeName === ANSWER_ROUTE_NAME ? parseToolArgs(routeArguments) : null;
+  const answerValid = fakeAnswerOnly ? routeCompleted && !routeError && !routeInvalid && !routeSeen && routeResponse?.content === answerMessage && !routeResponse.tool_calls?.length : isRecord(answerArgs) && Object.keys(answerArgs).length === 1 && typeof answerArgs.answer === "string" && answerArgs.answer === answerMessage && answerDecoder?.finish().state === "complete";
+  const initialCalls = !fakeAnswerOnly && exactRoute && routeName === TOOL_ROUTE_NAME && routeResponse ? routedToolCalls(routeResponse, tools) : null;
+  if (answerValid) finalMessage = answerMessage;
+  else if (!initialCalls) { const failure = !answerMessage && isBudgetExceededError(routeError) ? MODEL_BUDGET_EXHAUSTED : ROUTE_RESPONSE_FAILED; const failedMessage = answerMessage ? `${answerMessage}\n\n${failure}` : failure; yield failedMessage.slice(answerMessage.length); finalMessage = failedMessage; }
+  else {
     toolExecutionAttempted = true;
-    messages.push({ role: "assistant", content: firstResult.content || "", tool_calls: firstResult.tool_calls });
+    messages.push({ role: "assistant", content: "", tool_calls: initialCalls });
     const actor = requireConversationToolActor(ctx);
+    const versionReadPending = initialCalls.some(({ function: tool }) => tool.name === "query_actions" || tool.name === "query_tensions");
+    const initialMutationRejected = initialCalls.some(({ function: tool }) => isVersionedUpdateTool(tool.name));
 
-    for (const call of firstResult.tool_calls) {
+    for (const call of initialCalls) {
       const handler = TOOL_HANDLERS[call.function.name];
       const toolArgs = effectiveToolArgs(call.function.name, ctx, call.function.arguments);
       if (handler) {
@@ -1329,16 +1359,18 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
       }
     }
 
-    let followupMessage = "";
-    let followupStreamFailed = false;
-    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+    let followupMessage = ""; let followupStreamFailed = false;
+    let followupResult: import("@corgtex/models").ChatCompletionResponse | null = null;
+    const followupAllowed = !initialMutationRejected && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true);
+    const followupBudgetExhausted = !initialMutationRejected && !followupAllowed && pendingCrmOperations.length === 0;
+    if (followupAllowed) {
       const followupIterator = defaultModelGateway.chatStream({
         workspaceId: ctx.workspaceId,
         ...catalogUsageContext(ctx),
         model: env.MODEL_CHAT_CONVERSATION,
         taskType: "AGENT",
         messages,
-        tools,
+        tools: followupTools,
         signal: ctx.signal,
       })[Symbol.asyncIterator]();
 
@@ -1348,10 +1380,9 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
           const { done, value } = await followupIterator.next();
           if (done) {
             followupStreamDone = true;
+            followupResult = value;
             break;
           }
-          yield value;
-          finalMessage += value;
           followupMessage += value;
         }
       } catch (error) {
@@ -1363,7 +1394,26 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
         }
       }
     }
-    if (!followupMessage.trim() || followupStreamFailed) {
+    const followupState = initialMutationRejected ? "rejected"
+      : followupResult ? await executeVersionedFollowupTools(followupResult, followupTools, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
+    if (followupStreamFailed && versionReadPending) finalMessage = "";
+    if (followupBudgetExhausted) { finalMessage = toolBudgetFallback(executedToolResults, failedToolResults); yield finalMessage; }
+    else if (followupState === "none") { if (!followupStreamFailed) finalMessage = (versionReadPending ? "" : finalMessage) + followupMessage; if (finalMessage) yield finalMessage; }
+    else if (followupState === "rejected") { finalMessage = UNSAFE_VERSIONED_FOLLOWUP; yield finalMessage; }
+    else if (followupState === "executed") {
+      const updateFailure = versionedUpdateFailure(executedToolResults, failedToolResults);
+      if (updateFailure) { finalMessage = updateFailure; yield finalMessage; }
+      else { finalMessage = followupMessage; if (finalMessage) yield finalMessage; }
+      let summary = "";
+      if (!updateFailure && await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
+        const completed = await collectChatStream(defaultModelGateway.chatStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx),
+          model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, signal: ctx.signal }));
+        throwIfConversationCanceled(ctx, completed.error); summary = completed.error ? "" : completed.message;
+      }
+      if (!updateFailure) { summary ||= VERSIONED_UPDATE_SUMMARY_UNAVAILABLE; yield summary; finalMessage += summary; }
+      throwIfConversationCanceled(ctx);
+    }
+    if (!followupBudgetExhausted && followupState === "none" && (!followupMessage.trim() || followupStreamFailed)) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
         ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
       if (toolFallback) {

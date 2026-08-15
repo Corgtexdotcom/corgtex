@@ -460,6 +460,19 @@ function structuredJsonResult(value: Record<string, unknown>) {
   };
 }
 
+function isVersionConflictResult(result: unknown): boolean {
+  try {
+    const res = result as { content?: { type?: string; text?: string }[] };
+    if (res?.content?.[0]?.type === "text" && typeof res.content[0].text === "string") {
+      const parsed = JSON.parse(res.content[0].text) as { status?: string };
+      return parsed?.status === "VERSION_CONFLICT";
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 function duplicateGuardOptionsFromParams(params: {
   duplicateResolution?: "use_existing" | "update_existing" | "create_new";
   duplicateTargetEntityId?: string;
@@ -722,7 +735,11 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
         requireToolCapability(name);
         try {
           const result = await handler(...args);
-          await auditToolExecution(name, args[0], result);
+          if (isVersionConflictResult(result)) {
+            await auditToolExecution(name, args[0], null, new Error("VERSION_CONFLICT"));
+          } else {
+            await auditToolExecution(name, args[0], result);
+          }
           return result;
         } catch (error) {
           await auditToolExecution(name, args[0], null, error);
@@ -2542,9 +2559,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_proposal",
-    "Update a proposal's title, body, summary, or owning circle. Draft edits keep draft-manager permissions; OPEN proposal content edits require the connected author and create a saved previous version.",
+    "Update a proposal's title, body, summary, or owning circle. You must read the proposal first and pass its observed version. Draft edits keep draft-manager permissions; OPEN proposal content edits require the connected author and create a saved previous version.",
     {
       proposalId: z.string(),
+      expectedVersion: z.number().int().positive().describe("Pass the exact version observed in the previous read."),
       title: z.string().optional(),
       bodyMd: z.string().optional(),
       summary: z.string().optional(),
@@ -2552,18 +2570,31 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       ownerMemberId: z.string().nullable().optional(),
       priority: workItemPriorityInputSchema.optional().describe("Urgent, Important, Medium, Low, or integer priority"),
     },
-    async (params: { proposalId: string; title?: string; bodyMd?: string; summary?: string; circleId?: string; ownerMemberId?: string | null; priority?: number | string }) => {
+    async (params: { proposalId: string; expectedVersion: number; title?: string; bodyMd?: string; summary?: string; circleId?: string; ownerMemberId?: string | null; priority?: number | string }) => {
       requireScope(sessionCtx, "proposals:write");
-      const updated = await updateProposal(actor, {
-        workspaceId,
-        proposalId: params.proposalId,
-        title: params.title,
-        bodyMd: params.bodyMd,
-        summary: params.summary,
-        circleId: params.circleId ?? undefined,
-        ownerMemberId: params.ownerMemberId,
-        priority: coerceWorkItemPriorityInput(params.priority),
-      });
+      requireWorkItemVersionReadScope("PROPOSAL");
+      let updated;
+      try {
+        updated = await updateProposal(actor, {
+          workspaceId,
+          proposalId: params.proposalId,
+          expectedVersion: params.expectedVersion,
+          title: params.title,
+          bodyMd: params.bodyMd,
+          summary: params.summary,
+          circleId: params.circleId ?? undefined,
+          ownerMemberId: params.ownerMemberId,
+          priority: coerceWorkItemPriorityInput(params.priority),
+        });
+      } catch (error) {
+        if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+          return structuredJsonResult({
+            status: "VERSION_CONFLICT",
+            instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
+          });
+        }
+        throw error;
+      }
       const proposalForResponse = await loadProposalWorkItemResponse(workspaceId, updated.id, updated);
       const item = normalizeProposalWorkItem(proposalForResponse);
       return jsonResult({
@@ -2796,9 +2827,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_action",
-    "Update an action. Draft content edits keep draft-manager permissions; OPEN/IN_PROGRESS content edits require the connected author and create a saved previous version. Completing an action requires completedVia.",
+    "Update an action. You must read the action first and pass its observed version. Draft content edits keep draft-manager permissions; OPEN/IN_PROGRESS content edits require the connected author and create a saved previous version. Completing an action requires completedVia.",
     {
       actionId: z.string(),
+      expectedVersion: z.number().int().positive().describe("Pass the exact version observed in the previous read."),
       title: z.string().optional(),
       bodyMd: z.string().optional(),
       status: z.enum(ACTION_STATUS).optional(),
@@ -2810,6 +2842,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async (params: {
       actionId: string;
+      expectedVersion: number;
       title?: string;
       bodyMd?: string;
       status?: typeof ACTION_STATUS[number];
@@ -2820,18 +2853,31 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       completedVia?: string;
     }) => {
       requireScope(sessionCtx, "actions:write");
-      const updated = await updateAction(actor, {
-        workspaceId,
-        actionId: params.actionId,
-        title: params.title,
-        bodyMd: params.bodyMd,
-        status: params.status,
-        circleId: params.circleId,
-        assigneeMemberId: params.assigneeMemberId,
-        priority: coerceWorkItemPriorityInput(params.priority),
-        dueAt: params.dueAt ? new Date(params.dueAt) : undefined,
-        completedVia: params.completedVia,
-      });
+      requireWorkItemVersionReadScope("ACTION");
+      let updated;
+      try {
+        updated = await updateAction(actor, {
+          workspaceId,
+          actionId: params.actionId,
+          expectedVersion: params.expectedVersion,
+          title: params.title,
+          bodyMd: params.bodyMd,
+          status: params.status,
+          circleId: params.circleId,
+          assigneeMemberId: params.assigneeMemberId,
+          priority: coerceWorkItemPriorityInput(params.priority),
+          dueAt: params.dueAt ? new Date(params.dueAt) : undefined,
+          completedVia: params.completedVia,
+        });
+      } catch (error) {
+        if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+          return structuredJsonResult({
+            status: "VERSION_CONFLICT",
+            instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
+          });
+        }
+        throw error;
+      }
       const actionForResponse = await loadActionWorkItemResponse(workspaceId, updated.id, updated);
       const item = normalizeActionWorkItem(actionForResponse);
       return jsonResult({
@@ -3013,9 +3059,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_tension",
-    "Update a tension. Draft content edits keep draft-manager permissions; OPEN tension content edits require the connected author and create a saved previous version.",
+    "Update a tension. You must read the tension first and pass its observed version. Draft content edits keep draft-manager permissions; OPEN tension content edits require the connected author and create a saved previous version.",
     {
       tensionId: z.string(),
+      expectedVersion: z.number().int().positive().describe("Pass the exact version observed in the previous read."),
       title: z.string().optional(),
       bodyMd: z.string().optional(),
       status: z.enum(TENSION_STATUS).optional(),
@@ -3027,6 +3074,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async (params: {
       tensionId: string;
+      expectedVersion: number;
       title?: string;
       bodyMd?: string;
       status?: typeof TENSION_STATUS[number];
@@ -3037,18 +3085,31 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       resolvedVia?: string;
     }) => {
       requireScope(sessionCtx, "tensions:write");
-      const updated = await updateTension(actor, {
-        workspaceId,
-        tensionId: params.tensionId,
-        title: params.title,
-        bodyMd: params.bodyMd,
-        status: params.status,
-        circleId: params.circleId,
-        assigneeMemberId: params.assigneeMemberId,
-        raisedByMemberId: params.raisedByMemberId,
-        priority: coerceWorkItemPriorityInput(params.priority),
-        resolvedVia: params.resolvedVia,
-      });
+      requireWorkItemVersionReadScope("TENSION");
+      let updated;
+      try {
+        updated = await updateTension(actor, {
+          workspaceId,
+          tensionId: params.tensionId,
+          expectedVersion: params.expectedVersion,
+          title: params.title,
+          bodyMd: params.bodyMd,
+          status: params.status,
+          circleId: params.circleId,
+          assigneeMemberId: params.assigneeMemberId,
+          raisedByMemberId: params.raisedByMemberId,
+          priority: coerceWorkItemPriorityInput(params.priority),
+          resolvedVia: params.resolvedVia,
+        });
+      } catch (error) {
+        if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+          return structuredJsonResult({
+            status: "VERSION_CONFLICT",
+            instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
+          });
+        }
+        throw error;
+      }
       const tensionForResponse = await loadTensionWorkItemResponse(workspaceId, updated.id, updated);
       const item = normalizeTensionWorkItem(tensionForResponse);
       return jsonResult({
@@ -3346,9 +3407,10 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
 
   tool(
     "update_goal",
-    "Update a workspace goal's status, progress, dates, ownership, or content fields. Pass only the fields you want to change.",
+    "Update a workspace goal's status, progress, dates, ownership, or content fields. You must read the goal first and pass its observed version. Pass only the fields you want to change.",
     {
       goalId: z.string(),
+      expectedVersion: z.number().int().positive().describe("Pass the exact version observed in the previous read."),
       title: z.string().optional(),
       descriptionMd: z.string().optional(),
       cadence: z.enum(GOAL_CADENCE).optional(),
@@ -3363,6 +3425,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     },
     async (params: {
       goalId: string;
+      expectedVersion: number;
       title?: string;
       descriptionMd?: string;
       cadence?: typeof GOAL_CADENCE[number];
@@ -3376,21 +3439,34 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       ownerMemberId?: string | null;
     }) => {
       requireScope(sessionCtx, "goals:write");
-      const updated = await updateGoal(actor, {
-        workspaceId,
-        goalId: params.goalId,
-        title: params.title,
-        descriptionMd: params.descriptionMd,
-        cadence: params.cadence,
-        level: params.level,
-        status: params.status,
-        progressPercent: params.progressPercent,
-        targetDate: params.targetDate === undefined ? undefined : params.targetDate ? new Date(params.targetDate) : null,
-        startDate: params.startDate === undefined ? undefined : params.startDate ? new Date(params.startDate) : null,
-        parentGoalId: params.parentGoalId,
-        circleId: params.circleId,
-        ownerMemberId: params.ownerMemberId,
-      });
+      requireWorkItemVersionReadScope("GOAL");
+      let updated;
+      try {
+        updated = await updateGoal(actor, {
+          workspaceId,
+          goalId: params.goalId,
+          expectedVersion: params.expectedVersion,
+          title: params.title,
+          descriptionMd: params.descriptionMd,
+          cadence: params.cadence,
+          level: params.level,
+          status: params.status,
+          progressPercent: params.progressPercent,
+          targetDate: params.targetDate === undefined ? undefined : params.targetDate ? new Date(params.targetDate) : null,
+          startDate: params.startDate === undefined ? undefined : params.startDate ? new Date(params.startDate) : null,
+          parentGoalId: params.parentGoalId,
+          circleId: params.circleId,
+          ownerMemberId: params.ownerMemberId,
+        });
+      } catch (error) {
+        if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+          return structuredJsonResult({
+            status: "VERSION_CONFLICT",
+            instruction: "The record was modified by another request. Read the latest version and apply your changes again.",
+          });
+        }
+        throw error;
+      }
       return jsonResult({
         id: updated.id,
         status: updated.status,

@@ -1,16 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { listGoalsMock } = vi.hoisted(() => ({
+const { listGoalsMock, findManyTensionsMock, findManyActionsMock } = vi.hoisted(() => ({
   listGoalsMock: vi.fn(),
+  findManyTensionsMock: vi.fn(),
+  findManyActionsMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
-  prisma: {},
+  prisma: {
+    tension: { findMany: findManyTensionsMock },
+    action: { findMany: findManyActionsMock },
+  },
 }));
 
 vi.mock("@corgtex/domain", () => ({
   listGoals: listGoalsMock,
+  requireWorkspaceMembership: vi.fn().mockResolvedValue({ role: "MEMBER" }),
+  privacyFilter: (a: any, m?: any) =>
+    m?.role === "ADMIN"
+      ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT" }] }
+      : a?.kind === "user"
+      ? { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: a.user.id }] }
+      : { isPrivate: false },
 }));
 
 const actor: AppActor = {
@@ -77,5 +89,43 @@ describe("workspace agent tools", () => {
         ],
       }),
     ]);
+  });
+});
+
+describe("agent query tools version requirements", () => {
+  it("documents the version handoff and exposes exact-ID filters", async () => {
+    const { queryTensionsTool, queryActionsTool } = await import("./workspace");
+    expect(queryTensionsTool.function.description).toContain("update_tension");
+    expect(queryActionsTool.function.description).toContain("update_action");
+    expect((queryTensionsTool.function.parameters.properties as any).tensionId).toBeDefined();
+    expect((queryActionsTool.function.parameters.properties as any).actionId).toBeDefined();
+  });
+
+  it("returns versions from exact-ID reads without broadening anonymous privacy", async () => {
+    const { queryTensions, queryActions } = await import("./workspace");
+    findManyTensionsMock.mockResolvedValueOnce([{ id: "t-99", version: 4, title: "Tension", status: "OPEN", priority: "HIGH", author: { displayName: "Author" } }]);
+    findManyActionsMock.mockResolvedValueOnce([{ id: "a-99", version: 5, title: "Action", status: "OPEN", author: { displayName: "Author" } }]);
+    expect((await queryTensions("ws-1", undefined, undefined, "t-99"))[0]).toMatchObject({ id: "t-99", version: 4 });
+    expect((await queryActions("ws-1", undefined, undefined, "a-99"))[0]).toMatchObject({ id: "a-99", version: 5 });
+    expect(findManyTensionsMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "t-99", isPrivate: false }) }));
+    expect(findManyActionsMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "a-99", isPrivate: false }) }));
+  });
+
+  it("uses canonical member and admin privacy filters for exact-ID reads", async () => {
+    const { queryTensions, queryActions } = await import("./workspace");
+    const { requireWorkspaceMembership } = await import("@corgtex/domain");
+    const member = { kind: "user", user: { id: "u-1", email: "test@example.com", displayName: "Test", globalRole: "USER" } } as AppActor;
+    const memberPrivacy = { OR: [{ isPrivate: false }, { isPrivate: true, status: "DRAFT", authorUserId: "u-1" }] };
+    findManyTensionsMock.mockResolvedValue([]);
+    findManyActionsMock.mockResolvedValue([]);
+    await queryTensions("ws-1", undefined, undefined, "t-99", member);
+    await queryActions("ws-1", undefined, undefined, "a-99", member);
+    expect(findManyTensionsMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "t-99", ...memberPrivacy }) }));
+    expect(findManyActionsMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "a-99", ...memberPrivacy }) }));
+
+    const admin = { id: "m-1", workspaceId: "ws-1", userId: "u-1", role: "ADMIN", isActive: true } as const;
+    vi.mocked(requireWorkspaceMembership).mockResolvedValue(admin);
+    await queryTensions("ws-1", undefined, undefined, "t-99", member);
+    expect(findManyTensionsMock).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "t-99", OR: expect.arrayContaining([{ isPrivate: true, status: "DRAFT" }]) }) }));
   });
 });

@@ -3359,4 +3359,47 @@ describe("createCorgtexMcpServer", () => {
       openWorldHint: true,
     });
   });
+
+  describe("MCP update tools version requirements", () => {
+    const updateCases = [
+      { name: "update_proposal", args: { proposalId: "p-1", expectedVersion: 2 }, domainFn: updateProposalMock, scope: "proposals:read" },
+      { name: "update_action", args: { actionId: "a-1", expectedVersion: 2 }, domainFn: updateActionMock, scope: "actions:read" },
+      { name: "update_tension", args: { tensionId: "t-1", expectedVersion: 2 }, domainFn: updateTensionMock, scope: "tensions:read" },
+      { name: "update_goal", args: { goalId: "g-1", expectedVersion: 2 }, domainFn: updateGoalMock, scope: "goals:read" },
+    ];
+
+    it.each(updateCases)("[$name] enforces observed versions and safe conflicts without retry", async (testCase) => {
+      const { createCorgtexMcpServer } = await import("./server");
+      const { requireScope } = await import("./auth");
+      const { AppError } = await import("@corgtex/domain");
+      const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "u-1" } }, workspaceId: "ws-1" } as any);
+      const tool = (server as any)._registeredTools[testCase.name];
+      expect(tool.description.toLowerCase()).toContain("read");
+      for (const expectedVersion of [undefined, 0, -1, 1.5]) {
+        expect(tool.inputSchema.safeParse({ ...testCase.args, expectedVersion }).success).toBe(false);
+      }
+      testCase.domainFn.mockClear().mockResolvedValueOnce({ id: "id-1", version: 3 });
+      recordAuditMock.mockClear();
+      const success = await tool.handler(testCase.args);
+      expect(testCase.domainFn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(testCase.args));
+      expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.anything(), testCase.scope);
+      expect(JSON.parse(success.content[0].text)).toMatchObject({ version: 3 });
+      testCase.domainFn.mockRejectedValueOnce(new AppError(409, "VERSION_CONFLICT", "Conflict"));
+      recordAuditMock.mockClear();
+      expect(JSON.parse((await tool.handler(testCase.args)).content[0].text)).toEqual({
+        status: "VERSION_CONFLICT", instruction: expect.stringContaining("Read the latest version"),
+      });
+      expect(recordAuditMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({
+        meta: expect.objectContaining({ error: "VERSION_CONFLICT" }),
+      }));
+      expect(testCase.domainFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("leaves complete_action unchanged without expectedVersion requirements", async () => {
+      const { createCorgtexMcpServer } = await import("./server");
+      const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "u-1" } }, workspaceId: "ws-1" } as any);
+      const completeTool = (server as any)._registeredTools["complete_action"];
+      expect(completeTool.inputSchema.shape?.expectedVersion).toBeUndefined();
+    });
+  });
 });

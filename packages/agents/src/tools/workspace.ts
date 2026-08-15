@@ -1,7 +1,7 @@
 import { prisma } from "@corgtex/shared";
 import type { ModelTool } from "@corgtex/models";
 import type { AppActor } from "@corgtex/shared";
-import { listGoals } from "@corgtex/domain";
+import { listGoals, privacyFilter, requireWorkspaceMembership } from "@corgtex/domain";
 import type { TensionStatus, ActionStatus, ProposalStatus, GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const getWorkspaceOverviewTool: ModelTool = {
@@ -20,10 +20,11 @@ export const queryTensionsTool: ModelTool = {
   type: "function",
   function: {
     name: "query_tensions",
-    description: "List tensions in the workspace. Returns up to 20 tensions with their title, status, assignee, and a body preview.",
+    description: "List tensions in the workspace. Returns up to 20 tensions with their title, status, assignee, body preview, and version. The version must be passed to update_tension to prevent conflicting edits.",
     parameters: {
       type: "object",
       properties: {
+        tensionId: { type: "string", description: "Filter by exact tension ID to read its version" },
         status: { type: "string", description: "Filter by status: DRAFT, OPEN, RESOLVED" },
         assigneeId: { type: "string", description: "Filter by assigned member ID" },
       },
@@ -35,10 +36,11 @@ export const queryActionsTool: ModelTool = {
   type: "function",
   function: {
     name: "query_actions",
-    description: "List action items in the workspace. Returns up to 20 actions with title, status, assignee, and due date.",
+    description: "List action items in the workspace. Returns up to 20 actions with title, status, assignee, due date, and version. The version must be passed to update_action to prevent conflicting edits.",
     parameters: {
       type: "object",
       properties: {
+        actionId: { type: "string", description: "Filter by exact action ID to read its version" },
         status: { type: "string", description: "Filter by status: DRAFT, OPEN, IN_PROGRESS, COMPLETED" },
         assigneeId: { type: "string", description: "Filter by assigned member ID" },
       },
@@ -101,8 +103,17 @@ export async function getWorkspaceOverview(workspaceId: string) {
   return { memberCount, circleCount, openTensions, openActions, activeProposals, activeGoals };
 }
 
-export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string) {
+export async function queryTensions(workspaceId: string, status?: TensionStatus, assigneeId?: string, tensionId?: string, actor?: AppActor) {
   const where: any = { workspaceId };
+  if (tensionId) {
+    where.id = tensionId;
+    if (actor) {
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      Object.assign(where, privacyFilter(actor, membership));
+    } else {
+      where.isPrivate = false;
+    }
+  }
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
@@ -119,6 +130,7 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
 
   return tensions.map(t => ({
     id: t.id,
+    version: t.version,
     title: t.title,
     status: t.status,
     priority: t.priority,
@@ -130,8 +142,17 @@ export async function queryTensions(workspaceId: string, status?: TensionStatus,
   }));
 }
 
-export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string) {
+export async function queryActions(workspaceId: string, status?: ActionStatus, assigneeId?: string, actionId?: string, actor?: AppActor) {
   const where: any = { workspaceId };
+  if (actionId) {
+    where.id = actionId;
+    if (actor) {
+      const membership = await requireWorkspaceMembership({ actor, workspaceId });
+      Object.assign(where, privacyFilter(actor, membership));
+    } else {
+      where.isPrivate = false;
+    }
+  }
   if (status) where.status = status;
   if (assigneeId) where.assigneeMemberId = assigneeId;
 
@@ -144,6 +165,7 @@ export async function queryActions(workspaceId: string, status?: ActionStatus, a
 
   return actions.map(a => ({
     id: a.id,
+    version: a.version,
     title: a.title,
     status: a.status,
     author: a.author.displayName,
