@@ -34,7 +34,9 @@ const UINT8_ARRAY = Uint8Array;
 const UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
 const UINT8_ARRAY_SET = Uint8Array.prototype.set;
 const TYPED_ARRAY_PROTOTYPE = GET_PROTOTYPE(UINT8_ARRAY_PROTOTYPE);
+const TYPED_ARRAY_TAG = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
 const TYPED_ARRAY_BYTE_LENGTH = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
+const TYPED_ARRAY_BYTE_OFFSET = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, "byteOffset")!.get!;
 const TYPED_ARRAY_BUFFER = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, "buffer")!.get!;
 const ARRAY_BUFFER_PROTOTYPE = ArrayBuffer.prototype;
 const ARRAY_BUFFER_BYTE_LENGTH = GET_DESCRIPTOR(ARRAY_BUFFER_PROTOTYPE, "byteLength")!.get!;
@@ -128,11 +130,11 @@ function copyDate(value: unknown): string {
 function copyRedactionKey(value: unknown): readonly number[] {
   const observed = observeTenantPurgeValue(() => {
     const buffer = APPLY(TYPED_ARRAY_BUFFER, value, EMPTY);
-    return record({ prototype: GET_PROTOTYPE(value as object), length: APPLY(TYPED_ARRAY_BYTE_LENGTH, value, EMPTY), buffer,
+    return record({ prototype: GET_PROTOTYPE(value as object), tag: APPLY(TYPED_ARRAY_TAG, value, EMPTY), length: APPLY(TYPED_ARRAY_BYTE_LENGTH, value, EMPTY), byteOffset: APPLY(TYPED_ARRAY_BYTE_OFFSET, value, EMPTY), buffer,
       bufferPrototype: GET_PROTOTYPE(buffer as object), bufferLength: APPLY(ARRAY_BUFFER_BYTE_LENGTH, buffer, EMPTY), resizable: APPLY(ARRAY_BUFFER_RESIZABLE, buffer, EMPTY) });
   });
   const length = observed.length as number;
-  if (observed.prototype !== UINT8_ARRAY_PROTOTYPE || !IS_SAFE_INTEGER(length) || length < 32 || length > 64 || observed.bufferPrototype !== ARRAY_BUFFER_PROTOTYPE || observed.resizable !== false || !IS_SAFE_INTEGER(observed.bufferLength) || (observed.bufferLength as number) < length) return invalidTenantPurgeValue();
+  if (observed.prototype !== UINT8_ARRAY_PROTOTYPE || observed.tag !== "Uint8Array" || !IS_SAFE_INTEGER(length) || length < 32 || length > 64 || observed.byteOffset !== 0 || observed.bufferPrototype !== ARRAY_BUFFER_PROTOTYPE || observed.resizable !== false || observed.bufferLength !== length) return invalidTenantPurgeValue();
   const keys = observeTenantPurgeValue(() => OWN_KEYS(value as object));
   if (keys.length !== length) return invalidTenantPurgeValue();
   for (let index = 0; index < length; index += 1) if (keys[index] !== STRING(index) || valueOf(observeTenantPurgeValue(() => GET_DESCRIPTOR(value as object, keys[index]))) === ABSENT) return invalidTenantPurgeValue();
