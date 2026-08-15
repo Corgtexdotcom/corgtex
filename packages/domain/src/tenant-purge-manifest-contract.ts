@@ -159,3 +159,109 @@ export function normalizeTenantPurgeManifestValues(
   }
   return materialize(copied, captureTenantPurgeOwnedSchema(schema)) as TenantPurgeNormalizedManifestValues;
 }
+
+export type TenantPurgePreparedManifestValues = Readonly<{
+  schemaVersion: 1; target: TenantPurgeTarget; capabilitySha: string;
+  redactionKeyBytes: readonly number[]; policies: TenantPurgePolicies;
+  topology: TenantPurgeTopology; blockers: readonly TenantPurgeBlockerCode[];
+}>;
+
+export function prepareTenantPurgeManifestValues(
+  privateAuthority: unknown, targetMode: unknown, ownedValues: unknown,
+): TenantPurgePreparedManifestValues {
+  const snapshot = normalizeTenantPurgeManifestValues(privateAuthority, targetMode, ownedValues);
+  const found = CONSTRUCT(SET, NO_ARGUMENTS) as Set<TenantPurgeBlockerCode>;
+  for (let index = 0; index < snapshot.suppliedBlockers.length; index += 1)
+    APPLY(SET_ADD, found, [snapshot.suppliedBlockers[index]]);
+  const { account, deployment, trial, workspace } = snapshot.topology;
+  let hasTargetWorkspaceDeployment = false;
+  let hasOtherWorkspaceDeployment = false;
+  if (workspace !== null) {
+    for (let index = 0; index < workspace.managedDeploymentIds.length; index += 1) {
+      if (workspace.managedDeploymentIds[index] === snapshot.target.deploymentId)
+        hasTargetWorkspaceDeployment = true;
+      else hasOtherWorkspaceDeployment = true;
+    }
+  }
+  if (workspace === null || workspace.id !== snapshot.target.workspaceId ||
+    deployment === null || deployment.id !== snapshot.target.deploymentId ||
+    deployment.managedWorkspaceId !== snapshot.target.workspaceId || !hasTargetWorkspaceDeployment
+  )
+    APPLY(SET_ADD, found, ["TARGET_TUPLE_MISMATCH"]);
+  if (hasOtherWorkspaceDeployment) {
+    APPLY(SET_ADD, found, ["LINKED_DEPLOYMENT"]);
+    APPLY(SET_ADD, found, ["SIBLING_DEPLOYMENT"]);
+  }
+  if ((deployment !== null && deployment.primaryAccountIds.length > 0) ||
+    (account !== null && account.primaryDeploymentId !== null))
+    APPLY(SET_ADD, found, ["PRIMARY_ROUTING"]);
+  if (deployment !== null && deployment.sharedResourceAmbiguous)
+    APPLY(SET_ADD, found, ["SHARED_RESOURCE_AMBIGUITY"]);
+  if (deployment !== null && deployment.hasManagedReleaseLease)
+    APPLY(SET_ADD, found, ["MANAGED_RELEASE_LEASE"]);
+  if (deployment !== null && deployment.hasProviderCutover)
+    APPLY(SET_ADD, found, ["PROVIDER_CUTOVER"]);
+  if (deployment !== null && deployment.hasClientMigration)
+    APPLY(SET_ADD, found, ["CLIENT_MIGRATION"]);
+  let hasTargetTrial = false;
+  let hasOtherTrial = false;
+  if (workspace !== null) {
+    for (let index = 0; index < workspace.trialIds.length; index += 1) {
+      if (snapshot.target.mode === "SELF_SERVE_TRIAL_WORKSPACE" &&
+        workspace.trialIds[index] === snapshot.target.trialId) {
+        hasTargetTrial = true;
+      } else hasOtherTrial = true;
+    }
+  }
+  if (snapshot.target.mode === "ACCOUNT_WORKSPACE") {
+    let hasTargetAccountDeployment = false;
+    let hasOtherAccountDeployment = false;
+    if (account !== null) {
+      for (let index = 0; index < account.deploymentIds.length; index += 1) {
+        if (account.deploymentIds[index] === snapshot.target.deploymentId)
+          hasTargetAccountDeployment = true;
+        else hasOtherAccountDeployment = true;
+      }
+    }
+    if (account === null || account.id !== snapshot.target.accountId ||
+      deployment === null || deployment.accountId !== snapshot.target.accountId ||
+      !hasTargetAccountDeployment
+    )
+      APPLY(SET_ADD, found, ["TARGET_TUPLE_MISMATCH"]);
+    if (hasOtherAccountDeployment ||
+      (account !== null && account.primaryDeploymentId !== null &&
+        account.primaryDeploymentId !== snapshot.target.deploymentId)
+    ) {
+      APPLY(SET_ADD, found, ["LINKED_DEPLOYMENT"]);
+      APPLY(SET_ADD, found, ["SIBLING_DEPLOYMENT"]);
+    }
+    if (hasOtherTrial || trial !== null) APPLY(SET_ADD, found, ["LINKED_TRIAL"]);
+  } else {
+    if (trial === null || trial.id !== snapshot.target.trialId ||
+      trial.workspaceId !== snapshot.target.workspaceId || !hasTargetTrial
+    )
+      APPLY(SET_ADD, found, ["TARGET_TUPLE_MISMATCH"]);
+    if (trial !== null && !trial.expired) APPLY(SET_ADD, found, ["TRIAL_NOT_EXPIRED"]);
+    if (hasOtherTrial) APPLY(SET_ADD, found, ["LINKED_TRIAL"]);
+    if (account !== null || (deployment !== null && deployment.accountId !== null) ||
+      (deployment !== null && deployment.primaryAccountIds.length > 0)
+    )
+      APPLY(SET_ADD, found, ["LINKED_ACCOUNT"]);
+  }
+  const blockers = CONSTRUCT(ARRAY, NO_ARGUMENTS) as TenantPurgeBlockerCode[];
+  SET_PROTOTYPE(blockers, null);
+  for (let index = 0; index < TENANT_PURGE_BLOCKER_CODES.length; index += 1) {
+    const code = TENANT_PURGE_BLOCKER_CODES[index];
+    if (APPLY(SET_HAS, found, [code])) DEFINE(blockers, blockers.length, descriptor(code));
+  }
+  FREEZE(blockers);
+  const result = CREATE(null) as Record<string, unknown>;
+  DEFINE(result, "schemaVersion", descriptor(1));
+  DEFINE(result, "target", descriptor(snapshot.target));
+  DEFINE(result, "capabilitySha", descriptor(snapshot.capabilitySha));
+  DEFINE(result, "redactionKeyBytes", descriptor(snapshot.redactionKeyBytes));
+  DEFINE(result, "policies", descriptor(snapshot.policies));
+  DEFINE(result, "topology", descriptor(snapshot.topology));
+  DEFINE(result, "blockers", descriptor(blockers));
+  return FREEZE(result) as TenantPurgePreparedManifestValues;
+}
