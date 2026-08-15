@@ -159,3 +159,119 @@ export function normalizeTenantPurgeManifestValues(
   }
   return materialize(copied, captureTenantPurgeOwnedSchema(schema)) as TenantPurgeNormalizedManifestValues;
 }
+
+export type TenantPurgePreparedManifestValues = Readonly<{
+  schemaVersion: 1;
+  target: TenantPurgeTarget;
+  capabilitySha: string;
+  redactionKeyBytes: readonly number[];
+  policies: TenantPurgePolicies;
+  topology: TenantPurgeTopology;
+  blockers: readonly TenantPurgeBlockerCode[];
+}>;
+
+export function prepareTenantPurgeManifestValues(
+  privateAuthority: unknown,
+  targetMode: unknown,
+  ownedValues: unknown,
+): TenantPurgePreparedManifestValues {
+  const snapshot = normalizeTenantPurgeManifestValues(privateAuthority, targetMode, ownedValues);
+  const found = CONSTRUCT(SET, NO_ARGUMENTS) as Set<TenantPurgeBlockerCode>;
+  for (let index = 0; index < snapshot.suppliedBlockers.length; index += 1) {
+    APPLY(SET_ADD, found, [snapshot.suppliedBlockers[index]]);
+  }
+  const add = (code: TenantPurgeBlockerCode): void => {
+    APPLY(SET_ADD, found, [code]);
+  };
+  const { target, topology } = snapshot;
+  const { workspace, deployment, account, trial } = topology;
+  let workspaceHasTargetDeployment = false;
+  let workspaceHasOtherDeployment = false;
+  if (workspace !== null) {
+    for (let index = 0; index < workspace.managedDeploymentIds.length; index += 1) {
+      if (workspace.managedDeploymentIds[index] === target.deploymentId) workspaceHasTargetDeployment = true;
+      else workspaceHasOtherDeployment = true;
+    }
+  }
+  if (
+    workspace === null || workspace.id !== target.workspaceId ||
+    deployment === null || deployment.id !== target.deploymentId ||
+    deployment.managedWorkspaceId !== target.workspaceId || !workspaceHasTargetDeployment
+  ) add("TARGET_TUPLE_MISMATCH");
+  if (workspaceHasOtherDeployment) {
+    add("LINKED_DEPLOYMENT");
+    add("SIBLING_DEPLOYMENT");
+  }
+  if (
+    (deployment !== null && deployment.primaryAccountIds.length > 0) ||
+    (account !== null && account.primaryDeploymentId !== null)
+  ) add("PRIMARY_ROUTING");
+  if (deployment !== null) {
+    if (deployment.sharedResourceAmbiguous) add("SHARED_RESOURCE_AMBIGUITY");
+    if (deployment.hasManagedReleaseLease) add("MANAGED_RELEASE_LEASE");
+    if (deployment.hasProviderCutover) add("PROVIDER_CUTOVER");
+    if (deployment.hasClientMigration) add("CLIENT_MIGRATION");
+  }
+  if (target.mode === "ACCOUNT_WORKSPACE") {
+    let accountHasTargetDeployment = false;
+    let accountHasOtherDeployment = false;
+    if (account !== null) {
+      for (let index = 0; index < account.deploymentIds.length; index += 1) {
+        if (account.deploymentIds[index] === target.deploymentId) accountHasTargetDeployment = true;
+        else accountHasOtherDeployment = true;
+      }
+    }
+    if (
+      account === null || account.id !== target.accountId ||
+      deployment === null || deployment.accountId !== target.accountId ||
+      !accountHasTargetDeployment
+    ) add("TARGET_TUPLE_MISMATCH");
+    if (
+      accountHasOtherDeployment ||
+      (account !== null && account.primaryDeploymentId !== null && account.primaryDeploymentId !== target.deploymentId)
+    ) {
+      add("LINKED_DEPLOYMENT");
+      add("SIBLING_DEPLOYMENT");
+    }
+    if ((workspace !== null && workspace.trialIds.length > 0) || trial !== null) add("LINKED_TRIAL");
+  } else {
+    let workspaceHasTargetTrial = false;
+    let workspaceHasOtherTrial = false;
+    if (workspace !== null) {
+      for (let index = 0; index < workspace.trialIds.length; index += 1) {
+        if (workspace.trialIds[index] === target.trialId) workspaceHasTargetTrial = true;
+        else workspaceHasOtherTrial = true;
+      }
+    }
+    if (
+      trial === null || trial.id !== target.trialId || trial.workspaceId !== target.workspaceId ||
+      workspace === null || !workspaceHasTargetTrial
+    ) add("TARGET_TUPLE_MISMATCH");
+    if (trial !== null && !trial.expired) add("TRIAL_NOT_EXPIRED");
+    if (workspaceHasOtherTrial) add("LINKED_TRIAL");
+    if (
+      account !== null ||
+      (deployment !== null && (deployment.accountId !== null || deployment.primaryAccountIds.length > 0))
+    ) add("LINKED_ACCOUNT");
+  }
+  const blockers = CONSTRUCT(ARRAY, [0]) as TenantPurgeBlockerCode[];
+  SET_PROTOTYPE(blockers, null);
+  let blockerIndex = 0;
+  for (let index = 0; index < TENANT_PURGE_BLOCKER_CODES.length; index += 1) {
+    const code = TENANT_PURGE_BLOCKER_CODES[index];
+    if (APPLY(SET_HAS, found, [code])) {
+      DEFINE(blockers, blockerIndex, descriptor(code));
+      blockerIndex += 1;
+    }
+  }
+  FREEZE(blockers);
+  const prepared = CREATE(null) as Record<string, unknown>;
+  DEFINE(prepared, "schemaVersion", descriptor(1));
+  DEFINE(prepared, "target", descriptor(snapshot.target));
+  DEFINE(prepared, "capabilitySha", descriptor(snapshot.capabilitySha));
+  DEFINE(prepared, "redactionKeyBytes", descriptor(snapshot.redactionKeyBytes));
+  DEFINE(prepared, "policies", descriptor(snapshot.policies));
+  DEFINE(prepared, "topology", descriptor(snapshot.topology));
+  DEFINE(prepared, "blockers", descriptor(blockers));
+  return FREEZE(prepared) as TenantPurgePreparedManifestValues;
+}
