@@ -12,7 +12,7 @@ export function smokeConfig(source, argv = []) {
 }
 export function guardOneProviderRequest(fetchImpl, onRequest = () => {}) {
   let count = 0; const guarded = async (input, init) => {
-    const url = input instanceof Request ? input.url : String(input); if (url.includes("/chat/completions")) { onRequest(); count += 1; assert(count === 1, "Provider request limit exceeded."); }
+    const url = input instanceof Request ? input.url : String(input); if (url.includes("/chat/completions")) { assert(count === 0, "Provider request limit exceeded."); onRequest(); count += 1; }
     return fetchImpl(input, init); }; return { guarded, count: () => count };
 }
 export async function runContractSmoke({
