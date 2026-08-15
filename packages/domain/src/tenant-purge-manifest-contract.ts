@@ -80,7 +80,7 @@ const OWN_KEYS = Reflect.ownKeys;
 const APPLY = Reflect.apply;
 const ARRAY_IS_ARRAY = Array.isArray;
 const ARRAY_INCLUDES = Array.prototype.includes;
-const REGEXP_TEST = RegExp.prototype.test;
+const REGEXP_EXEC = RegExp.prototype.exec;
 const IS_SAFE_INTEGER = Number.isSafeInteger;
 const IS_INTEGER = Number.isInteger;
 const IS_FINITE = Number.isFinite;
@@ -106,7 +106,7 @@ function malformed(): never { return fail(400, "TENANT_PURGE_CONTRACT_INVALID", 
 function observe<T>(operation: () => T): T { try { return operation(); } catch { return malformed(); } }
 function keysMatch(keys: readonly PropertyKey[], shape: readonly string[]) { if (keys.length !== shape.length) return false; for (let index = 0; index < keys.length; index += 1) if (typeof keys[index] !== "string" || !APPLY(ARRAY_INCLUDES, shape, [keys[index]])) return false; return true; }
 function shapeMatches(keys: readonly PropertyKey[], shapes: readonly (readonly string[])[]) { for (let index = 0; index < shapes.length; index += 1) if (keysMatch(keys, shapes[index]!)) return true; return false; }
-function arrayKeysMatch(keys: readonly PropertyKey[], length: number) { if (keys.length !== length + 1) return false; for (let index = 0; index < keys.length; index += 1) { const key = keys[index]; if (typeof key !== "string" || (key !== "length" && (!APPLY(REGEXP_TEST, INDEX, [key]) || TO_NUMBER(key) >= length))) return false; } return true; }
+function arrayKeysMatch(keys: readonly PropertyKey[], length: number) { if (keys.length !== length + 1) return false; for (let index = 0; index < keys.length; index += 1) { const key = keys[index]; if (typeof key !== "string" || (key !== "length" && (!APPLY(REGEXP_EXEC, INDEX, [key]) || TO_NUMBER(key) >= length))) return false; } return true; }
 function append<T>(values: T[], value: T) { DEFINE_PROPERTY(values, TO_STRING(values.length), { value, enumerable: true, configurable: true, writable: true }); }
 function hasDuplicate(values: readonly unknown[]) { const seen = new SET<unknown>(); for (let index = 0; index < values.length; index += 1) { if (APPLY(SET_HAS, seen, [values[index]])) return true; APPLY(SET_ADD, seen, [values[index]]); } return false; }
 
@@ -153,8 +153,8 @@ function inputSnapshot(value: unknown) {
   return snapshot;
 }
 
-function uuid(value: unknown, label: string): string { if (typeof value !== "string" || !APPLY(REGEXP_TEST, UUID, [value])) invalid(label); return value; }
-function sha(value: unknown): string { if (typeof value !== "string" || !APPLY(REGEXP_TEST, SHA, [value])) invalid("capability SHA"); return value; }
+function uuid(value: unknown, label: string): string { if (typeof value !== "string" || !APPLY(REGEXP_EXEC, UUID, [value])) invalid(label); return value; }
+function sha(value: unknown): string { if (typeof value !== "string" || !APPLY(REGEXP_EXEC, SHA, [value])) invalid("capability SHA"); return value; }
 function boolean(value: unknown, label: string): boolean { if (typeof value !== "boolean") invalid(label); return value; }
 function integer(value: unknown, label: string, maximum: number, minimum = 1): number { if (typeof value !== "number" || !IS_INTEGER(value) || value < minimum || value > maximum) invalid(label); return value; }
 function nullableUuid(value: unknown, label: string) { return value === null ? null : uuid(value, label); }
