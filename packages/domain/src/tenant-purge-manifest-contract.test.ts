@@ -65,6 +65,15 @@ describe("tenant purge manifest normalization", () => {
     const repeated = [expectError(() => normalizeTenantPurgeManifestValues(input({ capabilitySha: "a" }))), expectError(() => normalizeTenantPurgeManifestValues(input({ capabilitySha: "a" })))]; expect(repeated[0]).not.toBe(repeated[1]);
   });
 
+  it("uses captured security intrinsics after caller traps mutate ambient methods", () => {
+    const originalFreeze = Object.freeze; let denial: unknown;
+    try { const denied = new Proxy(input({ privateAuthority: false }), { getOwnPropertyDescriptor(value, key) { if (key === "privateAuthority") Object.freeze = (() => undefined) as unknown as typeof Object.freeze; return Reflect.getOwnPropertyDescriptor(value, key); } }); try { normalizeTenantPurgeManifestValues(denied); } catch (error) { denial = error; } } finally { Object.freeze = originalFreeze; }
+    expect(denial).toMatchObject({ status: 403, code: "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED" }); expect(Object.isFrozen(denial)).toBe(true);
+    const originalTest = RegExp.prototype.test; let validation: unknown;
+    try { const hostile = new Proxy(input({ capabilitySha: "bad" }), { getOwnPropertyDescriptor(value, key) { if (key === "target") RegExp.prototype.test = () => true; return Reflect.getOwnPropertyDescriptor(value, key); } }); try { normalizeTenantPurgeManifestValues(hostile); } catch (error) { validation = error; } } finally { RegExp.prototype.test = originalTest; }
+    expect(validation).toMatchObject({ status: 400, code: "TENANT_PURGE_CONTRACT_INVALID" }); expect(Object.isFrozen(validation)).toBe(true);
+  });
+
   it("uses exact data descriptors and one target snapshot without invoking getters", () => {
     let descriptorReads = 0; const target = new Proxy({ ...accountTarget }, { get() { throw new Error("property get"); }, getOwnPropertyDescriptor(value, key) { descriptorReads += 1; return Reflect.getOwnPropertyDescriptor(value, key); } });
     expect(normalizeTenantPurgeManifestValues(input({ target })).target).toEqual(accountTarget); expect(descriptorReads).toBe(4);

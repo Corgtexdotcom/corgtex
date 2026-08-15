@@ -63,27 +63,50 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA = /^[0-9a-f]{40}$/;
 const INDEX = /^(0|[1-9]\d*)$/;
 const MAX_ARRAY_LENGTH = 100_000;
+const TO_OBJECT = Object;
+const TO_NUMBER = Number;
+const TO_STRING = String;
+const OBJECT_PROTOTYPE = Object.prototype;
+const ARRAY_PROTOTYPE = Array.prototype;
+const DATE_PROTOTYPE = Date.prototype;
+const OBJECT_CREATE = Object.create;
+const OBJECT_FREEZE = Object.freeze;
+const OBJECT_IS_FROZEN = Object.isFrozen;
+const OBJECT_VALUES = Object.values;
 const GET_DESCRIPTOR = Object.getOwnPropertyDescriptor;
 const GET_PROTOTYPE = Object.getPrototypeOf;
 const OWN_KEYS = Reflect.ownKeys;
+const APPLY = Reflect.apply;
 const ARRAY_IS_ARRAY = Array.isArray;
+const ARRAY_INCLUDES = Array.prototype.includes;
+const REGEXP_TEST = RegExp.prototype.test;
+const IS_SAFE_INTEGER = Number.isSafeInteger;
+const IS_INTEGER = Number.isInteger;
+const IS_FINITE = Number.isFinite;
+const UINT8_ARRAY = Uint8Array;
+const DATE = Date;
 const TYPED_ARRAY_PROTOTYPE = GET_PROTOTYPE(Uint8Array.prototype);
 const TYPED_ARRAY_KIND = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
 const TYPED_ARRAY_BYTE_LENGTH = GET_DESCRIPTOR(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
 const UINT8_SET = Uint8Array.prototype.set;
 const DATE_TIME = Date.prototype.getTime;
+const DATE_TO_ISO = Date.prototype.toISOString;
 
-function fail(status: number, code: string, message: string): never { throw Object.freeze(new AppError(status, code, message)); }
+function fail(status: number, code: string, message: string): never { throw OBJECT_FREEZE(new AppError(status, code, message)); }
 function invalid(label: string): never { return fail(400, "TENANT_PURGE_CONTRACT_INVALID", `Invalid tenant purge ${label}.`); }
 function malformed(): never { return fail(400, "TENANT_PURGE_CONTRACT_INVALID", "Invalid tenant purge contract input."); }
 function observe<T>(operation: () => T): T { try { return operation(); } catch { return malformed(); } }
-function keysMatch(keys: readonly PropertyKey[], shape: readonly string[]) { return keys.length === shape.length && keys.every((key) => typeof key === "string" && shape.includes(key)); }
+function keysMatch(keys: readonly PropertyKey[], shape: readonly string[]) { if (keys.length !== shape.length) return false; for (let index = 0; index < keys.length; index += 1) if (typeof keys[index] !== "string" || !APPLY(ARRAY_INCLUDES, shape, [keys[index]])) return false; return true; }
+function shapeMatches(keys: readonly PropertyKey[], shapes: readonly (readonly string[])[]) { for (let index = 0; index < shapes.length; index += 1) if (keysMatch(keys, shapes[index]!)) return true; return false; }
+function arrayKeysMatch(keys: readonly PropertyKey[], length: number) { if (keys.length !== length + 1) return false; for (let index = 0; index < keys.length; index += 1) { const key = keys[index]; if (typeof key !== "string" || (key !== "length" && (!APPLY(REGEXP_TEST, INDEX, [key]) || TO_NUMBER(key) >= length))) return false; } return true; }
+function hasDuplicate(values: readonly unknown[]) { for (let index = 0; index < values.length; index += 1) for (let prior = 0; prior < index; prior += 1) if (values[index] === values[prior]) return true; return false; }
 
 function exactRecord(value: unknown, shapes: readonly (readonly string[])[], label: string) {
   const observed = observe(() => ({ prototype: GET_PROTOTYPE(value as object), keys: OWN_KEYS(value as object) }));
-  if ((observed.prototype !== Object.prototype && observed.prototype !== null) || !shapes.some((shape) => keysMatch(observed.keys, shape))) invalid(label);
-  const snapshot = Object.create(null) as Record<string, unknown>;
-  for (const key of observed.keys as string[]) {
+  if ((observed.prototype !== OBJECT_PROTOTYPE && observed.prototype !== null) || !shapeMatches(observed.keys, shapes)) invalid(label);
+  const snapshot = OBJECT_CREATE(null) as Record<string, unknown>;
+  for (let index = 0; index < observed.keys.length; index += 1) {
+    const key = observed.keys[index] as string;
     const descriptor = observe(() => GET_DESCRIPTOR(value as object, key));
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid(label);
     snapshot[key] = descriptor.value;
@@ -94,40 +117,40 @@ function exactRecord(value: unknown, shapes: readonly (readonly string[])[], lab
 function exactArray(value: unknown, label: string): unknown[] {
   const lengthDescriptor = observe(() => GET_DESCRIPTOR(value as object, "length"));
   const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : -1;
-  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY_LENGTH || lengthDescriptor?.enumerable !== false) invalid(label);
+  if (typeof length !== "number" || !IS_SAFE_INTEGER(length) || length < 0 || length > MAX_ARRAY_LENGTH || lengthDescriptor?.enumerable !== false) invalid(label);
   const observed = observe(() => ({ array: ARRAY_IS_ARRAY(value), prototype: GET_PROTOTYPE(value as object), keys: OWN_KEYS(value as object) }));
-  if (!observed.array || observed.prototype !== Array.prototype || observed.keys.length !== length + 1 || observed.keys.some((key) => typeof key !== "string" || (key !== "length" && (!INDEX.test(key) || Number(key) >= length)))) invalid(label);
+  if (!observed.array || observed.prototype !== ARRAY_PROTOTYPE || !arrayKeysMatch(observed.keys, length)) invalid(label);
   const result: unknown[] = [];
   for (let index = 0; index < length; index += 1) {
-    const descriptor = observe(() => GET_DESCRIPTOR(value as object, String(index)));
+    const descriptor = observe(() => GET_DESCRIPTOR(value as object, TO_STRING(index)));
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid(label);
-    result.push(descriptor.value);
+    result[result.length] = descriptor.value;
   }
   return result;
 }
 
 function inputSnapshot(value: unknown) {
-  const authority = observe(() => GET_DESCRIPTOR(Object(value), "privateAuthority"));
+  const authority = observe(() => GET_DESCRIPTOR(TO_OBJECT(value), "privateAuthority"));
   if (!authority || !("value" in authority) || authority.value !== true) fail(403, "TENANT_PURGE_PRIVATE_AUTHORITY_REQUIRED", "Private tenant purge authority is required.");
   const required = ["target", "capabilitySha", "redactionKey", "privateAuthority", "policies", "topology"];
   const observed = observe(() => ({ prototype: GET_PROTOTYPE(value as object), keys: OWN_KEYS(value as object) }));
-  if ((observed.prototype !== Object.prototype && observed.prototype !== null) || !authority.enumerable || !keysMatch(observed.keys, required)) invalid("value input");
-  const snapshot = Object.create(null) as Record<string, unknown>; snapshot.privateAuthority = true;
-  for (const key of required) if (key !== "privateAuthority") {
+  if ((observed.prototype !== OBJECT_PROTOTYPE && observed.prototype !== null) || !authority.enumerable || !keysMatch(observed.keys, required)) invalid("value input");
+  const snapshot = OBJECT_CREATE(null) as Record<string, unknown>; snapshot.privateAuthority = true;
+  for (let index = 0; index < required.length; index += 1) { const key = required[index]!; if (key !== "privateAuthority") {
     const descriptor = observe(() => GET_DESCRIPTOR(value as object, key));
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid("value input");
     snapshot[key] = descriptor.value;
-  }
+  } }
   return snapshot;
 }
 
-function uuid(value: unknown, label: string): string { if (typeof value !== "string" || !UUID.test(value)) invalid(label); return value; }
-function sha(value: unknown): string { if (typeof value !== "string" || !SHA.test(value)) invalid("capability SHA"); return value; }
+function uuid(value: unknown, label: string): string { if (typeof value !== "string" || !APPLY(REGEXP_TEST, UUID, [value])) invalid(label); return value; }
+function sha(value: unknown): string { if (typeof value !== "string" || !APPLY(REGEXP_TEST, SHA, [value])) invalid("capability SHA"); return value; }
 function boolean(value: unknown, label: string): boolean { if (typeof value !== "boolean") invalid(label); return value; }
-function integer(value: unknown, label: string, maximum: number, minimum = 1): number { if (typeof value !== "number" || !Number.isInteger(value) || value < minimum || value > maximum) invalid(label); return value; }
+function integer(value: unknown, label: string, maximum: number, minimum = 1): number { if (typeof value !== "number" || !IS_INTEGER(value) || value < minimum || value > maximum) invalid(label); return value; }
 function nullableUuid(value: unknown, label: string) { return value === null ? null : uuid(value, label); }
-function uuidList(value: unknown, label: string) { const result = exactArray(value, label).map((item) => uuid(item, label)); if (new Set(result).size !== result.length) invalid(label); return result; }
-function freezeDeep<T>(value: T): T { if (typeof value === "object" && value !== null && !Object.isFrozen(value)) { Object.values(value).forEach(freezeDeep); Object.freeze(value); } return value; }
+function uuidList(value: unknown, label: string) { const items = exactArray(value, label); const result: string[] = []; for (let index = 0; index < items.length; index += 1) result[index] = uuid(items[index], label); if (hasDuplicate(result)) invalid(label); return result; }
+function freezeDeep<T>(value: T): T { if (typeof value === "object" && value !== null && !OBJECT_IS_FROZEN(value)) { const children = OBJECT_VALUES(value); for (let index = 0; index < children.length; index += 1) freezeDeep(children[index]); OBJECT_FREEZE(value); } return value; }
 
 function targetSnapshot(value: unknown): TenantPurgeTarget {
   const accountShape = ["mode", "accountId", "deploymentId", "workspaceId"];
@@ -140,12 +163,12 @@ function targetSnapshot(value: unknown): TenantPurgeTarget {
 }
 
 function keySnapshot(value: unknown) {
-  const observed = observe(() => ({ kind: Reflect.apply(TYPED_ARRAY_KIND, value, []), length: Reflect.apply(TYPED_ARRAY_BYTE_LENGTH, value, []) as number }));
-  if (observed.kind !== "Uint8Array" || !Number.isSafeInteger(observed.length) || observed.length < 32 || observed.length > 64) invalid("redaction key");
-  const copy = new Uint8Array(observed.length);
-  observe(() => Reflect.apply(UINT8_SET, copy, [value]));
+  const observed = observe(() => ({ kind: APPLY(TYPED_ARRAY_KIND, value, []), length: APPLY(TYPED_ARRAY_BYTE_LENGTH, value, []) as number }));
+  if (observed.kind !== "Uint8Array" || !IS_SAFE_INTEGER(observed.length) || observed.length < 32 || observed.length > 64) invalid("redaction key");
+  const copy = new UINT8_ARRAY(observed.length);
+  observe(() => APPLY(UINT8_SET, copy, [value]));
   const bytes: number[] = [];
-  for (let index = 0; index < observed.length; index += 1) bytes.push(copy[index]!);
+  for (let index = 0; index < observed.length; index += 1) bytes[index] = copy[index]!;
   return bytes;
 }
 
@@ -155,9 +178,9 @@ function policySnapshot(value: unknown): TenantPurgeManifestPolicies {
 }
 
 function dateSnapshot(value: unknown) {
-  const observed = observe(() => ({ prototype: GET_PROTOTYPE(value as object), keys: OWN_KEYS(value as object), milliseconds: Reflect.apply(DATE_TIME, value, []) as number }));
-  if (observed.prototype !== Date.prototype || observed.keys.length || !Number.isFinite(observed.milliseconds)) invalid("capture time");
-  return new Date(observed.milliseconds).toISOString();
+  const observed = observe(() => ({ prototype: GET_PROTOTYPE(value as object), keys: OWN_KEYS(value as object), milliseconds: APPLY(DATE_TIME, value, []) as number }));
+  if (observed.prototype !== DATE_PROTOTYPE || observed.keys.length || !IS_FINITE(observed.milliseconds)) invalid("capture time");
+  return APPLY(DATE_TO_ISO, new DATE(observed.milliseconds), []);
 }
 
 function topologySnapshot(value: unknown) {
@@ -167,7 +190,8 @@ function topologySnapshot(value: unknown) {
   const account = raw.account === null ? null : exactRecord(raw.account, [["id", "deploymentIds", "primaryDeploymentId"]], "account topology");
   const trial = raw.trial === null ? null : exactRecord(raw.trial, [["id", "workspaceId", "expired"]], "trial topology");
   const suppliedBlockers = exactArray(raw.blockers, "blockers");
-  if (new Set(suppliedBlockers).size !== suppliedBlockers.length || suppliedBlockers.some((code) => !TENANT_PURGE_BLOCKER_CODES.includes(code as never))) invalid("blockers");
+  if (hasDuplicate(suppliedBlockers)) invalid("blockers");
+  for (let index = 0; index < suppliedBlockers.length; index += 1) if (!APPLY(ARRAY_INCLUDES, TENANT_PURGE_BLOCKER_CODES, [suppliedBlockers[index]])) invalid("blockers");
   return {
     topology: {
       capturedAt: dateSnapshot(raw.capturedAt),
