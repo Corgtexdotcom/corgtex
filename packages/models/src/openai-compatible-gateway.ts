@@ -911,7 +911,7 @@ async function* completeChatEventStream(
   let content = "";
   let toolCallParts = new Map<number, PartialToolCall>();
   let usageDetailsObj: StreamUsage | null = null;
-  let buffer = "";
+  let buffer = ""; let eventData: string[] = [];
   let streamCompleted = false;
   let usage: UsageDetails | undefined;
   let usageRecorded = false;
@@ -959,12 +959,12 @@ async function* completeChatEventStream(
       let newlineIndex: number;
       while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, newlineIndex).replace(/\r$/, ""); buffer = buffer.slice(newlineIndex + 1);
-        const fieldValue = line.startsWith("data:") ? line.slice(5) : null; const dataValue = fieldValue?.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (dataValue !== null && /^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); if (dataValue === "[DONE]") {
+        if (line !== "") { if (line.startsWith("data:")) { const fieldValue = line.slice(5); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
+        if (eventData.length === 0) continue; const dataValue = eventData.join("\n"); eventData = []; if (dataValue === "[DONE]") {
           streamCompleted = true;
           await reader.cancel().catch(() => undefined);
           break;
         }
-        if (dataValue !== null) {
           let data: unknown;
           try {
             data = JSON.parse(dataValue);
@@ -993,7 +993,6 @@ async function* completeChatEventStream(
           content += contentDelta; toolCallParts = nextToolCallParts;
           if (nextUsage) usageDetailsObj = nextUsage;
           for (const event of events) yield event;
-        }
       }
     } if (!streamCompleted) { buffer += decoder.decode(); primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE]."); }
     } catch (error) { primaryFailure = streamSignal?.aborted ? abortedError(streamSignal) : error instanceof ChatStreamProtocolError ? error : new ChatStreamProtocolError("Streamed provider response could not be read safely."); }

@@ -38,10 +38,8 @@ export async function runContractSmoke({
   failurePhase = "gateway_preparation"; try {
     const stream = gateway.chatEventStream({ workspaceId: workspace.id, taskType: "AGENT", model,
       messages: [{ role: "user", content: `Call the required function with answer ${EXPECTED_ANSWER}.` }],
-      tools: [{ type: "function", function: {
-        name: TOOL_NAME, description: "Return the fixed synthetic route-stream contract answer.",
-        parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
-      } }], tool_choice: "required",
+      tools: [{ type: "function", function: { name: TOOL_NAME, description: "Return the fixed synthetic route-stream contract answer.",
+        parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false } } }], tool_choice: "required",
     });
     next = await stream.next(); while (!next.done) {
       if (next.value.type === "tool_call_delta") {
@@ -50,34 +48,21 @@ export async function runContractSmoke({
       }
       next = await stream.next();
     }
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  } finally { globalThis.fetch = originalFetch; }
   const terminal = next?.value; const tool = terminal?.tool_calls?.[0]; const streamed = deltas.get(0); failurePhase = "contract_validation"; let args;
   try { args = JSON.parse(tool?.function.arguments ?? ""); } catch { throw new Error("Terminal wrapper arguments were not JSON."); }
-  assert(guard.count() === 1, "Exactly one provider request was required.");
-  assert(terminal?.tool_calls?.length === 1 && tool?.function.name === TOOL_NAME, "Required wrapper tool was not returned.");
-  assert(streamed?.name === TOOL_NAME && streamed.arguments === tool.function.arguments, "Tool name/arguments were not fully streamed.");
-  assert(toolDeltaCount > 0 && args?.answer === EXPECTED_ANSWER && terminal?.usage, "Wrapper or usage contract failed.");
+  assert(guard.count() === 1, "Exactly one provider request was required."); assert(terminal?.tool_calls?.length === 1 && tool?.function.name === TOOL_NAME, "Required wrapper tool was not returned.");
+  assert(streamed?.name === TOOL_NAME && streamed.arguments === tool.function.arguments, "Tool name/arguments were not fully streamed."); assert(toolDeltaCount > 0 && args?.answer === EXPECTED_ANSWER && terminal?.usage, "Wrapper or usage contract failed.");
   const evidence = { schemaVersion: "model-route-stream-contract/v1", status: "pass", providerRequestCount: 1, toolDeltaCount, streamedName: true, streamedArguments: true, terminalArgumentsValid: true, usagePresent: true };
-  failurePhase = "evidence_write";
-  await writeEvidence(config.out, evidence);
-  return evidence;
+  failurePhase = "evidence_write"; await writeEvidence(config.out, evidence); return evidence;
   } catch {
     if (config.preflightOnly && failurePhase === "provider_stream" && guard.count() === 1) {
-      const residueAfter = await countResidue(config.workspaceId);
-      const residueDelta = residueAfter.map((count, index) => count - (residueBefore?.[index] ?? Number.NaN));
+      const residueAfter = await countResidue(config.workspaceId); const residueDelta = residueAfter.map((count, index) => count - (residueBefore?.[index] ?? Number.NaN));
       if (residueDelta.length === 3 && residueDelta.every((count) => count === 0)) {
         const evidence = { schemaVersion: "model-route-stream-contract/v1", status: "pass", mode: "preflight-only", providerRequestCount: 0, localFetchBoundaryCount: 1, workspaceRowDelta: 0, usageRowDelta: 0, ledgerRowDelta: 0 };
-        await writeEvidence(config.out, evidence); return evidence;
-      }
-    }
-    if (failurePhase !== "evidence_write") await writeEvidence(config.out, {
-      schemaVersion: "model-route-stream-contract/v1", status: "fail",
-      errorCode: failurePhase === "provider_preflight" ? "PROVIDER_CONFIGURATION_UNSAFE" : failurePhase === "gateway_preparation" ? "GATEWAY_PREPARATION_FAILED" : "CONTRACT_SMOKE_FAILED",
-      failurePhase, providerRequestCount: config.preflightOnly ? 0 : guard.count(), localFetchBoundaryCount: config.preflightOnly ? guard.count() : undefined,
-    });
-    throw new Error("Model route stream contract smoke failed.");
+        await writeEvidence(config.out, evidence); return evidence; } }
+    if (failurePhase !== "evidence_write") await writeEvidence(config.out, { schemaVersion: "model-route-stream-contract/v1", status: "fail", errorCode: failurePhase === "provider_preflight" ? "PROVIDER_CONFIGURATION_UNSAFE" : failurePhase === "gateway_preparation" ? "GATEWAY_PREPARATION_FAILED" : "CONTRACT_SMOKE_FAILED",
+      failurePhase, providerRequestCount: config.preflightOnly ? 0 : guard.count(), localFetchBoundaryCount: config.preflightOnly ? guard.count() : undefined }); throw new Error("Model route stream contract smoke failed.");
   }
 }
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
