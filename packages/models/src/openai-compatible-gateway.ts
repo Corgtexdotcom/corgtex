@@ -799,30 +799,20 @@ type PartialToolCall = {
 };
 
 function appendToolCallDelta(toolCalls: Map<number, PartialToolCall>, value: unknown): ChatStreamEvent {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new ChatStreamProtocolError("Streamed tool call delta must be an object.");
-  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ChatStreamProtocolError("Streamed tool call delta must be an object.");
   const tool = value as Record<string, unknown>;
   const index = tool.index;
-  if (!Number.isInteger(index) || (index as number) < 0) {
-    throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative integer.");
-  }
+  if (!Number.isInteger(index) || (index as number) < 0) throw new ChatStreamProtocolError("Streamed tool call index must be a non-negative integer.");
   if (tool.type != null && tool.type !== "function") {
     throw new ChatStreamProtocolError("Streamed tool call type must be function.");
   }
   if (tool.id != null && typeof tool.id !== "string") {
     throw new ChatStreamProtocolError("Streamed tool call id fragment must be a string.");
   }
-  if (tool.function != null && (typeof tool.function !== "object" || Array.isArray(tool.function))) {
-    throw new ChatStreamProtocolError("Streamed tool call function delta must be an object.");
-  }
+  if (tool.function != null && (typeof tool.function !== "object" || Array.isArray(tool.function))) throw new ChatStreamProtocolError("Streamed tool call function delta must be an object.");
   const fn = (tool.function ?? {}) as Record<string, unknown>;
-  if (fn.name != null && typeof fn.name !== "string") {
-    throw new ChatStreamProtocolError("Streamed tool call name fragment must be a string.");
-  }
-  if (fn.arguments != null && typeof fn.arguments !== "string") {
-    throw new ChatStreamProtocolError("Streamed tool call arguments fragment must be a string.");
-  }
+  if (fn.name != null && typeof fn.name !== "string") throw new ChatStreamProtocolError("Streamed tool call name fragment must be a string.");
+  if (fn.arguments != null && typeof fn.arguments !== "string") throw new ChatStreamProtocolError("Streamed tool call arguments fragment must be a string.");
   const idDelta = (tool.id ?? undefined) as string | undefined;
   const nameDelta = (fn.name ?? undefined) as string | undefined;
   const argumentsDelta = (fn.arguments as string | undefined) ?? "";
@@ -847,7 +837,14 @@ function completeToolCalls(toolCalls: Map<number, PartialToolCall>) {
     return { id: tool.id, type: "function" as const, function: { name: tool.name, arguments: tool.arguments } };
   });
 }
-
+type StreamUsage = Record<string, unknown> & { prompt_tokens?: number; completion_tokens?: number };
+function validateStreamUsage(value: unknown, requireTokens: boolean) {
+  if (value == null) { if (requireTokens) throw new ChatStreamProtocolError("Usage-only frames require token counts."); return undefined; }
+  if (typeof value !== "object" || Array.isArray(value)) throw new ChatStreamProtocolError("Streamed usage must be an object when present.");
+  const usage = value as StreamUsage;
+  for (const key of ["prompt_tokens", "completion_tokens"] as const) { const tokens = usage[key]; if ((requireTokens && tokens === undefined) || (tokens !== undefined && (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 0 || tokens > 2_147_483_647))) throw new ChatStreamProtocolError("Streamed token counts must be non-negative 32-bit integers."); }
+  return usage;
+}
 async function* completeChatEventStream(
   request: ChatCompletionRequest,
   taskType: ModelUsageInput["taskType"],
@@ -924,7 +921,7 @@ async function* completeChatEventStream(
   const decoder = new TextDecoder();
   let content = "";
   let toolCallParts = new Map<number, PartialToolCall>();
-  let usageDetailsObj: any = null;
+  let usageDetailsObj: StreamUsage | null = null;
   let buffer = "";
   let streamCompleted = false;
   let usage: UsageDetails | undefined;
@@ -987,7 +984,7 @@ async function* completeChatEventStream(
           const record = data as Record<string, unknown>; const choices = record.choices;
           if (choices !== undefined && !Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array when present.");
           if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
-          if (Array.isArray(choices) && choices.length === 0 && (!record.usage || typeof record.usage !== "object" || Array.isArray(record.usage))) throw new ChatStreamProtocolError("Empty streamed choices require a usage object.");
+          const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
           const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
           if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects.");
           if (candidate?.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
@@ -1000,7 +997,7 @@ async function* completeChatEventStream(
           const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(nextToolCallParts, tool)) : [];
           const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents];
           content += contentDelta; toolCallParts = nextToolCallParts;
-          if (record.usage) usageDetailsObj = record.usage;
+          if (nextUsage) usageDetailsObj = nextUsage;
           for (const event of events) yield event;
         }
       }

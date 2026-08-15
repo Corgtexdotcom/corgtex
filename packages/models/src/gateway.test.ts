@@ -1443,11 +1443,11 @@ describe("openAICompatibleModelGateway", () => {
     const frames = [
       { choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: '{"b":' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_", function: { name: "respond_", arguments: '{"a":"' } }] } }] },
-      { choices: [{ delta: { content: "café 漢" } }] },
+      { choices: [{ delta: { content: "café 漢" } }], usage: null },
       { choices: [{ delta: { tool_calls: [{ index: 1, id: "call_b", function: { name: "other", arguments: '"2"}' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "conversation", arguments: 'ok"}' } }] } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "" } }] } }] },
-      { choices: [], usage: { prompt_tokens: 12, completion_tokens: 7 } },
+      { choices: [], usage: { prompt_tokens: 12, completion_tokens: 7, provider_extension: { harmless: true } } },
     ];
     const bytes = new TextEncoder().encode(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\ndata: {"truncated"`);
     const body = new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } });
@@ -1498,11 +1498,12 @@ describe("openAICompatibleModelGateway", () => {
     const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway");
     const consume = async () => { for await (const _ of openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] })) { /* consume */ } }; await expect(consume()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
   });
-  it.each([["a later malformed tool", { choices: [{ delta: { content: "must-not-leak", tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: "{}" } }, { index: -1, id: "call_b", function: { name: "tool", arguments: "{}" } }] } }] }], ["a valid first and malformed second choice", { choices: [{ delta: { content: "must-not-leak" } }, 7] }], ["two valid choices", { choices: [{ delta: { content: "must-not-leak" } }, { delta: { content: "other" } }] }]])("rejects %s before yielding any event", async (_label, frame) => {
+  it.each([["a later malformed tool", { choices: [{ delta: { content: "must-not-leak", tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: "{}" } }, { index: -1, id: "call_b", function: { name: "tool", arguments: "{}" } }] } }] }], ["a valid first and malformed second choice", { choices: [{ delta: { content: "must-not-leak" } }, 7] }], ["two valid choices", { choices: [{ delta: { content: "must-not-leak" } }, { delta: { content: "other" } }] }], ["a non-object usage container", { choices: [{ delta: { content: "must-not-leak", tool_calls: [{ index: 0, id: "call_a", function: { name: "tool", arguments: "{}" } }] } }], usage: "bad" }], ["an array usage container", { choices: [{ delta: { content: "must-not-leak" } }], usage: [] }], ["a string token count", { choices: [{ delta: { content: "must-not-leak" } }], usage: { prompt_tokens: "NaN" } }], ["an array token count", { choices: [{ delta: { content: "must-not-leak" } }], usage: { completion_tokens: [] } }], ["a fractional token count", { choices: [{ delta: { content: "must-not-leak" } }], usage: { completion_tokens: 1.5 } }], ["a negative token count", { choices: [{ delta: { content: "must-not-leak" } }], usage: { prompt_tokens: -1 } }], ["an overflowing token count", { choices: [{ delta: { content: "must-not-leak" } }], usage: { completion_tokens: 2_147_483_648 } }], ["a null token count", { choices: [{ delta: { content: "must-not-leak" } }], usage: { prompt_tokens: null } }], ["a missing usage-only token count", { choices: [], usage: { prompt_tokens: 1 } }]])("rejects %s before yielding any event", async (_label, frame) => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(frame)}\n\ndata: [DONE]\n\n`, { status: 200 })));
-    const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const stream = openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
+    const usageModule = await import("./usage"); vi.mocked(usageModule.recordModelUsage).mockClear(); const { openAICompatibleModelGateway } = await import("./openai-compatible-gateway"); const stream = openAICompatibleModelGateway.chatEventStream({ workspaceId: "ws-1", taskType: "CHAT", messages: [] });
     await expect(stream.next()).rejects.toMatchObject({ name: "ChatStreamProtocolError" });
+    expect(vi.mocked(usageModule.recordModelUsage).mock.calls.at(-1)?.[0].outputTokens).toBe(0);
   });
   it("treats nullable optional tool continuation fields as absent", async () => {
     restoreEnv(); Object.assign(process.env, { MODEL_PROVIDER: "openrouter", MODEL_API_KEY: "test-key", MODEL_BASE_URL: "https://openrouter.ai/api/v1", MODEL_CHAT_DEFAULT: "qwen/qwen3-32b" });
