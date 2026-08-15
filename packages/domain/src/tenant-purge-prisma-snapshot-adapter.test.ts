@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { captureAuthorizedTenantPurgeManifestValues } from "./tenant-purge-atomic-capture-contract";
 import { createTenantPurgeOwnedVector, pushTenantPurgeOwnedVector } from "./tenant-purge-owned-vector-kernel";
@@ -136,8 +137,17 @@ describe("tenant purge Prisma snapshot adapter", () => {
     expect(Object.keys(adapter)).toEqual(["createTenantPurgePrismaAuthorizeAndCapture"]);
     const pattern = "(?:\\bfrom\\s*|\\bimport\\s*\\(\\s*|\\brequire\\s*\\(\\s*|^\\s*import\\s+)"
       + "([\"'])[^\"']*tenant-purge-prisma-snapshot-adapter\\1";
-    const scan = spawnSync("rg", ["--pcre2", "-n", pattern, "packages", "--glob", "*.ts",
-      "--glob", "!tenant-purge-prisma-snapshot-adapter.test.ts"], { encoding: "utf8" });
-    expect({ status: scan.status, output: scan.stdout }).toEqual({ status: 1, output: "" });
+    const pending = ["packages"]; const consumers: string[] = [];
+    while (pending.length > 0) {
+      const directory = pending.pop()!;
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const file = join(directory, entry.name);
+        if (entry.isDirectory()) pending.push(file);
+        else if (file.endsWith(".ts")
+          && file !== "packages/domain/src/tenant-purge-prisma-snapshot-adapter.test.ts"
+          && new RegExp(pattern, "m").test(readFileSync(file, "utf8"))) consumers.push(file);
+      }
+    }
+    expect(consumers).toEqual([]);
   });
 });
