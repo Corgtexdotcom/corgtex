@@ -2,6 +2,16 @@ export type IncrementalJsonStringResult = { delta: string; state: "incomplete" |
 type Phase = "start" | "key" | "colon" | "value" | "comma" | "done"; type StringRole = "key" | "target" | "skip";
 const ESCAPES: Record<string, string> = { "\"": "\"", "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
 const whitespace = (value: string) => " \n\r\t".includes(value); const hex = (value: string) => /^[0-9a-f]$/i.test(value);
+function jsonPrefixState(input: string): "incomplete" | "complete" | "malformed" {
+  let index = 0; const abort = (state: "incomplete" | "malformed"): never => { throw state; }; const skip = () => { while (index < input.length && whitespace(input[index]!)) index += 1; }; const take = () => { if (index >= input.length) abort("incomplete"); return input[index++]!; };
+  const string = () => { if (take() !== "\"") abort("malformed"); while (true) { const character = take(); if (character === "\"") return; if (character === "\\") { const escape = take(); if (escape === "u") { for (let count = 0; count < 4; count += 1) if (!hex(take())) abort("malformed"); } else if (!(escape in ESCAPES)) abort("malformed"); } else if (character.charCodeAt(0) < 0x20) abort("malformed"); } };
+  const literal = (expected: string) => { for (const character of expected) if (take() !== character) abort("malformed"); };
+  const number = () => { const start = index; while (index < input.length && /[0-9eE+.\-]/.test(input[index]!)) index += 1; const token = input.slice(start, index); const complete = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(token); const viable = /^-?$|^-?(?:0|[1-9]\d*)$|^-?(?:0|[1-9]\d*)\.\d*$|^-?(?:0|[1-9]\d*)(?:\.\d+)?[eE][+-]?\d*$/.test(token); if (!complete) { if (index === input.length && viable) abort("incomplete"); abort("malformed"); } };
+  function value() { skip(); if (index >= input.length) abort("incomplete"); const character = input[index]!; if (character === "\"") string(); else if (character === "{") object(); else if (character === "[") array(); else if (character === "t") literal("true"); else if (character === "f") literal("false"); else if (character === "n") literal("null"); else if (character === "-" || /\d/.test(character)) number(); else abort("malformed"); }
+  function object() { index += 1; skip(); if (index >= input.length) abort("incomplete"); if (input[index] === "}") { index += 1; return; } while (true) { string(); skip(); if (take() !== ":") abort("malformed"); value(); skip(); const delimiter = take(); if (delimiter === "}") return; if (delimiter !== ",") abort("malformed"); skip(); } }
+  function array() { index += 1; skip(); if (index >= input.length) abort("incomplete"); if (input[index] === "]") { index += 1; return; } while (true) { value(); skip(); const delimiter = take(); if (delimiter === "]") return; if (delimiter !== ",") abort("malformed"); skip(); } }
+  try { value(); skip(); if (index !== input.length) abort("malformed"); return "complete"; } catch (state) { return state === "incomplete" ? "incomplete" : "malformed"; }
+}
 export class IncrementalJsonStringDecoder {
   private fragments: string[] = []; private phase: Phase = "start"; private role: StringRole | null = null;
   private text = ""; private currentKey = ""; private targetValue = "";
@@ -88,8 +98,6 @@ export class IncrementalJsonStringDecoder {
     }
     return this.failed ? { delta: "", state: "malformed" } : { delta: this.delta, state: this.targetComplete ? "complete" : "incomplete" };
   }
-  finish(): IncrementalJsonStringResult { if (this.failed || this.high !== null) return { delta: "", state: "malformed" };
-    if (!this.targetComplete) return { delta: "", state: this.phase === "done" ? "malformed" : "incomplete" }; try {
-      const parsed = JSON.parse(this.fragments.join("")) as Record<string, unknown>; if (this.phase !== "done" || !parsed || Array.isArray(parsed) || parsed[this.field] !== this.targetValue) throw new Error(); return { delta: "", state: "complete" };
-    } catch { return { delta: "", state: "malformed" }; } }
+  finish(): IncrementalJsonStringResult { if (this.failed) return { delta: "", state: "malformed" };
+    if (!this.targetComplete) return { delta: "", state: this.phase === "done" ? "malformed" : "incomplete" }; const terminal = jsonPrefixState(this.fragments.join("")); return { delta: "", state: terminal === "complete" && this.phase !== "done" ? "malformed" : terminal }; }
 }
