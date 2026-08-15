@@ -43,6 +43,10 @@ describe("IncrementalJsonStringDecoder", () => {
   });
   it.each(['{"answer":"ok"]', '{"answer":"ok"}garbage', '{"answer":"ok","later":truth}', '{"answer":"ok","later":01}', '{"answer":"ok","later":[1,]}', '{"answer":"ok","later":{"x":}}', '{"answer":"ok","later":"bad\\x"}'])("classifies impossible terminal suffix %s as malformed", (source) => { expect(decode([source]).final.state).toBe("malformed"); });
   it.each(['{"answer":"ok"}', '{"later":[true,false,null,-12.3e+4],"answer":"ok"}', '{"answer":"ok","later":{"x":"y"}}   '])("classifies complete document %s as complete", (source) => { expect(decode([source]).final.state).toBe("complete"); });
+  it("counts consumed primitive and generated-corpus units exactly once", () => {
+    const documents: Array<[string, "complete" | "incomplete" | "malformed"]> = [['{"n":12,"t":true,"z":null,"s":"skip","answer":"ok","after":42}', "complete"], ['{"n":12,"t":true,"z":null,"s":"skip","answer":"ok","after":tru', "incomplete"], ['{"n":12,"answer":"ok","after":[1}', "malformed"], ['{"answer":"ok","after":tru,', "malformed"], ...Array.from({ length: 32 }, (_, index): [string, "complete"] => [`{"n":${index},"t":true,"z":null,"s":"v${index}","answer":"ok","after":${index + 1}}`, "complete"])];
+    for (const [source, state] of documents) for (const size of [1, 2, 7]) { const decoder = new IncrementalJsonStringDecoder("answer"); for (let index = 0; index < source.length; index += size) decoder.push(source.slice(index, index + size)); expect({ state: decoder.finish().state, work: decoder.processedCharacters }, `${state}:${size}:${source}`).toEqual({ state, work: source.length }); }
+  });
   it("processes a long one-character stream without rescanning prior input", () => {
     const source = `{"padding":"${"x".repeat(20_000)}","answer":"done"}`;
     const decoder = new IncrementalJsonStringDecoder("answer");

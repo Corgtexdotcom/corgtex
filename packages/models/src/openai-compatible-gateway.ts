@@ -905,9 +905,6 @@ async function* completeChatEventStream(
   }
 
   if (!response) throw lastError ?? new Error("OpenAI-compatible request failed after retries.");
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("Response body is not readable.");
-
   const decoder = new TextDecoder();
   let content = "";
   let toolCallParts = new Map<number, PartialToolCall>();
@@ -946,6 +943,9 @@ async function* completeChatEventStream(
     usageRecorded = true;
     return usage;
   }
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try { if (!response.body) throw new Error(); reader = response.body.getReader(); }
+  catch { try { await finalizeUsage(); } finally { streamSignalCleanup(); } throw new ChatStreamProtocolError("Streamed provider response body is not readable."); }
 
   try {
     while (true) {
@@ -971,7 +971,7 @@ async function* completeChatEventStream(
           if (!data || typeof data !== "object" || Array.isArray(data)) throw new ChatStreamProtocolError("Streamed provider data must be an object.");
           const record = data as Record<string, unknown>; const choices = record.choices;
           if (record.error != null) throw new ChatStreamProtocolError("Streamed provider reported an error.");
-          if (choices !== undefined && !Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array when present.");
+          if (!Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array.");
           if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
           const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
           if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present.");

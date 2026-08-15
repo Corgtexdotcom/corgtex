@@ -6,15 +6,12 @@ describe("model route stream contract smoke", () => {
     expect(() => smokeConfig({}, [])).toThrow(/acknowledgement/); expect(() => smokeConfig(source, ["--out=unsafe.json"])).toThrow(/artifact directory/);
   });
   it("fails before a second provider request", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("ok"));
-    const guard = guardOneProviderRequest(fetchMock);
+    const fetchMock = vi.fn().mockResolvedValue(new Response("ok")); const guard = guardOneProviderRequest(fetchMock);
     await guard.guarded("https://model.test/chat/completions", {});
     await expect(guard.guarded("https://model.test/chat/completions", {})).rejects.toThrow(/limit exceeded/);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+    expect(fetchMock).toHaveBeenCalledTimes(1); });
   it("writes only sanitized proof for one streamed wrapper request", async () => {
-    const writeEvidence = vi.fn();
-    const gateway = { async *chatEventStream() {
+    const writeEvidence = vi.fn(); const gateway = { async *chatEventStream() {
       await fetch("https://model.test/chat/completions", {});
       yield { type: "tool_call_delta", index: 0, idDelta: "call_", nameDelta: "respond_route_", argumentsDelta: '{"answer":"route-' };
       yield { type: "tool_call_delta", index: 0, idDelta: "one", nameDelta: "stream_contract", argumentsDelta: 'stream-contract-ok"}' };

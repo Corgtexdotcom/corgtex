@@ -77,13 +77,13 @@ export class IncrementalJsonStringDecoder {
     if (this.failed) return { delta: "", state: "malformed" };
     this.fragments.push(fragment); this.delta = "";
     for (let index = 0; index < fragment.length && !this.failed;) {
-      const character = fragment[index]!; this.work += 1;
+      const character = fragment[index]!;
       if (this.role) this.scanString(character);
       else if (this.stack.length > 0) this.scanNested(character);
       else if (this.primitive !== null) {
         if (whitespace(character) || character === "," || character === "}") {
           try { JSON.parse(this.primitive); } catch { this.fail(); }
-          this.primitive = null; this.phase = "comma"; continue;
+          this.primitive = null; this.phase = "comma"; if (this.failed) { index += 1; this.work += 1; } continue;
         }
         if (character === "]" || character === "{" || character === "[") this.fail(); else this.primitive += character;
       } else if (!whitespace(character)) {
@@ -94,7 +94,7 @@ export class IncrementalJsonStringDecoder {
         else if (this.phase === "comma") { if (character === ",") this.phase = "key"; else if (character === "}") this.phase = "done"; else this.fail(); }
         else this.fail();
       }
-      index += 1;
+      index += 1; this.work += 1;
     }
     return this.failed ? { delta: "", state: "malformed" } : { delta: this.delta, state: this.targetComplete ? "complete" : "incomplete" };
   }

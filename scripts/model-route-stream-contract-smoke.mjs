@@ -14,12 +14,9 @@ export function smokeConfig(source, argv = []) {
   return { workspaceId, out: resolvedOut, preflightOnly };
 }
 export function guardOneProviderRequest(fetchImpl, onRequest = () => {}) {
-  let count = 0;
-  const guarded = async (input, init) => {
-    const url = input instanceof Request ? input.url : String(input);
-    if (url.includes("/chat/completions")) { onRequest(); count += 1; assert(count === 1, "Provider request limit exceeded."); }
-    return fetchImpl(input, init);
-  };
+  let count = 0; const guarded = async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input); if (url.includes("/chat/completions")) { onRequest(); count += 1; assert(count === 1, "Provider request limit exceeded."); }
+    return fetchImpl(input, init); };
   return { guarded, count: () => count };
 }
 export async function runContractSmoke({
@@ -30,11 +27,8 @@ export async function runContractSmoke({
   fetchImpl = globalThis.fetch,
   writeEvidence = async (out, evidence) => { await mkdir(path.dirname(out), { recursive: true }); await writeFile(out, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 }); },
 } = {}) {
-  const config = smokeConfig(source, argv);
-  let failurePhase = "provider_preflight";
-  const localBoundary = async () => new Response("preflight-only", { status: 418 });
-  const guard = guardOneProviderRequest(config.preflightOnly ? localBoundary : fetchImpl, () => { failurePhase = "provider_stream"; });
-  let residueBefore;
+  const config = smokeConfig(source, argv); let failurePhase = "provider_preflight"; let residueBefore;
+  const localBoundary = async () => new Response("preflight-only", { status: 418 }); const guard = guardOneProviderRequest(config.preflightOnly ? localBoundary : fetchImpl, () => { failurePhase = "provider_stream"; });
   try {
   const model = source.MODEL_CHAT_CONVERSATION ?? env.MODEL_CHAT_CONVERSATION; const routes = source.MODEL_PROVIDER_ROUTES_JSON ? JSON.parse(source.MODEL_PROVIDER_ROUTES_JSON) : [];
   const route = routes.find((entry) => entry?.model === model);
@@ -48,11 +42,8 @@ export async function runContractSmoke({
   requireInternalValidationWorkspace(workspace, { env: {}, purpose: "model route stream contract smoke" });
   assert(workspace.plan === "ENTERPRISE_MANAGED" && !workspace.modelUsageBudget, "Validation workspace billing contract is unsafe.");
   if (config.preflightOnly) residueBefore = await countResidue(workspace.id);
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = guard.guarded;
-  let next;
-  const deltas = new Map();
-  let toolDeltaCount = 0;
+  const originalFetch = globalThis.fetch; globalThis.fetch = guard.guarded;
+  let next; const deltas = new Map(); let toolDeltaCount = 0;
   failurePhase = "gateway_preparation"; try {
     const stream = gateway.chatEventStream({ workspaceId: workspace.id, taskType: "AGENT", model,
       messages: [{ role: "user", content: `Call the required function with answer ${EXPECTED_ANSWER}.` }],
@@ -61,14 +52,10 @@ export async function runContractSmoke({
         parameters: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
       } }], tool_choice: "required",
     });
-    next = await stream.next();
-    while (!next.done) {
+    next = await stream.next(); while (!next.done) {
       if (next.value.type === "tool_call_delta") {
-        toolDeltaCount += 1;
-        const current = deltas.get(next.value.index) ?? { name: "", arguments: "" };
-        current.name += next.value.nameDelta ?? "";
-        current.arguments += next.value.argumentsDelta;
-        deltas.set(next.value.index, current);
+        toolDeltaCount += 1; const current = deltas.get(next.value.index) ?? { name: "", arguments: "" };
+        current.name += next.value.nameDelta ?? ""; current.arguments += next.value.argumentsDelta; deltas.set(next.value.index, current);
       }
       next = await stream.next();
     }
