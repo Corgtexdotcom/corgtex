@@ -959,7 +959,7 @@ async function* completeChatEventStream(
       let newlineIndex: number;
       while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, newlineIndex).replace(/\r$/, ""); buffer = buffer.slice(newlineIndex + 1);
-        if (line !== "") { if (line.startsWith("data:")) { const fieldValue = line.slice(5); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
+        if (line !== "") { const colon = line.indexOf(":"); const field = colon < 0 ? line : line.slice(0, colon); if (field === "data") { const fieldValue = colon < 0 ? "" : line.slice(colon + 1); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
         if (eventData.length === 0) continue; const dataValue = eventData.join("\n"); eventData = []; if (dataValue === "[DONE]") {
           streamCompleted = true;
           await reader.cancel().catch(() => undefined);

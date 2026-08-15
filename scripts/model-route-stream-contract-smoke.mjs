@@ -65,8 +65,4 @@ export async function runContractSmoke({
       failurePhase, providerRequestCount: config.preflightOnly ? 0 : guard.count(), localFetchBoundaryCount: config.preflightOnly ? guard.count() : undefined }); throw new Error("Model route stream contract smoke failed.");
   }
 }
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  runContractSmoke().then(() => console.log("Model route stream contract smoke: PASS (sanitized evidence written)."), () => {
-    console.error("Model route stream contract smoke: FAIL (details suppressed)."); process.exitCode = 1;
-  });
-}
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) runContractSmoke().then(() => console.log("Model route stream contract smoke: PASS (sanitized evidence written)."), () => { console.error("Model route stream contract smoke: FAIL (details suppressed)."); process.exitCode = 1; });
