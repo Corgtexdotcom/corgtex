@@ -958,15 +958,15 @@ async function* completeChatEventStream(
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
 
-        if (line === "data: [DONE]") {
+        const dataValue = line.startsWith("data:") ? line.slice(5).replace(/^ /, "") : null; if (dataValue === "[DONE]") {
           streamCompleted = true;
           await reader.cancel().catch(() => undefined);
           break;
         }
-        if (line.startsWith("data: ")) {
+        if (dataValue !== null) {
           let data: unknown;
           try {
-            data = JSON.parse(line.slice(6));
+            data = JSON.parse(dataValue);
           } catch {
             throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
           }
@@ -976,7 +976,7 @@ async function* completeChatEventStream(
           if (choices !== undefined && !Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array when present.");
           if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
           const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
-          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects.");
+          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && candidate.index !== 0) throw new ChatStreamProtocolError("Streamed choice index must be zero when present.");
           if (candidate?.finish_reason != null && typeof candidate.finish_reason !== "string") throw new ChatStreamProtocolError("Streamed finish_reason must be a string or null.");
           if (candidate?.finish_reason === "error") throw new ChatStreamProtocolError("Streamed provider reported an error.");
           const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
