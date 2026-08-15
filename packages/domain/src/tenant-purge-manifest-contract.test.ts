@@ -72,6 +72,9 @@ describe("tenant purge manifest normalization", () => {
     const originalTest = RegExp.prototype.test; let validation: unknown;
     try { const hostile = new Proxy(input({ capabilitySha: "bad" }), { getOwnPropertyDescriptor(value, key) { if (key === "target") RegExp.prototype.test = () => true; return Reflect.getOwnPropertyDescriptor(value, key); } }); try { normalizeTenantPurgeManifestValues(hostile); } catch (error) { validation = error; } } finally { RegExp.prototype.test = originalTest; }
     expect(validation).toMatchObject({ status: 400, code: "TENANT_PURGE_CONTRACT_INVALID" }); expect(Object.isFrozen(validation)).toBe(true);
+    const originalIndex = Object.getOwnPropertyDescriptor(Array.prototype, "0"); let setterCalls = 0; let normalized: ReturnType<typeof normalizeTenantPurgeManifestValues> | undefined;
+    try { const hostile = new Proxy(input(), { getOwnPropertyDescriptor(value, key) { if (key === "target") Object.defineProperty(Array.prototype, "0", { configurable: true, set() { setterCalls += 1; } }); return Reflect.getOwnPropertyDescriptor(value, key); } }); normalized = normalizeTenantPurgeManifestValues(hostile); } finally { if (originalIndex) Object.defineProperty(Array.prototype, "0", originalIndex); else delete (Array.prototype as unknown as Record<string, unknown>)["0"]; }
+    expect(setterCalls).toBe(0); expect(normalized?.redactionKeyBytes).toEqual(new Array(32).fill(7)); expect(normalized?.topology.workspace?.managedDeploymentIds).toEqual([DEPLOYMENT]);
   });
 
   it("uses exact data descriptors and one target snapshot without invoking getters", () => {
@@ -103,6 +106,7 @@ describe("tenant purge manifest normalization", () => {
     const substitutedTopology = topology(accountTarget); substitutedTopology.blockers = substituted as never; expectError(() => normalizeTenantPurgeManifestValues(input({ topology: substitutedTopology }))); expect(indexReads).toBe(0);
     for (const keys of [["length"], ["length", "01"], ["length", Symbol("0")]]) { const supplied = topology(accountTarget); supplied.blockers = new Proxy(["LEGAL_HOLD"], { ownKeys() { return keys; } }) as never; expectError(() => normalizeTenantPurgeManifestValues(input({ topology: supplied }))); }
     for (const badLength of [Number.MAX_SAFE_INTEGER + 1, -1, 1.5]) { const fake = {}; Object.defineProperty(fake, "length", { value: badLength }); const supplied = topology(accountTarget); supplied.blockers = fake as never; expectError(() => normalizeTenantPurgeManifestValues(input({ topology: supplied }))); }
+    const bounded = topology(accountTarget); bounded.blockers = Array.from({ length: 100_000 }, (_, index) => `UNKNOWN_${index}`) as never; expectError(() => normalizeTenantPurgeManifestValues(input({ topology: bounded })));
   });
 
   it("rejects holes, accessors, extras, prototype drift, and duplicates in every list", () => {

@@ -70,6 +70,7 @@ const OBJECT_PROTOTYPE = Object.prototype;
 const ARRAY_PROTOTYPE = Array.prototype;
 const DATE_PROTOTYPE = Date.prototype;
 const OBJECT_CREATE = Object.create;
+const DEFINE_PROPERTY = Object.defineProperty;
 const OBJECT_FREEZE = Object.freeze;
 const OBJECT_IS_FROZEN = Object.isFrozen;
 const OBJECT_VALUES = Object.values;
@@ -83,6 +84,9 @@ const REGEXP_TEST = RegExp.prototype.test;
 const IS_SAFE_INTEGER = Number.isSafeInteger;
 const IS_INTEGER = Number.isInteger;
 const IS_FINITE = Number.isFinite;
+const SET = Set;
+const SET_ADD = Set.prototype.add;
+const SET_HAS = Set.prototype.has;
 const UINT8_ARRAY = Uint8Array;
 const DATE = Date;
 const TYPED_ARRAY_PROTOTYPE = GET_PROTOTYPE(Uint8Array.prototype);
@@ -99,7 +103,8 @@ function observe<T>(operation: () => T): T { try { return operation(); } catch {
 function keysMatch(keys: readonly PropertyKey[], shape: readonly string[]) { if (keys.length !== shape.length) return false; for (let index = 0; index < keys.length; index += 1) if (typeof keys[index] !== "string" || !APPLY(ARRAY_INCLUDES, shape, [keys[index]])) return false; return true; }
 function shapeMatches(keys: readonly PropertyKey[], shapes: readonly (readonly string[])[]) { for (let index = 0; index < shapes.length; index += 1) if (keysMatch(keys, shapes[index]!)) return true; return false; }
 function arrayKeysMatch(keys: readonly PropertyKey[], length: number) { if (keys.length !== length + 1) return false; for (let index = 0; index < keys.length; index += 1) { const key = keys[index]; if (typeof key !== "string" || (key !== "length" && (!APPLY(REGEXP_TEST, INDEX, [key]) || TO_NUMBER(key) >= length))) return false; } return true; }
-function hasDuplicate(values: readonly unknown[]) { for (let index = 0; index < values.length; index += 1) for (let prior = 0; prior < index; prior += 1) if (values[index] === values[prior]) return true; return false; }
+function append<T>(values: T[], value: T) { DEFINE_PROPERTY(values, TO_STRING(values.length), { value, enumerable: true, configurable: true, writable: true }); }
+function hasDuplicate(values: readonly unknown[]) { const seen = new SET<unknown>(); for (let index = 0; index < values.length; index += 1) { if (APPLY(SET_HAS, seen, [values[index]])) return true; APPLY(SET_ADD, seen, [values[index]]); } return false; }
 
 function exactRecord(value: unknown, shapes: readonly (readonly string[])[], label: string) {
   const observed = observe(() => ({ prototype: GET_PROTOTYPE(value as object), keys: OWN_KEYS(value as object) }));
@@ -124,7 +129,7 @@ function exactArray(value: unknown, label: string): unknown[] {
   for (let index = 0; index < length; index += 1) {
     const descriptor = observe(() => GET_DESCRIPTOR(value as object, TO_STRING(index)));
     if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid(label);
-    result[result.length] = descriptor.value;
+    append(result, descriptor.value);
   }
   return result;
 }
@@ -149,7 +154,7 @@ function sha(value: unknown): string { if (typeof value !== "string" || !APPLY(R
 function boolean(value: unknown, label: string): boolean { if (typeof value !== "boolean") invalid(label); return value; }
 function integer(value: unknown, label: string, maximum: number, minimum = 1): number { if (typeof value !== "number" || !IS_INTEGER(value) || value < minimum || value > maximum) invalid(label); return value; }
 function nullableUuid(value: unknown, label: string) { return value === null ? null : uuid(value, label); }
-function uuidList(value: unknown, label: string) { const items = exactArray(value, label); const result: string[] = []; for (let index = 0; index < items.length; index += 1) result[index] = uuid(items[index], label); if (hasDuplicate(result)) invalid(label); return result; }
+function uuidList(value: unknown, label: string) { const items = exactArray(value, label); const result: string[] = []; for (let index = 0; index < items.length; index += 1) append(result, uuid(items[index], label)); if (hasDuplicate(result)) invalid(label); return result; }
 function freezeDeep<T>(value: T): T { if (typeof value === "object" && value !== null && !OBJECT_IS_FROZEN(value)) { const children = OBJECT_VALUES(value); for (let index = 0; index < children.length; index += 1) freezeDeep(children[index]); OBJECT_FREEZE(value); } return value; }
 
 function targetSnapshot(value: unknown): TenantPurgeTarget {
@@ -168,7 +173,7 @@ function keySnapshot(value: unknown) {
   const copy = new UINT8_ARRAY(observed.length);
   observe(() => APPLY(UINT8_SET, copy, [value]));
   const bytes: number[] = [];
-  for (let index = 0; index < observed.length; index += 1) bytes[index] = copy[index]!;
+  for (let index = 0; index < observed.length; index += 1) append(bytes, copy[index]!);
   return bytes;
 }
 
