@@ -832,6 +832,9 @@ async function executeVersionedFollowupTools(response: import("@corgtex/models")
 const UNSAFE_VERSIONED_FOLLOWUP = "I could not safely apply that update because the tool sequence did not use a matching observed version."; const VERSIONED_UPDATE_SUMMARY_UNAVAILABLE = "The versioned update was processed, but I could not generate a final summary. Read the current item version before retrying.";
 const VERSIONED_UPDATE_FAILED = "The versioned update could not be completed. Read the current item version before retrying."; const ROUTE_RESPONSE_FAILED = "I could not safely complete that response. Please retry."; const MODEL_BUDGET_EXHAUSTED = "I could not generate a response because the workspace model budget was reached.";
 const ANSWER_ROUTE_NAME = "respond_conversation"; const TOOL_ROUTE_NAME = "route_conversation_tools";
+function toolResultLabel({ toolName, result }: ExecutedConversationToolResult) { const value = isRecord(result) ? result : {}; const found = ([['actionId', 'action'], ['tensionId', 'tension'], ['proposalId', 'proposal'], ['goalId', 'goal'], ['seriesId', 'meeting'], ['sourceId', 'source'], ['memberId', 'member'], ['assignmentId', 'assignment'], ['toolLinkId', 'tool link']] as const).find(([key]) => typeof value[key] === "string"); return found ? `${toolName} (${found[1]} ${escapeMarkdownText(String(value[found[0]]))})` : toolName; }
+function toolResultState(result: unknown) { if (isRecord(result) && (result.success === false || typeof result.error === "string" || result.status === "VERSION_CONFLICT" || result.status === "INVALID_ARGUMENT")) return "failed"; return isRecord(result) && result.success === true ? "succeeded" : "completed"; }
+function toolBudgetFallback(executed: ExecutedConversationToolResult[], failed: FailedConversationToolResult[]) { const states = (["succeeded", "completed", "failed"] as const).flatMap((state) => { const labels = executed.filter(({ result }) => toolResultState(result) === state).map(toolResultLabel); if (state === "failed") labels.push(...failed.map(({ toolName }) => toolName)); return labels.length ? [`${state}: ${labels.join(", ")}`] : []; }); if (!states.length) return MODEL_BUDGET_EXHAUSTED; const hasSuccess = states.some((state) => state.startsWith("succeeded:")); const hasFailure = states.some((state) => state.startsWith("failed:")); return `Tool execution result — ${states.join("; ")}. The workspace model budget was reached before a follow-up summary could be generated. ${hasSuccess ? hasFailure ? "Retry only failed calls after checking current state." : "Do not retry successful calls." : "Check current state before retrying."}`; }
 function matchesJsonSchema(value: unknown, input: unknown): boolean {
   if (!isRecord(input)) return false; const schema = input as Record<string, any>; if ("const" in schema && value !== schema.const) return false; if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return false;
   if (Array.isArray(schema.oneOf)) return schema.oneOf.filter((item: unknown) => matchesJsonSchema(value, item)).length === 1; const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : []; const type = value === null ? "null" : Array.isArray(value) ? "array" : Number.isInteger(value) ? "integer" : typeof value; if (types.length && !types.includes(type) && !(type === "integer" && types.includes("number"))) return false;
@@ -1091,7 +1094,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
     }
 
     let followupMessage = "";
-    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations)) {
+    if (await canRunFollowupModelAfterTools(ctx, pendingCrmOperations, true)) {
       const followup = await defaultModelGateway.chat({
         workspaceId: ctx.workspaceId,
         ...catalogUsageContext(ctx),
@@ -1115,7 +1118,7 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
         }
         finalMessage = followupMessage;
       }
-    }
+    } else if (pendingCrmOperations.length === 0) followupMessage = finalMessage = toolBudgetFallback(executedToolResults, failedToolResults);
     if (!followupMessage.trim()) {
       const toolFallback = crmToolFallback(executedToolResults, ctx.pageContext, failedToolResults)
         ?? (pendingCrmOperations.length === 0 && toolExecutionAttempted ? emptyAssistantFallback() : null);
@@ -1301,11 +1304,12 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   const failedToolResults: FailedConversationToolResult[] = [];
   let toolExecutionAttempted = false;
 
-  const routeIterator = defaultModelGateway.chatEventStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, tools: conversationRouteTools(tools), tool_choice: "required", signal: ctx.signal })[Symbol.asyncIterator]();
+  const fakeAnswerOnly = env.MODEL_PROVIDER === "fake";
+  const routeIterator = defaultModelGateway.chatEventStream({ workspaceId: ctx.workspaceId, ...catalogUsageContext(ctx), model: env.MODEL_CHAT_CONVERSATION, taskType: "AGENT", messages, ...(fakeAnswerOnly ? {} : { tools: conversationRouteTools(tools), tool_choice: "required" as const }), signal: ctx.signal })[Symbol.asyncIterator]();
   let routeResponse: import("@corgtex/models").ChatCompletionResponse | null = null; let routeError: unknown; let routeCompleted = false; let routeInvalid = false; let routeSeen = false;
   let routeId = ""; let routeName = ""; let routeArguments = ""; let answerMessage = ""; let answerDecoder: IncrementalJsonStringDecoder | null = null;
   try { while (true) { const next = await routeIterator.next(); if (next.done) { routeCompleted = true; routeResponse = next.value; break; } const event = next.value;
-    if (event.type === "content_delta") { routeInvalid = true; continue; } routeSeen = true; if (event.index !== 0) { routeInvalid = true; continue; }
+    if (event.type === "content_delta") { if (!fakeAnswerOnly) routeInvalid = true; else { answerMessage += event.content; yield event.content; } continue; } if (fakeAnswerOnly) { routeInvalid = true; continue; } routeSeen = true; if (event.index !== 0) { routeInvalid = true; continue; }
     routeId += event.idDelta ?? ""; routeName += event.nameDelta ?? ""; routeArguments += event.argumentsDelta;
     if (!ANSWER_ROUTE_NAME.startsWith(routeName) && !TOOL_ROUTE_NAME.startsWith(routeName)) routeInvalid = true;
     if (!routeInvalid && routeName === ANSWER_ROUTE_NAME) { answerDecoder ??= new IncrementalJsonStringDecoder("answer"); const decoded = answerDecoder.push(routeArguments.slice(answerDecoder.processedCharacters)); if (decoded.state === "malformed") routeInvalid = true; else if (decoded.delta) { answerMessage += decoded.delta; yield decoded.delta; } }
@@ -1313,8 +1317,8 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
   throwIfConversationCanceled(ctx, routeError);
   const [terminalRoute] = routeResponse?.tool_calls ?? []; const exactRoute = routeCompleted && !routeError && !routeInvalid && routeSeen && routeResponse?.content === "" && routeResponse.tool_calls?.length === 1 && terminalRoute?.id === routeId && terminalRoute.function.name === routeName && terminalRoute.function.arguments === routeArguments;
   const answerArgs = exactRoute && routeName === ANSWER_ROUTE_NAME ? parseToolArgs(routeArguments) : null;
-  const answerValid = isRecord(answerArgs) && Object.keys(answerArgs).length === 1 && typeof answerArgs.answer === "string" && answerArgs.answer === answerMessage && answerDecoder?.finish().state === "complete";
-  const initialCalls = exactRoute && routeName === TOOL_ROUTE_NAME && routeResponse ? routedToolCalls(routeResponse, tools) : null;
+  const answerValid = fakeAnswerOnly ? routeCompleted && !routeError && !routeInvalid && !routeSeen && routeResponse?.content === answerMessage && !routeResponse.tool_calls?.length : isRecord(answerArgs) && Object.keys(answerArgs).length === 1 && typeof answerArgs.answer === "string" && answerArgs.answer === answerMessage && answerDecoder?.finish().state === "complete";
+  const initialCalls = !fakeAnswerOnly && exactRoute && routeName === TOOL_ROUTE_NAME && routeResponse ? routedToolCalls(routeResponse, tools) : null;
   if (answerValid) finalMessage = answerMessage;
   else if (!initialCalls) { const failure = !answerMessage && isBudgetExceededError(routeError) ? MODEL_BUDGET_EXHAUSTED : ROUTE_RESPONSE_FAILED; const failedMessage = answerMessage ? `${answerMessage}\n\n${failure}` : failure; yield failedMessage.slice(answerMessage.length); finalMessage = failedMessage; }
   else {
@@ -1393,7 +1397,7 @@ export async function* processConversationTurnStream(ctx: ConversationContext): 
     const followupState = initialMutationRejected ? "rejected"
       : followupResult ? await executeVersionedFollowupTools(followupResult, followupTools, actor, ctx, messages, executedToolResults, failedToolResults) : "none";
     if (followupStreamFailed && versionReadPending) finalMessage = "";
-    if (followupBudgetExhausted) { finalMessage = MODEL_BUDGET_EXHAUSTED; yield finalMessage; }
+    if (followupBudgetExhausted) { finalMessage = toolBudgetFallback(executedToolResults, failedToolResults); yield finalMessage; }
     else if (followupState === "none") { if (!followupStreamFailed) finalMessage = (versionReadPending ? "" : finalMessage) + followupMessage; if (finalMessage) yield finalMessage; }
     else if (followupState === "rejected") { finalMessage = UNSAFE_VERSIONED_FOLLOWUP; yield finalMessage; }
     else if (followupState === "executed") {
