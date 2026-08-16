@@ -28,9 +28,15 @@ if (!["present", "scope", "policy"].includes(mode)) {
 
 const LOCAL_PLAN_DIR = path.join(".agents", "plans");
 const PROTECTED_PATHS = [
+  /^AGENTS\.md$/,
+  /^\.agents\/plan-template\.md$/,
+  /^\.codex\/review\.md$/,
+  /^\.codex\/ops\//,
+  /^\.github\/pull_request_template\.md$/,
   /^deploy\//,
   /^\.github\/workflows\//,
   /^prisma\/migrations\//,
+  /^scripts\/check-plan\.mjs$/,
   /^packages\/domain\/src\/auth.*\.ts$/,
   /^apps\/web\/lib\/auth\.ts$/,
 ];
@@ -335,7 +341,19 @@ if (branch === "main" || branch === "HEAD") {
   ok(`skipped on ${branch}`);
 }
 
-if (labels.has("auto-revert") && mode === "present") {
+const blockingLabels = ["halt-agents", "needs-replan"].filter((label) =>
+  labels.has(label),
+);
+if (blockingLabels.length > 0) {
+  fail(`blocking label(s) present: ${blockingLabels.join(", ")}`);
+}
+
+const autoRevert = labels.has("auto-revert");
+if (autoRevert && !/^auto-revert\/[0-9a-f]{7,40}$/.test(branch)) {
+  fail("auto-revert label is valid only on an auto-revert/<sha> branch");
+}
+
+if (autoRevert && mode === "present") {
   ok("auto-revert label present, plan presence skipped");
 }
 
@@ -364,7 +382,7 @@ const base = baseRef();
 
 if (mode === "scope") {
   const files = changedFiles(base);
-  if (!labels.has("auto-revert")) {
+  if (!autoRevert) {
     const planText = readPlanText(branch);
     assertPlanHasNoCredentialMaterial(planText);
     const allowlist = parseAllowlist(planText);
@@ -393,7 +411,7 @@ if (mode === "scope") {
 }
 
 if (mode === "policy") {
-  if (labels.has("auto-revert")) {
+  if (autoRevert) {
     ok("auto-revert label present, policy skipped");
   }
 

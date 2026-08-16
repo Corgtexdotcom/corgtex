@@ -12,6 +12,11 @@ The repository policy assumes an active ruleset for `main` with:
 - direct pushes and force pushes blocked; and
 - no agent bypass of these protections.
 
+`.github/workflows/pr-policy-metadata.yml` must remain enabled. It revalidates live
+PR metadata from trusted default-branch code and refreshes the policy statuses
+without rerunning build and test jobs. Invalid metadata removes the PR from the
+merge queue.
+
 Required checks:
 
 - `Lint, Typecheck & Test`

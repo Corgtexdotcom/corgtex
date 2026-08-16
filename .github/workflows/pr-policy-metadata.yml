@@ -1,0 +1,130 @@
+name: PR Metadata Policy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [edited, labeled, unlabeled, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: pr-metadata-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  revalidate:
+    name: Revalidate PR metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # pull_request_target is privileged. Run only the policy script from the
+      # trusted base SHA; the PR checkout is data and is never executed.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Revalidate live PR metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          contexts=("PR Policy" "Plan Present" "Scope Check" "Diff Size")
+
+          publish() {
+            local state="$1"
+            local description="$2"
+            for context in "${contexts[@]}"; do
+              gh api --method POST \
+                "repos/$GITHUB_REPOSITORY/statuses/$PR_HEAD_SHA" \
+                -f state="$state" \
+                -f context="$context" \
+                -f description="$description" >/dev/null
+            done
+          }
+
+          dequeue() {
+            local entry_id
+            entry_id="$(gh api graphql \
+              -F owner="${GITHUB_REPOSITORY%/*}" \
+              -F name="${GITHUB_REPOSITORY#*/}" \
+              -F number="$PR_NUMBER" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeQueueEntry{id}}}}' \
+              --jq '.data.repository.pullRequest.mergeQueueEntry.id // empty')"
+            if [ -n "$entry_id" ]; then
+              gh api graphql \
+                -F id="$entry_id" \
+                -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}' \
+                >/dev/null
+            fi
+          }
+
+          fail_closed() {
+            local exit_code="$?"
+            trap - ERR
+            publish failure "Live PR metadata failed policy" || true
+            dequeue || true
+            exit "$exit_code"
+          }
+
+          trap fail_closed ERR
+          publish pending "Revalidating live PR metadata"
+
+          cp scripts/check-plan.mjs "$RUNNER_TEMP/trusted-check-plan.mjs"
+          git fetch --no-tags origin \
+            "$PR_BASE_SHA" \
+            "pull/$PR_NUMBER/head:refs/remotes/origin/pr-policy-head"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          test "$(git rev-parse refs/remotes/origin/pr-policy-head)" = "$PR_HEAD_SHA"
+          git update-ref "refs/remotes/origin/$PR_BASE_REF" "$PR_BASE_SHA"
+          git checkout --detach "$PR_HEAD_SHA"
+
+          export GITHUB_BASE_REF="$PR_BASE_REF"
+          export GITHUB_HEAD_REF="$PR_HEAD_REF"
+          node "$RUNNER_TEMP/trusted-check-plan.mjs" --mode=present
+          node "$RUNNER_TEMP/trusted-check-plan.mjs" --mode=scope
+          node "$RUNNER_TEMP/trusted-check-plan.mjs" --mode=policy
+
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+            > "$RUNNER_TEMP/live-pr.json"
+          LIVE_PR_PATH="$RUNNER_TEMP/live-pr.json" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const live = JSON.parse(readFileSync(process.env.LIVE_PR_PATH, "utf8"));
+          const expectedLabels = process.env.PR_LABELS.split(",").filter(Boolean).sort();
+          const liveLabels = live.labels.map(({ name }) => name).sort();
+          const unchanged =
+            live.state === "open" &&
+            live.head.sha === process.env.PR_HEAD_SHA &&
+            live.base.sha === process.env.PR_BASE_SHA &&
+            live.head.ref === process.env.PR_HEAD_REF &&
+            live.base.ref === process.env.PR_BASE_REF &&
+            (live.body ?? "") === process.env.PR_BODY &&
+            String(live.draft) === process.env.PR_DRAFT &&
+            JSON.stringify(liveLabels) === JSON.stringify(expectedLabels);
+
+          if (!unchanged) {
+            throw new Error("live PR metadata changed during policy evaluation");
+          }
+          NODE
+
+          publish success "Live PR metadata satisfies policy"
+          trap - ERR

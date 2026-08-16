@@ -36,16 +36,20 @@ diff size:
 - `critical`: auth, permissions, tenant isolation, secrets, migrations, deploy,
   destructive production data work, or agent/CI protection policy.
 
-Protected paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`,
-`packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`) require `critical` risk and
-an explicit justification in the PR body. They do not require a size exception or
-special label.
+Protected paths (`AGENTS.md`, `.agents/plan-template.md`, `.codex/review.md`,
+`.codex/ops/**`, `.github/pull_request_template.md`, `.github/workflows/**`,
+`scripts/check-plan.mjs`, `deploy/**`, `prisma/migrations/**`,
+`packages/domain/src/auth*.ts`, and `apps/web/lib/auth.ts`) require `critical` risk
+and an explicit justification in the PR body. They do not require a size exception
+or special label.
 
 The independent reviewer reads the complete current diff and blocks only objective
 correctness, security, privacy/data, acceptance, test, proof, or CI failures. Do not
 block on taste, speculative architecture, plan wording, or size alone. A push or
 base change invalidates prior approval; native GitHub rules provide the exact-head
-approval, thread-resolution, required-check, and merge-queue boundary.
+approval, thread-resolution, required-check, and merge-queue boundary. A trusted
+metadata workflow revalidates the live PR body, labels, and draft state without
+rerunning the expensive code checks, and removes an invalid PR from the queue.
 
 ## Build and test
 
