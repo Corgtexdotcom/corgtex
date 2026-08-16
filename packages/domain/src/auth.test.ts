@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, envMock, verifyPasswordMock, parseAllowedWorkspaceIdsMock } = vi.hoisted(() => ({
+const { prismaMock, envMock, verifyPasswordMock } = vi.hoisted(() => ({
   prismaMock: {
     user: {
       findUnique: vi.fn(),
@@ -17,21 +17,21 @@ const { prismaMock, envMock, verifyPasswordMock, parseAllowedWorkspaceIdsMock } 
       findUnique: vi.fn(),
     },
     workspace: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
   },
   envMock: {
     SESSION_LAST_SEEN_WRITE_INTERVAL_MS: 5 * 60 * 1000,
+    DEPLOYMENT_WORKSPACE_SCOPE_SLUG: undefined as string | undefined,
   },
   verifyPasswordMock: vi.fn(),
-  parseAllowedWorkspaceIdsMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
   env: envMock,
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash-password:${value}`),
-  parseAllowedWorkspaceIds: parseAllowedWorkspaceIdsMock,
   randomOpaqueToken: vi.fn(() => "plain-token"),
   sha256: vi.fn((value: string) => `hash:${value}`),
   verifyPassword: verifyPasswordMock,
@@ -68,7 +68,7 @@ describe("auth domain", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-24T12:00:00.000Z"));
     vi.clearAllMocks();
-    parseAllowedWorkspaceIdsMock.mockReturnValue(new Set<string>());
+    envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = undefined;
     prismaMock.session.create.mockResolvedValue({});
     prismaMock.session.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.session.deleteMany.mockResolvedValue({ count: 1 });
@@ -272,6 +272,67 @@ describe("auth domain", () => {
       });
     });
 
+    it("fails closed when an agent has no workspace scope", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      await expect(requireWorkspaceMembership({
+        actor: { ...agentActor, workspaceIds: [] },
+        workspaceId: "workspace-1",
+      })).rejects.toMatchObject({
+        status: 403,
+        code: "AGENT_WORKSPACE_SCOPE_REQUIRED",
+      });
+    });
+
+    it("does not let a resolved human membership bypass agent workspace scope", async () => {
+      const { requireWorkspaceMembership } = await import("./auth");
+      await expect(requireWorkspaceMembership({
+        actor: { ...agentActor, workspaceIds: [] },
+        workspaceId: "workspace-1",
+        resolvedMembership: {
+          id: "member-1",
+          workspaceId: "workspace-1",
+          userId: "user-1",
+          role: "ADMIN",
+          isActive: true,
+        },
+      })).rejects.toMatchObject({
+        status: 403,
+        code: "AGENT_WORKSPACE_SCOPE_REQUIRED",
+      });
+    });
+
+    it("enforces dedicated deployment scope before user membership authorization", async () => {
+      envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = "customer-alpha";
+      prismaMock.workspace.findFirst.mockResolvedValue(null);
+
+      const { requireWorkspaceMembership } = await import("./auth");
+      await expect(requireWorkspaceMembership({ actor: userActor, workspaceId: "workspace-other" })).rejects.toMatchObject({
+        status: 403,
+        code: "WORKSPACE_SCOPE_MISMATCH",
+      });
+      expect(prismaMock.member.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("allows the configured dedicated workspace before checking membership", async () => {
+      envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = "customer-alpha";
+      prismaMock.workspace.findFirst.mockResolvedValue({ id: "workspace-1" });
+      const membership = {
+        id: "member-1",
+        workspaceId: "workspace-1",
+        userId: "user-1",
+        role: "ADMIN",
+        isActive: true,
+      };
+      prismaMock.member.findUnique.mockResolvedValue(membership);
+
+      const { requireWorkspaceMembership } = await import("./auth");
+      await expect(requireWorkspaceMembership({ actor: userActor, workspaceId: "workspace-1" })).resolves.toEqual(membership);
+      expect(prismaMock.workspace.findFirst).toHaveBeenCalledWith({
+        where: { id: "workspace-1", slug: "customer-alpha" },
+        select: { id: true },
+      });
+    });
+
     it("returns an admin membership for a global operator", async () => {
       const { requireWorkspaceMembership } = await import("./auth");
       await expect(requireWorkspaceMembership({ actor: operatorActor, workspaceId: "workspace-1" })).resolves.toMatchObject({
@@ -332,6 +393,24 @@ describe("auth domain", () => {
 
       expect(prismaMock.workspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: { in: ["workspace-1"] } },
+      }));
+    });
+
+    it("returns no workspaces for an unscoped agent", async () => {
+      const { listActorWorkspaces } = await import("./auth");
+      await expect(listActorWorkspaces({ ...agentActor, workspaceIds: [] })).resolves.toEqual([]);
+      expect(prismaMock.workspace.findMany).not.toHaveBeenCalled();
+    });
+
+    it("limits workspace listings to the configured dedicated workspace", async () => {
+      envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = "customer-alpha";
+      prismaMock.workspace.findMany.mockResolvedValue([{ id: "workspace-1", slug: "customer-alpha" }]);
+
+      const { listActorWorkspaces } = await import("./auth");
+      await listActorWorkspaces(agentActor);
+
+      expect(prismaMock.workspace.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: { in: ["workspace-1"] }, slug: "customer-alpha" },
       }));
     });
 

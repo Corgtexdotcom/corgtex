@@ -91,6 +91,7 @@ type Env = {
   readonly CONTROL_PLANE_AGENT_API_KEY: string | undefined;
   readonly CONTROL_PLANE_AGENT_SCOPES: string | undefined;
   readonly WORKSPACE_SLUG: string | undefined;
+  readonly DEPLOYMENT_WORKSPACE_SCOPE_SLUG: string | undefined;
   readonly SESSION_COOKIE_SECRET: string;
   readonly SESSION_LAST_SEEN_WRITE_INTERVAL_MS: number;
   readonly REDIS_URL: string | undefined;
@@ -201,6 +202,9 @@ export const env: Env = {
   },
   get WORKSPACE_SLUG() {
     return optional("WORKSPACE_SLUG");
+  },
+  get DEPLOYMENT_WORKSPACE_SCOPE_SLUG() {
+    return deploymentWorkspaceScopeSlug() ?? undefined;
   },
   get SESSION_COOKIE_SECRET() {
     if (nodeEnv() === "production") {
@@ -432,4 +436,39 @@ export function parseAllowedWorkspaceIds(raw = env.AGENT_ALLOWED_WORKSPACE_IDS) 
       .map((value) => value.trim())
       .filter(Boolean),
   );
+}
+
+const SHARED_APP_HOSTS = new Set([
+  "app.corgtex.com",
+  "ops.corgtex.com",
+  "selfserve.corgtex.com",
+]);
+
+const LOCAL_APP_HOSTS = new Set([
+  "0.0.0.0",
+  "127.0.0.1",
+  "::1",
+  "localhost",
+]);
+
+function deploymentWorkspaceScopeSlug() {
+  if (env.CONTROL_PLANE_MODE) {
+    return null;
+  }
+
+  const workspaceSlug = env.WORKSPACE_SLUG?.trim().toLowerCase();
+  if (!workspaceSlug) {
+    return null;
+  }
+
+  try {
+    const hostname = new URL(env.APP_URL).hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+    if (SHARED_APP_HOSTS.has(hostname) || LOCAL_APP_HOSTS.has(hostname)) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return workspaceSlug;
 }

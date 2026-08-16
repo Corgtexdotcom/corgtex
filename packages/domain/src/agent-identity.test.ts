@@ -14,6 +14,7 @@ import {
 import { prisma } from "@corgtex/shared";
 
 vi.mock("@corgtex/shared", () => ({
+  env: { DEPLOYMENT_WORKSPACE_SCOPE_SLUG: undefined },
   prisma: {
     agentIdentity: {
       create: vi.fn(),
