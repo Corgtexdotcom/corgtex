@@ -182,6 +182,9 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_BODY: ${{ github.event.pull_request.body }}
+      - name: Test policy workflow invariants
+        if: github.event_name == 'pull_request'
+        run: node --test scripts/check-plan-policy.test.mjs
       - name: Merge queue policy gate
         if: github.event_name == 'merge_group'
         run: echo "PR Policy passed on pull_request before merge queue entry."
@@ -191,7 +194,7 @@ jobs:
   plan-present-compat:
     name: Plan Present
     needs: pr-policy
-    if: always()
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.pr-policy.result }}" = "success"
@@ -199,7 +202,7 @@ jobs:
   scope-check-compat:
     name: Scope Check
     needs: pr-policy
-    if: always()
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.pr-policy.result }}" = "success"
@@ -207,7 +210,7 @@ jobs:
   diff-size-compat:
     name: Diff Size
     needs: pr-policy
-    if: always()
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.pr-policy.result }}" = "success"

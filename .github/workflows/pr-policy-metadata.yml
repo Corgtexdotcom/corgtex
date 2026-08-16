@@ -61,27 +61,58 @@ jobs:
             done
           }
 
-          dequeue() {
-            local entry_id
-            entry_id="$(gh api graphql \
+          read_queue_state() {
+            gh api graphql \
               -F owner="${GITHUB_REPOSITORY%/*}" \
               -F name="${GITHUB_REPOSITORY#*/}" \
               -F number="$PR_NUMBER" \
-              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeQueueEntry{id}}}}' \
-              --jq '.data.repository.pullRequest.mergeQueueEntry.id // empty')"
-            if [ -n "$entry_id" ]; then
-              gh api graphql \
-                -F id="$entry_id" \
-                -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}' \
-                >/dev/null
+              -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id mergeQueueEntry{id}}}}' \
+              --jq '[.data.repository.pullRequest.id, (.data.repository.pullRequest.mergeQueueEntry.id // "")] | @tsv'
+          }
+
+          dequeue() {
+            local pr_id entry_id
+            IFS=$'\t' read -r pr_id entry_id <<< "$(read_queue_state)"
+            if [ -z "$pr_id" ]; then
+              echo "Unable to read pull-request queue state." >&2
+              return 1
             fi
+            if [ -z "$entry_id" ]; then
+              return 0
+            fi
+
+            for attempt in 1 2 3; do
+              if gh api graphql \
+                -F id="$pr_id" \
+                -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){clientMutationId}}' \
+                >/dev/null; then
+                local current_pr_id current_entry_id
+                IFS=$'\t' read -r current_pr_id current_entry_id \
+                  <<< "$(read_queue_state)"
+                if [ "$current_pr_id" != "$pr_id" ]; then
+                  echo "Pull-request identity changed during queue removal." >&2
+                  return 1
+                fi
+                if [ -z "$current_entry_id" ]; then
+                  return 0
+                fi
+              fi
+              sleep "$attempt"
+            done
+
+            echo "Unable to confirm removal of PR #$PR_NUMBER from the merge queue." >&2
+            return 1
           }
 
           fail_closed() {
             local exit_code="$?"
             trap - ERR
-            publish failure "Live PR metadata failed policy" || true
-            dequeue || true
+            if ! publish failure "Live PR metadata failed policy"; then
+              echo "Unable to publish failing PR policy statuses." >&2
+            fi
+            if ! dequeue; then
+              echo "Unable to enforce merge-queue removal." >&2
+            fi
             exit "$exit_code"
           }
 
