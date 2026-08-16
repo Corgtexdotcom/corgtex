@@ -129,8 +129,7 @@ describe("Corporate Rebels dedicated cutover", () => {
       await expect(execute(fake(), fake("ops"), fake("selfserve"), { fetchFn: async () => ({ ok: true,
         json: async () => body }) })).rejects.toThrow("health proof");
   });
-  it("fails before writes on held state, files, integrations, scalar, OAuth, binding,
-    or runtime payloads", async () => {
+  it("fails before writes on held or retained tenant state", async () => {
     for (const [label, options] of Object.entries({ drift: { drift: true }, attachments: { attachments: 1 },
       documents: { documents: 1 }, integration: { integration: true }, content: { contentSource: 1 },
       scalar: { scalar: 1 }, oauth: { oauth: 1 }, binding: { binding: 1 }, runtime: { orphanable: 1 } })) {
