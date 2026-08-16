@@ -10,7 +10,7 @@ const health = () => ({ status: "ok", database: "up", schema: "ready",
     imageTag: `sha-${SHA}`, version: `main-${SHA.slice(0, 12)}`,
     drift: { gitSha: false, imageTag: false, version: false } } });
 const healthy = async () => ({ ok: true, json: async () => health() });
-const databaseUrl = `postgresql://user:pass@${CONTRACT.databaseHost}/${CONTRACT.databaseName}`;
+const databaseUrl = `postgresql://user:pass@${CONTRACT.databaseHost}/${CONTRACT.databaseName}?sslmode=require`;
 
 function fake(options = {}) {
   const state = { workspaces: options.workspaces ?? [{ id: "sentinel", name: "Other", slug: "other" }],
@@ -76,7 +76,8 @@ describe("Corporate Rebels dedicated seed", () => {
   it("rejects foreign databases and unhealthy releases before writes", async () => {
     for (const url of ["postgresql://u:p@foreign.invalid/corgtex",
       `postgresql://u:p@${CONTRACT.databaseHost}:5432/corgtex`,
-      `postgresql://u:p@${CONTRACT.databaseHost}/foreign`]) {
+      `postgresql://u:p@${CONTRACT.databaseHost}/foreign?sslmode=require`,
+      `postgresql://u:p@${CONTRACT.databaseHost}/corgtex?sslmode=require&schema=staging`]) {
       const target = fake();
       await expect(run(target, { databaseUrl: url })).rejects.toThrow("database identity");
       expect(target.state.workspaces).toHaveLength(1);
@@ -98,5 +99,11 @@ describe("Corporate Rebels dedicated seed", () => {
     const existing = fake({ workspaces: [{ id: "one", name: CONTRACT.name,
       slug: CONTRACT.slug, plan: "ENTERPRISE_MANAGED" }] });
     await expect(run(existing)).rejects.toThrow("seed verification");
+    const corrupted = fake(); await run(corrupted);
+    corrupted.state.sources[1] = { ...corrupted.state.sources[0], id: "duplicate" };
+    await expect(run(corrupted)).rejects.toThrow("seed verification");
+    corrupted.state.sources[1] = { ...corrupted.state.sources[0],
+      externalId: "corporate-rebels-curation:CR-002", accessDomain: "PUBLIC" };
+    await expect(run(corrupted)).rejects.toThrow("seed verification");
   });
 });

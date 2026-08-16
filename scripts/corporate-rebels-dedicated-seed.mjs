@@ -47,7 +47,9 @@ export async function loadManifest(read = readFile) {
 function verifyDatabaseUrl(value) {
   let url; try { url = new URL(value); } catch { fail("Dedicated database URL is invalid."); }
   if (!["postgres:", "postgresql:"].includes(url.protocol) || url.hostname !== CONTRACT.databaseHost
-    || url.port || url.pathname.slice(1) !== CONTRACT.databaseName) fail("Dedicated database identity mismatch.");
+    || url.port || url.pathname.slice(1) !== CONTRACT.databaseName || url.hash
+    || url.searchParams.size !== 1 || url.searchParams.get("sslmode") !== "require")
+    fail("Dedicated database identity mismatch.");
 }
 
 async function verifyHealth(fetchFn, releaseGitSha) {
@@ -89,13 +91,24 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
     isPrivate: true, publishedAt: true, frontmatterJson: true } });
   const receipt = await db.auditLog.findFirst({ where: { workspaceId,
     action: "corporate_rebels.dedicated_seeded" }, orderBy: { createdAt: "desc" }, select: { meta: true } });
-  const seeded = await db.brainSource.findMany({ where: { workspaceId }, select: { externalId: true } });
-  const expectedIds = new Set(rows.map((row) => `corporate-rebels-curation:${row.id}`));
+  const seeded = await db.brainSource.findMany({ where: { workspaceId }, select: { externalId: true,
+    accessDomain: true, sourceType: true, tier: true, channel: true, content: true, metadata: true } });
+  const expected = new Map(sources(rows).map((source) => [source.externalId, source]));
+  const seen = new Set();
+  const invalidSource = seeded.some((source) => {
+    const wanted = expected.get(source.externalId); seen.add(source.externalId);
+    return !wanted || source.accessDomain !== wanted.accessDomain || source.sourceType !== wanted.sourceType
+      || source.tier !== wanted.tier || source.channel !== wanted.channel || source.content !== wanted.content
+      || source.metadata?.manifestId !== wanted.metadata.manifestId
+      || source.metadata?.canonicalUrl !== wanted.metadata.canonicalUrl
+      || source.metadata?.manifestSha256 !== CONTRACT.manifestSha256
+      || source.metadata?.permittedIngestionMode !== wanted.metadata.permittedIngestionMode;
+  });
   if (!workspace || workspace.name !== CONTRACT.name || workspace.slug !== CONTRACT.slug
     || workspace.plan !== "ENTERPRISE_MANAGED" || workspace._count.members
     || workspace._count.memberInviteRequests || workspace._count.brainSources !== 25
-    || workspace._count.brainArticles !== 1 || seeded.length !== expectedIds.size
-    || seeded.some(({ externalId }) => !expectedIds.has(externalId))
+    || workspace._count.brainArticles !== 1 || seeded.length !== expected.size || seen.size !== expected.size
+    || invalidSource
     || article?.authority !== "DRAFT" || !article.isPrivate || article.publishedAt
     || article.frontmatterJson?.manifestSha256 !== CONTRACT.manifestSha256
     || receipt?.meta?.sourceCount !== 25 || receipt.meta.releaseGitSha !== releaseGitSha
