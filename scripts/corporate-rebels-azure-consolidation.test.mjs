@@ -27,12 +27,14 @@ function fakeDatabase(kind, { ambiguous = false, attachments = 0, orphanable = 0
   };
   const deployment = { id: CONTRACT.opsDeploymentId, managedWorkspaceId: oldId,
     customerAccountId: CONTRACT.opsAccountId, customerSlug: CONTRACT.slug,
-    label: CONTRACT.name, cloudProvider: "RAILWAY" };
+    label: CONTRACT.name, cloudProvider: "RAILWAY", lastHealthError: "stale Railway error", lastWorkerHealthStatus: "stale",
+    lastReleaseCheck: new Date("2025-01-01T00:00:00.000Z") };
   const host = { id: CONTRACT.azureHostDeploymentId, cloudProvider: "AZURE", deploymentStatus: "ACTIVE",
     url: "https://selfserve.corgtex.com", region: "westus3", dataResidency: "US",
     providerResourceGroup: CONTRACT.azureResourceGroup, providerEnvironmentId: invalidHost ? null : CONTRACT.azureEnvironmentId,
     providerWebServiceId: CONTRACT.azureWebServiceId, providerWorkerServiceId: CONTRACT.azureWorkerServiceId,
-    releaseImageTag: "sha-reviewed", lastHealthStatus: "ok" };
+    releaseImageTag: "sha-reviewed", lastHealthStatus: "ok", lastHealthError: null, lastWorkerHealthStatus: "ok",
+    lastWorkerHealthCheck: new Date("2026-08-15T00:00:00.000Z"), lastReleaseCheck: null };
   const tx = { workspace: workspaceModel,
     approvalPolicy: { create: async ({ data }) => { state.policies.push(data); } },
     brainSource: { count: async () => attachments,
@@ -41,8 +43,8 @@ function fakeDatabase(kind, { ambiguous = false, attachments = 0, orphanable = 0
     document: { count: async () => 0 }, meetingAudioAsset: { count: async () => 0 },
     workspaceExternalResourceAttachment: { count: async () => 0 },
     buildArtifactAsset: { count: async () => 0 },
-    event: { count: async () => orphanable }, workflowJob: { count: async () => 0 },
-    meetingRecorderProviderEvent: { count: async () => 0 },
+    event: { count: async () => 0 }, workflowJob: { count: async () => 0 },
+    meetingRecorderProviderEvent: { count: async () => 0 }, communicationInboundEvent: { count: async () => orphanable },
     brainArticle: { create: async ({ data }) => { state.articles.push({ id: "article", ...data }); } },
     auditLog: { create: async ({ data }) => { state.audits.push(data); } },
     customerDeployment: { findUnique: async ({ where }) => where.id === deployment.id ? deployment : host,
@@ -128,7 +130,8 @@ describe("Corporate Rebels Azure consolidation", () => {
       readManifest: manifestBytes });
     expect(receipt.deployment).toMatchObject({ cloudProvider: "AZURE", remoteWorkspaceId: azureWorkspaceId,
       managedWorkspaceId: null });
-    expect(deployment.deploymentKind).toBe("REMOTE_MANAGED");
+    expect(deployment).toMatchObject({ deploymentKind: "SHARED_WORKSPACE", lastHealthError: null,
+      lastWorkerHealthStatus: "ok", lastReleaseCheck: null });
     expect(deployment.url).toBe(CONTRACT.azureWebUrl);
     expect(state.workspaces).toEqual([{ id: "other-workspace", name: "Untouched Tenant", slug: "untouched-tenant" }]);
     expect(state.events).toHaveLength(1);

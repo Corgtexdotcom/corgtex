@@ -69,7 +69,7 @@ async function exactWorkspace(prisma, id) {
     prisma.buildArtifactAsset.count({ where: { artifact: { workspaceId: id } } }),
     prisma.event.count({ where: { workspaceId: id } }),
     prisma.workflowJob.count({ where: { workspaceId: id } }),
-    prisma.meetingRecorderProviderEvent.count({ where: { workspaceId: id } }),
+    prisma.meetingRecorderProviderEvent.count({ where: { workspaceId: id } }), prisma.communicationInboundEvent.count({ where: { workspaceId: id } }),
   ]);
   const fileAttachments = safetyCounts.slice(0, 5).reduce((sum, count) => sum + count, 0);
   if (fileAttachments) fail(`Corporate Rebels workspace ${id} has file attachments.`);
@@ -137,7 +137,6 @@ async function azurePhase(prisma, manifest, execute) {
       azureEvidence: azureEvidence(result.id) };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-
 async function exactOpsState(prisma) {
   const legacy = await exactWorkspace(prisma, CONTRACT.opsLegacyWorkspaceId);
   const deployment = await prisma.customerDeployment.findUnique({ where: { id: CONTRACT.opsDeploymentId } });
@@ -155,7 +154,6 @@ async function exactOpsState(prisma) {
     || coordinates.some((value, index) => value !== expected[index])) fail("Azure host registry identity is not exact.");
   return { legacy, deployment, host, account };
 }
-
 async function opsPhase(prisma, azureWorkspaceId, evidence, execute) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(azureWorkspaceId ?? "")
     || [CONTRACT.azureLegacyWorkspaceId, CONTRACT.opsLegacyWorkspaceId].includes(azureWorkspaceId)) {
@@ -173,11 +171,12 @@ async function opsPhase(prisma, azureWorkspaceId, evidence, execute) {
     const providerKeys = ["region", "dataResidency", "providerSubscriptionId", "providerResourceGroup",
       "providerProjectId", "providerEnvironmentId", "providerWebServiceId", "providerWorkerServiceId",
       "providerPostgresServiceId", "providerRedisServiceId", "providerStorageResourceId", "providerLogsUrl",
-      "providerCostUrl", "releaseVersion", "releaseImageTag", "lastHealthCheck", "lastHealthStatus"];
+      "providerCostUrl", "releaseVersion", "releaseImageTag", "lastHealthCheck", "lastHealthStatus", "lastHealthError",
+      "lastWorkerHealthCheck", "lastWorkerHealthStatus", "lastReleaseCheck"];
     const provider = Object.fromEntries(providerKeys.map((key) => [key, locked.host[key] ?? null]));
     await tx.customerDeployment.update({ where: { id: locked.deployment.id }, data: { ...provider,
       url: CONTRACT.azureWebUrl,
-      deploymentKind: "REMOTE_MANAGED", deploymentStatus: "ACTIVE", cloudProvider: "AZURE",
+      deploymentKind: "SHARED_WORKSPACE", deploymentStatus: "ACTIVE", cloudProvider: "AZURE",
       remoteWorkspaceId: azureWorkspaceId, remoteWorkspaceSlug: CONTRACT.slug, managedWorkspaceId: null,
       provisioningStatus: "active", bootstrapStatus: "completed", supportBaseUrl: null,
       supportMcpUrl: null, supportCredentialEnc: null, supportCredentialLabel: null,
@@ -196,7 +195,6 @@ async function opsPhase(prisma, azureWorkspaceId, evidence, execute) {
     return { mode: "executed", ...preflight, deployment: result };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-
 export async function runCorporateRebelsConsolidation({ prisma, phase, execute = false,
   confirmation, azureWorkspaceId, azurePhaseEvidence, readManifest } = {}) {
   if (phase !== "azure" && phase !== "ops") fail("Phase must be azure or ops.");
@@ -205,7 +203,6 @@ export async function runCorporateRebelsConsolidation({ prisma, phase, execute =
   return phase === "azure" ? azurePhase(prisma, manifest, execute)
     : opsPhase(prisma, azureWorkspaceId, azurePhaseEvidence, execute);
 }
-
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const prisma = new PrismaClient();
   try {
