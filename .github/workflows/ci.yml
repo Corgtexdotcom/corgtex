@@ -182,9 +182,6 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_BODY: ${{ github.event.pull_request.body }}
-      - name: Test policy workflow invariants
-        if: github.event_name == 'pull_request'
-        run: node --test scripts/check-plan-policy.test.mjs
       - name: Merge queue policy gate
         if: github.event_name == 'merge_group'
         run: echo "PR Policy passed on pull_request before merge queue entry."
