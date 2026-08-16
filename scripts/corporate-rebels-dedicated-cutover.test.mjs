@@ -7,7 +7,8 @@ const SHA = "a".repeat(40);
 const manifest = () => readFile(new URL("./data/corporate-rebels-source-manifest-2026-08-13.csv", import.meta.url));
 const health = () => ({ status: "ok", database: "up", schema: "ready",
   runtime: { redis: "configured", storage: "configured" }, release: { provider: "azure", gitSha: SHA,
-    imageTag: `sha-${SHA}`, version: "main-a", drift: { gitSha: false, imageTag: false, version: false } } });
+    imageTag: `sha-${SHA}`, version: `main-${SHA.slice(0, 12)}`,
+    drift: { gitSha: false, imageTag: false, version: false } } });
 const healthy = async () => ({ ok: true, json: async () => health() });
 function fake(kind = "dedicated", options = {}) {
   const legacyId = kind === "ops" ? CONTRACT.opsLegacyWorkspaceId : CONTRACT.selfServeLegacyWorkspaceId;
@@ -61,14 +62,18 @@ function fake(kind = "dedicated", options = {}) {
     findFirst: async () => state.events.at(-1) ?? null },
   customerDeploymentBootstrapRun: { count: async () => 0 } };
   for (const model of ["emailDelivery", "financeImportCandidate", "financeReportFact", "procurementIdempotencyKey",
-    "selfServeEmailCapture", "selfServeSmokeRun", "selfServeSupportSession", "supportOperation", "tenantPurgeRun"])
+    "selfServeEmailCapture", "selfServeSmokeRun", "selfServeSupportSession", "supportOperation"])
     tx[model] = { count: async () => options.scalar ?? 0 };
+  tx.tenantPurgeRun = { count: async ({ where }) => {
+    if (!("targetWorkspaceId" in where)) throw new Error("wrong tenant purge selector");
+    return options.scalar ?? 0;
+  } };
   const prisma = { ...tx, $transaction: async (callback) => { if (options.drift) {
     state.workspaces.find((item) => item.id === legacyId).slug = "drift"; } return callback(tx); } };
   return { prisma, state };
 }
 const dedicatedUrl = `postgresql://user:pass@${CONTRACT.postgresServiceId}.postgres.database.azure.com/corgtex`;
-const opsUrl = `postgresql://user:pass@${CONTRACT.opsDatabaseHost}/railway`;
+const opsUrl = `postgresql://user:pass@${CONTRACT.opsDatabaseHost}:${CONTRACT.opsDatabasePort}/railway`;
 const selfServeUrl = `postgresql://user:pass@${CONTRACT.selfServeDatabaseHost}/corgtex`;
 const execute = (dedicated, ops, selfserve, extra = {}) => runCorporateRebelsDedicatedCutover({
   phase: "execute-cutover", execute: true, confirmation: CONTRACT.confirmation, releaseGitSha: SHA,
@@ -117,6 +122,7 @@ describe("Corporate Rebels dedicated cutover", () => {
   it("rejects every foreign database and unhealthy release before writes", async () => {
     for (const override of [{ dedicatedDatabaseUrl: "postgresql://u:p@foreign.invalid/corgtex" },
       { opsDatabaseUrl: "postgresql://u:p@foreign.invalid/railway" },
+      { opsDatabaseUrl: `postgresql://u:p@${CONTRACT.opsDatabaseHost}:45901/railway` },
       { selfServeDatabaseUrl: "postgresql://u:p@foreign.invalid/corgtex" }]) {
       const dedicated = fake(); const ops = fake("ops"); const selfserve = fake("selfserve");
       await expect(execute(dedicated, ops, selfserve, override)).rejects.toThrow("Database identity");
@@ -125,7 +131,8 @@ describe("Corporate Rebels dedicated cutover", () => {
     await expect(execute(fake(), fake("ops"), fake("selfserve"), { fetchFn: async () => ({ ok: true,
       json: async () => ({ status: "down" }) }) })).rejects.toThrow("health proof");
     for (const body of [{ ...health(), runtime: { redis: "missing", storage: "configured" } },
-      { ...health(), release: { ...health().release, drift: { version: true } } }])
+      { ...health(), release: { ...health().release, drift: { version: true } } },
+      { ...health(), release: { ...health().release, version: "main-wrong" } }])
       await expect(execute(fake(), fake("ops"), fake("selfserve"), { fetchFn: async () => ({ ok: true,
         json: async () => body }) })).rejects.toThrow("health proof");
   });

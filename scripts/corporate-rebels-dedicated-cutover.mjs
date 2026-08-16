@@ -15,6 +15,7 @@ export const CONTRACT = Object.freeze({
   workerServiceId: "ca-corgtex-corporate-rebels-prod-worker",
   postgresServiceId: "corgtex-corporate-rebels-prod-pg",
   opsDatabaseHost: "switchback.proxy.rlwy.net",
+  opsDatabasePort: "45900",
   selfServeDatabaseHost: "corgtex-ss-prod-pg.postgres.database.azure.com",
   redisServiceId: "corgtex-corporate-rebels-prod-redis",
   storageResourceId: "corgtexcrprodwus3",
@@ -35,14 +36,17 @@ const workspaceCounts = { members: true, memberInviteRequests: true, brainSource
 const blockedRelations = Object.keys(workspaceCounts).filter((key) => ![
   "members", "memberInviteRequests", "brainSources", "brainArticles", "documents", "meetings",
 ].includes(key));
-const scalarModels = ["emailDelivery", "financeImportCandidate", "financeReportFact",
-  "oAuthAccessToken", "oAuthAuthorizationCode", "procurementIdempotencyKey", "selfServeEmailCapture",
-  "selfServeSmokeRun", "selfServeSupportSession", "supportOperation", "tenantPurgeRun"];
+const scalarModels = { emailDelivery: "workspaceId", financeImportCandidate: "workspaceId",
+  financeReportFact: "workspaceId", oAuthAccessToken: "workspaceId", oAuthAuthorizationCode: "workspaceId",
+  procurementIdempotencyKey: "workspaceId", selfServeEmailCapture: "workspaceId",
+  selfServeSmokeRun: "workspaceId", selfServeSupportSession: "workspaceId", supportOperation: "workspaceId",
+  tenantPurgeRun: "targetWorkspaceId" };
 const fail = (message) => { throw new Error(message); };
 const digest = (...values) => createHash("sha256").update(values.join("\0")).digest("hex");
 const databaseIdentities = Object.freeze([
-  [`${CONTRACT.postgresServiceId}.postgres.database.azure.com`, "corgtex"],
-  [CONTRACT.opsDatabaseHost, "railway"], [CONTRACT.selfServeDatabaseHost, "corgtex"],
+  [`${CONTRACT.postgresServiceId}.postgres.database.azure.com`, "corgtex", ""],
+  [CONTRACT.opsDatabaseHost, "railway", CONTRACT.opsDatabasePort],
+  [CONTRACT.selfServeDatabaseHost, "corgtex", ""],
 ]);
 
 export function parseCsv(text) {
@@ -72,9 +76,9 @@ export async function loadManifest(read = readFile) {
   return rows;
 }
 function verifyDatabaseUrls(values) {
-  for (const [index, [host, database]] of databaseIdentities.entries()) {
+  for (const [index, [host, database, port]] of databaseIdentities.entries()) {
     let url; try { url = new URL(values[index]); } catch { fail("Database URL is invalid."); }
-    if (!["postgres:", "postgresql:"].includes(url.protocol) || url.hostname !== host
+    if (!["postgres:", "postgresql:"].includes(url.protocol) || url.hostname !== host || url.port !== port
       || url.pathname.slice(1) !== database) fail("Database identity mismatch.");
   }
 }
@@ -95,7 +99,7 @@ async function exactLegacy(prisma, id) {
     prisma.event.count({ where: { workspaceId: id } }), prisma.workflowJob.count({ where: { workspaceId: id } }),
     prisma.meetingRecorderProviderEvent.count({ where: { workspaceId: id } }),
     prisma.communicationInboundEvent.count({ where: { workspaceId: id } }),
-    ...scalarModels.map((model) => prisma[model].count({ where: { workspaceId: id } })),
+    ...Object.entries(scalarModels).map(([model, field]) => prisma[model].count({ where: { [field]: id } })),
     prisma.customerDeploymentBootstrapRun.count({ where: { customerSlug: CONTRACT.slug } }),
   ]);
   if (counts.slice(0, 5).some(Boolean)) fail("Corporate Rebels workspace has external file payloads.");
@@ -133,7 +137,8 @@ async function verifyHealth(fetchFn, releaseGitSha) {
   if (!health || health.status !== "ok" || health.database !== "up" || health.schema !== "ready"
     || health.runtime?.redis !== "configured" || health.runtime?.storage !== "configured"
     || health.release?.provider !== "azure" || health.release?.gitSha !== releaseGitSha
-    || health.release?.imageTag !== `sha-${releaseGitSha}` || !health.release?.version || health.release?.drift?.gitSha
+    || health.release?.imageTag !== `sha-${releaseGitSha}`
+    || health.release?.version !== `main-${releaseGitSha.slice(0, 12)}` || health.release?.drift?.gitSha
     || health.release?.drift?.imageTag || health.release?.drift?.version) fail("Dedicated Azure health proof failed.");
   return health.release;
 }
@@ -179,7 +184,7 @@ async function seedDedicated(prisma, rows, releaseGitSha, execute) {
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
 const cutoverAction = "corporate_rebels.dedicated_azure_cutover";
-function completedDeployment(deployment, workspaceId) {
+function completedDeployment(deployment, workspaceId, releaseGitSha) {
   return deployment?.remoteWorkspaceId === workspaceId && deployment.managedWorkspaceId === null
     && deployment.url === CONTRACT.url && deployment.deploymentKind === "REMOTE_MANAGED"
     && deployment.deploymentStatus === "ACTIVE" && deployment.cloudProvider === "AZURE"
@@ -192,9 +197,11 @@ function completedDeployment(deployment, workspaceId) {
     && deployment.providerWorkerServiceId === CONTRACT.workerServiceId
     && deployment.providerPostgresServiceId === CONTRACT.postgresServiceId
     && deployment.providerRedisServiceId === CONTRACT.redisServiceId
-    && deployment.providerStorageResourceId === CONTRACT.storageResourceId;
+    && deployment.providerStorageResourceId === CONTRACT.storageResourceId
+    && deployment.releaseImageTag === `sha-${releaseGitSha}`
+    && deployment.releaseVersion === `main-${releaseGitSha.slice(0, 12)}`;
 }
-async function opsState(db, workspaceId) {
+async function opsState(db, workspaceId, releaseGitSha) {
   const legacy = await legacyOrAbsent(db, CONTRACT.opsLegacyWorkspaceId);
   const deployment = await db.customerDeployment.findUnique({ where: { id: CONTRACT.opsDeploymentId } });
   const account = await db.customerAccount.findUnique({ where: { id: CONTRACT.opsAccountId } });
@@ -209,10 +216,11 @@ async function opsState(db, workspaceId) {
     && account.status === "ONBOARDING") {
     return { state: "initial", legacy, deployment, account };
   }
-  if (workspaceId && completedDeployment(deployment, workspaceId) && account.status === "ACTIVE"
+  if (workspaceId && completedDeployment(deployment, workspaceId, releaseGitSha) && account.status === "ACTIVE"
     && event?.meta?.remoteWorkspaceId === workspaceId
     && event.meta.legacyWorkspaceId === CONTRACT.opsLegacyWorkspaceId
-    && event.meta.approvedScope === "exact-corporate-rebels-only") {
+    && event.meta.approvedScope === "exact-corporate-rebels-only"
+    && event.meta.releaseGitSha === releaseGitSha) {
     return { state: "complete", legacy, deployment, account };
   }
   fail("Ops lifecycle state mismatch.");
@@ -221,15 +229,12 @@ async function cutoverOps(prisma, workspaceId, releaseGitSha, execute, fetchFn) 
   if (workspaceId && (!uuid.test(workspaceId) || [CONTRACT.selfServeLegacyWorkspaceId,
     CONTRACT.opsLegacyWorkspaceId].includes(workspaceId))) fail("New dedicated workspace UUID is required.");
   const release = await verifyHealth(fetchFn, releaseGitSha);
-  const state = await opsState(prisma, workspaceId);
-  if (state.state === "complete" && state.deployment.releaseImageTag !== release.imageTag) {
-    fail("Persisted Ops release proof failed.");
-  }
+  const state = await opsState(prisma, workspaceId, releaseGitSha);
   if (!execute || state.state === "complete") return { mode: execute ? "executed" : "preflight",
     phase: "cutover-ops", state: state.state, resumed: state.state === "complete",
     legacyCounts: state.legacy?._count };
   return prisma.$transaction(async (tx) => {
-    const locked = await opsState(tx, workspaceId); const now = new Date();
+    const locked = await opsState(tx, workspaceId, releaseGitSha); const now = new Date();
     if (locked.state !== "initial") fail("Ops lifecycle state drifted.");
     const deployment = await tx.customerDeployment.update({ where: { id: locked.deployment.id }, data: {
       url: CONTRACT.url, deploymentKind: "REMOTE_MANAGED", deploymentStatus: "ACTIVE", cloudProvider: "AZURE",
@@ -257,8 +262,8 @@ async function cutoverOps(prisma, workspaceId, releaseGitSha, execute, fetchFn) 
       remoteWorkspaceId: workspaceId };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-async function deleteSelfServe(prisma, opsPrisma, workspaceId, execute) {
-  if ((await opsState(opsPrisma, workspaceId)).state !== "complete") fail("Persisted Ops cutover proof failed.");
+async function deleteSelfServe(prisma, opsPrisma, workspaceId, releaseGitSha, execute) {
+  if ((await opsState(opsPrisma, workspaceId, releaseGitSha)).state !== "complete") fail("Persisted Ops cutover proof failed.");
   const legacy = await legacyOrAbsent(prisma, CONTRACT.selfServeLegacyWorkspaceId);
   if (!legacy) return { mode: execute ? "executed" : "preflight", phase: "delete-selfserve", resumed: true };
   if (!execute) return { mode: "preflight", phase: "delete-selfserve", legacyCounts: legacy._count };
@@ -270,9 +275,9 @@ async function deleteSelfServe(prisma, opsPrisma, workspaceId, execute) {
       preservedWorkspaceId: workspaceId };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-async function deleteOpsLegacy(prisma, workspaceId) {
+async function deleteOpsLegacy(prisma, workspaceId, releaseGitSha) {
   return prisma.$transaction(async (tx) => {
-    const state = await opsState(tx, workspaceId); const legacy = state.legacy;
+    const state = await opsState(tx, workspaceId, releaseGitSha); const legacy = state.legacy;
     if (state.state !== "complete") fail("Final Ops cutover proof failed.");
     if (!legacy) return { resumed: true };
     await tx.workspace.delete({ where: { id: legacy.id } });
@@ -294,8 +299,8 @@ export async function runCorporateRebelsDedicatedCutover({ phase, execute = fals
       selfServe: previewSelfServe };
     const seed = await seedDedicated(dedicatedPrisma, rows, releaseGitSha, true);
     const ops = await cutoverOps(opsPrisma, seed.workspace.id, releaseGitSha, true, fetchFn);
-    const selfServe = await deleteSelfServe(selfServePrisma, opsPrisma, seed.workspace.id, true);
-    const opsLegacy = await deleteOpsLegacy(opsPrisma, seed.workspace.id);
+    const selfServe = await deleteSelfServe(selfServePrisma, opsPrisma, seed.workspace.id, releaseGitSha, true);
+    const opsLegacy = await deleteOpsLegacy(opsPrisma, seed.workspace.id, releaseGitSha);
     return { mode: "executed", phase, workspaceId: seed.workspace.id,
       dedicated: seed, ops, selfServe, opsLegacy };
   }
