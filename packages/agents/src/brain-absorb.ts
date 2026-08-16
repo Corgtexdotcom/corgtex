@@ -64,6 +64,7 @@ export async function absorbSource(params: {
     kind: "agent",
     authProvider: "bootstrap",
     label: "brain-absorb",
+    workspaceIds: [params.workspaceId],
   };
 
   // Load the article index for matching

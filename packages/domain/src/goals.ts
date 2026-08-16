@@ -1694,6 +1694,7 @@ export async function recomputeGoalProgress(
         kind: "agent",
         authProvider: "bootstrap",
         label: "system:progress-recomputation",
+        workspaceIds: [goal.workspaceId],
       };
 
       const newVersion = await recordWorkItemVersion(tx, effectiveActor, {
