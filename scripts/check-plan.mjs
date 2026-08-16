@@ -228,6 +228,35 @@ function extractSection(planText, title) {
   return body.join("\n").trim();
 }
 
+function hasSubstantiveScopeJustification(planText) {
+  const section = extractSection(planText, "Scope");
+  if (!section) return false;
+
+  const normalized = section
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/^\s*[-*>]\s*/gm, "")
+    .replace(/[`*_]/g, "")
+    .trim();
+  if (!normalized) return false;
+
+  const placeholder = normalized
+    .replace(/^\[|\]$/g, "")
+    .trim()
+    .toLowerCase();
+  if (
+    /^(?:tbd|todo|n\/?a|none|not applicable)(?:[.!])?$/.test(placeholder) ||
+    /^what changes,? what intentionally does not,? and why this is one coherent pr\.?$/.test(
+      placeholder,
+    )
+  ) {
+    return false;
+  }
+
+  const words = normalized.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? [];
+  const alphanumericLength = normalized.replace(/[^A-Za-z0-9]/g, "").length;
+  return words.length >= 4 && alphanumericLength >= 20;
+}
+
 function hasVisualProof(planText) {
   const section = extractSection(planText, "Visual Proof");
   if (!section) return false;
@@ -423,10 +452,17 @@ if (mode === "scope") {
     const protectedFiles = files.filter((file) =>
       PROTECTED_PATHS.some((pattern) => pattern.test(file)),
     );
-    if (protectedFiles.length > 0 && parseRiskTier(planText) !== "critical") {
-      fail(
-        `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
-      );
+    if (protectedFiles.length > 0) {
+      if (parseRiskTier(planText) !== "critical") {
+        fail(
+          `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
+        );
+      }
+      if (!hasSubstantiveScopeJustification(planText)) {
+        fail(
+          `protected paths require a substantive "Scope" justification:\n  - ${protectedFiles.join("\n  - ")}`,
+        );
+      }
     }
   }
 

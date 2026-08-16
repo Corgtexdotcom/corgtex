@@ -35,17 +35,23 @@ function commitAll(cwd, message) {
   git(cwd, ["commit", "--message", message]);
 }
 
-function plan({ risk = "low", files = ["README.md"] } = {}) {
-  return [
+function plan({ risk = "low", files = ["README.md"], scope } = {}) {
+  const lines = [
     "## Goal",
     "Verify policy behavior.",
     "",
     "## Risk tier",
     risk,
     "",
+  ];
+  if (scope !== undefined) {
+    lines.push("## Scope", scope, "");
+  }
+  lines.push(
     "## Files to touch",
     ...files.map((file) => `- \`${file}\``),
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 function runPolicy(cwd, mode, env) {
@@ -183,6 +189,81 @@ describe("agent policy workflow invariants", () => {
           PR_DRAFT: "false",
         }),
       ).toThrow(/protected paths require critical risk:.*review-snapshot-integrity\.mjs/s);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a protected-path contract with no Scope justification", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      writeFileSync(path.join(cwd, "AGENTS.md"), "protected policy\n");
+      commitAll(cwd, "change protected policy");
+
+      expect(() =>
+        runPolicy(cwd, "scope", {
+          BASE: "HEAD^",
+          BRANCH: "codex/missing-protected-scope",
+          PR_BODY: plan({ risk: "critical", files: ["AGENTS.md"] }),
+          PR_DRAFT: "false",
+        }),
+      ).toThrow(/protected paths require a substantive "Scope" justification/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "TBD",
+    "TODO",
+    "N/A",
+    "none",
+    "not applicable",
+    "[What changes, what intentionally does not, and why this is one coherent PR.]",
+  ])("rejects a protected-path placeholder Scope: %s", (scope) => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      writeFileSync(path.join(cwd, "AGENTS.md"), "protected policy\n");
+      commitAll(cwd, "change protected policy");
+
+      expect(() =>
+        runPolicy(cwd, "scope", {
+          BASE: "HEAD^",
+          BRANCH: "codex/placeholder-protected-scope",
+          PR_BODY: plan({ risk: "critical", files: ["AGENTS.md"], scope }),
+          PR_DRAFT: "false",
+        }),
+      ).toThrow(/protected paths require a substantive "Scope" justification/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a protected-path contract with a substantive Scope justification", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      writeFileSync(path.join(cwd, "AGENTS.md"), "protected policy\n");
+      commitAll(cwd, "change protected policy");
+
+      expect(
+        runPolicy(cwd, "scope", {
+          BASE: "HEAD^",
+          BRANCH: "codex/substantive-protected-scope",
+          PR_BODY: plan({
+            risk: "critical",
+            files: ["AGENTS.md"],
+            scope:
+              "Update the repository delivery policy so protected-path contracts fail closed without explicit rationale.",
+          }),
+          PR_DRAFT: "false",
+        }),
+      ).toContain("all within scope");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
