@@ -186,6 +186,32 @@ jobs:
         if: github.event_name == 'merge_group'
         run: echo "PR Policy passed on pull_request before merge queue entry."
 
+  # Temporary required-check aliases. Remove after branch protection requires
+  # `PR Policy` instead of these three legacy context names.
+  plan-present-compat:
+    name: Plan Present
+    needs: pr-policy
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.pr-policy.result }}" = "success"
+
+  scope-check-compat:
+    name: Scope Check
+    needs: pr-policy
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.pr-policy.result }}" = "success"
+
+  diff-size-compat:
+    name: Diff Size
+    needs: pr-policy
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.pr-policy.result }}" = "success"
+
   gitleaks:
     name: Secret Scan
     runs-on: ubuntu-latest
