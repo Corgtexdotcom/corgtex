@@ -38,7 +38,7 @@ diff size:
 
 Protected paths (`AGENTS.md`, `.agents/plan-template.md`, `.codex/review.md`,
 `.codex/ops/**`, `.github/pull_request_template.md`, `.github/workflows/**`,
-`scripts/check-plan.mjs`, `deploy/**`, `prisma/migrations/**`,
+`scripts/check-plan.mjs`, `scripts/review-snapshot-integrity.mjs`, `deploy/**`, `prisma/migrations/**`,
 `packages/domain/src/auth*.ts`, and `apps/web/lib/auth.ts`) require `critical` risk
 and an explicit justification in the PR body. They do not require a size exception
 or special label.

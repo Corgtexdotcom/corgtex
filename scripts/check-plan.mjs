@@ -37,6 +37,7 @@ const PROTECTED_PATHS = [
   /^\.github\/workflows\//,
   /^prisma\/migrations\//,
   /^scripts\/check-plan\.mjs$/,
+  /^scripts\/review-snapshot-integrity\.mjs$/,
   /^packages\/domain\/src\/auth.*\.ts$/,
   /^apps\/web\/lib\/auth\.ts$/,
 ];

@@ -163,6 +163,31 @@ describe("agent policy workflow invariants", () => {
     }
   });
 
+  it("classifies the executable review evaluator as protected", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      mkdirSync(path.join(cwd, "scripts"), { recursive: true });
+      writeFileSync(
+        path.join(cwd, "scripts", "review-snapshot-integrity.mjs"),
+        "export const policy = true;\n",
+      );
+      commitAll(cwd, "add executable review policy");
+
+      expect(() =>
+        runPolicy(cwd, "scope", {
+          BASE: "HEAD^",
+          BRANCH: "codex/review-policy",
+          PR_BODY: plan({ files: ["scripts/review-snapshot-integrity.mjs"] }),
+          PR_DRAFT: "false",
+        }),
+      ).toThrow(/protected paths require critical risk:.*review-snapshot-integrity\.mjs/s);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("does not replace an empty live PR body with a local draft", () => {
     const cwd = initRepository();
     try {
