@@ -15,6 +15,44 @@ afterEach(() => {
 });
 
 describe("env", () => {
+  it("derives deployment workspace scope only for dedicated hosts", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      APP_URL: "https://customer-alpha.corgtex.test",
+      WORKSPACE_SLUG: " Customer Alpha ",
+    });
+
+    const { env } = await import("./env");
+    expect(env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG).toBe("customer-alpha");
+
+    process.env.APP_URL = "https://app.corgtex.com";
+    expect(env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG).toBeUndefined();
+
+    process.env.APP_URL = "http://localhost:3000";
+    expect(env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG).toBeUndefined();
+
+    process.env.APP_URL = "https://customer-alpha.corgtex.test";
+    process.env.CONTROL_PLANE_MODE = "true";
+    expect(env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG).toBeUndefined();
+  });
+
+  it("fails closed when a configured workspace has an explicitly malformed app URL", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      APP_URL: "not a valid URL",
+      WORKSPACE_SLUG: "customer-alpha",
+    });
+
+    const { env } = await import("./env");
+
+    expect(() => env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG).toThrowError(
+      "Invalid APP_URL: cannot determine dedicated deployment workspace scope while WORKSPACE_SLUG is configured.",
+    );
+
+    process.env.CONTROL_PLANE_MODE = "true";
+    expect(env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG).toBeUndefined();
+  });
+
   it("does not require DATABASE_URL until it is accessed", async () => {
     restoreEnv();
     Object.assign(process.env, { NODE_ENV: "production" });

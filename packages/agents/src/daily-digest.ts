@@ -1216,6 +1216,7 @@ export async function runDailyDigest(params: {
     kind: "agent",
     authProvider: "bootstrap",
     label: "daily-digest-agent",
+    workspaceIds: [params.workspaceId],
   };
 
   const cadence = normalizeNewspaperCadence(params.cadence);

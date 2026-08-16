@@ -1,6 +1,6 @@
 import type { AppActor } from "@corgtex/shared";
 import { env } from "@corgtex/shared";
-import { resolveAgentActorFromBearer, describeScope, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
+import { resolveAgentActorFromBearer, describeScope, requireWorkspaceMembership, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
 import type { McpOAuthProviderKey } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
 
@@ -78,11 +78,18 @@ export async function authenticateMcpRequest(
       throw new AppError(403, "FORBIDDEN", "MCP access requires an agent credential.");
     }
 
-    // Agent credentials are scoped to exactly one workspace
-    const workspaceId = agentActor.workspaceIds?.[0];
-    if (!workspaceId) {
-      throw new AppError(403, "FORBIDDEN", "Agent credential is not scoped to any workspace.");
+    const workspaceIds = [...new Set(agentActor.workspaceIds ?? [])];
+    if (workspaceIds.length !== 1) {
+      throw new AppError(
+        403,
+        "MCP_WORKSPACE_SCOPE_REQUIRED",
+        workspaceIds.length === 0
+          ? "MCP agent credentials must be scoped to exactly one workspace."
+          : "MCP cannot infer a workspace from a multi-workspace agent credential. Use a workspace credential or OAuth connection.",
+      );
     }
+    const [workspaceId] = workspaceIds;
+    await requireWorkspaceMembership({ actor: agentActor, workspaceId });
     if (agentActor.authProvider !== "bootstrap") {
       await requireTrialMcpAccess(workspaceId);
     }
@@ -97,6 +104,7 @@ export async function authenticateMcpRequest(
 
   const oauthSession = await resolveMcpOAuthAccessToken(token, options.resourceUrl);
   if (oauthSession) {
+    await requireWorkspaceMembership({ actor: oauthSession.actor, workspaceId: oauthSession.workspaceId });
     await requireTrialMcpAccess(oauthSession.workspaceId);
     return {
       actor: oauthSession.actor,

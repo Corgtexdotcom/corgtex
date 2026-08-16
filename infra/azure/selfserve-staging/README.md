@@ -107,11 +107,14 @@ The template references these Key Vault secret names by default when `deployCont
 - `redis-url`
 - `session-cookie-secret`
 - `encryption-key`
-- `agent-api-key`
 - `smoke-email-capture-secret`
 - `self-serve-registry-sync-secret`
 - `model-price-overrides-json`
 - `admin-password`
+
+Shared self-serve staging intentionally does not receive a global `AGENT_API_KEY`.
+Agents must use a per-workspace credential or OAuth so a newly created workspace
+cannot inherit bootstrap access to another tenant.
 
 These provider secrets are optional and are referenced only when their corresponding workflow input or Bicep parameter is enabled:
 

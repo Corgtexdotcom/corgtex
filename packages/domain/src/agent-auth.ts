@@ -162,11 +162,16 @@ export const bootstrapAgentAuthProvider: AgentAuthProvider = {
       return null;
     }
 
+    const workspaceIds = [...parseAllowedWorkspaceIds()];
+    if (workspaceIds.length === 0) {
+      return null;
+    }
+
     return {
       kind: "agent",
       authProvider: "bootstrap",
       label: BOOTSTRAP_AGENT_LABEL,
-      workspaceIds: [...parseAllowedWorkspaceIds()],
+      workspaceIds,
     };
   },
 };

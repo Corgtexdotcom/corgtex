@@ -639,7 +639,12 @@ export async function runSlackProactiveScan(params: {
 
   const model = await getAgentModelOverride(params.workspaceId, "slack-agent")
     ?? resolveModel(AGENT_REGISTRY["slack-agent"].defaultModelTier);
-  const agentActor: AppActor = { kind: "agent", authProvider: "bootstrap", label: "slack-agent" };
+  const agentActor: AppActor = {
+    kind: "agent",
+    authProvider: "bootstrap",
+    label: "slack-agent",
+    workspaceIds: [params.workspaceId],
+  };
   let actions = 0;
   let semanticReviews = 0;
   const actionCreationCutoff = new Date(now.getTime() - config.unansweredActionCreationDelayMinutes * 60 * 1000);

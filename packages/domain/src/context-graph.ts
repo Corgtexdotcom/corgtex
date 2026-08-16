@@ -2809,11 +2809,12 @@ export async function createMissingRegionFactsProposal(actor: AppActor, params: 
   });
 }
 
-export function contextGraphSystemActor(label = "context-graph-sync"): AppActor {
+export function contextGraphSystemActor(workspaceId: string, label = "context-graph-sync"): AppActor {
   return {
     kind: "agent",
     authProvider: "control-plane",
     label,
+    workspaceIds: [workspaceId],
   };
 }
 

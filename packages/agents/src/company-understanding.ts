@@ -331,11 +331,12 @@ export function normalizeCompanyUnderstandingOutput(output: unknown, fallbackSou
   };
 }
 
-function companyUnderstandingActor(): AppActor {
+function companyUnderstandingActor(workspaceId: string): AppActor {
   return {
     kind: "agent",
     authProvider: "bootstrap",
     label: "company-understanding",
+    workspaceIds: [workspaceId],
     scopes: ["context-graph:propose"],
   };
 }
@@ -623,7 +624,7 @@ export async function runCompanyUnderstandingSynthesis(params: {
   sourceId?: string | null;
   model: string;
 }) {
-  const actor = companyUnderstandingActor();
+  const actor = companyUnderstandingActor(params.workspaceId);
   const [sources, articles] = await Promise.all([
     prisma.brainSource.findMany({
       where: {

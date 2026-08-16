@@ -110,6 +110,13 @@ jobs:
 
       - run: npm run seed:e2e
 
+      - name: Scope bootstrap agent to the seeded workspace
+        shell: bash
+        run: |
+          workspace_id="$(node --input-type=module -e 'import { PrismaClient } from "@prisma/client"; const prisma = new PrismaClient(); const workspace = await prisma.workspace.findUnique({ where: { slug: process.env.WORKSPACE_SLUG || "corgtex" }, select: { id: true } }); await prisma.$disconnect(); if (!workspace) process.exit(1); console.log(workspace.id);')"
+          test -n "$workspace_id"
+          echo "AGENT_ALLOWED_WORKSPACE_IDS=$workspace_id" >> "$GITHUB_ENV"
+
       - run: env -u DATABASE_URL -u SHADOW_DATABASE_URL npm run build
 
       - name: Start local web and worker
