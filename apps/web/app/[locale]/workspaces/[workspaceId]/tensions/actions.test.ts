@@ -212,6 +212,24 @@ describe("tension server actions", () => {
     },
   );
 
+  it("rejects mixed Tension content and resolution evidence before every side effect", async () => {
+    const { updateTensionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("expectedVersion", "7");
+    formData.set("title", "Content edit");
+    formData.set("status", "RESOLVED");
+    formData.set("evidenceFile", new File(["synthetic evidence"], "evidence.txt", { type: "text/plain" }));
+
+    await expect(updateTensionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    expect(enforceDemoGuard).not.toHaveBeenCalled();
+    expect(requirePageActor).not.toHaveBeenCalled();
+    expect(updateTension).not.toHaveBeenCalled();
+    expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("keeps Tension resolution-only updates unversioned", async () => {
     const { updateTensionAction } = await import("./actions");
     const formData = new FormData();

@@ -50,13 +50,14 @@ export default async function GoalsPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ view?: string; cadence?: string; goalId?: string }>;
+  searchParams: Promise<{ view?: string; cadence?: string; goalId?: string; versionConflict?: string }>;
 }) {
   const { workspaceId } = await params;
   await requireWorkspaceFeature(workspaceId, "GOALS");
-  const { view = "tree", cadence = "QUARTERLY", goalId } = await searchParams;
+  const { view = "tree", cadence = "QUARTERLY", goalId, versionConflict } = await searchParams;
   const actor = await requirePageActor();
   const t = await getTranslations("goals");
+  const tWork = await getTranslations("workItems");
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
   const canManageAnyGoal = actor.kind === "agent" || membership?.role === "ADMIN";
   const currentUserId = actor.kind === "user" ? actor.user.id : null;
@@ -148,6 +149,17 @@ export default async function GoalsPage({
           />
         }
       />
+
+      {versionConflict && (
+        <div className="form-message form-message-error" role="alert">
+          <strong>{tWork("editConflictTitle")}</strong>
+          <div className="actions-inline">
+            <a href={`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goalId ?? "")}`} className="secondary small">
+              {tWork("editConflictReload")}
+            </a>
+          </div>
+        </div>
+      )}
 
       {focusedGoal && (
         <section className="ws-section">

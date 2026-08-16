@@ -46,6 +46,7 @@ const PROPOSAL_CONTENT_FIELDS = [
   "priority",
   "circleId",
   "ownerMemberId",
+  "includeAiSummaryRendered",
 ] as const;
 
 function proposalContentExpectedVersion(formData: FormData) {

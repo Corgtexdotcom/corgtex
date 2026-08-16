@@ -828,6 +828,17 @@ export default async function ActionsPage({
     <>
       <WorkspacePageHeader title={t("pageTitle")} description={t("pageDescription")} />
 
+      {resolvedSearch.versionConflict && (
+        <div className="form-message form-message-error" role="alert">
+          <strong>{tWork("editConflictTitle")}</strong>
+          <div className="actions-inline">
+            <a href={`/workspaces/${workspaceId}/actions`} className="secondary small">
+              {tWork("editConflictReload")}
+            </a>
+          </div>
+        </div>
+      )}
+
       <section className="ws-section">
         <div className="nr-work-board-header">
           <div className="nr-filter-bar nr-filter-bar-wrap">

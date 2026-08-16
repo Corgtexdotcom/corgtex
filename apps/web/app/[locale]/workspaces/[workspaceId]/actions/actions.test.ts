@@ -36,6 +36,7 @@ const updateActionChecklistItem = vi.fn();
 const updateDeliberationEntry = vi.fn();
 const uploadWorkItemEvidenceDocument = vi.fn(async () => []);
 const revalidatePath = vi.fn();
+const redirect = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -63,6 +64,10 @@ vi.mock("@corgtex/domain", () => ({
 
 vi.mock("next/cache", () => ({
   revalidatePath,
+}));
+
+vi.mock("next/navigation", () => ({
+  redirect,
 }));
 
 vi.mock("../work-item-evidence-upload", () => ({
@@ -143,6 +148,26 @@ describe("action item server actions", () => {
     }));
   });
 
+  it("redirects a stale generic Action content update to a safe conflict state", async () => {
+    const redirectSignal = new Error("NEXT_REDIRECT");
+    updateAction.mockRejectedValueOnce(new MockAppError(409, "VERSION_CONFLICT", "internal detail"));
+    redirect.mockImplementationOnce(() => {
+      throw redirectSignal;
+    });
+    const { updateActionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("actionId", "action-1");
+    formData.set("expectedVersion", "12");
+    formData.set("priority", "3");
+
+    await expect(updateActionAction(formData)).rejects.toBe(redirectSignal);
+
+    expect(redirect).toHaveBeenCalledWith("/workspaces/workspace-1/actions?versionConflict=action-1");
+    expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
   it.each(["title", "bodyMd", "priority", "circleId", "assigneeMemberId", "dueAt", "proposalId"])(
     "classifies Action %s as content requiring an observed version",
     async (field) => {
@@ -180,6 +205,24 @@ describe("action item server actions", () => {
       expect(revalidatePath).not.toHaveBeenCalled();
     },
   );
+
+  it("rejects mixed Action content and completion evidence before every side effect", async () => {
+    const { updateActionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("actionId", "action-1");
+    formData.set("expectedVersion", "9");
+    formData.set("title", "Content edit");
+    formData.set("status", "COMPLETED");
+    formData.set("evidenceFile", new File(["synthetic evidence"], "evidence.txt", { type: "text/plain" }));
+
+    await expect(updateActionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    expect(enforceDemoGuard).not.toHaveBeenCalled();
+    expect(requirePageActor).not.toHaveBeenCalled();
+    expect(updateAction).not.toHaveBeenCalled();
+    expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
 
   it("passes the exact rendered version and reports edit success only after revalidation", async () => {
     const { editActionAction } = await import("./actions");

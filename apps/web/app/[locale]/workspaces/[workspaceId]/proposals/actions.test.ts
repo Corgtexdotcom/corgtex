@@ -229,7 +229,7 @@ describe("proposal server actions", () => {
     }));
   });
 
-  it.each(["title", "summary", "bodyMd", "priority", "circleId", "ownerMemberId"])(
+  it.each(["title", "summary", "bodyMd", "priority", "circleId", "ownerMemberId", "includeAiSummaryRendered"])(
     "classifies Proposal %s as content requiring an observed version",
     async (field) => {
       const { updateProposalAction } = await import("./actions");
@@ -264,17 +264,39 @@ describe("proposal server actions", () => {
     },
   );
 
-  it("keeps Proposal non-content toggle-only updates unversioned", async () => {
+  it.each([undefined, "", "0", "-1", "1.5", "11x", "9007199254740992"])(
+    "rejects Proposal AI-summary toggle version %j before every side effect",
+    async (expectedVersion) => {
+      const { updateProposalAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("proposalId", "proposal-1");
+      formData.set("includeAiSummaryRendered", "1");
+      if (expectedVersion !== undefined) formData.set("expectedVersion", expectedVersion);
+
+      await expect(updateProposalAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateProposal).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it("forwards the exact version for an AI-summary toggle-only update", async () => {
     const { updateProposalAction } = await import("./actions");
     const formData = new FormData();
     formData.set("workspaceId", "workspace-1");
     formData.set("proposalId", "proposal-1");
+    formData.set("expectedVersion", "17");
     formData.set("includeAiSummaryRendered", "1");
 
     await updateProposalAction(formData);
 
-    expect(updateProposal.mock.calls[0]?.[1]).toMatchObject({ includeAiSummary: false });
-    expect(updateProposal.mock.calls[0]?.[1]).not.toHaveProperty("expectedVersion");
+    expect(updateProposal).toHaveBeenCalledTimes(1);
+    expect(updateProposal.mock.calls[0]?.[1]).toMatchObject({
+      expectedVersion: 17,
+      includeAiSummary: false,
+    });
   });
 
   it("creates a generic proposal advice request for selected members", async () => {

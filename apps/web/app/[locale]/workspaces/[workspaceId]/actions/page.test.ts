@@ -16,6 +16,12 @@ describe("Actions page observed-version forms", () => {
     }
   });
 
+  it("renders the safe conflict state returned by stale quick edits", () => {
+    expect(source).toContain("resolvedSearch.versionConflict");
+    expect(source).toContain('tWork("editConflictTitle")');
+    expect(source).toContain('tWork("editConflictReload")');
+  });
+
   it("keeps status and completion lifecycle submissions unversioned", () => {
     const statusForms = forms.filter((form) => form.includes("action={actionHandler}") && form.includes('name="status"'));
 

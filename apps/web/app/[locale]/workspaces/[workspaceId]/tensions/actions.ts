@@ -59,6 +59,11 @@ function expectedVersionFromForm(formData: FormData) {
   return expectedVersion;
 }
 
+function hasEvidenceFile(formData: FormData) {
+  const evidenceFile = formData.get("evidenceFile");
+  return evidenceFile instanceof File && evidenceFile.size > 0;
+}
+
 export async function createTensionAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -119,13 +124,16 @@ export async function createProposalFromTensionAction(formData: FormData) {
 
 export async function updateTensionAction(formData: FormData) {
   const expectedVersion = tensionContentExpectedVersion(formData);
+  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null;
+  if (expectedVersion !== undefined && status === "RESOLVED" && hasEvidenceFile(formData)) {
+    throw new AppError(400, "INVALID_INPUT", "Submit content edits and resolution evidence separately.");
+  }
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   const tensionId = asString(formData, "tensionId");
-  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null;
   const evidenceDocumentIds = status === "RESOLVED"
     ? await uploadWorkItemEvidenceDocument(actor, {
       workspaceId,

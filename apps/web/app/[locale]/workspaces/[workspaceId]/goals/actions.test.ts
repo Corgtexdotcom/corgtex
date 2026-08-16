@@ -32,6 +32,7 @@ const skipCompanyUnderstandingQuestion = vi.fn();
 const triggerAgentRun = vi.fn();
 const updateGoal = vi.fn();
 const revalidatePath = vi.fn();
+const redirect = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
   enforceDemoGuard,
@@ -59,6 +60,10 @@ vi.mock("@corgtex/domain", () => ({
 
 vi.mock("next/cache", () => ({
   revalidatePath,
+}));
+
+vi.mock("next/navigation", () => ({
+  redirect,
 }));
 
 afterEach(() => {
@@ -155,6 +160,26 @@ describe("goals server actions", () => {
       status: "ON_TRACK",
       progressPercent: 60,
     });
+  });
+
+  it("redirects stale mixed Goal progress to a safe conflict state", async () => {
+    const redirectSignal = new Error("NEXT_REDIRECT");
+    updateGoal.mockRejectedValueOnce(new MockAppError(409, "VERSION_CONFLICT", "internal detail"));
+    redirect.mockImplementationOnce(() => {
+      throw redirectSignal;
+    });
+    const { updateGoalFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("goalId", "goal-1");
+    formData.set("expectedVersion", "14");
+    formData.set("status", "ON_TRACK");
+    formData.set("progressPercent", "60");
+
+    await expect(updateGoalFormAction(formData)).rejects.toBe(redirectSignal);
+
+    expect(redirect).toHaveBeenCalledWith("/workspaces/workspace-1/goals?goalId=goal-1&versionConflict=1");
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 
   it.each(["title", "descriptionMd", "level", "cadence", "progressPercent", "targetDate", "startDate", "parentGoalId", "circleId", "ownerMemberId"])(

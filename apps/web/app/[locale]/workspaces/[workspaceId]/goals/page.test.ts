@@ -10,7 +10,8 @@ describe("Goals page source", () => {
   });
 
   it("uses the shared versioned edit form only for Goal content edits", () => {
-    const editForm = source.match(/<WorkItemEditForm[\s\S]*?<\/WorkItemEditForm>/)?.[0] ?? "";
+    const editForms = source.match(/<WorkItemEditForm[\s\S]*?<\/WorkItemEditForm>/g) ?? [];
+    const editForm = editForms.find((form) => form.includes('name="title"')) ?? "";
 
     expect(editForm).toContain("action={editGoalFormAction}");
     expect(editForm).toContain("expectedVersion={goal.version}");
@@ -32,5 +33,11 @@ describe("Goals page source", () => {
 
     expect(progressForm).toContain('name="expectedVersion" value={goal.version}');
     expect(draftToActiveForm).not.toContain('name="expectedVersion"');
+  });
+
+  it("renders the safe conflict state returned by stale progress edits", () => {
+    expect(source).toContain("versionConflict");
+    expect(source).toContain('tWork("editConflictTitle")');
+    expect(source).toContain('tWork("editConflictReload")');
   });
 });
