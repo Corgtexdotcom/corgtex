@@ -49,8 +49,10 @@ block on taste, speculative architecture, plan wording, or size alone. A push or
 base change invalidates prior approval; native GitHub rules provide the exact-head
 approval, thread-resolution, required-check, and merge-queue boundary. A trusted
 metadata workflow publishes the distinct `PR Metadata Policy` context for head,
-PR-body, label, and draft-state changes without rerunning expensive code checks,
-and removes an invalid PR from the queue.
+PR-body, label, draft-state, and merge-group changes without rerunning expensive
+code checks, and removes an invalid PR from the queue. Keep the legacy Review
+Snapshot Integrity gate until both replacement contexts are live and proven; its
+removal is a later protected cleanup, not part of the activation merge.
 
 ## Build and test
 

@@ -74,9 +74,11 @@ acceptance checklist, domain-test coverage, frontend proof, environment-file ban
 forbidden executable patterns. CI also runs tests, database sync, a database-free
 build, docs checks, secret scanning, and client-data scanning.
 
-Head, PR-body, label, and draft-state changes refresh the distinct trusted metadata
-policy status only; they do not waste another full build and test cycle. Invalid
-metadata removes the PR from the merge queue.
+Head, PR-body, label, draft-state, and merge-group changes refresh the distinct
+trusted metadata policy status only; they do not waste another full build and test
+cycle. Invalid metadata removes the PR from the merge queue. The legacy snapshot
+gate remains during activation and is removed only after the replacement is required
+and proven on both PR and merge-group SHAs.
 
 GitHub must enforce pull requests, one independent approval, stale-review dismissal,
 approval of the latest push, conversation resolution, required checks, merge queue,

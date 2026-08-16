@@ -43,11 +43,12 @@ Approve only the exact current head when every objective blocker is clear and na
 GitHub protection reports the required checks and conversation state satisfied. Any
 later push or base change invalidates the approval and requires a fresh review.
 
-Native branch/ruleset controls—not a custom attestation in review prose—enforce one
-approval, stale-review dismissal, approval of the latest push, conversation
-resolution, required checks, and merge queue entry. A trusted metadata workflow
-refreshes the distinct `PR Metadata Policy` context when the head, PR body, labels,
-or draft state changes.
+Native branch/ruleset controls are the target enforcement boundary. During the
+staged transition, Review Snapshot Integrity remains required: follow
+[`ops/review-snapshot-integrity.md`](ops/review-snapshot-integrity.md), include its
+exact-head attestation in the approval, and rerun the publisher for the same head.
+Remove that temporary gate only after `PR Policy` and `PR Metadata Policy` are live,
+required, and proven on both pull-request and merge-group SHAs.
 
 ## Special cases
 

@@ -8,5 +8,7 @@ Purpose: independently approve or reject ready PRs at their exact current snapsh
   labels, and unresolved threads.
 - Request changes for every objective blocker in one review; approve only when all
   blockers are clear and native protection is satisfied.
+- While Review Snapshot Integrity remains required, follow
+  `review-snapshot-integrity.md`, attest the exact head, and rerun its publisher.
 - Any push or base change invalidates the review. Re-read the new diff and live state.
 - Never edit, fix, push, resolve builder-owned threads, merge, or bypass protection.

@@ -109,6 +109,13 @@ describe("agent policy workflow invariants", () => {
     expect(metadata).toMatch(
       /cp scripts\/check-plan\.mjs .*trusted-check-plan\.mjs/,
     );
+    expect(metadata).toMatch(/^\s*merge_group:\s*$/m);
+    expect(metadata).toMatch(
+      /MERGE_GROUP_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/,
+    );
+    expect(metadata).toMatch(
+      /statuses\/\$MERGE_GROUP_SHA[\s\S]*context="PR Metadata Policy"/,
+    );
     expect(metadata).toContain('contexts=("PR Metadata Policy")');
     expect(metadata).not.toMatch(
       /contexts=.*(?:"PR Policy"|"Plan Present"|"Scope Check"|"Diff Size")/,

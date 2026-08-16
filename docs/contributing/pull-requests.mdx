@@ -44,9 +44,10 @@ Every PR runs:
 `PR Policy` checks the contract, declared files, critical handling of protected
 paths, acceptance completion, domain tests, frontend proof, environment files, and
 forbidden executable patterns. It does not enforce arbitrary line or file limits.
-Head, PR-body, label, and draft-state changes refresh the distinct trusted metadata
-policy status without rerunning expensive code checks. Invalid metadata removes the
-PR from the queue.
+Head, PR-body, label, draft-state, and merge-group changes refresh the distinct
+trusted metadata policy status without rerunning expensive code checks. Invalid
+metadata removes the PR from the queue. The legacy snapshot gate remains required
+during staged activation and is removed only after the replacement is proven.
 
 The independent reviewer reads the complete current diff and requests changes only
 for objective blockers. Native GitHub rules dismiss stale approvals, require the
