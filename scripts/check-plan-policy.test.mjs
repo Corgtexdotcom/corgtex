@@ -52,7 +52,12 @@ function runPolicy(cwd, mode, env) {
   return execFileSync("node", [checkPlanScript, `--mode=${mode}`], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: {
+      ...process.env,
+      GITHUB_BASE_REF: "",
+      GITHUB_HEAD_REF: "",
+      ...env,
+    },
   });
 }
 
