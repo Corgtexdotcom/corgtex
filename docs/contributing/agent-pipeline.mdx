@@ -74,9 +74,9 @@ acceptance checklist, domain-test coverage, frontend proof, environment-file ban
 forbidden executable patterns. CI also runs tests, database sync, a database-free
 build, docs checks, secret scanning, and client-data scanning.
 
-Edits to a PR body, labels, or draft state rerun the trusted metadata policy only;
-they do not waste another full build and test cycle. Invalid metadata removes the
-PR from the merge queue.
+Head, PR-body, label, and draft-state changes refresh the distinct trusted metadata
+policy status only; they do not waste another full build and test cycle. Invalid
+metadata removes the PR from the merge queue.
 
 GitHub must enforce pull requests, one independent approval, stale-review dismissal,
 approval of the latest push, conversation resolution, required checks, merge queue,

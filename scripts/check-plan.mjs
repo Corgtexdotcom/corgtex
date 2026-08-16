@@ -117,21 +117,38 @@ function prLabels() {
   );
 }
 
+function parseChangedPaths(output) {
+  if (!output) return [];
+  const fields = output.split("\0");
+  const paths = [];
+  let index = 0;
+  while (index < fields.length && fields[index]) {
+    const status = fields[index++];
+    const source = fields[index++];
+    if (!source) break;
+    paths.push(source);
+    if (/^[RC]/.test(status)) {
+      const destination = fields[index++];
+      if (destination) paths.push(destination);
+    }
+  }
+  return paths;
+}
+
 function changedFiles(base) {
   try {
-    const outputs = [gitDiffAgainstBase(base, "--name-only")];
+    const outputs = [gitDiffAgainstBase(base, "--name-status -z")];
     if (process.env.GITHUB_ACTIONS !== "true") {
-      outputs.push(sh("git diff --name-only --cached"));
-      outputs.push(sh("git diff --name-only"));
+      outputs.push(sh("git diff --name-status -z --cached"));
+      outputs.push(sh("git diff --name-status -z"));
     }
-    return [...new Set(outputs.flatMap((out) => (out ? out.split("\n") : [])))];
+    return [...new Set(outputs.flatMap(parseChangedPaths))];
   } catch (err) {
     if (process.env.GITHUB_ACTIONS === "true") {
       fail(`unable to compute changed files against ${base}: ${err.message}`);
     }
     // Fall back to uncommitted working-tree diff when running locally with no base.
-    const out = sh("git diff --name-only HEAD");
-    return out ? out.split("\n") : [];
+    return parseChangedPaths(sh("git diff --name-status -z HEAD"));
   }
 }
 
@@ -321,8 +338,13 @@ function ok(message) {
 }
 
 function readPlanText(branch) {
-  const prBody = process.env.PR_BODY?.trim();
-  if (prBody) return prBody;
+  if (Object.hasOwn(process.env, "PR_BODY")) {
+    const prBody = process.env.PR_BODY ?? "";
+    if (!prBody.trim()) {
+      fail("missing plan contract in live PR body");
+    }
+    return prBody;
+  }
 
   const localPlanPath = localPlanPathFor(branch);
   if (existsSync(localPlanPath)) {

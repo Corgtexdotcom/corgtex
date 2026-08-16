@@ -34,8 +34,8 @@ run with `npm run test:integration`; the database-independent production build i
 
 CI verifies the contract, declared file scope, security hygiene, tests, build, and
 documentation. An independent reviewer evaluates the complete current diff and
-objective risks. See [Agent delivery](/contributing/agent-pipeline) and
-[Branching and pull requests](/contributing/pull-requests).
+objective risks. See [Agent delivery](docs/contributing/agent-pipeline.mdx) and
+[Branching and pull requests](docs/contributing/pull-requests.mdx).
 
 ## Public documentation
 

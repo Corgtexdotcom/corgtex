@@ -37,14 +37,16 @@ Every PR runs:
 - database-independent `Build`;
 - `Docs Validation`;
 - `PR Policy`;
+- `PR Metadata Policy`;
 - `Secret Scan`; and
 - `Client Data Scan`.
 
 `PR Policy` checks the contract, declared files, critical handling of protected
 paths, acceptance completion, domain tests, frontend proof, environment files, and
 forbidden executable patterns. It does not enforce arbitrary line or file limits.
-PR-body, label, and draft-state edits refresh the trusted policy statuses without
-rerunning the expensive code checks. Invalid metadata removes the PR from the queue.
+Head, PR-body, label, and draft-state changes refresh the distinct trusted metadata
+policy status without rerunning expensive code checks. Invalid metadata removes the
+PR from the queue.
 
 The independent reviewer reads the complete current diff and requests changes only
 for objective blockers. Native GitHub rules dismiss stale approvals, require the

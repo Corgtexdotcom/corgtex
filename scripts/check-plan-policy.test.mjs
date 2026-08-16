@@ -1,4 +1,14 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ci = readFileSync(".github/workflows/ci.yml", "utf8");
@@ -6,6 +16,45 @@ const metadata = readFileSync(
   ".github/workflows/pr-policy-metadata.yml",
   "utf8",
 );
+const checkPlanScript = path.resolve("scripts/check-plan.mjs");
+
+function git(cwd, args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+function initRepository() {
+  const cwd = mkdtempSync(path.join(tmpdir(), "check-plan-policy-"));
+  git(cwd, ["init", "--initial-branch=main"]);
+  git(cwd, ["config", "user.name", "Policy Test"]);
+  git(cwd, ["config", "user.email", "policy-test@example.invalid"]);
+  return cwd;
+}
+
+function commitAll(cwd, message) {
+  git(cwd, ["add", "--all"]);
+  git(cwd, ["commit", "--message", message]);
+}
+
+function plan({ risk = "low", files = ["README.md"] } = {}) {
+  return [
+    "## Goal",
+    "Verify policy behavior.",
+    "",
+    "## Risk tier",
+    risk,
+    "",
+    "## Files to touch",
+    ...files.map((file) => `- \`${file}\``),
+  ].join("\n");
+}
+
+function runPolicy(cwd, mode, env) {
+  return execFileSync("node", [checkPlanScript, `--mode=${mode}`], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+}
 
 function jobBlock(source, jobId) {
   const marker = `  ${jobId}:\n`;
@@ -42,7 +91,10 @@ describe("agent policy workflow invariants", () => {
       "converted_to_draft",
       "edited",
       "labeled",
+      "opened",
       "ready_for_review",
+      "reopened",
+      "synchronize",
       "unlabeled",
     ].sort();
     expect(actual).toEqual(expected);
@@ -51,6 +103,10 @@ describe("agent policy workflow invariants", () => {
     );
     expect(metadata).toMatch(
       /cp scripts\/check-plan\.mjs .*trusted-check-plan\.mjs/,
+    );
+    expect(metadata).toContain('contexts=("PR Metadata Policy")');
+    expect(metadata).not.toMatch(
+      /contexts=.*(?:"PR Policy"|"Plan Present"|"Scope Check"|"Diff Size")/,
     );
   });
 
@@ -63,5 +119,48 @@ describe("agent policy workflow invariants", () => {
     expect(metadata).toMatch(/for attempt in 1 2 3/);
     expect(metadata).toMatch(/if \[ -z "\$current_entry_id" \]/);
     expect(metadata).toMatch(/Unable to confirm removal/);
+  });
+
+  it("classifies both sides of a protected-file rename", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "AGENTS.md"), "protected policy\n");
+      commitAll(cwd, "add protected policy");
+      renameSync(path.join(cwd, "AGENTS.md"), path.join(cwd, "harmless.md"));
+      commitAll(cwd, "rename protected policy");
+
+      expect(() =>
+        runPolicy(cwd, "scope", {
+          BASE: "HEAD^",
+          BRANCH: "codex/protected-rename",
+          PR_BODY: plan({ files: ["AGENTS.md", "harmless.md"] }),
+          PR_DRAFT: "false",
+        }),
+      ).toThrow(/protected paths require critical risk:.*AGENTS\.md/s);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replace an empty live PR body with a local draft", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      mkdirSync(path.join(cwd, ".agents", "plans"), { recursive: true });
+      writeFileSync(
+        path.join(cwd, ".agents", "plans", "codex-empty-body.md"),
+        plan(),
+      );
+
+      expect(() =>
+        runPolicy(cwd, "present", {
+          BRANCH: "codex/empty-body",
+          PR_BODY: "",
+        }),
+      ).toThrow(/missing plan contract in live PR body/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

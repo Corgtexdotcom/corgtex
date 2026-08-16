@@ -3,7 +3,7 @@ name: PR Metadata Policy
 on:
   pull_request_target:
     branches: [main]
-    types: [edited, labeled, unlabeled, ready_for_review, converted_to_draft]
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review, converted_to_draft]
 
 permissions:
   contents: read
@@ -47,7 +47,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          contexts=("PR Policy" "Plan Present" "Scope Check" "Diff Size")
+          contexts=("PR Metadata Policy")
 
           publish() {
             local state="$1"

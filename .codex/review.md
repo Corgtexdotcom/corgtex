@@ -46,7 +46,8 @@ later push or base change invalidates the approval and requires a fresh review.
 Native branch/ruleset controls—not a custom attestation in review prose—enforce one
 approval, stale-review dismissal, approval of the latest push, conversation
 resolution, required checks, and merge queue entry. A trusted metadata workflow
-refreshes the policy statuses when the PR body, labels, or draft state changes.
+refreshes the distinct `PR Metadata Policy` context when the head, PR body, labels,
+or draft state changes.
 
 ## Special cases
 
