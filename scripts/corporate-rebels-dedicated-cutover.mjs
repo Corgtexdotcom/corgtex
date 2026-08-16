@@ -30,6 +30,7 @@ const workspaceCounts = { members: true, memberInviteRequests: true, brainSource
   appInstallations: true };
 const fail = (message) => { throw new Error(message); };
 const digest = (...values) => createHash("sha256").update(values.join("\0")).digest("hex");
+const dedicatedDatabaseHost = `${CONTRACT.postgresServiceId}.postgres.database.azure.com`;
 
 export function parseCsv(text) {
   const rows = []; let row = []; let cell = ""; let quoted = false;
@@ -57,13 +58,11 @@ export async function loadManifest(read = readFile) {
     || [...urls].some((url) => !url.startsWith("https://"))) fail("Corporate Rebels manifest is invalid.");
   return rows;
 }
-function seedEvidence(workspaceId, releaseGitSha) {
-  return digest("corporate-rebels-dedicated-seed-v1", workspaceId, releaseGitSha,
-    CONTRACT.manifestSha256, CONTRACT.resourceGroup, CONTRACT.webServiceId, "25", "1", "0");
-}
-function opsEvidence(workspaceId, releaseGitSha) {
-  return digest("corporate-rebels-ops-cutover-v1", workspaceId, releaseGitSha,
-    CONTRACT.opsDeploymentId, CONTRACT.selfServeLegacyWorkspaceId);
+function verifyDedicatedDatabaseUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { fail("Dedicated Azure database URL is invalid."); }
+  if (!["postgres:", "postgresql:"].includes(url.protocol) || url.hostname !== dedicatedDatabaseHost
+    || !url.pathname.slice(1)) fail("Dedicated Azure database identity mismatch.");
 }
 async function exactLegacy(prisma, id) {
   if (![CONTRACT.selfServeLegacyWorkspaceId, CONTRACT.opsLegacyWorkspaceId].includes(id)) fail("Legacy target is not authorized.");
@@ -75,15 +74,24 @@ async function exactLegacy(prisma, id) {
   if (matches.length !== 1 || matches[0].id !== id) fail("Corporate Rebels workspace identity is ambiguous.");
   const counts = await Promise.all([
     prisma.brainSource.count({ where: { workspaceId: id, fileStorageKey: { not: null } } }),
+    prisma.document.count({ where: { workspaceId: id, storageKey: { not: "" } } }),
     prisma.meetingAudioAsset.count({ where: { workspaceId: id } }),
     prisma.workspaceExternalResourceAttachment.count({ where: { workspaceId: id } }),
     prisma.buildArtifactAsset.count({ where: { artifact: { workspaceId: id } } }),
     prisma.event.count({ where: { workspaceId: id } }), prisma.workflowJob.count({ where: { workspaceId: id } }),
     prisma.meetingRecorderProviderEvent.count({ where: { workspaceId: id } }),
     prisma.communicationInboundEvent.count({ where: { workspaceId: id } }),
+    prisma.workspaceIntegrationBinding.count({ where: { workspaceId: id } }),
+    prisma.oAuthConnection.count({ where: { workspaceId: id, status: "ACTIVE" } }),
+    prisma.oAuthApp.count({ where: { workspaceId: id, isActive: true, archivedAt: null } }),
+    prisma.oAuthAuthorizationCode.count({ where: { workspaceId: id, usedAt: null } }),
+    prisma.oAuthAccessToken.count({ where: { workspaceId: id, revokedAt: null } }),
+    prisma.mcpOAuthAuthorizationCode.count({ where: { workspaceId: id, usedAt: null } }),
+    prisma.mcpOAuthAccessToken.count({ where: { workspaceId: id, revokedAt: null } }),
   ]);
-  if (counts.slice(0, 4).some(Boolean)) fail("Corporate Rebels workspace has external file payloads.");
-  if (counts.slice(4).some(Boolean)) fail("Corporate Rebels workspace has orphanable runtime payloads.");
+  if (counts.slice(0, 5).some(Boolean)) fail("Corporate Rebels workspace has external file payloads.");
+  if (counts.slice(5, 9).some(Boolean)) fail("Corporate Rebels workspace has orphanable runtime payloads.");
+  if (counts.slice(9).some(Boolean)) fail("Corporate Rebels workspace has active binding or OAuth state.");
   if (workspace._count.externalMcpConnections || workspace._count.externalDataSources
     || workspace._count.externalResourceAttachments || workspace._count.communicationInstallations
     || workspace._count.appInstallations) fail("Corporate Rebels workspace has active integrations.");
@@ -135,19 +143,18 @@ async function seedDedicated(prisma, rows, releaseGitSha, execute) {
       sourceIds: seeded.map((source) => source.id), frontmatterJson: { corpusCount: 25,
         retrievalDate: "2026-08-13", manifestSha256: CONTRACT.manifestSha256, projection: "workspace-only" } } });
     await tx.auditLog.create({ data: { workspaceId: workspace.id, action: "corporate_rebels.dedicated_seeded",
-      entityType: "Workspace", entityId: workspace.id, meta: { sourceCount: 25, publication: false, invitations: false } } });
+      entityType: "Workspace", entityId: workspace.id,
+      meta: { sourceCount: 25, releaseGitSha, publication: false, invitations: false } } });
     const result = await tx.workspace.findUnique({ where: { id: workspace.id }, select: { id: true,
       _count: { select: { members: true, memberInviteRequests: true, brainSources: true, brainArticles: true } } } });
     if (!result || result._count.members || result._count.memberInviteRequests
       || result._count.brainSources !== 25 || result._count.brainArticles !== 1) fail("Dedicated seed verification failed.");
-    return { mode: "executed", phase: "seed-dedicated", workspace: result,
-      evidence: seedEvidence(result.id, releaseGitSha) };
+    return { mode: "executed", phase: "seed-dedicated", workspace: result };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-async function cutoverOps(prisma, workspaceId, evidence, releaseGitSha, execute, fetchFn) {
+async function cutoverOps(prisma, workspaceId, releaseGitSha, execute, fetchFn) {
   if (!uuid.test(workspaceId ?? "") || [CONTRACT.selfServeLegacyWorkspaceId,
     CONTRACT.opsLegacyWorkspaceId].includes(workspaceId)) fail("New dedicated workspace UUID is required.");
-  if (evidence !== seedEvidence(workspaceId, releaseGitSha)) fail("Dedicated seed evidence is invalid.");
   const release = await verifyHealth(fetchFn, releaseGitSha);
   const preflight = async (db) => {
     const legacy = await exactLegacy(db, CONTRACT.opsLegacyWorkspaceId);
@@ -182,13 +189,17 @@ async function cutoverOps(prisma, workspaceId, evidence, releaseGitSha, execute,
     await tx.customerDeploymentEvent.create({ data: { deploymentId: deployment.id,
       action: "corporate_rebels.dedicated_azure_cutover", meta: { legacyWorkspaceId: locked.legacy.id,
         remoteWorkspaceId: workspaceId, releaseGitSha, approvedScope: "exact-corporate-rebels-only" } } });
-    await tx.workspace.delete({ where: { id: locked.legacy.id } });
     return { mode: "executed", phase: "cutover-ops", deploymentId: deployment.id,
-      remoteWorkspaceId: workspaceId, evidence: opsEvidence(workspaceId, releaseGitSha) };
+      remoteWorkspaceId: workspaceId };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-async function deleteSelfServe(prisma, workspaceId, evidence, releaseGitSha, execute) {
-  if (evidence !== opsEvidence(workspaceId, releaseGitSha)) fail("Ops cutover evidence is invalid.");
+async function deleteSelfServe(prisma, opsPrisma, workspaceId, execute) {
+  const deployment = await opsPrisma.customerDeployment.findUnique({ where: { id: CONTRACT.opsDeploymentId } });
+  const oldOps = await opsPrisma.workspace.findUnique({ where: { id: CONTRACT.opsLegacyWorkspaceId }, select: { id: true } });
+  if (!deployment || !oldOps || deployment.remoteWorkspaceId !== workspaceId
+    || deployment.managedWorkspaceId !== null || deployment.url !== CONTRACT.url
+    || deployment.providerResourceGroup !== CONTRACT.resourceGroup
+    || deployment.providerPostgresServiceId !== CONTRACT.postgresServiceId) fail("Persisted Ops cutover proof failed.");
   const legacy = await exactLegacy(prisma, CONTRACT.selfServeLegacyWorkspaceId);
   if (!execute) return { mode: "preflight", phase: "delete-selfserve", legacyCounts: legacy._count };
   return prisma.$transaction(async (tx) => {
@@ -198,22 +209,46 @@ async function deleteSelfServe(prisma, workspaceId, evidence, releaseGitSha, exe
       preservedWorkspaceId: workspaceId };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
-export async function runCorporateRebelsDedicatedCutover({ prisma, phase, execute = false,
-  confirmation, workspaceId, evidence, releaseGitSha, readManifest, fetchFn = fetch } = {}) {
+async function deleteOpsLegacy(prisma, workspaceId) {
+  return prisma.$transaction(async (tx) => {
+    const legacy = await exactLegacy(tx, CONTRACT.opsLegacyWorkspaceId);
+    const deployment = await tx.customerDeployment.findUnique({ where: { id: CONTRACT.opsDeploymentId } });
+    if (!deployment || deployment.remoteWorkspaceId !== workspaceId || deployment.managedWorkspaceId !== null
+      || deployment.url !== CONTRACT.url) fail("Final Ops cutover proof failed.");
+    await tx.workspace.delete({ where: { id: legacy.id } });
+    return { deletedWorkspaceId: legacy.id };
+  }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
+}
+export async function runCorporateRebelsDedicatedCutover({ phase, execute = false,
+  confirmation, releaseGitSha, readManifest, fetchFn = fetch, dedicatedPrisma, opsPrisma,
+  selfServePrisma, dedicatedDatabaseUrl } = {}) {
   if (execute && confirmation !== CONTRACT.confirmation) fail("Exact execution confirmation is required.");
   const rows = await loadManifest(readManifest);
-  if (phase === "seed-dedicated") return seedDedicated(prisma, rows, releaseGitSha, execute);
-  if (phase === "cutover-ops") return cutoverOps(prisma, workspaceId, evidence, releaseGitSha, execute, fetchFn);
-  if (phase === "delete-selfserve") return deleteSelfServe(prisma, workspaceId, evidence, releaseGitSha, execute);
+  if (phase === "execute-cutover") {
+    verifyDedicatedDatabaseUrl(dedicatedDatabaseUrl);
+    const previewOps = await cutoverOps(opsPrisma, "11111111-1111-4111-8111-111111111111",
+      releaseGitSha, false, fetchFn);
+    const previewSelfServe = await exactLegacy(selfServePrisma, CONTRACT.selfServeLegacyWorkspaceId);
+    const seed = await seedDedicated(dedicatedPrisma, rows, releaseGitSha, execute);
+    if (!execute) return { mode: "preflight", phase, dedicated: seed, ops: previewOps,
+      selfServe: previewSelfServe };
+    const ops = await cutoverOps(opsPrisma, seed.workspace.id, releaseGitSha, true, fetchFn);
+    const selfServe = await deleteSelfServe(selfServePrisma, opsPrisma, seed.workspace.id, true);
+    const opsLegacy = await deleteOpsLegacy(opsPrisma, seed.workspace.id);
+    return { mode: "executed", phase, workspaceId: seed.workspace.id,
+      dedicated: seed, ops, selfServe, opsLegacy };
+  }
   fail("Unsupported phase.");
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const prisma = new PrismaClient();
+  const urls = [process.env.DEDICATED_DATABASE_URL, process.env.OPS_DATABASE_URL,
+    process.env.SELFSERVE_DATABASE_URL];
+  const clients = urls.map((datasourceUrl) => new PrismaClient({ datasourceUrl }));
   try {
-    const receipt = await runCorporateRebelsDedicatedCutover({ prisma, phase: process.argv[2],
+    const receipt = await runCorporateRebelsDedicatedCutover({ phase: process.argv[2],
       execute: process.argv.includes("--execute"), confirmation: process.env.CORPORATE_REBELS_CONFIRM,
-      workspaceId: process.env.CORPORATE_REBELS_WORKSPACE_ID, evidence: process.env.CORPORATE_REBELS_EVIDENCE,
-      releaseGitSha: process.env.CORPORATE_REBELS_RELEASE_GIT_SHA });
+      releaseGitSha: process.env.CORPORATE_REBELS_RELEASE_GIT_SHA, dedicatedPrisma: clients[0],
+      opsPrisma: clients[1], selfServePrisma: clients[2], dedicatedDatabaseUrl: urls[0] });
     console.log(JSON.stringify(receipt, null, 2));
-  } finally { await prisma.$disconnect(); }
+  } finally { await Promise.all(clients.map((client) => client.$disconnect())); }
 }
