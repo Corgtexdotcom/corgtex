@@ -9,20 +9,20 @@ export const CONTRACT = Object.freeze({
   opsDeploymentId: "160103a2-6ae5-4e6d-a92f-110e71b52d33",
   opsAccountId: "53c37e29-745e-4ed4-961e-18cd96d3874d",
   azureHostDeploymentId: "e0d34b24-bd86-4cb2-8ccb-f2f84309ca16",
+  azureResourceGroup: "rg-corgtex-selfserve-production-wus3", azureEnvironmentId: "cae-corgtex-ss-prod",
+  azureWebServiceId: "ca-corgtex-ss-prod-web", azureWorkerServiceId: "ca-corgtex-ss-prod-worker",
+  azureWebUrl: "https://ca-corgtex-ss-prod-web.ambitiouscoast-d5bf84e5.westus3.azurecontainerapps.io",
   name: "Corporate Rebels",
   slug: "corporate-rebels",
   manifestSha256: "91935b44e00c28b0cc1cb967b241944ecd75e2e7a9fc40ccad5ebed8004aaebe",
   confirmation: "delete-two-corporate-rebels-workspaces-and-create-one-private-azure-workspace",
 });
-
 const manifestUrl = new URL("./data/corporate-rebels-source-manifest-2026-08-13.csv", import.meta.url);
 const workspaceCountSelect = { members: true, memberInviteRequests: true, brainSources: true,
   brainArticles: true, documents: true, meetings: true, externalMcpConnections: true,
   externalDataSources: true, externalResourceAttachments: true, communicationInstallations: true,
   appInstallations: true };
-
 function fail(message) { throw new Error(message); }
-
 export function parseCsv(text) {
   const rows = []; let row = []; let cell = ""; let quoted = false;
   for (let index = 0; index < text.length; index += 1) {
@@ -39,7 +39,6 @@ export function parseCsv(text) {
   const [headers, ...values] = rows;
   return values.map((entry) => Object.fromEntries(headers.map((header, index) => [header, entry[index] ?? ""])));
 }
-
 export async function loadManifest(read = readFile) {
   const bytes = await read(manifestUrl);
   const digest = createHash("sha256").update(bytes).digest("hex");
@@ -53,7 +52,6 @@ export async function loadManifest(read = readFile) {
   }
   return { digest, rows };
 }
-
 async function exactWorkspace(prisma, id) {
   const workspace = await prisma.workspace.findUnique({ where: { id },
     select: { id: true, name: true, slug: true, _count: { select: workspaceCountSelect } } });
@@ -63,18 +61,26 @@ async function exactWorkspace(prisma, id) {
   const matches = await prisma.workspace.findMany({ where: { OR: [{ slug: CONTRACT.slug },
     { name: CONTRACT.name }] }, select: { id: true } });
   if (matches.length !== 1 || matches[0].id !== id) fail("Corporate Rebels workspace identity is ambiguous.");
-  const attachmentCounts = await Promise.all([
+  const safetyCounts = await Promise.all([
     prisma.brainSource.count({ where: { workspaceId: id, fileStorageKey: { not: null } } }),
     prisma.document.count({ where: { workspaceId: id } }),
     prisma.meetingAudioAsset.count({ where: { workspaceId: id } }),
     prisma.workspaceExternalResourceAttachment.count({ where: { workspaceId: id } }),
     prisma.buildArtifactAsset.count({ where: { artifact: { workspaceId: id } } }),
+    prisma.event.count({ where: { workspaceId: id } }),
+    prisma.workflowJob.count({ where: { workspaceId: id } }),
+    prisma.meetingRecorderProviderEvent.count({ where: { workspaceId: id } }),
   ]);
-  const fileAttachments = attachmentCounts.reduce((sum, count) => sum + count, 0);
+  const fileAttachments = safetyCounts.slice(0, 5).reduce((sum, count) => sum + count, 0);
   if (fileAttachments) fail(`Corporate Rebels workspace ${id} has file attachments.`);
-  return { ...workspace, fileAttachments };
+  const unsafePayloads = safetyCounts.slice(5).reduce((sum, count) => sum + count, 0);
+  if (unsafePayloads) fail(`Corporate Rebels workspace ${id} has orphanable payloads.`);
+  return { ...workspace, fileAttachments, unsafePayloads };
 }
-
+function azureEvidence(workspaceId) {
+  return createHash("sha256").update(["corporate-rebels-azure-v1", workspaceId, CONTRACT.azureLegacyWorkspaceId,
+    CONTRACT.manifestSha256, "25", "1", "0", "0"].join("\0")).digest("hex");
+}
 function sourceRows(rows) {
   return rows.map((row) => ({
     id: randomUUID(), accessDomain: "WORKSPACE", sourceType: "ARTICLE", tier: 2,
@@ -90,14 +96,12 @@ function sourceRows(rows) {
       manifestSha256: CONTRACT.manifestSha256 },
   }));
 }
-
 function indexBody(rows) {
   const sorted = [...rows].sort((left, right) => right.original_publication_date.localeCompare(
     left.original_publication_date) || left.id.localeCompare(right.id));
   const entries = sorted.map((row) => `- **[${row.title}](${row.canonical_https_url})** — ${row.publisher}; ${row.author_byline}; ${row.original_publication_date}. ${row.why_it_matters}`);
   return `# Corporate Rebels Curated Source Index — 2026-08-13\n\nPrivate workspace-only index of 25 dated public references. Metadata and original concise synopses only; no publisher page bodies are stored.\n\n${entries.join("\n")}`;
 }
-
 async function azurePhase(prisma, manifest, execute) {
   const legacy = await exactWorkspace(prisma, CONTRACT.azureLegacyWorkspaceId);
   const preflight = { phase: "azure", legacyWorkspaceId: legacy.id, legacyCounts: legacy._count,
@@ -106,7 +110,8 @@ async function azurePhase(prisma, manifest, execute) {
   if (!execute) return { mode: "preflight", ...preflight };
   const sources = sourceRows(manifest.rows);
   return prisma.$transaction(async (tx) => {
-    await tx.workspace.delete({ where: { id: legacy.id } });
+    const lockedLegacy = await exactWorkspace(tx, CONTRACT.azureLegacyWorkspaceId);
+    await tx.workspace.delete({ where: { id: lockedLegacy.id } });
     const workspace = await tx.workspace.create({ data: { name: CONTRACT.name, slug: CONTRACT.slug,
       description: "Private Azure-backed Corporate Rebels client workspace.", plan: "ENTERPRISE_MANAGED" } });
     await tx.approvalPolicy.create({ data: { workspaceId: workspace.id, subjectType: "PROPOSAL",
@@ -128,13 +133,12 @@ async function azurePhase(prisma, manifest, execute) {
         brainSources: true, brainArticles: true } } } });
     if (!result || result._count.members || result._count.memberInviteRequests
       || result._count.brainSources !== 25 || result._count.brainArticles !== 1) fail("Azure result verification failed.");
-    return { mode: "executed", ...preflight, azureWorkspace: result };
+    return { mode: "executed", ...preflight, azureWorkspace: result,
+      azureEvidence: azureEvidence(result.id) };
   }, { isolationLevel: "Serializable", maxWait: 10_000, timeout: 120_000 });
 }
 
-async function opsPhase(prisma, azureWorkspaceId, execute) {
-  if (!/^[0-9a-f-]{36}$/.test(azureWorkspaceId ?? "")
-    || azureWorkspaceId === CONTRACT.azureLegacyWorkspaceId) fail("A new Azure workspace ID is required.");
+async function exactOpsState(prisma) {
   const legacy = await exactWorkspace(prisma, CONTRACT.opsLegacyWorkspaceId);
   const deployment = await prisma.customerDeployment.findUnique({ where: { id: CONTRACT.opsDeploymentId } });
   const host = await prisma.customerDeployment.findUnique({ where: { id: CONTRACT.azureHostDeploymentId } });
@@ -143,20 +147,36 @@ async function opsPhase(prisma, azureWorkspaceId, execute) {
     || deployment.customerSlug !== CONTRACT.slug || deployment.label !== CONTRACT.name
     || account.primaryDeploymentId !== deployment.id || account.slug !== CONTRACT.slug
     || account.displayName !== CONTRACT.name) fail("Corporate Rebels control-plane identity mismatch.");
-  if (!host || host.cloudProvider !== "AZURE" || host.deploymentStatus !== "ACTIVE") fail("Azure host registry is not active.");
+  const coordinates = [host?.providerResourceGroup, host?.providerEnvironmentId,
+    host?.providerWebServiceId, host?.providerWorkerServiceId];
+  const expected = [CONTRACT.azureResourceGroup, CONTRACT.azureEnvironmentId,
+    CONTRACT.azureWebServiceId, CONTRACT.azureWorkerServiceId];
+  if (!host || host.cloudProvider !== "AZURE" || host.deploymentStatus !== "ACTIVE"
+    || coordinates.some((value, index) => value !== expected[index])) fail("Azure host registry identity is not exact.");
+  return { legacy, deployment, host, account };
+}
+
+async function opsPhase(prisma, azureWorkspaceId, evidence, execute) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(azureWorkspaceId ?? "")
+    || [CONTRACT.azureLegacyWorkspaceId, CONTRACT.opsLegacyWorkspaceId].includes(azureWorkspaceId)) {
+    fail("A new Azure workspace UUID is required.");
+  }
+  if (evidence !== azureEvidence(azureWorkspaceId)) fail("Verified Azure-phase evidence is required.");
+  const { legacy, deployment, host, account } = await exactOpsState(prisma);
   const preflight = { phase: "ops", legacyWorkspaceId: legacy.id, legacyCounts: legacy._count,
     legacyFileAttachments: legacy.fileAttachments, deploymentId: deployment.id,
     customerAccountId: account.id, azureHostDeploymentId: host.id, azureWorkspaceId,
     manifestSha256: CONTRACT.manifestSha256 };
   if (!execute) return { mode: "preflight", ...preflight };
   return prisma.$transaction(async (tx) => {
+    const locked = await exactOpsState(tx);
     const providerKeys = ["region", "dataResidency", "providerSubscriptionId", "providerResourceGroup",
       "providerProjectId", "providerEnvironmentId", "providerWebServiceId", "providerWorkerServiceId",
       "providerPostgresServiceId", "providerRedisServiceId", "providerStorageResourceId", "providerLogsUrl",
       "providerCostUrl", "releaseVersion", "releaseImageTag", "lastHealthCheck", "lastHealthStatus"];
-    const provider = Object.fromEntries(providerKeys.map((key) => [key, host[key] ?? null]));
-    await tx.customerDeployment.update({ where: { id: deployment.id }, data: { ...provider,
-      url: `${host.url.replace(/\/$/, "")}/workspaces/${azureWorkspaceId}`,
+    const provider = Object.fromEntries(providerKeys.map((key) => [key, locked.host[key] ?? null]));
+    await tx.customerDeployment.update({ where: { id: locked.deployment.id }, data: { ...provider,
+      url: CONTRACT.azureWebUrl,
       deploymentKind: "REMOTE_MANAGED", deploymentStatus: "ACTIVE", cloudProvider: "AZURE",
       remoteWorkspaceId: azureWorkspaceId, remoteWorkspaceSlug: CONTRACT.slug, managedWorkspaceId: null,
       provisioningStatus: "active", bootstrapStatus: "completed", supportBaseUrl: null,
@@ -164,9 +184,10 @@ async function opsPhase(prisma, azureWorkspaceId, execute) {
       supportConnectorStatus: "not_configured", supportLastConnectedAt: null, supportLastSyncAt: null,
       supportLastSyncError: null } });
     await tx.customerDeploymentEvent.create({ data: { deploymentId: deployment.id,
-      action: "corporate_rebels.azure_workspace_consolidated", meta: { legacyWorkspaceId: legacy.id,
-        azureWorkspaceId, azureHostDeploymentId: host.id, approvedScope: "exact-target-only" } } });
-    await tx.workspace.delete({ where: { id: legacy.id } });
+      action: "corporate_rebels.azure_workspace_consolidated", meta: { legacyWorkspaceId: locked.legacy.id,
+        azureWorkspaceId, azureHostDeploymentId: locked.host.id, azureEvidence: evidence,
+        approvedScope: "exact-target-only" } } });
+    await tx.workspace.delete({ where: { id: locked.legacy.id } });
     const result = await tx.customerDeployment.findUnique({ where: { id: deployment.id }, select: {
       id: true, cloudProvider: true, deploymentKind: true, remoteWorkspaceId: true,
       remoteWorkspaceSlug: true, managedWorkspaceId: true, releaseImageTag: true } });
@@ -177,12 +198,12 @@ async function opsPhase(prisma, azureWorkspaceId, execute) {
 }
 
 export async function runCorporateRebelsConsolidation({ prisma, phase, execute = false,
-  confirmation, azureWorkspaceId, readManifest } = {}) {
+  confirmation, azureWorkspaceId, azurePhaseEvidence, readManifest } = {}) {
   if (phase !== "azure" && phase !== "ops") fail("Phase must be azure or ops.");
   if (execute && confirmation !== CONTRACT.confirmation) fail("Exact execution confirmation is required.");
   const manifest = await loadManifest(readManifest);
   return phase === "azure" ? azurePhase(prisma, manifest, execute)
-    : opsPhase(prisma, azureWorkspaceId, execute);
+    : opsPhase(prisma, azureWorkspaceId, azurePhaseEvidence, execute);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -190,7 +211,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const receipt = await runCorporateRebelsConsolidation({ prisma, phase: process.argv[2],
       execute: process.argv.includes("--execute"), confirmation: process.env.CORPORATE_REBELS_CONFIRM,
-      azureWorkspaceId: process.env.CORPORATE_REBELS_AZURE_WORKSPACE_ID });
+      azureWorkspaceId: process.env.CORPORATE_REBELS_AZURE_WORKSPACE_ID,
+      azurePhaseEvidence: process.env.CORPORATE_REBELS_AZURE_EVIDENCE });
     console.log(JSON.stringify(receipt, null, 2));
   } finally { await prisma.$disconnect(); }
 }
