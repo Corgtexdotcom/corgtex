@@ -44,11 +44,12 @@ GitHub protection reports the required checks and conversation state satisfied. 
 later push or base change invalidates the approval and requires a fresh review.
 
 Native branch/ruleset controls are the target enforcement boundary. During the
-staged transition, Review Snapshot Integrity remains required: follow
+staged transition, reviewer policy also requires Review Snapshot Integrity even
+though it is not a native required context. Follow the one canonical procedure in
 [`ops/review-snapshot-integrity.md`](ops/review-snapshot-integrity.md), include its
 exact-head attestation in the approval, and rerun the publisher for the same head.
-Remove that temporary gate only after `PR Policy` and `PR Metadata Policy` are live,
-required, and proven on both pull-request and merge-group SHAs.
+Remove that temporary protocol only after `PR Policy` and `PR Metadata Policy` are
+live, required, and proven on both pull-request and merge-group SHAs.
 
 ## Special cases
 

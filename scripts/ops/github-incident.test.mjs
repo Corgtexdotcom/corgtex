@@ -12,6 +12,38 @@ const githubIncidentPath = fileURLToPath(new URL("./github-incident.mjs", import
 const healthSweepPath = fileURLToPath(new URL("./health-sweep.mjs", import.meta.url));
 
 describe("github-incident resolved issue sync", () => {
+  it("routes GitHub writes through the canonical Corgtex builder config", async () => {
+    const incident = [{
+      dedupeKey: "builder-config-routing",
+      severity: "P2",
+      service: "ops",
+      status: "failed",
+      summary: "Verify builder config routing",
+    }];
+    const defaultResult = await runWithFakeGh(githubIncidentPath, [], incident, {
+      env: {
+        GH_CONFIG_DIR: "",
+        HOME: "/tmp/corgtex-policy-home",
+        CORGTEX_BUILDER_GH_CONFIG_DIR: "",
+        CODEX_BUILDER_GH_CONFIG_DIR: "",
+      },
+    });
+    expect(new Set(defaultResult.state.ghConfigDirs)).toEqual(new Set([
+      "/tmp/corgtex-policy-home/.config/gh-corgtex-builder",
+    ]));
+
+    const overrideResult = await runWithFakeGh(githubIncidentPath, [], incident, {
+      env: {
+        GH_CONFIG_DIR: "",
+        CORGTEX_BUILDER_GH_CONFIG_DIR: "/tmp/corgtex-builder-override",
+        CODEX_BUILDER_GH_CONFIG_DIR: "/tmp/retired-builder-override",
+      },
+    });
+    expect(new Set(overrideResult.state.ghConfigDirs)).toEqual(new Set([
+      "/tmp/corgtex-builder-override",
+    ]));
+  });
+
   it("closes resolved ops-auto-fix issues while leaving active issues open", async () => {
     const activeToken = opsToken("active-dedupe");
     const resolvedToken = opsToken("resolved-dedupe");
@@ -579,6 +611,8 @@ const statePath = process.env.GH_FAKE_STATE;
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 const argv = process.argv.slice(2);
 state.calls.push(argv);
+state.ghConfigDirs ??= [];
+state.ghConfigDirs.push(process.env.GH_CONFIG_DIR ?? null);
 
 function save() {
   writeFileSync(statePath, JSON.stringify(state));

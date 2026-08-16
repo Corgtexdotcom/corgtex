@@ -36,7 +36,7 @@ active until the live ruleset API confirms them.
 Activation order is mandatory:
 
 1. Land and observe the replacement PR and merge-group publishers while Review
-   Snapshot Integrity remains required.
+   Snapshot Integrity remains a temporary reviewer-policy gate.
 2. Replace the legacy `Plan Present`, `Scope Check`, and `Diff Size` requirements
    with `PR Policy`; add `PR Metadata Policy`; then read back the live settings.
 3. Prove a valid PR can enter the queue and an invalid metadata edit fails and

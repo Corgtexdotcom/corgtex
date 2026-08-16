@@ -130,8 +130,9 @@ describe("review snapshot integrity", () => {
     const nodes = steps.map((step, index) => ({ position: index + 1, baseCommit: { oid: step.baseSha }, headCommit: { oid: step.headSha }, pullRequest: { number: index + 1, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: group.base_sha } }));
     expect(resolveMergeGroupPrNumbers(group, { nodes, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, steps)).toEqual([1, 2]);
   });
-  it("fails on halt-agents and force-merge labels", () => {
+  it("fails on halt-agents, needs-replan, and force-merge labels", () => {
     expect(decide(state({}, { labels: [{ name: "halt-agents" }] })).pass).toBe(false);
+    expect(decide(state({}, { labels: [{ name: "needs-replan" }] })).pass).toBe(false);
     expect(decide(state({}, { labels: [{ name: "force-merge" }] })).pass).toBe(false);
   });
   it("auto-revert relaxes plan/scope/criteria only", () => {
@@ -151,18 +152,18 @@ describe("review snapshot integrity", () => {
     expect(matchesAllowlist("ab/c.ts", ["a/*"])).toBe(false);
     expect(matchesAllowlist("a/bcd.ts", ["a/b*"])).toBe(true);
   });
-  it("enforces forbidden-path label, critical-cap escalation, and doc exclusion", () => {
+  it("does not restore retired size caps or approval labels", () => {
     const plan2 = PLAN.replace("- `scripts/x.mjs`", "- `scripts/x.mjs`\n- `.github/workflows/**`\n- `docs/**`");
     const base = { body: plan2, labels: [], draft: true };
     const wf = { filename: ".github/workflows/x.yml", additions: 1, deletions: 0 };
-    expect(evaluatePolicy({ ...base, files: [wf] })).toContain("forbidden path changed without forbidden-path-approved");
-    expect(evaluatePolicy({ body: "garbage", labels: ["auto-revert"], draft: false, files: [wf] })).toContain("forbidden path changed without forbidden-path-approved");
-    expect(evaluatePolicy({ ...base, labels: ["forbidden-path-approved"], files: [wf] })).toEqual([]);
-    expect(evaluatePolicy({ ...base, labels: ["forbidden-path-approved"], files: [{ ...wf, additions: 401 }] })[0]).toMatch("critical cap");
+    expect(evaluatePolicy({ ...base, files: [wf] })).toEqual([]);
+    expect(evaluatePolicy({ body: "garbage", labels: ["auto-revert"], draft: false, files: [wf] })).toEqual([]);
+    expect(evaluatePolicy({ ...base, files: [{ ...wf, additions: 5000 }] })).toEqual([]);
     expect(evaluatePolicy({ ...base, files: [{ filename: "docs/x.md", additions: 5000, deletions: 0 }] })).toEqual([]);
     const guardedPlan = PLAN.replace("scripts/x.mjs", "scripts/review-snapshot-integrity.mjs");
-    const guarded = { filename: "scripts/review-snapshot-integrity.mjs", additions: 401, deletions: 0 };
-    expect(evaluatePolicy({ body: guardedPlan, labels: [], draft: true, files: [guarded] })[0]).toMatch("critical cap");
+    const guarded = { filename: "scripts/review-snapshot-integrity.mjs", additions: 5000, deletions: 0 };
+    expect(evaluatePolicy({ body: guardedPlan, labels: [], draft: true, files: [guarded] })).toEqual([]);
+    expect(evaluatePolicy({ ...base, files: [{ filename: "outside.ts", additions: 1, deletions: 0 }] })).toContain("out-of-scope file: outside.ts");
   });
   it("fails closed on truncated pagination, closed-PR no-ops, and api retries then throws", async () => {
     expect(decide(state({ filesTruncated: true })).pass).toBe(false);

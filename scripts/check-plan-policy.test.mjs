@@ -116,6 +116,15 @@ describe("agent policy workflow invariants", () => {
     expect(metadata).toMatch(
       /statuses\/\$MERGE_GROUP_SHA[\s\S]*context="PR Metadata Policy"/,
     );
+    expect(metadata).toMatch(
+      /ref: \$\{\{ github\.event\.merge_group\.base_sha \}\}/,
+    );
+    expect(metadata).toContain("node scripts/review-snapshot-integrity.mjs");
+    expect(metadata).toContain('publish pending "Revalidating live merge-group metadata"');
+    expect(metadata).toContain('publish failure "Live merge-group metadata failed policy"');
+    expect(metadata).toContain('publish success "Live merge-group metadata satisfies policy"');
+    expect(metadata.indexOf("node scripts/review-snapshot-integrity.mjs"))
+      .toBeLessThan(metadata.indexOf('publish success "Live merge-group metadata satisfies policy"'));
     expect(metadata).toContain('contexts=("PR Metadata Policy")');
     expect(metadata).not.toMatch(
       /contexts=.*(?:"PR Policy"|"Plan Present"|"Scope Check"|"Diff Size")/,

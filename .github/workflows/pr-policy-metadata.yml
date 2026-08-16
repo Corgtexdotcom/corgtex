@@ -165,21 +165,56 @@ jobs:
           trap - ERR
 
   merge-group:
-    name: Publish merge-group metadata policy
+    name: Revalidate merge-group metadata
     if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
     steps:
-      - name: Publish merge-group policy status
+      # The evaluator comes from the immutable pre-merge base. During the staged
+      # transition it also powers RSI; a later cleanup keeps the live-member
+      # validation while removing the attestation/status protocol.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Revalidate live merge-group members
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          gh api --method POST \
-            "repos/$GITHUB_REPOSITORY/statuses/$MERGE_GROUP_SHA" \
-            -f state=success \
-            -f context="PR Metadata Policy" \
-            -f description="Queued PR metadata satisfied policy before merge-group creation" \
-            >/dev/null
+
+          publish() {
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/statuses/$MERGE_GROUP_SHA" \
+              -f state="$1" \
+              -f context="PR Metadata Policy" \
+              -f description="$2" \
+              >/dev/null
+          }
+
+          fail_closed() {
+            local exit_code="$?"
+            trap - ERR
+            publish failure "Live merge-group metadata failed policy" || \
+              echo "Unable to publish failing merge-group policy status." >&2
+            exit "$exit_code"
+          }
+
+          trap fail_closed ERR
+          publish pending "Revalidating live merge-group metadata"
+          node scripts/review-snapshot-integrity.mjs
+          publish success "Live merge-group metadata satisfies policy"
+          trap - ERR
