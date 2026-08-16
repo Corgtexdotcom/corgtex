@@ -1,160 +1,97 @@
 ---
-title: "Agent Pipeline"
-description: "Canonical specification for the autonomous three-agent development pipeline."
+title: "Agent Delivery"
+description: "How Corgtex agents deliver coherent changes safely and efficiently."
 ---
 
-Corgtex is developed by a fully autonomous three-agent pipeline. One
-human prompts each stage; no human reviews code. Safety comes from
-**role separation** (independent planning, execution, and exact-head review) plus **mechanical CI gates** (Codex
-cannot merge a PR whose required checks are red).
+Corgtex uses a simple accountability model: one delivery owner takes a task from
+plan through tested pull request, and an independent reviewer protects the merge.
+Automation handles mechanical gates; agents spend their effort on product behavior,
+realistic risk, and evidence.
 
-This page is the canonical spec. `AGENTS.md` at the repo root is the
-per-role quick reference loaded by each agent's harness.
+## Principles
 
-## Roles
+1. **Outcome first.** Deliver the smallest complete result that solves the stated
+   problem. Do not expand an exact task into a platform or PR program without
+   explicit approval.
+2. **One coherent PR by default.** Split only when every part is independently
+   useful, safe, testable, deployable, and rollbackable. Size alone is not a split
+   criterion.
+3. **Proportional process.** A PR contract contains outcome, risk, file scope,
+   acceptance, tests, proof where relevant, and rollback. It is not a separate role
+   or a second implementation project.
+4. **Autonomy inside scope.** The owner may edit, test, commit, push, and update the
+   PR. New approval is needed only for material scope, access, spend, external
+   communication, unapproved irreversible production/customer-data work, or bypass.
+5. **Independent exact-head review.** A separate read-only identity reviews the
+   complete current diff. Native GitHub rules invalidate stale approvals and gate
+   merge on checks, conversations, latest-push approval, and merge queue.
+6. **Short feedback loops.** After two unsuccessful corrections, reassess. A second
+   replan or more implementation PRs requires explicit user approval.
 
-| Role | Agent | Writes code? | Opens PR? | Merges? |
-| --- | --- | --- | --- | --- |
-| **Planner** | Claude Opus or Codex Sol | No | Draft only | No |
-| **Executor** | Gemini in Antigravity or Kimi K3 | Yes | Yes (ready) | No |
-| **Reviewer** | Codex (GitHub App) | No | No | Yes (via approval + auto-merge) |
+## Delivery owner
 
-Kimi and Gemini may support analysis and execution, but never own the first planning pass.
+The delivery owner:
 
-The human prompts each agent and can intervene with PR labels.
+- verifies the current goal, repository state, branch, and any existing PR;
+- creates a clean task worktree from current `origin/main` for new work;
+- writes the proportional PR contract and keeps its file scope current;
+- implements the complete acceptance criteria without unrelated cleanup;
+- runs targeted tests while iterating and the required broad checks on the stable
+  diff;
+- captures actual running proof for frontend changes;
+- publishes with the builder identity and responds to objective review findings;
+- never self-approves or bypasses protection without an explicit human directive.
 
-## Handoff artifact
+The same capable agent may perform planning and implementation. External workers are
+optional accelerators, not ownership or review boundaries.
 
-The single handoff artifact between all three agents is the plan
-contract in the pull request body.
+## Risk tiers
 
-- The format is fixed by [`/.agents/plan-template.md`](https://github.com/corgtex/corgtex/blob/main/.agents/plan-template.md).
-- The Planner writes it into the draft PR body, the Executor reads and updates it there, and the Reviewer diffs the final code against it.
-- Before a PR exists, agents may keep a local copy at `.agents/plans/<branch>.md`; that directory is ignored and must not be committed.
-- PR-body plans are intentionally retained in GitHub PR metadata. Keep them public-safe: no private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts. Put sensitive context in an approved private system and reference it generically from the PR plan.
-- `scripts/check-plan.mjs` enforces that (a) the PR body contains a valid plan, (b) changed files are a subset of the plan's "Files to touch" section, and (c) the PR satisfies the selected risk tier.
+| Tier | Use when | Evidence focus |
+| --- | --- | --- |
+| `low` | Docs, copy, styles, tightly scoped non-security work | Scope and targeted checks |
+| `standard` | Ordinary product or domain behavior | Behavior, regression tests, integration |
+| `high` | Shared workflows, external effects, operational risk | Failure paths, integration, rollback |
+| `critical` | Auth, tenant boundaries, secrets, migrations, deploy, destructive data, agent/CI policy | Trust boundaries, exact state, recovery, independent review |
 
-## Stage 1: Plan
+Risk controls review depth; it does not impose line or file caps. Protected paths
+listed in `AGENTS.md` require `critical` risk and justification.
 
-The Planner (Claude Opus or Codex Sol; never Kimi or Gemini):
+## Independent review
 
-1. Creates a new branch with a descriptive name.
-2. Copies the template into the PR body and fills every section, including `Risk tier`.
-3. Pushes the branch.
-4. Opens a **draft** PR whose body is the plan.
-5. Stops. Does not write implementation code.
+The reviewer uses [`.codex/review.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/.codex/review.md)
+and blocks only objective failures: incomplete acceptance, scope mismatch, incorrect
+behavior, realistic security/privacy/data defects, missing tests or proof, red CI,
+unresolved conversations, or stale live state. Style, taste, speculative hardening,
+and diff size alone are not blockers.
 
-## Stage 2: Execute
+Any new push or base change requires a fresh review of the new exact snapshot.
 
-The Executor (Gemini in Antigravity or Kimi K3):
+## Mechanical controls
 
-1. **Verify branch:** First action is to run `git branch --show-current` to ensure branch correctness, since multiple agents often run concurrently in the workspace. Checkout or create the correct branch first.
-2. **Context:** Reads the PR body plan. If the PR does not exist yet, reads `.agents/plans/<branch>.md`.
-3. **Implements strictly** within the plan's "Files to touch" allowlist. Any scope change requires updating the PR body plan first.
-4. **Validates locally:** Runs `npm run check` and whatever the plan's test plan specifies. Waits for these commands to complete entirely and strictly ensures there are no lint or compilation errors before pushing.
-5. **Opens or updates the PR** via `gh pr create` / `gh pr edit`. The PR description must explicitly include the risk tier, completed acceptance checklist, and visual proof links for frontend changes. Preferred visual proof links come from Corgtex Build Artifacts via `node scripts/upload-build-artifacts.mjs`.
-6. **Sets auto-merge:** `gh pr merge --auto --squash`. This fires the merge once Codex approves and GitHub CI is green.
-7. **Respects the CI fix cap**: 3 red-CI fix attempts, then labels the PR `needs-replan` and stops.
+`scripts/check-plan.mjs` verifies the PR contract, file allowlist, protected-path risk,
+acceptance checklist, domain-test coverage, frontend proof, environment-file ban, and
+forbidden executable patterns. CI also runs tests, database sync, a database-free
+build, docs checks, secret scanning, and client-data scanning.
 
-## Stage 3: Review
+Head, PR-body, label, draft-state, and merge-group changes refresh the distinct
+trusted metadata policy status only; they do not waste another full build and test
+cycle. Invalid metadata removes the PR from the merge queue. The legacy snapshot
+gate remains during activation and is removed only after the replacement is required
+and proven on both PR and merge-group SHAs.
 
-The Reviewer (Codex) applies the checklist in
-[`.codex/review.md`](https://github.com/corgtex/corgtex/blob/main/.codex/review.md):
+GitHub must enforce pull requests, one independent approval, stale-review dismissal,
+approval of the latest push, conversation resolution, required checks, merge queue,
+and blocked direct/force pushes. The live ruleset—not documentation—is authoritative.
 
-- Plan present in the PR body.
-- `scope-check` passes (changed files ⊆ allowlist).
-- Acceptance criteria all ticked and reflected in code.
-- No forbidden-path changes without `forbidden-path-approved`.
-- Diff within risk-tier caps unless `large-change-approved`.
-- `gitleaks` green. No `db push`, no `--no-verify`, no removed `force-dynamic`.
-- Tests added when domain code changed.
-- Visual proof links present in the PR body for frontend changes. Corgtex Build Artifacts links are preferred; PR attachments, CI artifacts, or private proof links are acceptable fallbacks when Build Artifacts is unavailable.
-- All required CI checks green.
+## Production and rollback
 
-Codex either approves (auto-merge fires) or requests changes (the
-Executor re-enters the fix loop).
+A merge is only code integration. Release proof requires current-main CI, deployment,
+serving SHA/no drift, a named smoke, appropriate observation, and rollback readiness.
+If production remains red, use the protected auto-revert path. If production has
+already recovered on the same SHA, rerun the trusted smoke before deciding to revert.
 
-## Scope and caps
-
-Mechanical, CI-enforced:
-
-- **File allowlist:** changed files ⊆ plan's "Files to touch".
-- **Risk tiers:** `low` is ≤ 1200 non-doc LOC and ≤ 50 files; `standard` is ≤ 800 non-doc LOC and ≤ 25 files; `high` is ≤ 700 non-doc LOC and ≤ 15 files; `critical` is ≤ 400 non-doc LOC and ≤ 15 files.
-- **Size override:** use `large-change-approved` only when the PR exceeds the selected risk-tier cap, with justification in the plan.
-- **Forbidden paths:** `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`. Require `forbidden-path-approved` label plus justification.
-- **Critical-cap enforcement:** forbidden-path and agent-pipeline policy changes are evaluated against the critical cap unless `large-change-approved` is present. Use the critical tier for auth, permissions, cross-tenant isolation, migrations, and deploy work even when no forbidden-path pattern matches.
-
-## Rollback
-
-Post-deploy safety is the `smoke-prod` job in `.github/workflows/ci.yml`.
-If it fails on `main`, first check whether current production health recovered
-on the same failed SHA:
-
-- If production is still unhealthy, `.github/workflows/auto-revert.yml` opens a revert PR labeled `auto-revert`, `forbidden-path-approved`, and `large-change-approved`.
-- The workflow uses `AUTO_REVERT_TOKEN`, a repo secret backed by a bot or app token with `contents`, `pull_requests`, and `workflow` access, so the revert PR triggers normal `pull_request` CI.
-- The Reviewer merges the revert immediately; the same gating applies (required checks green) but the plan-present / scope-check steps are relaxed for `auto-revert`-labeled PRs.
-- The original PR is re-opened as draft with the failure logs attached. The Planner decides next steps.
-- If production recovered on the failed SHA, rerun the trusted GitHub production smoke. Use a fix-forward window of up to one hour for smoke-script, deploy timing, or configuration recovery before rolling back.
-
-**Rule: rollback first when production remains red; fix forward briefly when production has already recovered on the failed SHA.**
-
-## Human intervention
-
-The human prompter controls the pipeline with PR labels:
-
-- `halt-agents` — the Reviewer will not merge and the Executor will stop pushing. Use when something looks wrong and you need to think.
-- `force-merge` — override the pipeline. Logged in the PR and in the daily digest. Rare. May be applied and executed by an agent when the human explicitly instructs it via prompt (see below).
-- `needs-replan` — set by the Executor when stuck, or by the human. The Planner updates the PR body plan before handing work back.
-
-### Human-directed agent bypass
-
-When a human explicitly instructs an agent (via prompt) to force-merge a PR:
-
-1. The agent adds the `force-merge` label to the PR.
-2. The agent adds a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.`
-3. The agent runs `gh pr merge <number> --admin --squash`.
-4. This is logged in the daily digest alongside all other `force-merge` events.
-
-**Scope:** This bypass covers branch protection (required reviews, status checks). It does **not** exempt the PR from secret scanning, `prisma db push` bans, or `--no-verify`.
-
-## Branch protection (required repo settings)
-
-This PR cannot set these; a human with repo admin must configure them
-in GitHub → Settings → Branches → `main`:
-
-- **Require a pull request before merging**: on.
-- **Require approvals**: 1.
-- **Dismiss stale approvals**: on.
-- **Require review from Code Owners**: off (no human owners in this pipeline).
-- **Require approval of the most recent reviewable push**: on.
-- **Require status checks to pass**: on. Required checks:
-  - `Lint, Typecheck & Test`
-  - `Database Sync`
-  - `Build`
-  - `Docs Validation`
-  - `Plan Present`
-  - `Scope Check`
-  - `Secret Scan`
-  - `Diff Size`
-- **Require branches to be up to date**: on.
-- **Require conversation resolution**: on.
-- **Require merge queue**: on (prevents two Executor PRs from racing).
-- **Do not allow bypassing the above settings** (no admin bypass): off — allows repo admins and human-directed agents to use `--admin` when needed.
-- **Restrict who can push to matching branches**: allow only the Reviewer (Codex GitHub App) and the merge queue.
-
-## Codex configuration (required app settings)
-
-Configure Codex as a GitHub App on the repo with permission to:
-
-- Read pull requests and repository contents.
-- **Submit reviews** (approve / request changes).
-- **Merge pull requests** (for auto-merge to fire under Codex's identity).
-
-Its review rules live in [`.codex/review.md`](https://github.com/corgtex/corgtex/blob/main/.codex/review.md).
-
-<Warning>
-  If Codex cannot be configured as a *required* reviewer (only advisory),
-  the pipeline degrades to human-click merges. In that case, disable
-  auto-merge and the human clicks "Merge" after reading Codex's review.
-  Everything else in this spec still applies.
-</Warning>
+Human controls remain simple: `halt-agents` stops work, `needs-replan` records a real
+impasse, `auto-revert` identifies recovery PRs, and `force-merge` is a rare, explicit,
+publicly logged bypass. No label substitutes for correctness, secret hygiene, or the
+`prisma db push` and `--no-verify` bans.

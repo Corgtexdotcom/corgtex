@@ -140,37 +140,10 @@ jobs:
       - run: mint broken-links
         working-directory: docs
 
-  plan-present:
-    name: Plan Present
+  pr-policy:
+    name: PR Policy
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-    steps:
-      - uses: actions/checkout@v5
-        if: github.event_name == 'pull_request'
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v5
-        if: github.event_name == 'pull_request'
-        with:
-          node-version: 22
-          package-manager-cache: false
-      - name: Check PR body plan exists
-        if: github.event_name == 'pull_request'
-        run: node scripts/check-plan.mjs --mode=present
-        env:
-          GITHUB_HEAD_REF: ${{ github.head_ref }}
-          GITHUB_BASE_REF: ${{ github.base_ref }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-      - name: Merge queue plan gate
-        if: github.event_name == 'merge_group'
-        run: echo "Plan Present passed on pull_request before merge queue entry."
-
-  scope-check:
-    name: Scope Check
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-    needs: plan-present
     steps:
       - uses: actions/checkout@v5
         if: github.event_name == 'pull_request'
@@ -184,7 +157,15 @@ jobs:
       - name: Fetch base ref
         if: github.event_name == 'pull_request'
         run: git fetch origin ${{ github.base_ref }} --depth=1
-      - name: Verify changed files are within plan scope
+      - name: Verify PR contract
+        if: github.event_name == 'pull_request'
+        run: node scripts/check-plan.mjs --mode=present
+        env:
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+      - name: Verify declared scope
         if: github.event_name == 'pull_request'
         run: node scripts/check-plan.mjs --mode=scope
         env:
@@ -201,38 +182,35 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_BODY: ${{ github.event.pull_request.body }}
-      - name: Merge queue scope gate
+      - name: Merge queue policy gate
         if: github.event_name == 'merge_group'
-        run: echo "Scope Check passed on pull_request before merge queue entry."
+        run: echo "PR Policy passed on pull_request before merge queue entry."
 
-  diff-size:
-    name: Diff Size
+  # Temporary required-check aliases. Remove after branch protection requires
+  # `PR Policy` instead of these three legacy context names.
+  plan-present-compat:
+    name: Plan Present
+    needs: pr-policy
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
-      - uses: actions/checkout@v5
-        if: github.event_name == 'pull_request'
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v5
-        if: github.event_name == 'pull_request'
-        with:
-          node-version: 22
-          package-manager-cache: false
-      - name: Fetch base ref
-        if: github.event_name == 'pull_request'
-        run: git fetch origin ${{ github.base_ref }} --depth=1
-      - name: Verify diff size within caps
-        if: github.event_name == 'pull_request'
-        run: node scripts/check-plan.mjs --mode=size
-        env:
-          GITHUB_HEAD_REF: ${{ github.head_ref }}
-          GITHUB_BASE_REF: ${{ github.base_ref }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-      - name: Merge queue diff-size gate
-        if: github.event_name == 'merge_group'
-        run: echo "Diff Size passed on pull_request before merge queue entry."
+      - run: test "${{ needs.pr-policy.result }}" = "success"
+
+  scope-check-compat:
+    name: Scope Check
+    needs: pr-policy
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.pr-policy.result }}" = "success"
+
+  diff-size-compat:
+    name: Diff Size
+    needs: pr-policy
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.pr-policy.result }}" = "success"
 
   gitleaks:
     name: Secret Scan
