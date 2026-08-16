@@ -85,9 +85,9 @@ describe("Corporate Rebels dedicated cutover", () => {
     expect(dedicated.state.workspaces.map(({ slug }) => slug)).toContain(CONTRACT.slug);
     expect(dedicated.state.articles[0]).toMatchObject({ authority: "DRAFT", isPrivate: true, publishedAt: null });
   });
-  it("rejects CRINA or Chirone databases and unhealthy releases before writes", async () => {
-    for (const host of ["corgtex-crina-prod-pg.postgres.database.azure.com",
-      "corgtex-chirone-prod-pg.postgres.database.azure.com"]) {
+  it("rejects every foreign Azure database and unhealthy releases before writes", async () => {
+    for (const host of ["other-client-a.postgres.database.azure.com",
+      "other-client-b.postgres.database.azure.com"]) {
       const dedicated = fake(); const ops = fake("ops"); const selfserve = fake("selfserve");
       await expect(execute(dedicated, ops, selfserve, { dedicatedDatabaseUrl:
         `postgresql://user:pass@${host}/corgtex` })).rejects.toThrow("database identity");
