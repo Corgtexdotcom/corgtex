@@ -438,6 +438,10 @@ export function parseAllowedWorkspaceIds(raw = env.AGENT_ALLOWED_WORKSPACE_IDS) 
   );
 }
 
+export function normalizeWorkspaceSlug(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
+}
+
 const SHARED_APP_HOSTS = new Set([
   "app.corgtex.com",
   "ops.corgtex.com",
@@ -456,18 +460,24 @@ function deploymentWorkspaceScopeSlug() {
     return null;
   }
 
-  const workspaceSlug = env.WORKSPACE_SLUG?.trim().toLowerCase();
+  const workspaceSlug = normalizeWorkspaceSlug(env.WORKSPACE_SLUG ?? "");
   if (!workspaceSlug) {
     return null;
   }
 
   try {
-    const hostname = new URL(env.APP_URL).hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+    const appUrl = new URL(env.APP_URL);
+    if ((appUrl.protocol !== "http:" && appUrl.protocol !== "https:") || !appUrl.hostname) {
+      throw new Error("APP_URL must be an absolute HTTP(S) URL.");
+    }
+    const hostname = appUrl.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
     if (SHARED_APP_HOSTS.has(hostname) || LOCAL_APP_HOSTS.has(hostname)) {
       return null;
     }
   } catch {
-    return null;
+    throw new Error(
+      "Invalid APP_URL: cannot determine dedicated deployment workspace scope while WORKSPACE_SLUG is configured.",
+    );
   }
 
   return workspaceSlug;

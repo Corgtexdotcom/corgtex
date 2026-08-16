@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock } = vi.hoisted(() => {
+const { envMock, prismaMock } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
     workspace: {
@@ -16,10 +16,17 @@ const { prismaMock } = vi.hoisted(() => {
       createMany: vi.fn(),
     },
   };
-  return { prismaMock: prisma };
+  return {
+    envMock: {
+      DEPLOYMENT_WORKSPACE_SCOPE_SLUG: undefined as string | undefined,
+    },
+    prismaMock: prisma,
+  };
 });
 
 vi.mock("@corgtex/shared", () => ({
+  env: envMock,
+  normalizeWorkspaceSlug: (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-"),
   prisma: prismaMock,
 }));
 
@@ -35,6 +42,7 @@ const actor: AppActor = {
 describe("workspaces domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = undefined;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     prismaMock.member.create.mockResolvedValue({});
     prismaMock.approvalPolicy.createMany.mockResolvedValue({ count: 2 });
@@ -66,6 +74,35 @@ describe("workspaces domain", () => {
         isActive: true,
       },
     });
+  });
+
+  it("createWorkspace allows the normalized configured dedicated workspace slug", async () => {
+    envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = "customer-alpha";
+    prismaMock.workspace.findUnique.mockResolvedValue(null);
+    prismaMock.workspace.create.mockResolvedValue({ id: "workspace-1", slug: "customer-alpha", name: "Customer Alpha" });
+
+    const { createWorkspace } = await import("./workspaces");
+    await expect(createWorkspace(actor, {
+      name: "Customer Alpha",
+      slug: " Customer Alpha ",
+    })).resolves.toMatchObject({ id: "workspace-1", slug: "customer-alpha" });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("createWorkspace rejects a foreign slug before starting a transaction", async () => {
+    envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = "customer-alpha";
+
+    const { createWorkspace } = await import("./workspaces");
+    await expect(createWorkspace(actor, {
+      name: "Foreign Workspace",
+      slug: "foreign-workspace",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "WORKSPACE_SCOPE_MISMATCH",
+    });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
   it("createWorkspace rejects a missing name", async () => {
