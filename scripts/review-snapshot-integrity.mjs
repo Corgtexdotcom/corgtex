@@ -13,10 +13,6 @@ const MAX_STATUSES_PER_CONTEXT = 1000;
 const STATUS_CREATOR = "github-actions[bot]";
 const PUBLISHER_ACTIONS = new Set(["opened", "reopened", "synchronize", "edited", "labeled", "unlabeled", "ready_for_review", "converted_to_draft"]);
 const MUTATING_EVENTS = new Set(["labeled", "unlabeled", "synchronize", "ready_for_review", "converted_to_draft", "reopened"]);
-const DOC_EXT = new Set([".md", ".mdx"]);
-const RISK_CAPS = { low: [1200, 50], standard: [800, 25], high: [700, 15], critical: [400, 15] };
-const FORBIDDEN_PATHS = [/^deploy\//, /^\.github\/workflows\//, /^prisma\/migrations\//, /^packages\/domain\/src\/auth.*\.ts$/, /^apps\/web\/lib\/auth\.ts$/];
-const POLICY_PATHS = [/^AGENTS\.md$/, /^\.agents\/plan-template\.md$/, /^\.codex\/review\.md$/, /^\.codex\/ops\/.*\.md$/, /^\.github\/pull_request_template\.md$/, /^docs\/contributing\/agent-pipeline\.mdx$/, /^docs\/contributing\/pull-requests\.mdx$/, /^scripts\/check-plan(?:-policy(?:\.test)?)?\.mjs$/, /^scripts\/review-snapshot-integrity\.mjs$/];
 const SECRET_PATTERNS = [/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/, /-----BEGIN OPENSSH PRIVATE KEY-----/, /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/, /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/, /\b(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}\b/, /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b/, /\bsk-or-v1-[A-Za-z0-9_-]{20,}\b/, /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/];
 const ATTESTATION_KEYS = ["v", "pr", "headSha", "baseSha", "bodyDigest", "labelDigest"];
 export function sha256Bytes(buf) { return createHash("sha256").update(buf).digest("hex"); }
@@ -136,15 +132,6 @@ export function evaluatePolicy({ body, labels, files, draft }) {
       for (const c of criteria) if (!c.checked) failures.push(`unticked criterion: ${c.text}`);
     }
   }
-  if (files.some((f) => FORBIDDEN_PATHS.some((p) => p.test(f.filename))) && !has("forbidden-path-approved")) failures.push("forbidden path changed without forbidden-path-approved");
-  if (!has("large-change-approved")) {
-    const tier = parseRiskTier(body) ?? "critical";
-    const effective = files.some((f) => [...FORBIDDEN_PATHS, ...POLICY_PATHS].some((p) => p.test(f.filename))) ? "critical" : tier;
-    const [codeCap, fileCap] = RISK_CAPS[effective];
-    const loc = files.filter((f) => !DOC_EXT.has(f.filename.slice(f.filename.lastIndexOf(".")))).reduce((n, f) => n + f.additions + f.deletions, 0);
-    if (files.length > fileCap) failures.push(`${files.length} files exceed ${effective} cap of ${fileCap}`);
-    if (loc > codeCap) failures.push(`${loc} non-doc LOC exceed ${effective} cap of ${codeCap}`);
-  }
   return failures;
 }
 export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, files, filesTruncated }) {
@@ -159,6 +146,7 @@ export function decide({ action, changes = null, eventUpdatedAt, pr, reviews, fi
   if (snapshot.bodyNull) failures.push("PR body is null");
   if (filesTruncated) failures.push("API pagination truncated (3000-file cap or review truncation)");
   if (labelNames.includes("halt-agents")) failures.push("halt-agents label present");
+  if (labelNames.includes("needs-replan")) failures.push("needs-replan label present");
   if (labelNames.includes("force-merge")) failures.push("force-merge label present");
   const effectiveReview = selectLatestReviewerReview(reviews);
   const approval = effectiveReview?.state === "APPROVED" ? effectiveReview : null;

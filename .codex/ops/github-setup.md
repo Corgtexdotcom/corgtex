@@ -1,55 +1,47 @@
-# GitHub Automation Setup
+# GitHub protection setup
 
-Purpose: keep builder and reviewer powers separated while allowing unattended auto-merge.
+The repository policy assumes an active ruleset for `main` with:
 
-Required identities:
+- pull requests required;
+- one independent approval;
+- stale approvals dismissed on push;
+- approval of the most recent reviewable push;
+- conversations resolved;
+- required status checks;
+- merge queue enabled;
+- direct pushes and force pushes blocked; and
+- no agent bypass of these protections.
 
-- `corgtex-codex-builder`: creates branches, commits, PRs, issue comments, labels, and auto-merge requests.
-- `beepto-codex`: reviews PRs and approves or requests changes.
+`.github/workflows/pr-policy-metadata.yml` must remain enabled. It revalidates live
+PR metadata from trusted default-branch code, publishes the distinct
+`PR Metadata Policy` status on PR and merge-group SHAs, and removes invalid PRs from
+the merge queue without rerunning build and test jobs.
 
-Required branch protection for `main`:
-
-- Require pull request before merge.
-- Require one approval.
-- Require approval of the most recent reviewable push.
-- Require status checks.
-- Require merge queue.
-- Restrict direct pushes to `main`.
-- Do not allow agents to bypass branch protection.
-
-Required checks:
+Target required checks after staged activation:
 
 - `Lint, Typecheck & Test`
 - `Database Sync`
 - `Build`
 - `Docs Validation`
-- `Plan Present`
-- `Scope Check`
+- `PR Policy`
+- `PR Metadata Policy`
 - `Secret Scan`
-- `Diff Size`
 - `Client Data Scan`
 
-Required secrets:
+Builder: `Corgtex-builder`. Reviewer: `beepto-codex`. Verify the selected
+account before every write and grant only the permissions each role needs. Ruleset
+administration requires a repository administrator; do not claim these controls are
+active until the live ruleset API confirms them.
 
-- Codex Builder: GitHub credentials for `corgtex-codex-builder`.
-- Codex Reviewer: GitHub credentials for `beepto-codex`.
-- Railway cron/webhook incident creation: `OPS_GITHUB_TOKEN` with repository issue access and `OPS_GITHUB_REPOSITORY=owner/repo`.
-- Railway webhook authentication: `RAILWAY_WEBHOOK_SECRET`.
-- Optional Slack notification fan-out: `OPS_SLACK_WEBHOOK_URL`.
+Activation order is mandatory:
 
-Operational labels:
+1. Land and observe the replacement PR and merge-group publishers while Review
+   Snapshot Integrity remains a temporary reviewer-policy gate.
+2. Replace the legacy `Plan Present`, `Scope Check`, and `Diff Size` requirements
+   with `PR Policy`; add `PR Metadata Policy`; then read back the live settings.
+3. Prove a valid PR can enter the queue and an invalid metadata edit fails and
+   dequeues it.
+4. Remove Review Snapshot Integrity in a later protected cleanup PR.
 
-- `ops-auto-fix`
-- `ops-incident`
-- `severity-p1`
-- `severity-p2`
-- `severity-p3`
-- `halt-agents`
-- `needs-replan`
-- `auto-revert`
-
-Rules:
-
-- Builder identity never approves.
-- Reviewer identity never writes code.
-- Auto-merge is set by the builder, but the merge only happens after reviewer approval and green required checks.
+Merge-queue builds rerun integration, database, build, documentation, and metadata
+checks on the synthetic merge commit.

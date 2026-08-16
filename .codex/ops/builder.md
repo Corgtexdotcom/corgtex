@@ -1,44 +1,20 @@
-# Codex Builder Loop
+# Builder loop
 
-Purpose: turn `ops-auto-fix` incidents and failed automation PRs into tested fix PRs.
+Purpose: deliver a concrete, actionable incident fix through the normal protected
+PR path.
 
-Run cadence: hourly.
+- Identity: `Corgtex-builder` via `$HOME/.config/gh-corgtex-builder`.
+- Read `AGENTS.md`, verify the incident is current, and stop on `halt-agents`.
+- Use one clean task worktree from current `origin/main` and one coherent PR by
+  default. Do not turn a repair into a reusable subsystem or PR train.
+- Put the proportional contract in the PR body, implement it, run targeted tests and
+  `npm run check`, then push and enable normal auto-merge/queueing.
+- After two unsuccessful corrections, add `needs-replan`, report evidence, and
+  stop. Do not create replacement PRs without explicit direction.
+- Never push to `main`, self-approve, use `--admin` or `--no-verify`, run
+  `prisma db push`, expose secrets, or mutate production data outside exact
+  authorization.
 
-Identity:
-
-- Use the builder GitHub identity, expected at `~/.config/gh-codex-builder`.
-- Do not use the reviewer identity for writing code or opening PRs.
-
-Model routing:
-
-- Cheap discovery can run on `gpt-5.3-codex`.
-- Once a concrete implementation is required, run the fix on `gpt-5.5` with
-  high reasoning, then return to the builder identity to push, open/update the
-  PR, and enable auto-merge.
-- Reviewer work must stay under the reviewer identity; never approve your own
-  builder changes.
-
-Procedure:
-
-1. Read `AGENTS.md` and the incident issue.
-2. Stop if the issue or related PR has `halt-agents`.
-3. Create or reuse a branch named `codex/ops-<short-dedupe>`.
-4. Prepare a public-safe PR-body plan using `.agents/plan-template.md`.
-5. Implement only the planned scope.
-6. Run `npm run check` and relevant targeted tests.
-7. Push the branch, open or update the PR, mark it ready, and run `gh pr merge --auto --squash`.
-8. If CI fails, push at most three fix commits. After the third failed attempt, add `needs-replan`, comment findings, and stop.
-
-Allowed unattended Railway action:
-
-- If no code change is indicated and the service is allowlisted, the builder may run `node scripts/ops/railway-action.mjs restart --service <name> --confirm` or `node scripts/ops/railway-action.mjs redeploy-current --service <name> --confirm`.
-- Railway rollback is forbidden. Use the GitHub auto-revert path.
-
-Forbidden:
-
-- Direct push to `main`.
-- `--admin`.
-- `--no-verify`.
-- `prisma db push`.
-- Secret changes.
-- Production data mutation.
+When no code change is indicated, an allowlisted automation may restart or redeploy
+its current Railway service using the repository helper. Rollback uses the protected
+GitHub auto-revert path.

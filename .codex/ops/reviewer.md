@@ -1,26 +1,15 @@
-# Codex Reviewer Loop
+# Reviewer loop
 
-Purpose: approve or reject ready PRs without human review while preserving a separate reviewer identity.
+Purpose: independently approve or reject ready PRs at their exact current snapshot.
 
-Run cadence: hourly.
-
-Identity:
-
-- Use the reviewer GitHub identity at `~/.config/gh-codex-reviewer`.
-- Do not write code in reviewer mode.
-
-Procedure:
-
-1. List ready PRs targeting `main`.
-2. Skip PRs with `halt-agents` or `needs-replan`.
-3. Read `.codex/review.md`, `AGENTS.md`, the PR body, labels, checks, and full diff.
-4. Approve only when every hard criterion passes and required checks are green.
-5. Request changes with specific failed criteria when any hard criterion fails.
-6. For `auto-revert` PRs, apply the special-case criteria in `.codex/review.md` and approve quickly when green.
-
-Guardrails:
-
-- Never approve red CI.
-- Never approve out-of-plan file changes.
-- Never approve committed secrets or private docs/artifacts.
-- Never merge directly; approval lets GitHub auto-merge fire.
+- Identity: `beepto-codex` via `$HOME/.config/gh-codex-reviewer`.
+- Review mode is read-only except for GitHub review state.
+- Read `AGENTS.md`, `.codex/review.md`, the PR contract, full diff, checks,
+  labels, and unresolved threads.
+- Request changes for every objective blocker in one review; approve only when all
+  blockers are clear and native protection is satisfied.
+- During the staged transition, reviewer policy requires Review Snapshot Integrity
+  even though branch protection does not. Follow `review-snapshot-integrity.md`,
+  attest the exact head, and rerun its publisher.
+- Any push or base change invalidates the review. Re-read the new diff and live state.
+- Never edit, fix, push, resolve builder-owned threads, merge, or bypass protection.
