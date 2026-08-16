@@ -1,208 +1,133 @@
-# AGENTS.md
+# Corgtex agent guide
 
-This file is loaded by every AI coding agent that works on this repo
-(Claude Code, Antigravity with Claude or Gemini, Codex). It is the
-single source of truth for how agents collaborate on Corgtex.
+This file is the repository source of truth for delivery. Use it with the global
+agent policy. Product invariants below are mandatory; process should stay as light
+as the risk permits.
 
-Corgtex uses a fully autonomous three-agent pipeline:
+## Delivery model
 
-- **Planner** (Claude Opus or Codex Sol) writes plans.
-- **Executor** (Gemini in Antigravity or Kimi K3) implements and opens the PR.
-- **Reviewer** (Codex) approves or rejects the PR.
+1. **Own the outcome.** One delivery owner may plan, implement, test, publish, and
+   fix the task. Use a separate identity for protected review.
+2. **Start clean.** New work uses a fresh task branch/worktree from current
+   `origin/main`. Never reset, stash, overwrite, or mix unrelated work. Continue an
+   existing branch/PR only when the user names that work.
+3. **Prefer one coherent PR.** Split only when every part is independently useful,
+   safe, testable, deployable, and rollbackable. Diff size alone never forces a
+   split. Do not land unused APIs or partial safety contracts.
+4. **Use one proportional contract.** The PR body records outcome, risk, file scope,
+   acceptance, tests, proof where relevant, and rollback. Update it when the actual
+   scope changes; do not create a separate planner handoff by default.
+5. **Act autonomously inside scope.** Routine edits, tests, commits, pushes, and PR
+   updates do not need repeated approval. Ask before material scope expansion,
+   unapproved irreversible production/customer-data operations, paid spend,
+   external communication, or protection bypass.
+6. **Stop loops early.** After two unsuccessful correction cycles, reassess and
+   report the evidence. A second replan or more implementation PRs needs explicit
+   user approval.
 
-Kimi and Gemini may support analysis and execution, but never own the first planning pass.
+## Risk and review
 
-A human prompts each stage and can intervene via labels. No human
-reviews code line-by-line. The full specification lives in
-[docs/contributing/agent-pipeline.mdx](docs/contributing/agent-pipeline.mdx).
+Use the smallest honest tier; tiers change review and evidence depth, not permitted
+diff size:
 
----
+- `low`: docs, copy, styles, or a tightly scoped non-security change.
+- `standard`: ordinary product or domain behavior.
+- `high`: broad shared behavior, workflows, external effects, or operational risk.
+- `critical`: auth, permissions, tenant isolation, secrets, migrations, deploy,
+  destructive production data work, or agent/CI protection policy.
 
-## Shared context (all agents read this)
+Protected paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`,
+`packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`) require `critical` risk and
+an explicit justification in the PR body. They do not require a size exception or
+special label.
 
-### Build, test, check
+The independent reviewer reads the complete current diff and blocks only objective
+correctness, security, privacy/data, acceptance, test, proof, or CI failures. Do not
+block on taste, speculative architecture, plan wording, or size alone. A push or
+base change invalidates prior approval; native GitHub rules provide the exact-head
+approval, thread-resolution, required-check, and merge-queue boundary.
 
-- **Dev server:** `npm run dev` | **Build:** `npm run build` | **Lint:** `npm run lint` | **Typecheck:** `npm run typecheck`
-- **All static checks:** `npm run check` (lint + typecheck + prisma validate)
-- **Unit tests:** `npm test` or `npm run test:unit` | **Single test:** `npx vitest run packages/domain/src/runtime.test.ts`
-- **Integration tests:** `npm run test:integration` (starts `docker-compose.test.yml`, runs the Vitest `integration` project, tears it down) | **All tests:** `npm run test:all`
-- **E2E agent flow:** `npm run prisma:seed`, `npm run seed:e2e`, set `AGENT_API_KEY`, run `npm run dev`, then use the Agent API flow below.
-- **Prisma / seeds:** `npm run prisma:generate` (required before tests), `npm run prisma:migrate`, `npm run prisma:migrate:deploy`, `npm run prisma:seed`, `npm run seed:e2e`, `npm run seed:pilot-tester`, `npm run seed:dogfood`, `npm run seed:jnj-demo`, `npm run seed:dogfood-demo`
+## Build and test
 
-### Branch and PR isolation
+- Dev: `npm run dev`
+- Static checks: `npm run check` (lint, typecheck, Prisma validate)
+- Unit tests: `npm test` or `npm run test:unit`
+- Integration: `npm run test:integration`; all tests: `npm run test:all`
+- Build: `env -u DATABASE_URL npm run build`
+- Prisma generation: `npm run prisma:generate`
 
-- Every new human-requested task that changes code, docs, tests, config, or plans must use a fresh task branch from the latest `origin/main`, unless the human explicitly names an existing branch/PR or says to continue the current one.
-- Before editing, inspect the current branch and any associated PR. If the branch already has an open or merged PR, or the PR title/body does not match the new task, do not reuse it.
-- If the current worktree has unrelated dirty files, do not stash, reset, or carry them into the new task. Create a separate worktree from `origin/main` and work there.
-- A PR must represent one task and one plan contract. Do not add a new feature, fix, or cleanup to an existing unrelated PR, even if the files overlap.
-- If a task genuinely needs to build on an unmerged PR, the PR body must explicitly say it is stacked on that PR and why. Otherwise, branch from `origin/main`.
+Run targeted checks while iterating, then the PR's required broad checks once the
+diff is stable. Domain source changes under `packages/domain/**` need corresponding
+same-package `*.test.ts` coverage. Do not rerun expensive unchanged evidence.
 
-### Architecture
+## Architecture and code
 
-- **Framework:** Next.js 15 (App Router) + React 19 + TypeScript (strict) + Tailwind CSS 3
-- **Runtime split:** `apps/web/` serves the UI and route handlers; `apps/worker/` runs the outbox / workflow worker loop
-- **Packages:** `packages/domain/` for business logic, `packages/shared/` for env/db/types, `packages/workflows/` for event/job orchestration, `packages/knowledge/` for retrieval, `packages/models/` for model gateways, `packages/agents/` for agent execution
-- **Database:** PostgreSQL via Prisma ORM (`prisma/schema.prisma`)
-- **Auth:** session-cookie auth and agent bearer auth resolved in [apps/web/lib/auth.ts](apps/web/lib/auth.ts); workspace/agent authorization in [packages/domain/src/auth.ts](packages/domain/src/auth.ts) and [packages/domain/src/agent-auth.ts](packages/domain/src/agent-auth.ts)
-- **API routes:** `apps/web/app/api/**` use `NextResponse.json`; convert domain `AppError`s with `handleRouteError()` from [apps/web/lib/http.ts](apps/web/lib/http.ts)
-- **Cross-origin integration:** The marketing site (`apps/site`, origin `NEXT_PUBLIC_SITE_URL`) and the web app (`apps/web`, origin `NEXT_PUBLIC_APP_URL`) run on separate domains. Any `apps/web` API route that accepts requests from the site must implement an `OPTIONS` handler and return `Access-Control-Allow-Origin` headers scoped to `NEXT_PUBLIC_SITE_URL`. Never use a wildcard `*` for cross-app CORS.
+- Next.js 15 App Router, React 19, strict TypeScript, Tailwind CSS 3.
+- `apps/web/` serves UI/routes; `apps/worker/` runs outbox/workflow processing.
+- Business logic belongs in `packages/domain/`; shared env/db/types in
+  `packages/shared/`; orchestration in `packages/workflows/`; retrieval in
+  `packages/knowledge/`; model gateways in `packages/models/`; execution in
+  `packages/agents/`.
+- Route handlers use `NextResponse.json`; convert `AppError` with
+  `handleRouteError()` from `apps/web/lib/http.ts`.
+- Imports: `@/*` for web modules and `@corgtex/*` for packages. Use type-only
+  imports, double quotes, semicolons, two-space indentation, and no `.js` files.
+- Monetary values are integer `*Cents`; IDs are UUIDs; use Prisma compound unique
+  keys for compound lookups.
+- UI uses shared workspace primitives and tokenized `nr-*` classes. Improve the
+  shared spine when that produces a better user result; avoid page-local control
+  families and emoji icons.
 
-### Security defaults
+## Security and data invariants
 
-- **Webhook endpoints:** Every new webhook route under `apps/web/app/api/webhooks/**` must verify the request origin via signature, shared secret, or bearer token before mutating any state. Unverified webhook endpoints are treated as security vulnerabilities by the Reviewer.
-- **Server actions:** Every server action that mutates workspace-scoped data must call `requireWorkspaceMembership()` (or an equivalent domain-level authorization guard) before performing the write. `requirePageActor()` alone is insufficient — it only proves the user is logged in, not that they belong to the target workspace.
+- Every webhook under `apps/web/app/api/webhooks/**` authenticates its origin before
+  mutation by signature, secret, or bearer token.
+- Every workspace-scoped mutating server action verifies workspace membership;
+  login alone is not authorization.
+- Cross-app routes implement `OPTIONS` and allow only `NEXT_PUBLIC_SITE_URL`, never
+  wildcard CORS.
+- Never hardcode, print, commit, or place in PR metadata any secret, credential, raw
+  private/client content, or `.env` file.
+- An authorized exact-target deletion still requires fresh target identity, zero-data
+  or stated precondition checks, cross-tenant checks, and the smallest available
+  dry-run/backup/rollback mechanism. Do not repeat the approval unless scope changes.
 
-### Code style
+## Prisma and build invariants
 
-- **Imports:** `@/*` for `apps/web` modules; `@corgtex/*` for shared package entrypoints. Use `import type { X }` for type-only imports.
-- **Formatting:** double quotes, semicolons, 2-space indent.
-- **Naming:** camelCase (variables/functions), PascalCase (types/components), UPPER_SNAKE (constants/enums).
-- **Icons:** Never use emoji characters (🌙, 🤖, 💾, etc.) in UI code. Use monochrome Unicode glyphs consistent with `apps/web/lib/nav-config.ts`. The ESLint `no-restricted-syntax` rule enforces this.
-- **UX spine first:** For workspace app UI, first use or improve the shared spine (`ControlPrimitives`, shared tables, work-item controls, workspace shell/nav, and tokenized `nr-*` classes). Do not create a local page-specific pattern when a shared primitive can be improved to serve the user better.
-- **Promote good exceptions:** If a page-specific pattern is better for the user than the current shared primitive, promote that pattern into the shared component/CSS layer and migrate the page to the promoted primitive in the same PR. Keep local exceptions only when the PR plan explains why reuse would hurt task clarity, accessibility, responsiveness, or performance.
-- **UI controls:** Controls in the same family must share size, typography, spacing, and alignment. Use the shared filter toolbar pattern for search/select/multiselect/apply/clear controls, the shared checkbox filter pattern for inline filters, shared segmented controls for view/mode switches, shared workspace subnav for module navigation, and shared table action groups for row actions. Inline `fontSize`, `padding`, `width`, `minWidth`, or `alignSelf` overrides on buttons, filters, checkbox controls, segmented controls, subnavs, or table actions are review concerns unless they map to a named design-system class.
-- **No `.js`:** `allowJs: false`.
-- **Errors:** throw `AppError(status, code, message)` from domain logic; convert in route handlers with `handleRouteError()`.
-- **DB:** monetary values as `*Cents: Int`. UUIDs for all IDs. Use Prisma compound unique keys for lookups.
+- Schema changes use `npm run prisma:migrate -- --name <name>` and commit the
+  migration. Validate changed migrations against a database.
+- Never use `prisma db push` in agent work, CI, Dockerfiles, or deploy flows. Run no
+  migration command when schema and migrations did not change.
+- Builds must remain database-independent. Prisma-dependent App Router pages,
+  layouts, and metadata functions that are not already request-bound export
+  `const dynamic = "force-dynamic"`.
+- Migrations apply at container startup through `deploy/entrypoint.sh`; do not move
+  them into generic build steps. Inside production containers invoke root scripts
+  with absolute paths such as `node /app/scripts/...`.
 
-### Prisma workflow rules
+## Evidence, demos, and release
 
-- **Schema changes:** if you change `prisma/schema.prisma`, run `npm run prisma:migrate -- --name <descriptive_name>` and commit the generated migration.
-- **Migration changes:** if you change `prisma/migrations/**`, validate against a database before finishing. Never use `prisma db push` to apply schema changes.
-- **No Prisma diff, no Prisma commands:** if neither `prisma/schema.prisma` nor `prisma/migrations/**` changed, do not run Prisma migration commands.
-- **Build contract:** `npm run build` must stay database-independent. Never hide schema mutation inside generic build scripts.
-- **Forbidden contexts for `db push`:** never in CI, Dockerfiles, production deploy flows, or routine agent work.
+- Frontend changes under `apps/web/app/**`, `apps/web/components/**`, or
+  `apps/web/lib/components/**` need actual running visual proof. Store captures in
+  ignored `.artifacts/` and upload through `scripts/upload-build-artifacts.mjs`;
+  never commit generated proof.
+- For customer-visible changes, update `scripts/seed-jnj-demo.mjs` when safe seeded
+  state is needed or explain why public demo exposure is unsafe or inapplicable.
+- `docs/` is public documentation only. Keep client/partner notes, handoffs, plans,
+  screenshots, recordings, Slack manifests, and generated QA outside Git history.
+- A merge is not a release claim. Required proof is current-main CI, deployment,
+  serving SHA/no drift, named smoke, observation where risk warrants it, and rollback
+  readiness. If production remains red, use the protected auto-revert path; if it
+  recovered on the same SHA, rerun the trusted production smoke before rollback.
 
-### Next.js build guardrails
+## GitHub roles
 
-- All Prisma-dependent App Router pages, layouts, and `generateMetadata()` functions that are not already request-bound (via `cookies()`, `headers()`, auth, or a route handler) MUST export `const dynamic = "force-dynamic"`.
-- Build-time database fallbacks are not an acceptable substitute. The web build must succeed without `DATABASE_URL`.
+- Builder: `Corgtex-builder` using `$HOME/.config/gh-corgtex-builder`.
+- Reviewer: `beepto-codex` using `$HOME/.config/gh-codex-reviewer`.
+- Verify `api user --jq .login` immediately before every GitHub write. The builder
+  never approves its own PR; the reviewer never edits, fixes, pushes, or merges.
+- Never push directly to `main`, use `--no-verify`, or bypass protection unless the
+  user explicitly directs a specific emergency bypass. Record any bypass publicly.
 
-### Deployment invariants
-
-- Migrations apply automatically at container startup via `deploy/entrypoint.sh`.
-- Railway's `preDeployCommand` is unreliable with `builder = "DOCKERFILE"`. Rely on `entrypoint.sh`.
-- Any PR merged to `main` must pass the post-deploy smoke routine. If it fails and current production health is still red, `.github/workflows/auto-revert.yml` opens a revert PR. If production has recovered on the failed SHA, rerun the trusted GitHub production smoke and use a fix-forward window of up to one hour before rolling back.
-- When invoking root-level scripts inside the production Docker container, always use absolute paths: `node /app/scripts/...`. Never `npm run <script>` — npm resolves the context into the child workspace and crashes.
-
-### Secrets and credentials
-
-- Never hardcode secrets in code, commits, PR descriptions, or agent output.
-- Production bootstrap seed: `npm run prisma:seed` provisions the configured workspace/admin/system baseline only. It does not create demo, JNJ, or E2E fixture users.
-- E2E UI credentials: read `AGENT_E2E_EMAIL` and `AGENT_E2E_PASSWORD` from the local `.env`. Defaults are `system+corgtex@corgtex.local` / `corgtex-test-agent-pw` if unset. Run `npm run seed:e2e` after `npm run prisma:seed` to provision the E2E UI user.
-- Production E2E credentials are not the same thing as local seeded E2E credentials. A local `.env` 401 from `https://app.corgtex.com` is a credential/config mismatch, not by itself evidence that production auth is broken. For production gates, prefer the GitHub `Production Smoke Test` on `main`, which uses repo-managed production secrets. If a transient health failure occurs during deploy, verify `https://app.corgtex.com/api/health`, rerun the GitHub production smoke, and avoid local credential overrides or Chrome-session fallback unless the trusted smoke path is unavailable or failing. If a plan requires CRM UI production proof, pull the latest `main` and run the focused client-readiness smoke, for example `CLIENT_READINESS_ROUTE_NAMES=leads node scripts/client-readiness-smoke.mjs https://app.corgtex.com .artifacts/client-readiness/<slug>`. If that fails at login, verify the GitHub production smoke result before stopping or requesting a Chrome-session fallback.
-- Agent API (E2E backend testing): set `AGENT_API_KEY` in `.env`. Use header `Authorization: Bearer agent-<AGENT_API_KEY>` against `http://localhost:3000`. `AGENT_API_KEY` is runtime auth config, not startup seed data. The bootstrap agent has ADMIN-equivalent access to allowed workspaces; wallet-dependent flows need extra setup.
-
-### Public docs hygiene
-
-- `docs/` is only for public documentation-site files. Do not commit private/client/partner notes, handoff docs, agent plans, Slack manifests, screenshots, recordings, or generated QA output under `docs/`.
-- Generated proof belongs in ignored local `.artifacts/` output first. For
-  Corgtex PR visual proof, prefer Corgtex Build Artifacts: upload proof with
-  `node scripts/upload-build-artifacts.mjs` and paste the emitted markdown
-  links into the PR body's **Visual Proof** section. Use PR attachments,
-  CI artifacts, or other private artifact links only when Build Artifacts is
-  unavailable. Do not commit proof files.
-- Local pre-PR plan drafts belong under ignored `.agents/plans/`; the reviewed plan contract lives in the PR body and remains visible as GitHub PR metadata.
-- PR-body plans must be public-safe. Do not include private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts. `scripts/check-plan.mjs` blocks obvious credential patterns in PR-body plans, but agents are still responsible for keeping plan prose sanitized.
-
----
-
-## For Planners (Claude Opus or Codex Sol)
-
-Your job is to produce a PR-body plan contract and nothing else. Do not write
-implementation code.
-
-1. Fetch the latest main branch and create a new task branch from it: `git fetch origin && git checkout -b <type>/<short-slug> origin/main` (e.g. `feat/optimistic-finance`, `fix/login-crash`). Do not reuse an existing branch/PR unless the human explicitly says this plan continues that exact branch/PR.
-2. Copy [.agents/plan-template.md](.agents/plan-template.md) into the draft PR body. For local checks before a PR exists, copy it to `.agents/plans/<branch>.md`; that directory is ignored and must not be committed.
-3. Fill every section, including **Risk tier** (`low`, `standard`, `high`, or `critical`). The **Files to touch** section is a hard allowlist — the Executor cannot modify files outside it without first updating the PR body plan.
-4. Pick the smallest honest risk tier:
-   - `low`: docs, copy, styles, or tightly scoped non-security changes. Review budget: ≤ 4000 non-doc LOC and ≤ 100 files.
-   - `standard`: normal product or domain work. Review budget: ≤ 2500 non-doc LOC and ≤ 60 files.
-   - `high`: normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category. Review budget: ≤ 1800 non-doc LOC and ≤ 40 files.
-   - `critical`: auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy. Review budget: ≤ 1200 non-doc LOC and ≤ 30 files.
-5. Treat these as agent review budgets, not target sizes and not reasons to manufacture micro-PRs. Prefer one cohesive vertical change when its contract, implementation, tests, and rollback are safer to understand together. Split only where every PR is independently useful, safe, testable, and rollbackable; do not land unused APIs, partial safety contracts, or test-only evidence solely to fit a cap.
-6. If a cohesive change exceeds its budget, prefer the `large-change-approved` path over artificial fragmentation. This label is a review-routing control, not a force-merge or human-bypass label. Keep the exception cheaper than splitting: add a concise cohesion rationale, subsystem/file review map, acceptance/test coverage map, and rollback boundaries to the existing plan; do not create another goal, plan, branch, PR, or release step solely because of size. The independent reviewer must inspect the complete exact-head diff in structured passes for scope/contracts, security and data boundaries, behavior, tests, integration, and rollback.
-7. Default to one cohesive implementation PR per user outcome. The plan must state the delivery shape, maximum planned implementation-PR count, and stop condition. Turning an exact-target operational task into a reusable subsystem or PR train is material scope expansion and requires explicit user approval before the additional planning or PRs begin. For cleanup claimed to contain no customer data, verify that claim against the exact targets at execution time and use the smallest supported, auditable mechanism with dry-run, backup/rollback, and cross-target checks.
-8. If the plan touches forbidden paths (`deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`), state the justification in the plan and note that the PR will need the `forbidden-path-approved` label. Forbidden paths and agent-pipeline policy files are always evaluated against the critical review budget.
-9. Push the branch and open a **draft** PR whose body is the completed public-safe plan. Do not commit local plan files. Do not mark ready-for-review.
-
-The numeric budgets are provisional local defaults, not research-established
-safety limits. Recalibrate them after each 20 merged agent PRs or 30 days using
-review findings, remediation cycles, reverts/incidents, and time-to-merge. Do
-not change them merely because a model has a larger context window.
-
-Stop there. Hand off to the Executor.
-
----
-
-## For Executors (Gemini in Antigravity or Kimi K3)
-
-Your job is to implement the plan. You do not plan, and you do not
-merge.
-
-1. **First action:** Verify your branch state (`git branch --show-current`) and inspect the matching PR before working. Multiple agents run simultaneously in this repo. If the branch/PR does not exactly match the assigned plan, stop and switch to the correct branch or create a fresh branch from `origin/main`. If the current worktree has unrelated dirty files, create a separate worktree for this task instead of stashing, resetting, or mixing them into the PR. Once on the correct branch, read the PR body plan. If the PR does not exist yet, read `.agents/plans/<branch>.md`.
-2. **Stay in scope:** only modify files listed in the plan's "Files to touch" section. If you discover the plan is wrong or incomplete, update the PR body plan before writing code. `scripts/check-plan.mjs` enforces this in CI.
-3. **Run the test plan locally** before pushing. Run `npm run check` and whatever the plan's "Test plan" specifies. Wait for it to exit with code `0`. Fix any TypeScript or ESLint errors before proceeding.
-3a. **Domain test coverage:** If the plan adds or modifies files under `packages/domain/**`, you must create or update the corresponding `*.test.ts` file in the same package *before* opening the PR. The Reviewer will reject any PR that changes domain source without same-package test coverage (Criterion 7).
-3b. **Acceptance criteria traceability:** Before checking off an acceptance criterion, verify that *every* sub-requirement it describes is actually implemented. If a criterion says "A and B both do X", confirm both A and B do X — do not check the box after only implementing A. Run the relevant code paths locally or via tests to confirm.
-4. **Open the PR as ready-for-review** once all acceptance criteria are ticked. Use `gh pr create`. If `gh` isn't on `PATH`, invoke `/opt/homebrew/bin/gh`. The PR body must explicitly include the completed acceptance criteria checklist in Markdown.
-5. **Frontend changes:** add actual visual proof links in the PR body's **Visual Proof** section. Any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` requires proof. **You must run the app locally and capture actual proof of the feature running. Do not submit AI-generated mockups or generic placeholders. Do not commit screenshots, recordings, or generated QA output under `docs/assets/`.**
-   - Preferred proof storage is Corgtex Build Artifacts. Capture screenshots or videos under ignored `.artifacts/`, then upload them with `node scripts/upload-build-artifacts.mjs`. The helper accepts `CORGTEX_API_BEARER` or `AGENT_API_KEY`, uploads screenshot/video assets, and prints markdown links for the PR.
-   - Use `visibility=PUBLIC_REVIEW` / `classification=OPEN_CORE` only after confirming the proof contains no private client data. For private proof, keep the artifact private and use an authenticated/private link.
-   - If Build Artifacts is unavailable because the target workspace feature flag, auth, or app URL is missing, use PR attachments, CI-uploaded artifacts, or another private artifact link and state that fallback in **Visual Proof**.
-   - For CRM / Relationships production UI proof, use the focused client-readiness smoke after pulling the current `main`: `CLIENT_READINESS_ROUTE_NAMES=leads node scripts/client-readiness-smoke.mjs https://app.corgtex.com .artifacts/client-readiness/<slug>`. If local production login returns 401, check the GitHub `Production Smoke Test` on `main` before treating the gate as blocked; do not ask for a Chrome-session fallback unless the secret-backed production smoke is unavailable or failing.
-   - For control/layout changes, visual proof must show that related page headers, subnavs, segmented controls, buttons, filters, checkbox controls, empty states, tables, and table row actions use the shared sizing and alignment patterns without reducing task clarity or density.
-5a. **Demo exposure:** For customer-visible product changes, either update `scripts/seed-jnj-demo.mjs` so the public J&J demo shows the safe parts of the feature, or state in the PR body's **Demo exposure** section why the feature cannot be shown safely (for example, because it requires private credentials, customer data, or write access).
-6. **CI fix loop cap:** if CI is red, you may push up to 3 fix commits. After the 3rd failed attempt, label the PR `needs-replan`, comment a summary, and stop. The human will re-prompt the Planner.
-7. **Never (default):** merge your own PR, use `--admin`, skip hooks with `--no-verify`, or run `prisma db push`. Never remove `export const dynamic = "force-dynamic"` from a Prisma-touching page. Never commit `.env` or any secret.
-8. **Human-directed bypass:** If the human explicitly instructs you via prompt to force-merge a specific PR, you may: (a) add the `force-merge` label, (b) run `gh pr merge <number> --admin --squash`, (c) add a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.` This is the **only** exception to rule 7's ban on `--admin` and self-merging. You must still never skip `--no-verify`, run `prisma db push`, or commit secrets.
-
-Stop when the PR is open and CI is green locally. Hand off to the Reviewer.
-
----
-
-## For Reviewers (Codex via `beepto-codex`)
-
-Your job is to approve or reject the PR based on mechanical criteria and to flag objective logic or security flaws.
-Do not write code. Do not merge if any criterion fails.
-
-**GitHub identity:** The Reviewer runs as [`beepto-codex`](https://github.com/beepto-codex), a dedicated bot account with `write` access to the repository. This is a separate identity from the Executor (`puncar-dev`), which allows the Reviewer to submit formal GitHub approvals on PRs authored by the Executor.
-
-**Authentication:** Codex must be configured with a PAT belonging to `beepto-codex` (stored in the Codex environment, never committed). The PAT needs `repo` scope.
-
-Canonical checklist lives in [.codex/review.md](.codex/review.md).
-Summary:
-
-1. **Plan exists** in the PR body.
-2. **Scope intact:** all changed files are in the plan's "Files to touch" allowlist (`scripts/check-plan.mjs` enforces).
-3. **Acceptance criteria all ticked** and each is reflected in code or CI output.
-4. **No forbidden-path changes** without the `forbidden-path-approved` label.
-5. **Diff within its agent review budget** unless `large-change-approved` is set.
-6. **No secrets** (gitleaks green), no `prisma db push`, no `--no-verify`, no `force-dynamic` removed from Prisma pages. `--admin` is forbidden unless the `force-merge` label is present and the PR comment trail documents the human directive.
-7. **Tests added** when `packages/domain/**` changed.
-8. **PR-body visual proof present** for any frontend-path change.
-9. **All required CI checks green.**
-10. **No objective logic flaws** (e.g., race conditions, unhandled rejections, security vulnerabilities).
-
-If all pass, approve the PR using `gh pr review <number> --approve`. You may leave non-blocking advisory comments for stylistic or minor architectural improvements, but they must not block approval. Auto-merge (set by the Executor via `gh pr merge --auto --squash`) will fire once the approval lands. If any fail, request changes with a comment pointing to the specific criterion; do not approve partially.
-
----
-
-## Human override
-
-The human prompter can intervene at any time using PR labels:
-
-- `halt-agents` — Reviewer will not merge; Executor will not push further commits.
-- `force-merge` — human override. Logged in the PR and in the daily digest. When applied by an agent acting on explicit human instruction, the agent must add a PR comment documenting the directive and may use `--admin` to merge.
-- `needs-replan` — Executor sets this when stuck; Planner picks up.
-
-### Human-directed agent bypass
-
-When a human explicitly instructs an agent (via prompt) to force-merge a PR:
-
-1. The agent adds the `force-merge` label to the PR.
-2. The agent adds a PR comment: `⚠️ Human-directed bypass: merged with --admin per explicit instruction.`
-3. The agent runs `gh pr merge <number> --admin --squash`.
-4. This is logged in the daily digest alongside all other `force-merge` events.
-
-**Scope:** This bypass covers branch protection (required reviews, status checks). It does **not** exempt the PR from secret scanning, `prisma db push` bans, or `--no-verify`.
+See `.agents/plan-template.md`, `.codex/review.md`, and
+`docs/contributing/agent-pipeline.mdx` for the short operational forms.

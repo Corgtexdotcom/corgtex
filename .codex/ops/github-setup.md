@@ -1,21 +1,16 @@
-# GitHub Automation Setup
+# GitHub protection setup
 
-Purpose: keep builder and reviewer powers separated while allowing unattended auto-merge.
+The repository policy assumes an active ruleset for `main` with:
 
-Required identities:
-
-- `corgtex-codex-builder`: creates branches, commits, PRs, issue comments, labels, and auto-merge requests.
-- `beepto-codex`: reviews PRs and approves or requests changes.
-
-Required branch protection for `main`:
-
-- Require pull request before merge.
-- Require one approval.
-- Require approval of the most recent reviewable push.
-- Require status checks.
-- Require merge queue.
-- Restrict direct pushes to `main`.
-- Do not allow agents to bypass branch protection.
+- pull requests required;
+- one independent approval;
+- stale approvals dismissed on push;
+- approval of the most recent reviewable push;
+- conversations resolved;
+- required status checks;
+- merge queue enabled;
+- direct pushes and force pushes blocked; and
+- no agent bypass of these protections.
 
 Required checks:
 
@@ -23,33 +18,14 @@ Required checks:
 - `Database Sync`
 - `Build`
 - `Docs Validation`
-- `Plan Present`
-- `Scope Check`
+- `PR Policy`
 - `Secret Scan`
-- `Diff Size`
 - `Client Data Scan`
 
-Required secrets:
+Builder: `Corgtex-builder`. Reviewer: `beepto-codex`. Verify the selected
+account before every write and grant only the permissions each role needs. Ruleset
+administration requires a repository administrator; do not claim these controls are
+active until the live ruleset API confirms them.
 
-- Codex Builder: GitHub credentials for `corgtex-codex-builder`.
-- Codex Reviewer: GitHub credentials for `beepto-codex`.
-- Railway cron/webhook incident creation: `OPS_GITHUB_TOKEN` with repository issue access and `OPS_GITHUB_REPOSITORY=owner/repo`.
-- Railway webhook authentication: `RAILWAY_WEBHOOK_SECRET`.
-- Optional Slack notification fan-out: `OPS_SLACK_WEBHOOK_URL`.
-
-Operational labels:
-
-- `ops-auto-fix`
-- `ops-incident`
-- `severity-p1`
-- `severity-p2`
-- `severity-p3`
-- `halt-agents`
-- `needs-replan`
-- `auto-revert`
-
-Rules:
-
-- Builder identity never approves.
-- Reviewer identity never writes code.
-- Auto-merge is set by the builder, but the merge only happens after reviewer approval and green required checks.
+Merge-queue builds rerun integration, database, build, and documentation checks on
+the synthetic merge commit. PR-only metadata checks run before queue entry.

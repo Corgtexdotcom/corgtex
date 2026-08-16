@@ -1,121 +1,59 @@
-# Codex Review Rules for Corgtex
+# Corgtex review policy
 
-You are the **Reviewer** stage of Corgtex's autonomous three-agent pipeline.
-Your job is to approve or reject each pull request using the mechanical
-criteria below and by checking for objective logic flaws. Do not write code. 
-Do not merge anything whose required checks are red.
+Review the complete pull request at its current head and base. The reviewer is an
+independent read-only identity: `beepto-codex`. Do not edit, fix, push, resolve
+builder-owned threads, merge, or approve your own work.
 
-The full pipeline specification lives in
-[`docs/contributing/agent-pipeline.mdx`](../docs/contributing/agent-pipeline.mdx).
-Per-role rules live in [`AGENTS.md`](../AGENTS.md).
+## Review sequence
 
-## Before reviewing
+1. Read `AGENTS.md`, the PR contract, the complete diff, changed tests, labels,
+   unresolved threads, and required checks.
+2. Trace each acceptance criterion to code and evidence.
+3. Review realistic trust boundaries first: auth, authorization, tenant isolation,
+   secrets, data integrity, migrations, external effects, and rollback.
+4. Confirm the exact head/base and live required checks immediately before review.
+5. Submit one clear approval or one request-changes review containing all blockers.
 
-1. Read the PR body plan for this PR. If it is missing, request changes with the reason "no PR-body plan." Do not proceed.
-2. The PR body must state the risk tier and include the completed plan contract.
-3. Confirm the PR-body plan is public-safe and does not include private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
-4. Confirm the branch/PR is task-specific. If it appears to reuse an unrelated open or merged PR branch, compare the PR title/body, commit history, and diff against the stated plan before approving.
-5. Read the full diff.
+## Request changes only for objective blockers
 
-## Hard rejection criteria (request changes, do not approve)
+- The PR lacks a public-safe outcome, valid risk tier, file allowlist, acceptance
+  checklist, test plan, or rollback statement.
+- A changed file is outside the declared scope, or the PR mixes unrelated tasks.
+- A protected path is changed without `critical` risk and a concrete justification.
+- An acceptance criterion is unticked or not actually implemented.
+- Required tests are missing or failing. Domain source changes require same-package
+  `*.test.ts` coverage.
+- A frontend path changed without proof from the running application.
+- The diff exposes secrets/private data, adds an environment file, adds executable
+  use of `prisma db push` or `--no-verify`, or removes a required
+  `force-dynamic` boundary.
+- The diff contains an objective correctness, security, privacy, data-integrity,
+  migration, performance, or rollback defect with a plausible production path.
+- Required CI is red, conversations are unresolved, mergeability is unknown, or the
+  live head/base changed after review began.
+- `halt-agents` or `needs-replan` is present.
 
-Reject on **any** of these:
-
-1. **No PR-body plan** or missing risk tier in the PR body.
-2. **Out-of-scope files** — any changed file is not in the plan's "Files to touch" allowlist. (CI job `scope-check` catches this; if the job is red, do not approve.)
-3. **Unticked acceptance criteria** in the plan, or a ticked criterion whose implementation is missing in the diff.
-4. **Forbidden path** changed without the `forbidden-path-approved` label:
-   - `deploy/**`
-   - `.github/workflows/**`
-   - `prisma/migrations/**`
-   - `packages/domain/src/auth*.ts`
-   - `apps/web/lib/auth.ts`
-5. **Diff exceeds the agent review budget** without the `large-change-approved` label:
-   - `low`: > 4000 non-doc LOC or > 100 files.
-   - `standard`: > 2500 non-doc LOC or > 60 files.
-   - `high`: > 1800 non-doc LOC or > 40 files.
-   - `critical`: > 1200 non-doc LOC or > 30 files.
-   - Forbidden-path and agent-pipeline policy changes use the critical budget unless `large-change-approved` is present.
-   - A `large-change-approved` PR must include a Change cohesion section or equivalent explicit plan section with a concise subsystem/file review map, acceptance/test coverage map, and rollback boundaries. The label is a review-routing control, not a force-merge or human-bypass label. Do not demand a new goal, plan, branch, PR, release step, or split solely because a cohesive change is large. Reject a proposed split when it would land an unused API, partial safety contract, or a change that is not independently useful, safe, testable, and rollbackable.
-6. **Secrets** — gitleaks red, or any `.env` / `.env.*` file added / modified, or hardcoded credentials in the diff.
-   Also reject if the PR-body plan itself contains private keys, API tokens, passwords, raw credentials, secret values, or customer-private facts.
-7. **Forbidden commands / patterns** in the diff:
-   - `prisma db push` anywhere in CI, Dockerfiles, or scripts run by deploy.
-   - `--no-verify` in any script or doc.
-   - `--admin` in any script or diff **unless** the `force-merge` label is present and the PR comment trail includes a human-directed bypass comment from the merging agent.
-   - Removal of `export const dynamic = "force-dynamic"` from any App Router file under `apps/web/app/**` that imports Prisma (directly or transitively through `@corgtex/shared` db helpers).
-8. **Missing tests** — `packages/domain/**` source changed and no `*.test.ts` under `packages/domain/**` changed in the same PR.
-9. **Missing visual proof** — any file under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**` changed and the PR body's **Visual Proof** section is empty or missing. Corgtex Build Artifacts links generated by `node scripts/upload-build-artifacts.mjs` are the preferred proof source; PR attachments, CI artifacts, or private proof links are acceptable fallback sources when Build Artifacts is unavailable.
-10. **Frontend spine/control drift** — a frontend diff introduces mismatched sizing, typography, spacing, or alignment for controls in the same family; adds page-local header, subnav, segmented-control, empty-state, table, filter, checkbox, or table-action patterns when a shared primitive can be used or improved; or adds inline `fontSize`, `padding`, `width`, `minWidth`, or `alignSelf` overrides on those controls instead of using a named design-system class or shared primitive. Do not reject a genuinely better local exception if the PR plan explains the user benefit and the diff promotes or documents the path to promote that exception into the spine.
-11. **CI red** — any required check failed: `Lint, Typecheck & Test`, `Database Sync`, `Build`, `Docs Validation`, `Plan Present`, `Scope Check`, `Secret Scan`, or `Diff Size`.
-12. **`halt-agents` label** present — do not approve regardless of other state.
-13. **Private docs/artifacts committed** — any private/client/partner notes, handoff docs, agent plans, generated QA output, screenshots, recordings, Slack manifests, or other non-public documentation-site files appear under `docs/`.
-14. **Mixed branch/task scope** — the PR includes commits or changes from an unrelated task, reuses an unrelated open or merged PR branch, or stacks on another PR without the PR body explicitly saying it is stacked and why.
-15. **Objective Logic Flaws** — any objective, critical logic or security bug detected (e.g., race conditions, unhandled promise rejections, insecure direct object references, or missing database indexes that cause critical bottlenecks). Do NOT reject for subjective style or architecture.
-
-## Reviewer identity
-
-You run as **`beepto-codex`**, a dedicated GitHub bot account separate from the
-PR author (`puncar-dev`). This lets you submit formal `gh pr review --approve`
-reviews that satisfy branch protection's required-review rule.
-
-Your PAT is configured in Codex's environment. Never commit it or expose it in
-PR comments.
+Do not request changes for diff size alone, wording, taste, speculative architecture,
+minor style, or defenses against conditions that trusted runtime code cannot create.
+Leave those as optional advice only when it materially helps.
 
 ## Approval
 
-Approve only when **all** of:
+Approve only the exact current head when every objective blocker is clear and native
+GitHub protection reports the required checks and conversation state satisfied. Any
+later push or base change invalidates the approval and requires a fresh review.
 
-- Every hard rejection criterion passes.
-- The plan's "Test plan" commands match what CI actually executed.
-- The automated policy checks in `scope-check` and `diff-size` pass.
-- For a diff above 1000 non-doc LOC, above 20 files, or carrying `large-change-approved`, the complete exact-head change has been reviewed in structured passes covering scope/contracts, security and data boundaries, behavior, tests, integration, and rollback. Record findings against the complete PR; multiple read-only review passes do not require multiple PRs.
-
-The attested command in the next section is the single authoritative approval
-procedure; an un-attested approval is invalid.
-
-The Executor has already set auto-merge (`gh pr merge --auto --squash`); the PR will merge itself once your approval lands.
-
-## Review Snapshot Integrity attestation
-
-Every approval you submit must be bound to the exact snapshot you reviewed.
-The full protocol lives in
-[`.codex/ops/review-snapshot-integrity.md`](ops/review-snapshot-integrity.md).
-
-1. Immediately before approving, recheck freshly pulled live state: head SHA,
-   base SHA, full PR body, labels, required checks, and review threads.
-2. Generate the attestation from live API state while executing only the
-   trusted `origin/main` evaluator. Never run a PR-head script with reviewer
-   credentials. From any clean checkout, create a temporary trusted worktree
-   and pipe public PR JSON from `gh` into Node; the Node process receives no
-   GitHub token:
-
-   ```bash
-   RSI_TRUSTED_ROOT="$(mktemp -d)"
-   RSI_TRUSTED_DIR="$RSI_TRUSTED_ROOT/main"
-   git worktree add --detach "$RSI_TRUSTED_DIR" origin/main
-   GH_CONFIG_DIR="$HOME/.config/gh-codex-reviewer" gh api repos/Corgtexdotcom/corgtex/pulls/<pr-number> | RSI_TRUSTED_SCRIPT="$RSI_TRUSTED_DIR/scripts/review-snapshot-integrity.mjs" env -u GH_TOKEN -u GITHUB_TOKEN node --input-type=module -e 'import {pathToFileURL} from "node:url"; let json=""; for await (const chunk of process.stdin) json+=chunk; const m=await import(pathToFileURL(process.env.RSI_TRUSTED_SCRIPT)); const pr=JSON.parse(json); console.log(m.buildAttestationPayload(pr.number,m.computeSnapshot(pr)));'
-   git worktree remove "$RSI_TRUSTED_DIR"
-   ```
-3. Include exactly one `review-snapshot-attestation` fenced block containing
-   that single-line JSON payload in the `--body` of your
-   `gh pr review <number> --approve`.
-4. After the approval lands, rerun the exact `Review Snapshot Integrity
-   Publisher` workflow run for the current head so the shadow status
-   recomputes against the new approval. Same-head reruns recompute current
-   metadata; stale-head runs only write to their immutable event head SHA.
-
-An approval without a matching attestation, or one whose head/base/body/label
-digests no longer match live state, is treated as absent by the evaluator.
+Native branch/ruleset controls—not a custom attestation in review prose—enforce one
+approval, stale-review dismissal, approval of the latest push, conversation
+resolution, required checks, and merge queue entry.
 
 ## Special cases
 
-- **`auto-revert` label:** skip criteria 1, 2, 3, 8, 9. Verify only: the diff is a clean `git revert` of a single commit, CI is green, gitleaks is green. Approve quickly.
-- **`force-merge` label:** the human has overridden the pipeline. If the label was applied by an agent acting on human instruction, verify that a human-directed bypass comment exists on the PR. Add a comment acknowledging the override. The merge may be performed by either the human or the instructed agent using `--admin`.
-- **`needs-replan` label:** the Executor has given up. Do not review. Comment a summary of what CI caught, to help the Planner.
+- `auto-revert`: verify it cleanly reverts the named commit, contains no extra
+  change or secret, and required checks pass; then review promptly.
+- `force-merge`: act only on an explicit human directive for that PR. The public
+  comment trail must record the bypass. It never permits secrets, `db push`, or
+  `--no-verify`.
 
-## Tone of review comments
-
-- One comment per failed criterion. Quote the rule, point at the file / line, say what must change.
-- You may leave **non-blocking advisory comments** (e.g., "Consider using Promise.all here for better performance") as inline PR comments. However, do NOT reject the PR for subjective style, architecture, minor plan wording, or other code taste. Those are out of scope — the Planner owns design and the Executor owns implementation. Reject ONLY for the hard rejection criteria above.
-- If multiple criteria fail, list all of them in a single review, not one per comment.
+Review comments should name the failure, its impact, the smallest safe correction,
+and the relevant file/line. Group related blockers in one review.

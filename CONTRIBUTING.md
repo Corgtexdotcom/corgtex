@@ -1,96 +1,50 @@
 # Contributing to Corgtex
 
-Corgtex is developed by an autonomous three-agent pipeline (Planner →
-Executor → Reviewer). The canonical specification for how work moves
-through that pipeline lives in
-[`docs/contributing/agent-pipeline.mdx`](docs/contributing/agent-pipeline.mdx).
-Per-role rules that each AI agent's harness loads automatically live in
-[`AGENTS.md`](AGENTS.md).
+Corgtex accepts changes through protected pull requests. Start by reading
+[`AGENTS.md`](AGENTS.md); it contains the repository's engineering invariants and
+agent operating model.
 
-If you are a human contributing manually, follow the same branching and
-PR process documented below — you'll just be playing all three roles
-yourself.
-
-## Development Setup
-
-### Prerequisites
-
-- Node.js 22 (we recommend `nvm` or `asdf`)
-- Docker Desktop or equivalent (for PostgreSQL)
-
-### 1. Clone & Install
+## Local setup
 
 ```bash
-git clone https://github.com/corgtex/corgtex.git
-cd corgtex
 npm install
-```
-
-### 2. Start PostgreSQL
-
-```bash
-docker compose -f docker-compose.selfhost.yml up postgres -d
-```
-
-### 3. Setup Database Schema and Seeds
-
-```bash
-cp .env.example .env
-
 npm run prisma:generate
-npm run prisma:migrate:deploy
-npm run prisma:seed
+npm run check
+npm run test:unit
 ```
 
-### 4. Start Development Server
+Use the targeted tests relevant to your change. Database-backed integration tests
+run with `npm run test:integration`; the database-independent production build is
+`env -u DATABASE_URL npm run build`.
 
-```bash
-npm run dev
-```
+## Pull requests
 
-The app will be available at [http://localhost:3000](http://localhost:3000).
+- Start new work from current `origin/main` in a clean task branch/worktree.
+- Default to one coherent PR for the complete outcome. Split only where each part is
+  independently useful, safe, testable, deployable, and rollbackable.
+- Put the short contract from [`.agents/plan-template.md`](.agents/plan-template.md)
+  in the PR body: outcome, risk, file scope, acceptance, tests, and rollback.
+- Keep the contract public-safe. Never include credentials, secrets, or customer-
+  private facts.
+- Update the PR body when real scope or acceptance changes; do not manufacture a
+  separate planning handoff.
+- Frontend changes need proof from the running application. Keep generated proof in
+  ignored `.artifacts/` and link it through Corgtex Build Artifacts or a safe private
+  fallback.
 
-## Testing
+CI verifies the contract, declared file scope, security hygiene, tests, build, and
+documentation. An independent reviewer evaluates the complete current diff and
+objective risks. See [Agent delivery](/contributing/agent-pipeline) and
+[Branching and pull requests](/contributing/pull-requests).
 
-The canonical commands and testing philosophy are in
-[`AGENTS.md`](AGENTS.md#build-test-check). Before opening a PR, at
-minimum run:
+## Public documentation
 
-```bash
-npm run check        # lint + typecheck + prisma validate
-npm run test:unit    # Vitest unit suite
-```
+`docs/` is public. Do not commit client/partner notes, handoffs, plans, screenshots,
+recordings, generated QA, or Slack manifests. Keep private material in an approved
+private system and generated output outside Git history.
 
-## Pull Request Process
+## Code style
 
-Every PR must include the plan contract in the PR body (see
-[`.agents/plan-template.md`](.agents/plan-template.md)). The Reviewer
-rejects PRs without a PR-body plan, with out-of-scope file changes, or
-with missing acceptance criteria. Local pre-PR plan drafts belong under
-`.agents/plans/`, which is ignored and must not be committed. PR-body
-plans remain visible in GitHub PR metadata, so keep them public-safe:
-no private keys, API tokens, passwords, raw credentials, secret values,
-or customer-private facts.
-
-The full workflow is documented in
-[`docs/contributing/agent-pipeline.mdx`](docs/contributing/agent-pipeline.mdx)
-and summarized per role in [`AGENTS.md`](AGENTS.md). Do not duplicate
-those rules here.
-
-## Public Docs Hygiene
-
-The `docs/` tree is only for the public documentation site. Do not
-commit private/client/partner notes, handoff docs, agent plans, PR proof
-assets, screenshots, recordings, generated QA output, or Slack manifests
-under `docs/`. Use PR attachments, CI artifacts, or ignored local
-`.artifacts/` output for generated proof.
-
-## Code Style
-
-- TypeScript (strict mode) everywhere.
-- 2-space indentation, double quotes, semicolons.
-- `@/*` imports for `apps/web` modules; `@corgtex/*` for shared packages.
-
-Full conventions in [`AGENTS.md`](AGENTS.md#code-style).
-
-Thank you for contributing!
+Use strict TypeScript, two-space indentation, double quotes, semicolons, `@/*` web
+imports, and `@corgtex/*` package imports. Formatting and static rules are enforced
+by `npm run check`.

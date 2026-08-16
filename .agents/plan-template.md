@@ -1,128 +1,38 @@
 # Plan: Short title
 
-{/*
-  This file is the canonical handoff from the initial Planner (Claude
-  Opus first; Codex Sol fallback) to Executor (Gemini in Antigravity or
-  Kimi K3) and Reviewer (Codex). Kimi and Gemini may execute or analyze,
-  but never own the first planning pass. Copy this template into the
-  pull request body. For local checks before a PR exists, copy
-  it to `.agents/plans/<branch>.md`; that directory is intentionally
-  ignored and must not be committed.
+## Outcome
 
-  Executor: your first action on this branch is to read the PR body, or
-  the ignored local plan file if the PR has not been opened yet.
-
-  Reviewer: reject the PR if changed files are not in "Files to touch",
-  if any acceptance criterion is not ticked, or if the PR body does not
-  include this plan contract.
-
-  This plan is stored in GitHub PR metadata. Keep it public-safe: never
-  include private keys, API tokens, passwords, customer-private facts,
-  raw credentials, or secret values. Link private context from an
-  approved internal system instead of pasting it here.
-*/}
-
-## Goal
-
-One paragraph. What are we trying to accomplish and why. Ground it in a
-concrete user-visible outcome or a concrete engineering invariant.
+[What user-visible or operational result will exist when this is done?]
 
 ## Risk tier
 
-Replace this section with exactly one list item whose value is `low`,
-`standard`, `high`, or `critical`. Guidance:
+[low | standard | high | critical]
 
-- `low` — docs, copy, styles, or tightly scoped non-security changes.
-- `standard` — normal product or domain work.
-- `high` — normal workflow or broad shared behavior that remains reviewable as one coherent change and does not affect a critical category.
-- `critical` — auth, permissions, cross-tenant isolation, migrations, deploy, or agent-pipeline policy.
+## Scope
 
-## Out of scope
-
-Bullet list of things that could plausibly be bundled in but won't be.
-This is load-bearing: Reviewer uses it to reject scope creep.
-
-## Change cohesion
-
-Explain why this is one coherent PR or why the proposed split points are
-independently useful, safe, testable, and rollbackable. Do not split merely to
-fit a line/file budget, and do not land unused APIs or partial safety contracts.
-For `large-change-approved`, include a subsystem/file review map, map tests to
-acceptance criteria, and identify rollback boundaries in this existing plan.
-Do not create another goal, plan, branch, PR, or release step solely for size.
-
-State the delivery shape, maximum planned implementation-PR count, and stop
-condition. Default to one cohesive PR. A reusable subsystem or PR train for an
-exact-target operational task is material scope expansion and needs explicit
-user approval before additional planning or PRs begin.
+[What changes, what intentionally does not, and why this is one coherent PR.]
 
 ## Files to touch
 
-Markdown list. Each item is a backtick-wrapped path or glob, one per
-line. `scripts/check-plan.mjs` parses this section literally. Anything
-outside this list will fail `scope-check` in CI.
-
 - `path/to/file.ts`
-- `path/to/dir/**`
-
-## Demo exposure
-
-For customer-visible product changes, state how the safe public demo
-will show the feature. Update `scripts/seed-jnj-demo.mjs` when seeded
-state is needed, or explain why the feature cannot be shown safely.
-
-## UX spine decisions
-
-For workspace UI changes, name the shared primitive or tokenized class family
-used or improved. If the plan keeps a local exception, explain the concrete
-user benefit and whether it should be promoted into the shared spine later.
 
 ## Acceptance criteria
 
-GitHub-style checklist. Each item must be independently verifiable by
-reading code or CI output. No prose. Reviewer verifies each one.
-
-- [ ] ...
-- [ ] ...
+- [ ] [A concrete behavior or evidence statement.]
 
 ## Test plan
 
-Executable commands, one per line in a fenced block. Reviewer checks
-that CI actually ran these or that the equivalent was run.
-
-```
+```text
 npm run check
-npm run test:unit
+[relevant targeted command]
 ```
 
-## Visual Proof
+## Visual proof
 
-For UI changes under `apps/web/app/**`, `apps/web/components/**`, or
-`apps/web/lib/components/**`, link actual proof from the PR body.
-Preferred: capture screenshots or videos under ignored `.artifacts/`,
-upload them to Corgtex Build Artifacts with
-`node scripts/upload-build-artifacts.mjs`, and paste the emitted
-markdown links here. Use PR attachments, CI-uploaded artifacts, or
-another private artifact link only when Build Artifacts is unavailable.
-Do not commit screenshots, recordings, or generated QA output.
+[For frontend changes, link proof from the running app. Prefer Corgtex Build
+Artifacts; use a private fallback when proof contains private data. Delete this
+section when no frontend path changed.]
 
-Delete this section if no UI paths changed.
+## Risk and rollback
 
-## Rollback
-
-What breaks if we revert this PR? How do we revert safely? If the change
-includes a migration or changes shared state, spell out the ordered
-steps. If it's pure code / docs, say so explicitly.
-
-## Labels this PR needs
-
-List any labels required by branch protection or by the forbidden-paths
-rule in `docs/contributing/agent-pipeline.mdx`. Common ones:
-
-- `forbidden-path-approved` — touches `deploy/**`, `.github/workflows/**`,
-  `prisma/migrations/**`, or auth files. Requires justification above.
-- `large-change-approved` — diff exceeds the risk-tier review budget. Requires
-  the concise cohesion, review-map, coverage-map, and rollback justification
-  above. It is not a force-merge or human-bypass label.
-
-Leave this section empty if none apply.
+[Name the realistic failure modes and the safe revert/recovery path.]

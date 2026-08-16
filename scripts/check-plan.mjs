@@ -1,12 +1,10 @@
 #!/usr/bin/env node
-// Enforces the agent-pipeline plan contract.
+// Enforces the concise PR contract.
 //
 // Modes:
 //   --mode=present   — verify the PR body contains the plan contract.
 //   --mode=scope     — verify changed files ⊆ plan's "Files to touch" allowlist.
-//   --mode=size      — verify diff is within the risk-tier review budget unless the PR carries
-//                      the `large-change-approved` label.
-//   --mode=policy    — verify review blockers that should be caught before Codex.
+//   --mode=policy    — verify mechanical review blockers.
 //
 // Reads branch/base/labels from env (GitHub Actions) or from git/flags locally.
 // Exits non-zero on violation; prints a one-line CI-friendly reason.
@@ -14,10 +12,6 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import {
-  FORBIDDEN_UNLABELED_PATHS,
-  sizePolicyForFiles,
-} from "./check-plan-policy.mjs";
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap((a) => {
@@ -27,13 +21,19 @@ const args = Object.fromEntries(
 );
 
 const mode = args.mode;
-if (!["present", "scope", "size", "policy"].includes(mode)) {
-  console.error("usage: check-plan.mjs --mode=<present|scope|size|policy>");
+if (!["present", "scope", "policy"].includes(mode)) {
+  console.error("usage: check-plan.mjs --mode=<present|scope|policy>");
   process.exit(2);
 }
 
-const DOCS_EXTENSIONS = new Set([".md", ".mdx"]);
 const LOCAL_PLAN_DIR = path.join(".agents", "plans");
+const PROTECTED_PATHS = [
+  /^deploy\//,
+  /^\.github\/workflows\//,
+  /^prisma\/migrations\//,
+  /^packages\/domain\/src\/auth.*\.ts$/,
+  /^apps\/web\/lib\/auth\.ts$/,
+];
 const UI_PATHS = [
   /^apps\/web\/app\//,
   /^apps\/web\/components\//,
@@ -349,6 +349,14 @@ if (mode === "present") {
   if (!allowlist || allowlist.length === 0) {
     fail('plan contract has no "Files to touch" entries');
   }
+  for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
+    if (!extractSection(planText, section)) {
+      fail(`plan contract has no non-empty "${section}" section`);
+    }
+  }
+  if (parseAcceptanceCriteria(planText).length === 0) {
+    fail("plan contract has no acceptance criteria checklist");
+  }
   ok("plan contract present in PR body or ignored local plan file");
 }
 
@@ -371,66 +379,17 @@ if (mode === "scope") {
         `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
       );
     }
-  }
-
-  const forbidden = files.filter((f) =>
-    FORBIDDEN_UNLABELED_PATHS.some((re) => re.test(f)),
-  );
-  if (forbidden.length > 0 && !labels.has("forbidden-path-approved")) {
-    fail(
-      `forbidden path change without "forbidden-path-approved" label:\n  - ${forbidden.join("\n  - ")}`,
+    const protectedFiles = files.filter((file) =>
+      PROTECTED_PATHS.some((pattern) => pattern.test(file)),
     );
+    if (protectedFiles.length > 0 && parseRiskTier(planText) !== "critical") {
+      fail(
+        `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
+      );
+    }
   }
 
   ok(`${files.length} file(s) all within scope`);
-}
-
-if (mode === "size") {
-  const files = changedFiles(base);
-  if (labels.has("large-change-approved")) {
-    ok("large-change-approved label present, size check skipped");
-  }
-  const planText = readPlanText(branch);
-  assertPlanHasNoCredentialMaterial(planText);
-  const riskTier = parseRiskTier(planText);
-  if (!riskTier) {
-    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
-  }
-  const { effectiveRiskTier, caps } = sizePolicyForFiles(riskTier, files);
-
-  if (files.length > caps.files) {
-    fail(
-      `${files.length} files changed, ${effectiveRiskTier} review budget is ${caps.files}. Add "large-change-approved" with a cohesion/review map, or split only at an independently safe boundary.`,
-    );
-  }
-  // Count LOC of non-doc files only.
-  let codeLoc = 0;
-  try {
-    const numstats = [gitDiffAgainstBase(base, "--numstat")];
-    if (process.env.GITHUB_ACTIONS !== "true") {
-      numstats.push(sh("git diff --numstat --cached"));
-      numstats.push(sh("git diff --numstat"));
-    }
-    for (const line of numstats.filter(Boolean).join("\n").split("\n")) {
-      if (!line) continue;
-      const [addedRaw, removedRaw, ...rest] = line.split("\t");
-      const added = Number(addedRaw);
-      const removed = Number(removedRaw);
-      const file = rest.join("\t");
-      if (!Number.isFinite(added) || !Number.isFinite(removed)) continue; // binary
-      const ext = path.extname(file);
-      if (DOCS_EXTENSIONS.has(ext)) continue;
-      codeLoc += added + removed;
-    }
-  } catch (err) {
-    fail(`unable to compute diff size: ${err.message}`);
-  }
-  if (codeLoc > caps.codeLoc) {
-    fail(
-      `${codeLoc} LOC of code changed, ${effectiveRiskTier} review budget is ${caps.codeLoc}. Add "large-change-approved" with a cohesion/review map, or split only at an independently safe boundary.`,
-    );
-  }
-  ok(`${files.length} file(s), ${codeLoc} code LOC within ${effectiveRiskTier} review budget`);
 }
 
 if (mode === "policy") {

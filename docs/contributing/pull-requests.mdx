@@ -1,110 +1,66 @@
 ---
 title: "Branching and Pull Requests"
-description: "How PRs flow through the autonomous Planner → Executor → Reviewer pipeline."
+description: "The concise contract and protected path for Corgtex changes."
 ---
-
-Corgtex uses an autonomous three-agent pipeline for all development.
-The full specification is in [Agent Pipeline](/contributing/agent-pipeline).
-This page covers the PR-specific conventions that apply to every change.
 
 ## Branching
 
-- One branch per plan. No overlapping scopes.
-- Descriptive names: `feat/optimistic-finance`, `fix/login-crash`, `docs/agent-pipeline`.
-- The plan contract lives in the PR body. Before the PR exists, agents may keep a local ignored copy at `.agents/plans/<branch>.md`.
+- New work starts from current `origin/main` in a clean task branch/worktree.
+- Continue an existing branch only when the task explicitly names that work.
+- Never reset, stash, overwrite, or mix unrelated work.
+- Default to one branch and PR for one complete outcome. Split only at independently
+  useful, safe, testable, deployable, and rollbackable boundaries.
 
-## The plan is the contract
+## PR contract
 
-Every PR is backed by a plan contract in the PR body. The plan
-is the handoff between Planner, Executor, and Reviewer, and it is
-enforced mechanically:
+Copy [`/.agents/plan-template.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/.agents/plan-template.md)
+into the PR body and keep these sections current:
 
-- `plan-present` CI job fails if the PR body does not contain a valid plan.
-- `scope-check` CI job fails if any changed file is outside the plan's "Files to touch" allowlist.
-- The PR body must state the risk tier.
-- The Reviewer (Codex) rejects PRs whose plan lacks ticked acceptance criteria.
+- outcome;
+- `low`, `standard`, `high`, or `critical` risk;
+- scope and file allowlist;
+- concrete acceptance checklist;
+- executable tests;
+- actual visual proof for frontend paths; and
+- realistic risk and rollback.
 
-Copy [`/.agents/plan-template.md`](https://github.com/corgtex/corgtex/blob/main/.agents/plan-template.md) to start.
+Before a PR exists, an ignored local copy may live at `.agents/plans/<branch>.md`.
+The PR body is public metadata: never include secrets, credentials, or private client
+facts.
 
-PR-body plans remain visible in GitHub PR metadata. That is acceptable
-for normal execution plans, but plans must stay public-safe: no private
-keys, API tokens, passwords, raw credentials, secret values, or
-customer-private facts. `scripts/check-plan.mjs` blocks obvious
-credential patterns in the PR body; sensitive context should live in an
-approved private system and be referenced only generically.
+## CI and review
 
-## Opening the PR
+Every PR runs:
 
-The Executor opens the PR using `gh pr create` (installed via
-Homebrew; `/opt/homebrew/bin/gh` if not on `PATH`). The PR body:
+- `Lint, Typecheck & Test`;
+- `Database Sync`;
+- database-independent `Build`;
+- `Docs Validation`;
+- `PR Policy`;
+- `Secret Scan`; and
+- `Client Data Scan`.
 
-1. **Contains the full plan contract.**
-2. **States the risk tier** — `low`, `standard`, `high`, or `critical`.
-3. **Explains change cohesion** — why the work belongs in one PR or why each split is independently useful, safe, testable, and rollbackable. For `large-change-approved`, include the subsystem/file review map, acceptance/test coverage map, and rollback boundaries.
-4. **Summarizes what shipped** — one or two sentences, the "walkthrough."
-5. **Describes demo exposure** for customer-visible product changes. Update `scripts/seed-jnj-demo.mjs` when safe seeded data is needed, or explain why the feature cannot be shown safely in the public demo.
-6. **Explains UX spine decisions** for workspace UI changes: name the shared primitive used or improved, and explain any local exception by user benefit rather than preference.
-7. **Links actual visual proof** in the **Visual Proof** section for any change under `apps/web/app/**`, `apps/web/components/**`, or `apps/web/lib/components/**`. Prefer Corgtex Build Artifacts: capture proof under ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`, and paste the emitted markdown links into the PR body. Use PR attachments, CI-uploaded artifacts, or another private artifact link only when Build Artifacts is unavailable. Do not commit generated screenshots or recordings.
+`PR Policy` checks the contract, declared files, critical handling of protected
+paths, acceptance completion, domain tests, frontend proof, environment files, and
+forbidden executable patterns. It does not enforce arbitrary line or file limits.
 
-Auto-merge is set by the Executor immediately (`gh pr merge --auto --squash`) so the PR merges as soon as the Reviewer approves and required checks are green.
+The independent reviewer reads the complete current diff and requests changes only
+for objective blockers. Native GitHub rules dismiss stale approvals, require the
+latest push to be approved, require conversations and status checks to pass, and
+send the result through the merge queue.
 
-## CI gates
+## Frontend proof
 
-Every PR must pass:
-
-- `check` — lint, typecheck, Prisma validate.
-- `test:unit` / `test:integration` / `test:all` — Vitest unit and DB-backed integration coverage. `test:integration` uses `docker-compose.test.yml`.
-- `db-sync` — migration ↔ schema parity.
-- `build` — `env -u DATABASE_URL npm run build` (database-independent).
-- `docs` — public docs guard, `mint validate`, and broken-link check.
-- `plan-present` — PR body contains the plan contract.
-- `scope-check` — changed files ⊆ plan allowlist and policy checks pass.
-- `gitleaks` — no secrets in the diff.
-- `diff-size` — agent review budgets: `low` ≤ 4000 non-doc LOC / 100 files, `standard` ≤ 2500 / 60, `high` ≤ 1800 / 40, `critical` ≤ 1200 / 30. Forbidden paths and agent-pipeline policy files always use the critical budget.
-
-These budgets are safeguards, not targets. Do not split a coherent change merely
-to satisfy a line or file threshold. If a larger change is safer to review as
-one unit, use `large-change-approved` with the required cohesion and review map.
-The independent reviewer may make several focused passes over the same exact
-head instead of requiring several separately deployed PRs.
-
-Default to one cohesive implementation PR per user outcome. The plan must state
-the maximum planned implementation-PR count and stop condition. Expanding an
-exact-target operational task into a reusable subsystem or PR train requires
-explicit user approval; a size threshold alone never authorizes that expansion.
-
-`large-change-approved` is a review-routing control, not a force-merge or
-human-bypass label. Keep it cheaper than fragmentation: add the concise review
-and rollback map to the existing plan, without creating another goal, plan,
-branch, PR, or release step solely because of size. The budgets are provisional
-and are recalibrated after each 20 merged agent PRs or 30 days from observed
-findings, remediation cycles, reverts/incidents, and time-to-merge.
-
-All of these are required by branch protection on `main`. The Reviewer
-cannot merge a PR whose required checks are red.
-
-## Public docs hygiene
-
-The `docs/` tree is only for the public documentation site. Private or
-client-specific notes, partner analysis, handoff docs, generated QA
-output, screenshots, recordings, Slack manifests, and agent plan files
-must stay out of `docs/` and out of Git history. Keep local generated
-output under `.artifacts/`, and prefer Corgtex Build Artifacts for
-review proof links. Use PR attachments, CI artifacts, or private
-artifact links only when Build Artifacts is unavailable.
+Run the application and capture the actual changed behavior. Keep captures under
+ignored `.artifacts/`, upload with `node scripts/upload-build-artifacts.mjs`, and
+paste the link into the PR. Use a private artifact when the proof contains private
+data. Never commit generated screenshots or recordings.
 
 ## Labels
 
-- `forbidden-path-approved` — justification in the plan, required for changes to `deploy/**`, `.github/workflows/**`, `prisma/migrations/**`, `packages/domain/src/auth*.ts`, `apps/web/lib/auth.ts`.
-- `large-change-approved` — override for the selected risk-tier review budget, backed by the existing plan's concise cohesion, coverage, review, and rollback map.
-- `halt-agents` — human stop; Reviewer will not merge, Executor will not push.
-- `force-merge` — human override, logged.
-- `needs-replan` — Executor is stuck; Planner picks up.
-- `auto-revert` — created by `.github/workflows/auto-revert.yml` after a failed `smoke-prod`.
+- `halt-agents`: stop work and review.
+- `needs-replan`: the bounded correction loop reached a genuine impasse.
+- `auto-revert`: a protected recovery PR.
+- `force-merge`: rare explicit human bypass with a public audit comment.
 
-## Automated Document Updates
-
-When a PR merges to `main`, our Mintlify AI workflow evaluates the diff
-to determine if documentation is now outdated. If so, it drafts a
-separate PR against the docs site through the same Planner → Executor →
-Reviewer pipeline described above.
+Labels do not waive secrets, tests, data safety, `prisma db push`, or `--no-verify`.
