@@ -51,8 +51,6 @@ We do not maintain heavy Cypress / Playwright frontend suites. For
 backend end-to-end coverage we expose a dedicated Agent API that an
 external script or the pipeline itself can hit.
 
-Setup and credentials are documented in
-[`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
 Summary:
 
 1. Set `AGENT_API_KEY` in `.env`.
@@ -68,7 +66,7 @@ Summary:
 ## Frontend E2E via browser agent
 
 When a PR touches `apps/web/app/**`, `apps/web/components/**`, or
-`apps/web/lib/components/**`, the Executor logs into the UI using
+`apps/web/lib/components/**`, the delivery owner logs into the UI using
 seeded credentials and links a screen recording, screenshot, or CI
 artifact from the PR body's **Visual Proof** section. Preferred proof
 storage is Corgtex Build Artifacts: capture browser output under
@@ -76,8 +74,7 @@ ignored `.artifacts/`, upload it with `node scripts/upload-build-artifacts.mjs`,
 and paste the emitted markdown links into the PR. Generated browser
 artifacts belong under `.artifacts/` or in CI artifacts, not under
 `docs/assets/`. Credentials live in `.env` (`AGENT_E2E_EMAIL`,
-`AGENT_E2E_PASSWORD`) — never hardcoded, never in PR descriptions. See the secrets section of
-[`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md#secrets-and-credentials).
+`AGENT_E2E_PASSWORD`) — never hardcoded and never included in PR descriptions.
 
 For workspace UI spine changes, visual proof must show the affected shared
 patterns in context: page header hierarchy, subnav or segmented controls,

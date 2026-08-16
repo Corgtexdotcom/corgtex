@@ -500,8 +500,9 @@ function runGh(argv) {
 function ghEnv() {
   const env = { ...process.env };
   if (!env.GH_CONFIG_DIR) {
-    const builderConfig = env.CODEX_BUILDER_GH_CONFIG_DIR
-      ?? (env.HOME ? `${env.HOME}/.config/gh-codex-builder` : null);
+    const builderConfig = env.CORGTEX_BUILDER_GH_CONFIG_DIR
+      || env.CODEX_BUILDER_GH_CONFIG_DIR
+      || (env.HOME ? `${env.HOME}/.config/gh-corgtex-builder` : null);
     if (builderConfig) env.GH_CONFIG_DIR = builderConfig;
   }
   return env;
