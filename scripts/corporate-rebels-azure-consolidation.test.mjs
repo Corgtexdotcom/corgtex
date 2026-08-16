@@ -1,0 +1,126 @@
+import { describe, expect, it } from "vitest";
+import { CONTRACT, loadManifest, parseCsv, runCorporateRebelsConsolidation } from "./corporate-rebels-azure-consolidation.mjs";
+
+const manifestBytes = () => import("node:fs/promises").then(({ readFile }) => readFile(
+  new URL("./data/corporate-rebels-source-manifest-2026-08-13.csv", import.meta.url)));
+
+function fakeDatabase(kind, { ambiguous = false, attachments = 0, failSources = false } = {}) {
+  const oldId = kind === "azure" ? CONTRACT.azureLegacyWorkspaceId : CONTRACT.opsLegacyWorkspaceId;
+  const state = { workspaces: [{ id: oldId, name: CONTRACT.name, slug: CONTRACT.slug },
+    { id: "other-workspace", name: "Untouched Tenant", slug: "untouched-tenant" }], members: [{ workspaceId: oldId }],
+    invites: [], sources: [{ workspaceId: oldId }], articles: [], policies: [], audits: [], events: [], ledger: [] };
+  if (ambiguous) state.workspaces.push({ id: "collision", name: CONTRACT.name, slug: "collision" });
+  const count = (workspaceId, key) => state[key].filter((row) => row.workspaceId === workspaceId).length;
+  const workspaceModel = {
+    findUnique: async ({ where }) => { const row = state.workspaces.find((entry) => entry.id === where.id);
+      return row ? { ...row, _count: { members: count(row.id, "members"), memberInviteRequests: count(row.id, "invites"),
+        brainSources: count(row.id, "sources"), brainArticles: count(row.id, "articles"), documents: 0, meetings: 0,
+        externalMcpConnections: 0, externalDataSources: 0, externalResourceAttachments: 0,
+        communicationInstallations: 0, appInstallations: 0 } } : null; },
+    findMany: async () => state.workspaces.filter((row) => row.slug === CONTRACT.slug || row.name === CONTRACT.name)
+      .map(({ id }) => ({ id })),
+    delete: async ({ where }) => { state.ledger.push(`workspace.delete:${where.id}`);
+      state.workspaces = state.workspaces.filter((row) => row.id !== where.id);
+      for (const key of ["members", "invites", "sources", "articles"]) state[key] = state[key].filter(
+        (row) => row.workspaceId !== where.id); },
+    create: async ({ data }) => { const row = { id: "11111111-1111-4111-8111-111111111111", ...data };
+      state.ledger.push(`workspace.create:${data.slug}`); state.workspaces.push(row); return row; },
+  };
+  const deployment = { id: CONTRACT.opsDeploymentId, managedWorkspaceId: oldId,
+    customerAccountId: CONTRACT.opsAccountId, customerSlug: CONTRACT.slug,
+    label: CONTRACT.name, cloudProvider: "RAILWAY" };
+  const host = { id: CONTRACT.azureHostDeploymentId, cloudProvider: "AZURE", deploymentStatus: "ACTIVE",
+    url: "https://selfserve.corgtex.com", region: "westus3", dataResidency: "US",
+    releaseImageTag: "sha-reviewed", lastHealthStatus: "ok" };
+  const tx = { workspace: workspaceModel,
+    approvalPolicy: { create: async ({ data }) => { state.policies.push(data); } },
+    brainSource: { count: async () => attachments,
+      createMany: async ({ data }) => { if (failSources) throw new Error("seed failed");
+        state.sources.push(...data); } },
+    document: { count: async () => 0 }, meetingAudioAsset: { count: async () => 0 },
+    workspaceExternalResourceAttachment: { count: async () => 0 },
+    buildArtifactAsset: { count: async () => 0 },
+    brainArticle: { create: async ({ data }) => { state.articles.push({ id: "article", ...data }); } },
+    auditLog: { create: async ({ data }) => { state.audits.push(data); } },
+    customerDeployment: { findUnique: async ({ where }) => where.id === deployment.id ? deployment : host,
+      update: async ({ data }) => { state.ledger.push(`deployment.update:${deployment.id}`);
+        Object.assign(deployment, data); return deployment; } },
+    customerAccount: { findUnique: async () => ({ id: CONTRACT.opsAccountId, slug: CONTRACT.slug,
+      displayName: CONTRACT.name, primaryDeploymentId: CONTRACT.opsDeploymentId }) },
+    customerDeploymentEvent: { create: async ({ data }) => { state.events.push(data); } },
+  };
+  const prisma = { ...tx, $transaction: async (callback) => { const snapshot = structuredClone(state);
+    try { return await callback(tx); } catch (error) { for (const key of Object.keys(state)) delete state[key];
+      Object.assign(state, snapshot); throw error; } } };
+  return { prisma, state, deployment };
+}
+
+describe("Corporate Rebels Azure consolidation", () => {
+  it("pins the authoritative 25-row manifest and parses quoted commas", async () => {
+    const manifest = await loadManifest();
+    expect(manifest).toMatchObject({ digest: CONTRACT.manifestSha256, rows: { length: 25 } });
+    expect(parseCsv('a,b\n"one, two","three"\n')).toEqual([{ a: "one, two", b: "three" }]);
+    await expect(loadManifest(async () => Buffer.from("drift"))).rejects.toThrow("digest mismatch");
+  });
+
+  it("keeps Azure preflight read-only", async () => {
+    const { prisma, state } = fakeDatabase("azure");
+    const receipt = await runCorporateRebelsConsolidation({ prisma, phase: "azure", readManifest: manifestBytes });
+    expect(receipt).toMatchObject({ mode: "preflight", phase: "azure", manifestCount: 25 });
+    expect(state.ledger).toEqual([]);
+  });
+
+  it("requires the exact execution confirmation before any write", async () => {
+    const { prisma, state } = fakeDatabase("azure");
+    await expect(runCorporateRebelsConsolidation({ prisma, phase: "azure", execute: true,
+      confirmation: "approved", readManifest: manifestBytes })).rejects.toThrow("Exact execution confirmation");
+    expect(state.ledger).toEqual([]);
+  });
+
+  it("atomically replaces the Azure legacy workspace with private seeded state and no users", async () => {
+    const { prisma, state } = fakeDatabase("azure");
+    const receipt = await runCorporateRebelsConsolidation({ prisma, phase: "azure", execute: true,
+      confirmation: CONTRACT.confirmation, readManifest: manifestBytes });
+    expect(receipt.azureWorkspace._count).toMatchObject({ members: 0, memberInviteRequests: 0,
+      brainSources: 25, brainArticles: 1 });
+    expect(state.workspaces.map((row) => row.id)).toContain("other-workspace");
+    expect(state.sources).toHaveLength(25);
+    expect(state.articles[0]).toMatchObject({ authority: "DRAFT", isPrivate: true, publishedAt: null });
+    expect(state.articles[0].sourceIds).toHaveLength(25);
+  });
+
+  it("fails closed on ambiguous Corporate Rebels identity", async () => {
+    const { prisma, state } = fakeDatabase("azure", { ambiguous: true });
+    await expect(runCorporateRebelsConsolidation({ prisma, phase: "azure",
+      readManifest: manifestBytes })).rejects.toThrow("identity is ambiguous");
+    expect(state.ledger).toEqual([]);
+  });
+
+  it("fails closed before deletion when file attachments exist", async () => {
+    const { prisma, state } = fakeDatabase("azure", { attachments: 1 });
+    await expect(runCorporateRebelsConsolidation({ prisma, phase: "azure",
+      readManifest: manifestBytes })).rejects.toThrow("has file attachments");
+    expect(state.ledger).toEqual([]);
+  });
+
+  it("rolls back the Azure transaction when seeding fails", async () => {
+    const { prisma, state } = fakeDatabase("azure", { failSources: true });
+    await expect(runCorporateRebelsConsolidation({ prisma, phase: "azure", execute: true,
+      confirmation: CONTRACT.confirmation, readManifest: manifestBytes })).rejects.toThrow("seed failed");
+    expect(state.workspaces.some((row) => row.id === CONTRACT.azureLegacyWorkspaceId)).toBe(true);
+    expect(state.ledger).toEqual([]);
+  });
+
+  it("moves only the exact Ops registry to Azure and deletes only its legacy workspace", async () => {
+    const { prisma, state, deployment } = fakeDatabase("ops");
+    const azureWorkspaceId = "11111111-1111-4111-8111-111111111111";
+    const receipt = await runCorporateRebelsConsolidation({ prisma, phase: "ops", execute: true,
+      confirmation: CONTRACT.confirmation, azureWorkspaceId, readManifest: manifestBytes });
+    expect(receipt.deployment).toMatchObject({ cloudProvider: "AZURE", remoteWorkspaceId: azureWorkspaceId,
+      managedWorkspaceId: null });
+    expect(deployment.deploymentKind).toBe("REMOTE_MANAGED");
+    expect(deployment.url).toBe(`https://selfserve.corgtex.com/workspaces/${azureWorkspaceId}`);
+    expect(state.workspaces).toEqual([{ id: "other-workspace", name: "Untouched Tenant", slug: "untouched-tenant" }]);
+    expect(state.events).toHaveLength(1);
+  });
+});
