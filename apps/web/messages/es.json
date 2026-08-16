@@ -488,7 +488,7 @@
     "sourcesTitle": "Fuentes de Brain",
     "sourcesDescription": "Fuentes sin procesar incorporadas a Brain. Los agentes las absorben en artículos wiki.",
     "ingestRawFiles": "Ingerir archivos sin procesar",
-    "fileToIngest": "Archivo para ingerir (PDF, DOCX, CSV, TXT, JSON)",
+    "fileToIngest": "Archivo para ingerir (PDF, DOCX, texto nativo de PPTX, CSV, TXT, JSON)",
     "uploadAndMap": "Subir y mapear a Brain",
     "uploadFilesButton": "Subir archivos",
     "uploadFilesTitle": "Subir archivos a Brain",

@@ -19,6 +19,11 @@ import {
   type DuplicateGuardOptions,
 } from "@corgtex/domain";
 import mammoth from "mammoth";
+import {
+  extractPptxText,
+  PPTX_MIME_TYPE,
+  PptxExtractionError,
+} from "./pptx-extraction";
 
 function asRecord(value: Record<string, unknown> | undefined) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -190,6 +195,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
             fileName: params.fileName,
             mimeType: params.mimeType,
             size: params.size,
+            ...(params.metadata.extraction ? { extraction: params.metadata.extraction } : {}),
             ...(contentHash ? { contentHash } : {}),
             duplicateGuardUpdatedAt: new Date().toISOString(),
           } as Prisma.InputJsonValue,
@@ -212,6 +218,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           metadata: {
             documentId: document.id,
             storageKey: params.storageKey,
+            ...(params.metadata.extraction ? { extraction: params.metadata.extraction } : {}),
             ...(contentHash ? { contentHash } : {}),
           } as Prisma.InputJsonValue,
         },
@@ -274,8 +281,38 @@ export async function extractTextFromFileBuffer(params: {
   let textContent: string | null = null;
   let supported = false;
   let truncated = false;
+  let extraction: Record<string, unknown> | undefined;
 
-  if (size <= maxExtractBytes) {
+  const mimeType = params.mimeType.split(";")[0]?.trim().toLowerCase() || "";
+  const isPptxName = lowerName.endsWith(".pptx");
+  const isPptxMime = mimeType === PPTX_MIME_TYPE;
+  const isGenericMime = !mimeType || mimeType === "application/octet-stream";
+  const hasNamedExtension = /\.[^./]+$/.test(lowerName);
+  if ((isPptxName && !isGenericMime && !isPptxMime) || (isPptxMime && hasNamedExtension && !isPptxName)) {
+    throw new AppError(422, "PPTX_FILE_TYPE_MISMATCH", "The presentation filename and content type do not match.");
+  }
+  const looksLikeZip = params.fileBuffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  const shouldTryPptx = isPptxName || isPptxMime || (isGenericMime && looksLikeZip);
+  if (shouldTryPptx) {
+    try {
+      const result = await extractPptxText(params.fileBuffer, { maxInputBytes: maxExtractBytes, maxTextLength });
+      textContent = result.textContent;
+      supported = true;
+      truncated = result.extraction.truncated;
+      extraction = result.extraction;
+    } catch (error) {
+      if (error instanceof PptxExtractionError && error.code === "NOT_PPTX" && !isPptxName && !isPptxMime) {
+        // Generic binary ZIP uploads remain unsupported unless package validation proves PPTX.
+      } else if (error instanceof PptxExtractionError) {
+        const status = error.code === "FILE_TOO_LARGE" || error.code === "EXTRACTION_LIMIT_EXCEEDED" ? 413 : 422;
+        throw new AppError(status, `PPTX_${error.code}`, error.message);
+      } else {
+        throw new AppError(422, "PPTX_EXTRACTION_FAILED", "Presentation text extraction could not be completed safely.");
+      }
+    }
+  }
+
+  if (!supported && size <= maxExtractBytes) {
     try {
       if (
         params.mimeType.startsWith("text/")
@@ -314,6 +351,11 @@ export async function extractTextFromFileBuffer(params: {
     truncated,
     size,
     fileName,
+    extraction: extraction ?? {
+      supported,
+      hasTextContent: Boolean(textContent?.trim()),
+      truncated,
+    },
   };
 }
 
@@ -352,7 +394,7 @@ export async function ingestFile(actor: AppActor, params: {
   }
 
   // 1. Extract text before writing the blob so duplicate stops do not create orphaned storage.
-  const { textContent, supported, truncated } = await extractTextFromFileBuffer({
+  const { textContent, supported, truncated, extraction } = await extractTextFromFileBuffer({
     fileBuffer: params.fileBuffer,
     fileName,
     mimeType: params.mimeType,
@@ -414,11 +456,7 @@ export async function ingestFile(actor: AppActor, params: {
         ingestionGuidanceMd,
         metadata: {
           ...documentMetadata,
-          extraction: {
-            supported,
-            hasTextContent: Boolean(textContent?.trim()),
-            truncated,
-          },
+          extraction,
         },
       });
     } catch (error) {
@@ -451,11 +489,7 @@ export async function ingestFile(actor: AppActor, params: {
             size,
             ...(contentHash ? { contentHash } : {}),
             ...(ingestionGuidanceMd ? { ingestionGuidanceMd } : {}),
-            extraction: {
-              supported,
-              hasTextContent: Boolean(textContent?.trim()),
-              truncated,
-            },
+            extraction,
           } as Prisma.InputJsonValue,
         },
       });
@@ -499,11 +533,7 @@ export async function ingestFile(actor: AppActor, params: {
           metadata: {
             documentId: document.id,
             ...(contentHash ? { contentHash } : {}),
-            extraction: {
-              supported,
-              hasTextContent: Boolean(textContent?.trim()),
-              truncated,
-            },
+            extraction,
           } as Prisma.InputJsonValue,
         },
       });

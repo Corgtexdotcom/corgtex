@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createHash } from "node:crypto";
-import { ingestFile } from "./file-ingestion";
+import { readFileSync } from "node:fs";
+import { extractTextFromFileBuffer, ingestFile } from "./file-ingestion";
 import { prisma } from "@corgtex/shared";
 import {
   assertTrialStorageCapacity,
@@ -53,6 +54,8 @@ const VALID_PDF_BUFFER = Buffer.from(
   '%PDF-1.0\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<<>>>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 100 700 Td (Hello PDF) Tj ET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000206 00000 n \ntrailer<</Size 5/Root 1 0 R>>\nstartxref\n300\n%%EOF',
   'ascii'
 );
+const VALID_PPTX_BUFFER = readFileSync(new URL("./fixtures/brain-pptx-ingestion.pptx", import.meta.url));
+const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
 describe("file-ingestion", () => {
   beforeEach(() => {
@@ -205,6 +208,84 @@ describe("file-ingestion", () => {
     
     const callArgs = txObj.brainSource.create.mock.calls[0][0];
     expect(callArgs.data.content).toContain("Hello PDF");
+  });
+
+  it("stores PPTX text and provenance and hashes the extracted content", async () => {
+    await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "synthetic.pptx",
+      mimeType: PPTX_MIME,
+      fileBuffer: VALID_PPTX_BUFFER,
+      uploadSource: "brain-upload",
+    });
+
+    expect(checkWorkspaceDuplicateGuard).toHaveBeenCalledWith(expect.objectContaining({
+      contentHash: expect.stringContaining("NEBULA-LATE-SLIDE-7421 searchable phrase"),
+    }), undefined);
+    const txCallback = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
+    const txObj = {
+      document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Synthetic", source: "brain-upload" }) },
+      brainSource: { create: vi.fn().mockResolvedValue({ id: "src1", sourceType: "FILE_UPLOAD", tier: 2 }) },
+      auditLog: { create: vi.fn() },
+      eventRecord: { createMany: vi.fn() },
+    };
+    await txCallback(txObj);
+
+    expect(txObj.document.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        textContent: expect.stringContaining("NEBULA-LATE-SLIDE-7421 searchable phrase"),
+        metadata: expect.objectContaining({
+          extraction: expect.objectContaining({
+            format: "PPTX",
+            parserVersion: "7.6.2",
+            slideCount: 2,
+            notesIncluded: true,
+          }),
+        }),
+      }),
+    }));
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        content: expect.stringContaining("NEBULA-LATE-SLIDE-7421 searchable phrase"),
+        metadata: expect.objectContaining({
+          extraction: expect.objectContaining({ format: "PPTX", hasTextContent: true }),
+        }),
+      }),
+    }));
+  });
+
+  it("validates generic binary PPTX before treating it as supported", async () => {
+    const valid = await extractTextFromFileBuffer({
+      fileBuffer: VALID_PPTX_BUFFER,
+      fileName: "upload.bin",
+      mimeType: "application/octet-stream",
+    });
+    const invalid = await extractTextFromFileBuffer({
+      fileBuffer: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00]),
+      fileName: "upload.bin",
+      mimeType: "application/octet-stream",
+    });
+
+    expect(valid.supported).toBe(true);
+    expect(valid.extraction).toMatchObject({ format: "PPTX", parserVersion: "7.6.2" });
+    expect(invalid).toMatchObject({ supported: false, textContent: null });
+  });
+
+  it("fails recognized unsafe PPTX before duplicate checks, storage, transactions, audits, or events", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
+
+    await expect(ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "unsafe.pptx",
+      mimeType: PPTX_MIME,
+      fileBuffer: Buffer.from("PRIVATE-DECK-CONTENT"),
+      uploadSource: "brain-upload",
+    })).rejects.toThrow("not a valid PowerPoint presentation");
+
+    expect(checkWorkspaceDuplicateGuard).not.toHaveBeenCalled();
+    expect(assertTrialStorageCapacity).not.toHaveBeenCalled();
+    expect(defaultStorage.put).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
   
   it("creates a Brain source stub when PDF extraction fails", async () => {
