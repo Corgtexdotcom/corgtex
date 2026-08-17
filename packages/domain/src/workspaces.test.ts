@@ -104,8 +104,8 @@ describe("workspaces domain", () => {
       select: { id: true },
     });
     expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: { role: "ADMIN", kind: "SYSTEM", isActive: true },
-      create: expect.objectContaining({ role: "ADMIN", kind: "SYSTEM", isActive: true }),
+      update: { role: "ADMIN", kind: "SYSTEM", isActive: false },
+      create: expect.objectContaining({ role: "ADMIN", kind: "SYSTEM", isActive: false }),
     }));
     expect(prismaMock.approvalPolicy.createMany).toHaveBeenCalledWith({
       data: [expect.objectContaining({ workspaceId: "workspace-1", subjectType: "PROPOSAL" })],
@@ -169,6 +169,8 @@ describe("workspaces domain", () => {
           userId: "system-user-1",
         },
       },
+      update: { role: "ADMIN", kind: "SYSTEM", isActive: false },
+      create: expect.objectContaining({ role: "ADMIN", kind: "SYSTEM", isActive: false }),
     }));
   });
 

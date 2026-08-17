@@ -390,6 +390,14 @@ async function createCanonicalWorkspaceTables(fixture) {
     )
   `);
   await fixture.$executeRawUnsafe(`
+    CREATE TABLE "SelfServeSupportSession" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "workspaceId" TEXT NOT NULL,
+      "supportUserId" TEXT NOT NULL,
+      "supportMemberId" TEXT NOT NULL
+    )
+  `);
+  await fixture.$executeRawUnsafe(`
     CREATE TABLE "ApprovalPolicy" (
       "id" TEXT NOT NULL PRIMARY KEY,
       "workspaceId" TEXT NOT NULL,
@@ -448,6 +456,17 @@ async function insertFixtureSsoIdentity(fixture, id, userId) {
     `INSERT INTO "UserSsoIdentity" ("id", "userId") VALUES ($1, $2)`,
     id,
     userId,
+  );
+}
+
+async function insertFixtureSupportSession(fixture, params) {
+  await fixture.$executeRawUnsafe(
+    `INSERT INTO "SelfServeSupportSession" ("id", "workspaceId", "supportUserId", "supportMemberId")
+     VALUES ($1, $2, $3, $4)`,
+    params.id,
+    params.workspaceId,
+    params.supportUserId,
+    params.supportMemberId,
   );
 }
 
@@ -526,6 +545,12 @@ async function runCanonicalWorkspaceHappyFixture() {
       role: "CONTRIBUTOR",
       kind: "SYSTEM",
     });
+    await insertFixtureSupportSession(fixture, {
+      id: "legacy-support-session",
+      workspaceId: "workspace-custom",
+      supportUserId: "legacy-support",
+      supportMemberId: "legacy-support-member",
+    });
     await fixture.$executeRawUnsafe(`
       INSERT INTO "ApprovalPolicy" (
         "id", "workspaceId", "subjectType", "mode", "quorumPercent",
@@ -560,7 +585,7 @@ async function runCanonicalWorkspaceHappyFixture() {
         ON membership."workspaceId" = workspace."id" AND membership."userId" = canonical_user."id"
       ORDER BY workspace."slug"
     `);
-    if (systemRows.length !== 3 || systemRows.some((row) => row.role !== "ADMIN" || row.kind !== "SYSTEM" || !row.isActive)) {
+    if (systemRows.length !== 3 || systemRows.some((row) => row.role !== "ADMIN" || row.kind !== "SYSTEM" || row.isActive)) {
       throw new Error(`Canonical system members were not established: ${JSON.stringify(systemRows)}`);
     }
     const created = systemRows.find((row) => row.slug === "workspace-new");
@@ -586,9 +611,86 @@ async function runCanonicalWorkspaceHappyFixture() {
       throw new Error("Canonical migration was not idempotent for proposal policies.");
     }
     if (await tableCount(fixture, "User", `"id" = 'legacy-support'`) !== 1
-      || await tableCount(fixture, "Member", `"id" = 'legacy-support-member'`) !== 1) {
+      || await tableCount(fixture, "Member", `"id" = 'legacy-support-member' AND "isActive" = true`) !== 1
+      || await tableCount(fixture, "SelfServeSupportSession", `"id" = 'legacy-support-session'`) !== 1) {
       throw new Error("Canonical migration changed a legacy support identity.");
     }
+  });
+}
+
+async function runNoncanonicalSystemProvenanceFixture(label, seedSystemState) {
+  await withIsolatedSchema(async (fixture, databaseUrl) => {
+    await createCanonicalWorkspaceTables(fixture);
+    await insertFixtureWorkspace(fixture, "workspace-clean", "workspace-clean", "Clean Workspace");
+    await insertFixtureWorkspace(fixture, "workspace-support", "workspace-support", "Support Workspace");
+    await seedSystemState(fixture);
+
+    let failed = false;
+    try {
+      applyExactMigration(databaseUrl, canonicalMigrationPath);
+    } catch (error) {
+      failed = true;
+      const output = `${error?.stdout ?? ""}${error?.stderr ?? ""}`;
+      if (!output.includes("NONCANONICAL_SYSTEM_PROVENANCE_INVALID")) {
+        throw new Error(`${label} failed without the sanitized provenance code.`);
+      }
+    }
+    if (!failed) throw new Error(`${label} unexpectedly passed system provenance preflight.`);
+
+    if (await tableCount(fixture, "User", `"email" = 'system+workspace-clean@corgtex.local'`) !== 0
+      || await tableCount(fixture, "ApprovalPolicy") !== 0) {
+      throw new Error(`${label} caused writes before system provenance preflight failed.`);
+    }
+  });
+}
+
+async function runNoncanonicalSystemProvenanceFixtures() {
+  await runNoncanonicalSystemProvenanceFixture("unproven support member", async (fixture) => {
+    await insertFixtureUser(fixture, {
+      id: "unproven-support-user",
+      email: "support+unproven@corgtex.local",
+    });
+    await insertFixtureMember(fixture, {
+      id: "unproven-support-member",
+      workspaceId: "workspace-support",
+      userId: "unproven-support-user",
+    });
+  });
+
+  await runNoncanonicalSystemProvenanceFixture("spoofed system member", async (fixture) => {
+    await insertFixtureUser(fixture, {
+      id: "spoof-user",
+      email: "automation@example.com",
+    });
+    await insertFixtureMember(fixture, {
+      id: "spoof-member",
+      workspaceId: "workspace-support",
+      userId: "spoof-user",
+    });
+    await insertFixtureSupportSession(fixture, {
+      id: "spoof-session",
+      workspaceId: "workspace-support",
+      supportUserId: "spoof-user",
+      supportMemberId: "spoof-member",
+    });
+  });
+
+  await runNoncanonicalSystemProvenanceFixture("partially mismatched support provenance", async (fixture) => {
+    await insertFixtureUser(fixture, {
+      id: "mismatched-support-user",
+      email: "support+mismatched@corgtex.local",
+    });
+    await insertFixtureMember(fixture, {
+      id: "mismatched-support-member",
+      workspaceId: "workspace-support",
+      userId: "mismatched-support-user",
+    });
+    await insertFixtureSupportSession(fixture, {
+      id: "mismatched-support-session",
+      workspaceId: "workspace-support",
+      supportUserId: "mismatched-support-user",
+      supportMemberId: "different-support-member",
+    });
   });
 }
 
@@ -803,6 +905,7 @@ async function main() {
     await runLegacyFinanceFixture();
     await runCanonicalWorkspaceHappyFixture();
     await runCanonicalCollisionFixtures();
+    await runNoncanonicalSystemProvenanceFixtures();
     await runCanonicalInvalidSlugFixture("Non-normalized workspace slug", " Invalid Slug ");
     await runCanonicalInvalidSlugFixture("Empty workspace slug", "");
     await runCanonicalLateFailureFixture();

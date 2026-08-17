@@ -260,6 +260,8 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
     return actor.user.id;
   }
 
+  await requireWorkspaceMembership({ actor, workspaceId });
+
   const workspace = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: { slug: true },
@@ -269,7 +271,7 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
   const systemMember = await prisma.member.findFirst({
     where: {
       workspaceId,
-      isActive: true,
+      isActive: false,
       role: "ADMIN",
       kind: "SYSTEM",
       mergedAt: null,

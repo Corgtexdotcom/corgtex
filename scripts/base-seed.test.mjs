@@ -61,8 +61,9 @@ describe("production bootstrap seed", () => {
     }])).toThrow("protected system member");
     expect(selectSafeE2EValidationUser("validation@example.com", [{
       id: "user-1",
+      email: "VALIDATION@EXAMPLE.COM",
       memberships: [{ kind: "HUMAN" }],
-    }])).toMatchObject({ id: "user-1" });
+    }])).toMatchObject({ id: "user-1", email: "VALIDATION@EXAMPLE.COM" });
 
     const preflight = e2eSource.indexOf("const existingUser = selectSafeE2EValidationUser(email, matchingUsers)");
     expect(preflight).toBeGreaterThan(-1);
@@ -71,5 +72,6 @@ describe("production bootstrap seed", () => {
     expect(preflight).toBeLessThan(e2eSource.indexOf("prisma.member.upsert"));
     expect(e2eSource).toContain('kind: "HUMAN"');
     expect(e2eSource).not.toContain('kind: "SYSTEM"');
+    expect(e2eSource).toMatch(/prisma\.user\.update\([\s\S]*?data:\s*{\s*email,/);
   });
 });

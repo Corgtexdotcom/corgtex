@@ -7,6 +7,7 @@ LOCK TABLE
   "OAuthConnection",
   "ExternalMcpConnection",
   "Member",
+  "SelfServeSupportSession",
   "Session",
   "PasswordResetToken",
   "OAuthAuthorizationCode",
@@ -83,6 +84,41 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       USING ERRCODE = '23514', MESSAGE = 'CANONICAL_SYSTEM_ACTOR_COLLISION';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM "Member" AS membership
+    JOIN "Workspace" AS workspace ON workspace."id" = membership."workspaceId"
+    JOIN "User" AS member_user ON member_user."id" = membership."userId"
+    WHERE membership."kind" = 'SYSTEM'
+      AND member_user."email" <> 'system+' || workspace."slug" || '@corgtex.local'
+      AND (
+        member_user."email" !~ '^support\+[^@]+@corgtex\.local$'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM "SelfServeSupportSession" AS support_session
+          WHERE support_session."workspaceId" = membership."workspaceId"
+            AND support_session."supportUserId" = membership."userId"
+            AND support_session."supportMemberId" = membership."id"
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM "SelfServeSupportSession" AS support_session
+          WHERE (
+            support_session."supportUserId" = membership."userId"
+            OR support_session."supportMemberId" = membership."id"
+          )
+            AND (
+              support_session."workspaceId" <> membership."workspaceId"
+              OR support_session."supportUserId" <> membership."userId"
+              OR support_session."supportMemberId" <> membership."id"
+            )
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION
+      USING ERRCODE = '23514', MESSAGE = 'NONCANONICAL_SYSTEM_PROVENANCE_INVALID';
   END IF;
 END;
 $$;
@@ -179,7 +215,7 @@ SELECT
   canonical_user."id",
   'ADMIN',
   'SYSTEM',
-  true,
+  false,
   CURRENT_TIMESTAMP
 FROM "Workspace" AS workspace
 JOIN "User" AS canonical_user
@@ -188,7 +224,7 @@ ON CONFLICT ("workspaceId", "userId") DO UPDATE
 SET
   "role" = 'ADMIN',
   "kind" = 'SYSTEM',
-  "isActive" = true;
+  "isActive" = false;
 
 INSERT INTO "ApprovalPolicy" (
   "id",
@@ -229,7 +265,7 @@ BEGIN
       AND membership."userId" = canonical_user."id"
       AND membership."role" = 'ADMIN'
       AND membership."kind" = 'SYSTEM'
-      AND membership."isActive" = true
+      AND membership."isActive" = false
       AND membership."mergedAt" IS NULL
       AND membership."mergedIntoMemberId" IS NULL
     LEFT JOIN "ApprovalPolicy" AS policy

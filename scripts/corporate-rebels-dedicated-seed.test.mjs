@@ -83,7 +83,7 @@ describe("Corporate Rebels dedicated seed", () => {
     expect(receipt.workspace._count).toEqual({ members: 1, memberInviteRequests: 0,
       brainSources: 25, brainArticles: 1 });
     expect(receipt.workspace.members).toEqual([expect.objectContaining({
-      role: "ADMIN", kind: "SYSTEM", isActive: true,
+      role: "ADMIN", kind: "SYSTEM", isActive: false,
       user: expect.objectContaining({ email: "system+corporate-rebels@corgtex.local" }),
     })]);
     expect(target.state.articles[0]).toMatchObject({ authority: "DRAFT", isPrivate: true, publishedAt: null });

@@ -232,7 +232,7 @@ describe("auth domain", () => {
   });
 
   describe("actorUserIdForWorkspace", () => {
-    it("returns only the exact active canonical system administrator", async () => {
+    it("authorizes the agent independently and returns only the exact inactive canonical system administrator", async () => {
       prismaMock.workspace.findUnique.mockResolvedValue({ slug: "workspace-1" });
       prismaMock.member.findFirst.mockResolvedValue({ userId: "system-user-1" });
 
@@ -242,7 +242,7 @@ describe("auth domain", () => {
       expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
         where: {
           workspaceId: "workspace-1",
-          isActive: true,
+          isActive: false,
           role: "ADMIN",
           kind: "SYSTEM",
           mergedAt: null,
@@ -263,6 +263,18 @@ describe("auth domain", () => {
         },
         select: { userId: true },
       });
+    });
+
+    it("rejects an unauthorized agent before looking up the attribution principal", async () => {
+      const { actorUserIdForWorkspace } = await import("./auth");
+
+      await expect(actorUserIdForWorkspace({
+        ...agentActor,
+        workspaceIds: ["workspace-other"],
+      }, "workspace-1")).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+
+      expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
     });
 
     it("fails closed instead of falling back to a human administrator", async () => {

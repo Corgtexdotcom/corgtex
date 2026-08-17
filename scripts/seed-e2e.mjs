@@ -58,6 +58,7 @@ async function main() {
     ? await prisma.user.update({
         where: { id: existingUser.id },
         data: {
+          email,
           displayName: "E2E Validation User",
           passwordHash: hashPassword(password),
         },

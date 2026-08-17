@@ -123,7 +123,7 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
   if (!workspace || workspace.name !== CONTRACT.name || workspace.slug !== CONTRACT.slug
     || workspace.plan !== "ENTERPRISE_MANAGED" || workspace._count.members !== 1
     || workspace.members.length !== 1 || workspace.members[0].role !== "ADMIN"
-    || workspace.members[0].kind !== "SYSTEM" || !workspace.members[0].isActive
+    || workspace.members[0].kind !== "SYSTEM" || workspace.members[0].isActive
     || workspace.members[0].user.email !== canonicalWorkspaceSystemEmail(CONTRACT.slug)
     || workspace._count.memberInviteRequests || workspace._count.brainSources !== 25
     || workspace._count.brainArticles !== 1 || seeded.length !== expected.size || seen.size !== expected.size

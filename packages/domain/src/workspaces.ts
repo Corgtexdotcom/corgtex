@@ -191,14 +191,14 @@ export async function ensureCanonicalWorkspaceBaseline(tx: Tx, workspace: Worksp
     update: {
       role: "ADMIN",
       kind: "SYSTEM",
-      isActive: true,
+      isActive: false,
     },
     create: {
       workspaceId: workspace.id,
       userId: systemUser.id,
       role: "ADMIN",
       kind: "SYSTEM",
-      isActive: true,
+      isActive: false,
     },
   });
 

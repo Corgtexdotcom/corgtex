@@ -181,7 +181,7 @@ describe("CRM Integration Lifecycle", () => {
           workspaceId: createdWorkspace.id,
           role: "ADMIN",
           kind: "SYSTEM",
-          isActive: true,
+          isActive: false,
           user: { email: canonicalEmail },
         },
       }),
