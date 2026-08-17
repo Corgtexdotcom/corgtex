@@ -52,6 +52,9 @@ beforeEach(() => {
   delete process.env.AZURE_STORAGE_CLIENT_ID;
   delete process.env.AZURE_CLIENT_ID;
   delete process.env.AZURE_STORAGE_CONNECTION_STRING;
+  delete process.env.WORKSPACE_SLUG;
+  delete process.env.CONTROL_PLANE_MODE;
+  delete process.env.APP_URL;
   fsMock.existsSync.mockReturnValue(false);
   fsMock.readdirSync.mockReturnValue([]);
 });
@@ -62,6 +65,8 @@ afterEach(() => {
 
 describe("GET /api/health", () => {
   it("returns the Corgtex fingerprint when the database is reachable", async () => {
+    process.env.WORKSPACE_SLUG = "corporate-rebels";
+    process.env.APP_URL = "https://corporate-rebels.corgtex.com";
     const { GET } = await import("./route");
     queryRaw
       .mockResolvedValueOnce([{ ok: 1 }])
@@ -97,9 +102,30 @@ describe("GET /api/health", () => {
       runtime: {
         redis: "missing",
         storage: "missing",
+        workspaceScopeSlug: "corporate-rebels",
+        workspaceScopeValid: true,
       },
       loginPath: "/login",
       apiLoginPath: "/api/auth/login",
+    });
+  });
+
+  it("returns structured degraded health for invalid dedicated scope configuration", async () => {
+    const { GET } = await import("./route");
+    process.env.WORKSPACE_SLUG = "corporate-rebels";
+    process.env.APP_URL = "not-an-absolute-url";
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      runtime: { workspaceScopeSlug: null, workspaceScopeValid: false },
     });
   });
 
