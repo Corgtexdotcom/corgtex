@@ -8,6 +8,7 @@ const manifest = () => readFile(new URL("./data/corporate-rebels-source-manifest
 const health = () => ({ status: "ok", database: "up", schema: "ready",
   runtime: { redis: "configured", storage: "configured", workspaceScopeSlug: CONTRACT.slug },
   release: { provider: "azure", gitSha: SHA,
+    runtime: { gitSha: SHA, source: "github" },
     imageTag: `sha-${SHA}`, version: `main-${SHA.slice(0, 12)}`,
     drift: { gitSha: false, imageTag: false, version: false } } });
 const healthy = async () => ({ ok: true, json: async () => health() });
@@ -87,6 +88,7 @@ describe("Corporate Rebels dedicated seed", () => {
     for (const body of [{ ...health(), status: "down" },
       { ...health(), runtime: { redis: "missing", storage: "configured" } },
       { ...health(), runtime: { ...health().runtime, workspaceScopeSlug: "wrong" } },
+      { ...health(), release: { ...health().release, runtime: { gitSha: null, source: "missing" } } },
       { ...health(), release: { ...health().release, version: "main-wrong" } }]) {
       const target = fake();
       await expect(run(target, { fetchFn: async () => ({ ok: true,

@@ -60,6 +60,7 @@ async function verifyHealth(fetchFn, releaseGitSha) {
     || health.runtime?.redis !== "configured" || health.runtime?.storage !== "configured"
     || health.runtime?.workspaceScopeSlug !== CONTRACT.slug
     || health.release?.provider !== "azure" || health.release?.gitSha !== releaseGitSha
+    || health.release?.runtime?.gitSha !== releaseGitSha
     || health.release?.imageTag !== `sha-${releaseGitSha}`
     || health.release?.version !== `main-${releaseGitSha.slice(0, 12)}` || health.release?.drift?.gitSha
     || health.release?.drift?.imageTag || health.release?.drift?.version) fail("Dedicated Azure health proof failed.");

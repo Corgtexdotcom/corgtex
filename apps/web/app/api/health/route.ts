@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { prisma, resolveReleaseMetadata } from "@corgtex/shared";
+import { env, prisma, resolveReleaseMetadata } from "@corgtex/shared";
 import {
   resolveAzureBlobStorageRuntimeConfig,
   resolveStorageProviderName,
@@ -40,7 +40,7 @@ function runtimeFingerprint() {
   return {
     redis: process.env.REDIS_URL ? "configured" : "missing",
     storage: storageConfigured ? "configured" : "missing",
-    workspaceScopeSlug: process.env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG ?? null,
+    workspaceScopeSlug: env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG ?? null,
   };
 }
 
