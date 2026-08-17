@@ -93,7 +93,7 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
   const article = await db.brainArticle.findUnique({ where: { workspaceId_slug: { workspaceId,
     slug: "corporate-rebels-curated-source-index-2026-08-13" } }, select: { slug: true, title: true,
     type: true, authority: true, bodyMd: true, isPrivate: true, publishedAt: true, sourceIds: true,
-    frontmatterJson: true } });
+    archivedAt: true, frontmatterJson: true } });
   const receipt = await db.auditLog.findFirst({ where: { workspaceId,
     action: "corporate_rebels.dedicated_seeded" }, orderBy: { createdAt: "desc" }, select: { meta: true } });
   const seeded = await db.brainSource.findMany({ where: { workspaceId }, select: { id: true, externalId: true,
@@ -120,7 +120,7 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
     || article.type !== expectedArticle.type || article.bodyMd !== expectedArticle.bodyMd
     || article.sourceIds.length !== sourceIds.length
     || article.sourceIds.slice().sort().some((id, index) => id !== sourceIds[index])
-    || article?.authority !== "DRAFT" || !article.isPrivate || article.publishedAt
+    || article?.authority !== "DRAFT" || !article.isPrivate || article.publishedAt || article.archivedAt
     || article.frontmatterJson?.manifestSha256 !== CONTRACT.manifestSha256
     || receipt?.meta?.sourceCount !== 25 || receipt.meta.releaseGitSha !== releaseGitSha
     || receipt.meta.publication !== false || receipt.meta.invitations !== false) fail("Dedicated seed verification failed.");

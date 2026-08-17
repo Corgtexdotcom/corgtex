@@ -118,5 +118,7 @@ describe("Corporate Rebels dedicated seed", () => {
     await expect(run(indexDrift)).rejects.toThrow("seed verification");
     const archived = fake(); await run(archived); archived.state.sources[0].archivedAt = new Date();
     await expect(run(archived)).rejects.toThrow("seed verification");
+    const archivedIndex = fake(); await run(archivedIndex); archivedIndex.state.articles[0].archivedAt = new Date();
+    await expect(run(archivedIndex)).rejects.toThrow("seed verification");
   });
 });
