@@ -6,20 +6,22 @@ import { CONTRACT, loadManifest, parseCsv,
 const SHA = "a".repeat(40);
 const manifest = () => readFile(new URL("./data/corporate-rebels-source-manifest-2026-08-13.csv", import.meta.url));
 const health = () => ({ status: "ok", database: "up", schema: "ready",
-  runtime: { redis: "configured", storage: "configured" }, release: { provider: "azure", gitSha: SHA,
+  runtime: { redis: "configured", storage: "configured", workspaceScopeSlug: CONTRACT.slug },
+  release: { provider: "azure", gitSha: SHA,
     imageTag: `sha-${SHA}`, version: `main-${SHA.slice(0, 12)}`,
     drift: { gitSha: false, imageTag: false, version: false } } });
 const healthy = async () => ({ ok: true, json: async () => health() });
 const databaseUrl = `postgresql://user:pass@${CONTRACT.databaseHost}/${CONTRACT.databaseName}?sslmode=require`;
 
 function fake(options = {}) {
-  const state = { workspaces: options.workspaces ?? [{ id: "sentinel", name: "Other", slug: "other" }],
+  const state = { workspaces: options.workspaces ?? [],
     sources: [], articles: [], receipts: [], policies: [] };
   const counts = () => ({ members: options.members ?? 0, memberInviteRequests: options.invites ?? 0,
     brainSources: state.sources.length, brainArticles: state.articles.length });
   const workspace = {
-    findMany: async ({ where }) => state.workspaces.filter((item) => !where
-      || item.slug === CONTRACT.slug || item.name === CONTRACT.name).map(({ id }) => ({ id })),
+    findMany: async ({ where, select }) => state.workspaces.filter((item) => !where
+      || item.slug === CONTRACT.slug || item.name === CONTRACT.name)
+      .map((item) => Object.fromEntries(Object.keys(select).map((key) => [key, item[key]]))),
     findUnique: async ({ where }) => { const row = state.workspaces.find((item) => item.id === where.id);
       return row ? { ...row, _count: counts() } : null; },
     create: async ({ data }) => { const row = { id: "11111111-1111-4111-8111-111111111111", ...data };
@@ -56,7 +58,7 @@ describe("Corporate Rebels dedicated seed", () => {
     await expect(runCorporateRebelsDedicatedSeed(params)).resolves.toMatchObject({ mode: "preflight" });
     await expect(runCorporateRebelsDedicatedSeed({ ...params, execute: true,
       confirmation: "wrong" })).rejects.toThrow("confirmation");
-    expect(target.state.workspaces).toHaveLength(1);
+    expect(target.state.workspaces).toHaveLength(0);
   });
 
   it("creates one private workspace seed and resumes without duplicates", async () => {
@@ -70,7 +72,7 @@ describe("Corporate Rebels dedicated seed", () => {
     await expect(run(target)).resolves.toMatchObject({ resumed: true, workspace: { id: receipt.workspace.id } });
     expect({ workspaces: target.state.workspaces.length, sources: target.state.sources.length,
       articles: target.state.articles.length, receipts: target.state.receipts.length })
-      .toEqual({ workspaces: 2, sources: 25, articles: 1, receipts: 1 });
+      .toEqual({ workspaces: 1, sources: 25, articles: 1, receipts: 1 });
   });
 
   it("rejects foreign databases and unhealthy releases before writes", async () => {
@@ -80,19 +82,22 @@ describe("Corporate Rebels dedicated seed", () => {
       `postgresql://u:p@${CONTRACT.databaseHost}/corgtex?sslmode=require&schema=staging`]) {
       const target = fake();
       await expect(run(target, { databaseUrl: url })).rejects.toThrow("database identity");
-      expect(target.state.workspaces).toHaveLength(1);
+      expect(target.state.workspaces).toHaveLength(0);
     }
     for (const body of [{ ...health(), status: "down" },
       { ...health(), runtime: { redis: "missing", storage: "configured" } },
+      { ...health(), runtime: { ...health().runtime, workspaceScopeSlug: "wrong" } },
       { ...health(), release: { ...health().release, version: "main-wrong" } }]) {
       const target = fake();
       await expect(run(target, { fetchFn: async () => ({ ok: true,
         json: async () => body }) })).rejects.toThrow("health proof");
-      expect(target.state.workspaces).toHaveLength(1);
+      expect(target.state.workspaces).toHaveLength(0);
     }
   });
 
   it("rejects ambiguous or unverifiable existing Corporate Rebels state", async () => {
+    await expect(run(fake({ workspaces: [{ id: "sentinel", name: "Other", slug: "other" }] })))
+      .rejects.toThrow("foreign workspace");
     const rows = [{ id: "one", name: CONTRACT.name, slug: CONTRACT.slug },
       { id: "two", name: CONTRACT.name, slug: "other" }];
     await expect(run(fake({ workspaces: rows }))).rejects.toThrow("ambiguous");
@@ -105,5 +110,7 @@ describe("Corporate Rebels dedicated seed", () => {
     corrupted.state.sources[1] = { ...corrupted.state.sources[0],
       externalId: "corporate-rebels-curation:CR-002", accessDomain: "PUBLIC" };
     await expect(run(corrupted)).rejects.toThrow("seed verification");
+    const indexDrift = fake(); await run(indexDrift); indexDrift.state.articles[0].bodyMd = "corrupted";
+    await expect(run(indexDrift)).rejects.toThrow("seed verification");
   });
 });

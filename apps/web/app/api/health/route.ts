@@ -40,6 +40,7 @@ function runtimeFingerprint() {
   return {
     redis: process.env.REDIS_URL ? "configured" : "missing",
     storage: storageConfigured ? "configured" : "missing",
+    workspaceScopeSlug: process.env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG ?? null,
   };
 }
 

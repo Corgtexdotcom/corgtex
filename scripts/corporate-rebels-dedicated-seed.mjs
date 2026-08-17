@@ -58,6 +58,7 @@ async function verifyHealth(fetchFn, releaseGitSha) {
   const health = response.ok ? await response.json() : null;
   if (!health || health.status !== "ok" || health.database !== "up" || health.schema !== "ready"
     || health.runtime?.redis !== "configured" || health.runtime?.storage !== "configured"
+    || health.runtime?.workspaceScopeSlug !== CONTRACT.slug
     || health.release?.provider !== "azure" || health.release?.gitSha !== releaseGitSha
     || health.release?.imageTag !== `sha-${releaseGitSha}`
     || health.release?.version !== `main-${releaseGitSha.slice(0, 12)}` || health.release?.drift?.gitSha
@@ -67,7 +68,8 @@ async function verifyHealth(fetchFn, releaseGitSha) {
 function sources(rows) {
   return rows.map((row) => ({ id: randomUUID(), accessDomain: "WORKSPACE", sourceType: "ARTICLE", tier: 2,
     externalId: `corporate-rebels-curation:${row.id}`, channel: "curated-public-web", title: row.title,
-    content: `${row.why_it_matters} Canonical source: ${row.canonical_https_url}`,
+    content: `${row.why_it_matters} Canonical source: ${row.canonical_https_url} Publisher: ${row.publisher}. `
+      + `Original publication date: ${row.original_publication_date}. Author/byline: ${row.author_byline || "not stated"}.`,
     ingestionGuidanceMd: "Attributed external reference only. Cite its canonical URL and original date.",
     metadata: { schemaVersion: 1, manifestId: row.id, canonicalUrl: row.canonical_https_url,
       publisher: row.publisher, authorByline: row.author_byline, originalPublishedAt: row.original_publication_date,
@@ -87,28 +89,34 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
     name: true, slug: true, plan: true,
     _count: { select: { members: true, memberInviteRequests: true, brainSources: true, brainArticles: true } } } });
   const article = await db.brainArticle.findUnique({ where: { workspaceId_slug: { workspaceId,
-    slug: "corporate-rebels-curated-source-index-2026-08-13" } }, select: { authority: true,
-    isPrivate: true, publishedAt: true, frontmatterJson: true } });
+    slug: "corporate-rebels-curated-source-index-2026-08-13" } }, select: { slug: true, title: true,
+    type: true, authority: true, bodyMd: true, isPrivate: true, publishedAt: true, sourceIds: true,
+    frontmatterJson: true } });
   const receipt = await db.auditLog.findFirst({ where: { workspaceId,
     action: "corporate_rebels.dedicated_seeded" }, orderBy: { createdAt: "desc" }, select: { meta: true } });
-  const seeded = await db.brainSource.findMany({ where: { workspaceId }, select: { externalId: true,
-    accessDomain: true, sourceType: true, tier: true, channel: true, content: true, metadata: true } });
+  const seeded = await db.brainSource.findMany({ where: { workspaceId }, select: { id: true, externalId: true,
+    accessDomain: true, sourceType: true, tier: true, channel: true, title: true, content: true,
+    ingestionGuidanceMd: true, metadata: true } });
   const expected = new Map(sources(rows).map((source) => [source.externalId, source]));
   const seen = new Set();
   const invalidSource = seeded.some((source) => {
     const wanted = expected.get(source.externalId); seen.add(source.externalId);
     return !wanted || source.accessDomain !== wanted.accessDomain || source.sourceType !== wanted.sourceType
       || source.tier !== wanted.tier || source.channel !== wanted.channel || source.content !== wanted.content
-      || source.metadata?.manifestId !== wanted.metadata.manifestId
-      || source.metadata?.canonicalUrl !== wanted.metadata.canonicalUrl
-      || source.metadata?.manifestSha256 !== CONTRACT.manifestSha256
-      || source.metadata?.permittedIngestionMode !== wanted.metadata.permittedIngestionMode;
+      || source.title !== wanted.title || source.ingestionGuidanceMd !== wanted.ingestionGuidanceMd
+      || Object.entries(wanted.metadata).some(([key, value]) => source.metadata?.[key] !== value);
   });
+  const expectedArticle = { slug: "corporate-rebels-curated-source-index-2026-08-13",
+    title: "Corporate Rebels Curated Source Index — 2026-08-13", type: "DIGEST", bodyMd: indexBody(rows) };
+  const sourceIds = seeded.map((source) => source.id).sort();
   if (!workspace || workspace.name !== CONTRACT.name || workspace.slug !== CONTRACT.slug
     || workspace.plan !== "ENTERPRISE_MANAGED" || workspace._count.members
     || workspace._count.memberInviteRequests || workspace._count.brainSources !== 25
     || workspace._count.brainArticles !== 1 || seeded.length !== expected.size || seen.size !== expected.size
-    || invalidSource
+    || invalidSource || article?.slug !== expectedArticle.slug || article.title !== expectedArticle.title
+    || article.type !== expectedArticle.type || article.bodyMd !== expectedArticle.bodyMd
+    || article.sourceIds.length !== sourceIds.length
+    || article.sourceIds.slice().sort().some((id, index) => id !== sourceIds[index])
     || article?.authority !== "DRAFT" || !article.isPrivate || article.publishedAt
     || article.frontmatterJson?.manifestSha256 !== CONTRACT.manifestSha256
     || receipt?.meta?.sourceCount !== 25 || receipt.meta.releaseGitSha !== releaseGitSha
@@ -117,15 +125,15 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
 }
 
 async function seedDedicated(prisma, rows, releaseGitSha, execute) {
-  const existing = await prisma.workspace.findMany({ where: { OR: [{ slug: CONTRACT.slug },
-    { name: CONTRACT.name }] }, select: { id: true } });
+  const inventory = await prisma.workspace.findMany({ select: { id: true, name: true, slug: true } });
+  const existing = inventory.filter((row) => row.slug === CONTRACT.slug || row.name === CONTRACT.name);
+  if (inventory.length !== existing.length) fail("Dedicated database contains a foreign workspace.");
   if (existing.length > 1) fail("Dedicated workspace identity is ambiguous.");
   if (existing.length) return { mode: execute ? "executed" : "preflight", phase: "seed-dedicated",
     workspace: await verifySeed(prisma, existing[0].id, rows, releaseGitSha), resumed: true };
   if (!execute) return { mode: "preflight", phase: "seed-dedicated", manifestCount: rows.length };
   return prisma.$transaction(async (tx) => {
-    if ((await tx.workspace.findMany({ where: { OR: [{ slug: CONTRACT.slug },
-      { name: CONTRACT.name }] }, select: { id: true } })).length) fail("Dedicated target drifted.");
+    if ((await tx.workspace.findMany({ select: { id: true } })).length) fail("Dedicated target drifted.");
     const workspace = await tx.workspace.create({ data: { name: CONTRACT.name, slug: CONTRACT.slug,
       description: "Private dedicated Azure Corporate Rebels client workspace.", plan: "ENTERPRISE_MANAGED" } });
     const seeded = sources(rows);

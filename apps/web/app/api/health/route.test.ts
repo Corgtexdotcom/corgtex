@@ -52,6 +52,7 @@ beforeEach(() => {
   delete process.env.AZURE_STORAGE_CLIENT_ID;
   delete process.env.AZURE_CLIENT_ID;
   delete process.env.AZURE_STORAGE_CONNECTION_STRING;
+  delete process.env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
   fsMock.existsSync.mockReturnValue(false);
   fsMock.readdirSync.mockReturnValue([]);
 });
@@ -62,6 +63,7 @@ afterEach(() => {
 
 describe("GET /api/health", () => {
   it("returns the Corgtex fingerprint when the database is reachable", async () => {
+    process.env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = "corporate-rebels";
     const { GET } = await import("./route");
     queryRaw
       .mockResolvedValueOnce([{ ok: 1 }])
@@ -97,6 +99,7 @@ describe("GET /api/health", () => {
       runtime: {
         redis: "missing",
         storage: "missing",
+        workspaceScopeSlug: "corporate-rebels",
       },
       loginPath: "/login",
       apiLoginPath: "/api/auth/login",
