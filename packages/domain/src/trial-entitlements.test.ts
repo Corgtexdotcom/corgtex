@@ -74,24 +74,17 @@ describe("trial entitlements", () => {
     prismaMock.document.findMany.mockResolvedValue([]);
   });
 
-  it("excludes persisted and legacy system identities while counting ordinary active humans", async () => {
+  it("counts only active persisted human members regardless of spoofable identity fields", async () => {
     const { assertTrialMemberCapacity } = await import("./trial-entitlements");
 
     await expect(assertTrialMemberCapacity("workspace-1")).resolves.toBeUndefined();
 
     expect(prismaMock.member.count).toHaveBeenCalledWith({
-      where: {
+      where: expect.objectContaining({
         workspaceId: "workspace-1",
         isActive: true,
-        NOT: [{
-          OR: [
-            { kind: "SYSTEM" },
-            { user: { email: { startsWith: "system+", mode: "insensitive" } } },
-            { user: { email: { startsWith: "support+", mode: "insensitive" } } },
-            { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
-          ],
-        }],
-      },
+        kind: "HUMAN",
+      }),
     });
   });
 

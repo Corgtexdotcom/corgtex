@@ -10,6 +10,7 @@ import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 import { appendEvents } from "./events";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { requireWorkspaceMembership } from "./auth";
 import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
 import { acquireConstitutionCorpusAdvisoryLock } from "./constitutions";
@@ -184,6 +185,7 @@ async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: st
     where: {
       workspaceId,
       isActive: true,
+      ...humanMemberIdentityWhere(),
     },
     select: {
       id: true,
@@ -193,11 +195,35 @@ async function eligibleApproverIds(tx: Prisma.TransactionClient, workspaceId: st
   return members.map((member) => member.id);
 }
 
-async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
+async function assertHumanGovernanceMember(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  memberId: string,
+) {
+  const membership = await tx.member.findFirst({
+    where: {
+      id: memberId,
+      workspaceId,
+      isActive: true,
+      ...humanMemberIdentityWhere(),
+    },
+    select: { id: true },
+  });
+  invariant(membership, 403, "FORBIDDEN", "System members cannot participate in approval governance.");
+}
+
+async function loadFlow(tx: Prisma.TransactionClient, flowId: string, workspaceId: string) {
   return tx.approvalFlow.findUnique({
     where: { id: flowId },
     include: {
       decisions: {
+        where: {
+          member: {
+            workspaceId,
+            isActive: true,
+            ...humanMemberIdentityWhere(),
+          },
+        },
         select: {
           choice: true,
         },
@@ -205,6 +231,15 @@ async function loadFlow(tx: Prisma.TransactionClient, flowId: string) {
       objections: {
         where: {
           resolvedAt: null,
+          user: {
+            memberships: {
+              some: {
+                workspaceId,
+                isActive: true,
+                ...humanMemberIdentityWhere(),
+              },
+            },
+          },
         },
         select: {
           id: true,
@@ -469,6 +504,13 @@ async function activeApprovalFlowsForWorkspace(workspaceId: string) {
     where: { workspaceId, status: "ACTIVE" },
     include: {
       decisions: {
+        where: {
+          member: {
+            workspaceId,
+            isActive: true,
+            ...humanMemberIdentityWhere(),
+          },
+        },
         select: {
           choice: true,
         },
@@ -547,6 +589,13 @@ export async function listProposalDecisionStates(
       },
       include: {
         decisions: {
+          where: {
+            member: {
+              workspaceId: params.workspaceId,
+              isActive: true,
+              ...humanMemberIdentityWhere(),
+            },
+          },
           select: {
             memberId: true,
             choice: true,
@@ -557,6 +606,15 @@ export async function listProposalDecisionStates(
         objections: {
           where: {
             resolvedAt: null,
+            user: {
+              memberships: {
+                some: {
+                  workspaceId: params.workspaceId,
+                  isActive: true,
+                  ...humanMemberIdentityWhere(),
+                },
+              },
+            },
           },
           select: {
             id: true,
@@ -724,7 +782,8 @@ export async function recordApprovalDecision(actor: AppActor, params: {
   const actorUserId = membership.userId;
 
   return prisma.$transaction(async (tx) => {
-    const current = await loadFlow(tx, params.flowId);
+    await assertHumanGovernanceMember(tx, params.workspaceId, membership.id);
+    const current = await loadFlow(tx, params.flowId, params.workspaceId);
 
     invariant(current && current.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
     invariant(current.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
@@ -751,7 +810,7 @@ export async function recordApprovalDecision(actor: AppActor, params: {
       },
     });
 
-    const flow = await loadFlow(tx, current.id);
+    const flow = await loadFlow(tx, current.id, params.workspaceId);
     invariant(flow, 404, "NOT_FOUND", "Approval flow not found.");
 
     const approverIds = await eligibleApproverIds(tx, params.workspaceId);
@@ -868,7 +927,8 @@ export async function createObjection(actor: AppActor, params: {
   invariant(bodyMd.length > 0, 400, "INVALID_INPUT", "Objection body is required.");
 
   return prisma.$transaction(async (tx) => {
-    const flow = await loadFlow(tx, params.flowId);
+    await assertHumanGovernanceMember(tx, params.workspaceId, membership.id);
+    const flow = await loadFlow(tx, params.flowId, params.workspaceId);
 
     invariant(flow && flow.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
     invariant(flow.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
@@ -896,7 +956,7 @@ export async function createObjection(actor: AppActor, params: {
       },
     });
 
-    const refreshed = await loadFlow(tx, flow.id);
+    const refreshed = await loadFlow(tx, flow.id, params.workspaceId);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
     const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
@@ -964,7 +1024,8 @@ export async function resolveObjection(actor: AppActor, params: {
   invariant(membership, 403, "FORBIDDEN", "Agents cannot resolve objections.");
 
   return prisma.$transaction(async (tx) => {
-    const flow = await loadFlow(tx, params.flowId);
+    await assertHumanGovernanceMember(tx, params.workspaceId, membership.id);
+    const flow = await loadFlow(tx, params.flowId, params.workspaceId);
 
     invariant(flow && flow.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Approval flow not found.");
     invariant(flow.status === "ACTIVE", 400, "INVALID_STATE", "Approval flow is not active.");
@@ -998,7 +1059,7 @@ export async function resolveObjection(actor: AppActor, params: {
       },
     });
 
-    const refreshed = await loadFlow(tx, flow.id);
+    const refreshed = await loadFlow(tx, flow.id, params.workspaceId);
     invariant(refreshed, 404, "NOT_FOUND", "Approval flow not found.");
     const approverIds = await eligibleApproverIds(tx, params.workspaceId);
     const outcome = calculateApprovalOutcome({
@@ -1054,8 +1115,8 @@ export async function resolveObjection(actor: AppActor, params: {
 
 export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BATCH_SIZE) {
   return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT flow.id
+    const rows = await tx.$queryRaw<Array<{ id: string; workspaceId: string }>>`
+      SELECT flow.id, flow."workspaceId"
       FROM "ApprovalFlow" AS flow
       WHERE flow.status = 'ACTIVE'
         AND flow.mode = 'CONSENT'
@@ -1070,7 +1131,7 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
     let finalized = 0;
 
     for (const row of rows) {
-      const flow = await loadFlow(tx, row.id);
+      const flow = await loadFlow(tx, row.id, row.workspaceId);
       if (!flow || flow.status !== "ACTIVE" || flow.mode !== "CONSENT" || flow.subjectType === "PROPOSAL") {
         continue;
       }

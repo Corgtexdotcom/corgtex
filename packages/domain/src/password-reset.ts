@@ -1,5 +1,6 @@
 import { prisma, hashPassword, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
+import { isCanonicalWorkspaceSystemEmail } from "./workspaces";
 
 const RESET_TOKEN_TTL_MS = 1000 * 60 * 15; // 15 minutes
 
@@ -36,6 +37,7 @@ async function issuePasswordResetToken(user: { id: string; email: string; displa
 export async function requestPasswordReset(email: string) {
   const normalizedEmail = email.trim().toLowerCase();
   invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
+  if (isCanonicalWorkspaceSystemEmail(normalizedEmail)) return null;
 
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
@@ -53,6 +55,7 @@ export async function requestPasswordReset(email: string) {
 export async function requestPasswordResetForActiveMember(email: string) {
   const normalizedEmail = email.trim().toLowerCase();
   invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
+  if (isCanonicalWorkspaceSystemEmail(normalizedEmail)) return null;
 
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
@@ -96,10 +99,13 @@ export async function consumePasswordReset(params: { token: string; newPassword:
       userId: true,
       expiresAt: true,
       usedAt: true,
+      user: {
+        select: { email: true },
+      },
     },
   });
 
-  if (!resetToken) {
+  if (!resetToken || isCanonicalWorkspaceSystemEmail(resetToken.user.email)) {
     throw new AppError(400, "INVALID_TOKEN", "This reset link is invalid or has expired.");
   }
 

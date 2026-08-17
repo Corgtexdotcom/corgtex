@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   calculateApprovalOutcome,
+  createObjection,
   finalizeExpiredApprovalFlows,
   listActionableApprovalFlows,
   listProposalDecisionStates,
   recordApprovalDecision,
+  resolveObjection,
   withdrawActiveApprovalFlowForSubject,
 } from "./approvals";
 
@@ -24,6 +26,7 @@ const prismaMock = vi.hoisted(() => {
       create: vi.fn(),
     },
     member: {
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     policyCorpus: {
@@ -64,6 +67,7 @@ beforeEach(() => {
     role: "MEMBER",
     isActive: true,
   });
+  prismaMock.member.findFirst.mockResolvedValue({ id: "member-1" });
   prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }]);
   prismaMock.approvalDecision.upsert.mockResolvedValue({});
   prismaMock.approvalFlow.update.mockResolvedValue({});
@@ -170,6 +174,14 @@ describe("recordApprovalDecision", () => {
         resultJson: expect.objectContaining({ approved: true }),
       },
     });
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        isActive: true,
+        kind: "HUMAN",
+      }),
+      select: { id: true },
+    });
   });
 
   it("rejects proposal author approval decisions", async () => {
@@ -196,6 +208,89 @@ describe("recordApprovalDecision", () => {
 
     expect(prismaMock.approvalDecision.upsert).not.toHaveBeenCalled();
     expect(prismaMock.approvalFlow.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects approval decisions and objections from system members before governance writes", async () => {
+    requireWorkspaceMembershipMock.mockResolvedValue({
+      id: "support-member",
+      workspaceId: "ws-1",
+      userId: "support-user",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.member.findFirst.mockResolvedValue(null);
+
+    await expect(recordApprovalDecision(
+      { kind: "user", user: { id: "support-user" } } as any,
+      { workspaceId: "ws-1", flowId: "flow-1", choice: "APPROVE" },
+    )).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(createObjection(
+      { kind: "user", user: { id: "support-user" } } as any,
+      { workspaceId: "ws-1", flowId: "flow-1", bodyMd: "Block" },
+    )).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    await expect(resolveObjection(
+      { kind: "user", user: { id: "support-user" } } as any,
+      { workspaceId: "ws-1", flowId: "flow-1", objectionId: "objection-1" },
+    )).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+
+    expect(prismaMock.approvalFlow.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.approvalDecision.upsert).not.toHaveBeenCalled();
+  });
+
+  it("loads outcomes from active human decisions and objections only", async () => {
+    const currentFlow = {
+      id: "flow-human-governance",
+      workspaceId: "ws-1",
+      subjectType: "PROPOSAL",
+      subjectId: "p-1",
+      status: "ACTIVE",
+      mode: "MAJORITY",
+      quorumPercent: 0,
+      minApproverCount: 1,
+      closesAt: null,
+      decisions: [],
+      objections: [],
+    };
+    prismaMock.approvalFlow.findUnique
+      .mockResolvedValueOnce(currentFlow)
+      .mockResolvedValueOnce({
+        ...currentFlow,
+        decisions: [{ choice: "APPROVE" }],
+      });
+
+    await recordApprovalDecision(
+      { kind: "user", user: { id: "u-1" } } as any,
+      { workspaceId: "ws-1", flowId: currentFlow.id, choice: "APPROVE" },
+    );
+
+    expect(prismaMock.approvalFlow.findUnique).toHaveBeenCalledWith({
+      where: { id: currentFlow.id },
+      include: expect.objectContaining({
+        decisions: expect.objectContaining({
+          where: {
+            member: expect.objectContaining({
+              workspaceId: "ws-1",
+              isActive: true,
+              kind: "HUMAN",
+            }),
+          },
+        }),
+        objections: expect.objectContaining({
+          where: expect.objectContaining({
+            resolvedAt: null,
+            user: {
+              memberships: {
+                some: expect.objectContaining({
+                  workspaceId: "ws-1",
+                  isActive: true,
+                  kind: "HUMAN",
+                }),
+              },
+            },
+          }),
+        }),
+      }),
+    });
   });
 });
 

@@ -6,6 +6,7 @@ import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { ALL_SCOPES, type AgentScope } from "./agent-auth";
 import type { AiWorkspaceProviderKey } from "./ai-workspaces";
+import { isCanonicalWorkspaceSystemEmail } from "./workspaces";
 
 const MCP_CLIENT_PREFIX = "mcp_client_";
 const MCP_CODE_PREFIX = "mcp_code_";
@@ -894,6 +895,9 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
   if (actor.kind !== "user") {
     throw new AppError(403, "FORBIDDEN", "Only users can complete MCP connector OAuth flows.");
   }
+  if (isCanonicalWorkspaceSystemEmail(actor.user.email)) {
+    throw new AppError(403, "FORBIDDEN", "Workspace system identities cannot complete MCP connector OAuth flows.");
+  }
 
   const client = await getMcpOAuthClientByClientId(params.clientId);
   await requireActiveMcpWorkspaceMembership({ userId: actor.user.id, workspaceId: params.workspaceId });
@@ -958,6 +962,14 @@ export async function exchangeMcpAuthorizationCode(params: {
   }
   if (params.resource && authCode.resource && !areEquivalentMcpResources(authCode.resource, params.resource)) {
     throw new AppError(400, "INVALID_INPUT", "Resource parameter mismatch.");
+  }
+
+  const authCodeUser = await prisma.user.findUnique({
+    where: { id: authCode.userId },
+    select: { email: true },
+  });
+  if (!authCodeUser || isCanonicalWorkspaceSystemEmail(authCodeUser.email)) {
+    throw new AppError(400, "INVALID_INPUT", "Invalid authorization code.");
   }
 
   verifyPkce({
@@ -1047,6 +1059,13 @@ export async function refreshMcpAccessToken(params: {
   if (!getMcpConnectorInstance(token.instanceSlug)) {
     throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
   }
+  const tokenUser = await prisma.user.findUnique({
+    where: { id: token.userId },
+    select: { email: true },
+  });
+  if (!tokenUser || isCanonicalWorkspaceSystemEmail(tokenUser.email)) {
+    throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+  }
   await requireActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId });
 
   const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
@@ -1107,7 +1126,7 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
     },
   });
 
-  if (!token || token.revokedAt || !token.client.isActive) {
+  if (!token || token.revokedAt || !token.client.isActive || isCanonicalWorkspaceSystemEmail(token.user.email)) {
     return null;
   }
   if (new Date() > token.expiresAt) {

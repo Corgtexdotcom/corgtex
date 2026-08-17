@@ -366,6 +366,15 @@ async function createCanonicalWorkspaceTables(fixture) {
       "userId" TEXT NOT NULL
     )
   `);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "OAuthConnection" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL)`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "ExternalMcpConnection" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL)`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "Session" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL)`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "PasswordResetToken" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "usedAt" TIMESTAMP(3))`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "OAuthAuthorizationCode" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "usedAt" TIMESTAMP(3))`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "OAuthAccessToken" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "revokedAt" TIMESTAMP(3))`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "McpOAuthAuthorizationCode" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "usedAt" TIMESTAMP(3))`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "McpOAuthAccessToken" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "revokedAt" TIMESTAMP(3))`);
+  await fixture.$executeRawUnsafe(`CREATE TABLE "AppSession" ("id" TEXT NOT NULL PRIMARY KEY, "actorUserId" TEXT, "revokedAt" TIMESTAMP(3))`);
   await fixture.$executeRawUnsafe(`
     CREATE TABLE "Member" (
       "id" TEXT NOT NULL PRIMARY KEY,
@@ -442,6 +451,36 @@ async function insertFixtureSsoIdentity(fixture, id, userId) {
   );
 }
 
+async function insertCanonicalInboundCredentials(fixture, userId, prefix = userId) {
+  await fixture.$executeRawUnsafe(`INSERT INTO "Session" ("id", "userId") VALUES ($1, $2)`, `${prefix}-session`, userId);
+  await fixture.$executeRawUnsafe(`INSERT INTO "PasswordResetToken" ("id", "userId") VALUES ($1, $2)`, `${prefix}-reset`, userId);
+  await fixture.$executeRawUnsafe(`INSERT INTO "OAuthAuthorizationCode" ("id", "userId") VALUES ($1, $2)`, `${prefix}-oauth-code`, userId);
+  await fixture.$executeRawUnsafe(`INSERT INTO "OAuthAccessToken" ("id", "userId") VALUES ($1, $2)`, `${prefix}-oauth-token`, userId);
+  await fixture.$executeRawUnsafe(`INSERT INTO "McpOAuthAuthorizationCode" ("id", "userId") VALUES ($1, $2)`, `${prefix}-mcp-code`, userId);
+  await fixture.$executeRawUnsafe(`INSERT INTO "McpOAuthAccessToken" ("id", "userId") VALUES ($1, $2)`, `${prefix}-mcp-token`, userId);
+  await fixture.$executeRawUnsafe(`INSERT INTO "AppSession" ("id", "actorUserId") VALUES ($1, $2)`, `${prefix}-app-session`, userId);
+}
+
+async function assertCanonicalInboundCredentialsRevoked(fixture, userId) {
+  if (await tableCount(fixture, "Session", `"userId" = '${userId}'`) !== 0) {
+    throw new Error("Canonical migration retained an interactive Session.");
+  }
+  for (const [table, timestamp] of [
+    ["PasswordResetToken", "usedAt"],
+    ["OAuthAuthorizationCode", "usedAt"],
+    ["OAuthAccessToken", "revokedAt"],
+    ["McpOAuthAuthorizationCode", "usedAt"],
+    ["McpOAuthAccessToken", "revokedAt"],
+  ]) {
+    if (await tableCount(fixture, table, `"userId" = '${userId}' AND "${timestamp}" IS NULL`) !== 0) {
+      throw new Error(`Canonical migration retained active ${table} credentials.`);
+    }
+  }
+  if (await tableCount(fixture, "AppSession", `"actorUserId" = '${userId}' AND "revokedAt" IS NULL`) !== 0) {
+    throw new Error("Canonical migration retained an active delegated AppSession.");
+  }
+}
+
 async function runCanonicalWorkspaceHappyFixture() {
   await withIsolatedSchema(async (fixture, databaseUrl) => {
     await createCanonicalWorkspaceTables(fixture);
@@ -462,6 +501,7 @@ async function runCanonicalWorkspaceHappyFixture() {
       role: "CONTRIBUTOR",
       isActive: false,
     });
+    await insertCanonicalInboundCredentials(fixture, "system-repair");
 
     await insertFixtureUser(fixture, {
       id: "system-custom",
@@ -500,6 +540,9 @@ async function runCanonicalWorkspaceHappyFixture() {
     `);
 
     applyExactMigration(databaseUrl, canonicalMigrationPath);
+    const [firstCanonicalHash] = await fixture.$queryRawUnsafe(`
+      SELECT "passwordHash" FROM "User" WHERE "id" = 'system-repair'
+    `);
     applyExactMigration(databaseUrl, canonicalMigrationPath);
 
     const systemRows = await fixture.$queryRawUnsafe(`
@@ -521,13 +564,16 @@ async function runCanonicalWorkspaceHappyFixture() {
       throw new Error(`Canonical system members were not established: ${JSON.stringify(systemRows)}`);
     }
     const created = systemRows.find((row) => row.slug === "workspace-new");
-    if (!/^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/.test(created?.passwordHash ?? "")) {
-      throw new Error("New canonical system user does not have a randomized valid-shape non-login password hash.");
+    if (created?.passwordHash !== "disabled$canonical-workspace-system-actor-v1") {
+      throw new Error("New canonical system user does not have the stable disabled password marker.");
     }
     const repaired = systemRows.find((row) => row.slug === "workspace-repair");
-    if (repaired?.displayName !== "Preserved Repair Name" || repaired?.passwordHash !== "preserved-repair-password") {
-      throw new Error("Migration changed an existing proven-safe canonical User.");
+    if (repaired?.displayName !== "Preserved Repair Name"
+      || repaired?.passwordHash !== "disabled$canonical-workspace-system-actor-v1"
+      || firstCanonicalHash?.passwordHash !== repaired.passwordHash) {
+      throw new Error("Migration did not stably disable an existing proven-safe canonical User.");
     }
+    await assertCanonicalInboundCredentialsRevoked(fixture, "system-repair");
 
     const [customPolicyAfter] = await fixture.$queryRawUnsafe(`
       SELECT "id", "mode"::text, "quorumPercent", "minApproverCount", "decisionWindowHours", "requireProposalLink"
@@ -647,6 +693,30 @@ async function runCanonicalCollisionFixtures() {
     });
     await insertFixtureSsoIdentity(fixture, "sso-identity", "sso-user");
   });
+  await runCanonicalCollisionFixture("OAuth-connected canonical user", async (fixture) => {
+    await insertFixtureUser(fixture, {
+      id: "oauth-user",
+      email: "system+workspace-collision@corgtex.local",
+    });
+    await insertFixtureMember(fixture, {
+      id: "oauth-member",
+      workspaceId: "workspace-collision",
+      userId: "oauth-user",
+    });
+    await fixture.$executeRawUnsafe(`INSERT INTO "OAuthConnection" ("id", "userId") VALUES ('oauth-connection', 'oauth-user')`);
+  });
+  await runCanonicalCollisionFixture("outbound MCP-connected canonical user", async (fixture) => {
+    await insertFixtureUser(fixture, {
+      id: "external-mcp-user",
+      email: "system+workspace-collision@corgtex.local",
+    });
+    await insertFixtureMember(fixture, {
+      id: "external-mcp-member",
+      workspaceId: "workspace-collision",
+      userId: "external-mcp-user",
+    });
+    await fixture.$executeRawUnsafe(`INSERT INTO "ExternalMcpConnection" ("id", "userId") VALUES ('external-mcp-connection', 'external-mcp-user')`);
+  });
 }
 
 async function runCanonicalInvalidSlugFixture(label, invalidSlug) {
@@ -676,6 +746,19 @@ async function runCanonicalLateFailureFixture() {
   await withIsolatedSchema(async (fixture, databaseUrl) => {
     await createCanonicalWorkspaceTables(fixture);
     await insertFixtureWorkspace(fixture, "workspace-late", "workspace-late", "Late Failure Workspace");
+    await insertFixtureUser(fixture, {
+      id: "system-late",
+      email: "system+workspace-late@corgtex.local",
+      passwordHash: "legacy-known-password-hash",
+    });
+    await insertFixtureMember(fixture, {
+      id: "member-late",
+      workspaceId: "workspace-late",
+      userId: "system-late",
+      role: "CONTRIBUTOR",
+      isActive: false,
+    });
+    await insertCanonicalInboundCredentials(fixture, "system-late");
     await fixture.$executeRawUnsafe(`
       CREATE FUNCTION reject_canonical_member_fixture() RETURNS trigger AS $$
       BEGIN
@@ -685,7 +768,7 @@ async function runCanonicalLateFailureFixture() {
     `);
     await fixture.$executeRawUnsafe(`
       CREATE TRIGGER reject_canonical_member_fixture
-      BEFORE INSERT ON "Member"
+      BEFORE INSERT OR UPDATE ON "Member"
       FOR EACH ROW EXECUTE FUNCTION reject_canonical_member_fixture()
     `);
 
@@ -696,7 +779,19 @@ async function runCanonicalLateFailureFixture() {
       failed = true;
     }
     if (!failed) throw new Error("Late Member failure fixture unexpectedly passed.");
-    if (await tableCount(fixture, "User") !== 0 || await tableCount(fixture, "ApprovalPolicy") !== 0) {
+    const [rolledBackUser] = await fixture.$queryRawUnsafe(`SELECT "passwordHash" FROM "User" WHERE "id" = 'system-late'`);
+    const activeInboundCredentialCounts = await Promise.all([
+      tableCount(fixture, "PasswordResetToken", `"userId" = 'system-late' AND "usedAt" IS NULL`),
+      tableCount(fixture, "OAuthAuthorizationCode", `"userId" = 'system-late' AND "usedAt" IS NULL`),
+      tableCount(fixture, "OAuthAccessToken", `"userId" = 'system-late' AND "revokedAt" IS NULL`),
+      tableCount(fixture, "McpOAuthAuthorizationCode", `"userId" = 'system-late' AND "usedAt" IS NULL`),
+      tableCount(fixture, "McpOAuthAccessToken", `"userId" = 'system-late' AND "revokedAt" IS NULL`),
+      tableCount(fixture, "AppSession", `"actorUserId" = 'system-late' AND "revokedAt" IS NULL`),
+    ]);
+    if (rolledBackUser?.passwordHash !== "legacy-known-password-hash"
+      || await tableCount(fixture, "Session", `"userId" = 'system-late'`) !== 1
+      || activeInboundCredentialCounts.some((count) => count !== 1)
+      || await tableCount(fixture, "ApprovalPolicy") !== 0) {
       throw new Error("Explicit migration transaction did not roll back writes after a late Member failure.");
     }
   });

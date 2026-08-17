@@ -11,6 +11,7 @@ import { ALL_SCOPES } from "./agent-auth";
 import { requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import { isCanonicalWorkspaceSystemEmail } from "./workspaces";
 import {
   createRailwayClientFromEnv,
   provisionRailwayAppRuntime,
@@ -505,21 +506,20 @@ function scopedAppToolRequirements(toolName: string, requiredScopes?: string[] |
 async function createEnterpriseAppSession(actor: AppActor, params: {
   workspaceId: string;
   row: EnterpriseAppInstallationRecord;
-  membership: MembershipSummary | null;
   ttlSeconds?: number | null;
 }) {
   const row = params.row;
   const token = randomOpaqueToken();
   const expiresAt = new Date(Date.now() + Math.max(params.ttlSeconds || row.sessionTtlSeconds || DEFAULT_SESSION_TTL_SECONDS, 60) * 1000);
   const actorPayload = actor.kind === "user"
-    ? {
+    ? await requireLiveEnterpriseAppUser(actor.user.id, params.workspaceId).then((liveActor) => ({
       user: {
-        id: actor.user.id,
-        email: actor.user.email,
-        displayName: actor.user.displayName,
-        role: params.membership?.role ?? "ADMIN",
+        id: liveActor.user.id,
+        email: liveActor.user.email,
+        displayName: liveActor.user.displayName,
+        role: liveActor.membership.role,
       },
-    }
+    }))
     : {
       agent: {
         label: actor.label,
@@ -555,6 +555,41 @@ async function createEnterpriseAppSession(actor: AppActor, params: {
   });
 
   return { token, expiresAt, payload };
+}
+
+async function requireLiveEnterpriseAppUser(userId: string, workspaceId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+      memberships: {
+        where: { workspaceId },
+        select: {
+          id: true,
+          role: true,
+          kind: true,
+          isActive: true,
+          mergedAt: true,
+          mergedIntoMemberId: true,
+        },
+      },
+    },
+  });
+  const membership = user?.memberships[0];
+  invariant(
+    user
+      && !isCanonicalWorkspaceSystemEmail(user.email)
+      && membership
+      && membership.isActive
+      && membership.mergedAt === null
+      && membership.mergedIntoMemberId === null,
+    401,
+    "INVALID_APP_SESSION_ACTOR",
+    "Enterprise app session actor is no longer eligible for this workspace.",
+  );
+  return { user, membership };
 }
 
 export function validateEnterpriseAppManifest(value: unknown): EnterpriseAppManifest {
@@ -1753,7 +1788,7 @@ export async function issueEnterpriseAppSession(actor: AppActor, params: {
   if (actor.kind !== "user") {
     throw new AppError(403, "FORBIDDEN", "Only signed-in users can launch enterprise app sessions.");
   }
-  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const row = await getInstallation(params.workspaceId, params.appInstallationId);
   assertAppKeyIsNotRetired(row.appDefinition.appKey);
   const reasons = unavailableReasons(row);
@@ -1761,7 +1796,6 @@ export async function issueEnterpriseAppSession(actor: AppActor, params: {
   const session = await createEnterpriseAppSession(actor, {
     workspaceId: params.workspaceId,
     row,
-    membership,
   });
 
   return {
@@ -1785,7 +1819,7 @@ export async function invokeInstalledAppTool(actor: AppActor, params: {
   invariant(workspaceId, 400, "INVALID_INPUT", "Workspace ID is required.");
   const toolName = text(params.toolName);
   invariant(toolName, 400, "INVALID_INPUT", "Tool name is required.");
-  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  await requireWorkspaceMembership({ actor, workspaceId });
   const appKey = params.appKey ? normalizeAppKey(params.appKey) : null;
   if (appKey) {
     assertAppKeyIsNotRetired(appKey);
@@ -1816,7 +1850,6 @@ export async function invokeInstalledAppTool(actor: AppActor, params: {
     const session = await createEnterpriseAppSession(actor, {
       workspaceId,
       row,
-      membership,
       ttlSeconds: DEFAULT_SESSION_TTL_SECONDS,
     });
     const response = await postJsonWithTimeout(mcpUrl, {
@@ -1906,6 +1939,10 @@ export async function consumeEnterpriseAppSessionToken(params: {
   invariant(!workspaceId || workspaceId === session.workspaceId, 401, "WRONG_WORKSPACE", "Enterprise app session token workspace mismatch.");
   const appInstallationId = text(params.appInstallationId);
   invariant(!appInstallationId || appInstallationId === session.appInstallationId, 401, "WRONG_INSTALLATION", "Enterprise app session token installation mismatch.");
+  const liveActor = session.actorUserId
+    ? await requireLiveEnterpriseAppUser(session.actorUserId, session.workspaceId)
+    : null;
+
   const reasons = unavailableReasons(session.appInstallation);
   invariant(reasons.length === 0, 401, "APP_RUNTIME_UNAVAILABLE", reasons.join(" "));
 
@@ -1924,7 +1961,17 @@ export async function consumeEnterpriseAppSessionToken(params: {
     appInstallationId: session.appInstallationId,
     scopes: session.scopes,
     expiresAt: session.expiresAt,
-    payload: session.payloadJson,
+    payload: liveActor
+      ? {
+        ...(isRecord(session.payloadJson) ? session.payloadJson : {}),
+        user: {
+          id: liveActor.user.id,
+          email: liveActor.user.email,
+          displayName: liveActor.user.displayName,
+          role: liveActor.membership.role,
+        },
+      }
+      : session.payloadJson,
   };
 }
 

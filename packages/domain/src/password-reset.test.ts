@@ -31,6 +31,10 @@ vi.mock("@corgtex/shared", () => ({
   sha256: vi.fn((v: string) => `sha256:${v}`),
 }));
 
+vi.mock("./workspaces", () => ({
+  isCanonicalWorkspaceSystemEmail: (email: string) => /^system\+[a-z0-9-]+@corgtex\.local$/i.test(email.trim()),
+}));
+
 import { requestPasswordReset, requestPasswordResetForActiveMember, consumePasswordReset } from "./password-reset";
 import { AppError } from "./errors";
 
@@ -65,6 +69,12 @@ describe("requestPasswordReset", () => {
 
   it("throws on empty email", async () => {
     await expect(requestPasswordReset("")).rejects.toThrow(AppError);
+  });
+
+  it("returns null for a canonical workspace system identity without issuing a token", async () => {
+    await expect(requestPasswordReset(" System+Workspace-1@Corgtex.Local ")).resolves.toBeNull();
+    expect(mockFindUnique).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
   });
 });
 
@@ -107,6 +117,12 @@ describe("requestPasswordResetForActiveMember", () => {
     await expect(requestPasswordResetForActiveMember("member@example.com")).resolves.toBeNull();
     expect(mockCreate).not.toHaveBeenCalled();
   });
+
+  it("returns null for a canonical workspace system identity before membership lookup", async () => {
+    await expect(requestPasswordResetForActiveMember("system+workspace-1@corgtex.local")).resolves.toBeNull();
+    expect(mockFindUnique).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
 });
 
 describe("consumePasswordReset", () => {
@@ -140,6 +156,7 @@ describe("consumePasswordReset", () => {
       userId: "user-1",
       expiresAt: new Date(Date.now() + 60000),
       usedAt: new Date(),
+      user: { email: "user@example.com" },
     });
 
     await expect(
@@ -153,6 +170,7 @@ describe("consumePasswordReset", () => {
       userId: "user-1",
       expiresAt: new Date(Date.now() - 60000),
       usedAt: null,
+      user: { email: "user@example.com" },
     });
 
     await expect(
@@ -166,6 +184,7 @@ describe("consumePasswordReset", () => {
       userId: "user-1",
       expiresAt: new Date(Date.now() + 60000),
       usedAt: null,
+      user: { email: "user@example.com" },
     });
     mockTransaction.mockResolvedValue([]);
 
@@ -176,5 +195,21 @@ describe("consumePasswordReset", () => {
 
     expect(result).toEqual({ success: true });
     expect(mockTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an existing canonical reset token without changing credentials", async () => {
+    mockFindUnique.mockResolvedValue({
+      id: "token-1",
+      userId: "system-user-1",
+      expiresAt: new Date(Date.now() + 60000),
+      usedAt: null,
+      user: { email: "system+workspace-1@corgtex.local" },
+    });
+
+    await expect(consumePasswordReset({
+      token: "canonical-token",
+      newPassword: "newpass123",
+    })).rejects.toThrow("invalid or has expired");
+    expect(mockTransaction).not.toHaveBeenCalled();
   });
 });

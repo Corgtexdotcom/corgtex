@@ -60,6 +60,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     member: {
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn().mockResolvedValue({
         id: "m_1",
         user: { email: "test@example.com" },
@@ -110,11 +111,20 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("./workspaces", () => ({
+  assertNonReservedWorkspaceSystemEmail: vi.fn((email: string) => {
+    if (/^system\+[^@]+@corgtex\.local$/i.test(email)) {
+      throw new AppError(409, "CANONICAL_SYSTEM_ACTOR_COLLISION", "Reserved canonical identity.");
+    }
+  }),
   createWorkspace: vi.fn().mockResolvedValue({ id: "ws_new" }),
 }));
 
 vi.mock("./members", () => ({
   createMember: vi.fn().mockResolvedValue({ id: "member_new" }),
+  updateMember: vi.fn().mockResolvedValue({ id: "member_updated" }),
+  deactivateMember: vi.fn().mockResolvedValue({ id: "member_deactivated" }),
+  removeMember: vi.fn().mockResolvedValue({ id: "member_removed" }),
+  resendMemberAccessLink: vi.fn().mockResolvedValue({ token: "member_setup_token" }),
 }));
 
 vi.mock("./password-reset", () => ({
@@ -339,6 +349,16 @@ describe("Platform Admin Tools", () => {
     expect(token).toBe("reset_token_123");
   });
 
+  it("adminTriggerPasswordReset returns no token for a canonical actor", async () => {
+    const { requestPasswordReset } = await import("./password-reset");
+    vi.mocked(requestPasswordReset).mockResolvedValueOnce(null);
+
+    await expect(admin.adminTriggerPasswordReset(
+      dummyActor,
+      "system+workspace-1@corgtex.local",
+    )).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
   // ── adminAddToWorkspace ──────────────────────────────────────────
 
   it("adminAddToWorkspace looks up user and creates member", async () => {
@@ -372,12 +392,28 @@ describe("Platform Admin Tools", () => {
   // ── adminRemoveFromWorkspace ─────────────────────────────────────
 
   it("adminRemoveFromWorkspace deletes the member", async () => {
-    await admin.adminRemoveFromWorkspace(dummyActor, { memberId: "m_1" });
+    const { removeMember } = await import("./members");
+    await admin.adminRemoveFromWorkspace(dummyActor, { workspaceId: "ws_1", memberId: "m_1" });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.delete).toHaveBeenCalledWith({
-      where: { id: "m_1" },
+    expect(removeMember).toHaveBeenCalledWith(dummyActor, {
+      workspaceId: "ws_1",
+      memberId: "m_1",
     });
+  });
+
+  it("adminRemoveFromWorkspace preserves canonical guard failures from the member domain", async () => {
+    const { removeMember } = await import("./members");
+    vi.mocked(removeMember).mockRejectedValueOnce(new AppError(
+      409,
+      "CANONICAL_SYSTEM_ACTOR_COLLISION",
+      "Reserved canonical identity.",
+    ));
+
+    await expect(admin.adminRemoveFromWorkspace(dummyActor, {
+      workspaceId: "ws_1",
+      memberId: "m_1",
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
   });
 
   // ── adminCreateMember ────────────────────────────────────────────
@@ -405,6 +441,7 @@ describe("Platform Admin Tools", () => {
   // ── adminUpdateMember ────────────────────────────────────────────
 
   it("adminUpdateMember updates the member role", async () => {
+    const { updateMember } = await import("./members");
     await admin.adminUpdateMember(dummyActor, {
       workspaceId: "ws_1",
       memberId: "m_1",
@@ -412,24 +449,26 @@ describe("Platform Admin Tools", () => {
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.update).toHaveBeenCalledWith({
-      where: { id: "m_1" },
-      data: { role: "ADMIN" },
+    expect(updateMember).toHaveBeenCalledWith(dummyActor, {
+      workspaceId: "ws_1",
+      memberId: "m_1",
+      role: "ADMIN",
     });
   });
 
   // ── adminDeactivateMember ────────────────────────────────────────
 
   it("adminDeactivateMember sets isActive to false", async () => {
+    const { deactivateMember } = await import("./members");
     await admin.adminDeactivateMember(dummyActor, {
       workspaceId: "ws_1",
       memberId: "m_1",
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.update).toHaveBeenCalledWith({
-      where: { id: "m_1" },
-      data: { isActive: false },
+    expect(deactivateMember).toHaveBeenCalledWith(dummyActor, {
+      workspaceId: "ws_1",
+      memberId: "m_1",
     });
   });
 
@@ -459,12 +498,8 @@ describe("Platform Admin Tools", () => {
 
   // ── adminResendAccessLink ────────────────────────────────────────
 
-  it("adminResendAccessLink looks up member and triggers password reset", async () => {
-    (prisma.member.findUniqueOrThrow as any).mockResolvedValue({
-      id: "m_1",
-      user: { email: "member@test.com" },
-    });
-    const { requestPasswordReset } = await import("./password-reset");
+  it("adminResendAccessLink delegates to the workspace-scoped member guard", async () => {
+    const { resendMemberAccessLink } = await import("./members");
 
     await admin.adminResendAccessLink(dummyActor, {
       workspaceId: "ws_1",
@@ -472,10 +507,10 @@ describe("Platform Admin Tools", () => {
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.findUniqueOrThrow).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: "m_1" } })
-    );
-    expect(requestPasswordReset).toHaveBeenCalledWith("member@test.com");
+    expect(resendMemberAccessLink).toHaveBeenCalledWith(dummyActor, {
+      workspaceId: "ws_1",
+      memberId: "m_1",
+    });
   });
 
   // ── adminCreateWorkspace ─────────────────────────────────────────

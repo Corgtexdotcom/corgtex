@@ -18,7 +18,7 @@ function trimTrailingSlash(value) {
 const runId = arg("run-id") || `proposal-discussion-${Date.now()}`;
 const baseUrl = trimTrailingSlash(arg("base-url") || process.env.PROPOSAL_DISCUSSION_BASE_URL || process.env.CLIENT_READINESS_BASE_URL || "http://localhost:3000");
 const outDir = path.resolve(arg("out-dir") || process.env.PROPOSAL_DISCUSSION_OUT_DIR || `.artifacts/proposal-discussion/${runId}`);
-const email = process.env.AGENT_E2E_EMAIL || "system+corgtex@corgtex.local";
+const email = process.env.AGENT_E2E_EMAIL || "e2e-validation@corgtex.local";
 const password = process.env.AGENT_E2E_PASSWORD || "corgtex-test-agent-pw";
 const headless = process.env.PROPOSAL_DISCUSSION_HEADFUL !== "true";
 

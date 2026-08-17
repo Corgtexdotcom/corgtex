@@ -15,6 +15,12 @@ const REQUIRED_CANONICAL_WORKSPACE_SEEDS = new Set([
   "scripts/seed-corgtex.mjs",
   "scripts/seed-jnj-demo.mjs",
 ]);
+export const DEFAULT_E2E_VALIDATION_EMAIL = "e2e-validation@corgtex.local";
+export const E2E_VALIDATION_IDENTITY_PATHS = [
+  "scripts/seed-e2e.mjs",
+  "scripts/client-readiness-smoke.mjs",
+  "scripts/proposal-discussion-smoke.mjs",
+];
 
 export function selectRuntimeSeedPaths(relativePaths) {
   return [...new Set(relativePaths.filter((relativePath) => {
@@ -63,6 +69,29 @@ export function assertCanonicalWorkspaceSeeds(root = rootDir) {
   return relativePaths;
 }
 
+export function assertE2EValidationIdentitySources(sources) {
+  const sourcesByPath = new Map(sources.map(({ relativePath, source }) => [relativePath, source]));
+  for (const relativePath of E2E_VALIDATION_IDENTITY_PATHS) {
+    const source = sourcesByPath.get(relativePath);
+    if (!source) {
+      throw new Error(`${relativePath} is missing from the E2E validation identity guard.`);
+    }
+    if (/system\+[a-z0-9-]*@corgtex\.local/i.test(source)) {
+      throw new Error(`${relativePath} retains the reserved canonical system actor as its E2E fallback.`);
+    }
+    if (!source.includes(DEFAULT_E2E_VALIDATION_EMAIL)) {
+      throw new Error(`${relativePath} must use the shared non-reserved E2E validation identity.`);
+    }
+  }
+}
+
+export function assertE2EValidationIdentityDefaults(root = rootDir) {
+  assertE2EValidationIdentitySources(E2E_VALIDATION_IDENTITY_PATHS.map((relativePath) => ({
+    relativePath,
+    source: readFileSync(path.join(root, relativePath), "utf8"),
+  })));
+}
+
 function run(command, args, options = {}) {
   console.log(`[seed-fixtures] ${[command, ...args].join(" ")}`);
   execFileSync(command, args, {
@@ -74,6 +103,7 @@ function run(command, args, options = {}) {
 
 function main() {
   assertCanonicalWorkspaceSeeds();
+  assertE2EValidationIdentityDefaults();
 
   for (const name of ["DATABASE_URL", "ADMIN_EMAIL", "ADMIN_PASSWORD"]) {
     if (!process.env[name]?.trim()) throw new Error(`${name} is required for seed fixture validation.`);

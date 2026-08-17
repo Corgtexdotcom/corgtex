@@ -150,6 +150,54 @@ describe("CRM Integration Lifecycle", () => {
     expect(customerAccount).toBeNull();
   });
 
+  it("concurrently captures first-use leads through one canonical workspace baseline", async () => {
+    const suffix = Date.now().toString();
+    const workspaceSlug = `crm-concurrent-${suffix}`;
+    const [first, second] = await Promise.all([
+      captureDemoLead({
+        email: `first-${suffix}@example.test`,
+        source: "concurrency_integration",
+        workspaceSlug,
+        workspaceName: "Concurrent CRM Workspace",
+      }),
+      captureDemoLead({
+        email: `second-${suffix}@example.test`,
+        source: "concurrency_integration",
+        workspaceSlug,
+        workspaceName: "Concurrent CRM Workspace",
+      }),
+    ]);
+
+    expect(first.demoLead.workspaceId).toBe(second.demoLead.workspaceId);
+    const createdWorkspace = await prisma.workspace.findUniqueOrThrow({
+      where: { slug: workspaceSlug },
+    });
+    const canonicalEmail = `system+${workspaceSlug}@corgtex.local`;
+    const [workspaces, canonicalUsers, memberships, policies, leads] = await Promise.all([
+      prisma.workspace.count({ where: { slug: workspaceSlug } }),
+      prisma.user.count({ where: { email: canonicalEmail } }),
+      prisma.member.count({
+        where: {
+          workspaceId: createdWorkspace.id,
+          role: "ADMIN",
+          kind: "SYSTEM",
+          isActive: true,
+          user: { email: canonicalEmail },
+        },
+      }),
+      prisma.approvalPolicy.count({ where: { workspaceId: createdWorkspace.id } }),
+      prisma.demoLead.count({ where: { workspaceId: createdWorkspace.id } }),
+    ]);
+
+    expect({ workspaces, canonicalUsers, memberships, policies, leads }).toEqual({
+      workspaces: 1,
+      canonicalUsers: 1,
+      memberships: 1,
+      policies: 1,
+      leads: 2,
+    });
+  });
+
   it("handles the reject flow correctly", async () => {
     const { demoLead } = await captureDemoLead({
       email: `reject-${Date.now()}@acme.test`,

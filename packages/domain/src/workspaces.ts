@@ -1,10 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import {
   env,
-  hashPassword,
   normalizeWorkspaceSlug,
   prisma,
-  randomOpaqueToken,
 } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
@@ -39,6 +37,8 @@ const DEFAULT_PROPOSAL_POLICY = {
   decisionWindowHours: 72,
 } as const;
 
+export const CANONICAL_WORKSPACE_SYSTEM_PASSWORD_HASH = "disabled$canonical-workspace-system-actor-v1";
+
 export function canonicalWorkspaceSlug(value: string) {
   const slug = normalizeWorkspaceSlug(value);
   invariant(slug.length > 0, 400, "INVALID_INPUT", "Workspace slug is required.");
@@ -58,9 +58,13 @@ export function canonicalWorkspaceSystemEmail(slug: string) {
   return `system+${normalizeWorkspaceSlug(slug)}@corgtex.local`;
 }
 
+export function isCanonicalWorkspaceSystemEmail(email: string) {
+  return /^system\+[^@]*@corgtex\.local$/i.test(email.trim());
+}
+
 export function assertNonReservedWorkspaceSystemEmail(email: string) {
   invariant(
-    !/^system\+[^@]*@corgtex\.local$/i.test(email.trim()),
+    !isCanonicalWorkspaceSystemEmail(email),
     409,
     "CANONICAL_SYSTEM_ACTOR_COLLISION",
     "Reserved workspace system identity cannot be used as a human member.",
@@ -88,7 +92,14 @@ export async function ensureCanonicalWorkspaceBaseline(tx: Tx, workspace: Worksp
       id: true,
       email: true,
       globalRole: true,
+      passwordHash: true,
       ssoIdentities: {
+        select: { id: true },
+      },
+      oauthConnections: {
+        select: { id: true },
+      },
+      externalMcpConnections: {
         select: { id: true },
       },
       memberships: {
@@ -112,6 +123,8 @@ export async function ensureCanonicalWorkspaceBaseline(tx: Tx, workspace: Worksp
         && existingUser
         && existingUser.globalRole === "USER"
         && existingUser.ssoIdentities.length === 0
+        && existingUser.oauthConnections.length === 0
+        && existingUser.externalMcpConnections.length === 0
         && existingUser.memberships.length === 1
         && targetMembership?.kind === "SYSTEM"
         && targetMembership.mergedAt === null
@@ -122,14 +135,51 @@ export async function ensureCanonicalWorkspaceBaseline(tx: Tx, workspace: Worksp
     );
   }
 
-  const systemUser = existingUser ?? await tx.user.create({
-    data: {
-      email,
-      displayName: `${workspace.name} System`,
-      passwordHash: hashPassword(randomOpaqueToken()),
-    },
-    select: { id: true },
-  });
+  const systemUser = existingUser
+    ? existingUser.passwordHash === CANONICAL_WORKSPACE_SYSTEM_PASSWORD_HASH
+      ? existingUser
+      : await tx.user.update({
+          where: { id: existingUser.id },
+          data: { passwordHash: CANONICAL_WORKSPACE_SYSTEM_PASSWORD_HASH },
+          select: { id: true },
+        })
+    : await tx.user.create({
+        data: {
+          email,
+          displayName: `${workspace.name} System`,
+          passwordHash: CANONICAL_WORKSPACE_SYSTEM_PASSWORD_HASH,
+        },
+        select: { id: true },
+      });
+
+  if (existingUser) {
+    const revokedAt = new Date();
+    await tx.session.deleteMany({ where: { userId: systemUser.id } });
+    await tx.passwordResetToken.updateMany({
+      where: { userId: systemUser.id, usedAt: null },
+      data: { usedAt: revokedAt },
+    });
+    await tx.oAuthAuthorizationCode.updateMany({
+      where: { userId: systemUser.id, usedAt: null },
+      data: { usedAt: revokedAt },
+    });
+    await tx.oAuthAccessToken.updateMany({
+      where: { userId: systemUser.id, revokedAt: null },
+      data: { revokedAt },
+    });
+    await tx.mcpOAuthAuthorizationCode.updateMany({
+      where: { userId: systemUser.id, usedAt: null },
+      data: { usedAt: revokedAt },
+    });
+    await tx.mcpOAuthAccessToken.updateMany({
+      where: { userId: systemUser.id, revokedAt: null },
+      data: { revokedAt },
+    });
+    await tx.appSession.updateMany({
+      where: { actorUserId: systemUser.id, revokedAt: null },
+      data: { revokedAt },
+    });
+  }
 
   await tx.member.upsert({
     where: {
@@ -186,19 +236,16 @@ export async function ensureCanonicalWorkspace(tx: Tx, params: CanonicalWorkspac
   const slug = canonicalWorkspaceSlug(params.slug);
   invariant(name.length > 0, 400, "INVALID_INPUT", "Workspace name is required.");
 
-  const existing = await tx.workspace.findUnique({ where: { slug } });
-  const workspace = existing
-    ? params.update
-      ? await tx.workspace.update({ where: { id: existing.id }, data: params.update })
-      : existing
-    : await tx.workspace.create({
-        data: {
-          ...params.data,
-          name,
-          slug,
-          description: params.description?.trim() || null,
-        },
-      });
+  const workspace = await tx.workspace.upsert({
+    where: { slug },
+    update: params.update ?? { slug },
+    create: {
+      ...params.data,
+      name,
+      slug,
+      description: params.description?.trim() || null,
+    },
+  });
 
   await ensureCanonicalWorkspaceBaseline(tx, workspace);
   return workspace;
