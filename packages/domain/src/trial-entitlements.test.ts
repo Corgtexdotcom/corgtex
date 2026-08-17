@@ -74,7 +74,7 @@ describe("trial entitlements", () => {
     prismaMock.document.findMany.mockResolvedValue([]);
   });
 
-  it("excludes internal support members from trial member capacity", async () => {
+  it("excludes persisted and legacy system identities while counting ordinary active humans", async () => {
     const { assertTrialMemberCapacity } = await import("./trial-entitlements");
 
     await expect(assertTrialMemberCapacity("workspace-1")).resolves.toBeUndefined();
@@ -83,16 +83,24 @@ describe("trial entitlements", () => {
       where: {
         workspaceId: "workspace-1",
         isActive: true,
-        NOT: {
-          user: {
-            email: {
-              startsWith: "support+",
-              endsWith: "@corgtex.local",
-            },
-          },
-        },
+        NOT: [{
+          OR: [
+            { kind: "SYSTEM" },
+            { user: { email: { startsWith: "system+", mode: "insensitive" } } },
+            { user: { email: { startsWith: "support+", mode: "insensitive" } } },
+            { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
+          ],
+        }],
       },
     });
+  });
+
+  it("rejects a new member when active human members have reached the trial limit", async () => {
+    prismaMock.member.count.mockResolvedValueOnce(5);
+    const { assertTrialMemberCapacity } = await import("./trial-entitlements");
+
+    await expect(assertTrialMemberCapacity("workspace-1"))
+      .rejects.toMatchObject({ code: "TRIAL_MEMBER_LIMIT_EXCEEDED" });
   });
 
   it("uses the caller transaction and locks before calculating trial storage usage", async () => {

@@ -99,6 +99,16 @@ const actor: AppActor = {
   },
 };
 
+const tenantAdminActor: AppActor = {
+  kind: "user" as const,
+  user: {
+    id: "tenant-admin-user",
+    email: "tenant-admin@example.com",
+    displayName: "Tenant Admin",
+    globalRole: "USER",
+  },
+};
+
 describe("members domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -200,22 +210,108 @@ describe("members domain", () => {
     }));
   });
 
-  it("createMember classifies system-convention accounts as system members", async () => {
-    prismaMock.user.upsert.mockResolvedValue({ id: "user-1", email: "system+workspace@corgtex.local", displayName: "System" });
-    prismaMock.member.upsert.mockResolvedValue({ id: "member-1", role: "ADMIN", kind: "SYSTEM" });
-
+  it("createMember rejects workspace A's reserved system address in workspace B before writes or token issuance", async () => {
     const { createMember } = await import("./members");
-    await createMember(actor, {
-      workspaceId: "workspace-1",
-      email: "system+workspace@corgtex.local",
-      displayName: "System",
+    await expect(createMember(tenantAdminActor, {
+      workspaceId: "workspace-b",
+      email: "SYSTEM+WORKSPACE-A@CORGTEX.LOCAL",
+      displayName: "Not Human",
       role: "ADMIN",
-    });
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
 
-    expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      update: expect.objectContaining({ kind: "SYSTEM" }),
-      create: expect.objectContaining({ kind: "SYSTEM" }),
-    }));
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.user.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.member.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.passwordResetToken.create).not.toHaveBeenCalled();
+  });
+
+  it("updateMember rejects changing a human user to any reserved workspace system address before writes", async () => {
+    const { updateMember } = await import("./members");
+
+    await expect(updateMember(tenantAdminActor, {
+      workspaceId: "workspace-b",
+      memberId: "human-member",
+      email: "system+workspace-a@corgtex.local",
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(prismaMock.passwordResetToken.create).not.toHaveBeenCalled();
+  });
+
+  it("updateMember rejects every mutation of an existing reserved canonical system member", async () => {
+    prismaMock.member.findUnique
+      .mockResolvedValueOnce({
+        id: "tenant-admin-member",
+        workspaceId: "workspace-b",
+        userId: "tenant-admin-user",
+        role: "ADMIN",
+        isActive: true,
+      })
+      .mockResolvedValueOnce({
+        id: "canonical-member",
+        workspaceId: "workspace-b",
+        userId: "canonical-user",
+        role: "ADMIN",
+        kind: "SYSTEM",
+        isActive: true,
+        user: {
+          id: "canonical-user",
+          email: "system+workspace-b@corgtex.local",
+          displayName: "Workspace B System",
+          ssoIdentities: [],
+          _count: { memberships: 1 },
+        },
+      });
+    const { updateMember } = await import("./members");
+
+    await expect(updateMember(tenantAdminActor, {
+      workspaceId: "workspace-b",
+      memberId: "canonical-member",
+      role: "CONTRIBUTOR",
+      kind: "HUMAN",
+      isActive: false,
+      displayName: "Changed",
+      email: "human@example.com",
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+
+    expect(prismaMock.member.update).not.toHaveBeenCalled();
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+    expect(prismaMock.passwordResetToken.create).not.toHaveBeenCalled();
+  });
+
+  it("resendMemberAccessLink rejects a reserved canonical system member before issuing a token", async () => {
+    prismaMock.member.findUnique
+      .mockResolvedValueOnce({
+        id: "tenant-admin-member",
+        workspaceId: "workspace-b",
+        userId: "tenant-admin-user",
+        role: "ADMIN",
+        isActive: true,
+      })
+      .mockResolvedValueOnce({
+        id: "canonical-member",
+        workspaceId: "workspace-b",
+        userId: "canonical-user",
+        role: "ADMIN",
+        kind: "SYSTEM",
+        isActive: true,
+        user: {
+          id: "canonical-user",
+          email: "system+workspace-b@corgtex.local",
+          displayName: "Workspace B System",
+        },
+      });
+    const { resendMemberAccessLink } = await import("./members");
+
+    await expect(resendMemberAccessLink(tenantAdminActor, {
+      workspaceId: "workspace-b",
+      memberId: "canonical-member",
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+
+    expect(prismaMock.passwordResetToken.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.passwordResetToken.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
   });
 
   it("createMember rejects a blank email before writing", async () => {

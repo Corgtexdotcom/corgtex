@@ -2,7 +2,7 @@ import type { MemberRole } from "@prisma/client";
 import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
-import { systemActorMemberIdentityWhere } from "./member-identity";
+import { canonicalWorkspaceSystemEmail } from "./workspaces";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
@@ -242,35 +242,38 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
     return actor.user.id;
   }
 
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true },
+  });
+  invariant(workspace, 500, "CONFIG_ERROR", "Workspace is unavailable for system action attribution.");
+
   const systemMember = await prisma.member.findFirst({
     where: {
       workspaceId,
       isActive: true,
       role: "ADMIN",
-      ...systemActorMemberIdentityWhere(),
+      kind: "SYSTEM",
+      mergedAt: null,
+      mergedIntoMemberId: null,
+      user: {
+        email: canonicalWorkspaceSystemEmail(workspace.slug),
+        globalRole: "USER",
+        ssoIdentities: { none: {} },
+        memberships: {
+          none: {
+            workspaceId: { not: workspaceId },
+          },
+        },
+      },
     },
     select: {
       userId: true,
     },
   });
 
-  if (systemMember) {
-    return systemMember.userId;
-  }
-
-  const fallbackAdmin = await prisma.member.findFirst({
-    where: {
-      workspaceId,
-      isActive: true,
-      role: "ADMIN",
-    },
-    select: {
-      userId: true,
-    },
-  });
-
-  invariant(fallbackAdmin, 500, "CONFIG_ERROR", "Workspace has no admin member available for system actions.");
-  return fallbackAdmin.userId;
+  invariant(systemMember, 500, "CONFIG_ERROR", "Workspace has no canonical system actor available for system actions.");
+  return systemMember.userId;
 }
 
 export async function listActorWorkspaces(actor: AppActor) {

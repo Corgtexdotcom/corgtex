@@ -1,14 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const prismaMock = vi.hoisted(() => ({
-  disconnect: vi.fn(),
-  transaction: vi.fn(),
-  workspaceUpsert: vi.fn(),
-  userFindUnique: vi.fn(),
-  userCreate: vi.fn(),
-  memberUpsert: vi.fn(),
-  auditLogFindFirst: vi.fn(),
-  auditLogCreate: vi.fn(),
+const { prismaMock, ensureCanonicalWorkspaceMock, assertNonReservedWorkspaceSystemEmailMock, baselineTx } = vi.hoisted(() => ({
+  baselineTx: { label: "baseline-tx" },
+  ensureCanonicalWorkspaceMock: vi.fn(),
+  assertNonReservedWorkspaceSystemEmailMock: vi.fn(),
+  prismaMock: {
+    disconnect: vi.fn(),
+    transaction: vi.fn(),
+    userFindUnique: vi.fn(),
+    userCreate: vi.fn(),
+    memberUpsert: vi.fn(),
+    auditLogFindFirst: vi.fn(),
+    auditLogCreate: vi.fn(),
+  },
+}));
+
+vi.mock("../../packages/domain/src/workspaces.ts", () => ({
+  assertNonReservedWorkspaceSystemEmail: assertNonReservedWorkspaceSystemEmailMock,
+  ensureCanonicalWorkspace: ensureCanonicalWorkspaceMock,
 }));
 
 vi.mock("@prisma/client", () => ({
@@ -16,9 +25,6 @@ vi.mock("@prisma/client", () => ({
     return {
       $disconnect: prismaMock.disconnect,
       $transaction: prismaMock.transaction,
-      workspace: {
-        upsert: prismaMock.workspaceUpsert,
-      },
       user: {
         findUnique: prismaMock.userFindUnique,
         create: prismaMock.userCreate,
@@ -44,8 +50,8 @@ describe("seedStableClient", () => {
     process.env.CLIENT_SEED_SAMPLE_DATA = "false";
 
     prismaMock.disconnect.mockResolvedValue(undefined);
-    prismaMock.transaction.mockRejectedValue(new Error("stable client seed must not use a broad transaction"));
-    prismaMock.workspaceUpsert.mockResolvedValue({ id: "workspace-1", slug: "validation" });
+    ensureCanonicalWorkspaceMock.mockResolvedValue({ id: "workspace-1", slug: "validation" });
+    prismaMock.transaction.mockImplementation(async (callback) => callback(baselineTx));
     prismaMock.userFindUnique.mockResolvedValue(null);
     prismaMock.userCreate.mockResolvedValue({
       id: "user-1",
@@ -62,7 +68,7 @@ describe("seedStableClient", () => {
     process.env = originalEnv;
   });
 
-  it("uses idempotent direct writes instead of one long interactive transaction", async () => {
+  it("uses one short canonical baseline transaction before idempotent fixture writes", async () => {
     const { seedStableClient } = await import("./client-stable-seed.mjs");
 
     await seedStableClient({
@@ -89,10 +95,17 @@ describe("seedStableClient", () => {
       auditAction: "validation.seeded",
     });
 
-    expect(prismaMock.transaction).not.toHaveBeenCalled();
-    expect(prismaMock.workspaceUpsert).toHaveBeenCalledWith(expect.objectContaining({
-      where: { slug: "validation" },
-    }));
+    expect(prismaMock.transaction).toHaveBeenCalledTimes(1);
+    expect(assertNonReservedWorkspaceSystemEmailMock).toHaveBeenCalledWith("validation@example.com");
+    expect(ensureCanonicalWorkspaceMock).toHaveBeenCalledWith(baselineTx, {
+      slug: "validation",
+      name: "Validation Workspace",
+      description: "Synthetic validation workspace",
+      update: {
+        name: "Validation Workspace",
+        description: "Synthetic validation workspace",
+      },
+    });
     expect(prismaMock.auditLogCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         workspaceId: "workspace-1",

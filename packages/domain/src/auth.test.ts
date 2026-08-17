@@ -15,8 +15,10 @@ const { prismaMock, envMock, verifyPasswordMock } = vi.hoisted(() => ({
     },
     member: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
     },
     workspace: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
@@ -33,6 +35,7 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash-password:${value}`),
   randomOpaqueToken: vi.fn(() => "plain-token"),
+  normalizeWorkspaceSlug: (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-"),
   sha256: vi.fn((value: string) => `hash:${value}`),
   verifyPassword: verifyPasswordMock,
 }));
@@ -194,6 +197,58 @@ describe("auth domain", () => {
         status: 400,
         code: "INVALID_INPUT",
       });
+    });
+  });
+
+  describe("actorUserIdForWorkspace", () => {
+    it("returns only the exact active canonical system administrator", async () => {
+      prismaMock.workspace.findUnique.mockResolvedValue({ slug: "workspace-1" });
+      prismaMock.member.findFirst.mockResolvedValue({ userId: "system-user-1" });
+
+      const { actorUserIdForWorkspace } = await import("./auth");
+      await expect(actorUserIdForWorkspace(agentActor, "workspace-1")).resolves.toBe("system-user-1");
+
+      expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
+        where: {
+          workspaceId: "workspace-1",
+          isActive: true,
+          role: "ADMIN",
+          kind: "SYSTEM",
+          mergedAt: null,
+          mergedIntoMemberId: null,
+          user: {
+            email: "system+workspace-1@corgtex.local",
+            globalRole: "USER",
+            ssoIdentities: { none: {} },
+            memberships: {
+              none: {
+                workspaceId: { not: "workspace-1" },
+              },
+            },
+          },
+        },
+        select: { userId: true },
+      });
+    });
+
+    it("fails closed instead of falling back to a human administrator", async () => {
+      prismaMock.workspace.findUnique.mockResolvedValue({ slug: "workspace-1" });
+      prismaMock.member.findFirst.mockResolvedValue(null);
+
+      const { actorUserIdForWorkspace } = await import("./auth");
+      await expect(actorUserIdForWorkspace(agentActor, "workspace-1")).rejects.toMatchObject({
+        status: 500,
+        code: "CONFIG_ERROR",
+      });
+
+      expect(prismaMock.member.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns a human actor directly without a workspace lookup", async () => {
+      const { actorUserIdForWorkspace } = await import("./auth");
+      await expect(actorUserIdForWorkspace(userActor, "workspace-1")).resolves.toBe("user-1");
+      expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
     });
   });
 

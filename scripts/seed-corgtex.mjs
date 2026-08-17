@@ -1,4 +1,8 @@
 import { PrismaClient } from "@prisma/client";
+import {
+  assertNonReservedWorkspaceSystemEmail,
+  ensureCanonicalWorkspace,
+} from "../packages/domain/src/workspaces.ts";
 import { randomBytes, scryptSync } from "node:crypto";
 
 const prisma = new PrismaClient();
@@ -114,23 +118,18 @@ const ARTICLES = [
 async function main() {
   console.log("🚀 Starting Corgtex dogfood workspace seed...");
 
-  // 1. Get or create workspace (Base seed handles this usually, but let's be safe)
-  let workspace = await prisma.workspace.findUnique({ where: { slug: WORKSPACE_SLUG } });
-  if (!workspace) {
-    workspace = await prisma.workspace.create({
-      data: {
-        slug: WORKSPACE_SLUG,
-        name: WORKSPACE_NAME,
-        description: "Internal company operating environment for Corgtex",
-      }
-    });
-    console.log(`Created workspace ${WORKSPACE_SLUG}`);
-  }
+  // 1. Reconcile the common workspace baseline in one short transaction.
+  const workspace = await prisma.$transaction((tx) => ensureCanonicalWorkspace(tx, {
+    slug: WORKSPACE_SLUG,
+    name: WORKSPACE_NAME,
+    description: "Internal company operating environment for Corgtex",
+  }));
   const wsId = workspace.id;
   console.log(`Using workspace ${workspace.slug} (${wsId})`);
 
   // 2. Ensure system & admin user exists
   const adminEmail = "puncar@corgtex.com";
+  assertNonReservedWorkspaceSystemEmail(adminEmail);
   let adminUser = await prisma.user.findUnique({ where: { email: adminEmail } });
   if (!adminUser) {
     adminUser = await prisma.user.create({
@@ -148,24 +147,6 @@ async function main() {
     create: { workspaceId: wsId, userId: adminUser.id, role: "ADMIN", isActive: true }
   });
 
-  const systemEmail = "system+corgtex@corgtex.local";
-  let systemUser = await prisma.user.findUnique({ where: { email: systemEmail } });
-  if (!systemUser) {
-    systemUser = await prisma.user.create({
-      data: { 
-        email: systemEmail, 
-        displayName: "Corgtex System Agent", 
-        passwordHash: hashPassword("system-internal-only") 
-      }
-    });
-  }
-
-  await prisma.member.upsert({
-    where: { workspaceId_userId: { workspaceId: wsId, userId: systemUser.id } },
-    update: { role: "ADMIN", kind: "SYSTEM", isActive: true },
-    create: { workspaceId: wsId, userId: systemUser.id, role: "ADMIN", kind: "SYSTEM", isActive: true }
-  });
-
   const additionalUsers = [
     { email: "andy.durrant@zinata.com", name: "Andy Durrant" },
     { email: "datise.biasi@zinata.com", name: "Datise Biasi" },
@@ -175,6 +156,7 @@ async function main() {
   ];
 
   for (const u of additionalUsers) {
+    assertNonReservedWorkspaceSystemEmail(u.email);
     let userRecord = await prisma.user.findUnique({ where: { email: u.email } });
     if (!userRecord) {
       userRecord = await prisma.user.create({

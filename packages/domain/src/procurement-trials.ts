@@ -23,6 +23,7 @@ import {
   applyTrialFeatureFlags,
 } from "./trial-entitlements";
 import { registerCustomerDeployment } from "./customer-lifecycle";
+import { assertNonReservedWorkspaceSystemEmail, createCanonicalWorkspace } from "./workspaces";
 
 export const PROCUREMENT_TRIAL_TTL_DAYS = 30;
 export const PROCUREMENT_TRIAL_LIMITS = {
@@ -852,19 +853,15 @@ async function createActiveTrial(params: {
 }) {
   const created = await prisma.$transaction(async (tx) => {
     const slug = await findAvailableSlug(tx, params.normalized.companyName);
-    const workspace = await tx.workspace.create({
+    assertNonReservedWorkspaceSystemEmail(params.normalized.adminEmail);
+    const workspace = await createCanonicalWorkspace(tx, {
+      name: params.normalized.companyName,
+      slug,
+      description: `Corgtex trial workspace for ${params.normalized.companyName}.`,
       data: {
-        name: params.normalized.companyName,
-        slug,
-        description: `Corgtex trial workspace for ${params.normalized.companyName}.`,
         plan: "TRIAL",
         planActivatedAt: new Date(),
         trialEndsAt: params.expiresAt,
-      },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
       },
     });
 
@@ -885,19 +882,6 @@ async function createActiveTrial(params: {
       managedWorkspaceId: workspace.id,
       primary: true,
     }, tx);
-
-    await tx.approvalPolicy.createMany({
-      data: [
-        {
-          workspaceId: workspace.id,
-          subjectType: "PROPOSAL",
-          mode: "CONSENT",
-          quorumPercent: 0,
-          minApproverCount: 1,
-          decisionWindowHours: 72,
-        },
-      ],
-    });
 
     const admin = await createTrialAdmin(tx, {
       workspaceId: workspace.id,

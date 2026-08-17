@@ -1,4 +1,8 @@
 import { PrismaClient } from "@prisma/client";
+import {
+  assertNonReservedWorkspaceSystemEmail,
+  ensureCanonicalWorkspace,
+} from "../../packages/domain/src/workspaces.ts";
 import { createHash, randomBytes, scryptSync } from "node:crypto";
 
 const VALID_MEMBER_ROLES = new Set(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"]);
@@ -458,6 +462,13 @@ export async function seedStableClient(config) {
   const printInviteLinks = boolFromAnyEnv([`${envPrefix}_PRINT_INVITE_LINKS`, "CLIENT_PRINT_INVITE_LINKS"]);
   const seedSampleData = boolFromAnyEnv([`${envPrefix}_SEED_SAMPLE_DATA`, "CLIENT_SEED_SAMPLE_DATA"], true);
   const clientUsers = parseClientUsers(envPrefix);
+  const adminEmail = normalizeEmail(
+    requiredFromEnv([`${envPrefix}_BOOTSTRAP_ADMIN_EMAIL`, "CLIENT_BOOTSTRAP_ADMIN_EMAIL", "ADMIN_EMAIL"]),
+  );
+  assertNonReservedWorkspaceSystemEmail(adminEmail);
+  for (const clientUser of clientUsers) {
+    assertNonReservedWorkspaceSystemEmail(clientUser.email);
+  }
 
   try {
     // Keep the stable-client seed rerunnable instead of wrapping all fixture
@@ -466,22 +477,16 @@ export async function seedStableClient(config) {
     // already idempotent and safe to complete on a later retry.
     const result = await (async () => {
       const tx = prisma;
-      const workspace = await tx.workspace.upsert({
-        where: { slug: workspaceSlug },
+      const workspace = await prisma.$transaction((baselineTx) => ensureCanonicalWorkspace(baselineTx, {
+        slug: workspaceSlug,
+        name: workspaceName,
+        description: config.workspace.description,
         update: {
           name: workspaceName,
           description: config.workspace.description,
         },
-        create: {
-          slug: workspaceSlug,
-          name: workspaceName,
-          description: config.workspace.description,
-        },
-      });
+      }));
 
-      const adminEmail = normalizeEmail(
-        requiredFromEnv([`${envPrefix}_BOOTSTRAP_ADMIN_EMAIL`, "CLIENT_BOOTSTRAP_ADMIN_EMAIL", "ADMIN_EMAIL"]),
-      );
       const existingAdmin = await tx.user.findUnique({ where: { email: adminEmail } });
       const adminPassword = process.env.ADMIN_PASSWORD?.trim();
       if ((!existingAdmin || resetPasswords) && !adminPassword) {

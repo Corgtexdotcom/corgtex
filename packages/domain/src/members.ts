@@ -10,6 +10,7 @@ import { closeRoleLifecycleForMember } from "./role-onboarding";
 import { maybeCaptureSelfServeSetupEmail } from "./self-serve-ops";
 import { renderAccountSetupEmail } from "./email-templates";
 import { humanMemberIdentityWhere, inferMemberKindFromUserIdentity, systemMemberIdentityWhere } from "./member-identity";
+import { assertNonReservedWorkspaceSystemEmail } from "./workspaces";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -319,6 +320,10 @@ export async function bulkInviteMembers(actor: AppActor, params: {
   workspaceId: string;
   members: { email: string; displayName?: string | null; role?: MemberRole; kind?: MemberKind }[];
 }): Promise<{ invited: number; details: { email: string; displayName: string | null; token: string }[]; errors: string[] }> {
+  for (const info of params.members) {
+    assertNonReservedWorkspaceSystemEmail(normalizeEmail(info.email));
+  }
+
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -360,6 +365,9 @@ export async function createMember(actor: AppActor, params: {
   kind?: MemberKind;
   skipAdminCheck?: boolean;
 }) {
+  const email = normalizeEmail(params.email);
+  assertNonReservedWorkspaceSystemEmail(email);
+
   if (!params.skipAdminCheck) {
     await requireWorkspaceMembership({
       actor,
@@ -368,7 +376,6 @@ export async function createMember(actor: AppActor, params: {
     });
   }
 
-  const email = normalizeEmail(params.email);
   const displayName = normalizeDisplayName(params.displayName);
   const kind = params.kind ?? inferMemberKindFromUserIdentity({ email, displayName });
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
@@ -455,6 +462,8 @@ export async function inviteMember(actor: AppActor, params: {
   email: string;
   displayName?: string | null;
 }) {
+  assertNonReservedWorkspaceSystemEmail(normalizeEmail(params.email));
+
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -484,6 +493,13 @@ export async function updateMember(actor: AppActor, params: {
   displayName?: string | null;
   email?: string | null;
 }) {
+  const normalizedEmail = params.email !== undefined && params.email !== null
+    ? normalizeEmail(params.email)
+    : undefined;
+  if (normalizedEmail !== undefined) {
+    assertNonReservedWorkspaceSystemEmail(normalizedEmail);
+  }
+
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -507,6 +523,7 @@ export async function updateMember(actor: AppActor, params: {
     });
 
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    assertNonReservedWorkspaceSystemEmail(member.user.email);
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
@@ -530,9 +547,6 @@ export async function updateMember(actor: AppActor, params: {
       invariant(otherAdminCount > 0, 400, "LAST_ADMIN", "Workspace must keep at least one active admin.");
     }
 
-    const normalizedEmail = params.email !== undefined && params.email !== null
-      ? normalizeEmail(params.email)
-      : undefined;
     if (normalizedEmail !== undefined) {
       invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
     }
@@ -678,6 +692,7 @@ export async function resendMemberAccessLink(actor: AppActor, params: {
       include: { user: { select: { id: true, email: true, displayName: true } } },
     });
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    assertNonReservedWorkspaceSystemEmail(member.user.email);
 
     const token = await issueSetupToken(tx, member.userId);
     await tx.auditLog.create({
@@ -700,6 +715,9 @@ export async function requestMemberInvite(actor: AppActor, params: {
   email: string;
   displayName?: string | null;
 }) {
+  const email = normalizeEmail(params.email);
+  assertNonReservedWorkspaceSystemEmail(email);
+
   const requesterMembership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -715,7 +733,6 @@ export async function requestMemberInvite(actor: AppActor, params: {
     throw new AppError(403, "FORBIDDEN", "Invite requests are not enabled for this workspace.");
   }
 
-  const email = normalizeEmail(params.email);
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
 
   const [existingActiveMember, existingPendingRequest] = await Promise.all([
@@ -787,6 +804,7 @@ export async function approveMemberInviteRequest(actor: AppActor, params: {
   });
   invariant(request && request.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Invite request not found.");
   invariant(request.status === "PENDING", 400, "INVALID_STATE", "Invite request is already decided.");
+  assertNonReservedWorkspaceSystemEmail(request.email);
 
   const result = await createMember(actor, {
     workspaceId: params.workspaceId,

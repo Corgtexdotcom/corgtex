@@ -53,6 +53,16 @@ export function configuredSeedScripts(env = process.env) {
   return [...uniqueScripts.values()];
 }
 
+export function seedCommand(script, root = rootDir) {
+  return {
+    command: process.execPath,
+    args: [
+      path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+      path.resolve(root, script),
+    ],
+  };
+}
+
 export function resolveStartupMode(env = process.env) {
   const mode = env.CORGTEX_STARTUP_MODE?.trim() || "combined";
   if (!STARTUP_MODES.has(mode)) {
@@ -145,7 +155,8 @@ function runMigrations() {
 
 function runSeeds() {
   console.log("[start-web] Step 2: Running Production Bootstrap Seed");
-  run(process.execPath, [path.join(rootDir, "prisma", "seed.mjs")]);
+  const baseSeed = seedCommand("prisma/seed.mjs");
+  run(baseSeed.command, baseSeed.args);
 
   const seedScripts = configuredSeedScripts();
 
@@ -156,7 +167,8 @@ function runSeeds() {
       continue;
     }
     console.log(`[start-web] Running explicit extra seed: ${script}`);
-    run(process.execPath, [resolved]);
+    const extraSeed = seedCommand(script);
+    run(extraSeed.command, extraSeed.args);
   }
 }
 

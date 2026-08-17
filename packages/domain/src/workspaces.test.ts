@@ -7,10 +7,16 @@ const { envMock, prismaMock } = vi.hoisted(() => {
     workspace: {
       findUnique: vi.fn(),
       create: vi.fn(),
+      update: vi.fn(),
       findMany: vi.fn(),
+    },
+    user: {
+      findMany: vi.fn(),
+      create: vi.fn(),
     },
     member: {
       create: vi.fn(),
+      upsert: vi.fn(),
     },
     approvalPolicy: {
       createMany: vi.fn(),
@@ -28,6 +34,8 @@ vi.mock("@corgtex/shared", () => ({
   env: envMock,
   normalizeWorkspaceSlug: (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-"),
   prisma: prismaMock,
+  hashPassword: vi.fn((value: string) => `hash:${value}`),
+  randomOpaqueToken: vi.fn(() => "opaque-system-password"),
 }));
 
 const actor: AppActor = {
@@ -44,7 +52,10 @@ describe("workspaces domain", () => {
     vi.clearAllMocks();
     envMock.DEPLOYMENT_WORKSPACE_SCOPE_SLUG = undefined;
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    prismaMock.user.findMany.mockResolvedValue([]);
+    prismaMock.user.create.mockResolvedValue({ id: "system-user-1" });
     prismaMock.member.create.mockResolvedValue({});
+    prismaMock.member.upsert.mockResolvedValue({});
     prismaMock.approvalPolicy.createMany.mockResolvedValue({ count: 2 });
   });
 
@@ -74,6 +85,171 @@ describe("workspaces domain", () => {
         isActive: true,
       },
     });
+    expect(prismaMock.user.create).toHaveBeenCalledWith({
+      data: {
+        email: "system+new-workspace@corgtex.local",
+        displayName: "New Workspace System",
+        passwordHash: "hash:opaque-system-password",
+      },
+      select: { id: true },
+    });
+    expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: { role: "ADMIN", kind: "SYSTEM", isActive: true },
+      create: expect.objectContaining({ role: "ADMIN", kind: "SYSTEM", isActive: true }),
+    }));
+    expect(prismaMock.approvalPolicy.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ workspaceId: "workspace-1", subjectType: "PROPOSAL" })],
+      skipDuplicates: true,
+    });
+  });
+
+  it("reconciles only an existing exact canonical system identity", async () => {
+    prismaMock.user.findMany.mockResolvedValue([{
+      id: "system-user-1",
+      email: "system+new-workspace@corgtex.local",
+      globalRole: "USER",
+      ssoIdentities: [],
+      memberships: [{
+        workspaceId: "workspace-1",
+        role: "ADMIN",
+        kind: "SYSTEM",
+        isActive: true,
+        mergedAt: null,
+        mergedIntoMemberId: null,
+      }],
+    }]);
+
+    const { ensureCanonicalWorkspaceBaseline } = await import("./workspaces");
+    await ensureCanonicalWorkspaceBaseline(prismaMock as never, {
+      id: "workspace-1",
+      slug: "new-workspace",
+      name: "New Workspace",
+    });
+
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
+    expect(prismaMock.member.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId_userId: {
+          workspaceId: "workspace-1",
+          userId: "system-user-1",
+        },
+      },
+    }));
+  });
+
+  it.each([
+    {
+      label: "case-insensitive alias",
+      users: [{ id: "alias", email: "System+new-workspace@corgtex.local", memberships: [] }],
+    },
+    {
+      label: "orphaned exact user",
+      users: [{
+        id: "orphan",
+        email: "system+new-workspace@corgtex.local",
+        globalRole: "USER",
+        ssoIdentities: [],
+        memberships: [],
+      }],
+    },
+    {
+      label: "foreign member",
+      users: [{
+        id: "foreign",
+        email: "system+new-workspace@corgtex.local",
+        globalRole: "USER",
+        ssoIdentities: [],
+        memberships: [{
+          workspaceId: "foreign-workspace",
+          role: "ADMIN",
+          kind: "SYSTEM",
+          isActive: true,
+          mergedAt: null,
+          mergedIntoMemberId: null,
+        }],
+      }],
+    },
+    {
+      label: "human member",
+      users: [{
+        id: "human",
+        email: "system+new-workspace@corgtex.local",
+        globalRole: "USER",
+        ssoIdentities: [],
+        memberships: [{
+          workspaceId: "workspace-1",
+          role: "ADMIN",
+          kind: "HUMAN",
+          isActive: true,
+          mergedAt: null,
+          mergedIntoMemberId: null,
+        }],
+      }],
+    },
+    {
+      label: "merged system member",
+      users: [{
+        id: "merged",
+        email: "system+new-workspace@corgtex.local",
+        globalRole: "USER",
+        ssoIdentities: [],
+        memberships: [{
+          workspaceId: "workspace-1",
+          role: "ADMIN",
+          kind: "SYSTEM",
+          isActive: true,
+          mergedAt: new Date("2026-08-01T00:00:00.000Z"),
+          mergedIntoMemberId: "replacement-member",
+        }],
+      }],
+    },
+    {
+      label: "global operator",
+      users: [{
+        id: "operator",
+        email: "system+new-workspace@corgtex.local",
+        globalRole: "OPERATOR",
+        ssoIdentities: [],
+        memberships: [{
+          workspaceId: "workspace-1",
+          role: "ADMIN",
+          kind: "SYSTEM",
+          isActive: true,
+          mergedAt: null,
+          mergedIntoMemberId: null,
+        }],
+      }],
+    },
+    {
+      label: "SSO-linked canonical user",
+      users: [{
+        id: "sso-linked",
+        email: "system+new-workspace@corgtex.local",
+        globalRole: "USER",
+        ssoIdentities: [{ id: "sso-identity" }],
+        memberships: [{
+          workspaceId: "workspace-1",
+          role: "ADMIN",
+          kind: "SYSTEM",
+          isActive: true,
+          mergedAt: null,
+          mergedIntoMemberId: null,
+        }],
+      }],
+    },
+  ])("fails closed for an incompatible canonical identity: $label", async ({ users }) => {
+    prismaMock.user.findMany.mockResolvedValue(users);
+
+    const { ensureCanonicalWorkspaceBaseline } = await import("./workspaces");
+    await expect(ensureCanonicalWorkspaceBaseline(prismaMock as never, {
+      id: "workspace-1",
+      slug: "new-workspace",
+      name: "New Workspace",
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+
+    expect(prismaMock.user.create).not.toHaveBeenCalled();
+    expect(prismaMock.member.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.approvalPolicy.createMany).not.toHaveBeenCalled();
   });
 
   it("createWorkspace allows the normalized configured dedicated workspace slug", async () => {
@@ -103,6 +279,31 @@ describe("workspaces domain", () => {
     });
 
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("createWorkspace rejects another workspace's reserved system address as its human owner", async () => {
+    const { createWorkspace } = await import("./workspaces");
+    await expect(createWorkspace({
+      kind: "user",
+      user: {
+        id: "system-user",
+        email: "SYSTEM+OTHER-WORKSPACE@CORGTEX.LOCAL",
+        displayName: "Not Human",
+      },
+    }, {
+      name: "Workspace",
+      slug: "workspace",
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("reserves the entire workspace system email namespace case-insensitively", async () => {
+    const { assertNonReservedWorkspaceSystemEmail } = await import("./workspaces");
+
+    expect(() => assertNonReservedWorkspaceSystemEmail(" System+foreign@Corgtex.Local "))
+      .toThrow("Reserved workspace system identity cannot be used as a human member.");
+    expect(() => assertNonReservedWorkspaceSystemEmail("human@corgtex.local")).not.toThrow();
   });
 
   it("createWorkspace rejects a missing name", async () => {

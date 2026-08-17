@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { AppError, invariant } from "./errors";
 import { requireGlobalOperator } from "./auth";
 import { appendEvents } from "./events";
+import { humanMemberIdentityWhere } from "./member-identity";
 
 export const TRIAL_STATUS_ACTIVE = "ACTIVE";
 export const TRIAL_STATUS_REVIEW_REQUIRED = "REVIEW_REQUIRED";
@@ -12,7 +13,6 @@ export const TRIAL_STATUS_EXPIRED = "EXPIRED";
 export const TRIAL_STATUS_CONVERTED = "CONVERTED";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const SUPPORT_EMAIL_DOMAIN = "corgtex.local";
 
 type TrialLike = {
   id: string;
@@ -186,14 +186,7 @@ export async function assertTrialMemberCapacity(workspaceId: string) {
     where: {
       workspaceId,
       isActive: true,
-      NOT: {
-        user: {
-          email: {
-            startsWith: "support+",
-            endsWith: `@${SUPPORT_EMAIL_DOMAIN}`,
-          },
-        },
-      },
+      ...humanMemberIdentityWhere(),
     },
   });
   invariant(activeMembers < trial.memberLimit, 403, "TRIAL_MEMBER_LIMIT_EXCEEDED", "Trial member limit exceeded.");

@@ -13,6 +13,7 @@ import { AppError, invariant } from "./errors";
 import { CrmDealStage, CrmActivityType } from "@prisma/client";
 import type { CustomerAccountStatus, CustomerDeploymentStatus, Prisma } from "@prisma/client";
 import { registerCustomerDeployment } from "./customer-lifecycle";
+import { createCanonicalWorkspace, ensureCanonicalWorkspace } from "./workspaces";
 
 const DEFAULT_DEMO_WORKSPACE = {
   slug: "corgtex",
@@ -536,14 +537,10 @@ export async function captureDemoLead(params: {
   const name = localPart.replace(/[^a-zA-Z0-9]/g, " ");
 
   return withCrmLinkSyncRetry(async (tx) => {
-    const workspace = await tx.workspace.upsert({
-      where: { slug: workspaceSlug },
-      update: {},
-      create: {
-        slug: workspaceSlug,
-        name: workspaceName,
-        description: workspaceDescription,
-      },
+    const workspace = await ensureCanonicalWorkspace(tx, {
+      slug: workspaceSlug,
+      name: workspaceName,
+      description: workspaceDescription,
     });
 
     const demoLead = await tx.demoLead.upsert({
@@ -3082,11 +3079,9 @@ export async function provisionProspectWorkspace(actor: AppActor, params: {
     invariant(!contactLinks || contact, 409, "ARCHIVED_PARENT", "Restore the matching contact and account before provisioning.");
     const newWorkspaceName = `Demo Workspace (${lead.email})`;
     const newWorkspaceSlug = `demo-${Date.now()}`;
-    const targetWorkspace = await tx.workspace.create({
-      data: {
-        name: newWorkspaceName,
-        slug: newWorkspaceSlug,
-      },
+    const targetWorkspace = await createCanonicalWorkspace(tx, {
+      name: newWorkspaceName,
+      slug: newWorkspaceSlug,
     });
 
     const prospectWorkspace = await tx.crmProspectWorkspace.create({
