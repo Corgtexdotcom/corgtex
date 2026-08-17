@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { CONTRACT, loadManifest, parseCsv,
@@ -51,6 +52,13 @@ const run = (target, extra = {}) => runCorporateRebelsDedicatedSeed({ phase: "se
   fetchFn: healthy, prisma: target.prisma, databaseUrl, ...extra });
 
 describe("Corporate Rebels dedicated seed", () => {
+  it("loads through the plain Node operational entrypoint", () => {
+    expect(() => execFileSync(process.execPath, ["-e",
+      'import("./scripts/corporate-rebels-dedicated-seed.mjs")'], {
+      cwd: new URL("..", import.meta.url), stdio: "pipe",
+    })).not.toThrow();
+  });
+
   it("pins the 25-row manifest and parses quoted commas", async () => {
     expect(await loadManifest()).toHaveLength(25);
     expect(parseCsv('a,b\n"one, two",three\n')).toEqual([{ a: "one, two", b: "three" }]);

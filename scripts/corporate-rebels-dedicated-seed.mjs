@@ -2,10 +2,12 @@ import { PrismaClient } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import {
+import { tsImport } from "tsx/esm/api";
+
+const {
   canonicalWorkspaceSystemEmail,
   ensureCanonicalWorkspace,
-} from "../packages/domain/src/workspaces.ts";
+} = await tsImport("../packages/domain/src/workspaces.ts", import.meta.url);
 
 export const CONTRACT = Object.freeze({
   databaseHost: "corgtex-corporate-rebels-prod-pg.postgres.database.azure.com",
