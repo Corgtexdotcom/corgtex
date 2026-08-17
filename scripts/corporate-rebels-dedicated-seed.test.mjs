@@ -6,7 +6,8 @@ import { CONTRACT, loadManifest, parseCsv,
 const SHA = "a".repeat(40);
 const manifest = () => readFile(new URL("./data/corporate-rebels-source-manifest-2026-08-13.csv", import.meta.url));
 const health = () => ({ status: "ok", database: "up", schema: "ready",
-  runtime: { redis: "configured", storage: "configured", workspaceScopeSlug: CONTRACT.slug },
+  runtime: { redis: "configured", storage: "configured", workspaceScopeSlug: CONTRACT.slug,
+    workspaceScopeValid: true },
   release: { provider: "azure", gitSha: SHA,
     runtime: { gitSha: SHA, source: "github" },
     imageTag: `sha-${SHA}`, version: `main-${SHA.slice(0, 12)}`,
@@ -68,6 +69,7 @@ describe("Corporate Rebels dedicated seed", () => {
     expect(receipt.workspace._count).toEqual({ members: 0, memberInviteRequests: 0,
       brainSources: 25, brainArticles: 1 });
     expect(target.state.articles[0]).toMatchObject({ authority: "DRAFT", isPrivate: true, publishedAt: null });
+    expect(target.state.sources[0].metadata.sourceUrl).toBe(target.state.sources[0].metadata.canonicalUrl);
     expect(target.state.receipts[0].meta).toEqual({ sourceCount: 25, releaseGitSha: SHA,
       publication: false, invitations: false });
     await expect(run(target)).resolves.toMatchObject({ resumed: true, workspace: { id: receipt.workspace.id } });
@@ -114,5 +116,7 @@ describe("Corporate Rebels dedicated seed", () => {
     await expect(run(corrupted)).rejects.toThrow("seed verification");
     const indexDrift = fake(); await run(indexDrift); indexDrift.state.articles[0].bodyMd = "corrupted";
     await expect(run(indexDrift)).rejects.toThrow("seed verification");
+    const archived = fake(); await run(archived); archived.state.sources[0].archivedAt = new Date();
+    await expect(run(archived)).rejects.toThrow("seed verification");
   });
 });

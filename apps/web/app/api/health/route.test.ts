@@ -103,9 +103,29 @@ describe("GET /api/health", () => {
         redis: "missing",
         storage: "missing",
         workspaceScopeSlug: "corporate-rebels",
+        workspaceScopeValid: true,
       },
       loginPath: "/login",
       apiLoginPath: "/api/auth/login",
+    });
+  });
+
+  it("returns structured degraded health for invalid dedicated scope configuration", async () => {
+    const { GET } = await import("./route");
+    process.env.WORKSPACE_SLUG = "corporate-rebels";
+    process.env.APP_URL = "not-an-absolute-url";
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      runtime: { workspaceScopeSlug: null, workspaceScopeValid: false },
     });
   });
 

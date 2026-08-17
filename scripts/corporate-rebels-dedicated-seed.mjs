@@ -58,7 +58,7 @@ async function verifyHealth(fetchFn, releaseGitSha) {
   const health = response.ok ? await response.json() : null;
   if (!health || health.status !== "ok" || health.database !== "up" || health.schema !== "ready"
     || health.runtime?.redis !== "configured" || health.runtime?.storage !== "configured"
-    || health.runtime?.workspaceScopeSlug !== CONTRACT.slug
+    || health.runtime?.workspaceScopeSlug !== CONTRACT.slug || health.runtime?.workspaceScopeValid !== true
     || health.release?.provider !== "azure" || health.release?.gitSha !== releaseGitSha
     || health.release?.runtime?.gitSha !== releaseGitSha
     || health.release?.imageTag !== `sha-${releaseGitSha}`
@@ -72,7 +72,8 @@ function sources(rows) {
     content: `${row.why_it_matters} Canonical source: ${row.canonical_https_url} Publisher: ${row.publisher}. `
       + `Original publication date: ${row.original_publication_date}. Author/byline: ${row.author_byline || "not stated"}.`,
     ingestionGuidanceMd: "Attributed external reference only. Cite its canonical URL and original date.",
-    metadata: { schemaVersion: 1, manifestId: row.id, canonicalUrl: row.canonical_https_url,
+    metadata: { schemaVersion: 1, manifestId: row.id, sourceUrl: row.canonical_https_url,
+      canonicalUrl: row.canonical_https_url,
       publisher: row.publisher, authorByline: row.author_byline, originalPublishedAt: row.original_publication_date,
       retrievedAt: row.retrieved_date, language: row.language, topic: row.topic,
       sourceClass: row.source_class, permittedIngestionMode: row.permitted_ingestion_mode,
@@ -97,12 +98,13 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
     action: "corporate_rebels.dedicated_seeded" }, orderBy: { createdAt: "desc" }, select: { meta: true } });
   const seeded = await db.brainSource.findMany({ where: { workspaceId }, select: { id: true, externalId: true,
     accessDomain: true, sourceType: true, tier: true, channel: true, title: true, content: true,
-    ingestionGuidanceMd: true, metadata: true } });
+    ingestionGuidanceMd: true, metadata: true, archivedAt: true } });
   const expected = new Map(sources(rows).map((source) => [source.externalId, source]));
   const seen = new Set();
   const invalidSource = seeded.some((source) => {
     const wanted = expected.get(source.externalId); seen.add(source.externalId);
-    return !wanted || source.accessDomain !== wanted.accessDomain || source.sourceType !== wanted.sourceType
+    return !wanted || source.archivedAt || source.accessDomain !== wanted.accessDomain
+      || source.sourceType !== wanted.sourceType
       || source.tier !== wanted.tier || source.channel !== wanted.channel || source.content !== wanted.content
       || source.title !== wanted.title || source.ingestionGuidanceMd !== wanted.ingestionGuidanceMd
       || Object.entries(wanted.metadata).some(([key, value]) => source.metadata?.[key] !== value);
