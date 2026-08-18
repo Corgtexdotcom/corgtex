@@ -271,6 +271,31 @@ describe("file-ingestion", () => {
     expect(invalid).toMatchObject({ supported: false, textContent: null });
   });
 
+  it.each(["application/zip", "application/x-zip-compressed"])(
+    "validates a named PPTX reported as %s without treating ordinary ZIP files as PPTX",
+    async (mimeType) => {
+      const valid = await extractTextFromFileBuffer({
+        fileBuffer: VALID_PPTX_BUFFER,
+        fileName: "presentation.pptx",
+        mimeType,
+      });
+      const ordinaryZip = await extractTextFromFileBuffer({
+        fileBuffer: VALID_PPTX_BUFFER,
+        fileName: "archive.zip",
+        mimeType,
+      });
+      const invalidPptx = extractTextFromFileBuffer({
+        fileBuffer: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00]),
+        fileName: "invalid.pptx",
+        mimeType,
+      });
+
+      expect(valid).toMatchObject({ supported: true, extraction: { format: "PPTX" } });
+      expect(ordinaryZip).toMatchObject({ supported: false, textContent: null });
+      await expect(invalidPptx).rejects.toThrow("not a valid PowerPoint presentation");
+    },
+  );
+
   it("fails recognized unsafe PPTX before duplicate checks, storage, transactions, audits, or events", async () => {
     const { defaultStorage } = await import("@corgtex/storage");
 

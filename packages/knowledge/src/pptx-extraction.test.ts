@@ -19,6 +19,25 @@ async function rewriteFixture(changes: Record<string, (value: string) => string>
   return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
 }
 
+async function rewriteFixtureBytes(changes: Record<string, (value: string) => Buffer>) {
+  const zip = await JSZip.loadAsync(await fixture());
+  for (const [path, change] of Object.entries(changes)) {
+    const entry = zip.file(path);
+    if (!entry) throw new Error(`Missing synthetic fixture part: ${path}`);
+    zip.file(path, change(await entry.async("string")));
+  }
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+
+function encodeXml(value: string, encoding: "utf-16le" | "utf-16be") {
+  const declared = value.replace(/encoding="UTF-8"/i, "encoding=\"UTF-16\"");
+  const littleEndian = Buffer.from(declared, "utf16le");
+  if (encoding === "utf-16le") return Buffer.concat([Buffer.from([0xff, 0xfe]), littleEndian]);
+  const bigEndian = Buffer.from(littleEndian);
+  bigEndian.swap16();
+  return Buffer.concat([Buffer.from([0xfe, 0xff]), bigEndian]);
+}
+
 async function markFixtureEncrypted() {
   const buffer = Buffer.from(await fixture());
   for (let offset = 0; offset <= buffer.length - 10; offset += 1) {
@@ -73,6 +92,34 @@ describe("PPTX extraction", () => {
     expect(result.textContent).toContain("Slide 1\nSecond slide");
     expect(result.textContent).not.toContain("First slide native body");
     expect(result.extraction.slideCount).toBe(1);
+  });
+
+  it("resolves presentation relationships by namespace instead of prefix", async () => {
+    const buffer = await rewriteFixture({
+      "ppt/presentation.xml": (xml) => xml
+        .replace("xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"", "xmlns:rel=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"")
+        .replaceAll("r:id=", "rel:id="),
+    });
+
+    const result = await extractPptxText(buffer);
+    expect(result.textContent).toContain("NEBULA-LATE-SLIDE-7421 searchable phrase");
+    expect(result.extraction.slideCount).toBe(2);
+  });
+
+  it("normalizes UTF-16LE and UTF-16BE XML parts before parsing", async () => {
+    const buffer = await rewriteFixtureBytes({
+      "[Content_Types].xml": (xml) => encodeXml(xml, "utf-16le"),
+      "ppt/presentation.xml": (xml) => encodeXml(xml, "utf-16be"),
+      "ppt/_rels/presentation.xml.rels": (xml) => encodeXml(xml, "utf-16le"),
+      "ppt/slides/slide1.xml": (xml) => encodeXml(xml, "utf-16be"),
+      "ppt/slides/_rels/slide1.xml.rels": (xml) => encodeXml(xml, "utf-16le"),
+      "ppt/notesSlides/notesSlide1.xml": (xml) => encodeXml(xml, "utf-16be"),
+    });
+
+    const result = await extractPptxText(buffer);
+    expect(result.textContent).toContain("First slide native body");
+    expect(result.textContent).toContain("First slide speaker rationale");
+    expect(result.textContent).toContain("NEBULA-LATE-SLIDE-7421 searchable phrase");
   });
 
   it("truncates deterministically inside the child output bound", async () => {

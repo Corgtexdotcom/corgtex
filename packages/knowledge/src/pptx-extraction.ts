@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export const PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
@@ -46,16 +48,16 @@ const DEFAULT_LIMITS = {
   processTimeoutMs: 30_000,
 };
 const PROCESS_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
-const PROCESS_MAX_DATA_KIB = 192 * 1024;
 
 const PROCESS_SOURCE = String.raw`
 const { posix: path } = require("node:path");
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 const elements = (node, localName) => Array.from(node.getElementsByTagName("*")).filter((item) => item.localName === localName);
 const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 (async () => {
-  const [officeParserPath, jsZipPath, xmlDomPath, maxInputValue, maxUncompressedValue, maxEntriesValue, maxSlidesValue, maxTextValue] = process.argv.slice(1);
+  const [packageAnchor, maxInputValue, maxUncompressedValue, maxEntriesValue, maxSlidesValue, maxTextValue] = process.argv.slice(1);
   const maxInputBytes = Number(maxInputValue);
   const maxUncompressedBytes = Number(maxUncompressedValue);
   const maxZipEntries = Number(maxEntriesValue);
@@ -69,8 +71,20 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
     chunks.push(chunk);
   }
   const buffer = Buffer.concat(chunks);
-  const JSZip = require(jsZipPath);
-  const { DOMParser } = require(xmlDomPath);
+  let JSZip;
+  let DOMParser;
+  let OfficeParser;
+  try {
+    const packageRequire = require("node:module").createRequire(packageAnchor);
+    const officeParserPath = packageRequire.resolve("officeparser");
+    const jsZipPath = packageRequire.resolve("jszip");
+    const xmlDomPath = packageRequire.resolve("@xmldom/xmldom");
+    JSZip = require(jsZipPath);
+    ({ DOMParser } = require(xmlDomPath));
+    ({ OfficeParser } = require(officeParserPath));
+  } catch {
+    fail("EXTRACTION_FAILED");
+  }
   let zip;
   try {
     zip = await JSZip.loadAsync(buffer, { checkCRC32: false, createFolders: false });
@@ -80,7 +94,42 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
   const entries = Object.values(zip.files).filter((entry) => !entry.dir);
   if (entries.length > maxZipEntries) fail("EXTRACTION_LIMIT_EXCEEDED");
   let inspectedBytes = 0;
+  let needsXmlNormalization = false;
+  const partCache = new Map();
+  const decodeXml = (content) => {
+    let encoding = "utf-8";
+    let offset = 0;
+    if (content[0] === 0xff && content[1] === 0xfe) {
+      encoding = "utf-16le";
+      offset = 2;
+    } else if (content[0] === 0xfe && content[1] === 0xff) {
+      encoding = "utf-16be";
+      offset = 2;
+    } else if (content[0] === 0x3c && content[1] === 0x00 && content[2] === 0x3f && content[3] === 0x00) {
+      encoding = "utf-16le";
+    } else if (content[0] === 0x00 && content[1] === 0x3c && content[2] === 0x00 && content[3] === 0x3f) {
+      encoding = "utf-16be";
+    }
+    let text;
+    try {
+      text = new TextDecoder(encoding, { fatal: true }).decode(content.subarray(offset));
+    } catch {
+      fail("MALFORMED_FILE");
+    }
+    const declared = text.match(/^<\?xml\s+[^>]*encoding\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase();
+    const declaredEncoding = declared === "utf8" ? "utf-8" : declared;
+    if (declaredEncoding && !["utf-8", "utf-16", "utf-16le", "utf-16be"].includes(declaredEncoding)) {
+      fail("MALFORMED_FILE");
+    }
+    if (declaredEncoding === "utf-8" && encoding !== "utf-8") fail("MALFORMED_FILE");
+    if (declaredEncoding?.startsWith("utf-16") && encoding === "utf-8") fail("MALFORMED_FILE");
+    if (declaredEncoding === "utf-16le" && encoding !== "utf-16le") fail("MALFORMED_FILE");
+    if (declaredEncoding === "utf-16be" && encoding !== "utf-16be") fail("MALFORMED_FILE");
+    if (encoding !== "utf-8") needsXmlNormalization = true;
+    return text;
+  };
   const readPart = async (partName, required = true) => {
+    if (partCache.has(partName)) return partCache.get(partName);
     const entry = zip.file(partName);
     if (!entry) {
       if (required) fail("MALFORMED_FILE");
@@ -89,7 +138,9 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
     const content = await entry.async("nodebuffer");
     inspectedBytes += content.length;
     if (inspectedBytes > Math.min(maxUncompressedBytes, 16 * 1024 * 1024)) fail("EXTRACTION_LIMIT_EXCEEDED");
-    return content.toString("utf8");
+    const text = decodeXml(content);
+    partCache.set(partName, text);
+    return text;
   };
   const parseXml = (value) => {
     let invalid = false;
@@ -116,7 +167,8 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
     if (!/^ppt\/slides\/slide\d+\.xml$/.test(normalized)) fail("MALFORMED_FILE");
     slideTargets.set(relation.getAttribute("Id"), normalized);
   }
-  const orderedSlides = elements(presentation, "sldId").map((node) => slideTargets.get(node.getAttribute("r:id")));
+  const orderedSlides = elements(presentation, "sldId").map((node) =>
+    slideTargets.get(node.getAttributeNS(OFFICE_RELATIONSHIPS_NS, "id")));
   if (orderedSlides.some((target) => !target) || new Set(orderedSlides).size !== orderedSlides.length) fail("MALFORMED_FILE");
   if (orderedSlides.length > maxSlides) fail("EXTRACTION_LIMIT_EXCEEDED");
 
@@ -147,8 +199,26 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
     visibleSlides.push({ slideNumber, noteNumber });
   }
 
-  const { OfficeParser } = require(officeParserPath);
-  const ast = await OfficeParser.parseOffice(buffer, {
+  const parserPartPattern = /^(?:ppt\/(?:presentation\.xml|slides\/slide\d+\.xml|notesSlides\/notesSlide\d+\.xml|slides\/_rels\/slide\d+\.xml\.rels)|docProps\/(?:core|custom|app)\.xml)$/;
+  for (const entry of entries) {
+    if (!parserPartPattern.test(entry.name)) continue;
+    parseXml(await readPart(entry.name));
+  }
+  let parserBuffer = buffer;
+  if (needsXmlNormalization) {
+    const normalizedZip = new JSZip();
+    normalizedZip.file("[Content_Types].xml", await readPart("[Content_Types].xml"));
+    for (const [partName, text] of partCache) {
+      if (parserPartPattern.test(partName)) normalizedZip.file(partName, text);
+    }
+    parserBuffer = await normalizedZip.generateAsync({
+      type: "nodebuffer",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    });
+  }
+
+  const ast = await OfficeParser.parseOffice(parserBuffer, {
     fileType: "pptx",
     ignoreComments: true,
     ignoreSlideMasters: true,
@@ -199,7 +269,7 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
 })().then(
   (value) => process.stdout.write(JSON.stringify({ ok: true, value })),
   (error) => {
-    const known = new Set(["FILE_TOO_LARGE", "NOT_PPTX", "MALFORMED_FILE", "EMPTY_EXTRACTION", "EXTRACTION_LIMIT_EXCEEDED"]);
+    const known = new Set(["FILE_TOO_LARGE", "NOT_PPTX", "MALFORMED_FILE", "EMPTY_EXTRACTION", "EXTRACTION_LIMIT_EXCEEDED", "EXTRACTION_FAILED"]);
     process.stdout.write(JSON.stringify({ ok: false, code: known.has(error?.code) ? error.code : "MALFORMED_FILE" }));
   },
 );
@@ -207,6 +277,17 @@ const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim()
 
 function boundedLimit(value: number | undefined, maximum: number) {
   return value && Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), maximum) : maximum;
+}
+
+function findKnowledgePackageAnchor() {
+  let current = process.cwd();
+  for (;;) {
+    const candidate = join(current, "packages/knowledge/package.json");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(current);
+    if (parent === current) throw new PptxExtractionError("EXTRACTION_FAILED");
+    current = parent;
+  }
 }
 
 export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtractionLimits = {}) {
@@ -220,9 +301,7 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
   };
   if (fileBuffer.byteLength > limits.maxInputBytes) throw new PptxExtractionError("FILE_TOO_LARGE");
   const args = [
-    "officeparser",
-    "jszip",
-    "@xmldom/xmldom",
+    findKnowledgePackageAnchor(),
     String(limits.maxInputBytes),
     String(limits.maxUncompressedBytes),
     String(limits.maxZipEntries),
@@ -231,11 +310,7 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
   ];
 
   const value = await new Promise<{ textContent: string; slideCount: number; notesIncluded: boolean; truncated: boolean }>((resolve, reject) => {
-    const child = spawn("/bin/sh", [
-      "-c",
-      `if [ "$(uname -s)" = Linux ]; then ulimit -d ${PROCESS_MAX_DATA_KIB} || exit 70; fi; exec "$@"`,
-      "pptx-extraction",
-      process.execPath,
+    const child = spawn(process.execPath, [
       "--max-old-space-size=192",
       "--max-semi-space-size=16",
       "--stack-size=4096",
@@ -284,6 +359,7 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
         }
         const safeCodes = new Set<PptxExtractionErrorCode>([
           "FILE_TOO_LARGE", "NOT_PPTX", "MALFORMED_FILE", "EMPTY_EXTRACTION", "EXTRACTION_LIMIT_EXCEEDED",
+          "EXTRACTION_FAILED",
         ]);
         finish(() => reject(new PptxExtractionError(message.code && safeCodes.has(message.code) ? message.code : "MALFORMED_FILE")), false);
       } catch {

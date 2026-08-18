@@ -287,8 +287,10 @@ export async function extractTextFromFileBuffer(params: {
   const isPptxName = lowerName.endsWith(".pptx");
   const isPptxMime = mimeType === PPTX_MIME_TYPE;
   const isGenericMime = !mimeType || mimeType === "application/octet-stream";
+  const isZipContainerMime = mimeType === "application/zip" || mimeType === "application/x-zip-compressed";
+  const isSniffablePptxMime = isGenericMime || isZipContainerMime;
   const hasNamedExtension = /\.[^./]+$/.test(lowerName);
-  if ((isPptxName && !isGenericMime && !isPptxMime) || (isPptxMime && hasNamedExtension && !isPptxName)) {
+  if ((isPptxName && !isSniffablePptxMime && !isPptxMime) || (isPptxMime && hasNamedExtension && !isPptxName)) {
     throw new AppError(422, "PPTX_FILE_TYPE_MISMATCH", "The presentation filename and content type do not match.");
   }
   const looksLikeZip = params.fileBuffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
