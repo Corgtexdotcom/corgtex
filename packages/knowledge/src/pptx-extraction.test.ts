@@ -106,6 +106,55 @@ describe("PPTX extraction", () => {
     expect(result.extraction.slideCount).toBe(2);
   });
 
+  it("accepts strict relationship namespaces and rejects conflicting relationship IDs", async () => {
+    const strict = await rewriteFixture({
+      "ppt/presentation.xml": (xml) => xml.replace(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships",
+      ),
+    });
+    const conflicting = await rewriteFixture({
+      "ppt/presentation.xml": (xml) => xml
+        .replace(
+          "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"",
+          "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:strict=\"http://purl.oclc.org/ooxml/officeDocument/relationships\"",
+        )
+        .replace('r:id="rId2"', 'r:id="rId2" strict:id="rId999"'),
+    });
+
+    await expect(extractPptxText(strict)).resolves.toMatchObject({
+      textContent: expect.stringContaining("NEBULA-LATE-SLIDE-7421 searchable phrase"),
+    });
+    await expect(extractPptxText(conflicting)).rejects.toMatchObject({ code: "MALFORMED_FILE" });
+  });
+
+  it("resolves package-absolute speaker-note targets", async () => {
+    const buffer = await rewriteFixture({
+      "ppt/slides/_rels/slide1.xml.rels": (xml) => xml.replace(
+        'Target="../notesSlides/notesSlide1.xml"',
+        'Target="/ppt/notesSlides/notesSlide1.xml"',
+      ),
+    });
+
+    await expect(extractPptxText(buffer)).resolves.toMatchObject({
+      textContent: expect.stringContaining("First slide speaker rationale"),
+      extraction: expect.objectContaining({ notesIncluded: true }),
+    });
+  });
+
+  it("removes only actual slide-number placeholders from speaker notes", async () => {
+    const buffer = await rewriteFixture({
+      "ppt/notesSlides/notesSlide1.xml": (xml) => xml.replace(
+        "First slide speaker rationale",
+        "1",
+      ),
+    });
+
+    const result = await extractPptxText(buffer);
+    expect(result.textContent).toContain("Speaker notes\n1");
+    expect(result.textContent.match(/^1$/gm)).toHaveLength(1);
+  });
+
   it("normalizes UTF-16LE and UTF-16BE XML parts before parsing", async () => {
     const buffer = await rewriteFixtureBytes({
       "[Content_Types].xml": (xml) => encodeXml(xml, "utf-16le"),
@@ -127,6 +176,34 @@ describe("PPTX extraction", () => {
     expect(result.textContent).toHaveLength(95);
     expect(result.textContent.endsWith("\n...[truncated]")).toBe(true);
     expect(result.extraction.truncated).toBe(true);
+  });
+
+  it("hashes complete extracted text independently from indexed-text truncation", async () => {
+    const first = await extractPptxText(await fixture(), { maxTextLength: 80 });
+    const secondBuffer = await rewriteFixture({
+      "ppt/slides/slide2.xml": (xml) => xml.replace(
+        "NEBULA-LATE-SLIDE-7421 searchable phrase",
+        "ORBIT-LATE-SLIDE-9184 different searchable phrase",
+      ),
+    });
+    const second = await extractPptxText(secondBuffer, { maxTextLength: 80 });
+
+    expect(first.textContent).toBe(second.textContent);
+    expect(first.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(second.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.contentHash).not.toBe(second.contentHash);
+  });
+
+  it("stops highly compressed XML while streaming at the inflated-byte limit", async () => {
+    const buffer = await rewriteFixture({
+      "ppt/slides/slide1.xml": (xml) => xml.replace(
+        "First slide native body",
+        "A".repeat(2 * 1024 * 1024),
+      ),
+    });
+
+    await expect(extractPptxText(buffer, { maxUncompressedBytes: 128 * 1024 }))
+      .rejects.toMatchObject({ code: "EXTRACTION_LIMIT_EXCEEDED" });
   });
 
   it.each([

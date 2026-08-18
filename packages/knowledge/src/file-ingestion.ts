@@ -51,10 +51,71 @@ function formatFileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function uploadedContentHash(fileBuffer: Buffer, textContent: string | null) {
-  return textContent?.trim()
+function uploadedContentHash(fileBuffer: Buffer, textContent: string | null, authoritativeContentHash?: string) {
+  return authoritativeContentHash ?? (textContent?.trim()
     ? duplicateGuardContentHash(textContent)
-    : createHash("sha256").update(fileBuffer).digest("hex");
+    : createHash("sha256").update(fileBuffer).digest("hex"));
+}
+
+type PptxExtractionResult = Awaited<ReturnType<typeof extractPptxText>>;
+
+type CachedPptxExtraction = {
+  fileName: string;
+  mimeType: string;
+  maxExtractBytes: number;
+  maxTextLength: number;
+  fingerprint: string;
+  result: Readonly<PptxExtractionResult>;
+};
+
+const pptxExtractionCache = new WeakMap<Buffer, CachedPptxExtraction>();
+
+function clonePptxExtraction(result: Readonly<PptxExtractionResult>): PptxExtractionResult {
+  return {
+    textContent: result.textContent,
+    contentHash: result.contentHash,
+    extraction: { ...result.extraction },
+  };
+}
+
+async function extractPptxTextCached(params: {
+  fileBuffer: Buffer;
+  fileName: string;
+  mimeType: string;
+  maxExtractBytes: number;
+  maxTextLength: number;
+}) {
+  const fingerprint = createHash("sha256").update(params.fileBuffer).digest("hex");
+  const cached = pptxExtractionCache.get(params.fileBuffer);
+  if (
+    cached
+    && cached.fileName === params.fileName
+    && cached.mimeType === params.mimeType
+    && cached.maxExtractBytes === params.maxExtractBytes
+    && cached.maxTextLength === params.maxTextLength
+    && cached.fingerprint === fingerprint
+  ) {
+    return clonePptxExtraction(cached.result);
+  }
+
+  const extracted = await extractPptxText(params.fileBuffer, {
+    maxInputBytes: params.maxExtractBytes,
+    maxTextLength: params.maxTextLength,
+  });
+  const frozen = Object.freeze({
+    textContent: extracted.textContent,
+    contentHash: extracted.contentHash,
+    extraction: Object.freeze({ ...extracted.extraction }),
+  }) as Readonly<PptxExtractionResult>;
+  pptxExtractionCache.set(params.fileBuffer, {
+    fileName: params.fileName,
+    mimeType: params.mimeType,
+    maxExtractBytes: params.maxExtractBytes,
+    maxTextLength: params.maxTextLength,
+    fingerprint,
+    result: frozen,
+  });
+  return clonePptxExtraction(frozen);
 }
 
 function buildBrainSourceContent(params: {
@@ -127,6 +188,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
   textContent: string | null;
   brainSourceContent: string;
   contentHash: string | null;
+  authoritativeContentHash?: string;
   ingestionGuidanceMd?: string;
   metadata: Record<string, unknown>;
 }) {
@@ -143,7 +205,8 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
     });
     const mergedText = duplicateGuardMergeText(existing.textContent, params.textContent);
     const mergedSourceContent = mergedText ? [params.documentTitle, mergedText].join("\n\n") : params.brainSourceContent;
-    const contentHash = mergedText ? duplicateGuardContentHash(mergedText) : params.contentHash;
+    const contentHash = params.authoritativeContentHash
+      ?? (mergedText ? duplicateGuardContentHash(mergedText) : params.contentHash);
     const document = await tx.document.update({
       where: { id: existing.id },
       data: {
@@ -282,6 +345,7 @@ export async function extractTextFromFileBuffer(params: {
   let supported = false;
   let truncated = false;
   let extraction: Record<string, unknown> | undefined;
+  let contentHash: string | undefined;
 
   const mimeType = params.mimeType.split(";")[0]?.trim().toLowerCase() || "";
   const isPptxName = lowerName.endsWith(".pptx");
@@ -297,11 +361,18 @@ export async function extractTextFromFileBuffer(params: {
   const shouldTryPptx = isPptxName || isPptxMime || (isGenericMime && looksLikeZip);
   if (shouldTryPptx) {
     try {
-      const result = await extractPptxText(params.fileBuffer, { maxInputBytes: maxExtractBytes, maxTextLength });
+      const result = await extractPptxTextCached({
+        fileBuffer: params.fileBuffer,
+        fileName,
+        mimeType,
+        maxExtractBytes,
+        maxTextLength,
+      });
       textContent = result.textContent;
       supported = true;
       truncated = result.extraction.truncated;
       extraction = result.extraction;
+      contentHash = result.contentHash;
     } catch (error) {
       if (error instanceof PptxExtractionError && error.code === "NOT_PPTX" && !isPptxName && !isPptxMime) {
         // Generic binary ZIP uploads remain unsupported unless package validation proves PPTX.
@@ -353,6 +424,7 @@ export async function extractTextFromFileBuffer(params: {
     truncated,
     size,
     fileName,
+    contentHash,
     extraction: extraction ?? {
       supported,
       hasTextContent: Boolean(textContent?.trim()),
@@ -396,7 +468,7 @@ export async function ingestFile(actor: AppActor, params: {
   }
 
   // 1. Extract text before writing the blob so duplicate stops do not create orphaned storage.
-  const { textContent, supported, truncated, extraction } = await extractTextFromFileBuffer({
+  const { textContent, supported, truncated, extraction, contentHash: authoritativeContentHash } = await extractTextFromFileBuffer({
     fileBuffer: params.fileBuffer,
     fileName,
     mimeType: params.mimeType,
@@ -410,7 +482,7 @@ export async function ingestFile(actor: AppActor, params: {
     extractionSupported: supported,
     ingestionGuidanceMd,
   });
-  const contentHash = uploadedContentHash(params.fileBuffer, textContent);
+  const contentHash = uploadedContentHash(params.fileBuffer, textContent, authoritativeContentHash);
   const duplicateDecision = await checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "Document",
@@ -455,6 +527,7 @@ export async function ingestFile(actor: AppActor, params: {
         textContent,
         brainSourceContent,
         contentHash,
+        authoritativeContentHash,
         ingestionGuidanceMd,
         metadata: {
           ...documentMetadata,

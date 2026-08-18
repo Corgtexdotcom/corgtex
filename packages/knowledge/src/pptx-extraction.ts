@@ -50,11 +50,16 @@ const DEFAULT_LIMITS = {
 const PROCESS_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 const PROCESS_SOURCE = String.raw`
+const { createHash } = require("node:crypto");
 const { posix: path } = require("node:path");
-const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
+const codedError = (code) => { const error = new Error(code); error.code = code; return error; };
+const fail = (code) => { throw codedError(code); };
 const elements = (node, localName) => Array.from(node.getElementsByTagName("*")).filter((item) => item.localName === localName);
 const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim();
-const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const OFFICE_RELATIONSHIPS_NAMESPACES = [
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+  "http://purl.oclc.org/ooxml/officeDocument/relationships",
+];
 
 (async () => {
   const [packageAnchor, maxInputValue, maxUncompressedValue, maxEntriesValue, maxSlidesValue, maxTextValue] = process.argv.slice(1);
@@ -94,6 +99,7 @@ const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocumen
   const entries = Object.values(zip.files).filter((entry) => !entry.dir);
   if (entries.length > maxZipEntries) fail("EXTRACTION_LIMIT_EXCEEDED");
   let inspectedBytes = 0;
+  const inspectedByteLimit = Math.min(maxUncompressedBytes, 16 * 1024 * 1024);
   let needsXmlNormalization = false;
   const partCache = new Map();
   const decodeXml = (content) => {
@@ -135,9 +141,44 @@ const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocumen
       if (required) fail("MALFORMED_FILE");
       return null;
     }
-    const content = await entry.async("nodebuffer");
-    inspectedBytes += content.length;
-    if (inspectedBytes > Math.min(maxUncompressedBytes, 16 * 1024 * 1024)) fail("EXTRACTION_LIMIT_EXCEEDED");
+    const content = await new Promise((resolve, reject) => {
+      const contentChunks = [];
+      const stream = entry.nodeStream("nodebuffer");
+      let partBytes = 0;
+      let settled = false;
+      let ended = false;
+      stream.on("error", () => {
+        if (settled) return;
+        settled = true;
+        reject(codedError("MALFORMED_FILE"));
+      });
+      stream.on("end", () => {
+        if (settled) return;
+        ended = true;
+        settled = true;
+        inspectedBytes += partBytes;
+        resolve(Buffer.concat(contentChunks, partBytes));
+      });
+      stream.on("close", () => {
+        if (settled || ended) return;
+        settled = true;
+        reject(codedError("MALFORMED_FILE"));
+      });
+      stream.on("data", (chunk) => {
+        if (settled) return;
+        const nextPartBytes = partBytes + chunk.length;
+        if (inspectedBytes + nextPartBytes > inspectedByteLimit) {
+          settled = true;
+          contentChunks.length = 0;
+          stream.pause();
+          stream.destroy();
+          reject(codedError("EXTRACTION_LIMIT_EXCEEDED"));
+          return;
+        }
+        partBytes = nextPartBytes;
+        contentChunks.push(chunk);
+      });
+    });
     const text = decodeXml(content);
     partCache.set(partName, text);
     return text;
@@ -150,11 +191,28 @@ const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocumen
     if (invalid || !document?.documentElement) fail("MALFORMED_FILE");
     return document;
   };
+  if (!zip.file("[Content_Types].xml")) fail("NOT_PPTX");
   const contentTypes = parseXml(await readPart("[Content_Types].xml"));
   const isPptx = elements(contentTypes, "Override").some((node) =>
     node.getAttribute("PartName") === "/ppt/presentation.xml"
       && node.getAttribute("ContentType") === "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml");
   if (!isPptx) fail("NOT_PPTX");
+
+  const resolvePackageTarget = (sourcePart, target, allowedPattern) => {
+    if (!target) fail("MALFORMED_FILE");
+    const normalized = path.normalize(target.startsWith("/")
+      ? target.slice(1)
+      : path.join(path.dirname(sourcePart), target));
+    if (!allowedPattern.test(normalized)) fail("MALFORMED_FILE");
+    return normalized;
+  };
+  const relationshipId = (node) => {
+    const values = OFFICE_RELATIONSHIPS_NAMESPACES
+      .map((namespace) => node.getAttributeNS(namespace, "id"))
+      .filter(Boolean);
+    if (new Set(values).size > 1) fail("MALFORMED_FILE");
+    return values[0];
+  };
 
   const presentation = parseXml(await readPart("ppt/presentation.xml"));
   const relationships = parseXml(await readPart("ppt/_rels/presentation.xml.rels"));
@@ -162,13 +220,15 @@ const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocumen
   for (const relation of elements(relationships, "Relationship")) {
     if (!relation.getAttribute("Type")?.endsWith("/slide")) continue;
     if ((relation.getAttribute("TargetMode") || "Internal") !== "Internal") continue;
-    const target = relation.getAttribute("Target") || "";
-    const normalized = path.normalize(target.startsWith("/") ? target.slice(1) : path.join("ppt", target));
-    if (!/^ppt\/slides\/slide\d+\.xml$/.test(normalized)) fail("MALFORMED_FILE");
+    const normalized = resolvePackageTarget(
+      "ppt/presentation.xml",
+      relation.getAttribute("Target") || "",
+      /^ppt\/slides\/slide\d+\.xml$/,
+    );
     slideTargets.set(relation.getAttribute("Id"), normalized);
   }
   const orderedSlides = elements(presentation, "sldId").map((node) =>
-    slideTargets.get(node.getAttributeNS(OFFICE_RELATIONSHIPS_NS, "id")));
+    slideTargets.get(relationshipId(node)));
   if (orderedSlides.some((target) => !target) || new Set(orderedSlides).size !== orderedSlides.length) fail("MALFORMED_FILE");
   if (orderedSlides.length > maxSlides) fail("EXTRACTION_LIMIT_EXCEEDED");
 
@@ -190,8 +250,12 @@ const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocumen
           && (node.getAttribute("TargetMode") || "Internal") === "Internal");
       const noteTarget = noteRelation?.getAttribute("Target");
       if (noteTarget) {
-        const normalized = path.normalize(path.join(path.dirname(target), noteTarget));
-        const noteMatch = normalized.match(/^ppt\/notesSlides\/notesSlide(\d+)\.xml$/);
+        const normalized = resolvePackageTarget(
+          target,
+          noteTarget,
+          /^ppt\/notesSlides\/notesSlide\d+\.xml$/,
+        );
+        const noteMatch = normalized.match(/notesSlide(\d+)\.xml$/);
         if (!noteMatch) fail("MALFORMED_FILE");
         noteNumber = Number(noteMatch[1]);
       }
@@ -255,17 +319,34 @@ const OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocumen
   visibleSlides.forEach(({ slideNumber, noteNumber }, index) => {
     const body = (slides.get(slideNumber)?.children || []).flatMap(renderNode).filter(Boolean);
     const note = noteNumber ? notes.get(noteNumber) : undefined;
-    const noteLines = (note?.children || []).flatMap(renderNode)
-      .filter((line) => line !== String(slideNumber) && line !== String(index + 1));
+    const placeholderCounts = new Map();
+    if (noteNumber) {
+      const noteXml = partCache.get("ppt/notesSlides/notesSlide" + noteNumber + ".xml");
+      if (noteXml) {
+        const noteDocument = parseXml(noteXml);
+        for (const shape of elements(noteDocument, "sp")) {
+          if (!elements(shape, "ph").some((node) => node.getAttribute("type") === "sldNum")) continue;
+          const line = normalizeText(elements(shape, "t").map((node) => node.textContent || "").join(" "));
+          if (line) placeholderCounts.set(line, (placeholderCounts.get(line) || 0) + 1);
+        }
+      }
+    }
+    const noteLines = (note?.children || []).flatMap(renderNode).filter((line) => {
+      const remaining = placeholderCounts.get(line) || 0;
+      if (remaining === 0) return true;
+      placeholderCounts.set(line, remaining - 1);
+      return false;
+    });
     if (body.length === 0 && noteLines.length === 0) return;
     if (noteLines.length > 0) notesIncluded = true;
     blocks.push(["Slide " + (index + 1), ...body, ...(noteLines.length ? ["Speaker notes", ...noteLines] : [])].join("\n"));
   });
   const fullText = blocks.join("\n\n").trim();
   if (!fullText) fail("EMPTY_EXTRACTION");
+  const contentHash = createHash("sha256").update(fullText).digest("hex");
   const truncated = fullText.length > maxTextLength;
   const textContent = truncated ? fullText.slice(0, maxTextLength) + "\n...[truncated]" : fullText;
-  return { textContent, slideCount: visibleSlides.length, notesIncluded, truncated };
+  return { textContent, contentHash, slideCount: visibleSlides.length, notesIncluded, truncated };
 })().then(
   (value) => process.stdout.write(JSON.stringify({ ok: true, value })),
   (error) => {
@@ -309,7 +390,13 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
     String(limits.maxTextLength),
   ];
 
-  const value = await new Promise<{ textContent: string; slideCount: number; notesIncluded: boolean; truncated: boolean }>((resolve, reject) => {
+  const value = await new Promise<{
+    textContent: string;
+    contentHash: string;
+    slideCount: number;
+    notesIncluded: boolean;
+    truncated: boolean;
+  }>((resolve, reject) => {
     const child = spawn(process.execPath, [
       "--max-old-space-size=192",
       "--max-semi-space-size=16",
@@ -350,7 +437,13 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
       try {
         const message = JSON.parse(Buffer.concat(output).toString("utf8")) as {
           ok?: boolean;
-          value?: { textContent: string; slideCount: number; notesIncluded: boolean; truncated: boolean };
+          value?: {
+            textContent: string;
+            contentHash: string;
+            slideCount: number;
+            notesIncluded: boolean;
+            truncated: boolean;
+          };
           code?: PptxExtractionErrorCode;
         };
         if (message.ok && message.value) {
@@ -372,6 +465,7 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
 
   return {
     textContent: value.textContent,
+    contentHash: value.contentHash,
     extraction: {
       format: "PPTX",
       parser: "officeparser",
