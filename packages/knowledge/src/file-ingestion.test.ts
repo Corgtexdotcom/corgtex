@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createHash } from "node:crypto";
-import { ingestFile } from "./file-ingestion";
+import { readFileSync } from "node:fs";
+import JSZip from "jszip";
+import { extractTextFromFileBuffer, ingestFile } from "./file-ingestion";
+import { extractPptxText, PptxExtractionError } from "./pptx-extraction";
 import { prisma } from "@corgtex/shared";
 import {
   assertTrialStorageCapacity,
@@ -9,6 +12,11 @@ import {
   lockAndAssertTrialStorageCapacity,
   requireWorkspaceMembership,
 } from "@corgtex/domain";
+
+vi.mock("./pptx-extraction", async (importOriginal) => {
+  const actual = await importOriginal() as any;
+  return { ...actual, extractPptxText: vi.fn(actual.extractPptxText) };
+});
 
 vi.mock("@corgtex/shared", () => ({
   prisma: {
@@ -39,7 +47,11 @@ vi.mock("@corgtex/domain", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
   isGlobalOperator: vi.fn().mockReturnValue(false),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
-  AppError: class extends Error { constructor(status: number, code: string, msg: string) { super(msg); } },
+  AppError: class extends Error {
+    constructor(public readonly status: number, public readonly code: string, msg: string) {
+      super(msg);
+    }
+  },
 }));
 
 vi.mock("@corgtex/storage", () => ({
@@ -53,6 +65,8 @@ const VALID_PDF_BUFFER = Buffer.from(
   '%PDF-1.0\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<<>>>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 100 700 Td (Hello PDF) Tj ET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000206 00000 n \ntrailer<</Size 5/Root 1 0 R>>\nstartxref\n300\n%%EOF',
   'ascii'
 );
+const VALID_PPTX_BUFFER = readFileSync(new URL("./fixtures/brain-pptx-ingestion.pptx", import.meta.url));
+const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 
 describe("file-ingestion", () => {
   beforeEach(() => {
@@ -206,6 +220,193 @@ describe("file-ingestion", () => {
     const callArgs = txObj.brainSource.create.mock.calls[0][0];
     expect(callArgs.data.content).toContain("Hello PDF");
   });
+
+  it("stores PPTX text and provenance and hashes the extracted content", async () => {
+    const extracted = await extractTextFromFileBuffer({
+      fileBuffer: VALID_PPTX_BUFFER,
+      fileName: "synthetic.pptx",
+      mimeType: PPTX_MIME,
+    });
+    await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "synthetic.pptx",
+      mimeType: PPTX_MIME,
+      fileBuffer: VALID_PPTX_BUFFER,
+      uploadSource: "brain-upload",
+    });
+
+    expect(checkWorkspaceDuplicateGuard).toHaveBeenCalledWith(expect.objectContaining({
+      contentHash: extracted.contentHash,
+    }), undefined);
+    const txCallback = vi.mocked(prisma.$transaction).mock.calls[0][0] as any;
+    const txObj = {
+      document: { create: vi.fn().mockResolvedValue({ id: "doc1", title: "Synthetic", source: "brain-upload" }) },
+      brainSource: { create: vi.fn().mockResolvedValue({ id: "src1", sourceType: "FILE_UPLOAD", tier: 2 }) },
+      auditLog: { create: vi.fn() },
+      eventRecord: { createMany: vi.fn() },
+    };
+    await txCallback(txObj);
+
+    expect(txObj.document.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        textContent: expect.stringContaining("NEBULA-LATE-SLIDE-7421 searchable phrase"),
+        metadata: expect.objectContaining({
+          extraction: expect.objectContaining({
+            format: "PPTX",
+            parserVersion: "7.6.2",
+            slideCount: 2,
+            notesIncluded: true,
+          }),
+        }),
+      }),
+    }));
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        content: expect.stringContaining("NEBULA-LATE-SLIDE-7421 searchable phrase"),
+        metadata: expect.objectContaining({
+          extraction: expect.objectContaining({ format: "PPTX", hasTextContent: true }),
+        }),
+      }),
+    }));
+  });
+
+  it("validates generic binary PPTX before treating it as supported", async () => {
+    const valid = await extractTextFromFileBuffer({
+      fileBuffer: VALID_PPTX_BUFFER,
+      fileName: "upload.bin",
+      mimeType: "application/octet-stream",
+    });
+    const invalid = await extractTextFromFileBuffer({
+      fileBuffer: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00]),
+      fileName: "upload.bin",
+      mimeType: "application/octet-stream",
+    });
+
+    expect(valid.supported).toBe(true);
+    expect(valid.extraction).toMatchObject({ format: "PPTX", parserVersion: "7.6.2" });
+    expect(invalid).toMatchObject({ supported: false, textContent: null });
+  });
+
+  it("keeps ordinary generic ZIP files unsupported while named PPTX files fail safely", async () => {
+    const zip = new JSZip();
+    zip.file("readme.txt", "ordinary archive");
+    const ordinaryZip = await zip.generateAsync({ type: "nodebuffer" });
+    const malformedPackage = new JSZip();
+    malformedPackage.file("[Content_Types].xml", "<broken");
+    const malformedPackageZip = await malformedPackage.generateAsync({ type: "nodebuffer" });
+
+    for (const mimeType of ["", "application/octet-stream"]) {
+      for (const fileBuffer of [ordinaryZip, malformedPackageZip]) {
+        await expect(extractTextFromFileBuffer({
+          fileBuffer,
+          fileName: "archive.bin",
+          mimeType,
+        })).resolves.toMatchObject({ supported: false, textContent: null });
+      }
+    }
+    await expect(extractTextFromFileBuffer({
+      fileBuffer: ordinaryZip,
+      fileName: "archive.pptx",
+      mimeType: "application/octet-stream",
+    })).rejects.toThrow("not a valid PowerPoint presentation");
+  });
+
+  it("reuses only matching immutable PPTX extraction results", async () => {
+    const buffer = Buffer.from(VALID_PPTX_BUFFER);
+    const first = await extractTextFromFileBuffer({
+      fileBuffer: buffer,
+      fileName: "cached.pptx",
+      mimeType: PPTX_MIME,
+    });
+    (first.extraction as Record<string, unknown>).parser = "tampered";
+    const second = await extractTextFromFileBuffer({
+      fileBuffer: buffer,
+      fileName: "cached.pptx",
+      mimeType: PPTX_MIME,
+    });
+
+    expect(vi.mocked(extractPptxText)).toHaveBeenCalledTimes(1);
+    expect(second.extraction).toMatchObject({ parser: "officeparser" });
+
+    await extractTextFromFileBuffer({
+      fileBuffer: buffer,
+      fileName: "cached.pptx",
+      mimeType: PPTX_MIME,
+      maxTextLength: 80,
+    });
+    expect(vi.mocked(extractPptxText)).toHaveBeenCalledTimes(2);
+
+    buffer[0] = 0;
+    await expect(extractTextFromFileBuffer({
+      fileBuffer: buffer,
+      fileName: "cached.pptx",
+      mimeType: PPTX_MIME,
+    })).rejects.toThrow("not a valid PowerPoint presentation");
+    expect(vi.mocked(extractPptxText)).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["application/zip", "application/x-zip-compressed"])(
+    "validates a named PPTX reported as %s without treating ordinary ZIP files as PPTX",
+    async (mimeType) => {
+      const valid = await extractTextFromFileBuffer({
+        fileBuffer: VALID_PPTX_BUFFER,
+        fileName: "presentation.pptx",
+        mimeType,
+      });
+      const ordinaryZip = await extractTextFromFileBuffer({
+        fileBuffer: VALID_PPTX_BUFFER,
+        fileName: "archive.zip",
+        mimeType,
+      });
+      const invalidPptx = extractTextFromFileBuffer({
+        fileBuffer: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00]),
+        fileName: "invalid.pptx",
+        mimeType,
+      });
+
+      expect(valid).toMatchObject({ supported: true, extraction: { format: "PPTX" } });
+      expect(ordinaryZip).toMatchObject({ supported: false, textContent: null });
+      await expect(invalidPptx).rejects.toThrow("not a valid PowerPoint presentation");
+    },
+  );
+
+  it("fails recognized unsafe PPTX before duplicate checks, storage, transactions, audits, or events", async () => {
+    const { defaultStorage } = await import("@corgtex/storage");
+
+    await expect(ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "unsafe.pptx",
+      mimeType: PPTX_MIME,
+      fileBuffer: Buffer.from("PRIVATE-DECK-CONTENT"),
+      uploadSource: "brain-upload",
+    })).rejects.toThrow("not a valid PowerPoint presentation");
+
+    expect(checkWorkspaceDuplicateGuard).not.toHaveBeenCalled();
+    expect(assertTrialStorageCapacity).not.toHaveBeenCalled();
+    expect(defaultStorage.put).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it.each(["EXTRACTION_BUSY", "EXTRACTION_FAILED"] as const)(
+    "maps %s to a retryable pre-storage failure",
+    async (code) => {
+      const { defaultStorage } = await import("@corgtex/storage");
+      vi.mocked(extractPptxText).mockRejectedValueOnce(new PptxExtractionError(code));
+
+      await expect(ingestFile(actor, {
+        workspaceId: "ws_1",
+        fileName: `retry-${code.toLowerCase()}.pptx`,
+        mimeType: PPTX_MIME,
+        fileBuffer: Buffer.from(VALID_PPTX_BUFFER),
+        uploadSource: "brain-upload",
+      })).rejects.toMatchObject({ status: 503, code: `PPTX_${code}` });
+
+      expect(checkWorkspaceDuplicateGuard).not.toHaveBeenCalled();
+      expect(assertTrialStorageCapacity).not.toHaveBeenCalled();
+      expect(defaultStorage.put).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
   
   it("creates a Brain source stub when PDF extraction fails", async () => {
     // A malformed PDF buffer will throw an error in PDFParse
@@ -427,6 +628,81 @@ describe("file-ingestion", () => {
     );
     expect(vi.mocked(lockAndAssertTrialStorageCapacity).mock.invocationCallOrder[0])
       .toBeLessThan(txObj.document.update.mock.invocationCallOrder[0]);
+  });
+
+  it("preserves the complete PPTX digest when updating a duplicate document", async () => {
+    const fileBuffer = Buffer.from(VALID_PPTX_BUFFER);
+    const extracted = await extractTextFromFileBuffer({
+      fileBuffer,
+      fileName: "replacement.pptx",
+      mimeType: PPTX_MIME,
+      maxTextLength: 80,
+    });
+    vi.mocked(checkWorkspaceDuplicateGuard).mockResolvedValueOnce({
+      resolution: "update_existing",
+      match: {
+        entityType: "Document",
+        entityId: "doc-existing",
+        title: "Existing Upload",
+        excerpt: "Old text",
+        score: 0.93,
+        matchKind: "likely",
+        reasons: ["similar content"],
+        createdAt: null,
+        updatedAt: null,
+        archivedAt: null,
+      },
+    });
+    const existingDocument = {
+      id: "doc-existing",
+      workspaceId: "ws_1",
+      title: "Existing Upload",
+      source: "FILE_UPLOAD",
+      storageKey: "old-storage-key",
+      mimeType: "text/plain",
+      textContent: "Old text",
+      metadata: {},
+      archivedAt: null,
+    };
+    vi.mocked((prisma as any).document.findFirst).mockResolvedValueOnce(existingDocument);
+    const txObj = {
+      document: {
+        findFirst: vi.fn().mockResolvedValue(existingDocument),
+        update: vi.fn().mockImplementation(async (args: any) => ({ ...existingDocument, ...args.data })),
+      },
+      brainSource: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        update: vi.fn(),
+        create: vi.fn().mockResolvedValue({ id: "source-new" }),
+      },
+      auditLog: { create: vi.fn() },
+      eventRecord: { createMany: vi.fn() },
+    };
+    vi.mocked(prisma.$transaction).mockImplementationOnce(async (callback: any) => callback(txObj));
+
+    await ingestFile(actor, {
+      workspaceId: "ws_1",
+      fileName: "replacement.pptx",
+      mimeType: PPTX_MIME,
+      fileBuffer,
+      uploadSource: "brain-upload",
+      duplicateGuard: {
+        resolution: "update_existing",
+        targetEntityId: "doc-existing",
+      },
+    });
+
+    expect(extracted.contentHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(txObj.document.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({ contentHash: extracted.contentHash }),
+      }),
+    }));
+    expect(txObj.brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({ contentHash: extracted.contentHash }),
+      }),
+    }));
   });
 
   it("cleans the new blob when the locked trial capacity check rejects", async () => {
