@@ -10,6 +10,7 @@ export type PptxExtractionErrorCode =
   | "MALFORMED_FILE"
   | "EMPTY_EXTRACTION"
   | "EXTRACTION_LIMIT_EXCEEDED"
+  | "EXTRACTION_BUSY"
   | "EXTRACTION_TIMEOUT"
   | "EXTRACTION_FAILED";
 
@@ -19,6 +20,7 @@ const SAFE_MESSAGES: Record<PptxExtractionErrorCode, string> = {
   MALFORMED_FILE: "The presentation is malformed, encrypted, or unreadable.",
   EMPTY_EXTRACTION: "The presentation has no extractable native slide or speaker-note text.",
   EXTRACTION_LIMIT_EXCEEDED: "The presentation exceeds the supported extraction limits.",
+  EXTRACTION_BUSY: "Presentation text extraction is busy. Try again shortly.",
   EXTRACTION_TIMEOUT: "Presentation text extraction timed out.",
   EXTRACTION_FAILED: "Presentation text extraction could not be completed safely.",
 };
@@ -48,6 +50,15 @@ const DEFAULT_LIMITS = {
   processTimeoutMs: 30_000,
 };
 const PROCESS_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_ACTIVE_EXTRACTIONS = 1;
+const MAX_QUEUED_EXTRACTIONS = 1;
+const EXTRACTION_SCHEDULER_KEY = Symbol.for("@corgtex/knowledge/pptx-extraction-scheduler");
+type ExtractionScheduler = { active: number; queue: Array<() => void> };
+const schedulerHost = globalThis as typeof globalThis & Record<symbol, unknown>;
+const extractionScheduler = (schedulerHost[EXTRACTION_SCHEDULER_KEY] ??= {
+  active: 0,
+  queue: [],
+}) as ExtractionScheduler;
 
 const PROCESS_SOURCE = String.raw`
 const { createHash } = require("node:crypto");
@@ -60,6 +71,21 @@ const OFFICE_RELATIONSHIPS_NAMESPACES = [
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
   "http://purl.oclc.org/ooxml/officeDocument/relationships",
 ];
+const PACKAGE_RELATIONSHIPS_NAMESPACES = [
+  "http://schemas.openxmlformats.org/package/2006/relationships",
+  "http://purl.oclc.org/ooxml/package/relationships",
+];
+const CONTENT_TYPES_NAMESPACES = [
+  "http://schemas.openxmlformats.org/package/2006/content-types",
+  "http://purl.oclc.org/ooxml/package/content-types",
+];
+const PRESENTATION_NAMESPACES = [
+  "http://schemas.openxmlformats.org/presentationml/2006/main",
+  "http://purl.oclc.org/ooxml/presentationml/main",
+];
+const PRESENTATION_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
+const SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+const NOTES_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml";
 
 (async () => {
   const [packageAnchor, maxInputValue, maxUncompressedValue, maxEntriesValue, maxSlidesValue, maxTextValue] = process.argv.slice(1);
@@ -100,7 +126,6 @@ const OFFICE_RELATIONSHIPS_NAMESPACES = [
   if (entries.length > maxZipEntries) fail("EXTRACTION_LIMIT_EXCEEDED");
   let inspectedBytes = 0;
   const inspectedByteLimit = Math.min(maxUncompressedBytes, 16 * 1024 * 1024);
-  let needsXmlNormalization = false;
   const partCache = new Map();
   const decodeXml = (content) => {
     let encoding = "utf-8";
@@ -131,7 +156,7 @@ const OFFICE_RELATIONSHIPS_NAMESPACES = [
     if (declaredEncoding?.startsWith("utf-16") && encoding === "utf-8") fail("MALFORMED_FILE");
     if (declaredEncoding === "utf-16le" && encoding !== "utf-16le") fail("MALFORMED_FILE");
     if (declaredEncoding === "utf-16be" && encoding !== "utf-16be") fail("MALFORMED_FILE");
-    if (encoding !== "utf-8") needsXmlNormalization = true;
+    if (/<!DOCTYPE\b|<!ENTITY\b/i.test(text)) fail("MALFORMED_FILE");
     return text;
   };
   const readPart = async (partName, required = true) => {
@@ -191,20 +216,50 @@ const OFFICE_RELATIONSHIPS_NAMESPACES = [
     if (invalid || !document?.documentElement) fail("MALFORMED_FILE");
     return document;
   };
-  if (!zip.file("[Content_Types].xml")) fail("NOT_PPTX");
-  const contentTypes = parseXml(await readPart("[Content_Types].xml"));
-  const isPptx = elements(contentTypes, "Override").some((node) =>
-    node.getAttribute("PartName") === "/ppt/presentation.xml"
-      && node.getAttribute("ContentType") === "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml");
-  if (!isPptx) fail("NOT_PPTX");
-
-  const resolvePackageTarget = (sourcePart, target, allowedPattern) => {
-    if (!target) fail("MALFORMED_FILE");
-    const normalized = path.normalize(target.startsWith("/")
-      ? target.slice(1)
-      : path.join(path.dirname(sourcePart), target));
-    if (!allowedPattern.test(normalized)) fail("MALFORMED_FILE");
+  const resolvePackageTarget = (sourcePart, target) => {
+    if (!target || /[\\\u0000-\u001f\u007f?#]/.test(target)) fail("MALFORMED_FILE");
+    let decoded;
+    try {
+      decoded = decodeURIComponent(target);
+    } catch {
+      fail("MALFORMED_FILE");
+    }
+    if (!decoded || /[\\\u0000-\u001f\u007f?#]/.test(decoded)) fail("MALFORMED_FILE");
+    const candidate = decoded.startsWith("/")
+      ? decoded.slice(1)
+      : path.join(path.dirname(sourcePart), decoded);
+    const normalized = path.normalize(candidate);
+    if (!normalized || normalized === "." || path.isAbsolute(normalized)
+      || normalized === ".." || normalized.startsWith("../")) fail("MALFORMED_FILE");
     return normalized;
+  };
+  const relationshipPartName = (partName) => {
+    const directory = path.dirname(partName);
+    const fileName = path.basename(partName);
+    return (directory === "." ? "" : directory + "/") + "_rels/" + fileName + ".rels";
+  };
+  const relationshipType = (node, kind) => OFFICE_RELATIONSHIPS_NAMESPACES.some(
+    (namespace) => node.getAttribute("Type") === namespace + "/" + kind,
+  );
+  const relationshipElements = (document) => {
+    const root = document.documentElement;
+    if (root.localName !== "Relationships" || !PACKAGE_RELATIONSHIPS_NAMESPACES.includes(root.namespaceURI)) {
+      fail("MALFORMED_FILE");
+    }
+    const relationships = Array.from(root.childNodes).filter((node) => node.nodeType === 1);
+    const ids = new Set();
+    for (const relation of relationships) {
+      if (relation.localName !== "Relationship" || relation.namespaceURI !== root.namespaceURI) fail("MALFORMED_FILE");
+      const id = relation.getAttribute("Id");
+      const type = relation.getAttribute("Type");
+      const target = relation.getAttribute("Target");
+      const targetMode = relation.getAttribute("TargetMode") || "Internal";
+      if (!id || !type || !target || !["Internal", "External"].includes(targetMode) || ids.has(id)) {
+        fail("MALFORMED_FILE");
+      }
+      ids.add(id);
+    }
+    return relationships;
   };
   const relationshipId = (node) => {
     const values = OFFICE_RELATIONSHIPS_NAMESPACES
@@ -214,73 +269,163 @@ const OFFICE_RELATIONSHIPS_NAMESPACES = [
     return values[0];
   };
 
-  const presentation = parseXml(await readPart("ppt/presentation.xml"));
-  const relationships = parseXml(await readPart("ppt/_rels/presentation.xml.rels"));
+  if (!zip.file("[Content_Types].xml")) fail("NOT_PPTX");
+  let contentTypes;
+  try {
+    contentTypes = parseXml(await readPart("[Content_Types].xml"));
+  } catch (error) {
+    if (error?.code === "EXTRACTION_LIMIT_EXCEEDED") throw error;
+    fail("NOT_PPTX");
+  }
+  const contentTypesRoot = contentTypes.documentElement;
+  if (contentTypesRoot.localName !== "Types" || !CONTENT_TYPES_NAMESPACES.includes(contentTypesRoot.namespaceURI)) {
+    fail("NOT_PPTX");
+  }
+  const contentTypeOverrides = new Map();
+  const contentTypeDefaults = new Map();
+  for (const node of Array.from(contentTypesRoot.childNodes).filter((item) => item.nodeType === 1)) {
+    if (node.namespaceURI !== contentTypesRoot.namespaceURI) fail("MALFORMED_FILE");
+    const contentType = node.getAttribute("ContentType");
+    if (!contentType) fail("MALFORMED_FILE");
+    if (node.localName === "Override") {
+      const partName = resolvePackageTarget("", node.getAttribute("PartName") || "");
+      if (!node.getAttribute("PartName")?.startsWith("/") || contentTypeOverrides.has(partName)) fail("MALFORMED_FILE");
+      contentTypeOverrides.set(partName, contentType);
+    } else if (node.localName === "Default") {
+      const extension = (node.getAttribute("Extension") || "").toLowerCase();
+      if (!extension || contentTypeDefaults.has(extension)) fail("MALFORMED_FILE");
+      contentTypeDefaults.set(extension, contentType);
+    } else {
+      fail("MALFORMED_FILE");
+    }
+  }
+  const contentTypeForPart = (partName) => contentTypeOverrides.get(partName)
+    || contentTypeDefaults.get(path.extname(partName).slice(1).toLowerCase());
+  const presentationParts = Array.from(contentTypeOverrides.entries())
+    .filter(([, contentType]) => contentType === PRESENTATION_CONTENT_TYPE)
+    .map(([partName]) => partName);
+  if (presentationParts.length === 0) fail("NOT_PPTX");
+  if (presentationParts.length !== 1) fail("MALFORMED_FILE");
+  const presentationPart = presentationParts[0];
+
+  const rootRelationships = relationshipElements(parseXml(await readPart("_rels/.rels")));
+  const officeDocumentRelationships = rootRelationships.filter((relation) => relationshipType(relation, "officeDocument"));
+  if (officeDocumentRelationships.length !== 1) fail("MALFORMED_FILE");
+  const officeDocumentRelationship = officeDocumentRelationships[0];
+  if ((officeDocumentRelationship.getAttribute("TargetMode") || "Internal") !== "Internal") fail("MALFORMED_FILE");
+  if (resolvePackageTarget("", officeDocumentRelationship.getAttribute("Target")) !== presentationPart) {
+    fail("MALFORMED_FILE");
+  }
+
+  const presentation = parseXml(await readPart(presentationPart));
+  if (presentation.documentElement.localName !== "presentation"
+    || !PRESENTATION_NAMESPACES.includes(presentation.documentElement.namespaceURI)) fail("MALFORMED_FILE");
+  const relationships = relationshipElements(parseXml(await readPart(relationshipPartName(presentationPart))));
   const slideTargets = new Map();
-  for (const relation of elements(relationships, "Relationship")) {
-    if (!relation.getAttribute("Type")?.endsWith("/slide")) continue;
-    if ((relation.getAttribute("TargetMode") || "Internal") !== "Internal") continue;
-    const normalized = resolvePackageTarget(
-      "ppt/presentation.xml",
-      relation.getAttribute("Target") || "",
-      /^ppt\/slides\/slide\d+\.xml$/,
-    );
+  for (const relation of relationships) {
+    if (!relationshipType(relation, "slide")) continue;
+    if ((relation.getAttribute("TargetMode") || "Internal") !== "Internal") fail("MALFORMED_FILE");
+    const normalized = resolvePackageTarget(presentationPart, relation.getAttribute("Target"));
+    if (contentTypeForPart(normalized) !== SLIDE_CONTENT_TYPE) fail("MALFORMED_FILE");
     slideTargets.set(relation.getAttribute("Id"), normalized);
   }
-  const orderedSlides = elements(presentation, "sldId").map((node) =>
+  const orderedSlides = elements(presentation, "sldId")
+    .filter((node) => PRESENTATION_NAMESPACES.includes(node.namespaceURI))
+    .map((node) =>
     slideTargets.get(relationshipId(node)));
   if (orderedSlides.some((target) => !target) || new Set(orderedSlides).size !== orderedSlides.length) fail("MALFORMED_FILE");
   if (orderedSlides.length > maxSlides) fail("EXTRACTION_LIMIT_EXCEEDED");
 
   const visibleSlides = [];
+  const usedNoteTargets = new Set();
   for (const target of orderedSlides) {
-    const match = target.match(/slide(\d+)\.xml$/);
-    if (!match) fail("MALFORMED_FILE");
-    const slideNumber = Number(match[1]);
-    const slideDocument = parseXml(await readPart(target));
+    const slideXml = await readPart(target);
+    const slideDocument = parseXml(slideXml);
+    if (slideDocument.documentElement.localName !== "sld"
+      || !PRESENTATION_NAMESPACES.includes(slideDocument.documentElement.namespaceURI)) fail("MALFORMED_FILE");
     const show = slideDocument.documentElement.getAttribute("show");
     if (show === "0" || show === "false") continue;
-    const relationPath = target.replace("/slides/", "/slides/_rels/") + ".rels";
+    const relationPath = relationshipPartName(target);
     const relationXml = await readPart(relationPath, false);
-    let noteNumber;
+    let noteTarget;
+    let noteXml;
+    let noteDocument;
     if (relationXml) {
-      const relationDocument = parseXml(relationXml);
-      const noteRelation = elements(relationDocument, "Relationship").find((node) =>
-        node.getAttribute("Type")?.endsWith("/notesSlide")
-          && (node.getAttribute("TargetMode") || "Internal") === "Internal");
-      const noteTarget = noteRelation?.getAttribute("Target");
-      if (noteTarget) {
-        const normalized = resolvePackageTarget(
-          target,
-          noteTarget,
-          /^ppt\/notesSlides\/notesSlide\d+\.xml$/,
-        );
-        const noteMatch = normalized.match(/notesSlide(\d+)\.xml$/);
-        if (!noteMatch) fail("MALFORMED_FILE");
-        noteNumber = Number(noteMatch[1]);
+      const noteRelationships = relationshipElements(parseXml(relationXml))
+        .filter((relation) => relationshipType(relation, "notesSlide"));
+      if (noteRelationships.some((relation) => (relation.getAttribute("TargetMode") || "Internal") !== "Internal")
+        || noteRelationships.length > 1) fail("MALFORMED_FILE");
+      if (noteRelationships.length === 1) {
+        noteTarget = resolvePackageTarget(target, noteRelationships[0].getAttribute("Target"));
+        if (contentTypeForPart(noteTarget) !== NOTES_CONTENT_TYPE || usedNoteTargets.has(noteTarget)) {
+          fail("MALFORMED_FILE");
+        }
+        usedNoteTargets.add(noteTarget);
+        noteXml = await readPart(noteTarget);
+        noteDocument = parseXml(noteXml);
+        if (noteDocument.documentElement.localName !== "notes"
+          || !PRESENTATION_NAMESPACES.includes(noteDocument.documentElement.namespaceURI)) fail("MALFORMED_FILE");
       }
     }
-    visibleSlides.push({ slideNumber, noteNumber });
+    visibleSlides.push({ slideXml, noteXml, noteDocument });
   }
 
-  const parserPartPattern = /^(?:ppt\/(?:presentation\.xml|slides\/slide\d+\.xml|notesSlides\/notesSlide\d+\.xml|slides\/_rels\/slide\d+\.xml\.rels)|docProps\/(?:core|custom|app)\.xml)$/;
-  for (const entry of entries) {
-    if (!parserPartPattern.test(entry.name)) continue;
-    parseXml(await readPart(entry.name));
-  }
-  let parserBuffer = buffer;
-  if (needsXmlNormalization) {
-    const normalizedZip = new JSZip();
-    normalizedZip.file("[Content_Types].xml", await readPart("[Content_Types].xml"));
-    for (const [partName, text] of partCache) {
-      if (parserPartPattern.test(partName)) normalizedZip.file(partName, text);
-    }
-    parserBuffer = await normalizedZip.generateAsync({
-      type: "nodebuffer",
-      compression: "DEFLATE",
-      compressionOptions: { level: 6 },
-    });
-  }
+  const asUtf8Xml = (value) => value.replace(
+    /^(<\?xml\s+[^>]*encoding\s*=\s*)["'][^"']+["']/i,
+    '$1"UTF-8"',
+  );
+  const parserZip = new JSZip();
+  const contentTypeXml = '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/ppt/presentation.xml" ContentType="' + PRESENTATION_CONTENT_TYPE + '"/>'
+    + visibleSlides.map((_, index) => '<Override PartName="/ppt/slides/slide' + (index + 1)
+      + '.xml" ContentType="' + SLIDE_CONTENT_TYPE + '"/>').join("")
+    + visibleSlides.flatMap((slide, index) => slide.noteXml
+      ? ['<Override PartName="/ppt/notesSlides/notesSlide' + (index + 1)
+        + '.xml" ContentType="' + NOTES_CONTENT_TYPE + '"/>']
+      : []).join("")
+    + '</Types>';
+  const rootRelationshipXml = '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
+    + '</Relationships>';
+  const presentationXml = '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+    + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    + '<p:sldIdLst>' + visibleSlides.map((_, index) => '<p:sldId id="' + (256 + index)
+      + '" r:id="rId' + (index + 1) + '"/>').join("") + '</p:sldIdLst>'
+    + '<p:sldSz cx="12192000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/>'
+    + '</p:presentation>';
+  const presentationRelationshipXml = '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + visibleSlides.map((_, index) => '<Relationship Id="rId' + (index + 1)
+      + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" '
+      + 'Target="slides/slide' + (index + 1) + '.xml"/>').join("")
+    + '</Relationships>';
+  parserZip.file("[Content_Types].xml", contentTypeXml);
+  parserZip.file("_rels/.rels", rootRelationshipXml);
+  parserZip.file("ppt/presentation.xml", presentationXml);
+  parserZip.file("ppt/_rels/presentation.xml.rels", presentationRelationshipXml);
+  visibleSlides.forEach((slide, index) => {
+    const number = index + 1;
+    parserZip.file("ppt/slides/slide" + number + ".xml", asUtf8Xml(slide.slideXml));
+    if (!slide.noteXml) return;
+    parserZip.file("ppt/notesSlides/notesSlide" + number + ".xml", asUtf8Xml(slide.noteXml));
+    parserZip.file(
+      "ppt/slides/_rels/slide" + number + ".xml.rels",
+      '<?xml version="1.0" encoding="UTF-8"?>'
+        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" '
+        + 'Target="../notesSlides/notesSlide' + number + '.xml"/>'
+        + '</Relationships>',
+    );
+  });
+  const generatedEntryCount = Object.values(parserZip.files).filter((entry) => !entry.dir).length;
+  if (generatedEntryCount > maxZipEntries) fail("EXTRACTION_LIMIT_EXCEEDED");
+  const parserBuffer = await parserZip.generateAsync({ type: "nodebuffer", compression: "STORE" });
+  if (parserBuffer.length > maxUncompressedBytes) fail("EXTRACTION_LIMIT_EXCEEDED");
 
   const ast = await OfficeParser.parseOffice(parserBuffer, {
     fileType: "pptx",
@@ -316,19 +461,17 @@ const OFFICE_RELATIONSHIPS_NAMESPACES = [
   };
   const blocks = [];
   let notesIncluded = false;
-  visibleSlides.forEach(({ slideNumber, noteNumber }, index) => {
+  visibleSlides.forEach(({ noteDocument }, index) => {
+    const slideNumber = index + 1;
     const body = (slides.get(slideNumber)?.children || []).flatMap(renderNode).filter(Boolean);
-    const note = noteNumber ? notes.get(noteNumber) : undefined;
+    const note = notes.get(slideNumber);
     const placeholderCounts = new Map();
-    if (noteNumber) {
-      const noteXml = partCache.get("ppt/notesSlides/notesSlide" + noteNumber + ".xml");
-      if (noteXml) {
-        const noteDocument = parseXml(noteXml);
-        for (const shape of elements(noteDocument, "sp")) {
-          if (!elements(shape, "ph").some((node) => node.getAttribute("type") === "sldNum")) continue;
-          const line = normalizeText(elements(shape, "t").map((node) => node.textContent || "").join(" "));
-          if (line) placeholderCounts.set(line, (placeholderCounts.get(line) || 0) + 1);
-        }
+    if (noteDocument) {
+      const excludedPlaceholderTypes = new Set(["sldNum", "dt", "hdr", "ftr"]);
+      for (const shape of elements(noteDocument, "sp")) {
+        if (!elements(shape, "ph").some((node) => excludedPlaceholderTypes.has(node.getAttribute("type")))) continue;
+        const line = normalizeText(elements(shape, "t").map((node) => node.textContent || "").join(" "));
+        if (line) placeholderCounts.set(line, (placeholderCounts.get(line) || 0) + 1);
       }
     }
     const noteLines = (note?.children || []).flatMap(renderNode).filter((line) => {
@@ -371,7 +514,27 @@ function findKnowledgePackageAnchor() {
   }
 }
 
-export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtractionLimits = {}) {
+async function acquireExtractionSlot() {
+  if (extractionScheduler.active < MAX_ACTIVE_EXTRACTIONS) {
+    extractionScheduler.active += 1;
+    return;
+  }
+  if (extractionScheduler.queue.length >= MAX_QUEUED_EXTRACTIONS) {
+    throw new PptxExtractionError("EXTRACTION_BUSY");
+  }
+  await new Promise<void>((resolve) => extractionScheduler.queue.push(resolve));
+}
+
+function releaseExtractionSlot() {
+  const next = extractionScheduler.queue.shift();
+  if (next) {
+    next();
+    return;
+  }
+  extractionScheduler.active -= 1;
+}
+
+async function extractPptxTextInChild(fileBuffer: Buffer, requested: PptxExtractionLimits = {}) {
   const limits = {
     maxInputBytes: boundedLimit(requested.maxInputBytes, DEFAULT_LIMITS.maxInputBytes),
     maxUncompressedBytes: boundedLimit(requested.maxUncompressedBytes, DEFAULT_LIMITS.maxUncompressedBytes),
@@ -477,4 +640,15 @@ export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtract
       truncated: value.truncated,
     },
   } as const;
+}
+
+export async function extractPptxText(fileBuffer: Buffer, requested: PptxExtractionLimits = {}) {
+  const maxInputBytes = boundedLimit(requested.maxInputBytes, DEFAULT_LIMITS.maxInputBytes);
+  if (fileBuffer.byteLength > maxInputBytes) throw new PptxExtractionError("FILE_TOO_LARGE");
+  await acquireExtractionSlot();
+  try {
+    return await extractPptxTextInChild(fileBuffer, requested);
+  } finally {
+    releaseExtractionSlot();
+  }
 }

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import JSZip from "jszip";
 import { extractTextFromFileBuffer, ingestFile } from "./file-ingestion";
-import { extractPptxText } from "./pptx-extraction";
+import { extractPptxText, PptxExtractionError } from "./pptx-extraction";
 import { prisma } from "@corgtex/shared";
 import {
   assertTrialStorageCapacity,
@@ -47,7 +47,11 @@ vi.mock("@corgtex/domain", () => ({
   requireWorkspaceMembership: vi.fn().mockResolvedValue({ id: "mem1" }),
   isGlobalOperator: vi.fn().mockReturnValue(false),
   getStorageUsageSummary: vi.fn().mockResolvedValue({ usageBytes: 0, limitBytes: Infinity }),
-  AppError: class extends Error { constructor(status: number, code: string, msg: string) { super(msg); } },
+  AppError: class extends Error {
+    constructor(public readonly status: number, public readonly code: string, msg: string) {
+      super(msg);
+    }
+  },
 }));
 
 vi.mock("@corgtex/storage", () => ({
@@ -287,13 +291,18 @@ describe("file-ingestion", () => {
     const zip = new JSZip();
     zip.file("readme.txt", "ordinary archive");
     const ordinaryZip = await zip.generateAsync({ type: "nodebuffer" });
+    const malformedPackage = new JSZip();
+    malformedPackage.file("[Content_Types].xml", "<broken");
+    const malformedPackageZip = await malformedPackage.generateAsync({ type: "nodebuffer" });
 
     for (const mimeType of ["", "application/octet-stream"]) {
-      await expect(extractTextFromFileBuffer({
-        fileBuffer: ordinaryZip,
-        fileName: "archive.bin",
-        mimeType,
-      })).resolves.toMatchObject({ supported: false, textContent: null });
+      for (const fileBuffer of [ordinaryZip, malformedPackageZip]) {
+        await expect(extractTextFromFileBuffer({
+          fileBuffer,
+          fileName: "archive.bin",
+          mimeType,
+        })).resolves.toMatchObject({ supported: false, textContent: null });
+      }
     }
     await expect(extractTextFromFileBuffer({
       fileBuffer: ordinaryZip,
@@ -377,6 +386,27 @@ describe("file-ingestion", () => {
     expect(defaultStorage.put).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
+
+  it.each(["EXTRACTION_BUSY", "EXTRACTION_FAILED"] as const)(
+    "maps %s to a retryable pre-storage failure",
+    async (code) => {
+      const { defaultStorage } = await import("@corgtex/storage");
+      vi.mocked(extractPptxText).mockRejectedValueOnce(new PptxExtractionError(code));
+
+      await expect(ingestFile(actor, {
+        workspaceId: "ws_1",
+        fileName: `retry-${code.toLowerCase()}.pptx`,
+        mimeType: PPTX_MIME,
+        fileBuffer: Buffer.from(VALID_PPTX_BUFFER),
+        uploadSource: "brain-upload",
+      })).rejects.toMatchObject({ status: 503, code: `PPTX_${code}` });
+
+      expect(checkWorkspaceDuplicateGuard).not.toHaveBeenCalled();
+      expect(assertTrialStorageCapacity).not.toHaveBeenCalled();
+      expect(defaultStorage.put).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
   
   it("creates a Brain source stub when PDF extraction fails", async () => {
     // A malformed PDF buffer will throw an error in PDFParse

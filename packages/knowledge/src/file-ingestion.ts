@@ -377,7 +377,11 @@ export async function extractTextFromFileBuffer(params: {
       if (error instanceof PptxExtractionError && error.code === "NOT_PPTX" && !isPptxName && !isPptxMime) {
         // Generic binary ZIP uploads remain unsupported unless package validation proves PPTX.
       } else if (error instanceof PptxExtractionError) {
-        const status = error.code === "FILE_TOO_LARGE" || error.code === "EXTRACTION_LIMIT_EXCEEDED" ? 413 : 422;
+        const status = error.code === "FILE_TOO_LARGE" || error.code === "EXTRACTION_LIMIT_EXCEEDED"
+          ? 413
+          : error.code === "EXTRACTION_BUSY" || error.code === "EXTRACTION_FAILED"
+            ? 503
+            : 422;
         throw new AppError(status, `PPTX_${error.code}`, error.message);
       } else {
         throw new AppError(422, "PPTX_EXTRACTION_FAILED", "Presentation text extraction could not be completed safely.");
