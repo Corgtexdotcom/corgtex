@@ -74,6 +74,7 @@ export async function absorbSource(params: {
   if (initialSkipReason) {
     return { skipped: true, reason: initialSkipReason };
   }
+  const sourceId = source.id;
 
   async function currentSkipReason() {
     const current = await prisma.brainSource.findUnique({
@@ -81,6 +82,11 @@ export async function absorbSource(params: {
       select: { workspaceId: true, absorbedAt: true, archivedAt: true },
     });
     return sourceSkipReason(current, params.workspaceId);
+  }
+
+  async function skippedIfSourceInactive() {
+    const reason = await currentSkipReason();
+    return reason ? { skipped: true, reason, sourceId } : null;
   }
 
   // Build an agent actor for domain service calls
@@ -161,10 +167,8 @@ Determine:
   const createNew = result.createNew && typeof result.createNew === "object" ? result.createNew : null;
   const documentLikeSource = isDocumentLikeSource(source.sourceType);
 
-  const postAnalysisSkipReason = await currentSkipReason();
-  if (postAnalysisSkipReason) {
-    return { skipped: true, reason: postAnalysisSkipReason, sourceId: source.id };
-  }
+  const postAnalysisSkip = await skippedIfSourceInactive();
+  if (postAnalysisSkip) return postAnalysisSkip;
 
   const touchedArticleIds: string[] = [];
   const skippedNonDraftSlugs: string[] = [];
@@ -212,6 +216,9 @@ Rules:
       ],
     });
 
+    const preUpdateSkip = await skippedIfSourceInactive();
+    if (preUpdateSkip) return preUpdateSkip;
+
     await updateArticle(agentActor, {
       workspaceId: params.workspaceId,
       slug: existing.slug,
@@ -258,6 +265,9 @@ Rules:
           },
         ],
       });
+
+      const preCreateSkip = await skippedIfSourceInactive();
+      if (preCreateSkip) return preCreateSkip;
 
       const article = await createArticle(agentActor, {
         workspaceId: params.workspaceId,
@@ -308,6 +318,9 @@ Rules:
         },
       ],
     });
+
+    const preFallbackCreateSkip = await skippedIfSourceInactive();
+    if (preFallbackCreateSkip) return preFallbackCreateSkip;
 
     const article = await createArticle(agentActor, {
       workspaceId: params.workspaceId,
@@ -408,6 +421,9 @@ Rules:
         });
 
         if (cascadeCheck.content.trim() !== "NO_UPDATE_NEEDED" && cascadeCheck.content.length > 50) {
+          const preCascadeUpdateSkip = await skippedIfSourceInactive();
+          if (preCascadeUpdateSkip) return preCascadeUpdateSkip;
+
           await updateArticle(agentActor, {
             workspaceId: params.workspaceId,
             slug: candidate.slug,
@@ -426,6 +442,9 @@ Rules:
   }
 
   // Step 4: Sync knowledge chunks for all touched articles
+  const preSyncSkip = await skippedIfSourceInactive();
+  if (preSyncSkip) return preSyncSkip;
+
   for (const articleId of touchedArticleIds) {
     await syncBrainArticleKnowledge({
       workspaceId: params.workspaceId,
@@ -434,9 +453,15 @@ Rules:
   }
 
   // Step 5: Rebuild backlinks
+  const preBacklinksSkip = await skippedIfSourceInactive();
+  if (preBacklinksSkip) return preBacklinksSkip;
+
   await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
 
   // Step 6: Mark source absorbed
+  const preAbsorbedMarkSkip = await skippedIfSourceInactive();
+  if (preAbsorbedMarkSkip) return preAbsorbedMarkSkip;
+
   await markSourceAbsorbed(agentActor, { sourceId: source.id });
 
   return {
