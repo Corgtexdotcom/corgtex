@@ -53,7 +53,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       title: typeof body.title === "string" ? body.title : null,
       externalId: typeof body.externalId === "string" ? body.externalId : null,
       channel: typeof body.channel === "string" ? body.channel : null,
-      authorMemberId: typeof body.authorMemberId === "string" ? body.authorMemberId : null,
+      ...(typeof body.authorMemberId === "string" ? { authorMemberId: body.authorMemberId } : {}),
       ingestionGuidanceMd: typeof body.ingestionGuidanceMd === "string" ? body.ingestionGuidanceMd : null,
       metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : undefined,
       duplicateGuard: duplicateGuardFromValues(body.duplicateResolution, body.duplicateTargetEntityId),

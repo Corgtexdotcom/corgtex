@@ -432,6 +432,25 @@ describe("brain source ingestion", () => {
     });
   });
 
+  it("defaults explicit null user source authors to the current user membership", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+      authorMemberId: null,
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
   it("allows admins to archive any Brain source", async () => {
     const { deleteSource } = await import("./brain");
     requireWorkspaceMembership.mockResolvedValueOnce({
@@ -482,6 +501,81 @@ describe("brain source ingestion", () => {
       entityType: "BrainSource",
       entityId: "source-1",
     }));
+  });
+
+  it("allows credential agents with Brain write scope to archive Brain sources", async () => {
+    const { deleteSource } = await import("./brain");
+    const agentActor = {
+      kind: "agent",
+      authProvider: "credential",
+      workspaceIds: ["ws-1"],
+      scopes: ["brain:write"],
+    } as any;
+    requireWorkspaceMembership.mockResolvedValueOnce(null);
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      authorMemberId: "mem-1",
+    });
+
+    await expect(deleteSource(agentActor, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).resolves.toEqual({ id: "source-1" });
+
+    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(agentActor, expect.objectContaining({
+      entityType: "BrainSource",
+      entityId: "source-1",
+    }));
+  });
+
+  it("allows credential agents with support write scope to archive Brain sources", async () => {
+    const { deleteSource } = await import("./brain");
+    const agentActor = {
+      kind: "agent",
+      authProvider: "credential",
+      workspaceIds: ["ws-1"],
+      scopes: ["support:write"],
+    } as any;
+    requireWorkspaceMembership.mockResolvedValueOnce(null);
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      authorMemberId: "mem-1",
+    });
+
+    await expect(deleteSource(agentActor, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).resolves.toEqual({ id: "source-1" });
+
+    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(agentActor, expect.objectContaining({
+      entityType: "BrainSource",
+      entityId: "source-1",
+    }));
+  });
+
+  it("blocks credential agents with only Brain read scope from archiving Brain sources", async () => {
+    const { deleteSource } = await import("./brain");
+    const agentActor = {
+      kind: "agent",
+      authProvider: "credential",
+      workspaceIds: ["ws-1"],
+      scopes: ["brain:read"],
+    } as any;
+    requireWorkspaceMembership.mockResolvedValueOnce(null);
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      authorMemberId: "mem-1",
+    });
+
+    await expect(deleteSource(agentActor, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
+    });
+
+    expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
   });
 
   it("blocks non-author contributors from archiving another member's Brain source", async () => {

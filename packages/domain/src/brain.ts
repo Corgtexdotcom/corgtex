@@ -39,6 +39,12 @@ function metadataString(value: Prisma.InputJsonValue | undefined, key: string) {
 
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 
+function canCredentialAgentArchiveBrainSource(actor: AppActor) {
+  return actor.kind !== "agent"
+    || actor.authProvider !== "credential"
+    || Boolean(actor.scopes?.includes("brain:write") || actor.scopes?.includes("support:write"));
+}
+
 async function nextAvailableArticleSlug(tx: Prisma.TransactionClient, workspaceId: string, baseSlug: string) {
   let candidate = baseSlug;
   for (let suffix = 2; suffix < 1000; suffix += 1) {
@@ -574,9 +580,9 @@ export async function ingestSource(actor: AppActor, params: {
         title,
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
-        authorMemberId: params.authorMemberId !== undefined
-          ? params.authorMemberId
-          : actor.kind === "user" ? persistedMemberId(membership) : null,
+        authorMemberId: actor.kind === "user"
+          ? params.authorMemberId ?? persistedMemberId(membership)
+          : params.authorMemberId ?? null,
         ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },
@@ -679,6 +685,12 @@ export async function deleteSource(actor: AppActor, params: {
     },
   });
   invariant(source, 404, "NOT_FOUND", "Source not found.");
+  invariant(
+    canCredentialAgentArchiveBrainSource(actor),
+    403,
+    "FORBIDDEN",
+    "Agent credential is missing the required Brain source archive scope.",
+  );
 
   const canArchive = actor.kind === "agent"
     || membership?.role === "ADMIN"
