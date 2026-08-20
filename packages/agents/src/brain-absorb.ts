@@ -6,6 +6,7 @@ import {
   updateArticle,
   markSourceAbsorbed,
   rebuildBacklinks,
+  lockWorkspaceArchiveArtifact,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
@@ -45,6 +46,15 @@ function sourceSkipReason(source: {
   return null;
 }
 
+type SourceSkipResult = { skipped: true; reason: string; sourceId: string };
+
+function isSourceSkipResult(value: unknown): value is SourceSkipResult {
+  return typeof value === "object"
+    && value !== null
+    && "skipped" in value
+    && (value as { skipped?: unknown }).skipped === true;
+}
+
 /**
  * Core absorption logic — called by the agent runtime.
  *
@@ -76,8 +86,8 @@ export async function absorbSource(params: {
   }
   const sourceId = source.id;
 
-  async function currentSkipReason() {
-    const current = await prisma.brainSource.findUnique({
+  async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
+    const current = await client.brainSource.findUnique({
       where: { id: params.sourceId },
       select: { workspaceId: true, absorbedAt: true, archivedAt: true },
     });
@@ -87,6 +97,15 @@ export async function absorbSource(params: {
   async function skippedIfSourceInactive() {
     const reason = await currentSkipReason();
     return reason ? { skipped: true, reason, sourceId } : null;
+  }
+
+  async function withSourceArchiveLock<T>(operation: () => Promise<T>): Promise<T | SourceSkipResult> {
+    return prisma.$transaction(async (tx) => {
+      await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
+      const reason = await currentSkipReason(tx);
+      if (reason) return { skipped: true, reason, sourceId };
+      return operation();
+    }, { maxWait: 5_000, timeout: 120_000 });
   }
 
   // Build an agent actor for domain service calls
@@ -216,17 +235,15 @@ Rules:
       ],
     });
 
-    const preUpdateSkip = await skippedIfSourceInactive();
-    if (preUpdateSkip) return preUpdateSkip;
-
-    await updateArticle(agentActor, {
+    const updateResult = await withSourceArchiveLock(() => updateArticle(agentActor, {
       workspaceId: params.workspaceId,
       slug: existing.slug,
       bodyMd: synthesized.content,
       sourceIds: [...new Set([...(existing.sourceIds ?? []), source.id])],
       changeSummary: `Absorbed ${source.sourceType} source: ${result.summary ?? "new information"}`,
       agentRunId: params.agentRunId,
-    });
+    }));
+    if (isSourceSkipResult(updateResult)) return updateResult;
 
     touchedArticleIds.push(existing.id);
   }
@@ -266,10 +283,7 @@ Rules:
         ],
       });
 
-      const preCreateSkip = await skippedIfSourceInactive();
-      if (preCreateSkip) return preCreateSkip;
-
-      const article = await createArticle(agentActor, {
+      const article = await withSourceArchiveLock(() => createArticle(agentActor, {
         workspaceId: params.workspaceId,
         slug: createNew.slug,
         title: createNew.title,
@@ -277,7 +291,8 @@ Rules:
         authority: source.tier === 1 || documentLikeSource ? "REFERENCE" : "DRAFT",
         bodyMd: drafted.content,
         sourceIds: [source.id],
-      });
+      }));
+      if (isSourceSkipResult(article)) return article;
 
       touchedArticleIds.push(article.id);
       createdArticleSlug = createNew.slug;
@@ -319,10 +334,7 @@ Rules:
       ],
     });
 
-    const preFallbackCreateSkip = await skippedIfSourceInactive();
-    if (preFallbackCreateSkip) return preFallbackCreateSkip;
-
-    const article = await createArticle(agentActor, {
+    const article = await withSourceArchiveLock(() => createArticle(agentActor, {
       workspaceId: params.workspaceId,
       slug,
       title: fallbackTitle,
@@ -330,7 +342,8 @@ Rules:
       authority: "REFERENCE",
       bodyMd: drafted.content,
       sourceIds: [source.id],
-    });
+    }));
+    if (isSourceSkipResult(article)) return article;
 
     touchedArticleIds.push(article.id);
     createdArticleSlug = slug;
@@ -421,16 +434,14 @@ Rules:
         });
 
         if (cascadeCheck.content.trim() !== "NO_UPDATE_NEEDED" && cascadeCheck.content.length > 50) {
-          const preCascadeUpdateSkip = await skippedIfSourceInactive();
-          if (preCascadeUpdateSkip) return preCascadeUpdateSkip;
-
-          await updateArticle(agentActor, {
+          const cascadeUpdateResult = await withSourceArchiveLock(() => updateArticle(agentActor, {
             workspaceId: params.workspaceId,
             slug: candidate.slug,
             bodyMd: cascadeCheck.content,
             changeSummary: `Cascading update: ${changedSummaries}`,
             agentRunId: params.agentRunId,
-          });
+          }));
+          if (isSourceSkipResult(cascadeUpdateResult)) return cascadeUpdateResult;
           touchedArticleIds.push(candidate.id);
           cascadedSlugs.push(candidate.slug);
         }
@@ -442,27 +453,21 @@ Rules:
   }
 
   // Step 4: Sync knowledge chunks for all touched articles
-  const preSyncSkip = await skippedIfSourceInactive();
-  if (preSyncSkip) return preSyncSkip;
-
   for (const articleId of touchedArticleIds) {
-    await syncBrainArticleKnowledge({
+    const syncResult = await withSourceArchiveLock(() => syncBrainArticleKnowledge({
       workspaceId: params.workspaceId,
       articleId,
-    });
+    }));
+    if (isSourceSkipResult(syncResult)) return syncResult;
   }
 
   // Step 5: Rebuild backlinks
-  const preBacklinksSkip = await skippedIfSourceInactive();
-  if (preBacklinksSkip) return preBacklinksSkip;
-
-  await rebuildBacklinks(agentActor, { workspaceId: params.workspaceId });
+  const backlinksResult = await withSourceArchiveLock(() => rebuildBacklinks(agentActor, { workspaceId: params.workspaceId }));
+  if (isSourceSkipResult(backlinksResult)) return backlinksResult;
 
   // Step 6: Mark source absorbed
-  const preAbsorbedMarkSkip = await skippedIfSourceInactive();
-  if (preAbsorbedMarkSkip) return preAbsorbedMarkSkip;
-
-  await markSourceAbsorbed(agentActor, { sourceId: source.id });
+  const markResult = await withSourceArchiveLock(() => markSourceAbsorbed(agentActor, { sourceId: source.id }));
+  if (isSourceSkipResult(markResult)) return markResult;
 
   return {
     absorbed: true,

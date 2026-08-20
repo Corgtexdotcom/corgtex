@@ -8,8 +8,10 @@ const {
   markSourceAbsorbedMock,
   rebuildBacklinksMock,
   syncBrainArticleKnowledgeMock,
+  lockWorkspaceArchiveArtifactMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
     brainSource: {
       findUnique: vi.fn(),
     },
@@ -29,6 +31,7 @@ const {
   markSourceAbsorbedMock: vi.fn(),
   rebuildBacklinksMock: vi.fn(),
   syncBrainArticleKnowledgeMock: vi.fn(),
+  lockWorkspaceArchiveArtifactMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -48,6 +51,7 @@ vi.mock("@corgtex/domain", () => ({
   updateArticle: updateArticleMock,
   markSourceAbsorbed: markSourceAbsorbedMock,
   rebuildBacklinks: rebuildBacklinksMock,
+  lockWorkspaceArchiveArtifact: lockWorkspaceArchiveArtifactMock,
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -57,6 +61,8 @@ vi.mock("@corgtex/knowledge", () => ({
 describe("absorbSource", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    lockWorkspaceArchiveArtifactMock.mockResolvedValue(undefined);
     prismaMock.brainSource.findUnique.mockResolvedValue({
       id: "source-1",
       workspaceId: "workspace-1",
@@ -252,6 +258,12 @@ describe("absorbSource", () => {
       authority: "REFERENCE",
       sourceIds: ["source-1"],
     }));
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(4);
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledWith(prismaMock, "BrainSource", "source-1");
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(createArticleMock.mock.invocationCallOrder[0]);
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[1]).toBeLessThan(syncBrainArticleKnowledgeMock.mock.invocationCallOrder[0]);
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[2]).toBeLessThan(rebuildBacklinksMock.mock.invocationCallOrder[0]);
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[3]).toBeLessThan(markSourceAbsorbedMock.mock.invocationCallOrder[0]);
     expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1" });
   });
 });

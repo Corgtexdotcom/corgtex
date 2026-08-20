@@ -39,12 +39,6 @@ function metadataString(value: Prisma.InputJsonValue | undefined, key: string) {
 
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 
-function canCredentialAgentArchiveBrainSource(actor: AppActor) {
-  return actor.kind !== "agent"
-    || actor.authProvider !== "credential"
-    || Boolean(actor.scopes?.includes("brain:write") || actor.scopes?.includes("support:write"));
-}
-
 function normalizedMemberId(value: string | null | undefined) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -676,41 +670,14 @@ export async function deleteSource(actor: AppActor, params: {
   workspaceId: string;
   sourceId: string;
 }) {
-  const membership = await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-  });
-  const source = await prisma.brainSource.findFirst({
-    where: {
-      id: params.sourceId,
-      workspaceId: params.workspaceId,
-    },
-    select: {
-      id: true,
-      authorMemberId: true,
-    },
-  });
-  invariant(source, 404, "NOT_FOUND", "Source not found.");
-  invariant(
-    canCredentialAgentArchiveBrainSource(actor),
-    403,
-    "FORBIDDEN",
-    "Agent credential is missing the required Brain source archive scope.",
-  );
-
-  const canArchive = actor.kind === "agent"
-    || membership?.role === "ADMIN"
-    || (source.authorMemberId !== null && source.authorMemberId === membership?.id);
-  invariant(canArchive, 403, "FORBIDDEN", "Only the source author, workspace admins, or agents can archive this Brain source.");
-
-  await archiveWorkspaceArtifact(actor, {
+  const archived = await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "BrainSource",
     entityId: params.sourceId,
     reason: "Archived from Brain source delete path.",
   });
 
-  return { id: params.sourceId };
+  return { id: archived.id };
 }
 
 // ---------------------------------------------------------------------------

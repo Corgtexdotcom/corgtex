@@ -106,6 +106,34 @@ function financeImportArtifactGuards(field: "documentId" | "brainSourceId") {
   };
 }
 
+const brainSourceFinanceImportGuards = financeImportArtifactGuards("brainSourceId");
+
+function canCredentialAgentArchiveBrainSource(actor: AppActor) {
+  return actor.kind !== "agent"
+    || actor.authProvider !== "credential"
+    || Boolean(actor.scopes?.includes("brain:write") || actor.scopes?.includes("support:write"));
+}
+
+async function requireBrainSourceArchivePermission({
+  tx,
+  record,
+  actor,
+  membership,
+}: Parameters<NonNullable<ArchiveConfig["canArchive"]>>[0]) {
+  await brainSourceFinanceImportGuards.canArchive({ tx, record, actor, membership });
+  invariant(
+    canCredentialAgentArchiveBrainSource(actor),
+    403,
+    "FORBIDDEN",
+    "Agent credential is missing the required Brain source archive scope.",
+  );
+
+  const canArchive = actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (record.authorMemberId !== null && record.authorMemberId === membership?.id);
+  invariant(canArchive, 403, "FORBIDDEN", "Only the source author, workspace admins, or agents can archive this Brain source.");
+}
+
 const directWorkspace = (workspaceId: string, id: string) => ({ id, workspaceId });
 const titleOrName = (record: any) => record.title ?? record.name ?? record.label ?? record.slug ?? record.email ?? record.id ?? null;
 const WORK_ITEM_ARCHIVE_ENTITY_TYPES = new Set<ArchiveEntityType>([
@@ -196,7 +224,8 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainSource",
     findWhere: directWorkspace,
     label: titleOrName,
-    ...financeImportArtifactGuards("brainSourceId"),
+    canArchive: requireBrainSourceArchivePermission,
+    canPurge: brainSourceFinanceImportGuards.canPurge,
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -402,7 +431,7 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+  if (entityType === "BrainSource" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
   }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
