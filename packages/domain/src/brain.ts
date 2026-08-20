@@ -490,7 +490,7 @@ export async function ingestSource(actor: AppActor, params: {
   metadata?: Prisma.InputJsonValue;
   duplicateGuard?: DuplicateGuardOptions | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -574,7 +574,9 @@ export async function ingestSource(actor: AppActor, params: {
         title,
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
-        authorMemberId: params.authorMemberId || null,
+        authorMemberId: params.authorMemberId !== undefined
+          ? params.authorMemberId
+          : actor.kind === "user" ? persistedMemberId(membership) : null,
         ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },
@@ -662,11 +664,26 @@ export async function deleteSource(actor: AppActor, params: {
   workspaceId: string;
   sourceId: string;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
-    allowedRoles: ["ADMIN"],
   });
+  const source = await prisma.brainSource.findFirst({
+    where: {
+      id: params.sourceId,
+      workspaceId: params.workspaceId,
+    },
+    select: {
+      id: true,
+      authorMemberId: true,
+    },
+  });
+  invariant(source, 404, "NOT_FOUND", "Source not found.");
+
+  const canArchive = actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (source.authorMemberId !== null && source.authorMemberId === membership?.id);
+  invariant(canArchive, 403, "FORBIDDEN", "Only the source author, workspace admins, or agents can archive this Brain source.");
 
   await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,

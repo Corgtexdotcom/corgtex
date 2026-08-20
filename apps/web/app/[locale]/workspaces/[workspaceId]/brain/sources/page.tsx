@@ -1,6 +1,6 @@
-import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources } from "@corgtex/domain";
+import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
-import { ingestSourceAction } from "../actions";
+import { deleteSourceAction, ingestSourceAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
 import { BrainSourceFileUploadForm } from "./BrainSourceFileUploadForm";
@@ -16,7 +16,10 @@ export default async function BrainSourcesPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
-  const { items: sources } = await listSources(actor, { workspaceId, take: 50 });
+  const [membership, { items: sources }] = await Promise.all([
+    requireWorkspaceMembership({ actor, workspaceId }),
+    listSources(actor, { workspaceId, take: 50 }),
+  ]);
 
   async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
@@ -88,33 +91,45 @@ export default async function BrainSourcesPage({
       <section className="ws-section">
         <h2>{t("sourcesCount", { count: sources.length })}</h2>
         <div className="list">
-          {sources.map((s) => (
-            <div className="item" key={s.id}>
-              <div className="row">
-                <strong>{s.title ?? s.id.slice(0, 8)}</strong>
-                <div>
-                  <span className="tag">{s.sourceType}</span>
-                  <span className="tag" style={{ marginLeft: 4 }}>{t("tierLabel", { tier: s.tier })}</span>
-                  <span className="tag" style={{ marginLeft: 4 }}>{s.absorbedAt ? t("absorbed") : t("pending")}</span>
+          {sources.map((s) => {
+            const canArchive = actor.kind === "agent"
+              || membership?.role === "ADMIN"
+              || (s.authorMemberId !== null && s.authorMemberId === membership?.id);
+            return (
+              <div className="item" key={s.id}>
+                <div className="row">
+                  <strong>{s.title ?? s.id.slice(0, 8)}</strong>
+                  <div>
+                    <span className="tag">{s.sourceType}</span>
+                    <span className="tag" style={{ marginLeft: 4 }}>{t("tierLabel", { tier: s.tier })}</span>
+                    <span className="tag" style={{ marginLeft: 4 }}>{s.absorbedAt ? t("absorbed") : t("pending")}</span>
+                  </div>
                 </div>
-              </div>
-              <div className="muted">
-                {s.channel && `${s.channel} · `}
-                {s.authorMember ? (s.authorMember.user.displayName ?? s.authorMember.user.email) : t("systemAuthor")}
-                {" · "}
-                {new Date(s.createdAt).toLocaleDateString()}
-                {s.fileStorageKey && (
-                  <>
-                    {" · "}
-                    <a href={`/api/workspaces/${workspaceId}/brain/sources/${s.id}/file`} target="_blank" rel="noreferrer" style={{ textDecoration: "underline" }}>
-                      {t("download")}
-                    </a>
-                  </>
+                <div className="muted">
+                  {s.channel && `${s.channel} · `}
+                  {s.authorMember ? (s.authorMember.user.displayName ?? s.authorMember.user.email) : t("systemAuthor")}
+                  {" · "}
+                  {new Date(s.createdAt).toLocaleDateString()}
+                  {s.fileStorageKey && (
+                    <>
+                      {" · "}
+                      <a href={`/api/workspaces/${workspaceId}/brain/sources/${s.id}/file`} target="_blank" rel="noreferrer" style={{ textDecoration: "underline" }}>
+                        {t("download")}
+                      </a>
+                    </>
+                  )}
+                </div>
+                <p style={{ margin: "8px 0 0", fontSize: "0.85rem" }}>{s.content.slice(0, 200)}{s.content.length > 200 ? "..." : ""}</p>
+                {canArchive && (
+                  <form action={deleteSourceAction} style={{ marginTop: 8 }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="sourceId" value={s.id} />
+                    <button type="submit" className="danger small">{t("archiveSource")}</button>
+                  </form>
                 )}
               </div>
-              <p style={{ margin: "8px 0 0", fontSize: "0.85rem" }}>{s.content.slice(0, 200)}{s.content.length > 200 ? "..." : ""}</p>
-            </div>
-          ))}
+            );
+          })}
           {sources.length === 0 && <p className="muted">{t("noSourcesIngested")}</p>}
         </div>
       </section>

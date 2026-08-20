@@ -42,6 +42,7 @@ const { prismaMock } = vi.hoisted(() => ({
 const requireWorkspaceMembership = vi.fn();
 const appendEvents = vi.fn();
 const resolveKnowledgeAccessDomains = vi.fn();
+const archiveWorkspaceArtifact = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -58,6 +59,15 @@ vi.mock("./events", () => ({
 
 vi.mock("./brain-access", () => ({
   resolveKnowledgeAccessDomains,
+}));
+
+vi.mock("./archive", () => ({
+  archiveFilterWhere: (filter: "active" | "archived" | "all" = "active") => {
+    if (filter === "all") return {};
+    if (filter === "archived") return { archivedAt: { not: null } };
+    return { archivedAt: null };
+  },
+  archiveWorkspaceArtifact,
 }));
 
 const ownerActor = {
@@ -309,6 +319,7 @@ describe("brain source ingestion", () => {
       absorbedAt: null,
     });
     resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE"]);
+    archiveWorkspaceArtifact.mockResolvedValue({ id: "source-1" });
   });
 
   it("filters workspace-only source items and totals through the shared access policy", async () => {
@@ -401,6 +412,126 @@ describe("brain source ingestion", () => {
         meta: expect.objectContaining({ hasIngestionGuidance: true }),
       }),
     }));
+  });
+
+  it("records the current user membership as the Brain source author", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
+  it("allows admins to archive any Brain source", async () => {
+    const { deleteSource } = await import("./brain");
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "admin-member",
+      workspaceId: "ws-1",
+      userId: "admin-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      authorMemberId: "author-member",
+    });
+
+    await expect(deleteSource({ kind: "user", user: { id: "admin-1" } } as any, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).resolves.toEqual({ id: "source-1" });
+
+    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(expect.any(Object), {
+      workspaceId: "ws-1",
+      entityType: "BrainSource",
+      entityId: "source-1",
+      reason: "Archived from Brain source delete path.",
+    });
+  });
+
+  it("allows the source author to archive their own Brain source", async () => {
+    const { deleteSource } = await import("./brain");
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "mem-1",
+      workspaceId: "ws-1",
+      userId: "user-1",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      authorMemberId: "mem-1",
+    });
+
+    await expect(deleteSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).resolves.toEqual({ id: "source-1" });
+
+    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(ownerActor, expect.objectContaining({
+      entityType: "BrainSource",
+      entityId: "source-1",
+    }));
+  });
+
+  it("blocks non-author contributors from archiving another member's Brain source", async () => {
+    const { deleteSource } = await import("./brain");
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "other-member",
+      workspaceId: "ws-1",
+      userId: "user-2",
+      role: "MEMBER",
+      isActive: true,
+    });
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce({
+      id: "source-1",
+      authorMemberId: "mem-1",
+    });
+
+    await expect(deleteSource({ kind: "user", user: { id: "user-2" } } as any, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "FORBIDDEN",
+    });
+
+    expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
+  });
+
+  it("does not archive missing or cross-workspace Brain sources", async () => {
+    const { deleteSource } = await import("./brain");
+    prismaMock.brainSource.findFirst.mockResolvedValueOnce(null);
+
+    await expect(deleteSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceId: "missing-source",
+    })).rejects.toMatchObject({
+      status: 404,
+      code: "NOT_FOUND",
+    });
+
+    expect(prismaMock.brainSource.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "missing-source",
+        workspaceId: "ws-1",
+      },
+      select: {
+        id: true,
+        authorMemberId: true,
+      },
+    });
+    expect(archiveWorkspaceArtifact).not.toHaveBeenCalled();
   });
 
   it("resets absorbed state when a duplicate Brain source is updated", async () => {
