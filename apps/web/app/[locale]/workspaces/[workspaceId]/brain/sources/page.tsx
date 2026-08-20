@@ -1,5 +1,6 @@
 import { duplicateGuardErrorPayload, isDuplicateGuardMatchError, listSources, requireWorkspaceMembership } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
+import { prisma } from "@corgtex/shared";
 import { deleteSourceAction, ingestSourceAction } from "../actions";
 import { getTranslations } from "next-intl/server";
 import { DuplicateGuardForm, type DuplicateGuardFormState } from "../../add/DuplicateGuardForm";
@@ -16,10 +17,12 @@ export default async function BrainSourcesPage({
   const { workspaceId } = await params;
   const actor = await requirePageActor();
   const t = await getTranslations("brain");
-  const [membership, { items: sources }] = await Promise.all([
+  const [membership, { items: sources }, currentWorkspace] = await Promise.all([
     requireWorkspaceMembership({ actor, workspaceId }),
     listSources(actor, { workspaceId, take: 50 }),
+    prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true } }),
   ]);
+  const isDemo = currentWorkspace?.slug === "jnj-demo";
 
   async function ingestSourceAndReturn(_state: DuplicateGuardFormState, formData: FormData): Promise<DuplicateGuardFormState> {
     "use server";
@@ -92,9 +95,11 @@ export default async function BrainSourcesPage({
         <h2>{t("sourcesCount", { count: sources.length })}</h2>
         <div className="list">
           {sources.map((s) => {
-            const canArchive = actor.kind === "agent"
+            const canArchive = !isDemo && (
+              actor.kind === "agent"
               || membership?.role === "ADMIN"
-              || (s.authorMemberId !== null && s.authorMemberId === membership?.id);
+              || (s.authorMemberId !== null && s.authorMemberId === membership?.id)
+            );
             return (
               <div className="item" key={s.id}>
                 <div className="row">

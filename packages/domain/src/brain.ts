@@ -45,6 +45,11 @@ function canCredentialAgentArchiveBrainSource(actor: AppActor) {
     || Boolean(actor.scopes?.includes("brain:write") || actor.scopes?.includes("support:write"));
 }
 
+function normalizedMemberId(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 async function nextAvailableArticleSlug(tx: Prisma.TransactionClient, workspaceId: string, baseSlug: string) {
   let candidate = baseSlug;
   for (let suffix = 2; suffix < 1000; suffix += 1) {
@@ -505,6 +510,7 @@ export async function ingestSource(actor: AppActor, params: {
   invariant(params.tier >= 1 && params.tier <= 3, 400, "INVALID_INPUT", "Tier must be 1, 2, or 3.");
   const title = params.title?.trim() || null;
   const content = params.content.trim();
+  const authorMemberId = normalizedMemberId(params.authorMemberId);
   const duplicateDecision = await checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "BrainSource",
@@ -581,8 +587,8 @@ export async function ingestSource(actor: AppActor, params: {
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
         authorMemberId: actor.kind === "user"
-          ? params.authorMemberId ?? persistedMemberId(membership)
-          : params.authorMemberId ?? null,
+          ? authorMemberId ?? persistedMemberId(membership)
+          : authorMemberId,
         ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },

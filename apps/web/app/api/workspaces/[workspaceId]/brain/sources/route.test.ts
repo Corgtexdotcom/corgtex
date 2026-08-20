@@ -81,4 +81,23 @@ describe("POST /api/workspaces/[workspaceId]/brain/sources", () => {
       authorMemberId: "member-1",
     }));
   });
+
+  it("omits blank API author attribution", async () => {
+    const actor = { kind: "user" as const, user: { id: "user-1" } };
+    resolveRequestActor.mockResolvedValue(actor);
+    ingestSource.mockResolvedValue({ id: "source-1" });
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      postBrainSource({
+        sourceType: "DOC",
+        content: "Policy text",
+        authorMemberId: "   ",
+      }),
+      { params: Promise.resolve({ workspaceId: "ws-1" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(ingestSource.mock.calls[0]?.[1]).not.toHaveProperty("authorMemberId");
+  });
 });

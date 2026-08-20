@@ -451,6 +451,25 @@ describe("brain source ingestion", () => {
     });
   });
 
+  it("defaults blank user source authors to the current user membership", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+      authorMemberId: "   ",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
   it("allows admins to archive any Brain source", async () => {
     const { deleteSource } = await import("./brain");
     requireWorkspaceMembership.mockResolvedValueOnce({

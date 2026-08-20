@@ -34,6 +34,17 @@ function uniqueSlug(base: string, existingSlugs: Set<string>) {
   return `${base}-${Date.now()}`;
 }
 
+function sourceSkipReason(source: {
+  workspaceId: string;
+  absorbedAt: Date | null;
+  archivedAt: Date | null;
+} | null, workspaceId: string) {
+  if (!source || source.workspaceId !== workspaceId) return "not_found";
+  if (source.archivedAt) return "archived";
+  if (source.absorbedAt) return "already_absorbed";
+  return null;
+}
+
 /**
  * Core absorption logic — called by the agent runtime.
  *
@@ -55,8 +66,21 @@ export async function absorbSource(params: {
     where: { id: params.sourceId },
   });
 
-  if (!source || source.workspaceId !== params.workspaceId || source.absorbedAt) {
-    return { skipped: true, reason: source?.absorbedAt ? "already_absorbed" : "not_found" };
+  if (!source) {
+    return { skipped: true, reason: "not_found" };
+  }
+
+  const initialSkipReason = sourceSkipReason(source, params.workspaceId);
+  if (initialSkipReason) {
+    return { skipped: true, reason: initialSkipReason };
+  }
+
+  async function currentSkipReason() {
+    const current = await prisma.brainSource.findUnique({
+      where: { id: params.sourceId },
+      select: { workspaceId: true, absorbedAt: true, archivedAt: true },
+    });
+    return sourceSkipReason(current, params.workspaceId);
   }
 
   // Build an agent actor for domain service calls
@@ -136,6 +160,11 @@ Determine:
   const updateSlugs = Array.isArray(result.updateSlugs) ? result.updateSlugs : [];
   const createNew = result.createNew && typeof result.createNew === "object" ? result.createNew : null;
   const documentLikeSource = isDocumentLikeSource(source.sourceType);
+
+  const postAnalysisSkipReason = await currentSkipReason();
+  if (postAnalysisSkipReason) {
+    return { skipped: true, reason: postAnalysisSkipReason, sourceId: source.id };
+  }
 
   const touchedArticleIds: string[] = [];
   const skippedNonDraftSlugs: string[] = [];

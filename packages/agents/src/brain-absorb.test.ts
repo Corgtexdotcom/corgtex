@@ -67,6 +67,7 @@ describe("absorbSource", () => {
       content: "Launch content",
       ingestionGuidanceMd: "Prioritize launch blockers.",
       absorbedAt: null,
+      archivedAt: null,
     });
     prismaMock.brainArticle.findMany.mockResolvedValue([]);
     prismaMock.brainBacklink.findMany.mockResolvedValue([]);
@@ -97,6 +98,68 @@ describe("absorbSource", () => {
       instruction: expect.stringContaining("Prioritize launch blockers."),
       input: expect.stringContaining("Prioritize launch blockers."),
     }));
+  });
+
+  it("skips archived sources before sending content to the model", async () => {
+    prismaMock.brainSource.findUnique.mockResolvedValueOnce({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      sourceType: "DOC",
+      tier: 1,
+      title: "Launch notes",
+      channel: "text-paste",
+      content: "Launch content",
+      ingestionGuidanceMd: null,
+      absorbedAt: null,
+      archivedAt: new Date("2026-08-20T10:00:00.000Z"),
+    });
+
+    const { absorbSource } = await import("./brain-absorb");
+    const result = await absorbSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      agentRunId: "run-1",
+    });
+
+    expect(result).toEqual({ skipped: true, reason: "archived" });
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+  });
+
+  it("skips article writes when a source is archived after analysis", async () => {
+    prismaMock.brainSource.findUnique
+      .mockResolvedValueOnce({
+        id: "source-1",
+        workspaceId: "workspace-1",
+        sourceType: "DOC",
+        tier: 1,
+        title: "Launch notes",
+        channel: "text-paste",
+        content: "Launch content",
+        ingestionGuidanceMd: null,
+        absorbedAt: null,
+        archivedAt: null,
+      })
+      .mockResolvedValueOnce({
+        workspaceId: "workspace-1",
+        absorbedAt: null,
+        archivedAt: new Date("2026-08-20T10:00:00.000Z"),
+      });
+
+    const { absorbSource } = await import("./brain-absorb");
+    const result = await absorbSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      agentRunId: "run-1",
+    });
+
+    expect(result).toEqual({ skipped: true, reason: "archived", sourceId: "source-1" });
+    expect(modelGatewayMock.extract).toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
   });
 
   it("creates a public reference recap when document sources match non-draft articles", async () => {
