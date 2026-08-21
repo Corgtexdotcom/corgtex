@@ -84,6 +84,7 @@ export async function createArticle(actor: AppActor, params: {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
   const title = params.title.trim();
@@ -203,6 +204,7 @@ export async function updateArticle(actor: AppActor, params: {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
   const run = async (tx: Prisma.TransactionClient) => {
@@ -587,9 +589,7 @@ export async function ingestSource(actor: AppActor, params: {
         title,
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
-        authorMemberId: actor.kind === "user"
-          ? authorMemberId ?? persistedMemberId(membership)
-          : authorMemberId,
+        authorMemberId: actor.kind === "user" ? persistedMemberId(membership) : authorMemberId,
         ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },
@@ -699,6 +699,7 @@ export async function rebuildBacklinks(actor: AppActor, params: {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
   const db = params.tx ?? prisma;

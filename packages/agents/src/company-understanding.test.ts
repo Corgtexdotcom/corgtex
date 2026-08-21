@@ -172,6 +172,22 @@ describe("company understanding synthesis", () => {
     }));
   });
 
+  it("skips source-triggered synthesis when the exact source is unavailable", async () => {
+    prismaMock.brainSource.findMany.mockResolvedValue([]);
+
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    const result = await runCompanyUnderstandingSynthesis({
+      workspaceId: "workspace-1",
+      agentRunId: "run-1",
+      sourceId: "archived-source",
+      model: "gpt-4o-mini",
+    });
+
+    expect(result).toEqual({ skipped: true, reason: "source_unavailable" });
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(createGoalMock).not.toHaveBeenCalled();
+  });
+
   it("applies automatic confidence gates across active goals, drafts, and questions", async () => {
     createGoalMock
       .mockResolvedValueOnce({ id: "goal-high" })

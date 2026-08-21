@@ -470,6 +470,25 @@ describe("brain source ingestion", () => {
     });
   });
 
+  it("ignores spoofed user source author ids", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+      authorMemberId: "other-member",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
   it("delegates Brain source archiving to the central archive service", async () => {
     const { deleteSource } = await import("./brain");
 

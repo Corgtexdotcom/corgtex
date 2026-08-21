@@ -735,6 +735,42 @@ describe("workspace archive domain", () => {
     expect(prismaMock.brainSource.update).not.toHaveBeenCalled();
   });
 
+  it("requires finance write scope before credential agents archive Finance BrainSources", async () => {
+    const source = {
+      id: "source-finance",
+      workspaceId: "workspace-1",
+      title: "Finance source",
+      authorMemberId: "author-member",
+      accessDomain: "FINANCE",
+      archivedAt: null,
+    };
+    prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.brainSource.update.mockResolvedValue({ ...source, archivedAt: new Date("2026-08-20T10:00:00.000Z") });
+    const { archiveWorkspaceArtifact } = await import("./archive");
+
+    await expect(archiveWorkspaceArtifact({
+      kind: "agent",
+      authProvider: "credential",
+      workspaceIds: ["workspace-1"],
+      scopes: ["brain:write"],
+    } as AppActor, {
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      entityId: "source-finance",
+    })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+
+    await expect(archiveWorkspaceArtifact({
+      kind: "agent",
+      authProvider: "credential",
+      workspaceIds: ["workspace-1"],
+      scopes: ["brain:write", "finance:write"],
+    } as AppActor, {
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      entityId: "source-finance",
+    })).resolves.toMatchObject({ id: "source-finance" });
+  });
+
   it("locks BrainSource archive state before reading and updating the source", async () => {
     const source = {
       id: "source-1",

@@ -109,10 +109,15 @@ function financeImportArtifactGuards(field: "documentId" | "brainSourceId") {
 
 const brainSourceFinanceImportGuards = financeImportArtifactGuards("brainSourceId");
 
-function canCredentialAgentArchiveBrainSource(actor: AppActor) {
-  return actor.kind !== "agent"
-    || actor.authProvider !== "credential"
-    || Boolean(actor.scopes?.includes("brain:write") || actor.scopes?.includes("support:write"));
+function canCredentialAgentArchiveBrainSource(actor: AppActor, record: any) {
+  if (actor.kind !== "agent" || actor.authProvider !== "credential") return true;
+  const scopes = actor.scopes ?? [];
+  const hasSupportWrite = scopes.includes("support:write");
+  const hasBrainWrite = scopes.includes("brain:write") || hasSupportWrite;
+  const hasFinanceWrite = record.accessDomain !== "FINANCE"
+    || scopes.includes("finance:write")
+    || hasSupportWrite;
+  return hasBrainWrite && hasFinanceWrite;
 }
 
 async function requireBrainSourceArchivePermission({
@@ -123,7 +128,7 @@ async function requireBrainSourceArchivePermission({
 }: Parameters<NonNullable<ArchiveConfig["canArchive"]>>[0]) {
   await brainSourceFinanceImportGuards.canArchive({ tx, record, actor, membership });
   invariant(
-    canCredentialAgentArchiveBrainSource(actor),
+    canCredentialAgentArchiveBrainSource(actor, record),
     403,
     "FORBIDDEN",
     "Agent credential is missing the required Brain source archive scope.",

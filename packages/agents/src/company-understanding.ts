@@ -645,6 +645,10 @@ export async function runCompanyUnderstandingSynthesis(params: {
     }),
   ]);
 
+  if (params.sourceId && sources.length === 0) {
+    return { skipped: true, reason: "source_unavailable" };
+  }
+
   if (sources.length === 0 && articles.length === 0) {
     return { skipped: true, reason: "no_brain_evidence" };
   }
