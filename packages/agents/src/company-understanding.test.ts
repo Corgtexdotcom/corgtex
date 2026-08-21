@@ -10,7 +10,7 @@ const {
   getApplyModeMock,
 } = vi.hoisted(() => ({
   prismaMock: {
-    brainSource: { findMany: vi.fn() },
+    brainSource: { findMany: vi.fn(), count: vi.fn() },
     brainArticle: { findMany: vi.fn() },
     goal: { findMany: vi.fn() },
     member: { findFirst: vi.fn() },
@@ -100,6 +100,7 @@ describe("company understanding synthesis", () => {
         absorbedAt: new Date(),
       },
     ]);
+    prismaMock.brainSource.count.mockResolvedValue(1);
     prismaMock.brainArticle.findMany.mockResolvedValue([
       {
         id: "article-1",
@@ -186,6 +187,55 @@ describe("company understanding synthesis", () => {
     expect(result).toEqual({ skipped: true, reason: "source_unavailable" });
     expect(modelGatewayMock.extract).not.toHaveBeenCalled();
     expect(createGoalMock).not.toHaveBeenCalled();
+  });
+
+  it("stops source-triggered synthesis when the exact source is archived before persistence", async () => {
+    prismaMock.brainSource.count.mockResolvedValue(0);
+    modelGatewayMock.extract.mockResolvedValue({
+      output: {
+        goals: [
+          {
+            title: "Launch onboarding",
+            summary: "Ship the onboarding flow this quarter.",
+            cadence: "QUARTERLY",
+            confidence: 0.91,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1", quote: "Launch onboarding" }],
+          },
+        ],
+        openQuestions: [
+          {
+            questionText: "Who owns onboarding?",
+            priority: 8,
+            confidence: 0.8,
+            relatedEntityType: "BrainSource",
+            relatedEntityId: "source-1",
+          },
+        ],
+        mapProposals: [
+          {
+            title: "Support ownership",
+            mapType: "org",
+            confidence: 0.9,
+            evidenceRefs: [{ sourceType: "BrainSource", sourceId: "source-1" }],
+            objects: [{ ref: "support", objectType: "Team", title: "Support", summary: null }],
+            relationships: [],
+          },
+        ],
+      },
+    });
+
+    const { runCompanyUnderstandingSynthesis } = await import("./company-understanding");
+    const result = await runCompanyUnderstandingSynthesis({
+      workspaceId: "workspace-1",
+      agentRunId: "run-1",
+      sourceId: "source-1",
+      model: "gpt-4o-mini",
+    });
+
+    expect(result).toMatchObject({ generatedGoals: 0, questions: 0, mapProposals: 0 });
+    expect(createGoalMock).not.toHaveBeenCalled();
+    expect(createQuestionMock).not.toHaveBeenCalled();
+    expect(createDiffMock).not.toHaveBeenCalled();
   });
 
   it("applies automatic confidence gates across active goals, drafts, and questions", async () => {
