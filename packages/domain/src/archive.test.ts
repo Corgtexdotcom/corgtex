@@ -804,13 +804,13 @@ describe("workspace archive domain", () => {
     expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.brainSource.update.mock.invocationCallOrder[0]);
   });
 
-  it("requeues pending BrainSource absorption when a source is restored", async () => {
+  it("requeues BrainSource processing when a source is restored", async () => {
     const source = {
-      id: "source-pending",
+      id: "source-restored",
       workspaceId: "workspace-1",
-      title: "Pending source",
+      title: "Restored source",
       authorMemberId: "author-member",
-      absorbedAt: null,
+      absorbedAt: new Date("2026-08-20T10:05:00.000Z"),
       archivedAt: new Date("2026-08-20T10:00:00.000Z"),
     };
     prismaMock.member.findUnique.mockResolvedValue({
@@ -828,7 +828,7 @@ describe("workspace archive domain", () => {
     await restoreWorkspaceArtifact(actor, {
       workspaceId: "workspace-1",
       entityType: "BrainSource",
-      entityId: "source-pending",
+      entityId: "source-restored",
     });
 
     expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [
@@ -836,8 +836,8 @@ describe("workspace archive domain", () => {
         workspaceId: "workspace-1",
         type: "brain-source.created",
         aggregateType: "BrainSource",
-        aggregateId: "source-pending",
-        payload: { sourceId: "source-pending" },
+        aggregateId: "source-restored",
+        payload: { sourceId: "source-restored" },
       },
     ]);
   });

@@ -695,7 +695,7 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
     }
-    if (config.entityType === "BrainSource" && updated.absorbedAt === null) {
+    if (config.entityType === "BrainSource") {
       await appendEvents(tx, [
         {
           workspaceId: params.workspaceId,
