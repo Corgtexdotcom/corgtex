@@ -1,4 +1,4 @@
-import type { MemberRole } from "@prisma/client";
+import type { MemberRole, Prisma } from "@prisma/client";
 import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -6,13 +6,13 @@ import { systemActorMemberIdentityWhere } from "./member-identity";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
-async function requireDeploymentWorkspaceScope(workspaceId: string) {
+async function requireDeploymentWorkspaceScope(workspaceId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
   const workspaceSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
   if (!workspaceSlug) {
     return;
   }
 
-  const scopedWorkspace = await prisma.workspace.findFirst({
+  const scopedWorkspace = await db.workspace.findFirst({
     where: {
       id: workspaceId,
       slug: workspaceSlug,
@@ -173,8 +173,10 @@ export async function requireWorkspaceMembership(params: {
   workspaceId: string;
   allowedRoles?: MemberRole[];
   resolvedMembership?: MembershipSummary | null;
+  tx?: Prisma.TransactionClient;
 }) {
-  await requireDeploymentWorkspaceScope(params.workspaceId);
+  const db = params.tx ?? prisma;
+  await requireDeploymentWorkspaceScope(params.workspaceId, db);
 
   if (params.actor.kind === "agent") {
     const allowed = new Set(params.actor.workspaceIds ?? []);
@@ -212,7 +214,7 @@ export async function requireWorkspaceMembership(params: {
     } as MembershipSummary;
   }
 
-  const membership = await prisma.member.findUnique({
+  const membership = await db.member.findUnique({
     where: {
       workspaceId_userId: {
         workspaceId: params.workspaceId,

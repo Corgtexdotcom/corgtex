@@ -11,6 +11,7 @@ const actor = {
 };
 
 const createArticle = vi.fn();
+const deleteSource = vi.fn();
 const enforceDemoGuard = vi.fn();
 const ingestSource = vi.fn();
 const publishArticle = vi.fn();
@@ -37,6 +38,7 @@ vi.mock("@corgtex/domain", () => ({
   AGREEMENT_BRAIN_ARTICLE_AUTHORITIES: ["AUTHORITATIVE", "REFERENCE"],
   AGREEMENT_BRAIN_ARTICLE_TYPES: ["DECISION", "PROCESS", "CULTURE", "STRATEGY"],
   createArticle,
+  deleteSource,
   ingestSource,
   publishArticle,
   requireWorkspaceMembership,
@@ -53,6 +55,22 @@ afterEach(() => {
 });
 
 describe("Brain article server actions", () => {
+  it("archives a Brain source through the existing delete path", async () => {
+    const { deleteSourceAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("sourceId", "source-1");
+
+    await deleteSourceAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(requirePageActor).toHaveBeenCalled();
+    expect(deleteSource).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+    });
+  });
+
   it("captures manual working agreement source and context as article frontmatter", async () => {
     const { createArticleAction } = await import("./actions");
     const formData = new FormData();

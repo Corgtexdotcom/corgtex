@@ -190,6 +190,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
   contentHash: string | null;
   authoritativeContentHash?: string;
   ingestionGuidanceMd?: string;
+  authorMemberId?: string;
   metadata: Record<string, unknown>;
 }) {
   return prisma.$transaction(async (tx) => {
@@ -233,6 +234,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
       where: {
         workspaceId: params.workspaceId,
         sourceType: { in: ["DOC", "FILE_UPLOAD"] },
+        archivedAt: null,
         metadata: { path: ["documentId"], equals: document.id },
       },
     });
@@ -271,7 +273,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           tier: 2,
           content: mergedSourceContent,
           title: params.documentTitle,
-          authorMemberId: null,
+          authorMemberId: params.authorMemberId ?? null,
           channel: params.source,
           ingestionGuidanceMd: params.ingestionGuidanceMd ?? null,
           fileStorageKey: params.storageKey,
@@ -533,6 +535,7 @@ export async function ingestFile(actor: AppActor, params: {
         contentHash,
         authoritativeContentHash,
         ingestionGuidanceMd,
+        authorMemberId,
         metadata: {
           ...documentMetadata,
           extraction,

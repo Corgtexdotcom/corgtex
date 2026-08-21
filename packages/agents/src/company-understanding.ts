@@ -357,7 +357,14 @@ async function resolveQuestionMemberId(workspaceId: string) {
   return fallback?.id ?? null;
 }
 
-async function createQuestionIfNew(actor: AppActor, workspaceId: string, memberId: string | null, question: QuestionInsight, metadata?: Prisma.InputJsonObject) {
+async function createQuestionIfNew(
+  actor: AppActor,
+  workspaceId: string,
+  memberId: string | null,
+  question: QuestionInsight,
+  metadata?: Prisma.InputJsonObject,
+  triggerSourceId?: string | null,
+) {
   if (!memberId) return { kind: "question" as const, skipped: true, reason: "no_member" };
   const existing = await prisma.checkIn.findFirst({
     where: {
@@ -370,6 +377,9 @@ async function createQuestionIfNew(actor: AppActor, workspaceId: string, memberI
     select: { id: true },
   });
   if (existing) return { kind: "question" as const, skipped: true, reason: "duplicate_question", id: existing.id };
+  if (!(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
+    return { kind: "question" as const, skipped: true, reason: "source_unavailable" };
+  }
   const created = await createCompanyUnderstandingQuestion(actor, {
     workspaceId,
     memberId,
@@ -388,8 +398,31 @@ async function createQuestionIfNew(actor: AppActor, workspaceId: string, memberI
   return { kind: "question" as const, created: true, id: created.id };
 }
 
-async function linkGoalEvidence(actor: AppActor, workspaceId: string, goalId: string, goal: GoalInsight, agentRunId: string) {
+async function triggerSourceStillAvailable(workspaceId: string, sourceId?: string | null) {
+  if (!sourceId) return true;
+  const count = await prisma.brainSource.count({
+    where: {
+      id: sourceId,
+      workspaceId,
+      archivedAt: null,
+      absorbedAt: { not: null },
+    },
+  });
+  return count > 0;
+}
+
+async function linkGoalEvidence(
+  actor: AppActor,
+  workspaceId: string,
+  goalId: string,
+  goal: GoalInsight,
+  agentRunId: string,
+  triggerSourceId?: string | null,
+) {
   for (const evidence of goal.evidenceRefs) {
+    if (!(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
+      continue;
+    }
     await createGoalLink(actor, {
       workspaceId,
       goalId,
@@ -485,6 +518,7 @@ async function applyGoalInsight(
   agentRunId: string,
   questionMemberId: string | null,
   goalIndex: GoalIndex,
+  triggerSourceId?: string | null,
 ) {
   const existing = findGoalIndexEntry(goalIndex, goal.title, goal.cadence);
 
@@ -498,13 +532,20 @@ async function applyGoalInsight(
       confidence: goal.confidence,
       relatedEntityType: goal.evidenceRefs[0]?.sourceType ?? null,
       relatedEntityId: goal.evidenceRefs[0]?.sourceId ?? null,
-    }, { generatedFrom: "goal-low-confidence", title: goal.title });
+    }, {
+      generatedFrom: "goal-low-confidence",
+      title: goal.title,
+    }, triggerSourceId);
   }
 
   const parent = goal.parentTitle
     ? findGoalIndexEntry(goalIndex, goal.parentTitle, goal.parentCadence)
     : null;
   const status = goalStatusForConfidence(goal.confidence, applyMode);
+  if (!existing && !(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
+    return { kind: "goal" as const, skipped: true, reason: "source_unavailable" };
+  }
+
   const target = existing ?? await createGoal(actor, {
     workspaceId,
     title: goal.title,
@@ -527,7 +568,7 @@ async function applyGoalInsight(
     });
   }
 
-  await linkGoalEvidence(actor, workspaceId, target.id, goal, agentRunId);
+  await linkGoalEvidence(actor, workspaceId, target.id, goal, agentRunId, triggerSourceId);
   return {
     kind: "goal" as const,
     created: !existing,
@@ -551,13 +592,20 @@ function mapQuestionForProposal(proposal: MapProposalInsight): QuestionInsight {
   };
 }
 
-async function applyMapProposal(actor: AppActor, workspaceId: string, proposal: MapProposalInsight, agentRunId: string, questionMemberId: string | null) {
+async function applyMapProposal(
+  actor: AppActor,
+  workspaceId: string,
+  proposal: MapProposalInsight,
+  agentRunId: string,
+  questionMemberId: string | null,
+  triggerSourceId?: string | null,
+) {
   if (proposal.confidence < DRAFT_CONFIDENCE || proposal.evidenceRefs.length === 0 || proposal.objects.length === 0) {
     return createQuestionIfNew(actor, workspaceId, questionMemberId, mapQuestionForProposal(proposal), {
       generatedFrom: "map-low-confidence",
       mapType: proposal.mapType,
       title: proposal.title,
-    });
+    }, triggerSourceId);
   }
 
   const reason = `Company understanding proposal: ${proposal.mapType}: ${proposal.title}`;
@@ -566,6 +614,9 @@ async function applyMapProposal(actor: AppActor, workspaceId: string, proposal: 
     select: { id: true },
   });
   if (existing) return { kind: "map-proposal" as const, skipped: true, reason: "duplicate_map_proposal", id: existing.id };
+  if (!(await triggerSourceStillAvailable(workspaceId, triggerSourceId))) {
+    return { kind: "map-proposal" as const, skipped: true, reason: "source_unavailable" };
+  }
 
   const primaryEvidence = proposal.evidenceRefs[0];
   const diff: ContextGraphDiffInput = {
@@ -644,6 +695,10 @@ export async function runCompanyUnderstandingSynthesis(params: {
       select: { id: true, slug: true, title: true, type: true, authority: true, bodyMd: true, sourceIds: true },
     }),
   ]);
+
+  if (params.sourceId && sources.length === 0) {
+    return { skipped: true, reason: "source_unavailable" };
+  }
 
   if (sources.length === 0 && articles.length === 0) {
     return { skipped: true, reason: "no_brain_evidence" };
@@ -744,15 +799,16 @@ Expected JSON shape:
       params.agentRunId,
       questionMemberId,
       goalIndex,
+      params.sourceId ?? null,
     ));
   }
   for (const question of [...normalized.questions, ...normalized.missingEvidence]) {
     questionResults.push(await createQuestionIfNew(actor, params.workspaceId, questionMemberId, question, {
       generatedFrom: "company-understanding",
-    }));
+    }, params.sourceId ?? null));
   }
   for (const proposal of normalized.mapProposals) {
-    mapResults.push(await applyMapProposal(actor, params.workspaceId, proposal, params.agentRunId, questionMemberId));
+    mapResults.push(await applyMapProposal(actor, params.workspaceId, proposal, params.agentRunId, questionMemberId, params.sourceId ?? null));
   }
 
   return {

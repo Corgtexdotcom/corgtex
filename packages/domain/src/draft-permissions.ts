@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
@@ -29,6 +30,7 @@ export async function requireDraftManager(params: {
   workspaceId: string;
   record: DraftManageableRecord;
   resolvedMembership?: MembershipSummary | null;
+  tx?: Prisma.TransactionClient;
 }) {
   invariant(params.record.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Record not found.");
   invariant(!params.record.archivedAt, 400, "INVALID_STATE", "Archived records cannot be managed as drafts.");
@@ -36,7 +38,8 @@ export async function requireDraftManager(params: {
   const membership = await requireWorkspaceMembership({
     actor: params.actor,
     workspaceId: params.workspaceId,
-    resolvedMembership: params.resolvedMembership ?? undefined,
+    resolvedMembership: params.resolvedMembership,
+    tx: params.tx,
   });
 
   if (!canManageDraftRecord(params.actor, membership, params.record)) {

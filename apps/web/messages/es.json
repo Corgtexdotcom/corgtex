@@ -534,6 +534,7 @@
     "pending": "Pendiente",
     "systemAuthor": "Sistema",
     "download": "Descargar",
+    "archiveSource": "Archivar",
     "noSourcesIngested": "Aún no se han ingerido fuentes.",
     "statusTitle": "Estado de Brain",
     "totalArticles": "Artículos totales",
