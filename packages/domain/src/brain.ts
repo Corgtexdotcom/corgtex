@@ -229,7 +229,7 @@ export async function updateArticle(actor: AppActor, params: {
       || params.sourceIds !== undefined;
     if (editsDraftContent) {
       invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
-      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership, tx });
     }
 
     // Create version snapshot of previous body before updating

@@ -569,6 +569,7 @@ describe("file-ingestion", () => {
       channel: "FILE_UPLOAD",
       ingestionGuidanceMd: null,
       metadata: { documentId: "doc-existing" },
+      archivedAt: new Date("2026-08-20T00:00:00.000Z"),
     };
     const txObj = {
       document: {
@@ -612,6 +613,7 @@ describe("file-ingestion", () => {
         fileName: "test.txt",
         fileMimeType: "text/plain",
         absorbedAt: null,
+        archivedAt: null,
       }),
     }));
     expect(txObj.brainSource.create).not.toHaveBeenCalled();

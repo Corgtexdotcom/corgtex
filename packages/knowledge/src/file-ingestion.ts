@@ -248,6 +248,7 @@ async function updateDuplicateUploadedDocument(actor: AppActor, params: {
           fileName: params.fileName,
           fileMimeType: params.mimeType,
           fileSizeBytes: params.size,
+          archivedAt: null,
           absorbedAt: null,
           metadata: {
             ...(typeof existingSource.metadata === "object" && existingSource.metadata !== null && !Array.isArray(existingSource.metadata)

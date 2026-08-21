@@ -161,6 +161,55 @@ describe("Brain article draft lifecycle", () => {
     expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
   });
 
+  it("keeps draft authorization on the supplied transaction client when updating draft articles", async () => {
+    const { updateArticle } = await import("./brain");
+
+    requireWorkspaceMembership.mockResolvedValue(null);
+    prismaMock.brainArticle.findUnique.mockResolvedValue({
+      id: "article-1",
+      workspaceId: "ws-1",
+      slug: "draft",
+      title: "Draft",
+      bodyMd: "Body",
+      authority: "DRAFT",
+      isPrivate: true,
+      ownerMemberId: null,
+      archivedAt: null,
+    });
+    prismaMock.brainArticle.update.mockResolvedValue({
+      id: "article-1",
+      workspaceId: "ws-1",
+      slug: "draft",
+      title: "Changed",
+      bodyMd: "Body",
+      authority: "DRAFT",
+      isPrivate: true,
+      ownerMemberId: null,
+      archivedAt: null,
+    });
+
+    await updateArticle({
+      kind: "agent",
+      authProvider: "api-key",
+      label: "brain-absorb",
+      workspaceIds: ["ws-1"],
+      scopes: ["brain:write"],
+    } as any, {
+      workspaceId: "ws-1",
+      slug: "draft",
+      title: "Changed",
+      tx: prismaMock as any,
+    });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+    expect(requireWorkspaceMembership).toHaveBeenNthCalledWith(1, expect.objectContaining({ tx: prismaMock }));
+    expect(requireWorkspaceMembership).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      resolvedMembership: null,
+      tx: prismaMock,
+    }));
+  });
+
   it("returns a public article to draft for the owner", async () => {
     const { returnArticleToDraft } = await import("./brain");
 
