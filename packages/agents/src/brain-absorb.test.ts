@@ -258,12 +258,12 @@ describe("absorbSource", () => {
       authority: "REFERENCE",
       sourceIds: ["source-1"],
     }));
-    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(4);
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(1);
     expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledWith(prismaMock, "BrainSource", "source-1");
     expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(createArticleMock.mock.invocationCallOrder[0]);
-    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[1]).toBeLessThan(syncBrainArticleKnowledgeMock.mock.invocationCallOrder[0]);
-    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[2]).toBeLessThan(rebuildBacklinksMock.mock.invocationCallOrder[0]);
-    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[3]).toBeLessThan(markSourceAbsorbedMock.mock.invocationCallOrder[0]);
-    expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1" });
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(rebuildBacklinksMock.mock.invocationCallOrder[0]);
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(markSourceAbsorbedMock.mock.invocationCallOrder[0]);
+    expect(markSourceAbsorbedMock.mock.invocationCallOrder[0]).toBeLessThan(syncBrainArticleKnowledgeMock.mock.invocationCallOrder[0]);
+    expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1", tx: prismaMock });
   });
 });

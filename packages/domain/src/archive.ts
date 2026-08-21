@@ -20,6 +20,7 @@ import {
   recordWorkItemVersion,
   type WorkItemEntityType,
 } from "./work-item-versions";
+import { appendEvents } from "./events";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -688,6 +689,17 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
     });
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
+    }
+    if (config.entityType === "BrainSource" && updated.absorbedAt === null) {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "brain-source.created",
+          aggregateType: "BrainSource",
+          aggregateId: record.id,
+          payload: { sourceId: record.id },
+        },
+      ]);
     }
 
     if (archiveRecord) {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
+const { prismaMock, storageDeleteMock, appendEventsMock } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
     action: {
@@ -67,7 +67,7 @@ const { prismaMock, storageDeleteMock } = vi.hoisted(() => {
     $executeRaw: vi.fn(),
     $queryRaw: vi.fn(),
   };
-  return { prismaMock: prisma, storageDeleteMock: vi.fn() };
+  return { prismaMock: prisma, storageDeleteMock: vi.fn(), appendEventsMock: vi.fn() };
 });
 
 vi.mock("@corgtex/shared", () => ({
@@ -82,6 +82,10 @@ vi.mock("@corgtex/storage", () => ({
   defaultStorage: {
     delete: storageDeleteMock,
   },
+}));
+
+vi.mock("./events", () => ({
+  appendEvents: appendEventsMock,
 }));
 
 const actor: AppActor = {
@@ -120,6 +124,7 @@ describe("workspace archive domain", () => {
     prismaMock.$executeRaw.mockResolvedValue(1);
     prismaMock.$queryRaw.mockResolvedValue([]);
     storageDeleteMock.mockResolvedValue(undefined);
+    appendEventsMock.mockResolvedValue(undefined);
   });
 
   it("archives artifacts with metadata and an audit record", async () => {
@@ -761,6 +766,44 @@ describe("workspace archive domain", () => {
     expect(prismaMock.$executeRaw).toHaveBeenCalled();
     expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.brainSource.findFirst.mock.invocationCallOrder[0]);
     expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.brainSource.update.mock.invocationCallOrder[0]);
+  });
+
+  it("requeues pending BrainSource absorption when a source is restored", async () => {
+    const source = {
+      id: "source-pending",
+      workspaceId: "workspace-1",
+      title: "Pending source",
+      authorMemberId: "author-member",
+      absorbedAt: null,
+      archivedAt: new Date("2026-08-20T10:00:00.000Z"),
+    };
+    prismaMock.member.findUnique.mockResolvedValue({
+      id: "admin-member",
+      workspaceId: "workspace-1",
+      userId: "admin-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.brainSource.findFirst.mockResolvedValue(source);
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValue({ id: "archive-source", previousState: {} });
+    prismaMock.brainSource.update.mockResolvedValue({ ...source, archivedAt: null });
+    const { restoreWorkspaceArtifact } = await import("./archive");
+
+    await restoreWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1",
+      entityType: "BrainSource",
+      entityId: "source-pending",
+    });
+
+    expect(appendEventsMock).toHaveBeenCalledWith(prismaMock, [
+      {
+        workspaceId: "workspace-1",
+        type: "brain-source.created",
+        aggregateType: "BrainSource",
+        aggregateId: "source-pending",
+        payload: { sourceId: "source-pending" },
+      },
+    ]);
   });
 
   it("retains generic lifecycle behavior for unlinked knowledge artifacts", async () => {

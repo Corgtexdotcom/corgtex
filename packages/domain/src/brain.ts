@@ -79,6 +79,7 @@ export async function createArticle(actor: AppActor, params: {
   sourceIds?: string[];
   isPrivate?: boolean;
   duplicateGuard?: DuplicateGuardOptions | null;
+  tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -103,7 +104,7 @@ export async function createArticle(actor: AppActor, params: {
     includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
   }, params.duplicateGuard);
   if (duplicateDecision?.resolution === "use_existing") {
-    const article = await prisma.brainArticle.findFirst({
+    const article = await (params.tx ?? prisma).brainArticle.findFirst({
       where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
     });
     invariant(article, 404, "NOT_FOUND", "Article not found.");
@@ -122,6 +123,7 @@ export async function createArticle(actor: AppActor, params: {
       ownerMemberId: article.ownerMemberId || params.ownerMemberId || undefined,
       sourceIds: Array.from(new Set([...(article.sourceIds ?? []), ...(params.sourceIds ?? [])])),
       changeSummary: "Merged duplicate upload context.",
+      tx: params.tx,
     });
   }
 
@@ -129,7 +131,7 @@ export async function createArticle(actor: AppActor, params: {
 
   const membershipId = persistedMemberId(membership);
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     const slug = await nextAvailableArticleSlug(tx, params.workspaceId, requestedSlug);
     const article = await tx.brainArticle.create({
       data: {
@@ -178,7 +180,9 @@ export async function createArticle(actor: AppActor, params: {
     ]);
 
     return article;
-  });
+  };
+
+  return params.tx ? run(params.tx) : prisma.$transaction(run);
 }
 
 export async function updateArticle(actor: AppActor, params: {
@@ -194,13 +198,14 @@ export async function updateArticle(actor: AppActor, params: {
   sourceIds?: string[];
   changeSummary?: string;
   agentRunId?: string | null;
+  tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     const article = await tx.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
@@ -285,7 +290,9 @@ export async function updateArticle(actor: AppActor, params: {
     ]);
 
     return updated;
-  });
+  };
+
+  return params.tx ? run(params.tx) : prisma.$transaction(run);
 }
 
 export async function getArticle(actor: AppActor, params: {
@@ -659,8 +666,9 @@ export async function listSources(actor: AppActor, params: {
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {
   sourceId: string;
+  tx?: Prisma.TransactionClient;
 }) {
-  await prisma.brainSource.update({
+  await (params.tx ?? prisma).brainSource.update({
     where: { id: params.sourceId },
     data: { absorbedAt: new Date() },
   });
@@ -686,13 +694,15 @@ export async function deleteSource(actor: AppActor, params: {
 
 export async function rebuildBacklinks(actor: AppActor, params: {
   workspaceId: string;
+  tx?: Prisma.TransactionClient;
 }) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
 
-  const articles = await prisma.brainArticle.findMany({
+  const db = params.tx ?? prisma;
+  const articles = await db.brainArticle.findMany({
     where: { workspaceId: params.workspaceId },
     select: { id: true, slug: true, title: true, bodyMd: true, frontmatterJson: true },
   });
@@ -730,7 +740,7 @@ export async function rebuildBacklinks(actor: AppActor, params: {
     }
   }
 
-  await prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     await tx.brainBacklink.deleteMany({
       where: { workspaceId: params.workspaceId },
     });
@@ -744,7 +754,10 @@ export async function rebuildBacklinks(actor: AppActor, params: {
         skipDuplicates: true,
       });
     }
-  });
+  };
+
+  if (params.tx) await run(params.tx);
+  else await prisma.$transaction(run);
 
   return { linkCount: links.length };
 }
