@@ -18,6 +18,7 @@ const TARGET_GROUP_ALIASES = Object.freeze({
 
 const SUPPORTED_PROVIDERS = new Set(["azure", "railway"]);
 const INELIGIBLE_STATUSES = new Set(["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "READ_ONLY_PENDING_FINALIZE", "ARCHIVED", "ROLLBACK_RETAINED", "RETIRED", "SUSPENDED"]);
+const MANAGED_INVENTORY_REF_PREFIX = "managed-inventory";
 
 export const TERMINAL_RAILWAY_FAILURES = new Set([
   "CRASHED",
@@ -313,18 +314,166 @@ export function formatReleasePlan({ manifest, targets, dryRun, concurrency, depr
     rings: groupTargetsByRing(targets).map(({ ring, targets: ringTargets }) => ({
       ring,
       targets: ringTargets.map((target) => ({
-        id: target.id,
-        label: target.label,
+        id: publicTargetId(target),
+        label: publicTargetLabel(target),
         group: target.group,
         workload: target.workload ?? target.group,
         provider: target.provider,
         criticality: targetCriticality(target),
         backupOnly: target.group === "backup-app",
-        url: target.url,
-        resourceTarget: providerResourceTarget(target),
+        url: target.inventoryRef ? null : target.url,
+        resourceTarget: target.inventoryRef ? null : providerResourceTarget(target),
         blockers: target.blockers ?? [],
       })),
     })),
+  };
+}
+
+export function normalizeManagedInventoryOrigin(value) {
+  let url;
+  try {
+    url = new URL(String(value ?? ""));
+  } catch {
+    throw new Error("managed_inventory_origin_invalid");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("managed_inventory_origin_invalid");
+  }
+  return url.origin.toLowerCase();
+}
+
+export function managedInventoryDigest(value) {
+  const input = String(value ?? "");
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export function publicTargetId(target) {
+  return target.inventoryRef ?? target.id;
+}
+
+export function publicTargetLabel(target) {
+  return target.inventoryRef ?? target.label;
+}
+
+export function buildManagedInventoryBlockerTarget(entry, blockers = []) {
+  const inventoryRef = entry.inventoryRef ?? `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(entry.inventoryKey ?? entry.deploymentId ?? entry.canonicalOrigin ?? "")}`;
+  return {
+    id: inventoryRef,
+    label: inventoryRef,
+    inventoryRef,
+    group: "managed-customers",
+    workload: "managed-customers",
+    provider: entry.provider ?? null,
+    blockers,
+  };
+}
+
+export function validateManagedInventoryTargets(targets) {
+  const entries = [];
+  const blockers = [];
+  const seenKeys = new Map();
+  const seenOrigins = new Map();
+  const seenDeploymentIds = new Map();
+
+  for (const target of targets) {
+    const inventoryKey = String(target.inventoryKey ?? "").trim();
+    const inventoryRef = `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(inventoryKey || target.deploymentId || target.url || target.id)}`;
+    const entryBlockers = [];
+    if (!inventoryKey) entryBlockers.push("managed_inventory_key_missing");
+    if (inventoryKey && seenKeys.has(inventoryKey)) entryBlockers.push("managed_inventory_key_duplicate");
+    if (!SUPPORTED_PROVIDERS.has(target.provider)) entryBlockers.push("managed_inventory_provider_invalid");
+    let canonicalOrigin = null;
+    try {
+      canonicalOrigin = normalizeManagedInventoryOrigin(target.canonicalOrigin ?? target.url);
+    } catch {
+      entryBlockers.push("managed_inventory_origin_invalid");
+    }
+    const deploymentId = String(target.deploymentId ?? "").trim();
+    if (!deploymentId) entryBlockers.push("managed_inventory_deployment_id_missing");
+    if (deploymentId && seenDeploymentIds.has(deploymentId)) entryBlockers.push("managed_inventory_deployment_id_duplicate");
+    if (canonicalOrigin && seenOrigins.has(canonicalOrigin)) entryBlockers.push("managed_inventory_origin_duplicate");
+    const resourceBlockers = providerResourceAssertionErrors(target);
+    entryBlockers.push(...resourceBlockers);
+
+    const entry = {
+      target,
+      inventoryKey,
+      inventoryRef,
+      canonicalOrigin,
+      deploymentId,
+      provider: target.provider,
+    };
+    entries.push(entry);
+    if (inventoryKey) seenKeys.set(inventoryKey, entry);
+    if (deploymentId) seenDeploymentIds.set(deploymentId, entry);
+    if (canonicalOrigin) seenOrigins.set(canonicalOrigin, entry);
+    if (entryBlockers.length > 0) blockers.push({ target: buildManagedInventoryBlockerTarget(entry, [...new Set(entryBlockers)]), blockers: [...new Set(entryBlockers)] });
+  }
+
+  return { ok: blockers.length === 0, entries, blockers };
+}
+
+export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlaneTargets, healthProofs }) {
+  const validation = validateManagedInventoryTargets(inventoryTargets);
+  const blockers = [...validation.blockers];
+  const reconciled = [];
+  const controlPlaneByDeploymentId = groupBy(controlPlaneTargets, (target) => String(target.deploymentId ?? "").trim());
+  const controlPlaneByOrigin = groupBy(controlPlaneTargets, (target) => {
+    try {
+      return target.url ? normalizeManagedInventoryOrigin(target.url) : "";
+    } catch {
+      return "";
+    }
+  });
+
+  for (const entry of validation.entries) {
+    if (blockers.some((item) => item.target.inventoryRef === entry.inventoryRef)) continue;
+    const matchesByDeploymentId = controlPlaneByDeploymentId.get(entry.deploymentId) ?? [];
+    const candidates = matchesByDeploymentId.length > 0 ? matchesByDeploymentId : controlPlaneByOrigin.get(entry.canonicalOrigin) ?? [];
+    const entryBlockers = [];
+    if (candidates.length === 0) entryBlockers.push("control_plane_row_missing");
+    if (candidates.length > 1) entryBlockers.push("control_plane_row_ambiguous");
+    const controlPlane = candidates.length === 1 ? candidates[0] : null;
+    if (controlPlane) {
+      const controlPlaneOrigin = safeManagedOrigin(controlPlane.url);
+      if (controlPlaneOrigin !== entry.canonicalOrigin) entryBlockers.push("control_plane_origin_mismatch");
+      if (controlPlane.provider !== entry.provider) entryBlockers.push("control_plane_provider_mismatch");
+      if (mutationIdentityForProvider(controlPlane) !== mutationIdentityForProvider(entry.target)) entryBlockers.push("control_plane_resource_mismatch");
+      if (targetEligibilityErrors(controlPlane).length > 0) entryBlockers.push("control_plane_lifecycle_ineligible");
+    }
+    const health = healthProofs.get(entry.inventoryRef);
+    if (!health) {
+      entryBlockers.push("health_provider_missing");
+    } else if (health.provider !== entry.provider) {
+      entryBlockers.push("provider_inventory_conflict");
+    }
+    if (entryBlockers.length > 0) {
+      blockers.push({ target: buildManagedInventoryBlockerTarget(entry, [...new Set(entryBlockers)]), blockers: [...new Set(entryBlockers)] });
+      continue;
+    }
+    reconciled.push({
+      ...entry.target,
+      id: entry.target.id ?? entry.deploymentId,
+      deploymentId: entry.deploymentId,
+      url: entry.canonicalOrigin,
+      inventoryRef: entry.inventoryRef,
+      controlPlaneDeploymentId: controlPlane.deploymentId ?? controlPlane.id,
+      deploymentStatus: controlPlane.deploymentStatus ?? entry.target.deploymentStatus,
+      provisioningStatus: controlPlane.provisioningStatus ?? entry.target.provisioningStatus,
+      releaseEligible: controlPlane.releaseEligible ?? entry.target.releaseEligible,
+    });
+  }
+
+  return {
+    ok: blockers.length === 0,
+    targets: blockers.length === 0 ? reconciled : [],
+    blockers,
+    digest: managedInventoryDigest(validation.entries.map((entry) => entry.inventoryRef).sort().join(",")),
   };
 }
 
@@ -393,4 +542,40 @@ function providerResourceTarget(target) {
   if (target.provider === "azure") return { resourceGroup: target.azure?.resourceGroup ?? null, acrName: target.azure?.acrName ?? null, webAppName: target.azure?.webAppName ?? null, workerAppName: target.azure?.workerAppName ?? null };
   if (target.provider === "railway") return { projectId: target.railway?.projectId ?? null, environmentId: target.railway?.environmentId ?? null, webServiceId: target.railway?.webServiceId ?? null, workerServiceId: target.railway?.workerServiceId ?? null };
   return null;
+}
+
+function providerResourceAssertionErrors(target) {
+  if (target.provider === "azure") {
+    return ["resourceGroup", "webAppName", "workerAppName"].filter((key) => !target.azure?.[key]).map((key) => `managed_inventory_azure_${key}_missing`);
+  }
+  if (target.provider === "railway") {
+    return ["projectId", "environmentId", "webServiceId", "workerServiceId"].filter((key) => !target.railway?.[key]).map((key) => `managed_inventory_railway_${key}_missing`);
+  }
+  return [];
+}
+
+function mutationIdentityForProvider(target) {
+  if (target.provider === "azure") return JSON.stringify(["azure", target.azure?.resourceGroup ?? null, target.azure?.webAppName ?? null, target.azure?.workerAppName ?? null]);
+  if (target.provider === "railway") return JSON.stringify(["railway", target.railway?.projectId ?? null, target.railway?.environmentId ?? null, target.railway?.webServiceId ?? null, target.railway?.workerServiceId ?? null]);
+  return JSON.stringify([target.provider ?? null]);
+}
+
+function safeManagedOrigin(value) {
+  try {
+    return normalizeManagedInventoryOrigin(value);
+  } catch {
+    return null;
+  }
+}
+
+function groupBy(items, keyFor) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = keyFor(item);
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(item);
+    groups.set(key, group);
+  }
+  return groups;
 }

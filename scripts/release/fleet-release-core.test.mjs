@@ -8,14 +8,18 @@ import {
   formatReleasePlan,
   healthProofErrors,
   imageTagForSha,
+  managedInventoryDigest,
   MCP_CONNECTOR_DEFAULT_SCOPES,
   mcpOAuthProofErrors,
+  normalizeManagedInventoryOrigin,
   normalizeReleaseInput,
   normalizeTargets,
   providerBoundaryErrors,
+  reconcileManagedInventoryTargets,
   releaseVersionForSha,
   targetEligibilityErrors,
   targetFromControlPlaneRow,
+  validateManagedInventoryTargets,
 } from "./fleet-release-core.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
@@ -207,5 +211,65 @@ describe("fleet release core", () => {
     expect(filterTargetsByGroups([active, retired, draft, cutoverSource, optedOut], ["managed-customers"], { excludeIneligible: true })).toEqual([active]);
     expect(filterTargetsByGroups([active, retired, draft, cutoverSource], ["managed-customers"])).toEqual([active, retired, draft, cutoverSource]);
     expect(targetEligibilityErrors(optedOut)).toEqual(["Target explicitly sets releaseEligible=false"]); expect(targetEligibilityErrors(cutoverSource)).toEqual(["Target lifecycle status READ_ONLY_PENDING_FINALIZE is not release-eligible"]);
+  });
+
+  it("validates generic managed inventory without exposing target identity", () => {
+    const target = {
+      inventoryKey: "customer-a",
+      deploymentId: "deployment-a",
+      canonicalOrigin: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      railway: {
+        projectId: "project-a",
+        environmentId: "env-a",
+        webServiceId: "web-a",
+        workerServiceId: "worker-a",
+      },
+    };
+    expect(normalizeManagedInventoryOrigin("https://Customer-A.Example.Test")).toBe("https://customer-a.example.test");
+    expect(validateManagedInventoryTargets([target])).toMatchObject({ ok: true });
+    const invalid = validateManagedInventoryTargets([target, { ...target, canonicalOrigin: "https://customer-a.example.test/path" }]);
+    expect(JSON.stringify(invalid.blockers)).not.toContain("customer-a.example.test");
+    expect(invalid.blockers.flatMap((item) => item.blockers)).toEqual(expect.arrayContaining([
+      "managed_inventory_key_duplicate",
+      "managed_inventory_deployment_id_duplicate",
+      "managed_inventory_origin_invalid",
+    ]));
+  });
+
+  it("reconciles managed inventory by deployment before origin and blocks provider drift", () => {
+    const inventory = [{
+      inventoryKey: "customer-a",
+      deploymentId: "deployment-a",
+      canonicalOrigin: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      railway: {
+        projectId: "project-a",
+        environmentId: "env-a",
+        webServiceId: "web-a",
+        workerServiceId: "worker-a",
+      },
+    }];
+    const healthProofs = new Map([[`managed-inventory-${managedInventoryDigest("customer-a")}`, { provider: "azure" }]]);
+    const conflict = reconcileManagedInventoryTargets({
+      inventoryTargets: inventory,
+      controlPlaneTargets: [{
+        deploymentId: "deployment-a",
+        url: "https://different-origin.example.test",
+        group: "managed-customers",
+        provider: "railway",
+        railway: inventory[0].railway,
+      }],
+      healthProofs,
+    });
+    expect(conflict.ok).toBe(false);
+    expect(conflict.blockers[0].blockers).toEqual(expect.arrayContaining([
+      "control_plane_origin_mismatch",
+      "provider_inventory_conflict",
+    ]));
+    expect(JSON.stringify(conflict)).not.toContain("customer-a.example.test");
+    expect(JSON.stringify(conflict)).not.toContain("project-a");
   });
 });

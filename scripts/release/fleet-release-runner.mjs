@@ -13,6 +13,9 @@ import {
   filterTargetsByGroups,
   formatReleasePlan,
   groupTargetsByRing,
+  buildManagedInventoryBlockerTarget,
+  managedInventoryDigest,
+  normalizeManagedInventoryOrigin,
   normalizeGitSha,
   normalizeReleaseInput,
   normalizeTargetGroup,
@@ -23,6 +26,9 @@ import {
   parseManifestJson,
   parsePositiveInteger,
   providerBoundaryErrors,
+  publicTargetId,
+  publicTargetLabel,
+  reconcileManagedInventoryTargets,
   targetEligibilityErrors,
   targetFromControlPlaneRow,
   targetSelectionDeprecations,
@@ -89,19 +95,26 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const allTargets = await discoverTargets(deps);
   const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase()) || [normalizeTargets("default"), normalizeTargets("all")].some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
   let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
-  if (targets.length === 0) {
+  const managedInventoryGate = selectedGroups.includes("managed-customers")
+    ? await reconcileManagedCustomerSelection(targets, deps)
+    : { targets, blockers: [], digest: null };
+  targets = managedInventoryGate.targets;
+  if (targets.length === 0 && managedInventoryGate.blockers.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
 
-  emitTargetInventory(targets, env, deps);
+  emitTargetInventory(targets, env, deps, { writeSnapshot: managedInventoryGate.blockers.length === 0 });
   const preflight = targets.map((target) => ({
     target,
     blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
   }));
-  const blockers = preflight.filter((item) => item.blockers.length > 0);
-  const planTargets = preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers })); const deprecations = [...targetSelectionDeprecations(targetSelection), ...targets.flatMap((target) => target.deprecations ?? [])];
+  const blockers = [...managedInventoryGate.blockers, ...preflight.filter((item) => item.blockers.length > 0)];
+  const planTargets = [
+    ...managedInventoryGate.blockers.map((item) => ({ ...item.target, blockers: item.blockers })),
+    ...preflight.map(({ target, blockers: targetBlockers }) => ({ ...target, blockers: targetBlockers })),
+  ]; const deprecations = [...targetSelectionDeprecations(targetSelection), ...targets.flatMap((target) => target.deprecations ?? [])];
   const plan = formatReleasePlan({ manifest, targets: planTargets, dryRun, concurrency, deprecations: [...new Set(deprecations)] });
-  console.log(JSON.stringify({ stage: "plan", plan, blockers: blockers.map(publicBlocker) }, null, 2));
+  console.log(JSON.stringify({ stage: "plan", plan, managedInventoryDigest: managedInventoryGate.digest, blockers: blockers.map(publicBlocker) }, null, 2));
   if (dryRun) {
     if (failOnBlockers && blockers.length > 0) {
       throw new Error(formatPreflightFailure(blockers));
@@ -271,7 +284,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   };
 }
 
-function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps) { const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
+function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? (target.group === "selfserve" ? "azure-selfserve" : null) : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps, options = {}) { const effectiveTargets = targets.filter((target) => !(target.provider === "azure" && target.group !== "selfserve")); const providers = new Set(effectiveTargets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(effectiveTargets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE && options.writeSnapshot !== false) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
 
 function validateConfiguredTargetJson(name, raw, invalid) {
   if (!raw?.trim()) return;
@@ -413,6 +426,8 @@ function normalizeTarget(target) {
     deploymentId: hasDeploymentId ? target.deploymentId : target.id ?? null,
     label: target.label ?? target.id ?? target.deploymentId,
     url: target.url,
+    inventoryKey: target.inventoryKey,
+    canonicalOrigin: target.canonicalOrigin,
     group,
     workload: group,
     ring: target.ring,
@@ -491,6 +506,71 @@ function preflightTarget(target, env, options = {}) {
     blockers.push(`Unsupported provider: ${target.provider}`);
   }
   return blockers;
+}
+
+async function reconcileManagedCustomerSelection(targets, deps) {
+  const configuredManagedTargets = configuredTargets(deps.env ?? process.env).map(normalizeTarget).filter((target) => target.group === "managed-customers");
+  if (configuredManagedTargets.length === 0) {
+    return {
+      targets: [],
+      blockers: [{
+        target: buildManagedInventoryBlockerTarget({ inventoryKey: "missing-managed-inventory", provider: null }, ["managed_inventory_missing"]),
+        blockers: ["managed_inventory_missing"],
+      }],
+      digest: managedInventoryDigest("missing-managed-inventory"),
+    };
+  }
+  const managedTargets = targets.filter((target) => target.group === "managed-customers");
+  if (managedTargets.length === 0) {
+    return {
+      targets: [],
+      blockers: [{
+        target: buildManagedInventoryBlockerTarget({ inventoryKey: "missing-managed-inventory", provider: null }, ["managed_inventory_missing"]),
+        blockers: ["managed_inventory_missing"],
+      }],
+      digest: managedInventoryDigest("missing-managed-inventory"),
+    };
+  }
+  const controlPlaneTargets = await discoverControlPlaneTargets(deps);
+  const healthProofs = new Map();
+  for (const target of managedTargets) {
+    const inventoryKey = String(target.inventoryKey ?? "").trim();
+    const inventoryRef = `managed-inventory-${managedInventoryDigest(inventoryKey || target.deploymentId || target.url || target.id)}`;
+    try {
+      const origin = normalizeManagedInventoryOrigin(target.canonicalOrigin ?? target.url);
+      healthProofs.set(inventoryRef, await probeManagedInventoryHealth(origin, deps));
+    } catch {
+      healthProofs.set(inventoryRef, null);
+    }
+  }
+  const reconciliation = reconcileManagedInventoryTargets({ inventoryTargets: managedTargets, controlPlaneTargets, healthProofs });
+  if (!reconciliation.ok) {
+    return { targets: [], blockers: reconciliation.blockers, digest: reconciliation.digest };
+  }
+  const reconciledByRef = new Map(reconciliation.targets.map((target) => [target.inventoryRef, target]));
+  const nextTargets = targets.map((target) => (
+    target.group === "managed-customers"
+      ? reconciledByRef.get(`managed-inventory-${managedInventoryDigest(String(target.inventoryKey ?? "").trim() || target.deploymentId || target.url || target.id)}`)
+      : target
+  )).filter(Boolean);
+  return { targets: nextTargets, blockers: [], digest: reconciliation.digest };
+}
+
+async function probeManagedInventoryHealth(origin, deps) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const timeoutMs = parsePositiveInteger((deps.env ?? process.env).FLEET_RELEASE_MANAGED_HEALTH_TIMEOUT_MS, 5000);
+  const response = await fetchImpl(new URL("/api/health", origin), {
+    headers: { "cache-control": "no-cache" },
+    redirect: "manual",
+    signal: (deps.abortSignalForTimeout ?? ((ms) => AbortSignal.timeout(ms)))(timeoutMs),
+  });
+  if (!response?.ok || response.status >= 300) throw new Error("health_provider_unavailable");
+  const raw = typeof response.text === "function" ? await response.text() : JSON.stringify(await response.json());
+  if (raw.length > 16_384) throw new Error("health_provider_malformed");
+  const body = JSON.parse(raw);
+  const provider = String(body?.release?.provider ?? "").trim().toLowerCase();
+  if (!["azure", "railway"].includes(provider)) throw new Error("health_provider_malformed");
+  return { provider };
 }
 
 function formatPreflightFailure(blockers) {
@@ -1156,8 +1236,8 @@ function emitGithubOutput(key, value, deps) {
 
 function publicBlocker(item) {
   return {
-    id: item.target.id,
-    label: item.target.label,
+    id: publicTargetId(item.target),
+    label: publicTargetLabel(item.target),
     group: item.target.group,
     blockers: item.blockers,
   };
@@ -1165,8 +1245,8 @@ function publicBlocker(item) {
 
 function publicResult(result) {
   return {
-    id: result.target.id,
-    label: result.target.label,
+    id: publicTargetId(result.target),
+    label: publicTargetLabel(result.target),
     status: result.status,
     error: result.error,
   };

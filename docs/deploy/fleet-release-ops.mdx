@@ -24,7 +24,7 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | `CONTROL_PLANE_URL` | Variable | Ops control-plane origin. Defaults to `https://ops.corgtex.com` when unset. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Variable, optional | Railway GraphQL endpoint override. Leave unset unless Railway support directs otherwise. |
 | `FLEET_RELEASE_STABLE_GIT_SHA` | Variable | Latest stable 40-character git SHA. Update only after canary proof. |
-| `FLEET_RELEASE_TARGETS_JSON` | Variable | Transition inventory for managed customer targets, or leave unset when control-plane discovery is authoritative. |
+| `FLEET_RELEASE_TARGETS_JSON` | Variable | Private managed-customer inventory. Managed releases fail closed when it is unset, incomplete, stale, or does not match control-plane and live health evidence. |
 | `FLEET_RELEASE_OPS_TARGET_JSON` | Variable | Dedicated Ops target. |
 | `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
 | `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Legacy-named selfserve target inventory; each target still declares its provider. |
@@ -37,6 +37,10 @@ Configure these values on the `fleet-release-production` environment. Store secr
 Each target variable may contain one target object or an array of target objects. Keep target inventory operational and sanitized: IDs, URLs, provider IDs, and release metadata are acceptable; raw customer content, credentials, private uploads, and bearer tokens are not.
 
 Every target must include `provider: "azure"` or `provider: "railway"`; provider is never derived from its group, hostname, or URL. Workload selectors are `managed-customers`, `selfserve`, `ops`, and `backup-app`. The legacy `railway-customers` and `azure-selfserve` selectors remain read-compatible and emit deprecation information.
+
+Managed-customer inventory is a private assertion, not public documentation. Each managed entry must carry a generic `inventoryKey`, exact `deploymentId`, canonical HTTPS origin, declared provider, and provider resource assertion. The runner reconciles every managed entry against exactly one production control-plane row and the live `/api/health` `release.provider` before writing target snapshots, selecting provider credentials, emitting observation targets, or dispatching provider commands.
+
+Managed-customer blockers are intentionally generic. A missing inventory entry, duplicate key/origin/deployment identity, ambiguous or missing control-plane row, lifecycle drift, resource mismatch, unavailable/redirected/malformed health response, or provider disagreement blocks the whole managed selection with codes such as `managed_inventory_missing`, `control_plane_row_ambiguous`, `control_plane_resource_mismatch`, `health_provider_missing`, and `provider_inventory_conflict`. These outputs use generic inventory references and digests only; do not place customer names, domains, deployment IDs, provider resource names, or private mappings in docs, issues, PR bodies, or logs.
 
 Railway targets must include:
 
@@ -63,6 +67,8 @@ Azure targets must include:
 - `azure.workerAppName`
 
 Only `selfserve` Azure targets are mutable in PR1. Azure managed-customer, core, backup, and Ops targets are shown with blockers and remain non-mutable until the generic Azure executor lands in PR3; they never inherit selfserve resource defaults.
+
+Live Azure health can veto a stale Railway assertion, but it never authorizes a managed Azure mutation. A managed Azure agreement emits no managed observation target and remains blocked by the managed-Azure non-mutable guard.
 
 Set `deploymentStatus` or `provisioningStatus` to `RETIRED` or `SUSPENDED`, or set `releaseEligible: false`, as soon as a target cannot receive releases. Default and `all` selections exclude those targets. A specific workload selection reports them as blockers and a real run fails before provider mutation.
 
