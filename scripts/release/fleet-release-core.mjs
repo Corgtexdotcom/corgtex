@@ -373,6 +373,11 @@ export function buildManagedInventoryBlockerTarget(entry, blockers = []) {
   };
 }
 
+export function managedInventoryRefForTarget(target) {
+  const inventoryKey = String(target.inventoryKey ?? "").trim();
+  return `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(inventoryKey || target.deploymentId || target.url || target.id)}`;
+}
+
 export function validateManagedInventoryTargets(targets) {
   const entries = [];
   const blockers = [];
@@ -382,7 +387,7 @@ export function validateManagedInventoryTargets(targets) {
 
   for (const target of targets) {
     const inventoryKey = String(target.inventoryKey ?? "").trim();
-    const inventoryRef = `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(inventoryKey || target.deploymentId || target.url || target.id)}`;
+    const inventoryRef = managedInventoryRefForTarget(target);
     const entryBlockers = [];
     if (!inventoryKey) entryBlockers.push("managed_inventory_key_missing");
     if (inventoryKey && seenKeys.has(inventoryKey)) entryBlockers.push("managed_inventory_key_duplicate");
@@ -430,18 +435,38 @@ export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlan
       return "";
     }
   });
+  const entriesByDeploymentId = new Set(validation.entries.map((entry) => entry.deploymentId).filter(Boolean));
+  const entriesByOrigin = new Set(validation.entries.map((entry) => entry.canonicalOrigin).filter(Boolean));
+
+  for (const controlPlane of controlPlaneTargets.filter(isEligibleManagedControlPlaneTarget)) {
+    const deploymentId = String(controlPlane.deploymentId ?? "").trim();
+    const origin = safeManagedOrigin(controlPlane.url);
+    if (!entriesByDeploymentId.has(deploymentId) || !entriesByOrigin.has(origin)) {
+      blockers.push({
+        target: buildManagedInventoryBlockerTarget({
+          inventoryKey: deploymentId || origin || controlPlane.id || "unmatched-control-plane-row",
+          provider: controlPlane.provider,
+        }, ["control_plane_inventory_unmatched"]),
+        blockers: ["control_plane_inventory_unmatched"],
+      });
+    }
+  }
 
   for (const entry of validation.entries) {
     if (blockers.some((item) => item.target.inventoryRef === entry.inventoryRef)) continue;
     const matchesByDeploymentId = controlPlaneByDeploymentId.get(entry.deploymentId) ?? [];
-    const candidates = matchesByDeploymentId.length > 0 ? matchesByDeploymentId : controlPlaneByOrigin.get(entry.canonicalOrigin) ?? [];
+    const originMatches = controlPlaneByOrigin.get(entry.canonicalOrigin) ?? [];
+    const candidates = matchesByDeploymentId;
     const entryBlockers = [];
     if (candidates.length === 0) entryBlockers.push("control_plane_row_missing");
     if (candidates.length > 1) entryBlockers.push("control_plane_row_ambiguous");
+    if (originMatches.length === 0) entryBlockers.push("control_plane_origin_missing");
+    if (originMatches.length > 1) entryBlockers.push("control_plane_origin_ambiguous");
     const controlPlane = candidates.length === 1 ? candidates[0] : null;
     if (controlPlane) {
       const controlPlaneOrigin = safeManagedOrigin(controlPlane.url);
       if (controlPlaneOrigin !== entry.canonicalOrigin) entryBlockers.push("control_plane_origin_mismatch");
+      if (!originMatches.includes(controlPlane)) entryBlockers.push("control_plane_deployment_origin_mismatch");
       if (controlPlane.provider !== entry.provider) entryBlockers.push("control_plane_provider_mismatch");
       if (mutationIdentityForProvider(controlPlane) !== mutationIdentityForProvider(entry.target)) entryBlockers.push("control_plane_resource_mismatch");
       if (targetEligibilityErrors(controlPlane).length > 0) entryBlockers.push("control_plane_lifecycle_ineligible");
@@ -552,6 +577,10 @@ function providerResourceAssertionErrors(target) {
     return ["projectId", "environmentId", "webServiceId", "workerServiceId"].filter((key) => !target.railway?.[key]).map((key) => `managed_inventory_railway_${key}_missing`);
   }
   return [];
+}
+
+function isEligibleManagedControlPlaneTarget(target) {
+  return target.group === "managed-customers" && SUPPORTED_PROVIDERS.has(target.provider) && targetEligibilityErrors(target).length === 0;
 }
 
 function mutationIdentityForProvider(target) {

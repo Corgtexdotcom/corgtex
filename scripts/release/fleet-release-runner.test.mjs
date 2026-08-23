@@ -878,12 +878,12 @@ describe("fleet release runner", () => {
       "--release",
       SHA,
       "--targets",
-      "railway-customers",
+      "ops",
       "--dry-run",
       "false",
     ], {
       env: {
-        FLEET_RELEASE_TARGETS_JSON: targetJson({ group: "railway-customers" }),
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
@@ -901,12 +901,12 @@ describe("fleet release runner", () => {
       "--release",
       SHA,
       "--targets",
-      "railway-customers",
+      "ops",
       "--dry-run",
       "false",
     ], {
       env: {
-        FLEET_RELEASE_TARGETS_JSON: targetJson({ group: "railway-customers" }),
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
@@ -1120,15 +1120,15 @@ describe("fleet release runner", () => {
     expect(result.targets[0]).toMatchObject({ group: "selfserve", provider: "azure" }); expect(outputs).toMatchObject({ uses_azure: true, uses_railway: false, observation_targets: "azure-selfserve" });
   });
 
-  it.each([
-    ["Railway", [{ id: "railway", environment: "production", cloudProvider: "RAILWAY" }], /RAILWAY_API_TOKEN/],
-    ["Azure", [{ id: "azure", environment: "production", cloudProvider: "AZURE" }], /AZURE_CLIENT_ID/],
-    ["mixed", [{ id: "railway", environment: "production", cloudProvider: "RAILWAY" }, { id: "azure", environment: "production", cloudProvider: "AZURE" }], /RAILWAY_API_TOKEN.*AZURE_CLIENT_ID/],
-  ])("validates credentials for discovered %s inventory", async (_label, rows, expected) => {
-    await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false"], {
-      env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "posthog-token", APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review" },
-      fetchImpl: vi.fn(async (_url, init) => { expect(JSON.parse(init.body).params.arguments).toEqual({ includeAllDeployments: true, uncapped: true }); return controlPlaneResult(rows); }),
-    })).rejects.toThrow(expected);
+  it("keeps managed validate-config provider-neutral before reconciliation", async () => {
+    const fetchImpl = vi.fn();
+    const result = await runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--dry-run", "false"], {
+      env: { FLEET_RELEASE_TARGETS_JSON: managedAzureTargetJson(), CONTROL_PLANE_AGENT_API_KEY: "control-plane-key", GITHUB_TOKEN: "github-token", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "posthog-token", APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=review" },
+      fetchImpl,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("keeps managed Azure targets non-mutable until PR3", async () => {
@@ -1173,6 +1173,165 @@ describe("fleet release runner", () => {
 
     expect(runCommand).not.toHaveBeenCalled();
     expect(outputs).toMatchObject({ uses_azure: false, uses_railway: false, observation_targets: "" });
+  });
+
+  it("rejects duplicate managed deployment IDs before dedupe", async () => {
+    const outputs = {};
+    const runCommand = vi.fn();
+    const targets = JSON.parse(managedRailwayTargetJson());
+    const duplicate = { ...targets[0], id: "customer-b", inventoryKey: "customer-b", canonicalOrigin: "https://customer-b.example.test", url: "https://customer-b.example.test" };
+    const fetchImpl = vi.fn(async (url, init = {}) => {
+      if (String(url).includes("/api/health")) return healthResponse("railway");
+      expect(JSON.parse(init.body).params.name).toBe("list_customers");
+      return controlPlaneResult([managedRailwayRow()]);
+    });
+
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate managed inventory."], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify([...targets, duplicate]),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
+    })).rejects.toThrow("managed_inventory_deployment_id_duplicate");
+
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: false, observation_targets: "" });
+  });
+
+  it("blocks managed provider conflict in non-dry-run before provider or observation effects", async () => {
+    const outputs = {};
+    const targetFile = join(mkdtempSync(join(tmpdir(), "managed-zero-effect-")), "targets.json");
+    writeFileSync(targetFile, "[]");
+    const runCommand = vi.fn();
+    const toolCalls = [];
+    const fetchImpl = vi.fn(async (url, init = {}) => {
+      if (String(url).includes("/api/health")) return healthResponse("azure");
+      const body = JSON.parse(init.body);
+      toolCalls.push(body.params.name);
+      if (body.params.name === "list_customers") return controlPlaneResult([managedAzureRow()]);
+      throw new Error(`unexpected control-plane effect ${body.params.name}`);
+    });
+
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--reason", "Validate managed inventory."], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: managedRailwayTargetJson(),
+        FLEET_RELEASE_TARGETS_FILE: targetFile,
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand,
+      fetchImpl,
+      sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
+    })).rejects.toThrow("provider_inventory_conflict");
+
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(toolCalls).toEqual(["list_customers"]);
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes("backboard.railway.com"))).toBe(false);
+    expect(execFileSync("cat", [targetFile], { encoding: "utf8" })).toBe("[]");
+    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: false, observation_targets: "" });
+  });
+
+  it("redacts managed target details from result and alert output", async () => {
+    const logs = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((value) => { logs.push(String(value)); });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const toolCalls = [];
+    const fetchImpl = vi.fn(async (url, init = {}) => {
+      if (String(url).includes("/api/health")) return healthResponse("railway");
+      if (String(url).includes("backboard.railway.com")) throw new Error("raw Customer A deployment-a project-a web-a https://customer-a.example.test");
+      const body = JSON.parse(init.body);
+      toolCalls.push(body.params.name);
+      if (body.params.name === "list_customers") return controlPlaneResult([managedRailwayRow()]);
+      throw new Error(`unexpected control-plane effect ${body.params.name}`);
+    });
+
+    try {
+      await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--reason", "Validate managed alert privacy."], {
+        env: {
+          FLEET_RELEASE_TARGETS_JSON: managedRailwayTargetJson(),
+          CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+          RAILWAY_API_TOKEN: "railway-token",
+          GITHUB_TOKEN: "github-token",
+          ...railwayObservabilityEnv,
+        },
+        runCommand: vi.fn(),
+        fetchImpl,
+        sleep: vi.fn(),
+      })).rejects.toThrow("Ring 2 failed");
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+
+    const output = logs.join("\n");
+    expect(output).toContain("managed_target_failed");
+    expect(output).not.toContain("Customer A");
+    expect(output).not.toContain("deployment-a");
+    expect(output).not.toContain("project-a");
+    expect(output).not.toContain("web-a");
+    expect(output).not.toContain("customer-a.example.test");
+    expect(toolCalls).toEqual(["list_customers"]);
+  });
+
+  it("bounds managed health probes with the configured concurrency", async () => {
+    const outputs = {};
+    const targets = Array.from({ length: 6 }, (_, index) => JSON.parse(managedRailwayTargetJson({
+      id: `customer-${index}`,
+      inventoryKey: `customer-${index}`,
+      deploymentId: `deployment-${index}`,
+      canonicalOrigin: `https://customer-${index}.example.test`,
+      url: `https://customer-${index}.example.test`,
+      railway: {
+        projectId: `project-${index}`,
+        environmentId: `env-${index}`,
+        webServiceId: `web-${index}`,
+        workerServiceId: `worker-${index}`,
+      },
+    }))[0]);
+    const rows = targets.map((target) => managedRailwayRow({
+      id: target.deploymentId,
+      url: target.url,
+      railwayProjectId: target.railway.projectId,
+      railwayEnvironmentId: target.railway.environmentId,
+      railwayWebServiceId: target.railway.webServiceId,
+      railwayWorkerServiceId: target.railway.workerServiceId,
+    }));
+    let active = 0, peak = 0;
+    const fetchImpl = vi.fn(async (url, init = {}) => {
+      if (String(url).includes("/api/health")) {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        active -= 1;
+        return healthResponse("railway");
+      }
+      expect(JSON.parse(init.body).params.name).toBe("list_customers");
+      return controlPlaneResult(rows);
+    });
+
+    const result = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate managed inventory."], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify(targets),
+        FLEET_RELEASE_MANAGED_HEALTH_CONCURRENCY: "3",
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-key",
+        RAILWAY_API_TOKEN: "railway-token",
+        GITHUB_TOKEN: "github-token",
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+      emitGithubOutput: (key, value) => { outputs[key] = value; },
+    });
+
+    expect(result.targets).toHaveLength(6);
+    expect(peak).toBe(3);
+    expect(outputs).toMatchObject({ uses_azure: false, uses_railway: true, observation_targets: "railway-customers" });
   });
 
   it("blocks managed discovery when private inventory is absent", async () => {

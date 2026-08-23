@@ -265,11 +265,47 @@ describe("fleet release core", () => {
       healthProofs,
     });
     expect(conflict.ok).toBe(false);
-    expect(conflict.blockers[0].blockers).toEqual(expect.arrayContaining([
+    expect(conflict.blockers.flatMap((item) => item.blockers)).toEqual(expect.arrayContaining([
       "control_plane_origin_mismatch",
       "provider_inventory_conflict",
     ]));
     expect(JSON.stringify(conflict)).not.toContain("customer-a.example.test");
     expect(JSON.stringify(conflict)).not.toContain("project-a");
+  });
+
+  it("fails closed for unmanaged control-plane rows and stale deployment IDs", () => {
+    const inventory = [{
+      inventoryKey: "customer-a",
+      deploymentId: "deployment-a",
+      canonicalOrigin: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "azure",
+      azure: {
+        resourceGroup: "rg-a",
+        acrName: "acr1",
+        webAppName: "web-a",
+        workerAppName: "worker-a",
+      },
+    }];
+    const stale = reconcileManagedInventoryTargets({
+      inventoryTargets: inventory,
+      controlPlaneTargets: [{
+        deploymentId: "deployment-b",
+        url: "https://customer-a.example.test",
+        group: "managed-customers",
+        provider: "azure",
+        azure: inventory[0].azure,
+      }],
+      healthProofs: new Map([[`managed-inventory-${managedInventoryDigest("customer-a")}`, { provider: "azure" }]]),
+    });
+
+    expect(stale.ok).toBe(false);
+    expect(stale.blockers.flatMap((item) => item.blockers)).toEqual(expect.arrayContaining([
+      "control_plane_inventory_unmatched",
+      "control_plane_row_missing",
+    ]));
+    expect(JSON.stringify(stale)).not.toContain("customer-a.example.test");
+    expect(JSON.stringify(stale)).not.toContain("deployment-b");
+    expect(JSON.stringify(stale)).not.toContain("rg-a");
   });
 });

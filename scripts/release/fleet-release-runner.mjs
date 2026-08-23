@@ -15,6 +15,7 @@ import {
   groupTargetsByRing,
   buildManagedInventoryBlockerTarget,
   managedInventoryDigest,
+  managedInventoryRefForTarget,
   normalizeManagedInventoryOrigin,
   normalizeGitSha,
   normalizeReleaseInput,
@@ -135,7 +136,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
           const currentTarget = env.FLEET_RELEASE_TARGETS_FILE ? await revalidateSnapshotTarget(target, deps, true) : target; retainedTargets.add(target); const result = await deployTarget(currentTarget, manifest, reason, deps);
           return { target: currentTarget, status: "succeeded", result };
         } catch (error) {
-          return { target, status: "failed", error: error instanceof Error ? error.message : String(error) };
+          return { target, status: "failed", error: publicErrorForTarget(target, error) };
         }
       });
       results.push(...ringResults);
@@ -145,7 +146,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
       }
     }
   } catch (error) {
-    await notifyFleetReleaseFailure({ manifest, results, error, stage: "deploy" }, deps)
+    await notifyFleetReleaseFailure({ manifest, results: results.map(sanitizeResultForAlert), error: sanitizeFleetError(error), stage: "deploy" }, deps)
       .then((alertResult) => {
         console.log(JSON.stringify({
           stage: "fleet-release-alert",
@@ -254,7 +255,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget); const selectedProviders = new Set(providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0).map((target) => target.provider));
+    const providerInventory = configuredTargets(env).map(normalizeTarget).filter((target) => target.group !== "managed-customers"); const selectedProviders = new Set(providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0).map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
     const includesAzureTarget = selectedProviders.has("azure");
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
@@ -295,8 +296,9 @@ function validateConfiguredTargetJson(name, raw, invalid) {
     }
     for (const target of parsed) {
       const provider = String(target.provider ?? "").trim().toLowerCase();
-      if (!provider) invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} must explicitly declare provider` });
-      else if (!["azure", "railway"].includes(provider)) invalid.push({ name, reason: `${target.label ?? target.id ?? "target"} has unsupported provider ${provider}` });
+      const label = name === "FLEET_RELEASE_TARGETS_JSON" ? "managed target" : target.label ?? target.id ?? "target";
+      if (!provider) invalid.push({ name, reason: `${label} must explicitly declare provider` });
+      else if (!["azure", "railway"].includes(provider)) invalid.push({ name, reason: `${label} has unsupported provider ${provider}` });
     }
   } catch (error) {
     invalid.push({
@@ -520,7 +522,7 @@ async function reconcileManagedCustomerSelection(targets, deps) {
       digest: managedInventoryDigest("missing-managed-inventory"),
     };
   }
-  const managedTargets = targets.filter((target) => target.group === "managed-customers");
+  const managedTargets = configuredManagedTargets;
   if (managedTargets.length === 0) {
     return {
       targets: [],
@@ -532,17 +534,15 @@ async function reconcileManagedCustomerSelection(targets, deps) {
     };
   }
   const controlPlaneTargets = await discoverControlPlaneTargets(deps);
-  const healthProofs = new Map();
-  for (const target of managedTargets) {
-    const inventoryKey = String(target.inventoryKey ?? "").trim();
-    const inventoryRef = `managed-inventory-${managedInventoryDigest(inventoryKey || target.deploymentId || target.url || target.id)}`;
+  const healthProofs = new Map(await runWithConcurrency(managedTargets, parsePositiveInteger((deps.env ?? process.env).FLEET_RELEASE_MANAGED_HEALTH_CONCURRENCY, 8), async (target) => {
+    const inventoryRef = managedInventoryRefForTarget(target);
     try {
       const origin = normalizeManagedInventoryOrigin(target.canonicalOrigin ?? target.url);
-      healthProofs.set(inventoryRef, await probeManagedInventoryHealth(origin, deps));
+      return [inventoryRef, await probeManagedInventoryHealth(origin, deps)];
     } catch {
-      healthProofs.set(inventoryRef, null);
+      return [inventoryRef, null];
     }
-  }
+  }));
   const reconciliation = reconcileManagedInventoryTargets({ inventoryTargets: managedTargets, controlPlaneTargets, healthProofs });
   if (!reconciliation.ok) {
     return { targets: [], blockers: reconciliation.blockers, digest: reconciliation.digest };
@@ -550,7 +550,7 @@ async function reconcileManagedCustomerSelection(targets, deps) {
   const reconciledByRef = new Map(reconciliation.targets.map((target) => [target.inventoryRef, target]));
   const nextTargets = targets.map((target) => (
     target.group === "managed-customers"
-      ? reconciledByRef.get(`managed-inventory-${managedInventoryDigest(String(target.inventoryKey ?? "").trim() || target.deploymentId || target.url || target.id)}`)
+      ? reconciledByRef.get(managedInventoryRefForTarget(target))
       : target
   )).filter(Boolean);
   return { targets: nextTargets, blockers: [], digest: reconciliation.digest };
@@ -574,7 +574,7 @@ async function probeManagedInventoryHealth(origin, deps) {
 }
 
 function formatPreflightFailure(blockers) {
-  return `Fleet release preflight failed: ${blockers.map((item) => `${item.target.label}: ${item.blockers.join("; ")}`).join(" | ")}`;
+  return `Fleet release preflight failed: ${blockers.map((item) => `${publicTargetLabel(item.target)}: ${item.blockers.join("; ")}`).join(" | ")}`;
 }
 
 export function checkReleaseImages(manifest, deps) {
@@ -1248,8 +1248,32 @@ function publicResult(result) {
     id: publicTargetId(result.target),
     label: publicTargetLabel(result.target),
     status: result.status,
-    error: result.error,
+    error: publicErrorForTarget(result.target, result.error),
   };
+}
+
+function publicErrorForTarget(target, error) {
+  if (target?.inventoryRef) {
+    return "managed_target_failed";
+  }
+  return sanitizeFleetError(error);
+}
+
+function sanitizeResultForAlert(result) {
+  return {
+    ...result,
+    target: {
+      id: publicTargetId(result.target),
+      label: publicTargetLabel(result.target),
+      group: result.target.group,
+      provider: result.target.provider,
+    },
+    error: publicErrorForTarget(result.target, result.error),
+  };
+}
+
+function sanitizeFleetError(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function sleep(ms, deps) {
