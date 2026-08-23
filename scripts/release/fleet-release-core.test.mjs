@@ -9,6 +9,7 @@ import {
   healthProofErrors,
   imageTagForSha,
   managedInventoryDigest,
+  managedInventoryRefForTarget,
   MCP_CONNECTOR_DEFAULT_SCOPES,
   mcpOAuthProofErrors,
   normalizeManagedInventoryOrigin,
@@ -159,21 +160,25 @@ describe("fleet release core", () => {
     expect(() => normalizeTargets("demo")).toThrow("Unknown release target");
   });
 
-  it("uses control-plane provider metadata without hostname classification", () => {
+  it("uses authoritative control-plane deployment classification", () => {
     expect(targetFromControlPlaneRow({
       id: "azure-1",
       label: "Azure",
       cloudProvider: "AZURE",
+      deploymentKind: "HOSTED_DEDICATED",
       url: "https://app.corgtex.com",
       providerResourceGroup: "rg-customer",
-    })).toMatchObject({ group: "managed-customers", provider: "azure", azure: { resourceGroup: "rg-customer" } });
+    })).toMatchObject({ group: "selfserve", provider: "azure", deploymentKind: "HOSTED_DEDICATED", azure: { resourceGroup: "rg-customer" } });
     expect(targetFromControlPlaneRow({
       id: "customer-1",
       label: "Acme",
       cloudProvider: "RAILWAY",
+      deploymentKind: "HOSTED_DEDICATED",
       url: "https://selfserve.corgtex.com",
-    })).toMatchObject({ group: "managed-customers", provider: "railway" });
+    })).toMatchObject({ group: "managed-customers", provider: "railway", deploymentKind: "HOSTED_DEDICATED" });
+    expect(targetFromControlPlaneRow({ id: "remote", deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE" })).toMatchObject({ group: "managed-customers", provider: "azure" });
     expect(targetFromControlPlaneRow({ id: "backup", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY" })).toMatchObject({ group: "backup-app", provider: "railway" });
+    expect(targetFromControlPlaneRow({ id: "unknown", deploymentKind: "SHARED_WORKSPACE", cloudProvider: "RAILWAY" })).toMatchObject({ group: null, provider: "railway" });
   });
 
   it("formats progressive rings without UI-specific behavior", () => {
@@ -229,6 +234,7 @@ describe("fleet release core", () => {
     };
     expect(normalizeManagedInventoryOrigin("https://Customer-A.Example.Test")).toBe("https://customer-a.example.test");
     expect(validateManagedInventoryTargets([target])).toMatchObject({ ok: true });
+    expect(managedInventoryRefForTarget(target)).toMatch(/^managed-inventory-[0-9a-f]{64}$/);
     const invalid = validateManagedInventoryTargets([target, { ...target, canonicalOrigin: "https://customer-a.example.test/path" }]);
     expect(JSON.stringify(invalid.blockers)).not.toContain("customer-a.example.test");
     expect(invalid.blockers.flatMap((item) => item.blockers)).toEqual(expect.arrayContaining([
@@ -236,6 +242,30 @@ describe("fleet release core", () => {
       "managed_inventory_deployment_id_duplicate",
       "managed_inventory_origin_invalid",
     ]));
+  });
+
+  it("keeps colliding legacy FNV keys distinct with SHA-256 public references", () => {
+    const left = {
+      inventoryKey: "costarring",
+      deploymentId: "deployment-a",
+      canonicalOrigin: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "project-a", environmentId: "env-a", webServiceId: "web-a", workerServiceId: "worker-a" },
+    };
+    const right = {
+      ...left,
+      inventoryKey: "liquid",
+      deploymentId: "deployment-b",
+      canonicalOrigin: "https://customer-b.example.test",
+      railway: { projectId: "project-b", environmentId: "env-b", webServiceId: "web-b", workerServiceId: "worker-b" },
+    };
+
+    const validation = validateManagedInventoryTargets([left, right]);
+
+    expect(validation.ok).toBe(true);
+    expect(managedInventoryRefForTarget(left)).not.toBe(managedInventoryRefForTarget(right));
+    expect(validation.entries.map((entry) => entry.inventoryKey)).toEqual(["costarring", "liquid"]);
   });
 
   it("reconciles managed inventory by deployment before origin and blocks provider drift", () => {
@@ -252,13 +282,14 @@ describe("fleet release core", () => {
         workerServiceId: "worker-a",
       },
     }];
-    const healthProofs = new Map([[`managed-inventory-${managedInventoryDigest("customer-a")}`, { provider: "azure" }]]);
+    const healthProofs = new Map([["customer-a", { provider: "azure" }]]);
     const conflict = reconcileManagedInventoryTargets({
       inventoryTargets: inventory,
       controlPlaneTargets: [{
         deploymentId: "deployment-a",
         url: "https://different-origin.example.test",
         group: "managed-customers",
+        deploymentKind: "HOSTED_DEDICATED",
         provider: "railway",
         railway: inventory[0].railway,
       }],
@@ -296,7 +327,7 @@ describe("fleet release core", () => {
         provider: "azure",
         azure: inventory[0].azure,
       }],
-      healthProofs: new Map([[`managed-inventory-${managedInventoryDigest("customer-a")}`, { provider: "azure" }]]),
+      healthProofs: new Map([["customer-a", { provider: "azure" }]]),
     });
 
     expect(stale.ok).toBe(false);
@@ -307,5 +338,31 @@ describe("fleet release core", () => {
     expect(JSON.stringify(stale)).not.toContain("customer-a.example.test");
     expect(JSON.stringify(stale)).not.toContain("deployment-b");
     expect(JSON.stringify(stale)).not.toContain("rg-a");
+  });
+
+  it("rejects exact matches that do not classify as managed", () => {
+    const inventory = [{
+      inventoryKey: "customer-a",
+      deploymentId: "deployment-a",
+      canonicalOrigin: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "project-a", environmentId: "env-a", webServiceId: "web-a", workerServiceId: "worker-a" },
+    }];
+    const result = reconcileManagedInventoryTargets({
+      inventoryTargets: inventory,
+      controlPlaneTargets: [{
+        deploymentId: "deployment-a",
+        url: "https://customer-a.example.test",
+        group: "backup-app",
+        deploymentKind: "INTERNAL",
+        provider: "railway",
+        railway: inventory[0].railway,
+      }],
+      healthProofs: new Map([["customer-a", { provider: "railway" }]]),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.blockers.flatMap((item) => item.blockers)).toContain("control_plane_classification_mismatch");
   });
 });

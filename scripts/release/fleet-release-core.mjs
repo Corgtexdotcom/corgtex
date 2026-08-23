@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export const TARGET_GROUPS = Object.freeze([
   "managed-customers",
   "selfserve",
@@ -343,13 +345,7 @@ export function normalizeManagedInventoryOrigin(value) {
 }
 
 export function managedInventoryDigest(value) {
-  const input = String(value ?? "");
-  let hash = 2166136261;
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return createHash("sha256").update(String(value ?? "")).digest("hex");
 }
 
 export function publicTargetId(target) {
@@ -384,6 +380,7 @@ export function validateManagedInventoryTargets(targets) {
   const seenKeys = new Map();
   const seenOrigins = new Map();
   const seenDeploymentIds = new Map();
+  const seenRefs = new Map();
 
   for (const target of targets) {
     const inventoryKey = String(target.inventoryKey ?? "").trim();
@@ -402,6 +399,7 @@ export function validateManagedInventoryTargets(targets) {
     if (!deploymentId) entryBlockers.push("managed_inventory_deployment_id_missing");
     if (deploymentId && seenDeploymentIds.has(deploymentId)) entryBlockers.push("managed_inventory_deployment_id_duplicate");
     if (canonicalOrigin && seenOrigins.has(canonicalOrigin)) entryBlockers.push("managed_inventory_origin_duplicate");
+    if (seenRefs.has(inventoryRef)) entryBlockers.push("managed_inventory_reference_duplicate");
     const resourceBlockers = providerResourceAssertionErrors(target);
     entryBlockers.push(...resourceBlockers);
 
@@ -417,14 +415,17 @@ export function validateManagedInventoryTargets(targets) {
     if (inventoryKey) seenKeys.set(inventoryKey, entry);
     if (deploymentId) seenDeploymentIds.set(deploymentId, entry);
     if (canonicalOrigin) seenOrigins.set(canonicalOrigin, entry);
+    seenRefs.set(inventoryRef, entry);
     if (entryBlockers.length > 0) blockers.push({ target: buildManagedInventoryBlockerTarget(entry, [...new Set(entryBlockers)]), blockers: [...new Set(entryBlockers)] });
   }
 
   return { ok: blockers.length === 0, entries, blockers };
 }
 
-export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlaneTargets, healthProofs }) {
-  const validation = validateManagedInventoryTargets(inventoryTargets);
+export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlaneTargets, healthProofs, validation: rawValidation = null }) {
+  const selectedValidation = validateManagedInventoryTargets(inventoryTargets);
+  const validation = rawValidation ?? selectedValidation;
+  const selectedEntries = selectedValidation.entries;
   const blockers = [...validation.blockers];
   const reconciled = [];
   const controlPlaneByDeploymentId = groupBy(controlPlaneTargets, (target) => String(target.deploymentId ?? "").trim());
@@ -435,8 +436,8 @@ export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlan
       return "";
     }
   });
-  const entriesByDeploymentId = new Set(validation.entries.map((entry) => entry.deploymentId).filter(Boolean));
-  const entriesByOrigin = new Set(validation.entries.map((entry) => entry.canonicalOrigin).filter(Boolean));
+  const entriesByDeploymentId = new Set(selectedEntries.map((entry) => entry.deploymentId).filter(Boolean));
+  const entriesByOrigin = new Set(selectedEntries.map((entry) => entry.canonicalOrigin).filter(Boolean));
 
   for (const controlPlane of controlPlaneTargets.filter(isEligibleManagedControlPlaneTarget)) {
     const deploymentId = String(controlPlane.deploymentId ?? "").trim();
@@ -452,7 +453,7 @@ export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlan
     }
   }
 
-  for (const entry of validation.entries) {
+  for (const entry of selectedEntries) {
     if (blockers.some((item) => item.target.inventoryRef === entry.inventoryRef)) continue;
     const matchesByDeploymentId = controlPlaneByDeploymentId.get(entry.deploymentId) ?? [];
     const originMatches = controlPlaneByOrigin.get(entry.canonicalOrigin) ?? [];
@@ -468,10 +469,11 @@ export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlan
       if (controlPlaneOrigin !== entry.canonicalOrigin) entryBlockers.push("control_plane_origin_mismatch");
       if (!originMatches.includes(controlPlane)) entryBlockers.push("control_plane_deployment_origin_mismatch");
       if (controlPlane.provider !== entry.provider) entryBlockers.push("control_plane_provider_mismatch");
+      if (!isAuthoritativeManagedControlPlaneTarget(controlPlane)) entryBlockers.push("control_plane_classification_mismatch");
       if (mutationIdentityForProvider(controlPlane) !== mutationIdentityForProvider(entry.target)) entryBlockers.push("control_plane_resource_mismatch");
       if (targetEligibilityErrors(controlPlane).length > 0) entryBlockers.push("control_plane_lifecycle_ineligible");
     }
-    const health = healthProofs.get(entry.inventoryRef);
+    const health = healthProofs.get(entry.inventoryKey);
     if (!health) {
       entryBlockers.push("health_provider_missing");
     } else if (health.provider !== entry.provider) {
@@ -498,7 +500,7 @@ export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlan
     ok: blockers.length === 0,
     targets: blockers.length === 0 ? reconciled : [],
     blockers,
-    digest: managedInventoryDigest(validation.entries.map((entry) => entry.inventoryRef).sort().join(",")),
+    digest: managedInventoryDigest(selectedEntries.map((entry) => entry.inventoryRef).sort().join(",")),
   };
 }
 
@@ -525,7 +527,8 @@ export function targetFromControlPlaneRow(row) {
   const label = row.label ?? row.customerName ?? row.name ?? row.customerSlug ?? row.id;
   const url = row.url ?? row.runtimeUrl ?? row.supportBaseUrl;
   const provider = cloudProvider === "AZURE" ? "azure" : cloudProvider === "RAILWAY" ? "railway" : null;
-  const workload = normalizeTargetGroup(row.workload ?? (row.deploymentKind === "INTERNAL" ? "backup-app" : "managed-customers"));
+  const deploymentKind = String(row.deploymentKind ?? "").trim().toUpperCase();
+  const workload = releaseGroupForControlPlaneRow(provider, deploymentKind);
   return {
     id: row.id ?? row.deploymentId ?? label,
     deploymentId: row.id ?? row.deploymentId ?? null,
@@ -534,6 +537,8 @@ export function targetFromControlPlaneRow(row) {
     group: workload,
     workload,
     provider,
+    environment: row.environment ?? null,
+    deploymentKind: deploymentKind || null,
     deploymentStatus: row.deploymentStatus ?? null,
     provisioningStatus: row.provisioningStatus ?? null,
     releaseEligible: row.releaseEligible !== false,
@@ -549,6 +554,14 @@ export function targetFromControlPlaneRow(row) {
       workerAppName: row.providerWorkerServiceId ?? row.azureWorkerAppName ?? null,
     },
   };
+}
+
+function releaseGroupForControlPlaneRow(provider, deploymentKind) {
+  if (deploymentKind === "REMOTE_MANAGED" && SUPPORTED_PROVIDERS.has(provider)) return "managed-customers";
+  if (deploymentKind === "HOSTED_DEDICATED" && provider === "railway") return "managed-customers";
+  if (deploymentKind === "HOSTED_DEDICATED" && provider === "azure") return "selfserve";
+  if (deploymentKind === "INTERNAL") return "backup-app";
+  return null;
 }
 
 export function filterTargetsByGroups(targets, groups, options = {}) {
@@ -580,7 +593,11 @@ function providerResourceAssertionErrors(target) {
 }
 
 function isEligibleManagedControlPlaneTarget(target) {
-  return target.group === "managed-customers" && SUPPORTED_PROVIDERS.has(target.provider) && targetEligibilityErrors(target).length === 0;
+  return isAuthoritativeManagedControlPlaneTarget(target) && targetEligibilityErrors(target).length === 0;
+}
+
+function isAuthoritativeManagedControlPlaneTarget(target) {
+  return target.group === "managed-customers" && SUPPORTED_PROVIDERS.has(target.provider);
 }
 
 function mutationIdentityForProvider(target) {

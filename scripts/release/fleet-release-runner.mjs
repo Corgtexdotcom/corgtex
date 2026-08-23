@@ -34,6 +34,7 @@ import {
   targetFromControlPlaneRow,
   targetSelectionDeprecations,
   TERMINAL_RAILWAY_FAILURES,
+  validateManagedInventoryTargets,
 } from "./fleet-release-core.mjs";
 import { notifyFleetReleaseFailure } from "./fleet-release-alerts.mjs";
 import { runPostDeployProbe } from "./fleet-release-probes.mjs";
@@ -95,7 +96,12 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
 
   const allTargets = await discoverTargets(deps);
   const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase()) || [normalizeTargets("default"), normalizeTargets("all")].some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
-  let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
+  let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection });
+  if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) {
+    const managed = targets.filter((target) => target.group === "managed-customers");
+    const other = await revalidateTargets(targets.filter((target) => target.group !== "managed-customers"), deps);
+    targets = [...managed, ...other];
+  }
   const managedInventoryGate = selectedGroups.includes("managed-customers")
     ? await reconcileManagedCustomerSelection(targets, deps)
     : { targets, blockers: [], digest: null };
@@ -390,7 +396,12 @@ async function discoverTargets(deps) {
   const env = deps.env ?? process.env;
   const snapshot = env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE);
   const configured = parseTargetJson(snapshot ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
-  if (snapshot) return revalidateTargets(dedupeTargets(configured.map(normalizeTarget)), deps);
+  if (snapshot) {
+    const normalized = dedupeTargets(configured.map(normalizeTarget));
+    const managed = normalized.filter((target) => target.group === "managed-customers");
+    const other = await revalidateTargets(normalized.filter((target) => target.group !== "managed-customers"), deps);
+    return [...managed, ...other];
+  }
   const discovered = configured.length > 0 ? [] : await discoverControlPlaneTargets(deps);
   const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
   const targets = dedupeTargets([...configured, ...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
@@ -415,7 +426,7 @@ async function discoverControlPlaneTargets(deps) {
   return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production" && row.deploymentKind !== "SHARED_WORKSPACE" && ["AZURE", "RAILWAY"].includes(row.cloudProvider)).map(targetFromControlPlaneRow);
 }
 
-async function revalidateTargets(targets, deps) { const revalidated = []; for (let index = 0; index < targets.length; index += 8) revalidated.push(...await Promise.all(targets.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps)))); return revalidated; } async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${target.label} authoritative provider or resource identity changed after preflight`); const classificationDrift = ["environment", "deploymentKind"].some((key) => target[key] && current[key] && target[key] !== current[key]); if (classificationDrift || (current.environment && String(current.environment).toLowerCase() !== "production")) throw new Error(`${target.label} authoritative workload or environment changed after preflight`); const revalidated = { ...target, environment: current.environment ?? target.environment, deploymentKind: current.deploymentKind ?? target.deploymentKind, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible }, errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${target.label}: ${errors.join("; ")}`); return revalidated; }
+async function revalidateTargets(targets, deps) { const revalidated = []; for (let index = 0; index < targets.length; index += 8) revalidated.push(...await Promise.all(targets.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps)))); return revalidated; } async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const label = publicTargetLabel(target); const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${label} authoritative provider or resource identity changed after preflight`); const classificationDrift = ["environment", "deploymentKind"].some((key) => target[key] && current[key] && target[key] !== current[key]); if (classificationDrift || (current.environment && String(current.environment).toLowerCase() !== "production")) throw new Error(`${label} authoritative workload or environment changed after preflight`); const revalidated = { ...target, environment: current.environment ?? target.environment, deploymentKind: current.deploymentKind ?? target.deploymentKind, deploymentStatus: current.deploymentStatus, provisioningStatus: current.provisioningStatus, releaseEligible: current.releaseEligible ?? target.releaseEligible }, errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${label}: ${errors.join("; ")}`); return revalidated; }
 function mutationIdentity(target) { const resource = target.provider === "azure" ? [target.azure?.resourceGroup, target.azure?.webAppName, target.azure?.workerAppName] : [target.railway?.projectId, target.railway?.environmentId, target.railway?.webServiceId, target.railway?.workerServiceId]; return JSON.stringify([target.provider, ...resource]); }
 
 function normalizeTarget(target) {
@@ -442,6 +453,9 @@ function normalizeTarget(target) {
     railway: target.railway ?? {},
     azure: { ...(group === "selfserve" && provider === "azure" ? DEFAULT_AZURE : {}), ...(target.azure ?? {}) },
   };
+  if (normalized.group === "managed-customers") {
+    normalized.inventoryRef = target.inventoryRef ?? managedInventoryRefForTarget(normalized);
+  }
   if (normalized.provider === "azure" && normalized.azure.acrName) {
     normalized.azure.acrServer = target.azure?.acrServer ?? `${normalized.azure.acrName}.azurecr.io`;
   }
@@ -511,7 +525,7 @@ function preflightTarget(target, env, options = {}) {
 }
 
 async function reconcileManagedCustomerSelection(targets, deps) {
-  const configuredManagedTargets = configuredTargets(deps.env ?? process.env).map(normalizeTarget).filter((target) => target.group === "managed-customers");
+  const configuredManagedTargets = configuredManagedInventoryTargets(deps.env ?? process.env).map(normalizeTarget).filter((target) => target.group === "managed-customers");
   if (configuredManagedTargets.length === 0) {
     return {
       targets: [],
@@ -522,28 +536,30 @@ async function reconcileManagedCustomerSelection(targets, deps) {
       digest: managedInventoryDigest("missing-managed-inventory"),
     };
   }
-  const managedTargets = configuredManagedTargets;
-  if (managedTargets.length === 0) {
-    return {
-      targets: [],
-      blockers: [{
-        target: buildManagedInventoryBlockerTarget({ inventoryKey: "missing-managed-inventory", provider: null }, ["managed_inventory_missing"]),
-        blockers: ["managed_inventory_missing"],
-      }],
-      digest: managedInventoryDigest("missing-managed-inventory"),
-    };
+  const rawValidation = validateManagedInventoryTargets(configuredManagedTargets);
+  if (!rawValidation.ok) {
+    return { targets: [], blockers: rawValidation.blockers, digest: managedInventoryDigest(rawValidation.entries.map((entry) => entry.inventoryRef).sort().join(",")) };
   }
+  const selectedKeys = new Set(targets.filter((target) => target.group === "managed-customers").map((target) => String(target.inventoryKey ?? "").trim()));
+  const managedTargets = configuredManagedTargets.filter((target) => selectedKeys.has(String(target.inventoryKey ?? "").trim()));
   const controlPlaneTargets = await discoverControlPlaneTargets(deps);
+  if (managedTargets.length === 0) {
+    const reconciliation = reconcileManagedInventoryTargets({ inventoryTargets: [], controlPlaneTargets, healthProofs: new Map(), validation: rawValidation });
+    if (!reconciliation.ok) {
+      return { targets: [], blockers: reconciliation.blockers, digest: reconciliation.digest };
+    }
+    return { targets: targets.filter((target) => target.group !== "managed-customers"), blockers: [], digest: reconciliation.digest };
+  }
   const healthProofs = new Map(await runWithConcurrency(managedTargets, parsePositiveInteger((deps.env ?? process.env).FLEET_RELEASE_MANAGED_HEALTH_CONCURRENCY, 8), async (target) => {
-    const inventoryRef = managedInventoryRefForTarget(target);
+    const inventoryKey = String(target.inventoryKey ?? "").trim();
     try {
       const origin = normalizeManagedInventoryOrigin(target.canonicalOrigin ?? target.url);
-      return [inventoryRef, await probeManagedInventoryHealth(origin, deps)];
+      return [inventoryKey, await probeManagedInventoryHealth(origin, deps)];
     } catch {
-      return [inventoryRef, null];
+      return [inventoryKey, null];
     }
   }));
-  const reconciliation = reconcileManagedInventoryTargets({ inventoryTargets: managedTargets, controlPlaneTargets, healthProofs });
+  const reconciliation = reconcileManagedInventoryTargets({ inventoryTargets: managedTargets, controlPlaneTargets, healthProofs, validation: rawValidation });
   if (!reconciliation.ok) {
     return { targets: [], blockers: reconciliation.blockers, digest: reconciliation.digest };
   }
@@ -554,6 +570,13 @@ async function reconcileManagedCustomerSelection(targets, deps) {
       : target
   )).filter(Boolean);
   return { targets: nextTargets, blockers: [], digest: reconciliation.digest };
+}
+
+function configuredManagedInventoryTargets(env) {
+  if (env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE)) {
+    return parseTargetJson(readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8"));
+  }
+  return configuredTargets(env);
 }
 
 async function probeManagedInventoryHealth(origin, deps) {
