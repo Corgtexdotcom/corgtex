@@ -24,7 +24,7 @@ Configure these values on the `fleet-release-production` environment. Store secr
 | `CONTROL_PLANE_URL` | Variable | Ops control-plane origin. Defaults to `https://ops.corgtex.com` when unset. |
 | `RAILWAY_GRAPHQL_ENDPOINT` | Variable, optional | Railway GraphQL endpoint override. Leave unset unless Railway support directs otherwise. |
 | `FLEET_RELEASE_STABLE_GIT_SHA` | Variable | Latest stable 40-character git SHA. Update only after canary proof. |
-| `FLEET_RELEASE_TARGETS_JSON` | Variable | Transition inventory for managed customer targets, or leave unset when control-plane discovery is authoritative. |
+| `FLEET_RELEASE_TARGETS_JSON` | Variable | Private configured inventory for managed customer targets. Required for managed-customer selection. |
 | `FLEET_RELEASE_OPS_TARGET_JSON` | Variable | Dedicated Ops target. |
 | `FLEET_RELEASE_BACKUP_APP_TARGET_JSON` | Variable | Backup app target. |
 | `FLEET_RELEASE_AZURE_TARGET_JSON` | Variable | Legacy-named selfserve target inventory; each target still declares its provider. |
@@ -34,7 +34,7 @@ Configure these values on the `fleet-release-production` environment. Store secr
 
 ## Target Inventory Checklist
 
-Each target variable may contain one target object or an array of target objects. Keep target inventory operational and sanitized: IDs, URLs, provider IDs, and release metadata are acceptable; raw customer content, credentials, private uploads, and bearer tokens are not.
+Each target variable may contain one target object or an array of target objects. Keep target inventory operational and sanitized: IDs, URLs, provider IDs, and release metadata are acceptable only inside the private GitHub environment inventory; raw customer content, credentials, private uploads, and bearer tokens are not.
 
 Every target must include `provider: "azure"` or `provider: "railway"`; provider is never derived from its group, hostname, or URL. Workload selectors are `managed-customers`, `selfserve`, `ops`, and `backup-app`. The legacy `railway-customers` and `azure-selfserve` selectors remain read-compatible and emit deprecation information.
 
@@ -50,6 +50,8 @@ Railway targets must include:
 - `railway.webServiceId`
 - `railway.workerServiceId`
 
+Managed-customer targets additionally require `inventoryKey`, `deploymentId`, and a canonical HTTPS origin that exactly matches the Ops control-plane production row. The runner validates the raw managed inventory before dedupe or external reads, then requires exact agreement with control-plane deployment ID, canonical origin, provider resources, environment, deployment kind, lifecycle, and runtime health provider. Managed public output uses only an opaque SHA-256 inventory reference; raw customer labels, origins, deployment IDs, Railway project/environment/service IDs, and Railway source URLs stay out of plans, blockers, GitHub outputs, summaries, advisories, and uploaded artifacts.
+
 Azure targets must include:
 
 - `id`
@@ -62,7 +64,7 @@ Azure targets must include:
 - `azure.webAppName`
 - `azure.workerAppName`
 
-Only `selfserve` Azure targets are mutable in PR1. Azure managed-customer, core, backup, and Ops targets are shown with blockers and remain non-mutable until the generic Azure executor lands in PR3; they never inherit selfserve resource defaults.
+Only `selfserve` Azure targets are mutable in PR1. Azure managed-customer, core, backup, and Ops targets are shown with blockers and remain non-mutable until the generic Azure executor lands in PR3; they never inherit selfserve resource defaults and do not emit managed-Azure observation targets.
 
 Set `deploymentStatus` or `provisioningStatus` to `RETIRED` or `SUSPENDED`, or set `releaseEligible: false`, as soon as a target cannot receive releases. Default and `all` selections exclude those targets. A specific workload selection reports them as blockers and a real run fails before provider mutation.
 
@@ -80,7 +82,7 @@ npm run release:fleet -- --reason "Plan latest stable fleet release." --dry-run
 
 Dry-runs use the lightweight preflight workflow by default. That path validates configuration, resolves `latest-stable`, and plans rings without `npm ci`, Prisma generation, Docker build, Azure login, or provider mutation.
 
-6. Confirm the dry-run dispatches `fleet-release-preflight.yml` and prints each target's workload, provider, ring, criticality, resource identifiers, deprecations, and blockers before any provider mutation. Ops must be in the final ring.
+6. Confirm the dry-run dispatches `fleet-release-preflight.yml` and prints each target's workload, provider, ring, criticality, deprecations, and blockers before any provider mutation. Managed-customer rows must show opaque inventory references instead of resource identifiers. Ops must be in the final ring.
 7. If the dry-run fails on missing config, fix the named GitHub environment setting and rerun.
 8. If the preflight takes longer than 30 seconds or reports unclear blockers, stop and repair the preflight before expanding release orchestration.
 9. For a real promotion, use a specific support reason and monitor the GitHub Actions run until each target proves matching `gitSha`, `imageTag`, `database=up`, `schema=ready`, passing customer-read probes, and `supportConnectorReadiness.status=ready`.

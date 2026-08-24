@@ -326,20 +326,25 @@ export async function queryRailwayRows({ env = process.env, manifest = {}, since
 
   const rows = [];
   for (const target of railwayTargets) {
-    const deployment = await latestRailwayDeployment(target, { env, deps });
-    const httpLogs = await queryRailwayHttpLogs({
-      env,
-      deploymentId: deployment.id,
-      since,
-      until,
-      deps,
-    });
-    rows.push(...parseRailwayHttpLogRows(httpLogs, {
-      target,
-      deployment,
-      manifest,
-      source_url: railwayDeploymentUrl(target, deployment.id),
-    }));
+    try {
+      const deployment = await latestRailwayDeployment(target, { env, deps });
+      const httpLogs = await queryRailwayHttpLogs({
+        env,
+        deploymentId: deployment.id,
+        since,
+        until,
+        deps,
+      });
+      rows.push(...parseRailwayHttpLogRows(httpLogs, {
+        target,
+        deployment,
+        manifest,
+        source_url: target.managedObservation ? null : railwayDeploymentUrl(target, deployment.id),
+      }));
+    } catch (error) {
+      if (!target.managedObservation) throw error;
+      rows.push(managedRailwayObservationFailureRow(target, manifest, error));
+    }
   }
 
   return rows;
@@ -385,14 +390,33 @@ export function parseRailwayHttpLogRows(payload, { target, deployment, manifest 
         surface: safeText(target.group ?? "railway"),
         route: safeText(log.path ?? log.requestPath ?? log.host),
         status,
-        code: safeText(log.responseDetails ?? "RAILWAY_HTTP_5XX"),
+        code: target.managedObservation ? "managed_observation_http_5xx" : safeText(log.responseDetails ?? "RAILWAY_HTTP_5XX"),
         events: 1,
         first_seen: isoText(log.timestamp),
         last_seen: isoText(log.timestamp),
-        deployment_id: safeText(deployment?.id),
+        deployment_id: target.managedObservation ? null : safeText(deployment?.id),
       };
     })
     .filter(Boolean);
+}
+
+function managedRailwayObservationFailureRow(target, manifest, error) {
+  const release = railwayTargetRelease(target, manifest);
+  return {
+    source: "railway",
+    source_url: null,
+    event: "corgtex_route_error",
+    instance_id: safeText(target.id ?? target.label),
+    provider: "railway",
+    release_git_sha: release.gitSha,
+    release_image_tag: release.imageTag,
+    release_version: release.releaseVersion,
+    surface: safeText(target.group ?? "railway-customers"),
+    route: "managed_observation",
+    status: 500,
+    code: boundedManagedRailwayObservationCode(error),
+    events: 1,
+  };
 }
 
 export function normalizeObservationRow(input) {
@@ -868,9 +892,11 @@ function railwayTargetsFromEnv(env, targets) {
       if (provider === "railway" && targetList.includes(group)) {
         const environmentId = safeText(target?.railway?.environmentId), webServiceId = safeText(target?.railway?.webServiceId);
         if (!webServiceId || !environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
+        const managedObservation = Boolean(safeText(target.inventoryRef));
         entries.push({
-          id: safeText(target.id ?? target.deploymentId ?? target.label),
-          label: safeText(target.label ?? target.id),
+          id: managedObservation ? safeText(target.inventoryRef) : safeText(target.id ?? target.deploymentId ?? target.label),
+          label: managedObservation ? safeText(target.inventoryRef) : safeText(target.label ?? target.id),
+          managedObservation,
           group,
           projectId: safeText(target.railway.projectId),
           environmentId,
@@ -886,9 +912,11 @@ function railwayTargetsFromEnv(env, targets) {
   if (targetList.includes("railway-customers")) {
     for (const target of parseJsonArray(env.FLEET_RELEASE_TARGETS_JSON)) {
       if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
+        const managedObservation = Boolean(safeText(target.inventoryRef));
         entries.push({
-          id: safeText(target.id ?? target.deploymentId ?? target.label),
-          label: safeText(target.label ?? target.id),
+          id: managedObservation ? safeText(target.inventoryRef) : safeText(target.id ?? target.deploymentId ?? target.label),
+          label: managedObservation ? safeText(target.inventoryRef) : safeText(target.label ?? target.id),
+          managedObservation,
           group: "railway-customers",
           projectId: safeText(target.railway.projectId),
           environmentId: safeText(target.railway.environmentId),
@@ -967,7 +995,7 @@ async function latestRailwayDeployment(target, { env = process.env, deps = {} })
   });
   const deployment = data?.deployments?.edges?.[0]?.node;
   if (!deployment?.id) {
-    throw new Error(`No Railway deployment found for ${target.label ?? target.id ?? target.webServiceId}.`);
+    throw new Error(target.managedObservation ? "managed_observation_missing_deployment" : `No Railway deployment found for ${target.label ?? target.id ?? target.webServiceId}.`);
   }
   return deployment;
 }
@@ -1019,11 +1047,26 @@ async function railwayGraphql({ env = process.env, deps = {}, query, variables }
     body: JSON.stringify({ query, variables }),
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  let body;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error("Railway API returned malformed JSON");
+  }
   if (!response.ok || body?.errors?.length) {
     throw new Error(body?.errors?.map((error) => error.message).filter(Boolean).join("; ") || `Railway API failed with ${response.status}`);
   }
   return body?.data ?? {};
+}
+
+function boundedManagedRailwayObservationCode(error) {
+  const message = errorMessage(error);
+  if (message === "managed_observation_missing_deployment") return message;
+  if (message === "managed_observation_malformed_response") return message;
+  if (/No Railway deployment found/i.test(message)) return "managed_observation_missing_deployment";
+  if (/json|parse|malformed/i.test(message)) return "managed_observation_malformed_response";
+  if (/graphql|railway|api|http|failed|fetch/i.test(message)) return "managed_observation_query_failed";
+  return "managed_observation_query_failed";
 }
 
 function railwayTargetRelease(target, manifest) {

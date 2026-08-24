@@ -15,6 +15,7 @@ import {
   parseRailwayHttpLogRows,
   queryAzureMonitorRows,
   runObservationGate,
+  renderMarkdownSummary,
 } from "./post-deploy-observation-gate.mjs";
 
 const SHA = "8c56008ab7cad48f55d3bbf96c761cdadd1b15e7";
@@ -319,6 +320,94 @@ describe("post-deploy observation gate", () => {
     expect(summary.status).toBe("passed");
     expect(summary.blockingFailures).toHaveLength(0);
     expect(summary.advisoryFailures).toHaveLength(0);
+  });
+
+  function writeManagedRailwayTargetsFile(prefix, inventoryRef) {
+    const tempDir = mkdtempSync(join(tmpdir(), prefix));
+    const targetsFile = join(tempDir, "targets.json");
+    writeFileSync(targetsFile, JSON.stringify([{ id: inventoryRef, label: inventoryRef, inventoryRef, provider: "railway", workload: "managed-customers", group: "managed-customers", railway: { projectId: "private-project-sentinel", environmentId: "private-env-sentinel", webServiceId: "private-web-sentinel" } }]));
+    return { tempDir, targetsFile };
+  }
+
+  it("keeps managed Railway observation public output opaque", async () => {
+    const inventoryRef = "managed-inventory-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const { tempDir, targetsFile } = writeManagedRailwayTargetsFile("managed-railway-observation-", inventoryRef);
+    const summaryFile = join(tempDir, "summary.json");
+
+    const fetchImpl = vi.fn(async (_url, options) => {
+      const body = JSON.parse(options.body);
+      if (body.query.includes("deployments(")) {
+        return { ok: true, text: async () => JSON.stringify({ data: { deployments: { edges: [{ node: { id: "private-deploy-sentinel", status: "SUCCESS" } }] } } }) };
+      }
+      return { ok: true, text: async () => JSON.stringify({ data: { httpLogs: [{
+        timestamp: "2026-08-23T10:00:00.000Z",
+        path: "/api/private-route-sentinel",
+        httpStatus: 500,
+        responseDetails: "private-response-sentinel",
+      }] } }) };
+    });
+
+    const summary = await runObservationGate({
+      manifest,
+      env: {
+        RAILWAY_API_TOKEN: "railway-token",
+        FLEET_RELEASE_TARGETS_FILE: targetsFile,
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      targets: "railway-customers",
+      since: new Date("2026-08-23T09:55:00.000Z"),
+      until: new Date("2026-08-23T10:05:00.000Z"),
+      summaryFile,
+      deps: { fetchImpl },
+    });
+
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures[0]).toMatchObject({
+      instance_id: inventoryRef,
+      source_url: null,
+      code: "managed_observation_http_5xx",
+    });
+    const publicText = [
+      JSON.stringify(summary),
+      readFileSync(summaryFile, "utf8"),
+      renderMarkdownSummary(summary),
+      JSON.stringify(summary.advisoryIncidents),
+    ].join("\n");
+    expect(publicText).toContain(inventoryRef);
+    expect(publicText).not.toContain("private-project-sentinel");
+    expect(publicText).not.toContain("private-env-sentinel");
+    expect(publicText).not.toContain("private-web-sentinel");
+    expect(publicText).not.toContain("private-deploy-sentinel");
+    expect(publicText).not.toContain("private-response-sentinel");
+    expect(publicText).not.toContain("railway.com/project");
+  });
+
+  it("bounds managed Railway API failures without raw upstream text", async () => {
+    const inventoryRef = "managed-inventory-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const { targetsFile } = writeManagedRailwayTargetsFile("managed-railway-failure-", inventoryRef);
+    const summary = await runObservationGate({
+      manifest,
+      env: {
+        RAILWAY_API_TOKEN: "railway-token",
+        FLEET_RELEASE_TARGETS_FILE: targetsFile,
+        OBSERVATION_REQUIRE_SOURCE: "true",
+      },
+      targets: "railway-customers",
+      since: new Date("2026-08-23T09:55:00.000Z"),
+      until: new Date("2026-08-23T10:05:00.000Z"),
+      deps: {
+        fetchImpl: vi.fn(async () => ({
+          ok: false,
+          status: 502,
+          text: async () => JSON.stringify({ errors: [{ message: "private-project-sentinel private-env-sentinel raw upstream failure" }] }),
+        })),
+      },
+    });
+    const text = JSON.stringify(summary);
+    expect(summary.blockingFailures[0].code).toBe("managed_observation_query_failed");
+    expect(text).toContain(inventoryRef);
+    expect(text).not.toContain("private-project-sentinel");
+    expect(text).not.toContain("raw upstream failure");
   });
 
   it("keeps release-correlated blockers even when older failures are noisy", () => {

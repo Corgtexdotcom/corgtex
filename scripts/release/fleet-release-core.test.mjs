@@ -8,14 +8,17 @@ import {
   formatReleasePlan,
   healthProofErrors,
   imageTagForSha,
+  managedInventoryRefForTarget,
   MCP_CONNECTOR_DEFAULT_SCOPES,
   mcpOAuthProofErrors,
   normalizeReleaseInput,
+  reconcileManagedInventoryTargets,
   normalizeTargets,
   providerBoundaryErrors,
   releaseVersionForSha,
   targetEligibilityErrors,
   targetFromControlPlaneRow,
+  validateManagedInventoryTargets,
 } from "./fleet-release-core.mjs";
 
 const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
@@ -161,15 +164,128 @@ describe("fleet release core", () => {
       label: "Azure",
       cloudProvider: "AZURE",
       url: "https://app.corgtex.com",
+      deploymentKind: "HOSTED_DEDICATED",
       providerResourceGroup: "rg-customer",
-    })).toMatchObject({ group: "managed-customers", provider: "azure", azure: { resourceGroup: "rg-customer" } });
+    })).toMatchObject({ group: "selfserve", provider: "azure", azure: { resourceGroup: "rg-customer" } });
     expect(targetFromControlPlaneRow({
       id: "customer-1",
       label: "Acme",
       cloudProvider: "RAILWAY",
       url: "https://selfserve.corgtex.com",
+      deploymentKind: "REMOTE_MANAGED",
     })).toMatchObject({ group: "managed-customers", provider: "railway" });
     expect(targetFromControlPlaneRow({ id: "backup", deploymentKind: "INTERNAL", cloudProvider: "RAILWAY" })).toMatchObject({ group: "backup-app", provider: "railway" });
+  });
+
+  it("validates managed inventory before dedupe or authority lookup", () => {
+    const target = {
+      inventoryKey: "customer-a",
+      deploymentId: "dep-a",
+      label: "Private Customer",
+      url: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "project-a", environmentId: "env-a", webServiceId: "web-a", workerServiceId: "worker-a" },
+    };
+    const result = validateManagedInventoryTargets([
+      target,
+      { ...target, label: "Duplicate Customer" },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.blockers[0].target.label).toMatch(/^managed-inventory-[0-9a-f]{64}$/);
+    expect(JSON.stringify(result.blockers)).not.toContain("Private Customer");
+    expect(result.blockers.flatMap((item) => item.blockers)).toEqual(expect.arrayContaining([
+      "managed_inventory_key_duplicate",
+      "managed_inventory_deployment_id_duplicate",
+      "managed_inventory_origin_duplicate",
+      "managed_inventory_resource_identity_duplicate",
+    ]));
+  });
+
+  it("reconciles managed inventory only on exact deployment, origin, resource, lifecycle, and health agreement", () => {
+    const inventory = {
+      inventoryKey: "customer-a",
+      deploymentId: "dep-a",
+      label: "Private Customer",
+      url: "https://customer-a.example.test",
+      canonicalOrigin: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "project-a", environmentId: "env-a", webServiceId: "web-a", workerServiceId: "worker-a" },
+    };
+    const controlPlane = targetFromControlPlaneRow({
+      id: "dep-a",
+      label: "Private Customer",
+      url: "https://customer-a.example.test",
+      environment: "production",
+      deploymentKind: "REMOTE_MANAGED",
+      cloudProvider: "RAILWAY",
+      deploymentStatus: "ACTIVE",
+      provisioningStatus: "ACTIVE",
+      releaseEligible: true,
+      railwayProjectId: "project-a",
+      railwayEnvironmentId: "env-a",
+      railwayWebServiceId: "web-a",
+      railwayWorkerServiceId: "worker-a",
+    });
+    const result = reconcileManagedInventoryTargets({
+      inventoryTargets: [{ ...inventory, inventoryRef: managedInventoryRefForTarget(inventory) }],
+      controlPlaneTargets: [controlPlane],
+      healthProofs: new Map([["customer-a", { provider: "railway" }]]),
+    });
+    expect(result.ok).toBe(true);
+    expect(result.targets[0]).toMatchObject({
+      inventoryRef: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/),
+      environment: "production",
+      deploymentKind: "REMOTE_MANAGED",
+      releaseEligible: true,
+    });
+
+    const drift = reconcileManagedInventoryTargets({
+      inventoryTargets: [{ ...inventory, inventoryRef: managedInventoryRefForTarget(inventory) }],
+      controlPlaneTargets: [{ ...controlPlane, railway: { ...controlPlane.railway, webServiceId: "other-web" } }],
+      healthProofs: new Map([["customer-a", { provider: "railway" }]]),
+    });
+    expect(drift.ok).toBe(false);
+    expect(drift.blockers[0].blockers).toContain("control_plane_resource_mismatch");
+    expect(JSON.stringify(drift)).not.toContain("customer-a.example.test");
+  });
+
+  it("preserves configured managed opt-out even when the control plane is active", () => {
+    const inventory = {
+      inventoryKey: "customer-a",
+      deploymentId: "dep-a",
+      label: "Private Customer",
+      url: "https://customer-a.example.test",
+      group: "managed-customers",
+      provider: "railway",
+      deploymentStatus: "SUSPENDED",
+      releaseEligible: false,
+      railway: { projectId: "project-a", environmentId: "env-a", webServiceId: "web-a", workerServiceId: "worker-a" },
+    };
+    const result = reconcileManagedInventoryTargets({
+      inventoryTargets: [{ ...inventory, inventoryRef: managedInventoryRefForTarget(inventory) }],
+      controlPlaneTargets: [targetFromControlPlaneRow({
+        id: "dep-a",
+        url: "https://customer-a.example.test",
+        environment: "production",
+        deploymentKind: "REMOTE_MANAGED",
+        cloudProvider: "RAILWAY",
+        deploymentStatus: "ACTIVE",
+        provisioningStatus: "ACTIVE",
+        releaseEligible: true,
+        railwayProjectId: "project-a",
+        railwayEnvironmentId: "env-a",
+        railwayWebServiceId: "web-a",
+        railwayWorkerServiceId: "worker-a",
+      })],
+      healthProofs: new Map([["customer-a", { provider: "railway" }]]),
+    });
+    expect(result.ok).toBe(true);
+    expect(targetEligibilityErrors(result.targets[0])).toEqual(expect.arrayContaining([
+      "Target lifecycle status SUSPENDED is not release-eligible",
+      "Target explicitly sets releaseEligible=false",
+    ]));
   });
 
   it("formats progressive rings without UI-specific behavior", () => {
