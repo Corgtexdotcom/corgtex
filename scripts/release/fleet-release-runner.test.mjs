@@ -431,42 +431,61 @@ describe("fleet release runner", () => {
     expect(fetchImpl).not.toHaveBeenCalledWith(expect.stringContaining("backboard.railway.com"), expect.anything());
   });
 
-  it("writes only an opaque managed Railway observation descriptor after reconciliation", async () => {
+  it("validates raw managed inventory before any external read", async () => {
+    const fetchImpl = vi.fn(), runCommand = vi.fn();
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--reason", "Validate ordering."], {
+      env: managedReleaseEnv({ FLEET_RELEASE_TARGETS_JSON: managedTargetJson({ inventoryRef: "private-customer-ref" }), FLEET_RELEASE_OPS_TARGET_JSON: targetJson() }),
+      fetchImpl,
+      runCommand,
+      sleep: vi.fn(),
+    })).rejects.toThrow("managed_inventory_reference_invalid");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("replays a private managed preflight snapshot before writing an opaque observation descriptor", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "fleet-managed-descriptor-"));
     const targetsFile = join(tempDir, "targets.json");
+    const railwayCalls = [];
     const fetchImpl = vi.fn(async (url, options) => {
       const body = JSON.parse(options?.body ?? "{}");
       if (String(url).includes("/api/control-plane/mcp")) {
-        expect(body.params.name).toBe("list_customers");
-        return controlPlaneResult([managedControlPlaneRow()]);
+        if (body.params.name === "list_customers") return controlPlaneResult([managedControlPlaneRow()]);
+        if (body.params.name === "get_customer_deployment_status") return controlPlaneResult(managedControlPlaneRow());
+        if (body.params.name === "record_verified_release") return controlPlaneResult({ recorded: true });
+        if (body.params.name === "refresh_fleet_snapshots") return controlPlaneResult({ results: [] });
       }
       if (String(url).endsWith("/api/health")) {
-        return { ok: true, status: 200, text: async () => JSON.stringify({ status: "ok", release: { provider: "railway" } }) };
+        return { ok: true, status: 200, text: async () => JSON.stringify({ status: "ok", release: { provider: "railway" } }), json: async () => ({ status: "ok", database: "up", schema: "ready", release: { imageTag: `sha-${SHA}`, gitSha: SHA, provider: "railway" } }) };
+      }
+      if (String(url).includes("backboard.railway.com")) {
+        railwayCalls.push(body);
+        return successfulRailwayResponse(body);
       }
       throw new Error(`unexpected call ${url}`);
     });
 
-    const result = await runFleetRelease(["deploy", "--release", SHA, "--dry-run"], {
+    const preflight = await runFleetRelease(["deploy", "--release", SHA, "--dry-run"], {
       env: managedReleaseEnv({ FLEET_RELEASE_TARGETS_FILE: targetsFile }),
       fetchImpl,
       sleep: vi.fn(),
       emitGithubOutput: vi.fn(),
     });
 
-    expect(result.dryRun).toBe(true);
+    expect(preflight.dryRun).toBe(true);
+    const privateSnapshot = JSON.parse(readFileSync(targetsFile, "utf8"));
+    expect(privateSnapshot).toEqual([expect.objectContaining({ id: "private-id-sentinel", label: "Private Label Sentinel", inventoryKey: "private-key-sentinel", deploymentId: "private-deployment-sentinel", canonicalOrigin: "https://private-origin-sentinel.example.test", inventoryRef: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/), railway: expect.objectContaining({ workerServiceId: "private-worker-sentinel" }) })]);
+
+    const promotion = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--reason", "Promote managed."], {
+      env: managedReleaseEnv({ FLEET_RELEASE_TARGETS_FILE: targetsFile, FLEET_RELEASE_POST_DEPLOY_PROBES: "false", GHCR_IMPORT_USERNAME: "github-user" }),
+      fetchImpl,
+      sleep: vi.fn(),
+      emitGithubOutput: vi.fn(),
+    });
+    expect(promotion.results[0].status).toBe("succeeded");
+    expect(railwayCalls.some((call) => call.query.includes("serviceInstanceUpdate"))).toBe(true);
     const descriptor = JSON.parse(readFileSync(targetsFile, "utf8"));
-    expect(descriptor).toEqual([expect.objectContaining({
-      id: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/),
-      label: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/),
-      inventoryRef: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/),
-      provider: "railway",
-      group: "managed-customers",
-      railway: {
-        projectId: "private-project-sentinel",
-        environmentId: "private-env-sentinel",
-        webServiceId: "private-web-sentinel",
-      },
-    })]);
+    expect(descriptor).toEqual([expect.objectContaining({ id: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/), label: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/), inventoryRef: expect.stringMatching(/^managed-inventory-[0-9a-f]{64}$/), provider: "railway", group: "managed-customers", railway: { projectId: "private-project-sentinel", environmentId: "private-env-sentinel", webServiceId: "private-web-sentinel" } })]);
     const descriptorText = JSON.stringify(descriptor);
     expect(descriptorText).not.toContain("private-origin-sentinel");
     expect(descriptorText).not.toContain("private-deployment-sentinel");
@@ -842,7 +861,7 @@ describe("fleet release runner", () => {
     writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject identity drift."], { env, runCommand, fetchImpl: vi.fn(async () => controlPlaneResult({ ...currentAzure, providerWebServiceId: "replacement-web" })), sleep: vi.fn() })).rejects.toThrow("provider or resource identity changed");
     writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); const forced = await runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--force-after-failure", "true", "--reason", "Reject workload drift."], { env, runCommand, fetchImpl: classificationFetch, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; } }); expect({ result: forced.results[0], snapshot: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })), ...outputs }).toMatchObject({ result: { status: "failed", error: expect.stringContaining("workload or environment changed") }, snapshot: [], uses_azure: false, observation_targets: "" }); const providerFetch = vi.fn().mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "ACTIVE" })).mockResolvedValueOnce(controlPlaneResult({ ...currentAzure, deploymentStatus: "ACTIVE" })), providerCommand = vi.fn(() => { throw new Error("provider failed"); }); writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); const postBoundary = await runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--force-after-failure", "true", "--reason", "Observe provider failure."], { env, runCommand: providerCommand, fetchImpl: providerFetch, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; } }); expect({ result: postBoundary.results[0], snapshot: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })), ...outputs }).toMatchObject({ result: { status: "failed", error: "provider failed" }, snapshot: [{ id: "azure" }], uses_azure: true, observation_targets: "azure-selfserve" });
     const lifecycleCommand = vi.fn();
-    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject lifecycle drift."], { env, runCommand: lifecycleCommand, fetchImpl: lifecycleFetch, sleep: vi.fn() })).rejects.toThrow("Ring 2 failed"); expect(lifecycleFetch).toHaveBeenCalledTimes(2); expect(lifecycleCommand).not.toHaveBeenCalled();
+    writeFileSync(targetFile, azureTargetJson({ deploymentStatus: "ACTIVE" })); await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--reason", "Reject lifecycle drift."], { env, runCommand: lifecycleCommand, fetchImpl: lifecycleFetch, sleep: vi.fn() })).rejects.toThrow("Target lifecycle status RETIRED"); expect(lifecycleFetch).toHaveBeenCalledTimes(1); expect(lifecycleCommand).not.toHaveBeenCalled();
   });
 
   it("fails preflight before mutation when provider credentials are missing", async () => {

@@ -94,6 +94,15 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error("A release reason is required.");
   }
 
+  const earlyManagedInventoryGate = selectedGroups.includes("managed-customers") && !(env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE))
+    ? validateRawManagedInventory(env)
+    : null;
+  if (earlyManagedInventoryGate && !earlyManagedInventoryGate.ok) {
+    const blockers = earlyManagedInventoryGate.blockers;
+    console.log(JSON.stringify({ stage: "plan", plan: formatReleasePlan({ manifest, targets: blockers.map((item) => ({ ...item.target, blockers: item.blockers })), dryRun, concurrency }), managedInventoryDigest: earlyManagedInventoryGate.digest, blockers: blockers.map(publicBlocker) }, null, 2));
+    throw new Error(formatPreflightFailure(blockers));
+  }
+
   const allTargets = await discoverTargets(deps);
   const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase()) || [normalizeTargets("default"), normalizeTargets("all")].some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
   let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection });
@@ -110,7 +119,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
 
-  emitTargetInventory(targets, env, deps, { writeSnapshot: managedInventoryGate.blockers.length === 0 });
+  emitTargetInventory(targets, env, deps, { writeSnapshot: managedInventoryGate.blockers.length === 0, snapshotKind: "promotion" });
   const preflight = targets.map((target) => ({
     target,
     blockers: preflightTarget(target, deps.env ?? process.env, { requireObservability: !dryRun }),
@@ -176,7 +185,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw error;
   }
 
-  if (env.FLEET_RELEASE_TARGETS_FILE) emitTargetInventory(results.filter((result) => result.status === "succeeded" || retainedTargets.has(result.target)).map((result) => result.target), env, deps);
+  if (env.FLEET_RELEASE_TARGETS_FILE) emitTargetInventory(results.filter((result) => result.status === "succeeded" || retainedTargets.has(result.target)).map((result) => result.target), env, deps, { snapshotKind: "observation" });
   return { manifest, results };
 }
 
@@ -292,7 +301,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   };
 }
 
-function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? (target.group === "selfserve" ? "azure-selfserve" : null) : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps, options = {}) { const effectiveTargets = targets.filter((target) => !(target.provider === "azure" && target.group !== "selfserve")); const providers = new Set(effectiveTargets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(effectiveTargets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE && options.writeSnapshot !== false) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets.map(snapshotTargetForObservation))); }
+function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? (target.group === "selfserve" ? "azure-selfserve" : null) : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps, options = {}) { const effectiveTargets = targets.filter((target) => !(target.provider === "azure" && target.group !== "selfserve")); const providers = new Set(effectiveTargets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(effectiveTargets).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE && options.writeSnapshot !== false) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets.map(options.snapshotKind === "observation" ? snapshotTargetForObservation : snapshotTargetForPromotion))); }
 
 function validateConfiguredTargetJson(name, raw, invalid) {
   if (!raw?.trim()) return;
@@ -423,7 +432,7 @@ async function discoverControlPlaneTargets(deps) {
   return rows.filter((row) => String(row.environment ?? "").trim().toLowerCase() === "production" && row.deploymentKind !== "SHARED_WORKSPACE" && ["AZURE", "RAILWAY"].includes(row.cloudProvider)).map(targetFromControlPlaneRow);
 }
 
-async function revalidateTargets(targets, deps) { const revalidated = []; for (let index = 0; index < targets.length; index += 8) revalidated.push(...await Promise.all(targets.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps)))); return revalidated; } async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const label = publicTargetLabel(target); const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${label} authoritative provider or resource identity changed after preflight`); const classificationDrift = ["environment", "deploymentKind", "group"].some((key) => target[key] && currentTarget[key] && target[key] !== currentTarget[key]); if (classificationDrift || (current.environment && String(current.environment).toLowerCase() !== "production")) throw new Error(`${label} authoritative workload or environment changed after preflight`); const revalidated = { ...target, environment: currentTarget.environment ?? target.environment, deploymentKind: currentTarget.deploymentKind ?? target.deploymentKind, deploymentStatus: target.deploymentStatus ?? currentTarget.deploymentStatus, provisioningStatus: target.provisioningStatus ?? currentTarget.provisioningStatus, releaseEligible: target.releaseEligible === false ? false : currentTarget.releaseEligible !== false }, errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${label}: ${errors.join("; ")}`); return revalidated; }
+async function revalidateTargets(targets, deps) { const revalidated = []; for (let index = 0; index < targets.length; index += 8) revalidated.push(...await Promise.all(targets.slice(index, index + 8).map((target) => revalidateSnapshotTarget(target, deps)))); return revalidated; } async function revalidateSnapshotTarget(target, deps, requireEligible = false) { if (!target.deploymentId) return target; const label = publicTargetLabel(target); const current = await callControlPlaneTool("get_customer_deployment_status", { deploymentId: target.deploymentId }, deps), currentTarget = normalizeTarget(targetFromControlPlaneRow(current)); if (mutationIdentity(target) !== mutationIdentity(currentTarget)) throw new Error(`${label} authoritative provider or resource identity changed after preflight`); const managed = Boolean(target.inventoryRef); if (managed) { if (String(currentTarget.deploymentId ?? "") !== String(target.deploymentId ?? "")) throw new Error(`${label} authoritative deployment identity changed after preflight`); if (normalizeManagedInventoryOrigin(currentTarget.canonicalOrigin ?? currentTarget.url) !== normalizeManagedInventoryOrigin(target.canonicalOrigin ?? target.url)) throw new Error(`${label} authoritative origin changed after preflight`); for (const key of ["environment", "deploymentKind", "group"]) if (!currentTarget[key] || (target[key] && target[key] !== currentTarget[key])) throw new Error(`${label} authoritative workload or environment changed after preflight`); if (String(currentTarget.environment).toLowerCase() !== "production") throw new Error(`${label} authoritative workload or environment changed after preflight`); } else { const classificationDrift = ["environment", "deploymentKind", "group"].some((key) => target[key] && currentTarget[key] && target[key] !== currentTarget[key]); if (classificationDrift || (current.environment && String(current.environment).toLowerCase() !== "production")) throw new Error(`${label} authoritative workload or environment changed after preflight`); } const revalidated = managed ? { ...target, environment: currentTarget.environment, deploymentKind: currentTarget.deploymentKind, group: currentTarget.group, workload: currentTarget.group, deploymentStatus: currentTarget.deploymentStatus, provisioningStatus: currentTarget.provisioningStatus, releaseEligible: currentTarget.releaseEligible !== false } : { ...target, environment: currentTarget.environment ?? target.environment, deploymentKind: currentTarget.deploymentKind ?? target.deploymentKind, deploymentStatus: currentTarget.deploymentStatus ?? target.deploymentStatus, provisioningStatus: currentTarget.provisioningStatus ?? target.provisioningStatus, releaseEligible: target.releaseEligible === false ? false : currentTarget.releaseEligible !== false }; const errors = requireEligible ? targetEligibilityErrors(revalidated) : []; if (errors.length) throw new Error(`${label}: ${errors.join("; ")}`); return revalidated; }
 function mutationIdentity(target) { const resource = target.provider === "azure" ? [target.azure?.resourceGroup, target.azure?.webAppName, target.azure?.workerAppName] : [target.railway?.projectId, target.railway?.environmentId, target.railway?.webServiceId, target.railway?.workerServiceId]; return JSON.stringify([target.provider, ...resource]); }
 
 function normalizeTarget(target) {
@@ -556,6 +565,12 @@ async function reconcileManagedCustomerSelection(targets, deps) {
   return { targets: targets.map((target) => target.group === "managed-customers" ? reconciledByRef.get(target.inventoryRef) : target).filter(Boolean), blockers: [], digest: reconciliation.digest };
 }
 
+function validateRawManagedInventory(env) {
+  const configuredManagedTargets = configuredManagedInventoryTargets(env).map(normalizeTarget).filter((target) => target.group === "managed-customers");
+  const validation = validateManagedInventoryTargets(configuredManagedTargets);
+  return { ...validation, digest: managedInventoryDigest(validation.entries.map((entry) => entry.inventoryRef).sort().join(",")) };
+}
+
 function configuredManagedInventoryTargets(env) {
   if (env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE)) return parseTargetJson(readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8"));
   return parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON);
@@ -574,6 +589,28 @@ async function probeManagedInventoryHealth(origin, deps) {
   const provider = String(JSON.parse(raw)?.release?.provider ?? "").trim().toLowerCase();
   if (!["azure", "railway"].includes(provider)) throw new Error("health_provider_malformed");
   return { provider };
+}
+
+function snapshotTargetForPromotion(target) {
+  return target.inventoryRef ? {
+    id: target.id ?? target.deploymentId,
+    deploymentId: target.deploymentId,
+    label: target.label,
+    url: target.url,
+    canonicalOrigin: target.canonicalOrigin ?? target.url,
+    inventoryKey: target.inventoryKey,
+    inventoryRef: target.inventoryRef,
+    provider: target.provider,
+    workload: target.group,
+    group: target.group,
+    environment: target.environment ?? null,
+    deploymentKind: target.deploymentKind ?? null,
+    deploymentStatus: target.deploymentStatus ?? null,
+    provisioningStatus: target.provisioningStatus ?? null,
+    releaseEligible: target.releaseEligible !== false,
+    railway: target.provider === "railway" ? { projectId: target.railway?.projectId ?? null, environmentId: target.railway?.environmentId ?? null, webServiceId: target.railway?.webServiceId ?? null, workerServiceId: target.railway?.workerServiceId ?? null } : undefined,
+    azure: target.provider === "azure" ? target.azure : undefined,
+  } : target;
 }
 
 function snapshotTargetForObservation(target) {

@@ -21,6 +21,7 @@ const TARGET_GROUP_ALIASES = Object.freeze({
 const SUPPORTED_PROVIDERS = new Set(["azure", "railway"]);
 const INELIGIBLE_STATUSES = new Set(["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "READ_ONLY_PENDING_FINALIZE", "ARCHIVED", "ROLLBACK_RETAINED", "RETIRED", "SUSPENDED"]);
 const MANAGED_INVENTORY_REF_PREFIX = "managed-inventory";
+const MANAGED_INVENTORY_REF_RE = /^managed-inventory-[0-9a-f]{64}$/;
 
 export const TERMINAL_RAILWAY_FAILURES = new Set([
   "CRASHED",
@@ -349,12 +350,12 @@ export function publicTargetId(target) { return target.inventoryRef ?? target.id
 export function publicTargetLabel(target) { return target.inventoryRef ?? target.label; }
 
 export function managedInventoryRefForTarget(target) {
-  const key = String(target.inventoryKey ?? "").trim() || target.deploymentId || target.canonicalOrigin || target.url || target.id;
+  const key = String(target.inventoryKey ?? "").trim();
   return `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(key)}`;
 }
 
 export function buildManagedInventoryBlockerTarget(entry, blockers = []) {
-  const inventoryRef = entry.inventoryRef ?? `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(entry.inventoryKey ?? entry.deploymentId ?? entry.canonicalOrigin ?? "missing")}`;
+  const inventoryRef = MANAGED_INVENTORY_REF_RE.test(entry.inventoryRef ?? "") ? entry.inventoryRef : `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(entry.inventoryKey ? String(entry.inventoryKey).trim() : "managed-inventory-blocked")}`;
   return { id: inventoryRef, label: inventoryRef, inventoryRef, group: "managed-customers", workload: "managed-customers", provider: entry.provider ?? null, blockers };
 }
 
@@ -365,7 +366,9 @@ export function validateManagedInventoryTargets(targets) {
 
   for (const target of targets) {
     const inventoryKey = String(target.inventoryKey ?? "").trim();
-    const inventoryRef = target.inventoryRef ?? managedInventoryRefForTarget(target);
+    const suppliedInventoryRef = String(target.inventoryRef ?? "").trim();
+    const derivedInventoryRef = inventoryKey ? `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest(inventoryKey)}` : `${MANAGED_INVENTORY_REF_PREFIX}-${managedInventoryDigest("managed-inventory-missing-key")}`;
+    const inventoryRef = derivedInventoryRef;
     const deploymentId = String(target.deploymentId ?? "").trim();
     const entryBlockers = [];
     let canonicalOrigin = null;
@@ -376,6 +379,8 @@ export function validateManagedInventoryTargets(targets) {
     }
     const resourceIdentity = mutationIdentityForProvider(target);
     if (!inventoryKey) entryBlockers.push("managed_inventory_key_missing");
+    if (suppliedInventoryRef && !MANAGED_INVENTORY_REF_RE.test(suppliedInventoryRef)) entryBlockers.push("managed_inventory_reference_invalid");
+    if (suppliedInventoryRef && MANAGED_INVENTORY_REF_RE.test(suppliedInventoryRef) && suppliedInventoryRef !== derivedInventoryRef) entryBlockers.push("managed_inventory_reference_mismatch");
     if (!deploymentId) entryBlockers.push("managed_inventory_deployment_id_missing");
     if (!SUPPORTED_PROVIDERS.has(target.provider)) entryBlockers.push("managed_inventory_provider_invalid");
     if (inventoryKey && seen.keys.has(inventoryKey)) entryBlockers.push("managed_inventory_key_duplicate");
@@ -385,7 +390,7 @@ export function validateManagedInventoryTargets(targets) {
     if (resourceIdentity && seen.resources.has(resourceIdentity)) entryBlockers.push("managed_inventory_resource_identity_duplicate");
     entryBlockers.push(...providerResourceAssertionErrors(target));
 
-    const entry = { target, inventoryKey, inventoryRef, deploymentId, canonicalOrigin, provider: target.provider };
+    const entry = { target: { ...target, inventoryRef }, inventoryKey, inventoryRef, deploymentId, canonicalOrigin, provider: target.provider };
     entries.push(entry);
     for (const [map, key] of [[seen.keys, inventoryKey], [seen.refs, inventoryRef], [seen.deployments, deploymentId], [seen.origins, canonicalOrigin], [seen.resources, resourceIdentity]]) if (key) map.set(key, entry);
     if (entryBlockers.length > 0) {
@@ -405,13 +410,13 @@ export function reconcileManagedInventoryTargets({ inventoryTargets, controlPlan
   const reconciled = [];
   const controlPlaneByDeploymentId = groupBy(controlPlaneTargets, (target) => String(target.deploymentId ?? "").trim());
   const controlPlaneByOrigin = groupBy(controlPlaneTargets, (target) => safeManagedOrigin(target.url));
-  const selectedDeploymentIds = new Set(selectedValidation.entries.map((entry) => entry.deploymentId).filter(Boolean));
-  const selectedOrigins = new Set(selectedValidation.entries.map((entry) => entry.canonicalOrigin).filter(Boolean));
+  const knownDeploymentIds = new Set(validation.entries.map((entry) => entry.deploymentId).filter(Boolean));
+  const knownOrigins = new Set(validation.entries.map((entry) => entry.canonicalOrigin).filter(Boolean));
 
   for (const controlPlane of controlPlaneTargets.filter(isEligibleManagedControlPlaneTarget)) {
     const deploymentId = String(controlPlane.deploymentId ?? "").trim();
     const origin = safeManagedOrigin(controlPlane.url);
-    if (!selectedDeploymentIds.has(deploymentId) || !selectedOrigins.has(origin)) {
+    if (!knownDeploymentIds.has(deploymentId) || !knownOrigins.has(origin)) {
       const blocker = buildManagedInventoryBlockerTarget({ inventoryKey: deploymentId || origin || controlPlane.id || "unmatched-control-plane-row", provider: controlPlane.provider }, ["control_plane_inventory_unmatched"]);
       blockers.push({ target: blocker, blockers: blocker.blockers });
     }

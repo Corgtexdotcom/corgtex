@@ -200,6 +200,7 @@ describe("fleet release core", () => {
       "managed_inventory_origin_duplicate",
       "managed_inventory_resource_identity_duplicate",
     ]));
+    expect(validateManagedInventoryTargets([{ ...target, inventoryRef: "private-customer-ref" }]).blockers[0].blockers).toContain("managed_inventory_reference_invalid");
   });
 
   it("reconciles managed inventory only on exact deployment, origin, resource, lifecycle, and health agreement", () => {

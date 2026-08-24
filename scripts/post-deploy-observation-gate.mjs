@@ -5,6 +5,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 import { parseArgs } from "./ops/ops-core.mjs";
 
@@ -45,6 +46,7 @@ const POSTHOG_CAPTURE_HOSTS = new Map([
   ["https://us.i.posthog.com", "https://us.posthog.com"],
   ["https://eu.i.posthog.com", "https://eu.posthog.com"],
 ]);
+const MANAGED_INVENTORY_REF_RE = /^managed-inventory-[0-9a-f]{64}$/;
 
 export async function runObservationGate(options = {}) {
   const manifest = normalizeManifest(options.manifest ?? {});
@@ -388,7 +390,7 @@ export function parseRailwayHttpLogRows(payload, { target, deployment, manifest 
         release_image_tag: release.imageTag,
         release_version: release.releaseVersion,
         surface: safeText(target.group ?? "railway"),
-        route: safeText(log.path ?? log.requestPath ?? log.host),
+        route: target.managedObservation ? "managed_observation" : safeText(log.path ?? log.requestPath ?? log.host),
         status,
         code: target.managedObservation ? "managed_observation_http_5xx" : safeText(log.responseDetails ?? "RAILWAY_HTTP_5XX"),
         events: 1,
@@ -876,13 +878,13 @@ function railwayTargetsFromEnv(env, targets) {
     for (const target of snapshot) {
       if (!target || typeof target !== "object" || Array.isArray(target)) throw new Error("FLEET_RELEASE_TARGETS_FILE entries must be target objects.");
       const provider = safeText(target.provider)?.toLowerCase();
-      if (!provider || !["azure", "railway"].includes(provider)) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an unsupported provider for ${safeText(target.id ?? target.label) ?? "target"}.`);
       const workload = safeText(target.workload);
       const group = workload === "managed-customers" || workload === "railway-customers" ? "railway-customers" : workload === "selfserve" || workload === "azure-selfserve"
         ? "railway-selfserve"
         : workload === "ops" || workload === "backup-app" ? workload : null;
-      if (!group) throw new Error(`FLEET_RELEASE_TARGETS_FILE has an invalid workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
-      if (provider === "azure" && group !== "railway-selfserve") throw new Error(`FLEET_RELEASE_TARGETS_FILE has an unsupported Azure workload for ${safeText(target.id ?? target.label) ?? "target"}.`);
+      if (!provider || !["azure", "railway"].includes(provider)) throw new Error(group === "railway-customers" ? "managed_observation_target_invalid" : `FLEET_RELEASE_TARGETS_FILE has an unsupported provider for ${safeText(target.id ?? target.label) ?? "target"}.`);
+      if (!group) throw new Error("FLEET_RELEASE_TARGETS_FILE has an invalid workload for target.");
+      if (provider === "azure" && group !== "railway-selfserve") throw new Error(group === "railway-customers" ? "managed_observation_target_invalid" : `FLEET_RELEASE_TARGETS_FILE has an unsupported Azure workload for target.`);
       const observationGroup = provider === "azure" ? (group === "railway-selfserve" ? "azure-selfserve" : null) : group;
       if (provider === "azure" && targetList.includes(observationGroup)) {
         const azure = [target.azure?.resourceGroup, target.azure?.acrName, target.azure?.webAppName, target.azure?.workerAppName].map(safeText);
@@ -891,17 +893,8 @@ function railwayTargetsFromEnv(env, targets) {
       }
       if (provider === "railway" && targetList.includes(group)) {
         const environmentId = safeText(target?.railway?.environmentId), webServiceId = safeText(target?.railway?.webServiceId);
-        if (!webServiceId || !environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
-        const managedObservation = Boolean(safeText(target.inventoryRef));
-        entries.push({
-          id: managedObservation ? safeText(target.inventoryRef) : safeText(target.id ?? target.deploymentId ?? target.label),
-          label: managedObservation ? safeText(target.inventoryRef) : safeText(target.label ?? target.id),
-          managedObservation,
-          group,
-          projectId: safeText(target.railway.projectId),
-          environmentId,
-          webServiceId,
-        });
+        if (!webServiceId || !environmentId) throw new Error(group === "railway-customers" ? "managed_observation_target_invalid" : `FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${group}.`);
+        entries.push(observationRailwayTarget(target, group));
         missingGroups.delete(group);
       }
     }
@@ -912,16 +905,7 @@ function railwayTargetsFromEnv(env, targets) {
   if (targetList.includes("railway-customers")) {
     for (const target of parseJsonArray(env.FLEET_RELEASE_TARGETS_JSON)) {
       if (target?.provider === "railway" && target?.railway?.webServiceId && target?.railway?.environmentId) {
-        const managedObservation = Boolean(safeText(target.inventoryRef));
-        entries.push({
-          id: managedObservation ? safeText(target.inventoryRef) : safeText(target.id ?? target.deploymentId ?? target.label),
-          label: managedObservation ? safeText(target.inventoryRef) : safeText(target.label ?? target.id),
-          managedObservation,
-          group: "railway-customers",
-          projectId: safeText(target.railway.projectId),
-          environmentId: safeText(target.railway.environmentId),
-          webServiceId: safeText(target.railway.webServiceId),
-        });
+        entries.push(observationRailwayTarget(target, "railway-customers"));
       }
     }
   }
@@ -970,6 +954,29 @@ function railwayTargetsFromEnv(env, targets) {
   }
 
   return entries.filter((entry) => entry.environmentId && entry.webServiceId);
+}
+
+function observationRailwayTarget(target, group) {
+  const managedObservation = group === "railway-customers" && (safeText(target.inventoryKey) || safeText(target.inventoryRef) || safeText(target.workload) === "managed-customers" || safeText(target.group) === "managed-customers");
+  const inventoryRef = managedObservation ? managedObservationRef(target) : null;
+  return {
+    id: managedObservation ? inventoryRef : safeText(target.id ?? target.deploymentId ?? target.label),
+    label: managedObservation ? inventoryRef : safeText(target.label ?? target.id),
+    managedObservation,
+    group,
+    projectId: safeText(target.railway.projectId),
+    environmentId: safeText(target.railway.environmentId),
+    webServiceId: safeText(target.railway.webServiceId),
+  };
+}
+
+function managedObservationRef(target) {
+  const key = safeText(target.inventoryKey);
+  const derived = key ? `managed-inventory-${createHash("sha256").update(key).digest("hex")}` : null;
+  const supplied = safeText(target.inventoryRef);
+  if (supplied && (!MANAGED_INVENTORY_REF_RE.test(supplied) || (derived && supplied !== derived))) throw new Error("managed_observation_target_invalid");
+  if (!derived && !supplied) throw new Error("managed_observation_target_invalid");
+  return derived ?? supplied;
 }
 
 async function latestRailwayDeployment(target, { env = process.env, deps = {} }) {
@@ -1063,6 +1070,7 @@ function boundedManagedRailwayObservationCode(error) {
   const message = errorMessage(error);
   if (message === "managed_observation_missing_deployment") return message;
   if (message === "managed_observation_malformed_response") return message;
+  if (message === "managed_observation_target_invalid") return message;
   if (/No Railway deployment found/i.test(message)) return "managed_observation_missing_deployment";
   if (/json|parse|malformed/i.test(message)) return "managed_observation_malformed_response";
   if (/graphql|railway|api|http|failed|fetch/i.test(message)) return "managed_observation_query_failed";
