@@ -82,6 +82,7 @@ const CREDENTIAL_CONSUMER_TYPES = new Set<ExactTargetRecordType>([
   "CALLBACK",
 ]);
 const IMAGE_CONSUMER_TYPES = new Set<ExactTargetRecordType>(["PROVIDER_RESOURCE", "WORKER"]);
+const ROLLBACK_REQUIRED_TYPES = new Set<ExactTargetRecordType>(["PROVIDER_RESOURCE", "DATA_STORE", "OBJECT_STORE", "WORKER"]);
 const TARGET_DEPENDENCY_TYPES = new Set<ExactTargetRecordType>([
   "WORKLOAD",
   "ENVIRONMENT",
@@ -446,6 +447,21 @@ type Parser = {
   readonly issues: SchemaIssue[];
   add(code: ExactTargetInventoryBlockerCode, path: string, inventoryRef?: string): void;
 };
+type EvidenceKind = ExactTargetEvidence["evidenceKind"];
+type RelationshipType = ExactTargetRelationship["relationshipType"];
+type TargetRoot = {
+  workloadClass: ExactTargetWorkloadClass;
+  workload: ExactTargetRecord;
+  environment: ExactTargetRecord;
+  records: ExactTargetRecord[];
+  recordRefs: Set<string>;
+};
+type RelationshipExpectation = {
+  type: RelationshipType;
+  fromRecordRef: string;
+  toRecordRef: string;
+  path: string;
+};
 
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -533,19 +549,19 @@ export function validateExactTargetInventory(input: unknown, options: ExactTarge
     return invalid([{ code: "INVALID_TIMESTAMP", path: "/now" }]);
   }
 
-  if (typeof input === "string") {
-    if (new TextEncoder().encode(input).byteLength > MAX_INPUT_BYTES) {
-      return invalid([{ code: "STRUCTURAL_LIMIT", path: "/" }]);
-    }
-    const duplicateKey = findDuplicateJsonKey(input);
-    if (duplicateKey) {
-      return invalid([{ code: "DUPLICATE_JSON_KEY", path: "/duplicate-key" }]);
-    }
-    try {
-      input = JSON.parse(input) as unknown;
-    } catch {
-      return invalid([{ code: "INVALID_JSON", path: "/" }]);
-    }
+  if (typeof input !== "string") {
+    return invalid([{ code: "INVALID_JSON", path: "/" }]);
+  }
+  if (input.length > MAX_INPUT_BYTES || new TextEncoder().encode(input).byteLength > MAX_INPUT_BYTES) {
+    return invalid([{ code: "STRUCTURAL_LIMIT", path: "/" }]);
+  }
+  if (findDuplicateJsonKey(input)) {
+    return invalid([{ code: "DUPLICATE_JSON_KEY", path: "/duplicate-key" }]);
+  }
+  try {
+    input = JSON.parse(input) as unknown;
+  } catch {
+    return invalid([{ code: "INVALID_JSON", path: "/" }]);
   }
 
   const captured = capturePlainJson(input);
@@ -584,13 +600,10 @@ export function selectExactTargetInventoryTarget(
 ): ExactTargetInventorySelectedTarget | null {
   if (!VALIDATED_SNAPSHOTS.has(snapshot) || !WORKLOAD_CLASS_SET.has(workloadClass)) return null;
   if (snapshot.derived.targetBlockers[workloadClass].length > 0) return null;
-  const workload = snapshot.records.find((record) => record.recordType === "WORKLOAD" && (record.detail as WorkloadDetail).workloadClass === workloadClass);
-  const environment = snapshot.records.find((record) => record.recordType === "ENVIRONMENT" && record.workloadId === workload?.workloadId && record.environmentId === workload.environmentId);
-  if (!workload || !environment) return null;
-  const records = snapshot.records.filter((record) => {
-    if (record.recordType === "GAP") return false;
-    return record.workloadId === workload.workloadId && record.environmentId === workload.environmentId;
-  });
+  const root = selectTargetRoot(snapshot, workloadClass);
+  if (!root) return null;
+  const reachableRefs = reachableOwnedRefs(snapshot.relationships, root.workload.inventoryRef);
+  const records = snapshot.records.filter((record) => reachableRefs.has(record.inventoryRef));
   const refs = new Set(records.map((record) => record.inventoryRef));
   const relationships = snapshot.relationships.filter((relationship) => refs.has(relationship.fromRecordRef) && refs.has(relationship.toRecordRef));
   const evidenceRefs = new Set<string>();
@@ -598,10 +611,13 @@ export function selectExactTargetInventoryTarget(
     collectRecordEvidenceRefs(record).forEach((ref) => evidenceRefs.add(ref));
   }
   relationships.flatMap((relationship) => relationship.evidenceRefs).forEach((ref) => evidenceRefs.add(ref));
+  snapshot.validationSummary.completeness
+    .find((row) => row.workloadClass === workloadClass)
+    ?.evidenceRefs.forEach((ref) => evidenceRefs.add(ref));
   return deepFreeze({
     workloadClass,
-    workloadId: workload.workloadId,
-    environmentId: workload.environmentId,
+    workloadId: root.workload.workloadId,
+    environmentId: root.workload.environmentId,
     records,
     relationships,
     evidence: snapshot.evidence.filter((evidence) => evidenceRefs.has(evidence.evidenceRef)),
@@ -618,6 +634,8 @@ export function selectExactTargetInventoryRecord(
   if (!record || !TARGET_DEPENDENCY_TYPES.has(record.recordType)) return null;
   const workloadClass = workloadClassForRecord(snapshot, record);
   if (!workloadClass || snapshot.derived.targetBlockers[workloadClass].length > 0) return null;
+  const selected = selectExactTargetInventoryTarget(snapshot, workloadClass);
+  if (!selected?.inventoryRefs.includes(record.inventoryRef)) return null;
   return record;
 }
 
@@ -646,11 +664,7 @@ function invalid(issues: SchemaIssue[]): ExactTargetInventoryValidationResult {
       completeness: [],
       blockerCodes: uniq(issues.map((issue) => issue.code)),
     },
-    issues: issues.map((issue) => ({
-      code: issue.code,
-      path: issue.path,
-      ...(issue.inventoryRef && isInventoryRef(issue.inventoryRef) ? { inventoryRef: issue.inventoryRef } : {}),
-    })),
+    issues: issues.map((issue) => ({ code: issue.code, path: issue.path })),
   };
 }
 
@@ -1140,8 +1154,11 @@ function validateSemanticContract(snapshot: Omit<ExactTargetInventorySnapshot, "
   const evidenceByRef = new Map<string, ExactTargetEvidence>();
   const inventoryKeys = new Set<string>();
   const recordIds = new Set<string>();
+  const evidenceIds = new Set<string>();
+  const recordPathByRef = new Map<string, string>();
   for (const [recordIndex, record] of snapshot.records.entries()) {
     const recordPath = `/records/${recordIndex}`;
+    recordPathByRef.set(record.inventoryRef, recordPath);
     const expectedKey = deriveExactTargetInventoryKey({
       recordType: record.recordType,
       workloadId: record.workloadId,
@@ -1172,7 +1189,9 @@ function validateSemanticContract(snapshot: Omit<ExactTargetInventorySnapshot, "
     if (expectedRef !== evidence.evidenceRef) parser.add("DERIVED_REF_MISMATCH", `${evidencePath}/evidenceRef`, evidence.evidenceRef);
     if (evidence.artifactDigest !== evidence.artifactRef.digest) parser.add("DERIVED_DIGEST_MISMATCH", `${evidencePath}/artifactDigest`, evidence.evidenceRef);
     if (evidenceByRef.has(evidence.evidenceRef)) parser.add("DUPLICATE_IDENTITY", `${evidencePath}/evidenceRef`, evidence.evidenceRef);
+    if (evidenceIds.has(evidence.evidenceId)) parser.add("DUPLICATE_IDENTITY", `${evidencePath}/evidenceId`, evidence.evidenceRef);
     evidenceByRef.set(evidence.evidenceRef, evidence);
+    evidenceIds.add(evidence.evidenceId);
     validateEvidenceChronology(evidence, generatedAt, now, parser, evidencePath);
     const source = recordByRef.get(evidence.sourceRecordRef);
     if (!source || source.recordType !== evidence.sourceRecordType || source.workloadId !== evidence.workloadId || source.environmentId !== evidence.environmentId) {
@@ -1184,6 +1203,14 @@ function validateSemanticContract(snapshot: Omit<ExactTargetInventorySnapshot, "
     }
   }
 
+  const roots = validateTargetRoots(snapshot, recordByRef, recordPathByRef, parser);
+  const relationships = validateRelationshipGraph(snapshot, recordByRef, recordPathByRef, roots, parser);
+  validateRollbackCoverage(snapshot, recordByRef, recordPathByRef, relationships.byKey, parser);
+  const proofRegistry = createEvidenceUseRegistry(
+    evidenceByRef,
+    (record) => workloadClassForRecord({ records: snapshot.records } as ExactTargetInventorySnapshot, record),
+    parser,
+  );
   for (const [recordIndex, record] of snapshot.records.entries()) {
     validateRecordReferences(
       record,
@@ -1193,6 +1220,7 @@ function validateSemanticContract(snapshot: Omit<ExactTargetInventorySnapshot, "
       `/records/${recordIndex}`,
       new Set([snapshot.validationSummary.validatorRef, snapshot.collectorContractRef.path, snapshot.collectorArtifactDigest]),
     );
+    registerRecordEvidenceClaims(record, proofRegistry, `/records/${recordIndex}`);
   }
   for (const [relationshipIndex, relationship] of snapshot.relationships.entries()) {
     const relationshipPath = `/relationships/${relationshipIndex}`;
@@ -1201,14 +1229,377 @@ function validateSemanticContract(snapshot: Omit<ExactTargetInventorySnapshot, "
     if (!from || !to || from.workloadId !== to.workloadId || from.environmentId !== to.environmentId) {
       parser.add("INVALID_REFERENCE", `${relationshipPath}/fromRecordRef`);
     }
-    validateEvidenceRefs(relationship.evidenceRefs, from ?? null, evidenceByRef, `${relationshipPath}/evidenceRefs`, parser, { requireCurrent: true, workloadClass: from ? workloadClassForRecord({ records: snapshot.records } as ExactTargetInventorySnapshot, from) : null });
+    if (from) proofRegistry.claimList(relationship.evidenceRefs, from, "RELATIONSHIP", `${relationshipPath}/evidenceRefs`, `relationship:${relationship.relationshipId}`);
   }
 
   const digest = sha256Hex(canonicalJson(documentDigestInput({ ...snapshot, derived: emptyDerived() } as ExactTargetInventorySnapshot)));
   if (snapshot.documentDigest !== digest) parser.add("DERIVED_DIGEST_MISMATCH", "/documentDigest");
 
-  validateSummary(snapshot, evidenceByRef, parser);
+  validateSummary(snapshot, roots, proofRegistry, parser);
+  proofRegistry.finish();
   return parser.issues;
+}
+
+function validateTargetRoots(
+  snapshot: Omit<ExactTargetInventorySnapshot, "derived">,
+  recordByRef: Map<string, ExactTargetRecord>,
+  recordPathByRef: Map<string, string>,
+  parser: Parser,
+): Map<ExactTargetWorkloadClass, TargetRoot> {
+  const roots = new Map<ExactTargetWorkloadClass, TargetRoot>();
+  const workloadsByClass = new Map<ExactTargetWorkloadClass, ExactTargetRecord[]>();
+  const tupleClass = new Map<string, ExactTargetWorkloadClass>();
+  for (const record of snapshot.records) {
+    if (record.recordType !== "WORKLOAD") continue;
+    const workloadClass = (record.detail as WorkloadDetail).workloadClass;
+    const workloads = workloadsByClass.get(workloadClass) ?? [];
+    workloads.push(record);
+    workloadsByClass.set(workloadClass, workloads);
+    const tuple = targetTuple(record);
+    const existingClass = tupleClass.get(tuple);
+    if (existingClass && existingClass !== workloadClass) parser.add("DUPLICATE_IDENTITY", `${recordPathByRef.get(record.inventoryRef) ?? "/records"}/workload/workloadClass`);
+    tupleClass.set(tuple, workloadClass);
+  }
+
+  for (const workloadClass of EXACT_TARGET_WORKLOAD_CLASSES) {
+    const workloads = workloadsByClass.get(workloadClass) ?? [];
+    if (workloads.length === 0) {
+      parser.add("MISSING_WORKLOAD_COVERAGE", "/records");
+      continue;
+    }
+    if (workloads.length > 1) {
+      parser.add("DUPLICATE_IDENTITY", `${recordPathByRef.get(workloads[1].inventoryRef) ?? "/records"}/workload/workloadClass`, workloads[1].inventoryRef);
+      continue;
+    }
+    const workload = workloads[0];
+    const environments = snapshot.records.filter((record) => record.recordType === "ENVIRONMENT" && targetTuple(record) === targetTuple(workload));
+    if (environments.length === 0) {
+      parser.add("MISSING_WORKLOAD_COVERAGE", `${recordPathByRef.get(workload.inventoryRef) ?? "/records"}/environment`, workload.inventoryRef);
+      continue;
+    }
+    if (environments.length > 1) {
+      parser.add("DUPLICATE_IDENTITY", `${recordPathByRef.get(environments[1].inventoryRef) ?? "/records"}/environment`, environments[1].inventoryRef);
+      continue;
+    }
+    const records = snapshot.records.filter((record) => targetTuple(record) === targetTuple(workload));
+    roots.set(workloadClass, {
+      workloadClass,
+      workload,
+      environment: environments[0],
+      records,
+      recordRefs: new Set(records.map((record) => record.inventoryRef)),
+    });
+  }
+
+  for (const record of snapshot.records) {
+    const matchingRoots = [...roots.values()].filter((root) => root.workload.workloadId === record.workloadId && root.workload.environmentId === record.environmentId);
+    if (matchingRoots.length !== 1 || !recordByRef.has(record.inventoryRef)) {
+      parser.add("INVALID_REFERENCE", `${recordPathByRef.get(record.inventoryRef) ?? "/records"}/workloadId`, record.inventoryRef);
+    }
+  }
+  return roots;
+}
+
+function validateRelationshipGraph(
+  snapshot: Omit<ExactTargetInventorySnapshot, "derived">,
+  recordByRef: Map<string, ExactTargetRecord>,
+  recordPathByRef: Map<string, string>,
+  roots: Map<ExactTargetWorkloadClass, TargetRoot>,
+  parser: Parser,
+): { byKey: Set<string> } {
+  const byKey = new Set<string>();
+  const relationshipIds = new Set<string>();
+  const relationshipTuples = new Set<string>();
+  for (const [index, relationship] of snapshot.relationships.entries()) {
+    const path = `/relationships/${index}`;
+    const from = recordByRef.get(relationship.fromRecordRef);
+    const to = recordByRef.get(relationship.toRecordRef);
+    if (relationshipIds.has(relationship.relationshipId)) parser.add("DUPLICATE_IDENTITY", `${path}/relationshipId`);
+    relationshipIds.add(relationship.relationshipId);
+    const tuple = relationshipKey(relationship.relationshipType, relationship.fromRecordRef, relationship.toRecordRef);
+    if (relationshipTuples.has(tuple)) parser.add("DUPLICATE_IDENTITY", `${path}/relationshipType`);
+    relationshipTuples.add(tuple);
+    if (relationship.fromRecordRef === relationship.toRecordRef) parser.add("INVALID_REFERENCE", `${path}/toRecordRef`);
+    if (!from || !to) continue;
+    if (!isAllowedRelationship(relationship.relationshipType, from.recordType, to.recordType)) {
+      parser.add("INVALID_REFERENCE", `${path}/relationshipType`, relationship.fromRecordRef);
+    }
+    byKey.add(tuple);
+  }
+
+  const expected = new Map<string, RelationshipExpectation>();
+  const add = (expectation: RelationshipExpectation) => {
+    expected.set(relationshipKey(expectation.type, expectation.fromRecordRef, expectation.toRecordRef), expectation);
+  };
+
+  for (const root of roots.values()) {
+    add({ type: "OWNS", fromRecordRef: root.workload.inventoryRef, toRecordRef: root.environment.inventoryRef, path: `${recordPathByRef.get(root.workload.inventoryRef) ?? "/records"}/workload` });
+    for (const record of root.records) {
+      if (record.inventoryRef !== root.workload.inventoryRef && record.inventoryRef !== root.environment.inventoryRef) {
+        add({ type: "OWNS", fromRecordRef: root.environment.inventoryRef, toRecordRef: record.inventoryRef, path: `${recordPathByRef.get(record.inventoryRef) ?? "/records"}/ownerRef` });
+      }
+    }
+  }
+
+  for (const record of snapshot.records) {
+    for (const relation of expectedDetailRelationships(record)) add(relation);
+  }
+
+  for (const [key, expectation] of expected) {
+    if (!byKey.has(key)) parser.add("INVALID_REFERENCE", expectation.path, expectation.fromRecordRef);
+  }
+  for (const [index, relationship] of snapshot.relationships.entries()) {
+    const key = relationshipKey(relationship.relationshipType, relationship.fromRecordRef, relationship.toRecordRef);
+    if (!expected.has(key)) parser.add("CLAIM_MISMATCH", `/relationships/${index}/relationshipType`, relationship.fromRecordRef);
+  }
+
+  for (const root of roots.values()) {
+    const reachable = new Set<string>();
+    const stack = [root.workload.inventoryRef];
+    while (stack.length > 0) {
+      const ref = stack.pop()!;
+      if (reachable.has(ref)) continue;
+      reachable.add(ref);
+      for (const relationship of snapshot.relationships) {
+        if (relationship.relationshipType === "OWNS" && relationship.fromRecordRef === ref) stack.push(relationship.toRecordRef);
+      }
+    }
+    for (const ref of root.recordRefs) {
+      if (!reachable.has(ref)) parser.add("INVALID_REFERENCE", `${recordPathByRef.get(ref) ?? "/records"}/ownerRef`, ref);
+    }
+    for (const ref of reachable) {
+      if (!root.recordRefs.has(ref)) parser.add("INVALID_REFERENCE", `${recordPathByRef.get(ref) ?? "/records"}/ownerRef`, ref);
+    }
+  }
+
+  return { byKey };
+}
+
+function validateRollbackCoverage(
+  snapshot: Omit<ExactTargetInventorySnapshot, "derived">,
+  recordByRef: Map<string, ExactTargetRecord>,
+  recordPathByRef: Map<string, string>,
+  relationshipKeys: Set<string>,
+  parser: Parser,
+): void {
+  for (const record of snapshot.records) {
+    if (!ROLLBACK_REQUIRED_TYPES.has(record.recordType)) continue;
+    const assets = snapshot.records.filter((candidate) => candidate.recordType === "ROLLBACK_ASSET" && (candidate.detail as RollbackAssetDetail).targetRecordRef === record.inventoryRef);
+    if (assets.length !== 1) {
+      parser.add("INVALID_REFERENCE", `${recordPathByRef.get(record.inventoryRef) ?? "/records"}/rollbackAsset`, record.inventoryRef);
+      continue;
+    }
+    if (!relationshipKeys.has(relationshipKey("HAS_ROLLBACK", record.inventoryRef, assets[0].inventoryRef))) {
+      parser.add("INVALID_REFERENCE", `${recordPathByRef.get(record.inventoryRef) ?? "/records"}/rollbackAsset`, record.inventoryRef);
+    }
+    if (!recordByRef.has(assets[0].inventoryRef)) parser.add("INVALID_REFERENCE", `${recordPathByRef.get(assets[0].inventoryRef) ?? "/records"}/inventoryRef`, assets[0].inventoryRef);
+  }
+}
+
+function expectedDetailRelationships(record: ExactTargetRecord): RelationshipExpectation[] {
+  const path = (suffix: string) => `/records/detail/${record.recordType}/${suffix}`;
+  const relation = (type: RelationshipType, fromRecordRef: string, toRecordRef: string, suffix: string): RelationshipExpectation => ({
+    type,
+    fromRecordRef,
+    toRecordRef,
+    path: path(suffix),
+  });
+  const detail = record.detail;
+  switch (record.recordType) {
+    case "WORKER": {
+      const worker = detail as WorkerDetail;
+      return [
+        relation("USES_IMAGE", record.inventoryRef, worker.imageRef, "imageRef"),
+        ...worker.queueRefs.map((ref) => relation("DEPENDS_ON", record.inventoryRef, ref, "queueRefs")),
+        ...worker.dataStoreRefs.map((ref) => relation("DEPENDS_ON", record.inventoryRef, ref, "dataStoreRefs")),
+        ...worker.objectStoreRefs.map((ref) => relation("DEPENDS_ON", record.inventoryRef, ref, "objectStoreRefs")),
+        ...worker.credentialRefs.map((ref) => relation("USES_CREDENTIAL", record.inventoryRef, ref, "credentialRefs")),
+      ];
+    }
+    case "SCHEDULER": {
+      const scheduler = detail as SchedulerDetail;
+      return [
+        relation("DEPENDS_ON", record.inventoryRef, scheduler.targetWorkerRef, "targetWorkerRef"),
+        ...scheduler.credentialRefs.map((ref) => relation("USES_CREDENTIAL", record.inventoryRef, ref, "credentialRefs")),
+      ];
+    }
+    case "QUEUE": {
+      const queue = detail as QueueDetail;
+      return [
+        ...queue.producerRefs.map((ref) => relation("DEPENDS_ON", ref, record.inventoryRef, "producerRefs")),
+        ...queue.consumerRefs.map((ref) => relation("DEPENDS_ON", ref, record.inventoryRef, "consumerRefs")),
+        ...queue.credentialRefs.map((ref) => relation("USES_CREDENTIAL", record.inventoryRef, ref, "credentialRefs")),
+      ];
+    }
+    case "DOMAIN": {
+      return [relation("EXPOSES_DOMAIN", (detail as DomainDetail).targetResourceRef, record.inventoryRef, "targetResourceRef")];
+    }
+    case "CALLBACK": {
+      const callback = detail as CallbackDetail;
+      return [
+        relation("CALLS_BACK", callback.targetResourceRef, record.inventoryRef, "targetResourceRef"),
+        ...callback.credentialRefs.map((ref) => relation("USES_CREDENTIAL", record.inventoryRef, ref, "credentialRefs")),
+      ];
+    }
+    case "CREDENTIAL_REF": {
+      return (detail as CredentialRefDetail).consumerResourceRefs.map((ref) => relation("USES_CREDENTIAL", ref, record.inventoryRef, "consumerResourceRefs"));
+    }
+    case "IMAGE": {
+      return (detail as ImageDetail).consumerResourceRefs.map((ref) => relation("USES_IMAGE", ref, record.inventoryRef, "consumerResourceRefs"));
+    }
+    case "ROLLBACK_ASSET": {
+      return [relation("HAS_ROLLBACK", (detail as RollbackAssetDetail).targetRecordRef, record.inventoryRef, "targetRecordRef")];
+    }
+    default:
+      return [];
+  }
+}
+
+function createEvidenceUseRegistry(
+  evidenceByRef: Map<string, ExactTargetEvidence>,
+  workloadClassForOwner: (record: ExactTargetRecord) => ExactTargetWorkloadClass | null,
+  parser: Parser,
+): {
+  claimList(refs: string[], owner: ExactTargetRecord, expectedKind: EvidenceKind, path: string, useSite: string): void;
+  finish(): void;
+} {
+  const consumed = new Map<string, string>();
+  const claim = (ref: string, owner: ExactTargetRecord, expectedKind: EvidenceKind, path: string, useSite: string) => {
+    const evidence = evidenceByRef.get(ref);
+    const existing = consumed.get(ref);
+    if (existing) {
+      parser.add("INVALID_REFERENCE", path, owner.inventoryRef);
+    } else {
+      consumed.set(ref, useSite);
+    }
+    if (!evidence) {
+      parser.add("INVALID_REFERENCE", path, owner.inventoryRef);
+      return;
+    }
+    const ownerClass = workloadClassForOwner(owner);
+    if (
+      evidence.sourceRecordRef !== owner.inventoryRef ||
+      evidence.sourceRecordType !== owner.recordType ||
+      evidence.workloadId !== owner.workloadId ||
+      evidence.environmentId !== owner.environmentId ||
+      evidence.workloadClass !== ownerClass
+    ) {
+      parser.add("INVALID_REFERENCE", path, owner.inventoryRef);
+    }
+    if (evidence.evidenceKind !== expectedKind) parser.add("INVALID_REFERENCE", path, owner.inventoryRef);
+    if (evidence.artifactRef.status !== "SETTLED") parser.add("POLICY_PENDING", path, owner.inventoryRef);
+    if (evidence.artifactDigest !== evidence.artifactRef.digest) parser.add("DERIVED_DIGEST_MISMATCH", path, owner.inventoryRef);
+    if (evidence.freshness !== "CURRENT") parser.add("STALE_OR_EXPIRED", path, owner.inventoryRef);
+  };
+  return {
+    claimList(refs, owner, expectedKind, path, useSite) {
+      const local = new Set<string>();
+      for (const [index, ref] of refs.entries()) {
+        if (local.has(ref)) parser.add("DUPLICATE_IDENTITY", `${path}/${index}`, owner.inventoryRef);
+        local.add(ref);
+        claim(ref, owner, expectedKind, `${path}/${index}`, `${useSite}:${index}`);
+      }
+    },
+    finish() {
+      for (const ref of evidenceByRef.keys()) {
+        if (!consumed.has(ref)) parser.add("INVALID_REFERENCE", "/evidence");
+      }
+    },
+  };
+}
+
+function registerRecordEvidenceClaims(
+  record: ExactTargetRecord,
+  registry: ReturnType<typeof createEvidenceUseRegistry>,
+  recordPath: string,
+): void {
+  registry.claimList(record.evidenceRefs, record, "CAPTURE", `${recordPath}/evidenceRefs`, `record:${record.inventoryRef}:capture`);
+  registry.claimList([record.lifecycle.stateEvidenceRef], record, "LIFECYCLE", `${recordPath}/lifecycle/stateEvidenceRef`, `record:${record.inventoryRef}:lifecycle`);
+  for (const dimension of AUTHORITY_DIMENSIONS) {
+    registry.claimList(record.authority[dimension].evidenceRefs, record, "AUTHORITY", `${recordPath}/authority/${dimension}/evidenceRefs`, `record:${record.inventoryRef}:authority:${dimension}`);
+  }
+  switch (record.recordType) {
+    case "ENVIRONMENT":
+      registry.claimList([(record.detail as EnvironmentDetail).policyEvidenceRef], record, "DETAIL", `${recordPath}/environment/policyEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "PROVIDER_RESOURCE":
+      registry.claimList([(record.detail as ProviderResourceDetail).providerEvidenceRef], record, "DETAIL", `${recordPath}/resource/providerEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "DATA_STORE":
+      registry.claimList([(record.detail as DataStoreDetail).bindingEvidenceRef], record, "DETAIL", `${recordPath}/dataStore/bindingEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "OBJECT_STORE":
+      registry.claimList([(record.detail as ObjectStoreDetail).bindingEvidenceRef], record, "DETAIL", `${recordPath}/objectStore/bindingEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "DOMAIN":
+      registry.claimList([(record.detail as DomainDetail).dnsEvidenceRef], record, "DETAIL", `${recordPath}/domain/dnsEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "CALLBACK":
+      registry.claimList([(record.detail as CallbackDetail).externalConfigurationEvidenceRef], record, "DETAIL", `${recordPath}/callback/externalConfigurationEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "CREDENTIAL_REF":
+      registry.claimList([(record.detail as CredentialRefDetail).rotationEvidenceRef], record, "DETAIL", `${recordPath}/credentialRef/rotationEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "IMAGE":
+      registry.claimList([(record.detail as ImageDetail).buildProvenanceEvidenceRef], record, "DETAIL", `${recordPath}/image/buildProvenanceEvidenceRef`, `record:${record.inventoryRef}:detail`);
+      break;
+    case "ROLLBACK_ASSET":
+      registry.claimList([(record.detail as RollbackAssetDetail).evidenceRef], record, "ROLLBACK", `${recordPath}/rollbackAsset/evidenceRef`, `record:${record.inventoryRef}:rollback`);
+      break;
+    case "GAP":
+      registry.claimList([(record.detail as GapDetail).evidenceRef], record, "DETAIL", `${recordPath}/gap/evidenceRef`, `record:${record.inventoryRef}:gap`);
+      break;
+  }
+}
+
+function isAllowedRelationship(type: RelationshipType, from: ExactTargetRecordType, to: ExactTargetRecordType): boolean {
+  switch (type) {
+    case "OWNS":
+      return (from === "WORKLOAD" && to === "ENVIRONMENT") || (from === "ENVIRONMENT" && to !== "WORKLOAD");
+    case "DEPENDS_ON":
+      return (from === "WORKER" && (to === "DATA_STORE" || to === "OBJECT_STORE" || to === "QUEUE")) || (from === "SCHEDULER" && (to === "WORKER" || to === "QUEUE"));
+    case "USES_CREDENTIAL":
+      return CREDENTIAL_CONSUMER_TYPES.has(from) && to === "CREDENTIAL_REF";
+    case "USES_IMAGE":
+      return IMAGE_CONSUMER_TYPES.has(from) && to === "IMAGE";
+    case "HAS_ROLLBACK":
+      return ROLLBACK_REQUIRED_TYPES.has(from) && to === "ROLLBACK_ASSET";
+    case "EXPOSES_DOMAIN":
+      return (from === "PROVIDER_RESOURCE" || from === "CALLBACK") && to === "DOMAIN";
+    case "CALLS_BACK":
+      return (from === "PROVIDER_RESOURCE" || from === "WORKER") && to === "CALLBACK";
+  }
+}
+
+function relationshipKey(type: RelationshipType, fromRecordRef: string, toRecordRef: string): string {
+  return `${type}:${fromRecordRef}:${toRecordRef}`;
+}
+
+function targetTuple(record: Pick<ExactTargetRecord, "workloadId" | "environmentId">): string {
+  return `${record.workloadId}:${record.environmentId}`;
+}
+
+function selectTargetRoot(snapshot: ExactTargetInventorySnapshot, workloadClass: ExactTargetWorkloadClass): { workload: ExactTargetRecord; environment: ExactTargetRecord } | null {
+  const workloads = snapshot.records.filter((record) => record.recordType === "WORKLOAD" && (record.detail as WorkloadDetail).workloadClass === workloadClass);
+  if (workloads.length !== 1) return null;
+  const workload = workloads[0];
+  const environments = snapshot.records.filter((record) => record.recordType === "ENVIRONMENT" && record.workloadId === workload.workloadId && record.environmentId === workload.environmentId);
+  if (environments.length !== 1) return null;
+  return { workload, environment: environments[0] };
+}
+
+function reachableOwnedRefs(relationships: readonly ExactTargetRelationship[], workloadRef: string): Set<string> {
+  const refs = new Set<string>();
+  const stack = [workloadRef];
+  while (stack.length > 0) {
+    const ref = stack.pop()!;
+    if (refs.has(ref)) continue;
+    refs.add(ref);
+    for (const relationship of relationships) {
+      if (relationship.relationshipType === "OWNS" && relationship.fromRecordRef === ref) stack.push(relationship.toRecordRef);
+    }
+  }
+  return refs;
 }
 
 function validateRecordChronology(record: ExactTargetRecord, generatedAt: number, now: number, parser: Parser, recordPath: string): void {
@@ -1402,24 +1793,30 @@ function validateEvidenceRefs(
   }
 }
 
-function validateSummary(snapshot: Omit<ExactTargetInventorySnapshot, "derived">, evidenceByRef: Map<string, ExactTargetEvidence>, parser: Parser): void {
+function validateSummary(
+  snapshot: Omit<ExactTargetInventorySnapshot, "derived">,
+  roots: Map<ExactTargetWorkloadClass, TargetRoot>,
+  registry: ReturnType<typeof createEvidenceUseRegistry>,
+  parser: Parser,
+): void {
   const validatedAt = parseTimestamp(snapshot.validationSummary.validatedAt)!;
   const generatedAt = parseTimestamp(snapshot.generatedAt)!;
   if (validatedAt > generatedAt) parser.add("STALE_OR_EXPIRED", "/validationSummary/validatedAt");
   const rowsByClass = new Map<ExactTargetWorkloadClass, ExactTargetValidationSummary["completeness"][number]>();
-  for (const row of snapshot.validationSummary.completeness) {
-    if (rowsByClass.has(row.workloadClass)) parser.add("DUPLICATE_IDENTITY", "/validationSummary/completeness/0/workloadClass");
+  for (const [index, row] of snapshot.validationSummary.completeness.entries()) {
+    const rowPath = `/validationSummary/completeness/${index}`;
+    if (rowsByClass.has(row.workloadClass)) parser.add("DUPLICATE_IDENTITY", `${rowPath}/workloadClass`);
     rowsByClass.set(row.workloadClass, row);
-    const owner = snapshot.records.find((record) => record.recordType === "WORKLOAD" && (record.detail as WorkloadDetail).workloadClass === row.workloadClass) ?? null;
-    validateEvidenceRefs(row.evidenceRefs, owner, evidenceByRef, "/validationSummary/completeness/0/evidenceRefs", parser, { requireCurrent: true, workloadClass: row.workloadClass });
+    const root = roots.get(row.workloadClass);
+    if (root) registry.claimList(row.evidenceRefs, root.workload, "COMPLETENESS", `${rowPath}/evidenceRefs`, `completeness:${row.workloadClass}`);
   }
   for (const workloadClass of EXACT_TARGET_WORKLOAD_CLASSES) {
     if (!rowsByClass.has(workloadClass)) parser.add("MISSING_WORKLOAD_COVERAGE", "/validationSummary/completeness");
   }
   const derived = deriveState({ ...snapshot, derived: emptyDerived() } as ExactTargetInventorySnapshot);
-  for (const row of snapshot.validationSummary.completeness) {
+  for (const [index, row] of snapshot.validationSummary.completeness.entries()) {
     const expected = derived.targetBlockers[row.workloadClass].length === 0 ? "COMPLETE" : "BLOCKED";
-    if (row.status !== expected) parser.add("CLAIM_MISMATCH", "/validationSummary/completeness/0/status");
+    if (row.status !== expected) parser.add("CLAIM_MISMATCH", `/validationSummary/completeness/${index}/status`);
   }
   const expectedCodes = new Set(derived.blockerCodes);
   const claimedCodes = new Set(snapshot.validationSummary.blockerCodes);
@@ -1801,6 +2198,11 @@ function stringArrayAt(value: JsonValue | undefined, path: string, parser: Parse
     if (options.digest && !isSha256(parsed)) parser.add("INVALID_DIGEST", entryPath);
     return parsed;
   });
+  const seen = new Set<string>();
+  for (const [index, entry] of strings.entries()) {
+    if (seen.has(entry)) parser.add("DUPLICATE_IDENTITY", `${path}/${index}`);
+    seen.add(entry);
+  }
   if ((options.min ?? 0) > strings.length) parser.add("REQUIRED_FIELD", path);
   return strings;
 }
