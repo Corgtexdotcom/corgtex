@@ -21,7 +21,7 @@ const tx = vi.hoisted(() => ({
 
 const prisma = vi.hoisted(() => ({
   workspace: { findUnique: vi.fn() },
-  productionValidationReceipt: { findUnique: vi.fn() },
+  productionValidationReceipt: { create: vi.fn(), findUnique: vi.fn(), findUniqueOrThrow: vi.fn() },
   $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
 }));
 
@@ -48,7 +48,7 @@ describe("PR 976 production validation receipt authority", () => {
 
   it("creates the durable receipt before any synthetic resource or credential", async () => {
     const { provisionPr976ActionGoalValidation } = await import("./production-validation");
-    tx.productionValidationReceipt.create.mockResolvedValue({
+    const receipt = {
       id: "receipt-1",
       operationKey: "pr976-action-goal-production-validation",
       workspaceId: "workspace-1",
@@ -84,12 +84,14 @@ describe("PR 976 production validation receipt authority", () => {
       transitions: [],
       createdAt: new Date(),
       updatedAt: new Date(),
-    });
+    };
+    prisma.productionValidationReceipt.create.mockResolvedValue(receipt);
+    tx.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue(receipt);
     tx.action.create.mockResolvedValue({ id: "action-1", version: 1 });
     tx.goal.create.mockResolvedValue({ id: "goal-1", version: 1 });
     tx.agentCredential.create.mockResolvedValue({ id: "cred-1" });
     tx.productionValidationReceipt.update.mockImplementation(async ({ data }) => ({
-      ...tx.productionValidationReceipt.create.mock.results[0].value,
+      ...receipt,
       ...data,
       id: "receipt-1",
       workspaceId: "workspace-1",
@@ -117,9 +119,9 @@ describe("PR 976 production validation receipt authority", () => {
     );
 
     expect(result.credentialToken).toBe("agentc-opaque-secret");
-    expect(tx.productionValidationReceipt.create).toHaveBeenCalledBefore(tx.action.create);
-    expect(tx.productionValidationReceipt.create).toHaveBeenCalledBefore(tx.goal.create);
-    expect(tx.productionValidationReceipt.create).toHaveBeenCalledBefore(tx.agentCredential.create);
+    expect(prisma.productionValidationReceipt.create).toHaveBeenCalledBefore(tx.action.create);
+    expect(prisma.productionValidationReceipt.create).toHaveBeenCalledBefore(tx.goal.create);
+    expect(prisma.productionValidationReceipt.create).toHaveBeenCalledBefore(tx.agentCredential.create);
     expect(tx.productionValidationReceipt.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         actionId: "action-1",
@@ -143,6 +145,6 @@ describe("PR 976 production validation receipt authority", () => {
       },
     )).rejects.toMatchObject({ code: "INVALID_OPERATION" });
     expect(prisma.workspace.findUnique).not.toHaveBeenCalled();
-    expect(tx.productionValidationReceipt.create).not.toHaveBeenCalled();
+    expect(prisma.productionValidationReceipt.create).not.toHaveBeenCalled();
   });
 });

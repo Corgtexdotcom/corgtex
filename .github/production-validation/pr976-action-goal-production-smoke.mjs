@@ -172,6 +172,31 @@ function expectMcpConflict(result) {
   }
 }
 
+function releaseDriftBlocker(release) {
+  const drift = release?.drift;
+  if (!drift) return null;
+  if (drift.gitSha || drift.imageTag || drift.version) {
+    return drift.details?.length ? drift.details.join("; ") : JSON.stringify(drift);
+  }
+  return null;
+}
+
+async function verifyHealth(baseUrl, expectedGitSha) {
+  const health = await fetchJson(`${baseUrl}/api/health`, {}, { timeoutMs: 20_000 });
+  const body = health.body;
+  if (body?.status !== "ok" || body?.database !== "up" || body?.schema !== "ready") {
+    throw Object.assign(new Error("HEALTH_NOT_READY"), { body });
+  }
+  if (body?.release?.gitSha !== expectedGitSha) {
+    throw Object.assign(new Error("SERVING_SHA_MISMATCH"), { body });
+  }
+  const drift = releaseDriftBlocker(body.release);
+  if (drift) {
+    throw Object.assign(new Error("SERVING_RELEASE_DRIFT"), { body: { drift } });
+  }
+  return body.release;
+}
+
 async function writeEvidence(outDir, evidence) {
   await mkdir(outDir, { recursive: true });
   await writeFile(`${outDir}/summary.json`, `${JSON.stringify(sanitize(evidence), null, 2)}\n`);
@@ -190,6 +215,8 @@ export async function run() {
   try {
     verifyGitLineage(deployedSha);
     evidence.steps.push({ name: "lineage", status: "passed" });
+    const initialRelease = await verifyHealth(baseUrl, deployedSha);
+    evidence.steps.push({ name: "pre-provision-health", status: "passed", release: initialRelease });
     cookie = await login(baseUrl, email, password);
     const provision = await internal(baseUrl, cookie, {
       operation: "provision",
@@ -242,7 +269,9 @@ export async function run() {
     }, 20_000);
     const terminal = await internal(baseUrl, cookie, { operation: "terminalize", operationKey: OPERATION_KEY, mode: "all" }, CLEANUP_RESERVE_MS);
     if (terminal.receipt.outcome !== "COMPLETED") throw new Error("TERMINAL_RECEIPT_INCOMPLETE");
+    const terminalRelease = await verifyHealth(baseUrl, deployedSha);
     evidence.steps.push({ name: "feature-and-cleanup", status: "passed", receipt: terminal.receipt });
+    evidence.steps.push({ name: "post-cleanup-health", status: "passed", release: terminalRelease });
     await writeEvidence(outDir, evidence);
   } catch (error) {
     evidence.error = { message: error.message, status: error.status, body: sanitize(error.body ?? null) };

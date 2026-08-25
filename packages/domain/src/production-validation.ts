@@ -133,25 +133,70 @@ function actorLabel(actor: AppActor) {
 }
 
 async function createReceipt(
-  tx: Prisma.TransactionClient,
   actor: AppActor,
   input: Pr976ProvisionInput,
   workspaceId: string,
 ) {
   try {
-    return await tx.productionValidationReceipt.create({
+    return {
+      receipt: await prisma.productionValidationReceipt.create({
+        data: {
+          operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+          workspaceId,
+          targetPullRequest: PR976_TARGET_PULL_REQUEST,
+          targetReleaseSha: PR976_TARGET_RELEASE_SHA,
+          deployedSha: input.deployedSha,
+          ancestorSha: input.ancestorSha,
+          workflowRunId: input.workflowRunId ?? null,
+          workflowRunAttempt: input.workflowRunAttempt ?? null,
+          syntheticMarker: PR976_SYNTHETIC_MARKER,
+          transitions: appendTransition({ transitions: [] }, {
+            type: "CLAIMED",
+            actor: actorLabel(actor),
+            deployedSha: input.deployedSha,
+            workflowRunId: input.workflowRunId ?? null,
+            workflowRunAttempt: input.workflowRunAttempt ?? null,
+          }),
+        },
+      }),
+      created: true,
+    };
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      const existing = await prisma.productionValidationReceipt.findUniqueOrThrow({
+        where: { operationKey: PR976_ACTION_GOAL_OPERATION_KEY },
+      });
+      assertReceiptClaim(existing);
+      return { receipt: existing, created: false };
+    }
+    throw error;
+  }
+}
+
+async function updateReceiptClaimAudit(
+  tx: Prisma.TransactionClient,
+  receipt: ValidationReceipt,
+  actor: AppActor,
+  input: Pr976ProvisionInput,
+) {
+  if (
+    receipt.deployedSha === input.deployedSha
+    && receipt.ancestorSha === input.ancestorSha
+    && receipt.workflowRunId === (input.workflowRunId ?? null)
+    && receipt.workflowRunAttempt === (input.workflowRunAttempt ?? null)
+  ) {
+    return receipt;
+  }
+  invariant(receipt.outcome === "PENDING", 409, "RECEIPT_ALREADY_CLAIMED", "Production validation receipt is already claimed for a different run.");
+  return tx.productionValidationReceipt.update({
+    where: { id: receipt.id },
       data: {
-        operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
-        workspaceId,
-        targetPullRequest: PR976_TARGET_PULL_REQUEST,
-        targetReleaseSha: PR976_TARGET_RELEASE_SHA,
         deployedSha: input.deployedSha,
         ancestorSha: input.ancestorSha,
         workflowRunId: input.workflowRunId ?? null,
         workflowRunAttempt: input.workflowRunAttempt ?? null,
-        syntheticMarker: PR976_SYNTHETIC_MARKER,
-        transitions: appendTransition({ transitions: [] }, {
-          type: "CLAIMED",
+      transitions: appendTransition(receipt, {
+        type: "CLAIM_REPLAYED",
           actor: actorLabel(actor),
           deployedSha: input.deployedSha,
           workflowRunId: input.workflowRunId ?? null,
@@ -159,16 +204,6 @@ async function createReceipt(
         }),
       },
     });
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      const existing = await tx.productionValidationReceipt.findUniqueOrThrow({
-        where: { operationKey: PR976_ACTION_GOAL_OPERATION_KEY },
-      });
-      assertReceiptClaim(existing);
-      return existing;
-    }
-    throw error;
-  }
 }
 
 async function ensureProvisionedResources(
@@ -266,9 +301,15 @@ async function ensureProvisionedResources(
 export async function provisionPr976ActionGoalValidation(actor: AppActor, input: Pr976ProvisionInput) {
   assertFixedProvisionInput(input);
   const { workspace, membership } = await requireValidationAdmin(actor);
+  const claim = await createReceipt(actor, input, workspace.id);
 
   return prisma.$transaction(async (tx) => {
-    const receipt = await createReceipt(tx, actor, input, workspace.id);
+    const currentReceipt = await tx.productionValidationReceipt.findUniqueOrThrow({
+      where: { id: claim.receipt.id },
+    });
+    const receipt = claim.created
+      ? currentReceipt
+      : await updateReceiptClaimAudit(tx, currentReceipt, actor, input);
     assertReceiptClaim(receipt);
     const provisioned = await ensureProvisionedResources(tx, actor, receipt, membership);
     return {
@@ -397,7 +438,9 @@ function terminalOutcome(states: {
   actionState: ProductionValidationLifecycleState;
   goalState: ProductionValidationLifecycleState;
   credentialState: ProductionValidationLifecycleState;
+  hasFailure: boolean;
 }): ProductionValidationOutcome {
+  if (states.actionState === "CLEANED" && states.goalState === "CLEANED" && states.credentialState === "CLEANED" && states.hasFailure) return "FAILED";
   if (states.actionState === "CLEANED" && states.goalState === "CLEANED" && states.credentialState === "CLEANED") return "COMPLETED";
   if (states.actionState === "BLOCKED" || states.goalState === "BLOCKED" || states.credentialState === "BLOCKED") return "BLOCKED";
   return "PENDING";
@@ -413,13 +456,17 @@ async function terminalizeAction(
   await acquireWorkItemAdvisoryLock(tx, "Action", receipt.actionId);
   const action = await tx.action.findUnique({ where: { id: receipt.actionId } });
   const counts = await actionCleanupRelations(tx, receipt.workspaceId, receipt.actionId);
+  const expectedBody = receipt.failureCode ? [PR976_ACTION_BASELINE_BODY, PR976_ACTION_PROVEN_BODY] : [PR976_ACTION_PROVEN_BODY];
+  const expectedVersion = receipt.failureCode && action?.bodyMd === PR976_ACTION_BASELINE_BODY
+    ? receipt.actionBaselineVersion
+    : receipt.actionBaselineVersion! + 1;
   const canArchive = action
     && action.workspaceId === receipt.workspaceId
     && action.title === syntheticTitle("Action")
-    && action.bodyMd === PR976_ACTION_PROVEN_BODY
+    && expectedBody.includes(action.bodyMd ?? "")
     && action.status === "DRAFT"
     && action.isPrivate
-    && action.version === receipt.actionBaselineVersion! + 1
+    && action.version === expectedVersion
     && !action.archivedAt
     && allZero(counts);
   if (!canArchive) return { state: "BLOCKED" as const, archiveRecordId: null };
@@ -459,14 +506,20 @@ async function terminalizeGoal(
   await acquireWorkItemAdvisoryLock(tx, "Goal", receipt.goalId);
   const goal = await tx.goal.findUnique({ where: { id: receipt.goalId } });
   const counts = await goalCleanupRelations(tx, receipt.goalId);
+  const expectedProgress = receipt.failureCode && goal?.progressPercent === 0
+    ? 0
+    : PR976_GOAL_PROVEN_PROGRESS;
+  const expectedVersion = receipt.failureCode && goal?.progressPercent === 0
+    ? receipt.goalBaselineVersion
+    : receipt.goalBaselineVersion! + 1;
   const canArchive = goal
     && goal.workspaceId === receipt.workspaceId
     && goal.title === syntheticTitle("Goal")
     && goal.descriptionMd === PR976_SYNTHETIC_MARKER
     && goal.status === "DRAFT"
     && goal.isPrivate
-    && goal.progressPercent === PR976_GOAL_PROVEN_PROGRESS
-    && goal.version === receipt.goalBaselineVersion! + 1
+    && goal.progressPercent === expectedProgress
+    && goal.version === expectedVersion
     && !goal.archivedAt
     && allZero(counts);
   if (!canArchive) return { state: "BLOCKED" as const, archiveRecordId: null };
@@ -507,6 +560,33 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
       data: { isActive: false },
     });
   }
+  const identity = await tx.agentIdentity.findFirst({
+    where: { workspaceId: receipt.workspaceId, linkedCredentialId: credential.id },
+  });
+  if (identity) {
+    const [assignments, roleHistory] = await Promise.all([
+      tx.circleAgentAssignment.count({ where: { agentIdentityId: identity.id } }),
+      tx.roleHolderHistory.count({ where: { agentIdentityId: identity.id, endedAt: null } }),
+    ]);
+    if (
+      identity.displayName !== credential.label
+      || identity.memberType !== "EXTERNAL"
+      || assignments !== 0
+      || roleHistory !== 0
+    ) {
+      return "BLOCKED" as const;
+    }
+    if (identity.isActive || !identity.archivedAt) {
+      await tx.agentIdentity.update({
+        where: { id: identity.id },
+        data: {
+          isActive: false,
+          archivedAt: identity.archivedAt ?? new Date(),
+          archiveReason: `Archived by ${PR976_ACTION_GOAL_OPERATION_KEY}.`,
+        },
+      });
+    }
+  }
   return "CLEANED" as const;
 }
 
@@ -546,6 +626,7 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
       actionState: actionResult.state,
       goalState: goalResult.state,
       credentialState,
+      hasFailure: Boolean(startedReceipt.failureCode),
     });
     const updated = await tx.productionValidationReceipt.update({
       where: { id: receipt.id },
