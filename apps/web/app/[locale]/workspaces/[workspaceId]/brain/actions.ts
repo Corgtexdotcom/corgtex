@@ -8,6 +8,7 @@ import {
   AGREEMENT_BRAIN_ARTICLE_AUTHORITIES,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
   createArticle,
+  deleteSource,
   updateArticle,
   ingestSource,
   publishArticle,
@@ -60,6 +61,7 @@ function workingAgreementAuthority(formData: FormData, isPrivate: boolean): Brai
 
 function refresh(workspaceId: string, slug?: string) {
   revalidatePath(`/workspaces/${workspaceId}/brain`);
+  revalidatePath(`/workspaces/${workspaceId}/brain/sources`);
   if (slug) {
     revalidatePath(`/workspaces/${workspaceId}/brain/${slug}`);
   }
@@ -152,6 +154,19 @@ export async function ingestSourceAction(formData: FormData) {
     title: asOptional(formData, "title"),
     channel: asOptional(formData, "channel"),
     duplicateGuard: duplicateGuardFromFormData(formData),
+  });
+  refresh(workspaceId);
+}
+
+export async function deleteSourceAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await deleteSource(actor, {
+    workspaceId,
+    sourceId: asString(formData, "sourceId"),
   });
   refresh(workspaceId);
 }

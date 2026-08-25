@@ -171,9 +171,6 @@ param sessionCookieSecretName string = 'session-cookie-secret'
 @description('Key Vault secret name containing ENCRYPTION_KEY.')
 param encryptionKeySecretName string = 'encryption-key'
 
-@description('Key Vault secret name containing AGENT_API_KEY.')
-param agentApiKeySecretName string = 'agent-api-key'
-
 @description('Key Vault secret name containing SMOKE_EMAIL_CAPTURE_SECRET.')
 param smokeEmailCaptureSecretName string = 'smoke-email-capture-secret'
 
@@ -300,7 +297,6 @@ var requiredSecretRefs = [
   { name: 'redis-url', keyVaultSecretName: redisUrlSecretName }
   { name: 'session-cookie-secret', keyVaultSecretName: sessionCookieSecretName }
   { name: 'encryption-key', keyVaultSecretName: encryptionKeySecretName }
-  { name: 'agent-api-key', keyVaultSecretName: agentApiKeySecretName }
   { name: 'smoke-email-capture-secret', keyVaultSecretName: smokeEmailCaptureSecretName }
   { name: 'self-serve-registry-sync-secret', keyVaultSecretName: selfServeRegistrySyncSecretName }
   { name: 'model-price-overrides-json', keyVaultSecretName: modelPriceOverridesSecretName }
@@ -373,7 +369,6 @@ var commonRuntimeEnv = concat([
   { name: 'REDIS_KEY_PREFIX', value: compactPrefix }
   { name: 'SESSION_COOKIE_SECRET', secretRef: 'session-cookie-secret' }
   { name: 'ENCRYPTION_KEY', secretRef: 'encryption-key' }
-  { name: 'AGENT_API_KEY', secretRef: 'agent-api-key' }
   { name: 'SMOKE_EMAIL_CAPTURE_SECRET', secretRef: 'smoke-email-capture-secret' }
   { name: 'SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS', value: smokeEmailCaptureAllowedDomains }
   { name: 'SELF_SERVE_REGISTRY_SYNC_SECRET', secretRef: 'self-serve-registry-sync-secret' }

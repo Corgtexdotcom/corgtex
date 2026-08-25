@@ -39,6 +39,11 @@ function metadataString(value: Prisma.InputJsonValue | undefined, key: string) {
 
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 
+function normalizedMemberId(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 async function nextAvailableArticleSlug(tx: Prisma.TransactionClient, workspaceId: string, baseSlug: string) {
   let candidate = baseSlug;
   for (let suffix = 2; suffix < 1000; suffix += 1) {
@@ -74,10 +79,12 @@ export async function createArticle(actor: AppActor, params: {
   sourceIds?: string[];
   isPrivate?: boolean;
   duplicateGuard?: DuplicateGuardOptions | null;
+  tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
   const title = params.title.trim();
@@ -98,7 +105,7 @@ export async function createArticle(actor: AppActor, params: {
     includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
   }, params.duplicateGuard);
   if (duplicateDecision?.resolution === "use_existing") {
-    const article = await prisma.brainArticle.findFirst({
+    const article = await (params.tx ?? prisma).brainArticle.findFirst({
       where: { id: duplicateDecision.match.entityId, workspaceId: params.workspaceId, archivedAt: null },
     });
     invariant(article, 404, "NOT_FOUND", "Article not found.");
@@ -117,6 +124,7 @@ export async function createArticle(actor: AppActor, params: {
       ownerMemberId: article.ownerMemberId || params.ownerMemberId || undefined,
       sourceIds: Array.from(new Set([...(article.sourceIds ?? []), ...(params.sourceIds ?? [])])),
       changeSummary: "Merged duplicate upload context.",
+      tx: params.tx,
     });
   }
 
@@ -124,7 +132,7 @@ export async function createArticle(actor: AppActor, params: {
 
   const membershipId = persistedMemberId(membership);
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     const slug = await nextAvailableArticleSlug(tx, params.workspaceId, requestedSlug);
     const article = await tx.brainArticle.create({
       data: {
@@ -173,7 +181,9 @@ export async function createArticle(actor: AppActor, params: {
     ]);
 
     return article;
-  });
+  };
+
+  return params.tx ? run(params.tx) : prisma.$transaction(run);
 }
 
 export async function updateArticle(actor: AppActor, params: {
@@ -189,13 +199,15 @@ export async function updateArticle(actor: AppActor, params: {
   sourceIds?: string[];
   changeSummary?: string;
   agentRunId?: string | null;
+  tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     const article = await tx.brainArticle.findUnique({
       where: {
         workspaceId_slug: {
@@ -217,7 +229,7 @@ export async function updateArticle(actor: AppActor, params: {
       || params.sourceIds !== undefined;
     if (editsDraftContent) {
       invariant(article.authority === "DRAFT", 400, "INVALID_STATE", "Only draft Brain articles can be edited.");
-      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership });
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: article, resolvedMembership: membership, tx });
     }
 
     // Create version snapshot of previous body before updating
@@ -280,7 +292,9 @@ export async function updateArticle(actor: AppActor, params: {
     ]);
 
     return updated;
-  });
+  };
+
+  return params.tx ? run(params.tx) : prisma.$transaction(run);
 }
 
 export async function getArticle(actor: AppActor, params: {
@@ -490,7 +504,7 @@ export async function ingestSource(actor: AppActor, params: {
   metadata?: Prisma.InputJsonValue;
   duplicateGuard?: DuplicateGuardOptions | null;
 }) {
-  await requireWorkspaceMembership({
+  const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
   });
@@ -499,6 +513,7 @@ export async function ingestSource(actor: AppActor, params: {
   invariant(params.tier >= 1 && params.tier <= 3, 400, "INVALID_INPUT", "Tier must be 1, 2, or 3.");
   const title = params.title?.trim() || null;
   const content = params.content.trim();
+  const authorMemberId = normalizedMemberId(params.authorMemberId);
   const duplicateDecision = await checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "BrainSource",
@@ -574,7 +589,7 @@ export async function ingestSource(actor: AppActor, params: {
         title,
         externalId: params.externalId || null,
         channel: params.channel?.trim() || null,
-        authorMemberId: params.authorMemberId || null,
+        authorMemberId: actor.kind === "user" ? persistedMemberId(membership) : authorMemberId,
         ingestionGuidanceMd: params.ingestionGuidanceMd?.trim() || null,
         ...(params.metadata === undefined ? {} : { metadata: params.metadata }),
       },
@@ -651,8 +666,9 @@ export async function listSources(actor: AppActor, params: {
 
 export async function markSourceAbsorbed(_actor: AppActor, params: {
   sourceId: string;
+  tx?: Prisma.TransactionClient;
 }) {
-  await prisma.brainSource.update({
+  await (params.tx ?? prisma).brainSource.update({
     where: { id: params.sourceId },
     data: { absorbedAt: new Date() },
   });
@@ -662,20 +678,14 @@ export async function deleteSource(actor: AppActor, params: {
   workspaceId: string;
   sourceId: string;
 }) {
-  await requireWorkspaceMembership({
-    actor,
-    workspaceId: params.workspaceId,
-    allowedRoles: ["ADMIN"],
-  });
-
-  await archiveWorkspaceArtifact(actor, {
+  const archived = await archiveWorkspaceArtifact(actor, {
     workspaceId: params.workspaceId,
     entityType: "BrainSource",
     entityId: params.sourceId,
     reason: "Archived from Brain source delete path.",
   });
 
-  return { id: params.sourceId };
+  return { id: archived.id };
 }
 
 // ---------------------------------------------------------------------------
@@ -684,13 +694,16 @@ export async function deleteSource(actor: AppActor, params: {
 
 export async function rebuildBacklinks(actor: AppActor, params: {
   workspaceId: string;
+  tx?: Prisma.TransactionClient;
 }) {
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
+    tx: params.tx,
   });
 
-  const articles = await prisma.brainArticle.findMany({
+  const db = params.tx ?? prisma;
+  const articles = await db.brainArticle.findMany({
     where: { workspaceId: params.workspaceId },
     select: { id: true, slug: true, title: true, bodyMd: true, frontmatterJson: true },
   });
@@ -728,7 +741,7 @@ export async function rebuildBacklinks(actor: AppActor, params: {
     }
   }
 
-  await prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     await tx.brainBacklink.deleteMany({
       where: { workspaceId: params.workspaceId },
     });
@@ -742,7 +755,10 @@ export async function rebuildBacklinks(actor: AppActor, params: {
         skipDuplicates: true,
       });
     }
-  });
+  };
+
+  if (params.tx) await run(params.tx);
+  else await prisma.$transaction(run);
 
   return { linkCount: links.length };
 }

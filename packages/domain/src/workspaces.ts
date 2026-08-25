@@ -1,4 +1,4 @@
-import { prisma } from "@corgtex/shared";
+import { env, normalizeWorkspaceSlug, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
 
@@ -10,9 +10,17 @@ export async function createWorkspace(actor: AppActor, params: {
   invariant(actor.kind === "user", 400, "INVALID_ACTOR", "Only users can create workspaces.");
 
   const name = params.name.trim();
-  const slug = params.slug.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const slug = normalizeWorkspaceSlug(params.slug);
   invariant(name.length > 0, 400, "INVALID_INPUT", "Workspace name is required.");
   invariant(slug.length > 0, 400, "INVALID_INPUT", "Workspace slug is required.");
+
+  const deploymentSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
+  invariant(
+    !deploymentSlug || slug === normalizeWorkspaceSlug(deploymentSlug),
+    403,
+    "WORKSPACE_SCOPE_MISMATCH",
+    "Workspace creation is restricted to this deployment's configured workspace.",
+  );
 
   return prisma.$transaction(async (tx) => {
     const existing = await tx.workspace.findUnique({ where: { slug } });

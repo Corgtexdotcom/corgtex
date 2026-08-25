@@ -20,6 +20,7 @@ import {
   recordWorkItemVersion,
   type WorkItemEntityType,
 } from "./work-item-versions";
+import { appendEvents } from "./events";
 
 export type ArchiveFilter = "active" | "archived" | "all";
 
@@ -104,6 +105,39 @@ function financeImportArtifactGuards(field: "documentId" | "brainSourceId") {
       await requireFinanceImportArtifactUnlinked(tx, record, field);
     },
   };
+}
+
+const brainSourceFinanceImportGuards = financeImportArtifactGuards("brainSourceId");
+
+function canCredentialAgentArchiveBrainSource(actor: AppActor, record: any) {
+  if (actor.kind !== "agent" || actor.authProvider !== "credential") return true;
+  const scopes = actor.scopes ?? [];
+  const hasSupportWrite = scopes.includes("support:write");
+  const hasBrainWrite = scopes.includes("brain:write") || hasSupportWrite;
+  const hasFinanceWrite = record.accessDomain !== "FINANCE"
+    || scopes.includes("finance:write")
+    || hasSupportWrite;
+  return hasBrainWrite && hasFinanceWrite;
+}
+
+async function requireBrainSourceArchivePermission({
+  tx,
+  record,
+  actor,
+  membership,
+}: Parameters<NonNullable<ArchiveConfig["canArchive"]>>[0]) {
+  await brainSourceFinanceImportGuards.canArchive({ tx, record, actor, membership });
+  invariant(
+    canCredentialAgentArchiveBrainSource(actor, record),
+    403,
+    "FORBIDDEN",
+    "Agent credential is missing the required Brain source archive scope.",
+  );
+
+  const canArchive = actor.kind === "agent"
+    || membership?.role === "ADMIN"
+    || (record.authorMemberId !== null && record.authorMemberId === membership?.id);
+  invariant(canArchive, 403, "FORBIDDEN", "Only the source author, workspace admins, or agents can archive this Brain source.");
 }
 
 const directWorkspace = (workspaceId: string, id: string) => ({ id, workspaceId });
@@ -196,7 +230,8 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "brainSource",
     findWhere: directWorkspace,
     label: titleOrName,
-    ...financeImportArtifactGuards("brainSourceId"),
+    canArchive: requireBrainSourceArchivePermission,
+    canPurge: brainSourceFinanceImportGuards.canPurge,
     beforePurge: async (tx, record) => {
       await tx.knowledgeChunk.deleteMany({
         where: {
@@ -402,7 +437,7 @@ export async function lockWorkspaceArchiveArtifact(
   entityType: ArchiveEntityType,
   entityId: string,
 ) {
-  if (CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
+  if (entityType === "BrainSource" || CRM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`workspace_archive:${entityType}:${entityId}`}, 0))`;
   }
   if (WORK_ITEM_ARCHIVE_ENTITY_TYPES.has(entityType)) {
@@ -659,6 +694,17 @@ export async function restoreWorkspaceArtifact(actor: AppActor, params: {
     });
     if (config.entityType === "Goal") {
       await recomputeGoalParentProgressForArchiveTransition(tx, actor, updated);
+    }
+    if (config.entityType === "BrainSource") {
+      await appendEvents(tx, [
+        {
+          workspaceId: params.workspaceId,
+          type: "brain-source.created",
+          aggregateType: "BrainSource",
+          aggregateId: record.id,
+          payload: { sourceId: record.id },
+        },
+      ]);
     }
 
     if (archiveRecord) {

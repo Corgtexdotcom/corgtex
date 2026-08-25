@@ -24,6 +24,7 @@ export async function runBrainMaintenance(params: {
     kind: "agent",
     authProvider: "bootstrap",
     label: "brain-maintenance",
+    workspaceIds: [params.workspaceId],
   };
 
   const articles = await prisma.brainArticle.findMany({
