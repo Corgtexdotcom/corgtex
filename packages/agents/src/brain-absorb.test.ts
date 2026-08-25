@@ -8,8 +8,10 @@ const {
   markSourceAbsorbedMock,
   rebuildBacklinksMock,
   syncBrainArticleKnowledgeMock,
+  lockWorkspaceArchiveArtifactMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
     brainSource: {
       findUnique: vi.fn(),
     },
@@ -29,6 +31,7 @@ const {
   markSourceAbsorbedMock: vi.fn(),
   rebuildBacklinksMock: vi.fn(),
   syncBrainArticleKnowledgeMock: vi.fn(),
+  lockWorkspaceArchiveArtifactMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -48,6 +51,7 @@ vi.mock("@corgtex/domain", () => ({
   updateArticle: updateArticleMock,
   markSourceAbsorbed: markSourceAbsorbedMock,
   rebuildBacklinks: rebuildBacklinksMock,
+  lockWorkspaceArchiveArtifact: lockWorkspaceArchiveArtifactMock,
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -57,6 +61,8 @@ vi.mock("@corgtex/knowledge", () => ({
 describe("absorbSource", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
+    lockWorkspaceArchiveArtifactMock.mockResolvedValue(undefined);
     prismaMock.brainSource.findUnique.mockResolvedValue({
       id: "source-1",
       workspaceId: "workspace-1",
@@ -67,6 +73,7 @@ describe("absorbSource", () => {
       content: "Launch content",
       ingestionGuidanceMd: "Prioritize launch blockers.",
       absorbedAt: null,
+      archivedAt: null,
     });
     prismaMock.brainArticle.findMany.mockResolvedValue([]);
     prismaMock.brainBacklink.findMany.mockResolvedValue([]);
@@ -97,6 +104,115 @@ describe("absorbSource", () => {
       instruction: expect.stringContaining("Prioritize launch blockers."),
       input: expect.stringContaining("Prioritize launch blockers."),
     }));
+  });
+
+  it("skips archived sources before sending content to the model", async () => {
+    prismaMock.brainSource.findUnique.mockResolvedValueOnce({
+      id: "source-1",
+      workspaceId: "workspace-1",
+      sourceType: "DOC",
+      tier: 1,
+      title: "Launch notes",
+      channel: "text-paste",
+      content: "Launch content",
+      ingestionGuidanceMd: null,
+      absorbedAt: null,
+      archivedAt: new Date("2026-08-20T10:00:00.000Z"),
+    });
+
+    const { absorbSource } = await import("./brain-absorb");
+    const result = await absorbSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      agentRunId: "run-1",
+    });
+
+    expect(result).toEqual({ skipped: true, reason: "archived" });
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+  });
+
+  it("skips article writes when a source is archived after analysis", async () => {
+    prismaMock.brainSource.findUnique
+      .mockResolvedValueOnce({
+        id: "source-1",
+        workspaceId: "workspace-1",
+        sourceType: "DOC",
+        tier: 1,
+        title: "Launch notes",
+        channel: "text-paste",
+        content: "Launch content",
+        ingestionGuidanceMd: null,
+        absorbedAt: null,
+        archivedAt: null,
+      })
+      .mockResolvedValueOnce({
+        workspaceId: "workspace-1",
+        absorbedAt: null,
+        archivedAt: new Date("2026-08-20T10:00:00.000Z"),
+      });
+
+    const { absorbSource } = await import("./brain-absorb");
+    const result = await absorbSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      agentRunId: "run-1",
+    });
+
+    expect(result).toEqual({ skipped: true, reason: "archived", sourceId: "source-1" });
+    expect(modelGatewayMock.extract).toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+  });
+
+  it("skips article creation when a source is archived after drafting", async () => {
+    prismaMock.brainSource.findUnique
+      .mockResolvedValueOnce({
+        id: "source-1",
+        workspaceId: "workspace-1",
+        sourceType: "DOC",
+        tier: 1,
+        title: "Launch notes",
+        channel: "text-paste",
+        content: "Launch content",
+        ingestionGuidanceMd: null,
+        absorbedAt: null,
+        archivedAt: null,
+      })
+      .mockResolvedValueOnce({
+        workspaceId: "workspace-1",
+        absorbedAt: null,
+        archivedAt: null,
+      })
+      .mockResolvedValueOnce({
+        workspaceId: "workspace-1",
+        absorbedAt: null,
+        archivedAt: new Date("2026-08-20T10:00:00.000Z"),
+      });
+    modelGatewayMock.extract.mockResolvedValue({
+      output: {
+        articleType: "PROJECT",
+        updateSlugs: [],
+        createNew: { title: "Launch notes", slug: "launch-notes" },
+        summary: "Launch context",
+      },
+    });
+
+    const { absorbSource } = await import("./brain-absorb");
+    const result = await absorbSource({
+      workspaceId: "workspace-1",
+      sourceId: "source-1",
+      agentRunId: "run-1",
+    });
+
+    expect(result).toEqual({ skipped: true, reason: "archived", sourceId: "source-1" });
+    expect(modelGatewayMock.chat).toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(updateArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
   });
 
   it("creates a public reference recap when document sources match non-draft articles", async () => {
@@ -142,6 +258,12 @@ describe("absorbSource", () => {
       authority: "REFERENCE",
       sourceIds: ["source-1"],
     }));
-    expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1" });
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledTimes(1);
+    expect(lockWorkspaceArchiveArtifactMock).toHaveBeenCalledWith(prismaMock, "BrainSource", "source-1");
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(createArticleMock.mock.invocationCallOrder[0]);
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(rebuildBacklinksMock.mock.invocationCallOrder[0]);
+    expect(lockWorkspaceArchiveArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(markSourceAbsorbedMock.mock.invocationCallOrder[0]);
+    expect(markSourceAbsorbedMock.mock.invocationCallOrder[0]).toBeLessThan(syncBrainArticleKnowledgeMock.mock.invocationCallOrder[0]);
+    expect(markSourceAbsorbedMock).toHaveBeenCalledWith(expect.objectContaining({ label: "brain-absorb" }), { sourceId: "source-1", tx: prismaMock });
   });
 });

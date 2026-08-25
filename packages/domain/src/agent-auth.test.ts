@@ -66,6 +66,18 @@ describe("resolveAgentActorFromBearer", () => {
     });
   });
 
+  it("rejects the bootstrap agent when no workspace allowlist is configured", async () => {
+    restoreEnv();
+    Object.assign(process.env, {
+      AGENT_API_KEY: "bootstrap-secret",
+    });
+    delete process.env.AGENT_ALLOWED_WORKSPACE_IDS;
+
+    const { resolveAgentActorFromBearer } = await import("./agent-auth");
+
+    await expect(resolveAgentActorFromBearer("agent-bootstrap-secret")).resolves.toBeNull();
+  });
+
   it("returns null for unknown bearer tokens", async () => {
     restoreEnv();
     Object.assign(process.env, {

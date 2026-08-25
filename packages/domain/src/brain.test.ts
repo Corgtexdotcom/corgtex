@@ -42,6 +42,7 @@ const { prismaMock } = vi.hoisted(() => ({
 const requireWorkspaceMembership = vi.fn();
 const appendEvents = vi.fn();
 const resolveKnowledgeAccessDomains = vi.fn();
+const archiveWorkspaceArtifact = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
@@ -58,6 +59,15 @@ vi.mock("./events", () => ({
 
 vi.mock("./brain-access", () => ({
   resolveKnowledgeAccessDomains,
+}));
+
+vi.mock("./archive", () => ({
+  archiveFilterWhere: (filter: "active" | "archived" | "all" = "active") => {
+    if (filter === "all") return {};
+    if (filter === "archived") return { archivedAt: { not: null } };
+    return { archivedAt: null };
+  },
+  archiveWorkspaceArtifact,
 }));
 
 const ownerActor = {
@@ -149,6 +159,55 @@ describe("Brain article draft lifecycle", () => {
     });
 
     expect(prismaMock.brainArticle.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps draft authorization on the supplied transaction client when updating draft articles", async () => {
+    const { updateArticle } = await import("./brain");
+
+    requireWorkspaceMembership.mockResolvedValue(null);
+    prismaMock.brainArticle.findUnique.mockResolvedValue({
+      id: "article-1",
+      workspaceId: "ws-1",
+      slug: "draft",
+      title: "Draft",
+      bodyMd: "Body",
+      authority: "DRAFT",
+      isPrivate: true,
+      ownerMemberId: null,
+      archivedAt: null,
+    });
+    prismaMock.brainArticle.update.mockResolvedValue({
+      id: "article-1",
+      workspaceId: "ws-1",
+      slug: "draft",
+      title: "Changed",
+      bodyMd: "Body",
+      authority: "DRAFT",
+      isPrivate: true,
+      ownerMemberId: null,
+      archivedAt: null,
+    });
+
+    await updateArticle({
+      kind: "agent",
+      authProvider: "api-key",
+      label: "brain-absorb",
+      workspaceIds: ["ws-1"],
+      scopes: ["brain:write"],
+    } as any, {
+      workspaceId: "ws-1",
+      slug: "draft",
+      title: "Changed",
+      tx: prismaMock as any,
+    });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(requireWorkspaceMembership).toHaveBeenCalledTimes(2);
+    expect(requireWorkspaceMembership).toHaveBeenNthCalledWith(1, expect.objectContaining({ tx: prismaMock }));
+    expect(requireWorkspaceMembership).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      resolvedMembership: null,
+      tx: prismaMock,
+    }));
   });
 
   it("returns a public article to draft for the owner", async () => {
@@ -309,6 +368,7 @@ describe("brain source ingestion", () => {
       absorbedAt: null,
     });
     resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE"]);
+    archiveWorkspaceArtifact.mockResolvedValue({ id: "source-1" });
   });
 
   it("filters workspace-only source items and totals through the shared access policy", async () => {
@@ -401,6 +461,97 @@ describe("brain source ingestion", () => {
         meta: expect.objectContaining({ hasIngestionGuidance: true }),
       }),
     }));
+  });
+
+  it("records the current user membership as the Brain source author", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
+  it("defaults explicit null user source authors to the current user membership", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+      authorMemberId: null,
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
+  it("defaults blank user source authors to the current user membership", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+      authorMemberId: "   ",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
+  it("ignores spoofed user source author ids", async () => {
+    const { ingestSource } = await import("./brain");
+
+    await ingestSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceType: "DOC",
+      tier: 1,
+      content: "Policy text",
+      title: "Policy",
+      authorMemberId: "other-member",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        authorMemberId: "mem-1",
+      }),
+    });
+  });
+
+  it("delegates Brain source archiving to the central archive service", async () => {
+    const { deleteSource } = await import("./brain");
+
+    await expect(deleteSource(ownerActor, {
+      workspaceId: "ws-1",
+      sourceId: "source-1",
+    })).resolves.toEqual({ id: "source-1" });
+
+    expect(archiveWorkspaceArtifact).toHaveBeenCalledWith(ownerActor, {
+      workspaceId: "ws-1",
+      entityType: "BrainSource",
+      entityId: "source-1",
+      reason: "Archived from Brain source delete path.",
+    });
   });
 
   it("resets absorbed state when a duplicate Brain source is updated", async () => {

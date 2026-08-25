@@ -61,6 +61,11 @@ afterEach(() => {
 
 describe("POST /api/workspaces", () => {
   it("rejects nonconfigured workspace creation on dedicated customer deployments", async () => {
+    createWorkspace.mockRejectedValueOnce(Object.assign(
+      new Error("Workspace creation is restricted to this deployment's configured workspace."),
+      { status: 403, code: "WORKSPACE_SCOPE_MISMATCH" },
+    ));
+
     const { POST } = await import("./route");
     const response = await POST(createWorkspaceRequest("orphan-workspace"));
 
@@ -71,7 +76,14 @@ describe("POST /api/workspaces", () => {
         message: "Workspace creation is restricted to this deployment's configured workspace.",
       },
     });
-    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(createWorkspace).toHaveBeenCalledWith({
+      kind: "user",
+      user: { id: "user-1" },
+    }, {
+      name: "Requested Workspace",
+      slug: "orphan-workspace",
+      description: null,
+    });
   });
 
   it("allows the configured workspace slug on dedicated customer deployments", async () => {

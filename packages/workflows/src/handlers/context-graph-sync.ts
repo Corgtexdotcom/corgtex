@@ -72,7 +72,7 @@ export async function handleContextGraphSync(
   workspaceId: string,
 ) {
   if (!payload.sourceType || !payload.sourceId) return;
-  const actor = contextGraphSystemActor();
+  const actor = contextGraphSystemActor(workspaceId);
 
   if (payload.sourceType === "MEETING") {
     await syncContextGraphForMeeting(actor, { workspaceId, meetingId: payload.sourceId });

@@ -1,4 +1,4 @@
-# Shadow-mode publisher for the `Review Snapshot Integrity` commit status.
+# Temporary transition publisher for the `Review Snapshot Integrity` status.
 # Trusted pull_request_target on the default branch only; never checks out,
 # fetches, interpolates, or executes pull-request-controlled content. The
 # separate read-only merge_group workflow is PR2 and intentionally absent here.

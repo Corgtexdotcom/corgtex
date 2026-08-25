@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 const resolveAgentActorFromBearerMock = vi.fn();
 const resolveMcpOAuthAccessTokenMock = vi.fn();
 const requireTrialMcpAccessMock = vi.fn();
+const requireWorkspaceMembershipMock = vi.fn();
 
 vi.mock("@corgtex/domain", () => {
   class AppError extends Error {
@@ -17,6 +18,7 @@ vi.mock("@corgtex/domain", () => {
     resolveAgentActorFromBearer: resolveAgentActorFromBearerMock,
     resolveMcpOAuthAccessToken: resolveMcpOAuthAccessTokenMock,
     requireTrialMcpAccess: requireTrialMcpAccessMock,
+    requireWorkspaceMembership: requireWorkspaceMembershipMock,
   };
 });
 
@@ -29,6 +31,7 @@ describe("authenticateMcpRequest", () => {
     resolveAgentActorFromBearerMock.mockReset();
     resolveMcpOAuthAccessTokenMock.mockReset();
     requireTrialMcpAccessMock.mockReset().mockResolvedValue(null);
+    requireWorkspaceMembershipMock.mockReset().mockResolvedValue(null);
   });
 
   it("resolves MCP OAuth bearer tokens with workspace, scopes, and instance binding", async () => {
@@ -50,6 +53,10 @@ describe("authenticateMcpRequest", () => {
     });
 
     expect(resolveMcpOAuthAccessTokenMock).toHaveBeenCalledWith("mcp_at_token", "https://mcp.corgtex.com/mcp");
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({
+      actor: expect.objectContaining({ kind: "user" }),
+      workspaceId: "ws-1",
+    });
     expect(requireTrialMcpAccessMock).toHaveBeenCalledWith("ws-1");
     expect(ctx).toMatchObject({
       authKind: "oauth",
@@ -60,6 +67,56 @@ describe("authenticateMcpRequest", () => {
       clientName: "Claude",
       providerKey: "claude",
     });
+  });
+
+  it("accepts a single-workspace agent credential and authorizes that exact workspace", async () => {
+    const actor = {
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "bootstrap-agent",
+      workspaceIds: ["ws-1"],
+    };
+    resolveAgentActorFromBearerMock.mockResolvedValue(actor);
+
+    const { authenticateMcpRequest } = await import("./auth");
+    await expect(authenticateMcpRequest("Bearer agent-token")).resolves.toMatchObject({
+      actor,
+      authKind: "agent",
+      workspaceId: "ws-1",
+    });
+    expect(requireWorkspaceMembershipMock).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
+  });
+
+  it("rejects an agent credential with no workspace scope", async () => {
+    resolveAgentActorFromBearerMock.mockResolvedValue({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "bootstrap-agent",
+      workspaceIds: [],
+    });
+
+    const { authenticateMcpRequest } = await import("./auth");
+    await expect(authenticateMcpRequest("Bearer agent-token")).rejects.toMatchObject({
+      status: 403,
+      code: "MCP_WORKSPACE_SCOPE_REQUIRED",
+    });
+    expect(requireWorkspaceMembershipMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a multi-workspace agent credential instead of choosing the first workspace", async () => {
+    resolveAgentActorFromBearerMock.mockResolvedValue({
+      kind: "agent",
+      authProvider: "bootstrap",
+      label: "bootstrap-agent",
+      workspaceIds: ["ws-1", "ws-2"],
+    });
+
+    const { authenticateMcpRequest } = await import("./auth");
+    await expect(authenticateMcpRequest("Bearer agent-token")).rejects.toMatchObject({
+      status: 403,
+      code: "MCP_WORKSPACE_SCOPE_REQUIRED",
+    });
+    expect(requireWorkspaceMembershipMock).not.toHaveBeenCalled();
   });
 
   it("enforces scopes for OAuth connector sessions", async () => {

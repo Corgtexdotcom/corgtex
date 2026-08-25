@@ -33,6 +33,7 @@ const returnTensionToDraft = vi.fn();
 const updateDeliberationEntry = vi.fn();
 const updateTension = vi.fn();
 const upvoteTension = vi.fn();
+const uploadWorkItemEvidenceDocument = vi.fn(async () => []);
 const revalidatePath = vi.fn();
 
 vi.mock("@/lib/demo-guard", () => ({
@@ -59,7 +60,7 @@ vi.mock("@corgtex/domain", () => ({
 }));
 
 vi.mock("../work-item-evidence-upload", () => ({
-  uploadWorkItemEvidenceDocument: vi.fn(async () => []),
+  uploadWorkItemEvidenceDocument,
 }));
 
 vi.mock("next/cache", () => ({
@@ -158,6 +159,7 @@ describe("tension server actions", () => {
     const formData = new FormData();
     formData.set("workspaceId", "workspace-1");
     formData.set("tensionId", "tension-1");
+    formData.set("expectedVersion", "15");
     formData.set("assigneeMemberId", "member-2");
     formData.set("priority", "3");
 
@@ -166,9 +168,80 @@ describe("tension server actions", () => {
     expect(updateTension).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       tensionId: "tension-1",
+      expectedVersion: 15,
       assigneeMemberId: "member-2",
       priority: 3,
     }));
+  });
+
+  it.each(["title", "bodyMd", "circleId", "assigneeMemberId", "raisedByMemberId", "proposalId", "priority"])(
+    "classifies Tension %s as content requiring an observed version",
+    async (field) => {
+      const { updateTensionAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("tensionId", "tension-1");
+      formData.set(field, "content-value");
+
+      await expect(updateTensionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateTension).not.toHaveBeenCalled();
+      expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "", "0", "-1", "1.5", "7x", "9007199254740992"])(
+    "rejects generic Tension content version %j before every side effect",
+    async (expectedVersion) => {
+      const { updateTensionAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("tensionId", "tension-1");
+      formData.set("title", "Content edit");
+      formData.set("status", "RESOLVED");
+      if (expectedVersion !== undefined) formData.set("expectedVersion", expectedVersion);
+
+      await expect(updateTensionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateTension).not.toHaveBeenCalled();
+      expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects mixed Tension content and resolution evidence before every side effect", async () => {
+    const { updateTensionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("expectedVersion", "7");
+    formData.set("title", "Content edit");
+    formData.set("status", "RESOLVED");
+    formData.set("evidenceFile", new File(["synthetic evidence"], "evidence.txt", { type: "text/plain" }));
+
+    await expect(updateTensionAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    expect(enforceDemoGuard).not.toHaveBeenCalled();
+    expect(requirePageActor).not.toHaveBeenCalled();
+    expect(updateTension).not.toHaveBeenCalled();
+    expect(uploadWorkItemEvidenceDocument).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("keeps Tension resolution-only updates unversioned", async () => {
+    const { updateTensionAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("tensionId", "tension-1");
+    formData.set("status", "RESOLVED");
+    formData.set("resolvedVia", "Synthetic evidence");
+
+    await updateTensionAction(formData);
+
+    expect(uploadWorkItemEvidenceDocument).toHaveBeenCalled();
+    expect(updateTension.mock.calls[0]?.[1]).not.toHaveProperty("expectedVersion");
   });
 
   it("creates selected-person input requests for open tensions", async () => {

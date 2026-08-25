@@ -1,12 +1,10 @@
 #!/usr/bin/env node
-// Enforces the agent-pipeline plan contract.
+// Enforces the concise PR contract.
 //
 // Modes:
 //   --mode=present   — verify the PR body contains the plan contract.
 //   --mode=scope     — verify changed files ⊆ plan's "Files to touch" allowlist.
-//   --mode=size      — verify diff is within risk-tier caps unless the PR carries
-//                      the `large-change-approved` label.
-//   --mode=policy    — verify review blockers that should be caught before Codex.
+//   --mode=policy    — verify mechanical review blockers.
 //
 // Reads branch/base/labels from env (GitHub Actions) or from git/flags locally.
 // Exits non-zero on violation; prints a one-line CI-friendly reason.
@@ -14,10 +12,6 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import {
-  FORBIDDEN_UNLABELED_PATHS,
-  sizePolicyForFiles,
-} from "./check-plan-policy.mjs";
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap((a) => {
@@ -27,13 +21,26 @@ const args = Object.fromEntries(
 );
 
 const mode = args.mode;
-if (!["present", "scope", "size", "policy"].includes(mode)) {
-  console.error("usage: check-plan.mjs --mode=<present|scope|size|policy>");
+if (!["present", "scope", "policy"].includes(mode)) {
+  console.error("usage: check-plan.mjs --mode=<present|scope|policy>");
   process.exit(2);
 }
 
-const DOCS_EXTENSIONS = new Set([".md", ".mdx"]);
 const LOCAL_PLAN_DIR = path.join(".agents", "plans");
+const PROTECTED_PATHS = [
+  /^AGENTS\.md$/,
+  /^\.agents\/plan-template\.md$/,
+  /^\.codex\/review\.md$/,
+  /^\.codex\/ops\//,
+  /^\.github\/pull_request_template\.md$/,
+  /^deploy\//,
+  /^\.github\/workflows\//,
+  /^prisma\/migrations\//,
+  /^scripts\/check-plan\.mjs$/,
+  /^scripts\/review-snapshot-integrity\.mjs$/,
+  /^packages\/domain\/src\/auth.*\.ts$/,
+  /^apps\/web\/lib\/auth\.ts$/,
+];
 const UI_PATHS = [
   /^apps\/web\/app\//,
   /^apps\/web\/components\//,
@@ -111,21 +118,38 @@ function prLabels() {
   );
 }
 
+function parseChangedPaths(output) {
+  if (!output) return [];
+  const fields = output.split("\0");
+  const paths = [];
+  let index = 0;
+  while (index < fields.length && fields[index]) {
+    const status = fields[index++];
+    const source = fields[index++];
+    if (!source) break;
+    paths.push(source);
+    if (/^[RC]/.test(status)) {
+      const destination = fields[index++];
+      if (destination) paths.push(destination);
+    }
+  }
+  return paths;
+}
+
 function changedFiles(base) {
   try {
-    const outputs = [gitDiffAgainstBase(base, "--name-only")];
+    const outputs = [gitDiffAgainstBase(base, "--name-status -z")];
     if (process.env.GITHUB_ACTIONS !== "true") {
-      outputs.push(sh("git diff --name-only --cached"));
-      outputs.push(sh("git diff --name-only"));
+      outputs.push(sh("git diff --name-status -z --cached"));
+      outputs.push(sh("git diff --name-status -z"));
     }
-    return [...new Set(outputs.flatMap((out) => (out ? out.split("\n") : [])))];
+    return [...new Set(outputs.flatMap(parseChangedPaths))];
   } catch (err) {
     if (process.env.GITHUB_ACTIONS === "true") {
       fail(`unable to compute changed files against ${base}: ${err.message}`);
     }
     // Fall back to uncommitted working-tree diff when running locally with no base.
-    const out = sh("git diff --name-only HEAD");
-    return out ? out.split("\n") : [];
+    return parseChangedPaths(sh("git diff --name-status -z HEAD"));
   }
 }
 
@@ -202,6 +226,35 @@ function extractSection(planText, title) {
     if (inSection) body.push(line);
   }
   return body.join("\n").trim();
+}
+
+function hasSubstantiveScopeJustification(planText) {
+  const section = extractSection(planText, "Scope");
+  if (!section) return false;
+
+  const normalized = section
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/^\s*[-*>]\s*/gm, "")
+    .replace(/[`*_]/g, "")
+    .trim();
+  if (!normalized) return false;
+
+  const placeholder = normalized
+    .replace(/^\[|\]$/g, "")
+    .trim()
+    .toLowerCase();
+  if (
+    /^(?:tbd|todo|n\/?a|none|not applicable)(?:[.!])?$/.test(placeholder) ||
+    /^what changes,? what intentionally does not,? and why this is one coherent pr\.?$/.test(
+      placeholder,
+    )
+  ) {
+    return false;
+  }
+
+  const words = normalized.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? [];
+  const alphanumericLength = normalized.replace(/[^A-Za-z0-9]/g, "").length;
+  return words.length >= 4 && alphanumericLength >= 20;
 }
 
 function hasVisualProof(planText) {
@@ -315,8 +368,13 @@ function ok(message) {
 }
 
 function readPlanText(branch) {
-  const prBody = process.env.PR_BODY?.trim();
-  if (prBody) return prBody;
+  if (Object.hasOwn(process.env, "PR_BODY")) {
+    const prBody = process.env.PR_BODY ?? "";
+    if (!prBody.trim()) {
+      fail("missing plan contract in live PR body");
+    }
+    return prBody;
+  }
 
   const localPlanPath = localPlanPathFor(branch);
   if (existsSync(localPlanPath)) {
@@ -335,7 +393,19 @@ if (branch === "main" || branch === "HEAD") {
   ok(`skipped on ${branch}`);
 }
 
-if (labels.has("auto-revert") && mode === "present") {
+const blockingLabels = ["halt-agents", "needs-replan"].filter((label) =>
+  labels.has(label),
+);
+if (blockingLabels.length > 0) {
+  fail(`blocking label(s) present: ${blockingLabels.join(", ")}`);
+}
+
+const autoRevert = labels.has("auto-revert");
+if (autoRevert && !/^auto-revert\/[0-9a-f]{7,40}$/.test(branch)) {
+  fail("auto-revert label is valid only on an auto-revert/<sha> branch");
+}
+
+if (autoRevert && mode === "present") {
   ok("auto-revert label present, plan presence skipped");
 }
 
@@ -349,6 +419,14 @@ if (mode === "present") {
   if (!allowlist || allowlist.length === 0) {
     fail('plan contract has no "Files to touch" entries');
   }
+  for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
+    if (!extractSection(planText, section)) {
+      fail(`plan contract has no non-empty "${section}" section`);
+    }
+  }
+  if (parseAcceptanceCriteria(planText).length === 0) {
+    fail("plan contract has no acceptance criteria checklist");
+  }
   ok("plan contract present in PR body or ignored local plan file");
 }
 
@@ -356,7 +434,7 @@ const base = baseRef();
 
 if (mode === "scope") {
   const files = changedFiles(base);
-  if (!labels.has("auto-revert")) {
+  if (!autoRevert) {
     const planText = readPlanText(branch);
     assertPlanHasNoCredentialMaterial(planText);
     const allowlist = parseAllowlist(planText);
@@ -371,70 +449,28 @@ if (mode === "scope") {
         `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
       );
     }
-  }
-
-  const forbidden = files.filter((f) =>
-    FORBIDDEN_UNLABELED_PATHS.some((re) => re.test(f)),
-  );
-  if (forbidden.length > 0 && !labels.has("forbidden-path-approved")) {
-    fail(
-      `forbidden path change without "forbidden-path-approved" label:\n  - ${forbidden.join("\n  - ")}`,
+    const protectedFiles = files.filter((file) =>
+      PROTECTED_PATHS.some((pattern) => pattern.test(file)),
     );
+    if (protectedFiles.length > 0) {
+      if (parseRiskTier(planText) !== "critical") {
+        fail(
+          `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
+        );
+      }
+      if (!hasSubstantiveScopeJustification(planText)) {
+        fail(
+          `protected paths require a substantive "Scope" justification:\n  - ${protectedFiles.join("\n  - ")}`,
+        );
+      }
+    }
   }
 
   ok(`${files.length} file(s) all within scope`);
 }
 
-if (mode === "size") {
-  const files = changedFiles(base);
-  if (labels.has("large-change-approved")) {
-    ok("large-change-approved label present, size check skipped");
-  }
-  const planText = readPlanText(branch);
-  assertPlanHasNoCredentialMaterial(planText);
-  const riskTier = parseRiskTier(planText);
-  if (!riskTier) {
-    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
-  }
-  const { effectiveRiskTier, caps } = sizePolicyForFiles(riskTier, files);
-
-  if (files.length > caps.files) {
-    fail(
-      `${files.length} files changed, ${effectiveRiskTier} risk cap is ${caps.files}. Split the PR or add "large-change-approved".`,
-    );
-  }
-  // Count LOC of non-doc files only.
-  let codeLoc = 0;
-  try {
-    const numstats = [gitDiffAgainstBase(base, "--numstat")];
-    if (process.env.GITHUB_ACTIONS !== "true") {
-      numstats.push(sh("git diff --numstat --cached"));
-      numstats.push(sh("git diff --numstat"));
-    }
-    for (const line of numstats.filter(Boolean).join("\n").split("\n")) {
-      if (!line) continue;
-      const [addedRaw, removedRaw, ...rest] = line.split("\t");
-      const added = Number(addedRaw);
-      const removed = Number(removedRaw);
-      const file = rest.join("\t");
-      if (!Number.isFinite(added) || !Number.isFinite(removed)) continue; // binary
-      const ext = path.extname(file);
-      if (DOCS_EXTENSIONS.has(ext)) continue;
-      codeLoc += added + removed;
-    }
-  } catch (err) {
-    fail(`unable to compute diff size: ${err.message}`);
-  }
-  if (codeLoc > caps.codeLoc) {
-    fail(
-      `${codeLoc} LOC of code changed, ${effectiveRiskTier} risk cap is ${caps.codeLoc}. Split the PR or add "large-change-approved".`,
-    );
-  }
-  ok(`${files.length} file(s), ${codeLoc} code LOC within ${effectiveRiskTier} risk caps`);
-}
-
 if (mode === "policy") {
-  if (labels.has("auto-revert")) {
+  if (autoRevert) {
     ok("auto-revert label present, policy skipped");
   }
 

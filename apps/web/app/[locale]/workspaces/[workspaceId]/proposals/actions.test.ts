@@ -212,6 +212,7 @@ describe("proposal server actions", () => {
     const formData = new FormData();
     formData.set("workspaceId", "workspace-1");
     formData.set("proposalId", "proposal-1");
+    formData.set("expectedVersion", "13");
     formData.set("title", "Clarify approval policy");
     formData.set("bodyMd", "Long proposal body");
     formData.set("ownerMemberId", "member-owner");
@@ -222,9 +223,80 @@ describe("proposal server actions", () => {
     expect(updateProposal).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       proposalId: "proposal-1",
+      expectedVersion: 13,
       ownerMemberId: "member-owner",
       includeAiSummary: false,
     }));
+  });
+
+  it.each(["title", "summary", "bodyMd", "priority", "circleId", "ownerMemberId", "includeAiSummaryRendered"])(
+    "classifies Proposal %s as content requiring an observed version",
+    async (field) => {
+      const { updateProposalAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("proposalId", "proposal-1");
+      formData.set(field, "content-value");
+
+      await expect(updateProposalAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateProposal).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "", "0", "-1", "1.5", "11x", "9007199254740992"])(
+    "rejects generic Proposal content version %j before every side effect",
+    async (expectedVersion) => {
+      const { updateProposalAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("proposalId", "proposal-1");
+      formData.set("title", "Content edit");
+      if (expectedVersion !== undefined) formData.set("expectedVersion", expectedVersion);
+
+      await expect(updateProposalAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateProposal).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, "", "0", "-1", "1.5", "11x", "9007199254740992"])(
+    "rejects Proposal AI-summary toggle version %j before every side effect",
+    async (expectedVersion) => {
+      const { updateProposalAction } = await import("./actions");
+      const formData = new FormData();
+      formData.set("workspaceId", "workspace-1");
+      formData.set("proposalId", "proposal-1");
+      formData.set("includeAiSummaryRendered", "1");
+      if (expectedVersion !== undefined) formData.set("expectedVersion", expectedVersion);
+
+      await expect(updateProposalAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      expect(enforceDemoGuard).not.toHaveBeenCalled();
+      expect(requirePageActor).not.toHaveBeenCalled();
+      expect(updateProposal).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    },
+  );
+
+  it("forwards the exact version for an AI-summary toggle-only update", async () => {
+    const { updateProposalAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("proposalId", "proposal-1");
+    formData.set("expectedVersion", "17");
+    formData.set("includeAiSummaryRendered", "1");
+
+    await updateProposalAction(formData);
+
+    expect(updateProposal).toHaveBeenCalledTimes(1);
+    expect(updateProposal.mock.calls[0]?.[1]).toMatchObject({
+      expectedVersion: 17,
+      includeAiSummary: false,
+    });
   });
 
   it("creates a generic proposal advice request for selected members", async () => {

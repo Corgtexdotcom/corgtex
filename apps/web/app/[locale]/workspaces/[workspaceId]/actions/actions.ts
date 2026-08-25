@@ -22,6 +22,7 @@ import {
 import type { AdviceRequestAudienceType, AdviceRequestPreferredChannel } from "@prisma/client";
 import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
 import { uploadWorkItemEvidenceDocument } from "../work-item-evidence-upload";
+import { redirect } from "next/navigation";
 
 function asStringArray(formData: FormData, key: string) {
   return formData.getAll(key).map((value) => String(value).trim()).filter(Boolean);
@@ -30,6 +31,22 @@ function asStringArray(formData: FormData, key: string) {
 function asOptionalDate(formData: FormData, key: string) {
   const value = asOptional(formData, key);
   return value ? new Date(value) : null;
+}
+
+const ACTION_CONTENT_FIELDS = [
+  "title",
+  "bodyMd",
+  "priority",
+  "circleId",
+  "assigneeMemberId",
+  "dueAt",
+  "proposalId",
+] as const;
+
+function actionContentExpectedVersion(formData: FormData) {
+  return ACTION_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
 }
 
 function expectedVersionFromForm(formData: FormData) {
@@ -42,6 +59,11 @@ function expectedVersionFromForm(formData: FormData) {
     throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
   }
   return expectedVersion;
+}
+
+function hasEvidenceFile(formData: FormData) {
+  const evidenceFile = formData.get("evidenceFile");
+  return evidenceFile instanceof File && evidenceFile.size > 0;
 }
 
 export async function createActionAction(formData: FormData) {
@@ -65,13 +87,17 @@ export async function createActionAction(formData: FormData) {
 }
 
 export async function updateActionAction(formData: FormData) {
+  const expectedVersion = actionContentExpectedVersion(formData);
+  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED" | null;
+  if (expectedVersion !== undefined && status === "COMPLETED" && hasEvidenceFile(formData)) {
+    throw new AppError(400, "INVALID_INPUT", "Submit content edits and completion evidence separately.");
+  }
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   const actionId = asString(formData, "actionId");
-  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "IN_PROGRESS" | "COMPLETED" | null;
   const evidenceDocumentIds = status === "COMPLETED"
     ? await uploadWorkItemEvidenceDocument(actor, {
       workspaceId,
@@ -81,18 +107,26 @@ export async function updateActionAction(formData: FormData) {
       purpose: "completion_evidence",
     })
     : [];
-  await updateAction(actor, {
-    workspaceId,
-    actionId,
-    title: asOptional(formData, "title") ?? undefined,
-    bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
-    assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
-    dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
-    priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
-    status: status ?? undefined,
-    completedVia: asOptional(formData, "completedVia") ?? undefined,
-    evidenceDocumentIds,
-  });
+  try {
+    await updateAction(actor, {
+      workspaceId,
+      actionId,
+      ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      title: asOptional(formData, "title") ?? undefined,
+      bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
+      assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
+      dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
+      priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
+      status: status ?? undefined,
+      completedVia: asOptional(formData, "completedVia") ?? undefined,
+      evidenceDocumentIds,
+    });
+  } catch (error) {
+    if (expectedVersion !== undefined && error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      redirect(`/workspaces/${workspaceId}/actions?versionConflict=${encodeURIComponent(actionId)}`);
+    }
+    throw error;
+  }
   refresh(workspaceId);
 }
 

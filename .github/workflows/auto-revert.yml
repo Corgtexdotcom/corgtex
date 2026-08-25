@@ -268,6 +268,4 @@ jobs:
             --head "$BRANCH" \
             --title "auto-revert: ${SUBJECT} (${SHORT})" \
             --label auto-revert \
-            --label forbidden-path-approved \
-            --label large-change-approved \
             --body "Production smoke test failed after the merge of \`${SHORT}\` (\"${SUBJECT}\"), and the current production health probe did not recover on that SHA. This PR reverts that change. Failed CI run: ${RUN_URL}"

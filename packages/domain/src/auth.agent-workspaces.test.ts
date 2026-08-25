@@ -1,15 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const findMany = vi.fn();
-const parseAllowedWorkspaceIds = vi.fn(() => new Set<string>());
 
 vi.mock("@corgtex/shared", () => ({
+  env: { DEPLOYMENT_WORKSPACE_SCOPE_SLUG: undefined },
   prisma: {
     workspace: {
       findMany,
     },
   },
-  parseAllowedWorkspaceIds,
   hashPassword: vi.fn(),
   randomOpaqueToken: vi.fn(),
   sha256: vi.fn(),
@@ -19,12 +18,10 @@ vi.mock("@corgtex/shared", () => ({
 afterEach(() => {
   vi.clearAllMocks();
   vi.resetModules();
-  parseAllowedWorkspaceIds.mockReturnValue(new Set<string>());
 });
 
 describe("listActorWorkspaces", () => {
   it("uses authenticated agent workspaceIds before the global allowlist", async () => {
-    parseAllowedWorkspaceIds.mockReturnValue(new Set(["env-ws"]));
     findMany.mockResolvedValue([]);
 
     const { listActorWorkspaces } = await import("./auth");
@@ -43,22 +40,19 @@ describe("listActorWorkspaces", () => {
     }));
   });
 
-  it("falls back to the env allowlist when the agent has no explicit workspaceIds", async () => {
-    parseAllowedWorkspaceIds.mockReturnValue(new Set(["env-ws"]));
+  it("does not fall back to ambient configuration when the authenticated actor is unscoped", async () => {
     findMany.mockResolvedValue([]);
 
     const { listActorWorkspaces } = await import("./auth");
 
-    await listActorWorkspaces({
+    await expect(listActorWorkspaces({
       kind: "agent",
       authProvider: "bootstrap",
       label: "bootstrap-agent",
       workspaceIds: [],
-    });
+    })).resolves.toEqual([]);
 
-    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: { in: ["env-ws"] } },
-    }));
+    expect(findMany).not.toHaveBeenCalled();
   });
 
   it("lists every workspace for global operators", async () => {

@@ -31,6 +31,22 @@ function asOptionalDate(formData: FormData, key: string) {
   return value ? new Date(value) : null;
 }
 
+const TENSION_CONTENT_FIELDS = [
+  "title",
+  "bodyMd",
+  "circleId",
+  "assigneeMemberId",
+  "raisedByMemberId",
+  "proposalId",
+  "priority",
+] as const;
+
+function tensionContentExpectedVersion(formData: FormData) {
+  return TENSION_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
+}
+
 function expectedVersionFromForm(formData: FormData) {
   const value = asString(formData, "expectedVersion");
   if (!/^[1-9]\d*$/.test(value)) {
@@ -41,6 +57,11 @@ function expectedVersionFromForm(formData: FormData) {
     throw new AppError(400, "INVALID_INPUT", "Expected version must be a positive integer.");
   }
   return expectedVersion;
+}
+
+function hasEvidenceFile(formData: FormData) {
+  const evidenceFile = formData.get("evidenceFile");
+  return evidenceFile instanceof File && evidenceFile.size > 0;
 }
 
 export async function createTensionAction(formData: FormData) {
@@ -102,13 +123,17 @@ export async function createProposalFromTensionAction(formData: FormData) {
 }
 
 export async function updateTensionAction(formData: FormData) {
+  const expectedVersion = tensionContentExpectedVersion(formData);
+  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null;
+  if (expectedVersion !== undefined && status === "RESOLVED" && hasEvidenceFile(formData)) {
+    throw new AppError(400, "INVALID_INPUT", "Submit content edits and resolution evidence separately.");
+  }
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   const tensionId = asString(formData, "tensionId");
-  const status = asOptional(formData, "status") as "DRAFT" | "OPEN" | "RESOLVED" | null;
   const evidenceDocumentIds = status === "RESOLVED"
     ? await uploadWorkItemEvidenceDocument(actor, {
       workspaceId,
@@ -121,6 +146,7 @@ export async function updateTensionAction(formData: FormData) {
   await updateTension(actor, {
     workspaceId,
     tensionId,
+    ...(expectedVersion !== undefined ? { expectedVersion } : {}),
     title: asOptional(formData, "title") ?? undefined,
     bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
     status: status ?? undefined,

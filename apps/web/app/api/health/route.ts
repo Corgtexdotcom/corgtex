@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { prisma, resolveReleaseMetadata } from "@corgtex/shared";
+import { env, prisma, resolveReleaseMetadata } from "@corgtex/shared";
 import {
   resolveAzureBlobStorageRuntimeConfig,
   resolveStorageProviderName,
@@ -36,10 +36,19 @@ function runtimeFingerprint() {
   const storageConfigured = resolveStorageProviderName() === "azure_blob"
     ? resolveAzureBlobStorageRuntimeConfig().configured
     : resolveStorageRuntimeConfig().configured;
+  let workspaceScopeSlug: string | null = null;
+  let workspaceScopeValid = true;
+  try {
+    workspaceScopeSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG ?? null;
+  } catch {
+    workspaceScopeValid = false;
+  }
 
   return {
     redis: process.env.REDIS_URL ? "configured" : "missing",
     storage: storageConfigured ? "configured" : "missing",
+    workspaceScopeSlug,
+    workspaceScopeValid,
   };
 }
 
@@ -133,6 +142,20 @@ export async function GET() {
       );
     }
 
+    const runtime = runtimeFingerprint();
+    if (!runtime.workspaceScopeValid) {
+      return NextResponse.json({
+        status: "degraded",
+        service: "web",
+        database: "up",
+        schema: "ready",
+        app: "corgtex",
+        auth: "password-session",
+        release: releaseFingerprint(),
+        runtime,
+      }, { status: 503 });
+    }
+
     return NextResponse.json({
       status: "ok",
       service: "web",
@@ -141,7 +164,7 @@ export async function GET() {
       app: "corgtex",
       auth: "password-session",
       release: releaseFingerprint(),
-      runtime: runtimeFingerprint(),
+      runtime,
       loginPath: "/login",
       apiLoginPath: "/api/auth/login",
     });

@@ -1,10 +1,32 @@
-import type { MemberRole } from "@prisma/client";
-import { env, prisma, hashPassword, parseAllowedWorkspaceIds, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
+import type { MemberRole, Prisma } from "@prisma/client";
+import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { systemActorMemberIdentityWhere } from "./member-identity";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
+
+async function requireDeploymentWorkspaceScope(workspaceId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
+  const workspaceSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
+  if (!workspaceSlug) {
+    return;
+  }
+
+  const scopedWorkspace = await db.workspace.findFirst({
+    where: {
+      id: workspaceId,
+      slug: workspaceSlug,
+    },
+    select: { id: true },
+  });
+
+  invariant(
+    scopedWorkspace,
+    403,
+    "WORKSPACE_SCOPE_MISMATCH",
+    "This deployment is restricted to its configured workspace.",
+  );
+}
 export async function loginUserWithPassword(params: {
   email: string;
   password: string;
@@ -151,22 +173,17 @@ export async function requireWorkspaceMembership(params: {
   workspaceId: string;
   allowedRoles?: MemberRole[];
   resolvedMembership?: MembershipSummary | null;
+  tx?: Prisma.TransactionClient;
 }) {
-  if (params.resolvedMembership !== undefined) {
-    if (params.allowedRoles && params.allowedRoles.length > 0) {
-      if (!params.resolvedMembership || !params.allowedRoles.includes(params.resolvedMembership.role as MemberRole)) {
-        throw new AppError(403, "FORBIDDEN", "Insufficient permissions.");
-      }
-    }
-    invariant(params.resolvedMembership?.isActive, 403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
-    return params.resolvedMembership;
-  }
+  const db = params.tx ?? prisma;
+  await requireDeploymentWorkspaceScope(params.workspaceId, db);
 
   if (params.actor.kind === "agent") {
-    const allowed = params.actor.workspaceIds?.length
-      ? new Set(params.actor.workspaceIds)
-      : parseAllowedWorkspaceIds();
-    if (allowed.size > 0 && !allowed.has(params.workspaceId)) {
+    const allowed = new Set(params.actor.workspaceIds ?? []);
+    if (allowed.size === 0) {
+      throw new AppError(403, "AGENT_WORKSPACE_SCOPE_REQUIRED", "Agent is not scoped to any workspace.");
+    }
+    if (!allowed.has(params.workspaceId)) {
       throw new AppError(403, "FORBIDDEN", "Agent is not allowed for this workspace.");
     }
     if (params.allowedRoles && params.allowedRoles.length > 0) {
@@ -175,6 +192,16 @@ export async function requireWorkspaceMembership(params: {
       }
     }
     return null;
+  }
+
+  if (params.resolvedMembership !== undefined) {
+    if (params.allowedRoles && params.allowedRoles.length > 0) {
+      if (!params.resolvedMembership || !params.allowedRoles.includes(params.resolvedMembership.role as MemberRole)) {
+        throw new AppError(403, "FORBIDDEN", "Insufficient permissions.");
+      }
+    }
+    invariant(params.resolvedMembership?.isActive, 403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
+    return params.resolvedMembership;
   }
 
   if (isGlobalOperator(params.actor)) {
@@ -187,7 +214,7 @@ export async function requireWorkspaceMembership(params: {
     } as MembershipSummary;
   }
 
-  const membership = await prisma.member.findUnique({
+  const membership = await db.member.findUnique({
     where: {
       workspaceId_userId: {
         workspaceId: params.workspaceId,
@@ -249,12 +276,18 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
 }
 
 export async function listActorWorkspaces(actor: AppActor) {
+  const deploymentSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
+
   if (actor.kind === "agent") {
-    const allowed = actor.workspaceIds?.length
-      ? new Set(actor.workspaceIds)
-      : parseAllowedWorkspaceIds();
+    const allowed = new Set(actor.workspaceIds ?? []);
+    if (allowed.size === 0) {
+      return [];
+    }
     return prisma.workspace.findMany({
-      where: allowed.size > 0 ? { id: { in: [...allowed] } } : undefined,
+      where: {
+        id: { in: [...allowed] },
+        ...(deploymentSlug ? { slug: deploymentSlug } : {}),
+      },
       select: {
         id: true,
         slug: true,
@@ -267,6 +300,7 @@ export async function listActorWorkspaces(actor: AppActor) {
 
   if (isGlobalOperator(actor)) {
     return prisma.workspace.findMany({
+      where: deploymentSlug ? { slug: deploymentSlug } : undefined,
       select: {
         id: true,
         slug: true,
@@ -279,6 +313,7 @@ export async function listActorWorkspaces(actor: AppActor) {
 
   return prisma.workspace.findMany({
     where: {
+      ...(deploymentSlug ? { slug: deploymentSlug } : {}),
       members: {
         some: {
           userId: actor.user.id,

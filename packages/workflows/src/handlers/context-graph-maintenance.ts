@@ -23,7 +23,7 @@ export async function handleContextGraphStalenessSweep(
   payload: StalenessSweepPayload,
   workspaceId: string,
 ) {
-  return markStaleContextGraphFacts(contextGraphSystemActor(), {
+  return markStaleContextGraphFacts(contextGraphSystemActor(workspaceId), {
     workspaceId,
     staleAfterDays: configuredStaleAfterDays(payload),
   });
