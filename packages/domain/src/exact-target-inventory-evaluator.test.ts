@@ -21,11 +21,39 @@ const expiresAt = "2026-08-26T12:00:00.000Z";
 let proofCounter = 0;
 
 const proofDigest = (seed: string) => `sha256:${createHash("sha256").update(seed).digest("hex")}`;
+const uuid = (index: number) => `00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`;
+const canonicalJson = (value: unknown): string => {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+};
+const topology = (components: any[]) => {
+  const normalized = components.map((component) => ({
+    componentId: component.componentId,
+    kind: component.kind,
+    required: component.required,
+    dependencies: component.dependencies.map((dependency: any) => ({
+      componentId: dependency.componentId,
+      kind: dependency.kind,
+    })).sort((a: any, b: any) => a.componentId.localeCompare(b.componentId)),
+    rollback: component.rollback === undefined ? null : {
+      strategy: component.rollback.strategy,
+      predecessorRef: component.rollback.predecessorRef,
+    },
+  })).sort((a, b) => a.componentId.localeCompare(b.componentId));
+  return {
+    topologyDigest: `sha256:${createHash("sha256").update(canonicalJson(normalized)).digest("hex")}`,
+    componentCount: components.length,
+    dependencyCount: components.reduce((count, component) => count + component.dependencies.length, 0),
+    rollbackCount: components.reduce((count, component) => count + (component.rollback === undefined ? 0 : 1), 0),
+  };
+};
 
 const claim = (owner: string, kind: string, purpose: string) => {
   proofCounter += 1;
   const seed = `${owner}-${kind}-${purpose}-${proofCounter}`;
-  const fileSeed = seed.toLowerCase();
+  const fileSeed = seed.toLowerCase().replaceAll(/[^a-z0-9-]/g, "-");
   return {
     kind,
     owner,
@@ -47,38 +75,47 @@ const claim = (owner: string, kind: string, purpose: string) => {
 };
 
 const target = (targetId: string, componentPrefix: string) => {
-  const appComponent = `${componentPrefix}-app`;
-  const dbComponent = `${componentPrefix}-db`;
+  const seed = exactTargetInventoryWorkloadClasses.indexOf(componentPrefix as ExactTargetInventoryWorkloadClass) + 1;
+  const appComponent = uuid(seed * 10 + 1);
+  const dbComponent = uuid(seed * 10 + 2);
+  const components = [
+    {
+      componentId: appComponent,
+      kind: "WEB_APP",
+      required: true,
+      dependencies: [{
+        componentId: dbComponent,
+        kind: "DATABASE",
+        claim: claim(`${appComponent}->${dbComponent}`, "DEPENDENCY", "component-dependency"),
+      }],
+      rollback: {
+        strategy: "PREVIOUS_IMAGE",
+        predecessorRef: appComponent,
+        claim: claim(`${appComponent}->${appComponent}`, "ROLLBACK", "component-rollback"),
+      },
+    },
+    {
+      componentId: dbComponent,
+      kind: "DATABASE",
+      required: true,
+      dependencies: [],
+      rollback: {
+        strategy: "RESTORE_SNAPSHOT",
+        predecessorRef: dbComponent,
+        claim: claim(`${dbComponent}->${dbComponent}`, "ROLLBACK", "component-rollback"),
+      },
+    },
+  ];
   return {
     targetId,
     lifecycleClaim: claim(targetId, "LIFECYCLE", "target-lifecycle"),
     authorityClaim: claim(targetId, "AUTHORITY", "target-authority"),
-    completenessClaim: claim(targetId, "COMPLETENESS", "target-completeness"),
+    completenessClaim: {
+      ...claim(targetId, "COMPLETENESS", "target-completeness"),
+      ...topology(components),
+    },
     policyClaim: claim(targetId, "POLICY", "target-policy"),
-    components: [
-      {
-        componentId: appComponent,
-        kind: "WEB_APP",
-        required: true,
-        dependencies: [{ componentId: dbComponent, kind: "DATABASE" }],
-        rollback: {
-          strategy: "PREVIOUS_IMAGE",
-          predecessorRef: `${componentPrefix}-prev`,
-          claim: claim(appComponent, "ROLLBACK", "component-rollback"),
-        },
-      },
-      {
-        componentId: dbComponent,
-        kind: "DATABASE",
-        required: true,
-        dependencies: [],
-        rollback: {
-          strategy: "RESTORE_SNAPSHOT",
-          predecessorRef: `${componentPrefix}-snap`,
-          claim: claim(dbComponent, "ROLLBACK", "component-rollback"),
-        },
-      },
-    ],
+    components,
   };
 };
 
@@ -103,7 +140,7 @@ const fixture = (): ExactTargetInventoryDocument => {
   proofCounter = 0;
   return {
     schemaVersion: "2.0.0",
-    inventoryId: "p0-05-v2",
+    inventoryId: uuid(1),
     generatedAt,
     classes: exactTargetInventoryWorkloadClasses.map((workloadClass) => {
       const disposition = dispositions.get(workloadClass) ?? "BLOCKED";
@@ -113,7 +150,7 @@ const fixture = (): ExactTargetInventoryDocument => {
         workloadClass,
         disposition,
         rootClaim: claim(classOwner, "AUTHORITY", "target-authority"),
-        targets: selectable ? [target(`${workloadClass.toLowerCase().replaceAll("_", "-")}-target`, workloadClass.toLowerCase().replaceAll("_", "-"))] : [],
+        targets: selectable ? [target(uuid((exactTargetInventoryWorkloadClasses.indexOf(workloadClass) + 1) * 100), workloadClass)] : [],
       };
     }),
   } as ExactTargetInventoryDocument;
@@ -232,7 +269,11 @@ describe("exact target inventory evaluator", () => {
     }, "DEPENDENCY_INVALID");
     expectOracle("dependency cycle", (value) => {
       const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
-      if (coreWeb) coreWeb.targets[0].components[1].dependencies = [{ componentId: "core-web-app", kind: "WEB_APP" }] as never;
+      if (coreWeb) coreWeb.targets[0].components[1].dependencies = [{
+        componentId: coreWeb.targets[0].components[0].componentId,
+        kind: "WEB_APP",
+        claim: claim(`${coreWeb.targets[0].components[1].componentId}->${coreWeb.targets[0].components[0].componentId}`, "DEPENDENCY", "component-dependency"),
+      }] as never;
       return value;
     }, "DEPENDENCY_CYCLE");
     expectOracle("missing rollback", (value) => {
@@ -242,11 +283,63 @@ describe("exact target inventory evaluator", () => {
     }, "ROLLBACK_INVALID");
     expectOracle("ambiguous class selection", (value) => {
       const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
-      if (coreWeb) coreWeb.targets = [...coreWeb.targets, target("core-web-second", "core-web-two")] as never;
+      if (coreWeb) coreWeb.targets = [...coreWeb.targets, target(uuid(1002), "CORE_WEB")] as never;
       return value;
     }, "TARGET_CARDINALITY_INVALID");
     expectOracle("blocked authority class", (value) => value, "CLASS_BLOCKED", "ACTIVE_CLIENT_AUTHORITY_UNPROVEN");
     expectOracle("retirement always blocked", (value) => value, "RETIREMENT_BLOCKED", "DUPLICATE_AZURE");
+    expectOracle("fixed disposition cannot be overridden", (value) => {
+      const duplicate = value.classes.find((item: any) => item.workloadClass === "DUPLICATE_AZURE");
+      if (duplicate) {
+        duplicate.disposition = "SELECTABLE";
+        duplicate.targets = [target(uuid(998), "DUPLICATE_AZURE")];
+      }
+      return value;
+    }, "DISPOSITION_MISMATCH", "DUPLICATE_AZURE");
+    expectOracle("dependency proof is required", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) delete coreWeb.targets[0].components[0].dependencies[0].claim;
+      return value;
+    }, "UNKNOWN_KEY");
+    expectOracle("dependency endpoint kind must match", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components[0].dependencies[0].kind = "QUEUE";
+      return value;
+    }, "DEPENDENCY_INVALID");
+    expectOracle("completeness binds normalized topology", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components.push({
+        componentId: uuid(999),
+        kind: "QUEUE",
+        required: false,
+        dependencies: [],
+      });
+      return value;
+    }, "PROOF_INVALID");
+    expectOracle("optional rollback data cannot bypass validation", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components.push({
+        componentId: uuid(1000),
+        kind: "QUEUE",
+        required: false,
+        dependencies: [],
+        rollback: { strategy: "RESTORE_SNAPSHOT", predecessorRef: uuid(1000), claim: { invalid: true } },
+      });
+      return value;
+    }, "ROLLBACK_INVALID");
+    expectOracle("rollback predecessor must resolve", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components[0].rollback.predecessorRef = uuid(1001);
+      return value;
+    }, "ROLLBACK_INVALID");
+    expectOracle("slug ids are rejected", (value) => {
+      value.inventoryId = "p0-05-v2";
+      return value;
+    }, "TYPE_MISMATCH");
+    expectOracle("evidence traversal is rejected", (value) => {
+      value.classes[0].rootClaim.proof.artifact.path = "evidence/a/../../private.json";
+      return value;
+    }, "INVALID_VALUE");
   });
 
   it("sanitizes hostile non-string and oversize input without reflection or raw values", () => {

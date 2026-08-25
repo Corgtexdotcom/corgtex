@@ -11,6 +11,7 @@ import {
   exactTargetInventoryClaimKinds,
   exactTargetInventoryComponentKinds,
   exactTargetInventoryProofPurposes,
+  exactTargetInventoryRequiredDispositions,
   exactTargetInventoryUseSiteProofRequirements,
   exactTargetInventoryWorkloadClasses,
   type ExactTargetInventoryArtifactIdentity,
@@ -18,6 +19,7 @@ import {
   type ExactTargetInventoryClassProjection,
   type ExactTargetInventoryClaim,
   type ExactTargetInventoryComponent,
+  type ExactTargetInventoryCompletenessClaim,
   type ExactTargetInventoryDependency,
   type ExactTargetInventoryDocument,
   type ExactTargetInventoryEvaluationOptions,
@@ -32,6 +34,12 @@ import {
 } from "./exact-target-inventory-contract";
 
 type MutableIssue = ExactTargetInventoryIssue;
+type TargetTopology = {
+  readonly digest: string;
+  readonly componentCount: number;
+  readonly dependencyCount: number;
+  readonly rollbackCount: number;
+};
 
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
   const actual = Object.keys(value);
@@ -45,10 +53,15 @@ const enumHas = <T extends readonly string[]>(values: T, value: unknown): value 
   typeof value === "string" && values.includes(value);
 
 const boundedId = (value: unknown): value is string =>
+  typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+
+const boundedSlug = (value: unknown): value is string =>
   typeof value === "string" && /^[a-z0-9][a-z0-9-]{2,63}$/.test(value);
 
-const boundedPath = (value: unknown): value is string =>
-  typeof value === "string" && /^evidence\/[a-z0-9][a-z0-9./-]{2,120}\.json$/.test(value);
+const boundedPath = (value: unknown): value is string => {
+  if (typeof value !== "string" || !/^evidence\/[a-z0-9][a-z0-9./-]{2,120}\.json$/.test(value)) return false;
+  return value.split("/").every((segment) => segment !== "." && segment !== ".." && segment.length > 0);
+};
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -157,6 +170,28 @@ const canonicalJson = (value: unknown): string => {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 };
 
+const targetTopology = (components: readonly ExactTargetInventoryComponent[]): TargetTopology => {
+  const normalized = components.map((component) => ({
+    componentId: component.componentId,
+    kind: component.kind,
+    required: component.required,
+    dependencies: component.dependencies.map((dependency) => ({
+      componentId: dependency.componentId,
+      kind: dependency.kind,
+    })).sort((a, b) => a.componentId.localeCompare(b.componentId)),
+    rollback: component.rollback === undefined ? null : {
+      strategy: component.rollback.strategy,
+      predecessorRef: component.rollback.predecessorRef,
+    },
+  })).sort((a, b) => a.componentId.localeCompare(b.componentId));
+  return {
+    digest: `sha256:${digest(canonicalJson(normalized))}`,
+    componentCount: components.length,
+    dependencyCount: components.reduce((count, component) => count + component.dependencies.length, 0),
+    rollbackCount: components.reduce((count, component) => count + (component.rollback === undefined ? 0 : 1), 0),
+  };
+};
+
 const depthOf = (value: unknown, depth = 0): number => {
   if (depth > EXACT_TARGET_INVENTORY_MAX_DEPTH) return depth;
   if (value === null || typeof value !== "object") return depth;
@@ -245,8 +280,38 @@ class Reader {
     return { kind: claimKind, owner, assertedAt: value.assertedAt, proof };
   }
 
-  public dependency(value: unknown): ExactTargetInventoryDependency | null {
-    if (!isRecord(value) || !exactKeys(value, ["componentId", "kind"])) {
+  public completenessClaim(value: unknown, owner: string, topology: TargetTopology): ExactTargetInventoryCompletenessClaim | null {
+    if (!isRecord(value) || !exactKeys(value, ["kind", "owner", "assertedAt", "proof", "topologyDigest", "componentCount", "dependencyCount", "rollbackCount"])) {
+      this.add("UNKNOWN_KEY", "proof");
+      return null;
+    }
+    const claim = this.claim(
+      {
+        kind: value.kind,
+        owner: value.owner,
+        assertedAt: value.assertedAt,
+        proof: value.proof,
+      },
+      owner,
+      "COMPLETENESS",
+      exactTargetInventoryUseSiteProofRequirements.completenessClaim.purpose,
+    );
+    if (claim === null || value.topologyDigest !== topology.digest || value.componentCount !== topology.componentCount
+      || value.dependencyCount !== topology.dependencyCount || value.rollbackCount !== topology.rollbackCount) {
+      this.add("PROOF_INVALID", "proof");
+      return null;
+    }
+    return {
+      ...claim,
+      topologyDigest: value.topologyDigest,
+      componentCount: value.componentCount,
+      dependencyCount: value.dependencyCount,
+      rollbackCount: value.rollbackCount,
+    };
+  }
+
+  public dependency(value: unknown, owner: string): ExactTargetInventoryDependency | null {
+    if (!isRecord(value) || !exactKeys(value, ["componentId", "kind", "claim"])) {
       this.add("UNKNOWN_KEY", "component");
       return null;
     }
@@ -254,7 +319,9 @@ class Reader {
       this.add("DEPENDENCY_INVALID", "component");
       return null;
     }
-    return { componentId: value.componentId, kind: value.kind };
+    const claim = this.claim(value.claim, owner, "DEPENDENCY", exactTargetInventoryUseSiteProofRequirements.dependencyClaim.purpose);
+    if (claim === null) return null;
+    return { componentId: value.componentId, kind: value.kind, claim };
   }
 
   public rollback(value: unknown, owner: string): ExactTargetInventoryRollback | null {
@@ -266,7 +333,7 @@ class Reader {
       this.add("ROLLBACK_INVALID", "component");
       return null;
     }
-    const claim = this.claim(value.claim, owner, "ROLLBACK", exactTargetInventoryUseSiteProofRequirements.rollbackClaim.purpose);
+    const claim = this.claim(value.claim, `${owner}->${value.predecessorRef}`, "ROLLBACK", exactTargetInventoryUseSiteProofRequirements.rollbackClaim.purpose);
     if (claim === null) return null;
     return { strategy: value.strategy as ExactTargetInventoryRollback["strategy"], predecessorRef: value.predecessorRef, claim };
   }
@@ -284,9 +351,10 @@ class Reader {
     if (this.componentIds.has(value.componentId)) this.add("COMPONENT_TOPOLOGY_INVALID", "component");
     this.componentIds.add(value.componentId);
     if (value.dependencies.length > EXACT_TARGET_INVENTORY_MAX_DEPENDENCIES_PER_COMPONENT) this.add("LIMIT_EXCEEDED", "component");
-    const dependencies = value.dependencies.map((item) => this.dependency(item)).filter((item): item is ExactTargetInventoryDependency => item !== null);
-    const rollback = value.required ? this.rollback(value.rollback, value.componentId) : undefined;
-    if (value.required && rollback === null) this.add("ROLLBACK_INVALID", "component");
+    const dependencies = value.dependencies.map((item) => this.dependency(item, `${value.componentId}->${isRecord(item) && typeof item.componentId === "string" ? item.componentId : "invalid"}`)).filter((item): item is ExactTargetInventoryDependency => item !== null);
+    const rollback = Object.hasOwn(value, "rollback") ? this.rollback(value.rollback, value.componentId) : undefined;
+    if (value.required && rollback === undefined) this.add("ROLLBACK_INVALID", "component");
+    if (rollback === null) this.add("ROLLBACK_INVALID", "component");
     return {
       componentId: value.componentId,
       kind: value.kind,
@@ -308,12 +376,13 @@ class Reader {
     if (this.targetIds.has(value.targetId)) this.add("TARGET_IDENTITY_REUSED", "target");
     this.targetIds.add(value.targetId);
     if (value.components.length === 0 || value.components.length > EXACT_TARGET_INVENTORY_MAX_COMPONENTS_PER_TARGET) this.add("LIMIT_EXCEEDED", "target");
-    const lifecycleClaim = this.claim(value.lifecycleClaim, value.targetId, "LIFECYCLE", exactTargetInventoryUseSiteProofRequirements.lifecycleClaim.purpose);
-    const authorityClaim = this.claim(value.authorityClaim, value.targetId, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
-    const completenessClaim = this.claim(value.completenessClaim, value.targetId, "COMPLETENESS", exactTargetInventoryUseSiteProofRequirements.completenessClaim.purpose);
-    const policyClaim = this.claim(value.policyClaim, value.targetId, "POLICY", exactTargetInventoryUseSiteProofRequirements.policyClaim.purpose);
     const components = value.components.map((item) => this.component(item)).filter((item): item is ExactTargetInventoryComponent => item !== null);
     validateComponentTopology(components, this);
+    const topology = targetTopology(components);
+    const lifecycleClaim = this.claim(value.lifecycleClaim, value.targetId, "LIFECYCLE", exactTargetInventoryUseSiteProofRequirements.lifecycleClaim.purpose);
+    const authorityClaim = this.claim(value.authorityClaim, value.targetId, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
+    const completenessClaim = this.completenessClaim(value.completenessClaim, value.targetId, topology);
+    const policyClaim = this.claim(value.policyClaim, value.targetId, "POLICY", exactTargetInventoryUseSiteProofRequirements.policyClaim.purpose);
     if (lifecycleClaim === null || authorityClaim === null || completenessClaim === null || policyClaim === null) return null;
     return { targetId: value.targetId, lifecycleClaim, authorityClaim, completenessClaim, policyClaim, components };
   }
@@ -327,7 +396,9 @@ class Reader {
       this.add("TYPE_MISMATCH", "class");
       return null;
     }
+    if (value.disposition !== exactTargetInventoryRequiredDispositions[value.workloadClass]) this.add("DISPOSITION_MISMATCH", "class", value.workloadClass);
     if (value.targets.length > EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS) this.add("LIMIT_EXCEEDED", "class", value.workloadClass);
+    if (value.disposition === "SELECTABLE" && value.targets.length > 1) this.add("TARGET_CARDINALITY_INVALID", "target", value.workloadClass);
     const rootClaim = this.claim(value.rootClaim, `class-${value.workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
     const targets = value.targets.map((item) => this.target(item)).filter((item): item is ExactTargetInventoryTarget => item !== null);
     if (rootClaim === null) return null;
@@ -337,10 +408,13 @@ class Reader {
 
 const validateComponentTopology = (components: readonly ExactTargetInventoryComponent[], reader: Reader): void => {
   const componentIds = new Set(components.map((component) => component.componentId));
+  const componentById = new Map(components.map((component) => [component.componentId, component]));
   for (const component of components) {
     const seenDependencies = new Set<string>();
     for (const dependency of component.dependencies) {
-      if (!componentIds.has(dependency.componentId) || dependency.componentId === component.componentId || seenDependencies.has(dependency.componentId)) {
+      const target = componentById.get(dependency.componentId);
+      if (!componentIds.has(dependency.componentId) || dependency.componentId === component.componentId || seenDependencies.has(dependency.componentId)
+        || target?.kind !== dependency.kind) {
         reader.add("DEPENDENCY_INVALID", "component");
       }
       seenDependencies.add(dependency.componentId);
@@ -368,6 +442,7 @@ const validateComponentTopology = (components: readonly ExactTargetInventoryComp
   }
   for (const component of components) {
     if (component.required && component.rollback === undefined) reader.add("ROLLBACK_INVALID", "component");
+    if (component.rollback !== undefined && !componentIds.has(component.rollback.predecessorRef)) reader.add("ROLLBACK_INVALID", "component");
   }
 };
 

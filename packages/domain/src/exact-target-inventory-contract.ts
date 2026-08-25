@@ -83,6 +83,7 @@ export type ExactTargetInventoryIssueCode =
   | "LIMIT_EXCEEDED"
   | "TYPE_MISMATCH"
   | "INVALID_VALUE"
+  | "DISPOSITION_MISMATCH"
   | "CLASS_CARDINALITY_INVALID"
   | "TARGET_CARDINALITY_INVALID"
   | "TARGET_IDENTITY_REUSED"
@@ -130,6 +131,7 @@ export type ExactTargetInventoryClaim = {
 export type ExactTargetInventoryDependency = {
   readonly componentId: string;
   readonly kind: ExactTargetInventoryComponentKind;
+  readonly claim: ExactTargetInventoryClaim;
 };
 
 export type ExactTargetInventoryRollback = {
@@ -150,9 +152,16 @@ export type ExactTargetInventoryTarget = {
   readonly targetId: string;
   readonly lifecycleClaim: ExactTargetInventoryClaim;
   readonly authorityClaim: ExactTargetInventoryClaim;
-  readonly completenessClaim: ExactTargetInventoryClaim;
+  readonly completenessClaim: ExactTargetInventoryCompletenessClaim;
   readonly policyClaim: ExactTargetInventoryClaim;
   readonly components: readonly ExactTargetInventoryComponent[];
+};
+
+export type ExactTargetInventoryCompletenessClaim = ExactTargetInventoryClaim & {
+  readonly topologyDigest: string;
+  readonly componentCount: number;
+  readonly dependencyCount: number;
+  readonly rollbackCount: number;
 };
 
 export type ExactTargetInventoryClassBundle = {
@@ -230,3 +239,20 @@ export const exactTargetInventoryUseSiteProofRequirements = {
   dependencyClaim: { kind: "DEPENDENCY", purpose: "component-dependency" },
   rollbackClaim: { kind: "ROLLBACK", purpose: "component-rollback" },
 } as const;
+
+export const exactTargetInventoryRequiredDispositions = {
+  ACTIVE_CLIENT_PRIMARY: "SELECTABLE",
+  ACTIVE_CLIENT_AUTHORITY_UNPROVEN: "BLOCKED",
+  ACTIVE_CLIENT_CANARY: "BLOCKED",
+  ACTIVE_CLIENT_DECISION_REQUIRED: "DECISION_REQUIRED",
+  CORE_WEB: "SELECTABLE",
+  CORE_WORKER: "SELECTABLE",
+  MCP: "SELECTABLE",
+  PUBLIC_SITE: "SELECTABLE",
+  SELFSERVE: "BLOCKED",
+  STAGING_TEST_E2E: "BLOCKED",
+  DEMO: "DECISION_REQUIRED",
+  OPS_CONTROL_PLANE: "BLOCKED",
+  RESIDUAL_RAILWAY: "RETIRE_ONLY",
+  DUPLICATE_AZURE: "RETIRE_ONLY",
+} as const satisfies Record<ExactTargetInventoryWorkloadClass, ExactTargetInventoryClassDisposition>;

@@ -26,7 +26,7 @@ try {
   const inputText = readFileSync(filePath, "utf8");
   const result = evaluateExactTargetInventoryJson(inputText, { now, requestedWorkloadClass: requested });
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  process.exit(result.artifactStatus === "VALID" ? 0 : 1);
+  process.exit(result.artifactStatus === "VALID" && (requested === undefined || result.selection?.status === "SELECTED") ? 0 : 1);
 } catch {
   closed("READ_FAILED");
 }
