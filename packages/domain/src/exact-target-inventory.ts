@@ -112,6 +112,7 @@ export type ExactTargetInventoryBlockerCode =
   | "POLICY_PENDING"
   | "AUTHORITY_UNPROVEN"
   | "RETIREMENT_NOT_BLOCKED"
+  | "LIFECYCLE_NOT_SELECTABLE"
   | "STALE_OR_EXPIRED"
   | "SECRET_SENTINEL"
   | "ISSUE_LIMIT";
@@ -270,13 +271,14 @@ export function deriveInventoryRef(inventoryKey: string) {
 }
 
 export function deriveExactTargetInventoryKey(input: {
-  recordType: string;
+  recordType: ExactTargetRecordType;
   workloadId: string;
   environmentId: string;
   provider?: Provider | JsonObject;
   detail: JsonObject;
-}) {
-  const recordType = input.recordType as ExactTargetRecordType;
+}): string | null {
+  if (!RECORD_TYPE_SET.has(input.recordType)) return null;
+  const recordType = input.recordType;
   const spec = RECORD_SPECS[recordType];
   const provider = input.provider;
   const providerTuple = provider
@@ -314,7 +316,7 @@ export function validateExactTargetInventory(raw: unknown, options: ExactTargetI
 
   const semanticIssues = [...ctx.issues];
   verifyDigestsAndGraph(parsed, semanticIssues, now.ms);
-  const derived = deriveState(parsed.records, semanticIssues);
+  const derived = deriveState(parsed, semanticIssues);
   reconcileRecordAuthorization(parsed.records, derived, semanticIssues);
   compareCallerSummary(parsed.validationSummary, derived, parsed.records, semanticIssues);
   const closedSnapshot = deepFreeze({ ...parsed, derived }) as ExactTargetInventorySnapshot;
@@ -395,7 +397,7 @@ function capturePlainJson(raw: unknown): { ok: true; value: JsonObject } | { ok:
   if (typeof raw === "string") {
     if (Buffer.byteLength(raw, "utf8") > MAX_INPUT_BYTES) return { ok: false, issues: [{ code: "STRUCTURAL_LIMIT", path: "/" }] };
     const duplicatePath = findDuplicateJsonKey(raw);
-    if (duplicatePath) return { ok: false, issues: [{ code: "DUPLICATE_JSON_KEY", path: duplicatePath }] };
+    if (duplicatePath) return { ok: false, issues: [{ code: "DUPLICATE_JSON_KEY", path: "/" }] };
     try {
       return capturePlainJson(JSON.parse(raw));
     } catch {
@@ -452,6 +454,14 @@ function copyJson(value: unknown, path: string, depth: number, seen: WeakSet<obj
         return undefined;
       }
       const descriptors = Object.getOwnPropertyDescriptors(value);
+      const expectedKeys = new Set<PropertyKey>(["length"]);
+      for (let index = 0; index < value.length; index += 1) expectedKeys.add(String(index));
+      for (const key of Reflect.ownKeys(value)) {
+        if (!expectedKeys.has(key)) {
+          addIssue(issues, "STRUCTURAL_LIMIT", path);
+          return undefined;
+        }
+      }
       for (let index = 0; index < value.length; index += 1) {
         const descriptor = descriptors[String(index)];
         if (!descriptor || !descriptor.enumerable || "get" in descriptor || "set" in descriptor || descriptor.value === undefined) {
@@ -519,6 +529,7 @@ function parseSnapshot(raw: JsonObject, ctx: ParseContext): Omit<ExactTargetInve
   if (ctx.issues.length > 0) return null;
   if (!inventoryId || !generatedAt || !validFrom || !expiresAt || !policyRef || !dispositionRef || !collectorContractRef || !collectorArtifactDigest || !documentDigest || snapshotSequence < 1) return null;
   if (!timeOrder([generatedAt, validFrom, ctx.nowIso, expiresAt])) addIssue(ctx.issues, "STALE_OR_EXPIRED", "/expiresAt");
+  if (validationSummary.validatedAt && !timeOrder([generatedAt, validationSummary.validatedAt, ctx.nowIso])) addIssue(ctx.issues, "STALE_OR_EXPIRED", "/validationSummary/validatedAt");
 
   const records = recordsRaw.map((record, index) => parseRecord(record, `/records/${index}`, ctx)).filter((record): record is ExactTargetRecord => record !== null);
   const relationships = relationshipsRaw.map((relationship, index) => parseRelationship(relationship, `/relationships/${index}`, ctx)).filter((relationship): relationship is ExactTargetRelationship => relationship !== null);
@@ -588,8 +599,8 @@ function parseRecord(value: JsonValue, path: string, ctx: ParseContext): ExactTa
   if (!recordId || !workloadId || !environmentId || !ownerRef || !criticality || !firstObservedAt || !lastObservedAt || !verifiedAt || !expiresAt || !lifecycle || !disposition || !authority || !detail || !inventoryKey || !inventoryRef || !recordDigest) return null;
   validateRootDetailIdentity(recordType, workloadId, environmentId, detail, path, ctx, inventoryRef);
   const derivedKey = deriveExactTargetInventoryKey({ recordType, workloadId, environmentId, provider, detail });
-  if (inventoryKey !== derivedKey) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/inventoryKey`, inventoryRef);
-  if (inventoryRef !== deriveInventoryRef(derivedKey)) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/inventoryRef`, inventoryRef);
+  if (!derivedKey || inventoryKey !== derivedKey) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/inventoryKey`, inventoryRef);
+  if (!derivedKey || inventoryRef !== deriveInventoryRef(derivedKey)) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/inventoryRef`, inventoryRef);
 
   return { recordId, recordType, inventoryKey, inventoryRef, recordRevision, recordDigest, workloadId, environmentId, ownerRef, criticality, lifecycle, disposition, authority, evidenceRefs, firstObservedAt, lastObservedAt, verifiedAt, expiresAt, provider, detailKey, detail };
 }
@@ -643,6 +654,7 @@ function parseAuthorityDimension(value: JsonObject | null, path: string, ctx: Pa
   const expiresAt = requiredTimestamp(value, "expiresAt", path, ctx);
   const independentVerifierRef = requiredString(value, "independentVerifierRef", path, ctx);
   if (!timeOrder([observedAt, verifiedAt, ctx.nowIso, expiresAt])) addIssue(ctx.issues, "STALE_OR_EXPIRED", `${path}/expiresAt`);
+  if (verdict === "PROVEN" && evidenceRefs.length === 0) addIssue(ctx.issues, "INVALID_REFERENCE", `${path}/evidenceRefs`);
   return verdict && observedAt && verifiedAt && expiresAt && independentVerifierRef ? { verdict, evidenceRefs, observedAt, verifiedAt, expiresAt, independentVerifierRef } : null;
 }
 
@@ -657,7 +669,10 @@ function parseProvider(value: JsonObject | null, path: string, ctx: ParseContext
   const managementPlane = requiredString(value, "managementPlane", path, ctx);
   const authorityBoundary = requiredString(value, "authorityBoundary", path, ctx);
   if (!providerKind || !providerAccountId || !providerScopeId || !managementPlane || !authorityBoundary) return undefined;
-  return { providerKind, providerAccountId, providerTenantId, providerSubscriptionOrProjectId, providerScopeId, managementPlane, authorityBoundary };
+  const provider: Mutable<Provider> = { providerKind, providerAccountId, providerScopeId, managementPlane, authorityBoundary };
+  if (providerTenantId !== undefined) provider.providerTenantId = providerTenantId;
+  if (providerSubscriptionOrProjectId !== undefined) provider.providerSubscriptionOrProjectId = providerSubscriptionOrProjectId;
+  return provider;
 }
 
 function parseDetail(recordType: ExactTargetRecordType, value: JsonObject | null, path: string, ctx: ParseContext): JsonObject | null {
@@ -767,6 +782,7 @@ function parseEvidence(value: JsonValue, path: string, ctx: ParseContext): Exact
   const freshnessStatus = requiredEnum(value, "freshnessStatus", EVIDENCE_FRESHNESS, path, ctx);
   const limitations = requiredStringArray(value, "limitations", path, ctx);
   if (!timeOrder([sourceObservedAt, collectedAt, verifiedAt, ctx.nowIso, expiresAt])) addIssue(ctx.issues, "STALE_OR_EXPIRED", `${path}/expiresAt`);
+  if (artifactRef && artifactDigest && artifactRef.digest !== artifactDigest) addIssue(ctx.issues, "DERIVED_DIGEST_MISMATCH", `${path}/artifactDigest`);
   return evidenceId && evidenceType && sourceAuthority && sourceRecordId && collectorIdentityRef && collectorVersionDigest && collectedAt && sourceObservedAt && verifiedAt && expiresAt && sanitizationClass && artifactRef && artifactDigest && freshnessStatus ? { evidenceId, evidenceType, sourceAuthority, sourceRecordId, positiveFieldProjection, collectorIdentityRef, collectorVersionDigest, collectedAt, sourceObservedAt, verifiedAt, expiresAt, sanitizationClass, artifactRef, artifactDigest, freshnessStatus, limitations } : null;
 }
 
@@ -853,6 +869,7 @@ function validateCompletenessEvidence(snapshot: Omit<ExactTargetInventorySnapsho
   for (const row of snapshot.validationSummary.completenessLedger) {
     if (seenClasses.has(row.workloadClass)) addIssue(issues, "DUPLICATE_IDENTITY", "/validationSummary/completenessLedger/workloadClass");
     seenClasses.add(row.workloadClass);
+    if (row.evidenceRefs.length === 0) addIssue(issues, "INVALID_REFERENCE", "/validationSummary/completenessLedger/evidenceRefs");
     for (const evidenceRef of row.evidenceRefs) {
       const evidence = evidenceById.get(evidenceRef);
       const source = evidence ? recordsById.get(evidence.sourceRecordId) : undefined;
@@ -924,7 +941,9 @@ function validateDetailReferences(record: ExactTargetRecord, recordsByRef: Map<s
   }
 }
 
-function deriveState(records: ExactTargetRecord[], existingIssues: ExactTargetInventoryIssue[]): ExactTargetDerivedState {
+function deriveState(snapshot: Omit<ExactTargetInventorySnapshot, "derived">, existingIssues: ExactTargetInventoryIssue[]): ExactTargetDerivedState {
+  const records = snapshot.records;
+  const evidenceById = new Map(snapshot.evidence.map((evidence) => [evidence.evidenceId, evidence]));
   const recordBlockers: Record<string, ExactTargetInventoryBlockerCode[]> = {};
   for (const issue of existingIssues) {
     if (issue.inventoryRef) recordBlockers[issue.inventoryRef] = uniqueCodes([...(recordBlockers[issue.inventoryRef] ?? []), issue.code]);
@@ -936,10 +955,11 @@ function deriveState(records: ExactTargetRecord[], existingIssues: ExactTargetIn
     const workloads = classRecords.filter((record) => record.recordType === "WORKLOAD");
     const environments = classRecords.filter((record) => record.recordType === "ENVIRONMENT");
     const gaps = classRecords.filter((record) => record.recordType === "GAP");
+    if (snapshot.policyRef.status !== "SETTLED" || snapshot.dispositionRef.status !== "SETTLED" || snapshot.collectorContractRef.status !== "SETTLED") classBlockers.push("POLICY_PENDING");
     if (workloads.length !== 1 || environments.length < 1) classBlockers.push("MISSING_WORKLOAD_COVERAGE");
     if (gaps.length > 0) classBlockers.push("MISSING_WORKLOAD_COVERAGE");
     for (const record of classRecords) {
-      const blockers = blockersForRecord(record, workloadClass);
+      const blockers = blockersForRecord(record, workloadClass, evidenceById);
       if (blockers.length > 0) recordBlockers[record.inventoryRef] = uniqueCodes([...(recordBlockers[record.inventoryRef] ?? []), ...blockers]);
       classBlockers.push(...blockers);
     }
@@ -954,11 +974,21 @@ function deriveState(records: ExactTargetRecord[], existingIssues: ExactTargetIn
   };
 }
 
-function blockersForRecord(record: ExactTargetRecord, workloadClass: ExactTargetWorkloadClass | "UNKNOWN"): ExactTargetInventoryBlockerCode[] {
+function blockersForRecord(record: ExactTargetRecord, workloadClass: ExactTargetWorkloadClass | "UNKNOWN", evidenceById: Map<string, ExactTargetEvidence>): ExactTargetInventoryBlockerCode[] {
   const blockers: ExactTargetInventoryBlockerCode[] = [];
   if (record.lifecycle.retirementEligibility !== "BLOCKED") blockers.push("RETIREMENT_NOT_BLOCKED");
+  if (record.lifecycle.releaseEligibility === "INELIGIBLE" || record.lifecycle.state === "RETIRED") blockers.push("LIFECYCLE_NOT_SELECTABLE");
   if (record.lifecycle.releaseEligibility === "POLICY_PENDING" || record.lifecycle.releaseEligibility === "UNKNOWN" || record.lifecycle.state === "UNKNOWN") blockers.push("POLICY_PENDING");
   if (BLOCKING_DISPOSITIONS.has(record.disposition.status) || record.disposition.decision === "DECISION_REQUIRED") blockers.push("POLICY_PENDING");
+  if (record.recordType === "ENVIRONMENT" && (record.detail.policyStatus !== "SETTLED" || record.detail.dataClass === "POLICY_PENDING")) blockers.push("POLICY_PENDING");
+  for (const evidenceRef of uniqueStrings([
+    ...record.evidenceRefs,
+    record.lifecycle.stateEvidenceRef,
+    ...AUTHORITY_DIMENSIONS.flatMap((dimension) => record.authority[dimension].evidenceRefs),
+  ])) {
+    const evidence = evidenceById.get(evidenceRef);
+    if (evidence && evidence.freshnessStatus !== "CURRENT") blockers.push("POLICY_PENDING");
+  }
   for (const dimension of AUTHORITY_DIMENSIONS) {
     if (BLOCKING_VERDICTS.has(record.authority[dimension].verdict)) blockers.push(record.authority[dimension].verdict === "AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING");
   }

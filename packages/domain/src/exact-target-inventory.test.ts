@@ -140,13 +140,15 @@ function common(recordType: string, workloadClass: string, index: number, detail
 
 function finaliseRecord(record: JsonObject) {
   const detail = record[detailKeyByType[record.recordType]];
-  record.inventoryKey = deriveExactTargetInventoryKey({
+  const inventoryKey = deriveExactTargetInventoryKey({
     recordType: record.recordType,
     workloadId: record.workloadId,
     environmentId: record.environmentId,
     provider: record.provider,
     detail,
   });
+  if (!inventoryKey) throw new Error("invalid fixture record type");
+  record.inventoryKey = inventoryKey;
   record.inventoryRef = deriveInventoryRef(record.inventoryKey);
   record.recordDigest = sha256Hex(canonicalJson(withoutKey(record, "recordDigest")));
 }
@@ -463,6 +465,74 @@ function deps() {
   };
 }
 
+function primaryClass() {
+  return EXACT_TARGET_WORKLOAD_CLASSES[0];
+}
+
+function primaryRecords(snapshot: JsonObject) {
+  const workloadClass = primaryClass();
+  return (snapshot.records as JsonObject[]).filter((record) => {
+    if (record.workload?.workloadClass === workloadClass) return true;
+    if (record.environmentId === `env-${workloadClass.toLowerCase().replaceAll("_", "-")}`) return true;
+    return false;
+  });
+}
+
+function settleRecord(record: JsonObject) {
+  record.lifecycle.state = "ACTIVE";
+  record.lifecycle.provisioningState = "ACTIVE";
+  record.lifecycle.releaseEligibility = "ELIGIBLE";
+  record.lifecycle.retirementEligibility = "BLOCKED";
+  record.disposition.decision = "ADOPT";
+  record.disposition.status = "SETTLED";
+  record.authority.authorizationState = "INVENTORY_ONLY";
+  for (const dimension of ["serving", "data", "object", "worker", "scheduler", "queue", "domain", "callback"]) {
+    record.authority[dimension].verdict = "PROVEN";
+  }
+  if (record.environment) {
+    record.environment.dataClass = "INTERNAL";
+    record.environment.policyStatus = "SETTLED";
+  }
+  if (record.worker) record.worker.authorityVerdict = "PROVEN";
+  if (record.scheduler) record.scheduler.authorityVerdict = "PROVEN";
+  if (record.queue) record.queue.authorityVerdict = "PROVEN";
+  if (record.domain) record.domain.authorityVerdict = "PROVEN";
+  if (record.callback) record.callback.authorityVerdict = "PROVEN";
+  if (record.rollbackAsset) record.rollbackAsset.readinessVerdict = "PROVEN";
+}
+
+function setPrimarySummary(snapshot: JsonObject, blockers: ExactTargetInventoryBlockerCode[] = []) {
+  const row = (snapshot.validationSummary.completenessLedger as JsonObject[]).find((candidate) => candidate.workloadClass === primaryClass())!;
+  row.status = blockers.length > 0 ? "BLOCKED" : "COMPLETE";
+  row.blockingGaps = blockers;
+  row.policyStatus = blockers.includes("POLICY_PENDING") ? "POLICY_PENDING" : "SETTLED";
+  row.authorityGate = blockers.includes("AUTHORITY_UNPROVEN") ? "AUTHORITY_UNPROVEN" : blockers.includes("POLICY_PENDING") ? "POLICY_PENDING" : "PROVEN";
+  row.dispositionDecision = "ADOPT";
+  row.evidenceRefs = [evidenceRefFor(primaryClass())];
+  snapshot.validationSummary.blockerCodes = ["AUTHORITY_UNPROVEN", "MISSING_WORKLOAD_COVERAGE", "POLICY_PENDING", ...blockers].filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function selectablePrimaryInventory() {
+  const snapshot = inventedInventory();
+  snapshot.policyRef.status = "SETTLED";
+  snapshot.dispositionRef.status = "SETTLED";
+  snapshot.collectorContractRef.status = "SETTLED";
+  snapshot.records = (snapshot.records as JsonObject[]).filter((record) => !(record.recordType === "GAP" && record.gap.workloadClass === primaryClass()));
+  for (const record of primaryRecords(snapshot)) settleRecord(record);
+  const evidence = (snapshot.evidence as JsonObject[]).find((candidate) => candidate.evidenceId === evidenceRefFor(primaryClass()))!;
+  evidence.freshnessStatus = "CURRENT";
+  evidence.artifactRef.status = "SETTLED";
+  setPrimarySummary(snapshot);
+  return rehash(snapshot);
+}
+
+function expectZeroEffects(input: unknown) {
+  const blockedDeps = deps();
+  const result = dependencyHarness(input, blockedDeps);
+  for (const call of Object.values(blockedDeps)) expect(call).not.toHaveBeenCalled();
+  return result;
+}
+
 describe("exact target inventory correction contract", () => {
   it("AC-01 AC-02 hostile raw structures return closed blockers and never throw", () => {
     const cyclic: JsonObject = {};
@@ -619,8 +689,11 @@ describe("exact target inventory correction contract", () => {
     const commonIdentity = { recordType: "DATA_STORE" as const, workloadId: "wl", environmentId: "env", provider: provider() };
     const first = deriveExactTargetInventoryKey({ ...commonIdentity, detail: { providerResourceId: "a/b", databaseId: "c", role: "AUTHORITATIVE_CANDIDATE" } });
     const second = deriveExactTargetInventoryKey({ ...commonIdentity, detail: { providerResourceId: "a", databaseId: "b/c", role: "AUTHORITATIVE_CANDIDATE" } });
+    if (!first || !second) throw new Error("fixture identity derivation failed");
     expect(first).not.toBe(second);
     expect(deriveInventoryRef(first)).not.toBe(deriveInventoryRef(second));
+    expect(() => deriveExactTargetInventoryKey({ recordType: "TYPO" as any, workloadId: "wl", environmentId: "env", detail: {} })).not.toThrow();
+    expect(deriveExactTargetInventoryKey({ recordType: "TYPO" as any, workloadId: "wl", environmentId: "env", detail: {} })).toBeNull();
 
     const mismatch = inventedInventory();
     mismatch.records[0].workload.workloadId = "wl-contradiction";
@@ -715,6 +788,116 @@ describe("exact target inventory correction contract", () => {
       firstRecordOf(snapshot, "ROLLBACK_ASSET").rollbackAsset[field] = value;
       rehash(snapshot);
       expect(validate(snapshot).issues.map((issue) => issue.code), field).toContain("STALE_OR_EXPIRED");
+    }
+  });
+
+  it("AC-01 rejects named and symbol array fields without invoking accessors", () => {
+    const named = inventedInventory();
+    let getterHits = 0;
+    Object.defineProperty(named.records, "privateName", {
+      enumerable: true,
+      get() {
+        getterHits += 1;
+        return "private-value";
+      },
+    });
+    const namedResult = validate(named);
+    expect(namedResult.ok).toBe(false);
+    expect(namedResult.issues.map((issue) => issue.code)).toContain("STRUCTURAL_LIMIT");
+    expect(getterHits).toBe(0);
+    expect(JSON.stringify(namedResult.publicProjection)).not.toContain("private-value");
+
+    const symbol = inventedInventory();
+    Object.defineProperty(symbol.evidence, Symbol("private-symbol"), {
+      enumerable: true,
+      value: "private-value",
+    });
+    const symbolResult = validate(symbol);
+    expect(symbolResult.ok).toBe(false);
+    expect(symbolResult.issues.map((issue) => issue.code)).toContain("STRUCTURAL_LIMIT");
+    expect(JSON.stringify(symbolResult.publicProjection)).not.toContain("private-value");
+  });
+
+  it("AC-02 bounds duplicate-key issue paths without leaking caller keys", () => {
+    const result = validate("{\"private-client-secret\":1,\"private-client-secret\":2}");
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContainEqual({ code: "DUPLICATE_JSON_KEY", path: "/" });
+    expect(JSON.stringify(result)).not.toContain("private-client-secret");
+  });
+
+  it("AC-10 canonicalizes omitted optional provider fields without undefined replay", () => {
+    const snapshot = inventedInventory();
+    const runtime = firstRecordOf(snapshot, "PROVIDER_RESOURCE");
+    delete runtime.provider.providerTenantId;
+    delete runtime.provider.providerSubscriptionOrProjectId;
+    rehash(snapshot);
+    firstRecordOf(snapshot, "DOMAIN").domain.boundRuntimeResourceId = runtime.inventoryRef;
+    firstRecordOf(snapshot, "CALLBACK").callback.boundResourceRef = runtime.inventoryRef;
+    rehash(snapshot);
+    const result = validate(snapshot);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.canonicalJson).not.toContain("undefined");
+    expect(() => JSON.parse(result.canonicalJson)).not.toThrow();
+    expect(validate(result.canonicalJson)).toMatchObject({ ok: true, documentDigest: result.documentDigest });
+  });
+
+  it("AC-04 AC-08 rejects unsupported proven authority and mismatched evidence digests", () => {
+    const noEvidence = selectablePrimaryInventory();
+    firstRecordOf(noEvidence, "WORKLOAD").authority.serving.evidenceRefs = [];
+    rehash(noEvidence);
+    const noEvidenceResult = expectZeroEffects(noEvidence);
+    expect(noEvidenceResult.ok).toBe(false);
+    expect(noEvidenceResult.issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+
+    const digestMismatch = selectablePrimaryInventory();
+    const evidence = (digestMismatch.evidence as JsonObject[]).find((candidate) => candidate.evidenceId === evidenceRefFor(primaryClass()))!;
+    evidence.artifactDigest = sha256Hex("different-artifact");
+    rehash(digestMismatch);
+    const digestResult = expectZeroEffects(digestMismatch);
+    expect(digestResult.ok).toBe(false);
+    expect(digestResult.issues.map((issue) => issue.code)).toContain("DERIVED_DIGEST_MISMATCH");
+  });
+
+  it("AC-04 derives blockers for pending freshness and missing completeness evidence", () => {
+    const pendingFreshness = selectablePrimaryInventory();
+    for (const record of primaryRecords(pendingFreshness)) record.authority.authorizationState = "BLOCKED";
+    const evidence = (pendingFreshness.evidence as JsonObject[]).find((candidate) => candidate.evidenceId === evidenceRefFor(primaryClass()))!;
+    evidence.freshnessStatus = "POLICY_PENDING";
+    evidence.artifactRef.status = "POLICY_PENDING";
+    setPrimarySummary(pendingFreshness, ["POLICY_PENDING"]);
+    rehash(pendingFreshness);
+    const pendingResult = expectZeroEffects(pendingFreshness);
+    expect(pendingResult.ok).toBe(true);
+    expect(pendingResult.publicProjection.completeness.find((row) => row.workloadClass === primaryClass())?.blockerCodes).toContain("POLICY_PENDING");
+
+    const missingCompleteness = selectablePrimaryInventory();
+    missingCompleteness.validationSummary.completenessLedger.find((row: JsonObject) => row.workloadClass === primaryClass()).evidenceRefs = [];
+    rehash(missingCompleteness);
+    const missingResult = expectZeroEffects(missingCompleteness);
+    expect(missingResult.ok).toBe(false);
+    expect(missingResult.issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+  });
+
+  it("AC-04 derives blockers for future validation timestamps and nonselectable lifecycle states", () => {
+    const futureValidation = selectablePrimaryInventory();
+    futureValidation.validationSummary.validatedAt = "2026-08-26T00:00:00Z";
+    rehash(futureValidation);
+    const futureResult = expectZeroEffects(futureValidation);
+    expect(futureResult.ok).toBe(false);
+    expect(futureResult.issues.map((issue) => issue.code)).toContain("STALE_OR_EXPIRED");
+
+    for (const [field, value] of [["releaseEligibility", "INELIGIBLE"], ["state", "RETIRED"]] as const) {
+      const lifecycle = selectablePrimaryInventory();
+      const record = firstRecordOf(lifecycle, "DATA_STORE");
+      record.lifecycle[field] = value;
+      record.authority.authorizationState = "BLOCKED";
+      setPrimarySummary(lifecycle, ["LIFECYCLE_NOT_SELECTABLE"]);
+      rehash(lifecycle);
+      const result = expectZeroEffects(lifecycle);
+      expect(result.ok, field).toBe(true);
+      expect(result.publicProjection.records.find((candidate) => candidate.inventoryRef === record.inventoryRef)?.blockerCodes).toContain("LIFECYCLE_NOT_SELECTABLE");
+      expect(result.publicProjection.completeness.find((row) => row.workloadClass === primaryClass())?.blockerCodes).toContain("LIFECYCLE_NOT_SELECTABLE");
     }
   });
 
