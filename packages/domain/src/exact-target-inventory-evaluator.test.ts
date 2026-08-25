@@ -322,6 +322,40 @@ describe("exact target inventory evaluator", () => {
     expect(expired.artifactStatus).toBe("INVALID");
     expect(expired.issueCodes).toContain("PROOF_EXPIRED");
     expect(expired.selection?.status).toBe("INVALID");
+    expect(expired.selection?.issueCodes).toContain("PROOF_EXPIRED");
+    expect(expired.selection?.issueCodes).not.toContain("REQUESTED_CLASS_NOT_FOUND");
+  });
+
+  it("preserves invalid-artifact causes for known requested classes without effects", () => {
+    const expiredResult = evaluateExactTargetInventoryJson(serialize(fixture()), { now: EXPIRED_NOW, requestedWorkloadClass: "CORE_WEB" });
+    const expiredEffects = Array.from({ length: 8 }, () => vi.fn());
+    if (expiredResult.ok && expiredResult.artifactStatus === "VALID" && expiredResult.selection?.status === "SELECTED") {
+      expiredEffects.forEach((effect) => effect(expiredResult.selection?.opaqueTargetId));
+    }
+    expect(expiredResult.artifactStatus).toBe("INVALID");
+    expect(expiredResult.selection).toEqual({
+      workloadClass: "CORE_WEB",
+      status: "INVALID",
+      issueCodes: expect.arrayContaining(["PROOF_EXPIRED"]),
+    });
+    expect(expiredResult.selection?.issueCodes).not.toContain("REQUESTED_CLASS_NOT_FOUND");
+    expect(expiredEffects.reduce((count, effect) => count + effect.mock.calls.length, 0)).toBe(0);
+
+    const missingClass = fixture() as any;
+    missingClass.classes = missingClass.classes.filter((item: any) => item.workloadClass !== "DUPLICATE_AZURE");
+    const missingClassAdmission = admitThroughPublicBoundary(serialize(missingClass), "CORE_WEB", true);
+    expect(missingClassAdmission.result.artifactStatus).toBe("INVALID");
+    expect(missingClassAdmission.result.selection).toEqual({
+      workloadClass: "CORE_WEB",
+      status: "INVALID",
+      issueCodes: expect.arrayContaining(["CLASS_CARDINALITY_INVALID"]),
+    });
+    expect(missingClassAdmission.result.selection?.issueCodes).not.toContain("REQUESTED_CLASS_NOT_FOUND");
+    expect(missingClassAdmission.effectCount).toBe(0);
+
+    const unknownClass = evaluateExactTargetInventoryJson(serialize(fixture()), { now: NOW, requestedWorkloadClass: "NOT_A_CLASS" as ExactTargetInventoryWorkloadClass });
+    expect(unknownClass.artifactStatus).toBe("VALID");
+    expect(unknownClass.selection).toEqual({ status: "INVALID", issueCodes: ["REQUESTED_CLASS_NOT_FOUND"] });
   });
 
   it("uses one black-box admission harness: valid selected baseline reaches eight fakes exactly once", () => {

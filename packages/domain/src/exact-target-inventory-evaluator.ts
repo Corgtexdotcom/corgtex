@@ -589,11 +589,15 @@ const selectionFor = (
   requested: RequestedWorkloadClass,
   classes: readonly ExactTargetInventoryClassProjection[],
   document: ExactTargetInventoryDocument | null,
+  artifactIssueCodes: readonly ExactTargetInventoryIssueCode[],
 ): ExactTargetInventorySelectionProjection | undefined => {
   if (requested.status === "NONE") return undefined;
   if (requested.status === "INVALID") return { status: "INVALID", issueCodes: ["REQUESTED_CLASS_NOT_FOUND"] };
   const projection = classes.find((item) => item.workloadClass === requested.workloadClass);
-  if (projection === undefined || document === null) {
+  if (document === null) {
+    return { workloadClass: requested.workloadClass, status: "INVALID", issueCodes: artifactIssueCodes };
+  }
+  if (projection === undefined) {
     return { workloadClass: requested.workloadClass, status: "INVALID", issueCodes: ["REQUESTED_CLASS_NOT_FOUND"] };
   }
   if (projection.status !== "ELIGIBLE") {
@@ -651,7 +655,7 @@ export function evaluateExactTargetInventoryJson(
   const artifactIssues = reader.issues;
   const artifactValid = document !== null && artifactIssues.length === 0;
   const classes = artifactValid ? document.classes.map(publicClassProjection) : [];
-  const selection = selectionFor(requested, classes, artifactValid ? document : null);
+  const selection = selectionFor(requested, classes, artifactValid ? document : null, uniqueCodes(artifactIssues));
   const requestedIssues = requested.status === "INVALID" ? [issue("REQUESTED_CLASS_NOT_FOUND", "selection")] : [];
   const allIssues = [...artifactIssues, ...requestedIssues].slice(0, EXACT_TARGET_INVENTORY_MAX_ISSUES);
   const canonical = artifactValid ? canonicalJson(parsed) : null;
