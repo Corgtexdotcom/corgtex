@@ -667,6 +667,9 @@ async function applyProposalDuplicateUpdate(actor: AppActor, params: CreatePropo
   if (!existing.circleId && params.circleId) updateParams.circleId = params.circleId;
   if (!existing.ownerMemberId && params.ownerMemberId) updateParams.ownerMemberId = params.ownerMemberId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
+  if (Object.keys(updateParams).length > 2) {
+    updateParams.expectedVersion = existing.version;
+  }
   const proposal = Object.keys(updateParams).length > 2 ? await updateProposal(actor, updateParams) : existing;
 
   if (sourceTension || relatedActions.length > 0) {
@@ -990,6 +993,25 @@ function requireValidExpectedVersion(expectedVersion: number, currentVersion: nu
   invariant(expectedVersion === currentVersion, 409, "VERSION_CONFLICT", PROPOSAL_UPDATE_VERSION_CONFLICT_MESSAGE);
 }
 
+function proposalEditsContent(params: UpdateProposalParams) {
+  return params.title !== undefined
+    || params.summary !== undefined
+    || params.includeAiSummary !== undefined
+    || params.bodyMd !== undefined
+    || params.priority !== undefined
+    || params.circleId !== undefined
+    || params.ownerMemberId !== undefined;
+}
+
+function requireExpectedVersionForProposalContent(params: UpdateProposalParams, currentVersion: number) {
+  if (proposalEditsContent(params)) {
+    invariant(params.expectedVersion !== undefined, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+  }
+  if (params.expectedVersion !== undefined) {
+    requireValidExpectedVersion(params.expectedVersion, currentVersion);
+  }
+}
+
 type UpdateProposalAiAdmission = {
   data: Record<string, unknown>;
   effectiveTitle: string;
@@ -1036,9 +1058,7 @@ async function runUpdateProposalTransaction(
     }
     requireUpdateProposalEditable(actor, membership, proposal);
 
-    if (params.expectedVersion !== undefined) {
-      requireValidExpectedVersion(params.expectedVersion, proposal.version);
-    }
+    requireExpectedVersionForProposalContent(params, proposal.version);
 
     const data: Record<string, unknown> = aiAdmission ? { ...aiAdmission.data } : {};
     if (!aiAdmission) {
@@ -1153,9 +1173,7 @@ export async function updateProposal(actor: AppActor, params: UpdateProposalPara
 
     invariant(admissionProposal && admissionProposal.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Proposal not found.");
     requireUpdateProposalEditable(actor, membership, admissionProposal);
-    if (params.expectedVersion !== undefined) {
-      requireValidExpectedVersion(params.expectedVersion, admissionProposal.version);
-    }
+    requireExpectedVersionForProposalContent(params, admissionProposal.version);
 
     const data: Record<string, unknown> = {};
     if (params.title !== undefined) {
