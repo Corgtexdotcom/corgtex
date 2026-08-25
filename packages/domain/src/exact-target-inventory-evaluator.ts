@@ -45,6 +45,13 @@ type RequestedWorkloadClass =
   | { readonly status: "NONE" }
   | { readonly status: "VALID"; readonly workloadClass: ExactTargetInventoryWorkloadClass }
   | { readonly status: "INVALID" };
+type NormalizedOptions = {
+  readonly evaluatedAt: string;
+  readonly requested: RequestedWorkloadClass;
+};
+type OptionsResult =
+  | { readonly ok: true; readonly options: NormalizedOptions }
+  | { readonly ok: false; readonly evaluatedAt: string };
 
 const workloadClasses = Object.freeze([...exactTargetInventoryWorkloadClasses]);
 const workloadClassSet = new Set<string>(workloadClasses);
@@ -63,8 +70,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const enumHas = <T extends readonly string[]>(values: T, value: unknown): value is T[number] =>
   typeof value === "string" && values.includes(value);
 
-const requestedWorkloadClass = (options: ExactTargetInventoryEvaluationOptions): RequestedWorkloadClass => {
-  const requested = (options as { readonly requestedWorkloadClass?: unknown }).requestedWorkloadClass;
+const requestedWorkloadClass = (requested: unknown): RequestedWorkloadClass => {
   if (requested === undefined) return { status: "NONE" };
   if (typeof requested === "string" && workloadClassSet.has(requested)) {
     return { status: "VALID", workloadClass: requested as ExactTargetInventoryWorkloadClass };
@@ -97,24 +103,22 @@ const uniqueCodes = (issues: readonly ExactTargetInventoryIssue[]): readonly Exa
 const fail = (
   code: ExactTargetInventoryIssueCode,
   scope: ExactTargetInventoryIssue["scope"],
-  options: ExactTargetInventoryEvaluationOptions,
+  options: NormalizedOptions,
 ): ExactTargetInventoryEvaluationResult => {
-  const evaluatedAt = normalizeNow(options.now);
-  const requested = requestedWorkloadClass(options);
   const issues = [issue(code, scope)];
   return {
     ok: false,
     schemaVersion: EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
     artifactStatus: "INVALID",
-    evaluatedAt,
+    evaluatedAt: options.evaluatedAt,
     validUntil: null,
     canonicalDigest: null,
     issueCodes: uniqueCodes(issues),
     issues,
     classes: [],
-    ...(requested.status === "NONE" ? {} : {
+    ...(options.requested.status === "NONE" ? {} : {
       selection: {
-        ...(requested.status === "VALID" ? { workloadClass: requested.workloadClass } : {}),
+        ...(options.requested.status === "VALID" ? { workloadClass: options.requested.workloadClass } : {}),
         status: "INVALID",
         issueCodes: [code],
       } satisfies ExactTargetInventorySelectionProjection,
@@ -122,15 +126,63 @@ const fail = (
   };
 };
 
-const normalizeNow = (value: string | Date): string => {
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toISOString() : new Date(0).toISOString();
-};
+const failInvalidOptions = (evaluatedAt = "1970-01-01T00:00:00.000Z"): ExactTargetInventoryEvaluationResult => ({
+  ok: false,
+  schemaVersion: EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
+  artifactStatus: "INVALID",
+  evaluatedAt,
+  validUntil: null,
+  canonicalDigest: null,
+  issueCodes: ["INVALID_VALUE"],
+  issues: [issue("INVALID_VALUE", "input")],
+  classes: [],
+});
 
 const parseInstant = (value: unknown): number | null => {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return null;
   const time = Date.parse(value);
   return Number.isFinite(time) && new Date(time).toISOString() === value ? time : null;
+};
+
+const normalizeNowValue = (value: unknown): string | null => {
+  if (typeof value === "string") return parseInstant(value) === null ? null : value;
+  if (value instanceof Date) {
+    try {
+      const time = Date.prototype.getTime.call(value);
+      return Number.isFinite(time) ? new Date(time).toISOString() : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const normalizeOptions = (value: ExactTargetInventoryEvaluationOptions): OptionsResult => {
+  try {
+    if (!isRecord(value)) return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Object.keys(descriptors);
+    if (!keys.includes("now") || keys.some((key) => key !== "now" && key !== "requestedWorkloadClass")) {
+      return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
+    }
+    const nowDescriptor = descriptors.now;
+    const requestedDescriptor = descriptors.requestedWorkloadClass;
+    if (nowDescriptor === undefined || !Object.hasOwn(nowDescriptor, "value")
+      || (requestedDescriptor !== undefined && !Object.hasOwn(requestedDescriptor, "value"))) {
+      return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
+    }
+    const evaluatedAt = normalizeNowValue(nowDescriptor.value);
+    if (evaluatedAt === null) return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
+    return {
+      ok: true,
+      options: {
+        evaluatedAt,
+        requested: requestedWorkloadClass(requestedDescriptor?.value),
+      },
+    };
+  } catch {
+    return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
+  }
 };
 
 const detectDuplicateJsonKeys = (text: string): boolean => {
@@ -472,7 +524,10 @@ const validateComponentTopology = (components: readonly ExactTargetInventoryComp
   }
   for (const component of components) {
     if (component.required && component.rollback === undefined) reader.add("ROLLBACK_INVALID", "component");
-    if (component.rollback !== undefined && !componentIds.has(component.rollback.predecessorRef)) reader.add("ROLLBACK_INVALID", "component");
+    if (component.rollback !== undefined) {
+      const predecessor = componentById.get(component.rollback.predecessorRef);
+      if (predecessor === undefined || predecessor.kind !== component.kind) reader.add("ROLLBACK_INVALID", "component");
+    }
   }
 };
 
@@ -580,18 +635,19 @@ export function evaluateExactTargetInventoryJson(
   inputText: unknown,
   options: ExactTargetInventoryEvaluationOptions,
 ): ExactTargetInventoryEvaluationResult {
-  if (typeof inputText !== "string") return fail("INPUT_NOT_STRING", "input", options);
-  const evaluatedAt = normalizeNow(options.now);
-  if (Buffer.byteLength(inputText, "utf8") > EXACT_TARGET_INVENTORY_MAX_BYTES) return fail("INPUT_TOO_LARGE", "input", options);
-  if (detectDuplicateJsonKeys(inputText)) return fail("DUPLICATE_JSON_KEY", "input", options);
+  const normalized = normalizeOptions(options);
+  if (!normalized.ok) return failInvalidOptions(normalized.evaluatedAt);
+  const { evaluatedAt, requested } = normalized.options;
+  if (typeof inputText !== "string") return fail("INPUT_NOT_STRING", "input", normalized.options);
+  if (Buffer.byteLength(inputText, "utf8") > EXACT_TARGET_INVENTORY_MAX_BYTES) return fail("INPUT_TOO_LARGE", "input", normalized.options);
+  if (detectDuplicateJsonKeys(inputText)) return fail("DUPLICATE_JSON_KEY", "input", normalized.options);
   let parsed: unknown;
   try {
     parsed = JSON.parse(inputText) as unknown;
   } catch {
-    return fail("JSON_MALFORMED", "input", options);
+    return fail("JSON_MALFORMED", "input", normalized.options);
   }
   const { document, reader } = readDocument(parsed, evaluatedAt);
-  const requested = requestedWorkloadClass(options);
   const artifactIssues = reader.issues;
   const artifactValid = document !== null && artifactIssues.length === 0;
   const classes = artifactValid ? document.classes.map(publicClassProjection) : [];

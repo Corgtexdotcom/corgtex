@@ -124,6 +124,19 @@ const validFixture = () => {
     }),
   });
 };
+const runCli = (args: readonly string[]) => {
+  try {
+    return {
+      status: 0,
+      output: execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    };
+  } catch (error) {
+    return {
+      status: Number((error as { status?: number }).status ?? 0),
+      output: String((error as { stdout?: string }).stdout ?? ""),
+    };
+  }
+};
 
 describe("validate exact target inventory CLI static boundary", () => {
   it("imports only local file reading, path resolution, and the public evaluator", () => {
@@ -133,28 +146,43 @@ describe("validate exact target inventory CLI static boundary", () => {
       'import { resolve } from "node:path";',
       "import {",
     ]);
+    expect(source).toContain("from \"@corgtex/domain/exact-target-inventory\"");
+    expect(source).not.toContain("from \"@corgtex/domain\"");
     expect(source).not.toMatch(/fetch\(|@azure|prisma|DATABASE_URL|SECRET|TOKEN|scripts\/release|child_process|spawn|exec|https?:\/\//);
   });
+
+  it("exposes and uses an offline exact-target package subpath without the domain barrel", () => {
+    const packageJson = JSON.parse(readFileSync(new URL("../packages/domain/package.json", import.meta.url), "utf8")) as {
+      exports: Record<string, string>;
+    };
+    expect(packageJson.exports["./exact-target-inventory"]).toBe("./src/exact-target-inventory.ts");
+
+    const facade = readFileSync(new URL("../packages/domain/src/exact-target-inventory.ts", import.meta.url), "utf8");
+    const evaluator = readFileSync(new URL("../packages/domain/src/exact-target-inventory-evaluator.ts", import.meta.url), "utf8");
+    const contract = readFileSync(new URL("../packages/domain/src/exact-target-inventory-contract.ts", import.meta.url), "utf8");
+    const closure = `${facade}\n${evaluator}\n${contract}`;
+    expect(facade).not.toContain("./index");
+    expect(closure).not.toMatch(/@corgtex\/domain["']|@corgtex\/shared|@corgtex\/storage|prisma|DATABASE_URL|REDIS|railway|fetch\(|https?:\/\/|scripts\/release|process\.env|child_process|spawn|exec/);
+
+    const imported = execFileSync("./node_modules/.bin/tsx", ["-e", "import('@corgtex/domain/exact-target-inventory').then((m) => process.stdout.write(String(typeof m.evaluateExactTargetInventoryJson)))"], {
+      encoding: "utf8",
+      env: { ...process.env, DATABASE_URL: "postgresql://poison.invalid/db", RAILWAY_TOKEN: "poison" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    expect(imported).toBe("function");
+  }, 30_000);
 
   it("fails closed for malformed and unreadable files without raw local paths", () => {
     const dir = mkdtempSync(join(tmpdir(), "exact-target-inventory-"));
     const malformed = join(dir, "malformed.json");
     writeFileSync(malformed, "{\"private\":\"customer-secret\",", "utf8");
     let output = "";
-    try {
-      execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", malformed, "--now=2026-08-24T12:00:00.000Z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      output = String((error as { stdout?: string }).stdout ?? "");
-    }
+    output = runCli([malformed, "--now=2026-08-24T12:00:00.000Z"]).output;
     expect(output).toContain("\"JSON_MALFORMED\"");
     expect(output).not.toContain(malformed);
     expect(output).not.toContain("customer-secret");
 
-    try {
-      execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", join(dir, "missing.json")], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      output = String((error as { stdout?: string }).stdout ?? "");
-    }
+    output = runCli([join(dir, "missing.json")]).output;
     expect(output).toBe("{\"ok\":false,\"error\":\"READ_FAILED\"}\n");
   }, 30_000);
 
@@ -163,11 +191,7 @@ describe("validate exact target inventory CLI static boundary", () => {
     const inventory = join(dir, "inventory.json");
     writeFileSync(inventory, validFixture(), "utf8");
     let output = "";
-    try {
-      execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", inventory, "--class=RESIDUAL_RAILWAY", "--now=2026-08-24T12:00:00.000Z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      output = String((error as { stdout?: string }).stdout ?? "");
-    }
+    output = runCli([inventory, "--class=RESIDUAL_RAILWAY", "--now=2026-08-24T12:00:00.000Z"]).output;
     expect(output).toContain("\"status\":\"BLOCKED\"");
     expect(output).toContain("RETIREMENT_BLOCKED");
   }, 30_000);
@@ -191,18 +215,37 @@ describe("validate exact target inventory CLI static boundary", () => {
     const inventory = join(dir, "inventory.json");
     writeFileSync(inventory, validFixture(), "utf8");
     const hostile = `SECRET_${"x".repeat(12_000)}`;
-    let output = "";
-    let status = 0;
-    try {
-      execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", inventory, `--class=${hostile}`, "--now=2026-08-24T12:00:00.000Z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      output = String((error as { stdout?: string }).stdout ?? "");
-      status = Number((error as { status?: number }).status ?? 0);
-    }
+    const { output, status } = runCli([inventory, `--class=${hostile}`, "--now=2026-08-24T12:00:00.000Z"]);
     expect(status).toBe(2);
     expect(output).toBe("{\"ok\":false,\"error\":\"INVALID_CLASS\"}\n");
     expect(output).not.toContain(hostile);
     expect(output).not.toContain("SECRET");
     expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(MAX_OUTPUT_BYTES);
+  }, 30_000);
+
+  it("rejects every unconsumed, malformed, duplicate, or invalid CLI argument before admission", () => {
+    const dir = mkdtempSync(join(tmpdir(), "exact-target-inventory-"));
+    const inventory = join(dir, "inventory.json");
+    writeFileSync(inventory, validFixture(), "utf8");
+    const rows: Array<readonly [string, readonly string[], string]> = [
+      ["no args", [], "MISSING_FILE"],
+      ["option-like file", ["--class=CORE_WEB"], "MISSING_FILE"],
+      ["misspelled option", [inventory, "--clas=CORE_WEB"], "INVALID_ARGS"],
+      ["spaced class option", [inventory, "--class", "CORE_WEB"], "INVALID_ARGS"],
+      ["extra positional", [inventory, "extra.json"], "INVALID_ARGS"],
+      ["empty class", [inventory, "--class="], "INVALID_CLASS"],
+      ["duplicate class", [inventory, "--class=CORE_WEB", "--class=CORE_WORKER"], "INVALID_CLASS"],
+      ["invalid now", [inventory, "--now=not-a-date"], "INVALID_NOW"],
+      ["offset now", [inventory, "--now=2026-08-24T12:00:00.000+00:00"], "INVALID_NOW"],
+      ["duplicate now", [inventory, "--now=2026-08-24T12:00:00.000Z", "--now=2026-08-24T12:00:01.000Z"], "INVALID_NOW"],
+    ];
+
+    for (const [name, args, code] of rows) {
+      const result = runCli(args);
+      expect(result.status, name).toBe(2);
+      expect(result.output, name).toBe(`${JSON.stringify({ ok: false, error: code })}\n`);
+      expect(result.output, name).not.toContain(inventory);
+      expect(Buffer.byteLength(result.output, "utf8"), name).toBeLessThanOrEqual(MAX_OUTPUT_BYTES);
+    }
   }, 30_000);
 });

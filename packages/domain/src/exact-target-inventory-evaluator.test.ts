@@ -161,6 +161,9 @@ const serialize = (value: unknown) => JSON.stringify(value);
 const evaluate = (value: unknown, requestedWorkloadClass: ExactTargetInventoryWorkloadClass = "CORE_WEB") =>
   evaluateExactTargetInventoryJson(typeof value === "string" ? value : serialize(value), { now: NOW, requestedWorkloadClass });
 const outputBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+const retopologize = (targetValue: any) => {
+  Object.assign(targetValue.completenessClaim, topology(targetValue.components));
+};
 
 const admitThroughPublicBoundary = (inputText: string, requestedWorkloadClass: ExactTargetInventoryWorkloadClass, permit: boolean) => {
   const effects = Array.from({ length: 8 }, () => vi.fn());
@@ -234,6 +237,30 @@ describe("exact target inventory evaluator", () => {
     expect(blocked.effectCount).toBe(0);
   });
 
+  it("preserves zero-selectable-target semantics as artifact-valid and class-blocked", () => {
+    const value = fixture() as any;
+    const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+    coreWeb.targets = [];
+    const input = serialize(value);
+
+    const noRequest = evaluateExactTargetInventoryJson(input, { now: NOW });
+    expect(noRequest.artifactStatus).toBe("VALID");
+    expect(noRequest.ok).toBe(true);
+    expect(noRequest.issueCodes).toEqual([]);
+    expect(noRequest.classes.find((item) => item.workloadClass === "CORE_WEB")).toMatchObject({
+      status: "BLOCKED",
+      issueCodes: ["TARGET_CARDINALITY_INVALID"],
+      targetCount: 0,
+      eligibleTargetCount: 0,
+    });
+
+    const requested = admitThroughPublicBoundary(input, "CORE_WEB", true);
+    expect(requested.result.artifactStatus).toBe("VALID");
+    expect(requested.result.ok).toBe(false);
+    expect(requested.result.selection).toEqual({ workloadClass: "CORE_WEB", status: "BLOCKED", issueCodes: ["TARGET_CARDINALITY_INVALID"] });
+    expect(requested.effectCount).toBe(0);
+  });
+
   it("bounds hostile requested-class handling without reflecting raw caller input", () => {
     const hostile = `SECRET_${"x".repeat(12_000)}`;
     const result = evaluateExactTargetInventoryJson(serialize(fixture()), { now: NOW, requestedWorkloadClass: hostile as ExactTargetInventoryWorkloadClass });
@@ -245,6 +272,47 @@ describe("exact target inventory evaluator", () => {
     expect(output).not.toContain(hostile);
     expect(output).not.toContain("SECRET");
     expect(outputBytes(result)).toBeLessThanOrEqual(EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES);
+  });
+
+  it("rejects invalid or hostile evaluation clocks without epoch substitution or caller reflection", () => {
+    const input = serialize(fixture());
+    const rows: Array<readonly [string, unknown]> = [
+      ["invalid string", "not-a-date"],
+      ["offset string", "2026-08-24T12:00:00.000+00:00"],
+      ["local string", "2026-08-24T12:00:00.000"],
+      ["nan date", new Date(Number.NaN)],
+      ["infinite date", new Date(Number.POSITIVE_INFINITY)],
+      ["hostile options", new Proxy({}, { getOwnPropertyDescriptor: () => { throw new Error("private-trap"); } })],
+      ["extra option", { now: NOW, requestedWorkloadClass: "CORE_WEB", customerSecret: "private" }],
+      ["accessor option", Object.defineProperty({}, "now", { get: () => { throw new Error("private-trap"); }, enumerable: true })],
+    ];
+
+    for (const [name, now] of rows) {
+      const result = evaluateExactTargetInventoryJson(input, { now: now as string, requestedWorkloadClass: "CORE_WEB" });
+      expect(result.artifactStatus, name).toBe("INVALID");
+      expect(result.ok, name).toBe(false);
+      expect(result.issueCodes, name).toEqual(["INVALID_VALUE"]);
+      expect(result.evaluatedAt, name).toBe("1970-01-01T00:00:00.000Z");
+      expect(JSON.stringify(result), name).not.toMatch(/customer-secret|private-trap|private/);
+      expect(outputBytes(result), name).toBeLessThanOrEqual(EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES);
+    }
+
+    const dateResult = evaluateExactTargetInventoryJson(input, { now: new Date(Date.parse(NOW)), requestedWorkloadClass: "CORE_WEB" });
+    expect(dateResult.artifactStatus).toBe("VALID");
+    expect(dateResult.evaluatedAt).toBe(NOW);
+    const dateSubclass = new (class extends Date {
+      public override toISOString(): string {
+        return "customer-secret";
+      }
+    })(Date.parse(NOW));
+    const dateSubclassResult = evaluateExactTargetInventoryJson(input, { now: dateSubclass, requestedWorkloadClass: "CORE_WEB" });
+    expect(dateSubclassResult.artifactStatus).toBe("VALID");
+    expect(dateSubclassResult.evaluatedAt).toBe(NOW);
+    expect(JSON.stringify(dateSubclassResult)).not.toContain("customer-secret");
+    const pre1970 = evaluateExactTargetInventoryJson(input, { now: "1969-12-31T23:59:59.999Z", requestedWorkloadClass: "CORE_WEB" });
+    expect(pre1970.artifactStatus).toBe("INVALID");
+    expect(pre1970.evaluatedAt).toBe("1969-12-31T23:59:59.999Z");
+    expect(pre1970.issueCodes).toContain("PROOF_CHRONOLOGY_INVALID");
   });
 
   it("re-evaluates the same exact bytes against current time and closes after expiry", () => {
@@ -421,6 +489,19 @@ describe("exact target inventory evaluator", () => {
     expectOracle("rollback predecessor must resolve", (value) => {
       const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
       if (coreWeb) coreWeb.targets[0].components[0].rollback.predecessorRef = uuid(1001);
+      return value;
+    }, "ROLLBACK_INVALID");
+    expectOracle("rollback predecessor kind must match owner", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) {
+        const targetValue = coreWeb.targets[0];
+        const app = targetValue.components[0];
+        const db = targetValue.components[1];
+        app.rollback.predecessorRef = db.componentId;
+        app.rollback.claim.owner = `${app.componentId}->${db.componentId}`;
+        app.rollback.claim.proof.owner = `${app.componentId}->${db.componentId}`;
+        retopologize(targetValue);
+      }
       return value;
     }, "ROLLBACK_INVALID");
     expectOracle("slug ids are rejected", (value) => {

@@ -12,6 +12,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./exact-target-inventory": "./src/exact-target-inventory.ts",
     "./modules": "./src/modules/index.ts"
   }
 }
