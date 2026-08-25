@@ -21,6 +21,7 @@ const classes = [
   "RESIDUAL_RAILWAY",
   "DUPLICATE_AZURE",
 ] as const;
+const MAX_OUTPUT_BYTES = 8_192;
 const dispositions = new Map<string, string>([
   ["ACTIVE_CLIENT_PRIMARY", "SELECTABLE"],
   ["ACTIVE_CLIENT_AUTHORITY_UNPROVEN", "BLOCKED"],
@@ -169,5 +170,39 @@ describe("validate exact target inventory CLI static boundary", () => {
     }
     expect(output).toContain("\"status\":\"BLOCKED\"");
     expect(output).toContain("RETIREMENT_BLOCKED");
+  }, 30_000);
+
+  it("returns zero only for valid no-request and selected-class admission", () => {
+    const dir = mkdtempSync(join(tmpdir(), "exact-target-inventory-"));
+    const inventory = join(dir, "inventory.json");
+    writeFileSync(inventory, validFixture(), "utf8");
+
+    const noRequest = execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", inventory, "--now=2026-08-24T12:00:00.000Z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    expect(noRequest).toContain("\"ok\":true");
+    expect(noRequest).not.toContain("\"selection\"");
+
+    const selected = execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", inventory, "--class=CORE_WEB", "--now=2026-08-24T12:00:00.000Z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    expect(selected).toContain("\"ok\":true");
+    expect(selected).toContain("\"status\":\"SELECTED\"");
+  }, 30_000);
+
+  it("rejects hostile requested classes before evaluation without echoing caller input", () => {
+    const dir = mkdtempSync(join(tmpdir(), "exact-target-inventory-"));
+    const inventory = join(dir, "inventory.json");
+    writeFileSync(inventory, validFixture(), "utf8");
+    const hostile = `SECRET_${"x".repeat(12_000)}`;
+    let output = "";
+    let status = 0;
+    try {
+      execFileSync("./node_modules/.bin/tsx", ["scripts/validate-exact-target-inventory.ts", inventory, `--class=${hostile}`, "--now=2026-08-24T12:00:00.000Z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      output = String((error as { stdout?: string }).stdout ?? "");
+      status = Number((error as { status?: number }).status ?? 0);
+    }
+    expect(status).toBe(2);
+    expect(output).toBe("{\"ok\":false,\"error\":\"INVALID_CLASS\"}\n");
+    expect(output).not.toContain(hostile);
+    expect(output).not.toContain("SECRET");
+    expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(MAX_OUTPUT_BYTES);
   }, 30_000);
 });

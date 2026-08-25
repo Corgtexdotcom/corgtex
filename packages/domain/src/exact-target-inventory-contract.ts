@@ -5,8 +5,9 @@ export const EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS = 4;
 export const EXACT_TARGET_INVENTORY_MAX_COMPONENTS_PER_TARGET = 12;
 export const EXACT_TARGET_INVENTORY_MAX_DEPENDENCIES_PER_COMPONENT = 8;
 export const EXACT_TARGET_INVENTORY_MAX_ISSUES = 32;
+export const EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES = 8_192;
 
-export const exactTargetInventoryWorkloadClasses = [
+export const exactTargetInventoryWorkloadClasses = Object.freeze([
   "ACTIVE_CLIENT_PRIMARY",
   "ACTIVE_CLIENT_AUTHORITY_UNPROVEN",
   "ACTIVE_CLIENT_CANARY",
@@ -21,11 +22,11 @@ export const exactTargetInventoryWorkloadClasses = [
   "OPS_CONTROL_PLANE",
   "RESIDUAL_RAILWAY",
   "DUPLICATE_AZURE",
-] as const;
+] as const);
 
 export type ExactTargetInventoryWorkloadClass = typeof exactTargetInventoryWorkloadClasses[number];
 
-export const exactTargetInventoryComponentKinds = [
+export const exactTargetInventoryComponentKinds = Object.freeze([
   "WEB_APP",
   "WORKER_APP",
   "MCP_SERVER",
@@ -38,38 +39,38 @@ export const exactTargetInventoryComponentKinds = [
   "REGISTRY",
   "SECRET_BINDING",
   "OBSERVABILITY",
-] as const;
+] as const);
 
 export type ExactTargetInventoryComponentKind = typeof exactTargetInventoryComponentKinds[number];
 
-export const exactTargetInventoryClaimKinds = [
+export const exactTargetInventoryClaimKinds = Object.freeze([
   "LIFECYCLE",
   "AUTHORITY",
   "COMPLETENESS",
   "DEPENDENCY",
   "ROLLBACK",
   "POLICY",
-] as const;
+] as const);
 
 export type ExactTargetInventoryClaimKind = typeof exactTargetInventoryClaimKinds[number];
 
-export const exactTargetInventoryProofPurposes = [
+export const exactTargetInventoryProofPurposes = Object.freeze([
   "target-lifecycle",
   "target-authority",
   "target-completeness",
   "component-dependency",
   "component-rollback",
   "target-policy",
-] as const;
+] as const);
 
 export type ExactTargetInventoryProofPurpose = typeof exactTargetInventoryProofPurposes[number];
 
-export const exactTargetInventoryClassDispositions = [
+export const exactTargetInventoryClassDispositions = Object.freeze([
   "SELECTABLE",
   "BLOCKED",
   "DECISION_REQUIRED",
   "RETIRE_ONLY",
-] as const;
+] as const);
 
 export type ExactTargetInventoryClassDisposition = typeof exactTargetInventoryClassDispositions[number];
 
@@ -188,7 +189,7 @@ export type ExactTargetInventoryClassProjection = {
 };
 
 export type ExactTargetInventorySelectionProjection = {
-  readonly workloadClass: ExactTargetInventoryWorkloadClass;
+  readonly workloadClass?: ExactTargetInventoryWorkloadClass;
   readonly status: "SELECTED" | "BLOCKED" | "INVALID";
   readonly opaqueTargetId?: string;
   readonly issueCodes: readonly ExactTargetInventoryIssueCode[];
@@ -217,7 +218,7 @@ export type ExactTargetInventoryFieldOwner = {
   readonly owner: string;
 };
 
-export const exactTargetInventoryFieldOwnership: readonly ExactTargetInventoryFieldOwner[] = [
+export const exactTargetInventoryFieldOwnership: readonly ExactTargetInventoryFieldOwner[] = Object.freeze([
   { fact: "schema version", owner: "document.schemaVersion" },
   { fact: "generation time", owner: "document.generatedAt" },
   { fact: "workload class identity", owner: "class.workloadClass" },
@@ -229,18 +230,18 @@ export const exactTargetInventoryFieldOwnership: readonly ExactTargetInventoryFi
   { fact: "claim status", owner: "inline claim proof" },
   { fact: "artifact identity", owner: "inline proof artifact path and digest" },
   { fact: "selection", owner: "evaluateExactTargetInventoryJson invocation" },
-] as const;
+] as const);
 
-export const exactTargetInventoryUseSiteProofRequirements = {
-  lifecycleClaim: { kind: "LIFECYCLE", purpose: "target-lifecycle" },
-  authorityClaim: { kind: "AUTHORITY", purpose: "target-authority" },
-  completenessClaim: { kind: "COMPLETENESS", purpose: "target-completeness" },
-  policyClaim: { kind: "POLICY", purpose: "target-policy" },
-  dependencyClaim: { kind: "DEPENDENCY", purpose: "component-dependency" },
-  rollbackClaim: { kind: "ROLLBACK", purpose: "component-rollback" },
-} as const;
+export const exactTargetInventoryUseSiteProofRequirements = Object.freeze({
+  lifecycleClaim: Object.freeze({ kind: "LIFECYCLE", purpose: "target-lifecycle" }),
+  authorityClaim: Object.freeze({ kind: "AUTHORITY", purpose: "target-authority" }),
+  completenessClaim: Object.freeze({ kind: "COMPLETENESS", purpose: "target-completeness" }),
+  policyClaim: Object.freeze({ kind: "POLICY", purpose: "target-policy" }),
+  dependencyClaim: Object.freeze({ kind: "DEPENDENCY", purpose: "component-dependency" }),
+  rollbackClaim: Object.freeze({ kind: "ROLLBACK", purpose: "component-rollback" }),
+} as const);
 
-export const exactTargetInventoryRequiredDispositions = {
+export const exactTargetInventoryRequiredDispositions = Object.freeze({
   ACTIVE_CLIENT_PRIMARY: "SELECTABLE",
   ACTIVE_CLIENT_AUTHORITY_UNPROVEN: "BLOCKED",
   ACTIVE_CLIENT_CANARY: "BLOCKED",
@@ -255,4 +256,4 @@ export const exactTargetInventoryRequiredDispositions = {
   OPS_CONTROL_PLANE: "BLOCKED",
   RESIDUAL_RAILWAY: "RETIRE_ONLY",
   DUPLICATE_AZURE: "RETIRE_ONLY",
-} as const satisfies Record<ExactTargetInventoryWorkloadClass, ExactTargetInventoryClassDisposition>;
+} as const satisfies Record<ExactTargetInventoryWorkloadClass, ExactTargetInventoryClassDisposition>);

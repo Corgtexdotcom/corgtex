@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EXACT_TARGET_INVENTORY_MAX_BYTES,
+  EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES,
   EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
   exactTargetInventoryClassDispositions,
   exactTargetInventoryFieldOwnership,
@@ -12,6 +13,7 @@ describe("exact target inventory v2 phase 0 contract evidence", () => {
   it("freezes the v2 public boundary, field ownership table, and use-site proof matrix", () => {
     expect(EXACT_TARGET_INVENTORY_SCHEMA_VERSION).toBe("2.0.0");
     expect(EXACT_TARGET_INVENTORY_MAX_BYTES).toBe(96_000);
+    expect(EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES).toBe(8_192);
     expect(exactTargetInventoryWorkloadClasses).toEqual([
       "ACTIVE_CLIENT_PRIMARY",
       "ACTIVE_CLIENT_AUTHORITY_UNPROVEN",
@@ -29,7 +31,11 @@ describe("exact target inventory v2 phase 0 contract evidence", () => {
       "DUPLICATE_AZURE",
     ]);
     expect(new Set(exactTargetInventoryWorkloadClasses)).toHaveProperty("size", 14);
+    expect(Object.isFrozen(exactTargetInventoryWorkloadClasses)).toBe(true);
+    expect(() => (exactTargetInventoryWorkloadClasses as unknown as string[]).pop()).toThrow(TypeError);
+    expect(exactTargetInventoryWorkloadClasses).toHaveLength(14);
     expect(exactTargetInventoryClassDispositions).toEqual(["SELECTABLE", "BLOCKED", "DECISION_REQUIRED", "RETIRE_ONLY"]);
+    expect(Object.isFrozen(exactTargetInventoryClassDispositions)).toBe(true);
     expect(exactTargetInventoryFieldOwnership).toEqual([
       { fact: "schema version", owner: "document.schemaVersion" },
       { fact: "generation time", owner: "document.generatedAt" },
@@ -51,6 +57,8 @@ describe("exact target inventory v2 phase 0 contract evidence", () => {
       dependencyClaim: { kind: "DEPENDENCY", purpose: "component-dependency" },
       rollbackClaim: { kind: "ROLLBACK", purpose: "component-rollback" },
     });
+    expect(Object.isFrozen(exactTargetInventoryUseSiteProofRequirements)).toBe(true);
+    expect(Object.isFrozen(exactTargetInventoryUseSiteProofRequirements.dependencyClaim)).toBe(true);
   });
 
   it("records the exact 14-class phase 0 disposition matrix without granting retirement or release authority", () => {

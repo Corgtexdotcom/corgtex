@@ -5,6 +5,7 @@ import {
   EXACT_TARGET_INVENTORY_MAX_DEPENDENCIES_PER_COMPONENT,
   EXACT_TARGET_INVENTORY_MAX_DEPTH,
   EXACT_TARGET_INVENTORY_MAX_ISSUES,
+  EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES,
   EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS,
   EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
   exactTargetInventoryClassDispositions,
@@ -40,6 +41,16 @@ type TargetTopology = {
   readonly dependencyCount: number;
   readonly rollbackCount: number;
 };
+type RequestedWorkloadClass =
+  | { readonly status: "NONE" }
+  | { readonly status: "VALID"; readonly workloadClass: ExactTargetInventoryWorkloadClass }
+  | { readonly status: "INVALID" };
+
+const workloadClasses = Object.freeze([...exactTargetInventoryWorkloadClasses]);
+const workloadClassSet = new Set<string>(workloadClasses);
+const componentKinds = Object.freeze([...exactTargetInventoryComponentKinds]);
+const classDispositions = Object.freeze([...exactTargetInventoryClassDispositions]);
+const requiredDispositions = Object.freeze({ ...exactTargetInventoryRequiredDispositions });
 
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
   const actual = Object.keys(value);
@@ -51,6 +62,15 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const enumHas = <T extends readonly string[]>(values: T, value: unknown): value is T[number] =>
   typeof value === "string" && values.includes(value);
+
+const requestedWorkloadClass = (options: ExactTargetInventoryEvaluationOptions): RequestedWorkloadClass => {
+  const requested = (options as { readonly requestedWorkloadClass?: unknown }).requestedWorkloadClass;
+  if (requested === undefined) return { status: "NONE" };
+  if (typeof requested === "string" && workloadClassSet.has(requested)) {
+    return { status: "VALID", workloadClass: requested as ExactTargetInventoryWorkloadClass };
+  }
+  return { status: "INVALID" };
+};
 
 const boundedId = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -80,6 +100,7 @@ const fail = (
   options: ExactTargetInventoryEvaluationOptions,
 ): ExactTargetInventoryEvaluationResult => {
   const evaluatedAt = normalizeNow(options.now);
+  const requested = requestedWorkloadClass(options);
   const issues = [issue(code, scope)];
   return {
     ok: false,
@@ -91,9 +112,9 @@ const fail = (
     issueCodes: uniqueCodes(issues),
     issues,
     classes: [],
-    ...(options.requestedWorkloadClass === undefined ? {} : {
+    ...(requested.status === "NONE" ? {} : {
       selection: {
-        workloadClass: options.requestedWorkloadClass,
+        ...(requested.status === "VALID" ? { workloadClass: requested.workloadClass } : {}),
         status: "INVALID",
         issueCodes: [code],
       } satisfies ExactTargetInventorySelectionProjection,
@@ -201,7 +222,9 @@ const depthOf = (value: unknown, depth = 0): number => {
 
 class Reader {
   public readonly issues: MutableIssue[] = [];
-  private readonly artifactIds = new Set<string>();
+  private readonly artifactPaths = new Map<string, string>();
+  private readonly artifactDigests = new Map<string, string>();
+  private readonly proofExpiries: string[] = [];
   private readonly componentIds = new Set<string>();
   private readonly targetIds = new Set<string>();
   private readonly now: number;
@@ -225,10 +248,16 @@ class Reader {
       this.add("INVALID_VALUE", "proof");
       return null;
     }
-    const key = `${value.path}\u0000${value.digest}`;
-    if (this.artifactIds.has(key)) this.add("PROOF_ARTIFACT_REUSED", "proof");
-    this.artifactIds.add(key);
+    if (this.artifactPaths.has(value.path) || this.artifactDigests.has(value.digest)) {
+      this.add("PROOF_ARTIFACT_REUSED", "proof");
+    }
+    this.artifactPaths.set(value.path, value.digest);
+    this.artifactDigests.set(value.digest, value.path);
     return { path: value.path, digest: value.digest };
+  }
+
+  public validUntil(): string | null {
+    return [...this.proofExpiries].sort()[0] ?? null;
   }
 
   public proof(value: unknown, owner: string, claimKind: ExactTargetInventoryClaim["kind"], purpose: ExactTargetInventoryProof["purpose"]): ExactTargetInventoryProof | null {
@@ -249,6 +278,7 @@ class Reader {
       this.add(expiresAt !== null && expiresAt <= this.now ? "PROOF_EXPIRED" : "PROOF_CHRONOLOGY_INVALID", "proof");
       return null;
     }
+    this.proofExpiries.push(value.expiresAt);
     return {
       purpose,
       owner,
@@ -315,7 +345,7 @@ class Reader {
       this.add("UNKNOWN_KEY", "component");
       return null;
     }
-    if (!boundedId(value.componentId) || !enumHas(exactTargetInventoryComponentKinds, value.kind)) {
+    if (!boundedId(value.componentId) || !enumHas(componentKinds, value.kind)) {
       this.add("DEPENDENCY_INVALID", "component");
       return null;
     }
@@ -344,7 +374,7 @@ class Reader {
       this.add("UNKNOWN_KEY", "component");
       return null;
     }
-    if (!boundedId(value.componentId) || !enumHas(exactTargetInventoryComponentKinds, value.kind) || typeof value.required !== "boolean" || !Array.isArray(value.dependencies)) {
+    if (!boundedId(value.componentId) || !enumHas(componentKinds, value.kind) || typeof value.required !== "boolean" || !Array.isArray(value.dependencies)) {
       this.add("TYPE_MISMATCH", "component");
       return null;
     }
@@ -392,11 +422,11 @@ class Reader {
       this.add("UNKNOWN_KEY", "class");
       return null;
     }
-    if (!enumHas(exactTargetInventoryWorkloadClasses, value.workloadClass) || !enumHas(exactTargetInventoryClassDispositions, value.disposition) || !Array.isArray(value.targets)) {
+    if (!enumHas(workloadClasses, value.workloadClass) || !enumHas(classDispositions, value.disposition) || !Array.isArray(value.targets)) {
       this.add("TYPE_MISMATCH", "class");
       return null;
     }
-    if (value.disposition !== exactTargetInventoryRequiredDispositions[value.workloadClass]) this.add("DISPOSITION_MISMATCH", "class", value.workloadClass);
+    if (value.disposition !== requiredDispositions[value.workloadClass]) this.add("DISPOSITION_MISMATCH", "class", value.workloadClass);
     if (value.targets.length > EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS) this.add("LIMIT_EXCEEDED", "class", value.workloadClass);
     if (value.disposition === "SELECTABLE" && value.targets.length > 1) this.add("TARGET_CARDINALITY_INVALID", "target", value.workloadClass);
     const rootClaim = this.claim(value.rootClaim, `class-${value.workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
@@ -460,9 +490,9 @@ const readDocument = (value: unknown, nowIso: string): { document: ExactTargetIn
   if (depthOf(value) > EXACT_TARGET_INVENTORY_MAX_DEPTH) reader.add("LIMIT_EXCEEDED", "artifact");
   const classes = value.classes.map((item) => reader.classBundle(item)).filter((item): item is ExactTargetInventoryClassBundle => item !== null);
   const classNames = classes.map((item) => item.workloadClass);
-  const expected = new Set(exactTargetInventoryWorkloadClasses);
-  if (classes.length !== exactTargetInventoryWorkloadClasses.length
-    || new Set(classNames).size !== exactTargetInventoryWorkloadClasses.length
+  const expected = new Set(workloadClasses);
+  if (classes.length !== workloadClasses.length
+    || new Set(classNames).size !== workloadClasses.length
     || classNames.some((item) => !expected.has(item))) {
     reader.add("CLASS_CARDINALITY_INVALID", "artifact");
   }
@@ -500,42 +530,49 @@ const publicClassProjection = (bundle: ExactTargetInventoryClassBundle): ExactTa
   };
 };
 
-const validUntil = (document: ExactTargetInventoryDocument): string | null => {
-  const expiries: string[] = [];
-  const collectClaim = (claim: ExactTargetInventoryClaim) => expiries.push(claim.proof.expiresAt);
-  for (const bundle of document.classes) {
-    collectClaim(bundle.rootClaim);
-    for (const target of bundle.targets) {
-      collectClaim(target.lifecycleClaim);
-      collectClaim(target.authorityClaim);
-      collectClaim(target.completenessClaim);
-      collectClaim(target.policyClaim);
-      target.components.forEach((component) => {
-        if (component.rollback) collectClaim(component.rollback.claim);
-      });
-    }
-  }
-  return expiries.sort()[0] ?? null;
-};
-
 const selectionFor = (
-  requestedWorkloadClass: ExactTargetInventoryWorkloadClass,
+  requested: RequestedWorkloadClass,
   classes: readonly ExactTargetInventoryClassProjection[],
   document: ExactTargetInventoryDocument | null,
-): ExactTargetInventorySelectionProjection => {
-  const projection = classes.find((item) => item.workloadClass === requestedWorkloadClass);
+): ExactTargetInventorySelectionProjection | undefined => {
+  if (requested.status === "NONE") return undefined;
+  if (requested.status === "INVALID") return { status: "INVALID", issueCodes: ["REQUESTED_CLASS_NOT_FOUND"] };
+  const projection = classes.find((item) => item.workloadClass === requested.workloadClass);
   if (projection === undefined || document === null) {
-    return { workloadClass: requestedWorkloadClass, status: "INVALID", issueCodes: ["REQUESTED_CLASS_NOT_FOUND"] };
+    return { workloadClass: requested.workloadClass, status: "INVALID", issueCodes: ["REQUESTED_CLASS_NOT_FOUND"] };
   }
   if (projection.status !== "ELIGIBLE") {
-    return { workloadClass: requestedWorkloadClass, status: "BLOCKED", issueCodes: projection.issueCodes };
+    return { workloadClass: requested.workloadClass, status: "BLOCKED", issueCodes: projection.issueCodes };
   }
-  const target = document.classes.find((item) => item.workloadClass === requestedWorkloadClass)?.targets[0];
+  const target = document.classes.find((item) => item.workloadClass === requested.workloadClass)?.targets[0];
   return {
-    workloadClass: requestedWorkloadClass,
+    workloadClass: requested.workloadClass,
     status: "SELECTED",
-    opaqueTargetId: target === undefined ? undefined : digest(`${requestedWorkloadClass}:${target.targetId}`).slice(0, 32),
+    opaqueTargetId: target === undefined ? undefined : digest(`${requested.workloadClass}:${target.targetId}`).slice(0, 32),
     issueCodes: [],
+  };
+};
+
+const assertOutputBound = (result: ExactTargetInventoryEvaluationResult): ExactTargetInventoryEvaluationResult => {
+  const bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+  if (bytes <= EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES) return result;
+  return {
+    ok: false,
+    schemaVersion: EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
+    artifactStatus: "INVALID",
+    evaluatedAt: result.evaluatedAt,
+    validUntil: null,
+    canonicalDigest: null,
+    issueCodes: ["LIMIT_EXCEEDED"],
+    issues: [issue("LIMIT_EXCEEDED", "artifact")],
+    classes: [],
+    ...(result.selection === undefined ? {} : {
+      selection: {
+        ...(result.selection.workloadClass === undefined ? {} : { workloadClass: result.selection.workloadClass }),
+        status: "INVALID",
+        issueCodes: ["LIMIT_EXCEEDED"],
+      } satisfies ExactTargetInventorySelectionProjection,
+    }),
   };
 };
 
@@ -554,26 +591,25 @@ export function evaluateExactTargetInventoryJson(
     return fail("JSON_MALFORMED", "input", options);
   }
   const { document, reader } = readDocument(parsed, evaluatedAt);
+  const requested = requestedWorkloadClass(options);
   const artifactIssues = reader.issues;
   const artifactValid = document !== null && artifactIssues.length === 0;
   const classes = artifactValid ? document.classes.map(publicClassProjection) : [];
-  const classBlockIssues = classes.flatMap((projection) =>
-    projection.issueCodes.map((code) => issue(code, "class", projection.workloadClass)));
-  const allIssues = [...artifactIssues, ...classBlockIssues].slice(0, EXACT_TARGET_INVENTORY_MAX_ISSUES);
+  const selection = selectionFor(requested, classes, artifactValid ? document : null);
+  const requestedIssues = requested.status === "INVALID" ? [issue("REQUESTED_CLASS_NOT_FOUND", "selection")] : [];
+  const allIssues = [...artifactIssues, ...requestedIssues].slice(0, EXACT_TARGET_INVENTORY_MAX_ISSUES);
   const canonical = artifactValid ? canonicalJson(parsed) : null;
   const result: ExactTargetInventoryEvaluationResult = {
-    ok: artifactValid && classBlockIssues.length === 0,
+    ok: artifactValid && (requested.status === "NONE" || selection?.status === "SELECTED"),
     schemaVersion: EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
     artifactStatus: artifactValid ? "VALID" : "INVALID",
     evaluatedAt,
-    validUntil: artifactValid ? validUntil(document) : null,
+    validUntil: artifactValid ? reader.validUntil() : null,
     canonicalDigest: canonical === null ? null : `sha256:${digest(canonical)}`,
     issueCodes: uniqueCodes(allIssues),
     issues: allIssues,
     classes,
-    ...(options.requestedWorkloadClass === undefined ? {} : {
-      selection: selectionFor(options.requestedWorkloadClass, classes, artifactValid ? document : null),
-    }),
+    ...(selection === undefined ? {} : { selection }),
   };
-  return result;
+  return assertOutputBound(result);
 }
