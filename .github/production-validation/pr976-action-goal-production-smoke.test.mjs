@@ -1,0 +1,77 @@
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vitest";
+import { fetchJson, sanitize, verifyGitLineage, PR976_FILES, TARGET_SHA } from "./pr976-action-goal-production-smoke.mjs";
+
+function server(handler) {
+  return new Promise((resolve) => {
+    const instance = createServer(handler);
+    instance.listen(0, "127.0.0.1", () => {
+      const address = instance.address();
+      resolve({
+        url: `http://127.0.0.1:${address.port}`,
+        close: () => new Promise((done) => instance.close(done)),
+      });
+    });
+  });
+}
+
+describe("pr976 action/goal production smoke driver", () => {
+  it("keeps the abort deadline active through stalled body reads", async () => {
+    const app = await server((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write("{");
+    });
+    try {
+      await expect(fetchJson(app.url, {}, { timeoutMs: 25 })).rejects.toThrow(/aborted|deadline|BodyStreamBuffer/i);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects oversized response bodies before parsing", async () => {
+    const app = await server((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: "x".repeat(128) }));
+    });
+    try {
+      await expect(fetchJson(app.url, {}, { maxBytes: 32 })).rejects.toThrow("RESPONSE_TOO_LARGE");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("sanitizes cookies, bearer tokens, credential tokens, and passwords", () => {
+    const clean = sanitize({
+      credentialToken: "agentc-secret",
+      headers: { authorization: "Bearer abc", cookie: "corgtex_session=raw" },
+      nested: { password: "secret" },
+    });
+    expect(JSON.stringify(clean)).not.toMatch(/agentc-|Bearer|corgtex_session|secret/);
+  });
+
+  it("pins the exact twelve PR 976 files for successor equality", () => {
+    expect(TARGET_SHA).toBe("086cec6d25f3457ce7b6858aa8c8f31ceb0cc771");
+    expect(PR976_FILES).toHaveLength(12);
+    expect(PR976_FILES).toContain("apps/web/app/[locale]/workspaces/[workspaceId]/goals/actions.ts");
+  });
+
+  it("fails closed when PR 976 file equality drifts", () => {
+    expect(() => verifyGitLineage("0000000000000000000000000000000000000000")).toThrow(/Command failed/);
+  });
+});
+
+describe("pr976 action/goal production smoke workflow", () => {
+  it("is manual, protected, main-only, minimally permissioned, and fixed-input", async () => {
+    const workflow = await readFile(new URL("../workflows/pr976-action-goal-production-smoke.yml", import.meta.url), "utf8");
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).not.toMatch(/schedule:|workflow_run:|pull_request:/);
+    expect(workflow).toContain("environment: production");
+    expect(workflow).toContain("if: github.ref == 'refs/heads/main'");
+    expect(workflow).toContain("contents: read");
+    expect(workflow).toContain("actions: read");
+    expect(workflow).toContain("cancel-in-progress: false");
+    expect(workflow).toContain("expected_deployed_sha");
+    expect(workflow).not.toContain("PRODUCTION_DATABASE_URL");
+  });
+});
