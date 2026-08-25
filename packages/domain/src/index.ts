@@ -130,3 +130,4 @@ export * from "./user-profile";
 export * from "./avatar";
 export * from "./provider-cutover";
 export * from "./customer-issue-publication";
+export * from "./exact-target-inventory";
