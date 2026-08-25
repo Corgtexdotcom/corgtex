@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
 
 const tx = vi.hoisted(() => ({
+  $queryRaw: vi.fn(),
   productionValidationReceipt: {
     create: vi.fn(),
     findUniqueOrThrow: vi.fn(),
@@ -86,6 +88,7 @@ describe("PR 976 production validation receipt authority", () => {
       updatedAt: new Date(),
     };
     prisma.productionValidationReceipt.create.mockResolvedValue(receipt);
+    tx.$queryRaw.mockResolvedValue([{ id: "receipt-1" }]);
     tx.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue(receipt);
     tx.action.create.mockResolvedValue({ id: "action-1", version: 1 });
     tx.goal.create.mockResolvedValue({ id: "goal-1", version: 1 });
@@ -132,6 +135,72 @@ describe("PR 976 production validation receipt authority", () => {
         credentialState: "PROVISIONED",
       }),
     }));
+  });
+
+  it("serializes provisioning on the claimed receipt row and rejects tuple rewrites", async () => {
+    const { provisionPr976ActionGoalValidation } = await import("./production-validation");
+    const existing = {
+      id: "receipt-1",
+      operationKey: "pr976-action-goal-production-validation",
+      workspaceId: "workspace-1",
+      targetPullRequest: 976,
+      targetReleaseSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+      deployedSha: "1".repeat(40),
+      ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+      workflowRunId: "10",
+      workflowRunAttempt: 1,
+      syntheticMarker: "corgtex:production-validation:pr976:action-goal",
+      actionId: null,
+      goalId: null,
+      agentCredentialId: null,
+      actionBaselineVersion: null,
+      goalBaselineVersion: null,
+      actionExpectedDigest: null,
+      actionObservedDigest: null,
+      goalExpectedProgress: null,
+      goalObservedProgress: null,
+      actionState: "PENDING",
+      goalState: "PENDING",
+      credentialState: "PENDING",
+      outcome: "PENDING",
+      actionArchiveRecordId: null,
+      goalArchiveRecordId: null,
+      cleanupStartedAt: null,
+      completedAt: null,
+      claimedAt: new Date(),
+      featureProvenAt: null,
+      terminalizedAt: null,
+      failureCode: null,
+      failureMessage: null,
+      transitions: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    prisma.productionValidationReceipt.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+      code: "P2002",
+      clientVersion: "test",
+      meta: {},
+    }));
+    prisma.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue(existing);
+    tx.$queryRaw.mockResolvedValue([{ id: "receipt-1" }]);
+    tx.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue(existing);
+
+    await expect(provisionPr976ActionGoalValidation(
+      { kind: "user", user: { id: "user-1", email: "admin@example.com" } } as any,
+      {
+        operationKey: "pr976-action-goal-production-validation",
+        deployedSha: "2".repeat(40),
+        ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+        workflowRunId: "11",
+        workflowRunAttempt: 1,
+      },
+    )).rejects.toMatchObject({ code: "RECEIPT_ALREADY_CLAIMED" });
+
+    expect(tx.$queryRaw).toHaveBeenCalled();
+    expect(tx.productionValidationReceipt.update).not.toHaveBeenCalled();
+    expect(tx.action.create).not.toHaveBeenCalled();
+    expect(tx.goal.create).not.toHaveBeenCalled();
+    expect(tx.agentCredential.create).not.toHaveBeenCalled();
   });
 
   it("rejects non-fixed operation keys before claim", async () => {

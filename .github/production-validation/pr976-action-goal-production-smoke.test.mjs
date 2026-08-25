@@ -1,7 +1,21 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { fetchJson, sanitize, verifyGitLineage, PR976_FILES, TARGET_SHA } from "./pr976-action-goal-production-smoke.mjs";
+import {
+  ACTION_PROVEN_BODY,
+  GOAL_PROGRESS,
+  fetchJson,
+  sanitize,
+  verifyGitLineage,
+  PR976_FILES,
+  TARGET_SHA,
+  assertActionNoEffect,
+  assertActionProofResponse,
+  assertGoalNoEffect,
+  assertGoalProofResponse,
+  expectConflict,
+  expectMcpConflict,
+} from "./pr976-action-goal-production-smoke.mjs";
 
 function server(handler) {
   return new Promise((resolve) => {
@@ -59,6 +73,32 @@ describe("pr976 action/goal production smoke driver", () => {
   it("fails closed when PR 976 file equality drifts", () => {
     expect(() => verifyGitLineage("0000000000000000000000000000000000000000")).toThrow(/Command failed/);
   });
+
+  it("requires an exact HTTP stale-write conflict envelope", () => {
+    expect(() => expectConflict({ status: 409, body: { error: { code: "VERSION_CONFLICT" } } })).not.toThrow();
+    expect(() => expectConflict({ status: 409, body: { error: { code: "NOT_VERSION_CONFLICT" } } })).toThrow();
+    expect(() => expectConflict({ status: 400, body: { error: { code: "VERSION_CONFLICT" } } })).toThrow();
+    expect(() => expectConflict({ status: 409, body: { code: "VERSION_CONFLICT" } })).toThrow();
+  });
+
+  it("requires an exact MCP stale-write status", () => {
+    expect(() => expectMcpConflict({ status: "VERSION_CONFLICT" })).not.toThrow();
+    expect(() => expectMcpConflict({ status: "NOT_VERSION_CONFLICT" })).toThrow("MCP_VERSION_CONFLICT_NOT_RETURNED");
+  });
+
+  it("proves Action stale writes are exact no-effect writes", () => {
+    assertActionProofResponse({ action: { id: "action-1", bodyMd: ACTION_PROVEN_BODY, version: 2 } }, "action-1", 1);
+    assertActionNoEffect({ action: { id: "action-1", bodyMd: ACTION_PROVEN_BODY, version: 2 } }, "action-1", 2);
+    expect(() => assertActionNoEffect({ action: { id: "action-1", bodyMd: ACTION_PROVEN_BODY, version: 3 } }, "action-1", 2)).toThrow("ACTION_STALE_NO_EFFECT_UNPROVEN");
+    expect(() => assertActionNoEffect({ action: { id: "action-1", bodyMd: `${ACTION_PROVEN_BODY}:forbidden-stale`, version: 2 } }, "action-1", 2)).toThrow("ACTION_STALE_NO_EFFECT_UNPROVEN");
+  });
+
+  it("proves Goal stale writes are exact no-effect writes", () => {
+    assertGoalProofResponse({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 2 } }, "goal-1", 1);
+    assertGoalNoEffect({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 2 } }, "goal-1", 2);
+    expect(() => assertGoalNoEffect({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 3 } }, "goal-1", 2)).toThrow("GOAL_STALE_NO_EFFECT_UNPROVEN");
+    expect(() => assertGoalNoEffect({ goal: { id: "goal-1", progressPercent: 99, version: 2 } }, "goal-1", 2)).toThrow("GOAL_STALE_NO_EFFECT_UNPROVEN");
+  });
 });
 
 describe("pr976 action/goal production smoke workflow", () => {
@@ -69,7 +109,7 @@ describe("pr976 action/goal production smoke workflow", () => {
     expect(workflow).toContain("environment: production");
     expect(workflow).toContain("if: github.ref == 'refs/heads/main'");
     expect(workflow).toContain("contents: read");
-    expect(workflow).toContain("actions: read");
+    expect(workflow).not.toContain("actions: read");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("expected_deployed_sha");
     expect(workflow).not.toContain("PRODUCTION_DATABASE_URL");

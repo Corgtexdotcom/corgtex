@@ -161,14 +161,53 @@ async function mcp(baseUrl, token, name, args) {
   }
 }
 
-function expectConflict(error, expectedCode = "VERSION_CONFLICT") {
-  const code = error?.body?.error?.code ?? error?.body?.code ?? error?.body?.result?.content?.[0]?.text ?? error?.status;
-  if (!String(code).includes(expectedCode)) throw error;
+export function expectConflict(error, expectedCode = "VERSION_CONFLICT") {
+  if (error?.status !== 409 || error?.body?.error?.code !== expectedCode) throw error;
 }
 
-function expectMcpConflict(result) {
+export function expectMcpConflict(result) {
   if (result?.status !== "VERSION_CONFLICT") {
     throw Object.assign(new Error("MCP_VERSION_CONFLICT_NOT_RETURNED"), { body: result });
+  }
+}
+
+export function assertActionProofResponse(action, actionId, baselineVersion) {
+  if (
+    action?.action?.id !== actionId
+    || action.action.bodyMd !== ACTION_PROVEN_BODY
+    || action.action.version !== baselineVersion + 1
+  ) {
+    throw Object.assign(new Error("ACTION_PROOF_WRITE_UNPROVEN"), { body: action });
+  }
+}
+
+export function assertActionNoEffect(status, actionId, provenVersion) {
+  if (
+    status?.action?.id !== actionId
+    || status.action.bodyMd !== ACTION_PROVEN_BODY
+    || status.action.version !== provenVersion
+  ) {
+    throw Object.assign(new Error("ACTION_STALE_NO_EFFECT_UNPROVEN"), { body: status });
+  }
+}
+
+export function assertGoalProofResponse(result, goalId, baselineVersion) {
+  if (
+    result?.goal?.id !== goalId
+    || result.goal.progressPercent !== GOAL_PROGRESS
+    || result.goal.version !== baselineVersion + 1
+  ) {
+    throw Object.assign(new Error("GOAL_PROOF_WRITE_UNPROVEN"), { body: result });
+  }
+}
+
+export function assertGoalNoEffect(status, goalId, provenVersion) {
+  if (
+    status?.goal?.id !== goalId
+    || status.goal.progressPercent !== GOAL_PROGRESS
+    || status.goal.version !== provenVersion
+  ) {
+    throw Object.assign(new Error("GOAL_STALE_NO_EFFECT_UNPROVEN"), { body: status });
   }
 }
 
@@ -233,6 +272,7 @@ export async function run() {
       bodyMd: ACTION_PROVEN_BODY,
       expectedVersion: actionBaselineVersion,
     });
+    assertActionProofResponse(action, actionId, actionBaselineVersion);
     try {
       await patchAction(baseUrl, cookie, workspaceId, actionId, {
         bodyMd: `${ACTION_PROVEN_BODY}:forbidden-stale`,
@@ -243,14 +283,13 @@ export async function run() {
       expectConflict(error);
     }
     const afterAction = await internal(baseUrl, cookie, { operation: "status", operationKey: OPERATION_KEY }, 20_000);
-    if (afterAction.action.bodyMd !== ACTION_PROVEN_BODY || afterAction.action.version !== action.action.version) {
-      throw new Error("ACTION_STALE_NO_EFFECT_UNPROVEN");
-    }
-    await mcp(baseUrl, token, "update_goal", {
+    assertActionNoEffect(afterAction, actionId, action.action.version);
+    const goalUpdate = await mcp(baseUrl, token, "update_goal", {
       goalId,
       progressPercent: GOAL_PROGRESS,
       expectedVersion: goalBaselineVersion,
     });
+    assertGoalProofResponse(goalUpdate, goalId, goalBaselineVersion);
     const staleGoal = await mcp(baseUrl, token, "update_goal", {
       goalId,
       progressPercent: 99,
@@ -258,7 +297,7 @@ export async function run() {
     });
     expectMcpConflict(staleGoal);
     const afterGoal = await internal(baseUrl, cookie, { operation: "status", operationKey: OPERATION_KEY }, 20_000);
-    if (afterGoal.goal.progressPercent !== GOAL_PROGRESS) throw new Error("GOAL_STALE_NO_EFFECT_UNPROVEN");
+    assertGoalNoEffect(afterGoal, goalId, goalUpdate.goal.version);
     await internal(baseUrl, cookie, {
       operation: "feature_proof",
       operationKey: OPERATION_KEY,

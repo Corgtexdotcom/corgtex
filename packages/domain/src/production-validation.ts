@@ -20,6 +20,11 @@ type TerminalizeMode = "all" | ReceiptTarget;
 
 type ValidationReceipt = Prisma.ProductionValidationReceiptGetPayload<Record<string, never>>;
 
+type TargetCleanupResult = {
+  state: ProductionValidationLifecycleState;
+  archiveRecordId: string | null;
+};
+
 export type Pr976ProvisionInput = {
   operationKey: string;
   deployedSha: string;
@@ -122,6 +127,40 @@ function assertReceiptClaim(receipt: { operationKey: string; targetPullRequest: 
   invariant(receipt.syntheticMarker === PR976_SYNTHETIC_MARKER, 409, "RECEIPT_MISMATCH", "Receipt marker mismatch.");
 }
 
+function assertImmutableReceiptClaim(
+  receipt: ValidationReceipt,
+  input: Pr976ProvisionInput,
+  workspaceId: string,
+) {
+  assertReceiptClaim(receipt);
+  invariant(receipt.workspaceId === workspaceId, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
+  invariant(
+    receipt.deployedSha === input.deployedSha
+    && receipt.ancestorSha === input.ancestorSha
+    && receipt.workflowRunId === (input.workflowRunId ?? null)
+    && receipt.workflowRunAttempt === (input.workflowRunAttempt ?? null),
+    409,
+    "RECEIPT_ALREADY_CLAIMED",
+    "Production validation receipt is already claimed for a different run.",
+  );
+}
+
+async function readLockedReceiptById(tx: Prisma.TransactionClient, receiptId: string) {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "ProductionValidationReceipt" WHERE "id" = ${receiptId} FOR UPDATE
+  `;
+  invariant(rows.length === 1, 404, "NOT_FOUND", "Production validation receipt not found.");
+  return tx.productionValidationReceipt.findUniqueOrThrow({ where: { id: receiptId } });
+}
+
+async function readLockedReceiptByOperation(tx: Prisma.TransactionClient, operationKey: string) {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "ProductionValidationReceipt" WHERE "operationKey" = ${operationKey} FOR UPDATE
+  `;
+  invariant(rows.length === 1, 404, "NOT_FOUND", "Production validation receipt not found.");
+  return tx.productionValidationReceipt.findUniqueOrThrow({ where: { id: rows[0]!.id } });
+}
+
 function actorUserId(actor: AppActor) {
   return actor.kind === "user" ? actor.user.id : null;
 }
@@ -171,39 +210,6 @@ async function createReceipt(
     }
     throw error;
   }
-}
-
-async function updateReceiptClaimAudit(
-  tx: Prisma.TransactionClient,
-  receipt: ValidationReceipt,
-  actor: AppActor,
-  input: Pr976ProvisionInput,
-) {
-  if (
-    receipt.deployedSha === input.deployedSha
-    && receipt.ancestorSha === input.ancestorSha
-    && receipt.workflowRunId === (input.workflowRunId ?? null)
-    && receipt.workflowRunAttempt === (input.workflowRunAttempt ?? null)
-  ) {
-    return receipt;
-  }
-  invariant(receipt.outcome === "PENDING", 409, "RECEIPT_ALREADY_CLAIMED", "Production validation receipt is already claimed for a different run.");
-  return tx.productionValidationReceipt.update({
-    where: { id: receipt.id },
-      data: {
-        deployedSha: input.deployedSha,
-        ancestorSha: input.ancestorSha,
-        workflowRunId: input.workflowRunId ?? null,
-        workflowRunAttempt: input.workflowRunAttempt ?? null,
-      transitions: appendTransition(receipt, {
-        type: "CLAIM_REPLAYED",
-          actor: actorLabel(actor),
-          deployedSha: input.deployedSha,
-          workflowRunId: input.workflowRunId ?? null,
-          workflowRunAttempt: input.workflowRunAttempt ?? null,
-        }),
-      },
-    });
 }
 
 async function ensureProvisionedResources(
@@ -304,13 +310,8 @@ export async function provisionPr976ActionGoalValidation(actor: AppActor, input:
   const claim = await createReceipt(actor, input, workspace.id);
 
   return prisma.$transaction(async (tx) => {
-    const currentReceipt = await tx.productionValidationReceipt.findUniqueOrThrow({
-      where: { id: claim.receipt.id },
-    });
-    const receipt = claim.created
-      ? currentReceipt
-      : await updateReceiptClaimAudit(tx, currentReceipt, actor, input);
-    assertReceiptClaim(receipt);
+    const receipt = await readLockedReceiptById(tx, claim.receipt.id);
+    assertImmutableReceiptClaim(receipt, input, workspace.id);
     const provisioned = await ensureProvisionedResources(tx, actor, receipt, membership);
     return {
       receipt: publicReceipt(provisioned.receipt),
@@ -373,7 +374,7 @@ export async function recordPr976ActionGoalFeatureProof(actor: AppActor, input: 
   invariant(input.operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
   const { workspace } = await requireValidationAdmin(actor);
   return prisma.$transaction(async (tx) => {
-    const receipt = await tx.productionValidationReceipt.findUniqueOrThrow({ where: { operationKey: input.operationKey } });
+    const receipt = await readLockedReceiptByOperation(tx, input.operationKey);
     assertReceiptClaim(receipt);
     invariant(receipt.workspaceId === workspace.id, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
     invariant(receipt.outcome === "PENDING", 409, "RECEIPT_TERMINAL", "Receipt is already terminal.");
@@ -450,8 +451,10 @@ async function terminalizeAction(
   tx: Prisma.TransactionClient,
   actor: AppActor,
   receipt: ValidationReceipt,
-) {
-  if (receipt.actionState === "CLEANED") return { state: receipt.actionState, archiveRecordId: receipt.actionArchiveRecordId };
+): Promise<TargetCleanupResult> {
+  if (receipt.actionState === "CLEANED" || receipt.actionState === "BLOCKED") {
+    return { state: receipt.actionState, archiveRecordId: receipt.actionArchiveRecordId };
+  }
   if (!receipt.actionId) return { state: "BLOCKED" as const, archiveRecordId: null };
   await acquireWorkItemAdvisoryLock(tx, "Action", receipt.actionId);
   const action = await tx.action.findUnique({ where: { id: receipt.actionId } });
@@ -500,8 +503,10 @@ async function terminalizeGoal(
   tx: Prisma.TransactionClient,
   actor: AppActor,
   receipt: ValidationReceipt,
-) {
-  if (receipt.goalState === "CLEANED") return { state: receipt.goalState, archiveRecordId: receipt.goalArchiveRecordId };
+): Promise<TargetCleanupResult> {
+  if (receipt.goalState === "CLEANED" || receipt.goalState === "BLOCKED") {
+    return { state: receipt.goalState, archiveRecordId: receipt.goalArchiveRecordId };
+  }
   if (!receipt.goalId) return { state: "BLOCKED" as const, archiveRecordId: null };
   await acquireWorkItemAdvisoryLock(tx, "Goal", receipt.goalId);
   const goal = await tx.goal.findUnique({ where: { id: receipt.goalId } });
@@ -550,7 +555,7 @@ async function terminalizeGoal(
 }
 
 async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: ValidationReceipt) {
-  if (receipt.credentialState === "CLEANED") return "CLEANED" as const;
+  if (receipt.credentialState === "CLEANED" || receipt.credentialState === "BLOCKED") return receipt.credentialState;
   if (!receipt.agentCredentialId) return "BLOCKED" as const;
   const credential = await tx.agentCredential.findUnique({ where: { id: receipt.agentCredentialId } });
   if (!credential || credential.workspaceId !== receipt.workspaceId || credential.label !== `${PR976_SYNTHETIC_MARKER}:credential`) return "BLOCKED" as const;
@@ -590,19 +595,85 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
   return "CLEANED" as const;
 }
 
+function boundedFailureMessage(error: unknown) {
+  return error instanceof Error ? error.message.slice(0, 500) : "Unknown production validation cleanup failure.";
+}
+
+async function markTargetBlocked(
+  operationKey: string,
+  target: ReceiptTarget,
+  error: unknown,
+): Promise<TargetCleanupResult> {
+  return prisma.$transaction(async (tx) => {
+    const receipt = await readLockedReceiptByOperation(tx, operationKey);
+    const stateField = target === "action" ? "actionState" : target === "goal" ? "goalState" : "credentialState";
+    const failureMessage = boundedFailureMessage(error);
+    await tx.productionValidationReceipt.update({
+      where: { id: receipt.id },
+      data: {
+        [stateField]: "BLOCKED",
+        failureCode: receipt.failureCode ?? "TARGET_CLEANUP_FAILED",
+        failureMessage: receipt.failureMessage ?? failureMessage,
+        transitions: appendTransition(receipt, {
+          type: "TARGET_CLEANUP_FAILED",
+          target,
+          code: "TARGET_CLEANUP_FAILED",
+          message: failureMessage,
+        }),
+      },
+    });
+    return { state: "BLOCKED", archiveRecordId: null };
+  });
+}
+
+async function runTargetCleanup(
+  actor: AppActor,
+  operationKey: string,
+  target: ReceiptTarget,
+): Promise<TargetCleanupResult> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const receipt = await readLockedReceiptByOperation(tx, operationKey);
+      const result = target === "action"
+        ? await terminalizeAction(tx, actor, receipt)
+        : target === "goal"
+          ? await terminalizeGoal(tx, actor, receipt)
+          : { state: await terminalizeCredential(tx, receipt), archiveRecordId: null };
+      const stateField = target === "action" ? "actionState" : target === "goal" ? "goalState" : "credentialState";
+      const archiveField = target === "action" ? "actionArchiveRecordId" : target === "goal" ? "goalArchiveRecordId" : null;
+      await tx.productionValidationReceipt.update({
+        where: { id: receipt.id },
+        data: {
+          [stateField]: result.state,
+          ...(archiveField ? { [archiveField]: result.archiveRecordId } : {}),
+          transitions: appendTransition(receipt, {
+            type: "TARGET_TERMINALIZED",
+            target,
+            state: result.state,
+            archiveRecordId: result.archiveRecordId,
+          }),
+        },
+      });
+      return result;
+    });
+  } catch (error) {
+    return markTargetBlocked(operationKey, target, error);
+  }
+}
+
 export async function terminalizePr976ActionGoalValidation(actor: AppActor, input: Pr976TerminalizeInput) {
   invariant(input.operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
   const { workspace } = await requireValidationAdmin(actor);
   const mode = input.mode ?? "all";
 
-  return prisma.$transaction(async (tx) => {
-    const receipt = await tx.productionValidationReceipt.findUniqueOrThrow({ where: { operationKey: input.operationKey } });
+  await prisma.$transaction(async (tx) => {
+    const receipt = await readLockedReceiptByOperation(tx, input.operationKey);
     assertReceiptClaim(receipt);
     invariant(receipt.workspaceId === workspace.id, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
     invariant(receipt.actionState === "FEATURE_PROVEN" || receipt.actionState === "CLEANED" || mode !== "action", 409, "FEATURE_NOT_PROVEN", "Action feature proof is incomplete.");
     invariant(receipt.goalState === "FEATURE_PROVEN" || receipt.goalState === "CLEANED" || mode !== "goal", 409, "FEATURE_NOT_PROVEN", "Goal feature proof is incomplete.");
 
-    const startedReceipt = await tx.productionValidationReceipt.update({
+    await tx.productionValidationReceipt.update({
       where: { id: receipt.id },
       data: {
         cleanupStartedAt: receipt.cleanupStartedAt ?? new Date(),
@@ -611,44 +682,46 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
         transitions: appendTransition(receipt, { type: "TERMINALIZE_STARTED", mode }),
       },
     });
+  });
 
-    const actionResult = mode === "all" || mode === "action"
-      ? await terminalizeAction(tx, actor, startedReceipt)
-      : { state: startedReceipt.actionState, archiveRecordId: startedReceipt.actionArchiveRecordId };
-    const goalResult = mode === "all" || mode === "goal"
-      ? await terminalizeGoal(tx, actor, startedReceipt)
-      : { state: startedReceipt.goalState, archiveRecordId: startedReceipt.goalArchiveRecordId };
-    const credentialState = mode === "all" || mode === "credential"
-      ? await terminalizeCredential(tx, startedReceipt)
-      : startedReceipt.credentialState;
+  if (mode === "all" || mode === "action") {
+    await runTargetCleanup(actor, input.operationKey, "action");
+  }
+  if (mode === "all" || mode === "goal") {
+    await runTargetCleanup(actor, input.operationKey, "goal");
+  }
+  if (mode === "all" || mode === "credential") {
+    await runTargetCleanup(actor, input.operationKey, "credential");
+  }
 
+  const finalized = await prisma.$transaction(async (tx) => {
+    const receipt = await readLockedReceiptByOperation(tx, input.operationKey);
     const outcome = terminalOutcome({
-      actionState: actionResult.state,
-      goalState: goalResult.state,
-      credentialState,
-      hasFailure: Boolean(startedReceipt.failureCode),
+      actionState: receipt.actionState,
+      goalState: receipt.goalState,
+      credentialState: receipt.credentialState,
+      hasFailure: Boolean(receipt.failureCode),
     });
-    const updated = await tx.productionValidationReceipt.update({
+    return tx.productionValidationReceipt.update({
       where: { id: receipt.id },
       data: {
-        actionState: actionResult.state,
-        goalState: goalResult.state,
-        credentialState,
-        actionArchiveRecordId: actionResult.archiveRecordId,
-        goalArchiveRecordId: goalResult.archiveRecordId,
         outcome,
         terminalizedAt: new Date(),
         completedAt: outcome === "COMPLETED" ? new Date() : null,
-        transitions: appendTransition(startedReceipt, {
+        transitions: appendTransition(receipt, {
           type: "TERMINALIZED",
           mode,
-          actionState: actionResult.state,
-          goalState: goalResult.state,
-          credentialState,
+          actionState: receipt.actionState,
+          goalState: receipt.goalState,
+          credentialState: receipt.credentialState,
           outcome,
         }),
       },
     });
-    return { receipt: publicReceipt(updated) };
   });
+
+  const committed = await prisma.productionValidationReceipt.findUniqueOrThrow({
+    where: { id: finalized.id },
+  });
+  return { receipt: publicReceipt(committed) };
 }
