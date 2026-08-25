@@ -17,6 +17,7 @@ import type { GoalLevel, GoalCadence, GoalStatus } from "@prisma/client";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { asOptional, asOptionalInt, asString, duplicateGuardFromFormData, refresh } from "../action-utils";
 import type { WorkItemEditActionState } from "@/lib/components/WorkItemEditForm";
+import { redirect } from "next/navigation";
 
 type GoalKeyResultInput = {
   title: string;
@@ -39,6 +40,25 @@ function optionalDate(formData: FormData, key: string) {
 function optionalNumber(value: FormDataEntryValue | null) {
   const raw = String(value ?? "").trim();
   return raw.length > 0 ? Number(raw) : null;
+}
+
+const GOAL_CONTENT_FIELDS = [
+  "title",
+  "descriptionMd",
+  "level",
+  "cadence",
+  "progressPercent",
+  "targetDate",
+  "startDate",
+  "parentGoalId",
+  "circleId",
+  "ownerMemberId",
+] as const;
+
+function goalContentExpectedVersion(formData: FormData) {
+  return GOAL_CONTENT_FIELDS.some((field) => formData.has(field))
+    ? expectedVersionFromForm(formData)
+    : undefined;
 }
 
 function expectedVersionFromForm(formData: FormData) {
@@ -102,26 +122,36 @@ export async function createGoalFormAction(formData: FormData) {
 }
 
 export async function updateGoalFormAction(formData: FormData) {
+  const expectedVersion = goalContentExpectedVersion(formData);
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
   const workspaceId = await requireGoalsEnabled(formData);
-  await updateGoal(actor, {
-    workspaceId,
-    goalId: asString(formData, "goalId"),
-    title: formData.has("title") ? asOptional(formData, "title") ?? undefined : undefined,
-    descriptionMd: formData.has("descriptionMd") ? asOptional(formData, "descriptionMd") : undefined,
-    level: formData.has("level") ? asString(formData, "level") as GoalLevel : undefined,
-    cadence: formData.has("cadence") ? asString(formData, "cadence") as GoalCadence : undefined,
-    status: formData.has("status") ? asString(formData, "status") as GoalStatus : undefined,
-    progressPercent: formData.has("progressPercent") ? asOptionalInt(formData, "progressPercent") : undefined,
-    startDate: formData.has("startDate") ? optionalDate(formData, "startDate") : undefined,
-    targetDate: formData.has("targetDate") ? optionalDate(formData, "targetDate") : undefined,
-    parentGoalId: formData.has("parentGoalId") ? asOptional(formData, "parentGoalId") : undefined,
-    circleId: formData.has("circleId") ? asOptional(formData, "circleId") : undefined,
-    ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
-  });
+  const goalId = asString(formData, "goalId");
+  try {
+    await updateGoal(actor, {
+      workspaceId,
+      goalId,
+      ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      title: formData.has("title") ? asOptional(formData, "title") ?? undefined : undefined,
+      descriptionMd: formData.has("descriptionMd") ? asOptional(formData, "descriptionMd") : undefined,
+      level: formData.has("level") ? asString(formData, "level") as GoalLevel : undefined,
+      cadence: formData.has("cadence") ? asString(formData, "cadence") as GoalCadence : undefined,
+      status: formData.has("status") ? asString(formData, "status") as GoalStatus : undefined,
+      progressPercent: formData.has("progressPercent") ? asOptionalInt(formData, "progressPercent") : undefined,
+      startDate: formData.has("startDate") ? optionalDate(formData, "startDate") : undefined,
+      targetDate: formData.has("targetDate") ? optionalDate(formData, "targetDate") : undefined,
+      parentGoalId: formData.has("parentGoalId") ? asOptional(formData, "parentGoalId") : undefined,
+      circleId: formData.has("circleId") ? asOptional(formData, "circleId") : undefined,
+      ownerMemberId: formData.has("ownerMemberId") ? asOptional(formData, "ownerMemberId") : undefined,
+    });
+  } catch (error) {
+    if (expectedVersion !== undefined && error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      redirect(`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goalId)}&versionConflict=1`);
+    }
+    throw error;
+  }
   refresh(workspaceId);
 }
 

@@ -370,6 +370,7 @@ export default async function ActionsPage({
       >
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="actionId" value={action.id} />
+        <input type="hidden" name="expectedVersion" value={action.version} />
         <input type="hidden" name="priority" value={target.priority} />
         <button type="submit" aria-hidden={hidden} tabIndex={hidden ? -1 : undefined}>{priorityText(target.priority)}</button>
       </form>
@@ -388,6 +389,7 @@ export default async function ActionsPage({
       >
         <input type="hidden" name="workspaceId" value={workspaceId} />
         <input type="hidden" name="actionId" value={action.id} />
+        <input type="hidden" name="expectedVersion" value={action.version} />
         <input type="hidden" name="dueAt" value={dueAt} />
         <button type="submit" aria-hidden={hidden} tabIndex={hidden ? -1 : undefined}>{tCommon("save")}</button>
       </form>
@@ -471,6 +473,7 @@ export default async function ActionsPage({
         <form action={updateActionAction} className="nr-card-chip-form">
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="actionId" value={action.id} />
+          <input type="hidden" name="expectedVersion" value={action.version} />
           <label>
             <span className="nr-item-meta">{t("formPriority")}</span>
             <select name="priority" defaultValue={String(currentPriority)}>
@@ -497,6 +500,7 @@ export default async function ActionsPage({
         <form action={updateActionAction} className="nr-card-chip-form">
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="actionId" value={action.id} />
+          <input type="hidden" name="expectedVersion" value={action.version} />
           <label>
             <span className="nr-item-meta">{t("formDueDate")}</span>
             <input name="dueAt" type="date" defaultValue={dateInputValue(action.dueAt)} />
@@ -823,6 +827,17 @@ export default async function ActionsPage({
   return (
     <>
       <WorkspacePageHeader title={t("pageTitle")} description={t("pageDescription")} />
+
+      {resolvedSearch.versionConflict && (
+        <div className="form-message form-message-error" role="alert">
+          <strong>{tWork("editConflictTitle")}</strong>
+          <div className="actions-inline">
+            <a href={`/workspaces/${workspaceId}/actions`} className="secondary small">
+              {tWork("editConflictReload")}
+            </a>
+          </div>
+        </div>
+      )}
 
       <section className="ws-section">
         <div className="nr-work-board-header">
