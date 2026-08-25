@@ -538,6 +538,32 @@ describe("exact target inventory evaluator", () => {
       }
       return value;
     }, "ROLLBACK_INVALID");
+    expectOracle("non-string rollback strategy object fails closed", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) {
+        coreWeb.targets[0].components[0].rollback.strategy = {
+          toString: null,
+          valueOf: null,
+          private: "customer-secret",
+        };
+      }
+      return value;
+    }, "ROLLBACK_INVALID");
+    expectOracle("non-string rollback strategy array fails closed", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components[0].rollback.strategy = ["PREVIOUS_IMAGE"];
+      return value;
+    }, "ROLLBACK_INVALID");
+    expectOracle("non-string rollback strategy number fails closed", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components[0].rollback.strategy = 7;
+      return value;
+    }, "ROLLBACK_INVALID");
+    expectOracle("null rollback strategy fails closed", (value) => {
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWeb) coreWeb.targets[0].components[0].rollback.strategy = null;
+      return value;
+    }, "ROLLBACK_INVALID");
     expectOracle("slug ids are rejected", (value) => {
       value.inventoryId = "p0-05-v2";
       return value;

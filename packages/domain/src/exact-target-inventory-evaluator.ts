@@ -58,6 +58,7 @@ const workloadClassSet = new Set<string>(workloadClasses);
 const componentKinds = Object.freeze([...exactTargetInventoryComponentKinds]);
 const classDispositions = Object.freeze([...exactTargetInventoryClassDispositions]);
 const requiredDispositions = Object.freeze({ ...exactTargetInventoryRequiredDispositions });
+const rollbackStrategies = Object.freeze(["PREVIOUS_IMAGE", "PREVIOUS_CONFIG", "RESTORE_SNAPSHOT"] as const);
 
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
   const actual = Object.keys(value);
@@ -411,13 +412,13 @@ class Reader {
       this.add("UNKNOWN_KEY", "component");
       return null;
     }
-    if (!["PREVIOUS_IMAGE", "PREVIOUS_CONFIG", "RESTORE_SNAPSHOT"].includes(String(value.strategy)) || !boundedId(value.predecessorRef)) {
+    if (!enumHas(rollbackStrategies, value.strategy) || !boundedId(value.predecessorRef)) {
       this.add("ROLLBACK_INVALID", "component");
       return null;
     }
     const claim = this.claim(value.claim, `${owner}->${value.predecessorRef}`, "ROLLBACK", exactTargetInventoryUseSiteProofRequirements.rollbackClaim.purpose);
     if (claim === null) return null;
-    return { strategy: value.strategy as ExactTargetInventoryRollback["strategy"], predecessorRef: value.predecessorRef, claim };
+    return { strategy: value.strategy, predecessorRef: value.predecessorRef, claim };
   }
 
   public component(value: unknown): ExactTargetInventoryComponent | null {

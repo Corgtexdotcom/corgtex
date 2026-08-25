@@ -49,6 +49,12 @@ describe("exact target inventory v2 phase 0 contract evidence", () => {
       { fact: "artifact identity", owner: "inline proof artifact path and digest" },
       { fact: "selection", owner: "evaluateExactTargetInventoryJson invocation" },
     ]);
+    expect(Object.isFrozen(exactTargetInventoryFieldOwnership)).toBe(true);
+    expect(exactTargetInventoryFieldOwnership.every((record) => Object.isFrozen(record))).toBe(true);
+    expect(() => {
+      (exactTargetInventoryFieldOwnership[0] as { owner: string }).owner = "mutated";
+    }).toThrow(TypeError);
+    expect(exactTargetInventoryFieldOwnership[0]?.owner).toBe("document.schemaVersion");
     expect(exactTargetInventoryUseSiteProofRequirements).toEqual({
       lifecycleClaim: { kind: "LIFECYCLE", purpose: "target-lifecycle" },
       authorityClaim: { kind: "AUTHORITY", purpose: "target-authority" },

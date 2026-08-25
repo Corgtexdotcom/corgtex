@@ -219,17 +219,17 @@ export type ExactTargetInventoryFieldOwner = {
 };
 
 export const exactTargetInventoryFieldOwnership: readonly ExactTargetInventoryFieldOwner[] = Object.freeze([
-  { fact: "schema version", owner: "document.schemaVersion" },
-  { fact: "generation time", owner: "document.generatedAt" },
-  { fact: "workload class identity", owner: "class.workloadClass" },
-  { fact: "root disposition", owner: "class.disposition" },
-  { fact: "target identity", owner: "target.targetId" },
-  { fact: "component identity", owner: "target.components[].componentId" },
-  { fact: "dependency edge", owner: "consumer component dependencies[]" },
-  { fact: "rollback obligation", owner: "owning component rollback" },
-  { fact: "claim status", owner: "inline claim proof" },
-  { fact: "artifact identity", owner: "inline proof artifact path and digest" },
-  { fact: "selection", owner: "evaluateExactTargetInventoryJson invocation" },
+  Object.freeze({ fact: "schema version", owner: "document.schemaVersion" }),
+  Object.freeze({ fact: "generation time", owner: "document.generatedAt" }),
+  Object.freeze({ fact: "workload class identity", owner: "class.workloadClass" }),
+  Object.freeze({ fact: "root disposition", owner: "class.disposition" }),
+  Object.freeze({ fact: "target identity", owner: "target.targetId" }),
+  Object.freeze({ fact: "component identity", owner: "target.components[].componentId" }),
+  Object.freeze({ fact: "dependency edge", owner: "consumer component dependencies[]" }),
+  Object.freeze({ fact: "rollback obligation", owner: "owning component rollback" }),
+  Object.freeze({ fact: "claim status", owner: "inline claim proof" }),
+  Object.freeze({ fact: "artifact identity", owner: "inline proof artifact path and digest" }),
+  Object.freeze({ fact: "selection", owner: "evaluateExactTargetInventoryJson invocation" }),
 ] as const);
 
 export const exactTargetInventoryUseSiteProofRequirements = Object.freeze({
