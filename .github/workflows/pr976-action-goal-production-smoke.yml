@@ -25,6 +25,7 @@ on:
         default: ""
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -46,6 +47,7 @@ jobs:
       PR976_SMOKE_ADMIN_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
       PR976_SMOKE_ADMIN_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
       PR976_SMOKE_OUT_DIR: .artifacts/production-validation/pr976-action-goal-production-smoke
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
         with:
