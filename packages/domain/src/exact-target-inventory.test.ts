@@ -38,10 +38,14 @@ const detailKeyByType: Record<string, string> = {
 
 const baseBlockers = ["MISSING_WORKLOAD_COVERAGE", "POLICY_PENDING"];
 
-function authorityDimension(verdict = "PROVEN") {
+function evidenceRefFor(workloadClass: string) {
+  return `evidence-${workloadClass.toLowerCase().replaceAll("_", "-")}`;
+}
+
+function authorityDimension(workloadClass: string, verdict = "PROVEN") {
   return {
     verdict,
-    evidenceRefs: ["evidence-offline-plan"],
+    evidenceRefs: [evidenceRefFor(workloadClass)],
     observedAt: OBSERVED,
     verifiedAt: OBSERVED,
     expiresAt: EXPIRES,
@@ -52,14 +56,14 @@ function authorityDimension(verdict = "PROVEN") {
 function authorityFor(workloadClass: string) {
   return {
     authorizationState: "BLOCKED",
-    serving: authorityDimension(),
-    data: authorityDimension(workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "PROVEN"),
-    object: authorityDimension(),
-    worker: authorityDimension(workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "PROVEN"),
-    scheduler: authorityDimension(),
-    queue: authorityDimension(workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "PROVEN"),
-    domain: authorityDimension(),
-    callback: authorityDimension(),
+    serving: authorityDimension(workloadClass),
+    data: authorityDimension(workloadClass, workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "PROVEN"),
+    object: authorityDimension(workloadClass),
+    worker: authorityDimension(workloadClass, workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "PROVEN"),
+    scheduler: authorityDimension(workloadClass),
+    queue: authorityDimension(workloadClass, workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "PROVEN"),
+    domain: authorityDimension(workloadClass),
+    callback: authorityDimension(workloadClass),
   };
 }
 
@@ -102,6 +106,7 @@ function provider() {
 
 function common(recordType: string, workloadClass: string, index: number, detail: JsonObject, extra: JsonObject = {}) {
   const slug = workloadClass.toLowerCase().replaceAll("_", "-");
+  const evidenceRef = evidenceRefFor(workloadClass);
   return {
     recordId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     recordType,
@@ -119,11 +124,11 @@ function common(recordType: string, workloadClass: string, index: number, detail
       releaseEligibility: "POLICY_PENDING",
       retirementEligibility: "BLOCKED",
       stateObservedAt: OBSERVED,
-      stateEvidenceRef: "evidence-offline-plan",
+      stateEvidenceRef: evidenceRef,
     },
     disposition: dispositionFor(workloadClass),
     authority: authorityFor(workloadClass),
-    evidenceRefs: ["evidence-offline-plan"],
+    evidenceRefs: [evidenceRef],
     firstObservedAt: OBSERVED,
     lastObservedAt: OBSERVED,
     verifiedAt: OBSERVED,
@@ -193,6 +198,7 @@ function inventedInventory() {
   const records: JsonObject[] = [];
   EXACT_TARGET_WORKLOAD_CLASSES.forEach((workloadClass, index) => records.push(...workloadRecords(workloadClass, index * 20 + 1)));
   const primaryClass = EXACT_TARGET_WORKLOAD_CLASSES[0];
+  const primaryEvidenceRef = evidenceRefFor(primaryClass);
   const runtime = common("PROVIDER_RESOURCE", primaryClass, 400, {
     providerResourceId: "resource-runtime",
     providerResourceType: "container-app",
@@ -214,10 +220,10 @@ function inventedInventory() {
     region: "offline-region",
     workloadBinding: "primary",
     role: "AUTHORITATIVE_CANDIDATE",
-    endpointFingerprint: "postgres://offline.example:5432/database-main",
+    endpointFingerprint: sha256Hex("endpoint-data"),
     schemaMigrationIdentityRefs: ["schema-v1"],
     backupRefs: ["backup-data"],
-    bindingEvidenceRef: "evidence-offline-plan",
+    bindingEvidenceRef: primaryEvidenceRef,
   }, { provider: provider() });
   const objectStore = common("OBJECT_STORE", primaryClass, 402, {
     providerResourceId: "resource-object",
@@ -225,9 +231,9 @@ function inventedInventory() {
     region: "offline-region",
     workloadBinding: "primary",
     role: "AUTHORITATIVE_CANDIDATE",
-    endpointFingerprint: "https://objects.example",
+    endpointFingerprint: sha256Hex("endpoint-object"),
     versioningRetentionPolicyRef: "retention-policy",
-    inventoryParityEvidenceRefs: ["evidence-offline-plan"],
+    inventoryParityEvidenceRefs: [primaryEvidenceRef],
     backupRefs: ["backup-object"],
   }, { provider: provider() });
   const credential = common("CREDENTIAL_REF", primaryClass, 403, {
@@ -248,7 +254,7 @@ function inventedInventory() {
     digest: sha256Hex("image"),
     imageRole: "web",
     sourceGitSha: SHA,
-    buildProvenanceEvidenceRef: "evidence-offline-plan",
+    buildProvenanceEvidenceRef: primaryEvidenceRef,
     consumingResourceRefs: [],
   }, { provider: provider() });
   const scheduler = common("SCHEDULER", primaryClass, 405, {
@@ -283,7 +289,7 @@ function inventedInventory() {
     dataStoreRef: "",
     queueRefs: [],
     schedulerRefs: [],
-    bindingEvidenceRef: "evidence-offline-plan",
+    bindingEvidenceRef: primaryEvidenceRef,
     concurrencyPolicyRef: "concurrency-policy",
     authorityVerdict: "POLICY_PENDING",
   }, { provider: provider() });
@@ -307,7 +313,7 @@ function inventedInventory() {
     canonicalPath: "/callback",
     boundResourceRef: "",
     credentialRef: "",
-    externalConfigurationEvidenceRef: "evidence-offline-plan",
+    externalConfigurationEvidenceRef: primaryEvidenceRef,
     authorityVerdict: "POLICY_PENDING",
   }, { provider: provider() });
   const rollback = common("ROLLBACK_ASSET", primaryClass, 410, {
@@ -360,13 +366,15 @@ function inventedInventory() {
       fromRecordId: runtime.recordId,
       toRecordId: worker.recordId,
       relationshipType: "BINDS",
-      evidenceRefs: ["evidence-offline-plan"],
+      evidenceRefs: [primaryEvidenceRef],
     }],
-    evidence: [{
-      evidenceId: "evidence-offline-plan",
+    evidence: EXACT_TARGET_WORKLOAD_CLASSES.map((workloadClass) => {
+      const sourceRecord = records.find((record) => record.recordType === "WORKLOAD" && record.workload.workloadClass === workloadClass)!;
+      return {
+      evidenceId: evidenceRefFor(workloadClass),
       evidenceType: "SANITIZED_HANDOFF",
       sourceAuthority: "P0_05_OFFLINE_PLAN",
-      sourceRecordId: records[0].recordId,
+      sourceRecordId: sourceRecord.recordId,
       positiveFieldProjection: ["genericClass", "policyStatus"],
       collectorIdentityRef: "offline-validator",
       collectorVersionDigest: DIGEST,
@@ -379,12 +387,13 @@ function inventedInventory() {
       artifactDigest: DIGEST,
       freshnessStatus: "POLICY_PENDING",
       limitations: ["invented offline fixture"],
-    }],
+    };
+    }),
     validationSummary: {
       completenessLedger: EXACT_TARGET_WORKLOAD_CLASSES.map((workloadClass) => ({
         workloadClass,
         status: "BLOCKED",
-        evidenceRefs: ["evidence-offline-plan"],
+        evidenceRefs: [evidenceRefFor(workloadClass)],
         blockingGaps: workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? [...baseBlockers, "AUTHORITY_UNPROVEN"] : [...baseBlockers],
         policyStatus: "POLICY_PENDING",
         dispositionDecision: dispositionFor(workloadClass).decision,
@@ -428,6 +437,17 @@ function dependencyHarness(input: unknown, deps: Record<string, () => void>) {
   deps.release();
   deps.snapshotEmission();
   return result;
+}
+
+function fanOutControl(deps: Record<string, () => void>) {
+  deps.snapshotRead();
+  deps.providerRead();
+  deps.hook();
+  deps.observation();
+  deps.probe();
+  deps.alert();
+  deps.release();
+  deps.snapshotEmission();
 }
 
 function deps() {
@@ -579,10 +599,135 @@ describe("exact target inventory correction contract", () => {
     expect(validate(credential).issues.map((issue) => issue.code)).toContain("SECRET_SENTINEL");
   });
 
-  it("AC-13 valid non-dry harness reaches dependencies and invalid blocker cases are zero-effect", () => {
-    const successDeps = deps();
-    expect(dependencyHarness(inventedInventory(), successDeps)).toMatchObject({ ok: true });
-    for (const call of Object.values(successDeps)) expect(call).toHaveBeenCalledTimes(1);
+  it("AC-01 AC-02 captures descriptors without invoking accessors or inherited fields", () => {
+    let getterHits = 0;
+    const accessorArray: any[] = [];
+    Object.defineProperty(accessorArray, "0", { enumerable: true, get() { getterHits += 1; return inventedInventory().records[0]; } });
+    expect(validate({ records: accessorArray })).toMatchObject({ ok: false });
+    expect(getterHits).toBe(0);
+
+    const inherited = Object.create(inventedInventory());
+    expect(validate(inherited).issues.map((issue) => issue.code)).toContain("STRUCTURAL_LIMIT");
+
+    const protoPayload = JSON.parse("{\"__proto__\":{\"schemaVersion\":\"1.0.0\"},\"records\":[]}");
+    const result = validate(protoPayload);
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining(["UNKNOWN_FIELD", "REQUIRED_FIELD"]));
+  });
+
+  it("AC-06 uses collision-free identity and requires root/detail agreement", () => {
+    const commonIdentity = { recordType: "DATA_STORE" as const, workloadId: "wl", environmentId: "env", provider: provider() };
+    const first = deriveExactTargetInventoryKey({ ...commonIdentity, detail: { providerResourceId: "a/b", databaseId: "c", role: "AUTHORITATIVE_CANDIDATE" } });
+    const second = deriveExactTargetInventoryKey({ ...commonIdentity, detail: { providerResourceId: "a", databaseId: "b/c", role: "AUTHORITATIVE_CANDIDATE" } });
+    expect(first).not.toBe(second);
+    expect(deriveInventoryRef(first)).not.toBe(deriveInventoryRef(second));
+
+    const mismatch = inventedInventory();
+    mismatch.records[0].workload.workloadId = "wl-contradiction";
+    rehash(mismatch);
+    const result = validate(mismatch);
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain("DERIVED_REF_MISMATCH");
+  });
+
+  it("AC-04 AC-08 reconciles authority, completeness, evidence, credential, and image references", () => {
+    const authority = inventedInventory();
+    firstRecordOf(authority, "WORKLOAD").authority.authorizationState = "INVENTORY_ONLY";
+    rehash(authority);
+    expect(validate(authority).issues.map((issue) => issue.code)).toContain("CLAIM_MISMATCH");
+
+    const evidence = inventedInventory();
+    firstRecordOf(evidence, "DATA_STORE").dataStore.bindingEvidenceRef = evidenceRefFor(EXACT_TARGET_WORKLOAD_CLASSES[1]);
+    rehash(evidence);
+    expect(validate(evidence).issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+
+    const completeness = inventedInventory();
+    completeness.validationSummary.completenessLedger[0].evidenceRefs = [evidenceRefFor(EXACT_TARGET_WORKLOAD_CLASSES[1])];
+    rehash(completeness);
+    expect(validate(completeness).issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+
+    const credential = inventedInventory();
+    firstRecordOf(credential, "CREDENTIAL_REF").credentialRef.consumerResourceRefs = [firstRecordOf(credential, "IMAGE").inventoryRef];
+    rehash(credential);
+    expect(validate(credential).issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+
+    const image = inventedInventory();
+    firstRecordOf(image, "IMAGE").image.consumingResourceRefs = [firstRecordOf(image, "QUEUE").inventoryRef];
+    rehash(image);
+    expect(validate(image).issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+  });
+
+  it("AC-08 permits only same-target credential and image consumer classes", () => {
+    const base = inventedInventory();
+    const credentialAllowedTypes = ["PROVIDER_RESOURCE", "DATA_STORE", "OBJECT_STORE", "WORKER", "SCHEDULER", "QUEUE", "DOMAIN", "CALLBACK"];
+    for (const recordType of credentialAllowedTypes) {
+      const candidate = inventedInventory();
+      firstRecordOf(candidate, "CREDENTIAL_REF").credentialRef.consumerResourceRefs = [firstRecordOf(candidate, recordType).inventoryRef];
+      rehash(candidate);
+      expect(validate(candidate).ok, recordType).toBe(true);
+    }
+    for (const recordType of ["PROVIDER_RESOURCE", "WORKER"]) {
+      const candidate = inventedInventory();
+      firstRecordOf(candidate, "IMAGE").image.consumingResourceRefs = [firstRecordOf(candidate, recordType).inventoryRef];
+      rehash(candidate);
+      expect(validate(candidate).ok, recordType).toBe(true);
+    }
+    const otherClass = EXACT_TARGET_WORKLOAD_CLASSES[1];
+    const otherSlug = otherClass.toLowerCase().replaceAll("_", "-");
+    const otherTargetRuntime = common("PROVIDER_RESOURCE", otherClass, 800, {
+      providerResourceId: "resource-runtime-cross-target",
+      providerResourceType: "container-app",
+      providerNativeName: "runtime-cross-target",
+      resourceRole: "RUNTIME",
+      region: "offline-region",
+      parentResourceId: "parent-runtime",
+      deploymentOrRevisionId: "revision-runtime",
+      instanceId: "instance-runtime",
+      networkExposure: "internal",
+      canonicalOrigin: "origin-runtime",
+      providerState: "EVIDENCE_ONLY",
+    }, { provider: provider(), workloadId: `wl-${otherSlug}`, environmentId: `env-${otherSlug}` });
+    finaliseRecord(otherTargetRuntime);
+    base.records.push(otherTargetRuntime);
+    firstRecordOf(base, "CREDENTIAL_REF").credentialRef.consumerResourceRefs = [otherTargetRuntime.inventoryRef];
+    rehash(base);
+    expect(validate(base).issues.map((issue) => issue.code)).toContain("INVALID_REFERENCE");
+  });
+
+  it("AC-12 keeps endpoint observations opaque and rejects credential-bearing endpoint strings", () => {
+    const endpoint = inventedInventory();
+    firstRecordOf(endpoint, "DATA_STORE").dataStore.endpointFingerprint = "postgres://user:pass@host.example:5432/db";
+    rehash(endpoint);
+    const result = validate(endpoint);
+    expect(result.issues.map((issue) => issue.code)).toContain("SECRET_SENTINEL");
+    expect(JSON.stringify(result.publicProjection)).not.toContain("postgres");
+    expect(JSON.stringify(validate(inventedInventory()).publicProjection)).not.toContain("endpoint");
+  });
+
+  it("AC-11 rejects rollback assets that are stale, expired, future, or chronologically impossible", () => {
+    for (const [field, value] of [
+      ["createdAt", "2026-08-24T21:00:00Z"],
+      ["verifiedAt", "2026-08-23T20:00:00Z"],
+      ["restoreTestedAt", "2026-08-26T00:00:00Z"],
+      ["retainUntil", "2026-08-24T23:00:00Z"],
+    ] as const) {
+      const snapshot = inventedInventory();
+      firstRecordOf(snapshot, "ROLLBACK_ASSET").rollbackAsset[field] = value;
+      rehash(snapshot);
+      expect(validate(snapshot).issues.map((issue) => issue.code), field).toContain("STALE_OR_EXPIRED");
+    }
+  });
+
+  it("AC-13 blocked non-dry harness validates but reaches zero dependencies", () => {
+    const controlDeps = deps();
+    fanOutControl(controlDeps);
+    for (const call of Object.values(controlDeps)) expect(call).toHaveBeenCalledTimes(1);
+
+    const blockedValidDeps = deps();
+    const blockedValid = dependencyHarness(inventedInventory(), blockedValidDeps);
+    expect(blockedValid).toMatchObject({ ok: true });
+    expect(blockedValid.publicProjection.authorizationState).toBe("BLOCKED");
+    for (const call of Object.values(blockedValidDeps)) expect(call).not.toHaveBeenCalled();
 
     const cases: Array<[ExactTargetInventoryBlockerCode, unknown]> = [
       ["INVALID_JSON", "{"],
@@ -613,14 +758,13 @@ describe("exact target inventory correction contract", () => {
     }
   });
 
-  it("AC-14 AC-16 exports immutable validated handles and rejects forged raw handles", () => {
+  it("AC-14 AC-16 exports immutable blocked snapshots and rejects forged raw handles", () => {
     const result = validate(inventedInventory());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(Object.isFrozen(result.snapshot)).toBe(true);
     const selected = selectExactTargetInventoryRecord(result.snapshot, result.snapshot.records[0].inventoryRef);
-    expect(selected).toMatchObject({ inventoryRef: result.snapshot.records[0].inventoryRef, recordType: "WORKLOAD" });
-    expect(Object.isFrozen(selected)).toBe(true);
+    expect(selected).toBeNull();
     expect(() => selectExactTargetInventoryRecord({ records: [] } as any, result.snapshot.records[0].inventoryRef)).toThrow("module-validated");
   });
 

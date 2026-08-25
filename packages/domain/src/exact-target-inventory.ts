@@ -55,6 +55,8 @@ const DATA_STORE_ROLES = new Set(["AUTHORITATIVE_CANDIDATE", "ROLLBACK_CANDIDATE
 const OBJECT_STORE_ROLES = new Set(["AUTHORITATIVE_CANDIDATE", "ROLLBACK_CANDIDATE", "AUXILIARY", "EVIDENCE_ONLY"]);
 const QUEUE_SEMANTICS = new Set(["POSTGRES_OUTBOX", "WORKFLOW_JOB", "SYNTHETIC_QUEUE"]);
 const RECORD_TYPES_WITH_REF_ARRAYS = new Set(["WORKER", "SCHEDULER", "QUEUE", "CREDENTIAL_REF", "IMAGE"]);
+const CREDENTIAL_CONSUMER_TYPES = new Set<ExactTargetRecordType>(["PROVIDER_RESOURCE", "DATA_STORE", "OBJECT_STORE", "WORKER", "SCHEDULER", "QUEUE", "DOMAIN", "CALLBACK"]);
+const IMAGE_CONSUMER_TYPES = new Set<ExactTargetRecordType>(["PROVIDER_RESOURCE", "WORKER"]);
 const BLOCKING_VERDICTS = new Set(["AUTHORITY_UNPROVEN", "CONFLICTED", "POLICY_PENDING"]);
 const BLOCKING_DISPOSITIONS = new Set(["POLICY_PENDING", "EVIDENCE_PENDING"]);
 const DETAIL_KEYS: Record<ExactTargetRecordType, string> = {
@@ -218,7 +220,7 @@ type ExactTargetRelationship = Readonly<{ relationshipId: string; fromRecordId: 
 type ExactTargetEvidence = Readonly<{ evidenceId: string; evidenceType: string; sourceAuthority: string; sourceRecordId: string; positiveFieldProjection: string[]; collectorIdentityRef: string; collectorVersionDigest: string; collectedAt: string; sourceObservedAt: string; verifiedAt: string; expiresAt: string; sanitizationClass: string; artifactRef: ArtifactRef; artifactDigest: string; freshnessStatus: string; limitations: string[] }>;
 type ExactTargetValidationSummary = Readonly<{ completenessLedger: Array<{ workloadClass: ExactTargetWorkloadClass; status: string; evidenceRefs: string[]; blockingGaps: string[]; policyStatus: string; dispositionDecision: string; authorityGate: string }>; blockerCodes: string[]; validatedAt: string }>;
 type ParseContext = { issues: ExactTargetInventoryIssue[]; nowMs: number; nowIso: string };
-type FieldKind = "string" | "uuid" | "digest" | "gitSha" | "timestamp" | "booleanFalse" | "stringArray" | "url" | "fqdn" | "integer" | "enum";
+type FieldKind = "string" | "uuid" | "digest" | "gitSha" | "timestamp" | "booleanFalse" | "stringArray" | "url" | "fqdn" | "integer" | "enum" | "endpointFingerprint";
 type FieldSpec = { kind: FieldKind; enum?: Set<string>; optional?: boolean };
 type RecordSpec = { detailKey: string; requiresProvider: boolean; identityFields: string[]; fields: Record<string, FieldSpec> };
 
@@ -240,8 +242,8 @@ const RECORD_SPECS: Record<ExactTargetRecordType, RecordSpec> = {
   WORKLOAD: { detailKey: "workload", requiresProvider: false, identityFields: ["workloadId", "workloadClass"], fields: { workloadId: COMMON_STRING, workloadSlug: COMMON_STRING, workloadClass: { kind: "enum", enum: WORKLOAD_CLASS_SET }, businessRole: COMMON_STRING, customerAccountId: COMMON_STRING, customerDeploymentId: COMMON_STRING, workspaceId: COMMON_STRING, runtimeRoles: { kind: "stringArray" }, systemOfRecordRoles: { kind: "stringArray" }, dispositionRef: COMMON_STRING } },
   ENVIRONMENT: { detailKey: "environment", requiresProvider: false, identityFields: ["environmentId", "environmentClass"], fields: { environmentId: COMMON_STRING, environmentName: COMMON_STRING, environmentClass: { kind: "enum", enum: ENVIRONMENT_CLASSES }, isolationBoundary: COMMON_STRING, dataClass: { kind: "enum", enum: DATA_CLASSES }, ownerRef: COMMON_STRING, policyStatus: { kind: "enum", enum: POLICY_STATUSES } } },
   PROVIDER_RESOURCE: { detailKey: "resource", requiresProvider: true, identityFields: ["providerResourceId", "providerResourceType", "resourceRole", "deploymentOrRevisionId", "instanceId"], fields: { providerResourceId: COMMON_STRING, providerResourceType: COMMON_STRING, providerNativeName: COMMON_STRING, resourceRole: { kind: "enum", enum: RECORD_ROLES }, region: COMMON_STRING, parentResourceId: COMMON_STRING, deploymentOrRevisionId: COMMON_STRING, instanceId: COMMON_STRING, networkExposure: COMMON_STRING, canonicalOrigin: COMMON_STRING, providerState: COMMON_STRING } },
-  DATA_STORE: { detailKey: "dataStore", requiresProvider: true, identityFields: ["providerResourceId", "databaseId", "role"], fields: { providerResourceId: COMMON_STRING, databaseId: COMMON_STRING, databaseName: COMMON_STRING, engine: COMMON_STRING, region: COMMON_STRING, workloadBinding: COMMON_STRING, role: { kind: "enum", enum: DATA_STORE_ROLES }, endpointFingerprint: COMMON_STRING, schemaMigrationIdentityRefs: { kind: "stringArray" }, backupRefs: { kind: "stringArray" }, bindingEvidenceRef: COMMON_STRING } },
-  OBJECT_STORE: { detailKey: "objectStore", requiresProvider: true, identityFields: ["providerResourceId", "namespace", "role"], fields: { providerResourceId: COMMON_STRING, namespace: COMMON_STRING, region: COMMON_STRING, workloadBinding: COMMON_STRING, role: { kind: "enum", enum: OBJECT_STORE_ROLES }, endpointFingerprint: COMMON_STRING, versioningRetentionPolicyRef: COMMON_STRING, inventoryParityEvidenceRefs: { kind: "stringArray" }, backupRefs: { kind: "stringArray" } } },
+  DATA_STORE: { detailKey: "dataStore", requiresProvider: true, identityFields: ["providerResourceId", "databaseId", "role"], fields: { providerResourceId: COMMON_STRING, databaseId: COMMON_STRING, databaseName: COMMON_STRING, engine: COMMON_STRING, region: COMMON_STRING, workloadBinding: COMMON_STRING, role: { kind: "enum", enum: DATA_STORE_ROLES }, endpointFingerprint: { kind: "endpointFingerprint" }, schemaMigrationIdentityRefs: { kind: "stringArray" }, backupRefs: { kind: "stringArray" }, bindingEvidenceRef: COMMON_STRING } },
+  OBJECT_STORE: { detailKey: "objectStore", requiresProvider: true, identityFields: ["providerResourceId", "namespace", "role"], fields: { providerResourceId: COMMON_STRING, namespace: COMMON_STRING, region: COMMON_STRING, workloadBinding: COMMON_STRING, role: { kind: "enum", enum: OBJECT_STORE_ROLES }, endpointFingerprint: { kind: "endpointFingerprint" }, versioningRetentionPolicyRef: COMMON_STRING, inventoryParityEvidenceRefs: { kind: "stringArray" }, backupRefs: { kind: "stringArray" } } },
   WORKER: { detailKey: "worker", requiresProvider: true, identityFields: ["providerAppId", "providerServiceId", "deploymentOrRevisionId", "processRole"], fields: { providerAppId: COMMON_STRING, providerServiceId: COMMON_STRING, deploymentOrRevisionId: COMMON_STRING, instanceIds: { kind: "stringArray" }, processRole: { kind: "enum", enum: RECORD_ROLES }, replicaState: COMMON_STRING, imageRef: COMMON_STRING, dataStoreRef: COMMON_STRING, queueRefs: { kind: "stringArray" }, schedulerRefs: { kind: "stringArray" }, bindingEvidenceRef: COMMON_STRING, concurrencyPolicyRef: COMMON_STRING, authorityVerdict: { kind: "enum", enum: AUTHORITY_VERDICTS } } },
   SCHEDULER: { detailKey: "scheduler", requiresProvider: true, identityFields: ["schedulerId", "scheduleIdentity"], fields: { schedulerId: COMMON_STRING, scheduleIdentity: COMMON_STRING, timezone: COMMON_STRING, enabledState: COMMON_STRING, enqueueTargetRefs: { kind: "stringArray" }, credentialRef: COMMON_STRING, lastObservedAt: { kind: "timestamp" }, authorityVerdict: { kind: "enum", enum: AUTHORITY_VERDICTS } } },
   QUEUE: { detailKey: "queue", requiresProvider: true, identityFields: ["queueId", "semantics"], fields: { queueId: COMMON_STRING, semantics: { kind: "enum", enum: QUEUE_SEMANTICS }, availabilityPolicyRef: COMMON_STRING, lockPolicyRef: COMMON_STRING, retryPolicyRef: COMMON_STRING, producerRefs: { kind: "stringArray" }, consumerRefs: { kind: "stringArray" }, schedulerRefs: { kind: "stringArray" }, authorityVerdict: { kind: "enum", enum: AUTHORITY_VERDICTS } } },
@@ -286,17 +288,17 @@ export function deriveExactTargetInventoryKey(input: {
         stringOrEmpty(provider.providerScopeId),
         stringOrEmpty(provider.managementPlane),
         stringOrEmpty(provider.authorityBoundary),
-      ].join("/")
-    : "NO_PROVIDER";
-  const detailTuple = spec.identityFields.map((field) => stringOrEmpty(input.detail[field])).join("/");
-  return [
+      ]
+    : ["NO_PROVIDER"];
+  const detailTuple = spec.identityFields.map((field) => [field, stringOrEmpty(input.detail[field])]);
+  return canonicalJson([
     "exact-target-inventory/v1",
     recordType,
-    normalizeToken(input.workloadId),
-    normalizeToken(input.environmentId),
-    normalizeToken(providerTuple),
-    normalizeToken(detailTuple),
-  ].join("|");
+    input.workloadId,
+    input.environmentId,
+    providerTuple,
+    detailTuple,
+  ]);
 }
 
 export function validateExactTargetInventory(raw: unknown, options: ExactTargetInventoryValidationOptions): ExactTargetInventoryValidationResult {
@@ -313,7 +315,8 @@ export function validateExactTargetInventory(raw: unknown, options: ExactTargetI
   const semanticIssues = [...ctx.issues];
   verifyDigestsAndGraph(parsed, semanticIssues, now.ms);
   const derived = deriveState(parsed.records, semanticIssues);
-  compareCallerSummary(parsed.validationSummary, derived, semanticIssues);
+  reconcileRecordAuthorization(parsed.records, derived, semanticIssues);
+  compareCallerSummary(parsed.validationSummary, derived, parsed.records, semanticIssues);
   const closedSnapshot = deepFreeze({ ...parsed, derived }) as ExactTargetInventorySnapshot;
 
   if (semanticIssues.length > 0) {
@@ -340,10 +343,16 @@ export function selectExactTargetInventoryRecord(snapshot: ExactTargetInventoryS
   }
   const record = snapshot.records.find((candidate) => candidate.inventoryRef === inventoryRef) ?? null;
   if (!record) return null;
+  if (snapshot.derived.authorizationState !== "INVENTORY_ONLY") return null;
+  if ((snapshot.derived.recordBlockers[record.inventoryRef] ?? []).length > 0) return null;
+  const workloadClass = workloadClassForRecord(snapshot, record);
+  if (workloadClass === "UNKNOWN") return null;
+  const completeness = snapshot.derived.completeness.find((row) => row.workloadClass === workloadClass);
+  if (!completeness || completeness.status !== "COMPLETE") return null;
   return deepFreeze({
     inventoryRef: record.inventoryRef,
     recordType: record.recordType,
-    workloadClass: workloadClassForRecord(snapshot, record),
+    workloadClass,
     blockerCodes: snapshot.derived.recordBlockers[record.inventoryRef] ?? [],
     record,
   });
@@ -444,14 +453,15 @@ function copyJson(value: unknown, path: string, depth: number, seen: WeakSet<obj
       }
       const descriptors = Object.getOwnPropertyDescriptors(value);
       for (let index = 0; index < value.length; index += 1) {
-        if (!Object.hasOwn(descriptors, String(index))) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !descriptor.enumerable || "get" in descriptor || "set" in descriptor || descriptor.value === undefined) {
           addIssue(issues, "STRUCTURAL_LIMIT", `${path}/${index}`);
           return undefined;
         }
       }
       const result: JsonValue[] = [];
       for (let index = 0; index < value.length; index += 1) {
-        result.push(copyJson(value[index], `${path}/${index}`, depth + 1, seen, nodeCount, issues) ?? null);
+        result.push(copyJson(descriptors[String(index)]!.value, `${path}/${index}`, depth + 1, seen, nodeCount, issues) ?? null);
       }
       return result;
     }
@@ -465,14 +475,19 @@ function copyJson(value: unknown, path: string, depth: number, seen: WeakSet<obj
       return undefined;
     }
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    const result: JsonObject = {};
+    const result = Object.create(null) as JsonObject;
     for (const key of keys as string[]) {
       const descriptor = descriptors[key];
       if (!descriptor || !descriptor.enumerable || "get" in descriptor || "set" in descriptor || descriptor.value === undefined) {
         addIssue(issues, "STRUCTURAL_LIMIT", joinPath(path, key));
         continue;
       }
-      result[key] = copyJson(descriptor.value, joinPath(path, key), depth + 1, seen, nodeCount, issues) ?? null;
+      Object.defineProperty(result, key, {
+        value: copyJson(descriptor.value, joinPath(path, key), depth + 1, seen, nodeCount, issues) ?? null,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return result;
   } catch {
@@ -571,6 +586,7 @@ function parseRecord(value: JsonValue, path: string, ctx: ParseContext): ExactTa
   if (disposition && !timeOrder([disposition.decidedAt, verifiedAt, ctx.nowIso])) addIssue(ctx.issues, "STALE_OR_EXPIRED", `${path}/disposition/decidedAt`, inventoryRef);
 
   if (!recordId || !workloadId || !environmentId || !ownerRef || !criticality || !firstObservedAt || !lastObservedAt || !verifiedAt || !expiresAt || !lifecycle || !disposition || !authority || !detail || !inventoryKey || !inventoryRef || !recordDigest) return null;
+  validateRootDetailIdentity(recordType, workloadId, environmentId, detail, path, ctx, inventoryRef);
   const derivedKey = deriveExactTargetInventoryKey({ recordType, workloadId, environmentId, provider, detail });
   if (inventoryKey !== derivedKey) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/inventoryKey`, inventoryRef);
   if (inventoryRef !== deriveInventoryRef(derivedKey)) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/inventoryRef`, inventoryRef);
@@ -659,6 +675,7 @@ function parseDetail(recordType: ExactTargetRecordType, value: JsonObject | null
   if (recordType === "ENVIRONMENT" && typeof detail.environmentId === "string" && detail.environmentId.length === 0) addIssue(ctx.issues, "REQUIRED_FIELD", `${path}/environmentId`);
   if (recordType === "IMAGE" && detail.digestAlgorithm !== "sha256") addIssue(ctx.issues, "INVALID_VALUE", `${path}/digestAlgorithm`);
   if (recordType === "CALLBACK") validateCallbackDetail(detail, path, ctx);
+  if (recordType === "ROLLBACK_ASSET") validateRollbackDetail(detail, path, ctx);
   return detail;
 }
 
@@ -679,9 +696,26 @@ function parseField(value: JsonObject, field: string, spec: FieldSpec, path: str
     if (value[field] !== false) addIssue(ctx.issues, "SECRET_SENTINEL", `${path}/${field}`);
     return value[field] === false ? false : undefined;
   }
+  if (spec.kind === "endpointFingerprint") return requiredEndpointFingerprint(value, field, path, ctx);
   if (spec.kind === "fqdn") return requiredFqdn(value, field, path, ctx);
   if (spec.kind === "url") return requiredUrl(value, field, path, ctx);
   return undefined;
+}
+
+function validateRootDetailIdentity(recordType: ExactTargetRecordType, workloadId: string, environmentId: string, detail: JsonObject, path: string, ctx: ParseContext, inventoryRef: string) {
+  if (recordType === "WORKLOAD" && detail.workloadId !== workloadId) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/workload/workloadId`, inventoryRef);
+  if (recordType === "ENVIRONMENT" && detail.environmentId !== environmentId) addIssue(ctx.issues, "DERIVED_REF_MISMATCH", `${path}/environment/environmentId`, inventoryRef);
+}
+
+function validateRollbackDetail(detail: JsonObject, path: string, ctx: ParseContext) {
+  const createdAt = typeof detail.createdAt === "string" ? parseTimestampMs(detail.createdAt) : null;
+  const verifiedAt = typeof detail.verifiedAt === "string" ? parseTimestampMs(detail.verifiedAt) : null;
+  const restoreTestedAt = typeof detail.restoreTestedAt === "string" ? parseTimestampMs(detail.restoreTestedAt) : null;
+  const retainUntil = typeof detail.retainUntil === "string" ? parseTimestampMs(detail.retainUntil) : null;
+  if (createdAt === null || verifiedAt === null || restoreTestedAt === null || retainUntil === null) return;
+  if (createdAt > verifiedAt || verifiedAt > restoreTestedAt || restoreTestedAt > ctx.nowMs || ctx.nowMs >= retainUntil) {
+    addIssue(ctx.issues, "STALE_OR_EXPIRED", `${path}/retainUntil`);
+  }
 }
 
 function validateCallbackDetail(detail: JsonObject, path: string, ctx: ParseContext) {
@@ -775,12 +809,12 @@ function verifyDigestsAndGraph(snapshot: Omit<ExactTargetInventorySnapshot, "der
   for (const record of snapshot.records) {
     const normalized = recordForDigest(record);
     if (record.recordDigest !== sha256Hex(canonicalJson(normalized))) addIssue(issues, "DERIVED_DIGEST_MISMATCH", "/records/recordDigest", record.inventoryRef);
-    for (const evidenceRef of record.evidenceRefs) if (!evidenceById.has(evidenceRef)) addIssue(issues, "INVALID_REFERENCE", "/records/evidenceRefs", record.inventoryRef);
-    if (!evidenceById.has(record.lifecycle.stateEvidenceRef)) addIssue(issues, "INVALID_REFERENCE", "/records/lifecycle/stateEvidenceRef", record.inventoryRef);
+    for (const evidenceRef of record.evidenceRefs) validateEvidenceForRecord(evidenceRef, record, recordsById, evidenceById, "/records/evidenceRefs", issues);
+    validateEvidenceForRecord(record.lifecycle.stateEvidenceRef, record, recordsById, evidenceById, "/records/lifecycle/stateEvidenceRef", issues);
     for (const dimension of AUTHORITY_DIMENSIONS) {
-      for (const evidenceRef of record.authority[dimension].evidenceRefs) if (!evidenceById.has(evidenceRef)) addIssue(issues, "INVALID_REFERENCE", `/records/authority/${dimension}/evidenceRefs`, record.inventoryRef);
+      for (const evidenceRef of record.authority[dimension].evidenceRefs) validateEvidenceForRecord(evidenceRef, record, recordsById, evidenceById, `/records/authority/${dimension}/evidenceRefs`, issues);
     }
-    validateDetailReferences(record, recordsByRef, evidenceById, issues);
+    validateDetailReferences(record, recordsByRef, recordsById, evidenceById, issues);
   }
 
   for (const relationship of snapshot.relationships) {
@@ -788,7 +822,10 @@ function verifyDigestsAndGraph(snapshot: Omit<ExactTargetInventorySnapshot, "der
     const to = recordsById.get(relationship.toRecordId);
     if (!from || !to) addIssue(issues, "INVALID_REFERENCE", "/relationships");
     if (from && to && (from.workloadId !== to.workloadId || from.environmentId !== to.environmentId)) addIssue(issues, "INVALID_REFERENCE", "/relationships/target");
-    for (const evidenceRef of relationship.evidenceRefs) if (!evidenceById.has(evidenceRef)) addIssue(issues, "INVALID_REFERENCE", "/relationships/evidenceRefs");
+    for (const evidenceRef of relationship.evidenceRefs) {
+      if (from) validateEvidenceForRecord(evidenceRef, from, recordsById, evidenceById, "/relationships/evidenceRefs", issues);
+      else if (!evidenceById.has(evidenceRef)) addIssue(issues, "INVALID_REFERENCE", "/relationships/evidenceRefs");
+    }
   }
 
   for (const evidence of snapshot.evidence) {
@@ -797,11 +834,39 @@ function verifyDigestsAndGraph(snapshot: Omit<ExactTargetInventorySnapshot, "der
     if (parseTimestampMs(evidence.expiresAt)! <= nowMs) addIssue(issues, "STALE_OR_EXPIRED", "/evidence/expiresAt");
   }
 
+  validateCompletenessEvidence(snapshot, recordsById, evidenceById, issues);
+
   const actualDocumentDigest = sha256Hex(canonicalJson(snapshotForDigest(snapshot)));
   if (snapshot.documentDigest !== actualDocumentDigest) addIssue(issues, "DERIVED_DIGEST_MISMATCH", "/documentDigest");
 }
 
-function validateDetailReferences(record: ExactTargetRecord, recordsByRef: Map<string, ExactTargetRecord>, evidenceById: Map<string, ExactTargetEvidence>, issues: ExactTargetInventoryIssue[]) {
+function validateEvidenceForRecord(evidenceRef: string, record: ExactTargetRecord, recordsById: Map<string, ExactTargetRecord>, evidenceById: Map<string, ExactTargetEvidence>, path: string, issues: ExactTargetInventoryIssue[]) {
+  const evidence = evidenceById.get(evidenceRef);
+  const source = evidence ? recordsById.get(evidence.sourceRecordId) : undefined;
+  if (!evidence || !source || source.workloadId !== record.workloadId || source.environmentId !== record.environmentId) {
+    addIssue(issues, "INVALID_REFERENCE", path, record.inventoryRef);
+  }
+}
+
+function validateCompletenessEvidence(snapshot: Omit<ExactTargetInventorySnapshot, "derived">, recordsById: Map<string, ExactTargetRecord>, evidenceById: Map<string, ExactTargetEvidence>, issues: ExactTargetInventoryIssue[]) {
+  const seenClasses = new Set<ExactTargetWorkloadClass>();
+  for (const row of snapshot.validationSummary.completenessLedger) {
+    if (seenClasses.has(row.workloadClass)) addIssue(issues, "DUPLICATE_IDENTITY", "/validationSummary/completenessLedger/workloadClass");
+    seenClasses.add(row.workloadClass);
+    for (const evidenceRef of row.evidenceRefs) {
+      const evidence = evidenceById.get(evidenceRef);
+      const source = evidence ? recordsById.get(evidence.sourceRecordId) : undefined;
+      if (!source || workloadClassForRecordFromRecords(snapshot.records, source) !== row.workloadClass) {
+        addIssue(issues, "INVALID_REFERENCE", "/validationSummary/completenessLedger/evidenceRefs");
+      }
+    }
+  }
+  for (const workloadClass of EXACT_TARGET_WORKLOAD_CLASSES) {
+    if (!seenClasses.has(workloadClass)) addIssue(issues, "CLAIM_MISMATCH", "/validationSummary/completenessLedger");
+  }
+}
+
+function validateDetailReferences(record: ExactTargetRecord, recordsByRef: Map<string, ExactTargetRecord>, recordsById: Map<string, ExactTargetRecord>, evidenceById: Map<string, ExactTargetEvidence>, issues: ExactTargetInventoryIssue[]) {
   const refKind = (ref: JsonValue | undefined, expected: ExactTargetRecordType, path: string) => {
     if (typeof ref !== "string") return;
     const target = recordsByRef.get(ref);
@@ -812,7 +877,12 @@ function validateDetailReferences(record: ExactTargetRecord, recordsByRef: Map<s
     for (const ref of refs) refKind(ref, expected, path);
   };
   const evidenceRef = (ref: JsonValue | undefined, path: string) => {
-    if (typeof ref === "string" && !evidenceById.has(ref)) addIssue(issues, "INVALID_REFERENCE", path, record.inventoryRef);
+    if (typeof ref === "string") validateEvidenceForRecord(ref, record, recordsById, evidenceById, path, issues);
+  };
+  const refAllowedKinds = (ref: JsonValue | undefined, allowed: Set<ExactTargetRecordType>, path: string) => {
+    if (typeof ref !== "string") return;
+    const target = recordsByRef.get(ref);
+    if (!target || !allowed.has(target.recordType) || target.workloadId !== record.workloadId || target.environmentId !== record.environmentId) addIssue(issues, "INVALID_REFERENCE", path, record.inventoryRef);
   };
   const d = record.detail;
   if (record.recordType === "WORKER") {
@@ -837,18 +907,20 @@ function validateDetailReferences(record: ExactTargetRecord, recordsByRef: Map<s
   } else if (record.recordType === "CREDENTIAL_REF") {
     if (Array.isArray(d.consumerResourceRefs)) {
       for (const ref of d.consumerResourceRefs) {
-        if (typeof ref === "string" && !recordsByRef.has(ref)) addIssue(issues, "INVALID_REFERENCE", "/credentialRef/consumerResourceRefs", record.inventoryRef);
+        refAllowedKinds(ref, CREDENTIAL_CONSUMER_TYPES, "/credentialRef/consumerResourceRefs");
       }
     }
   } else if (record.recordType === "IMAGE") {
     evidenceRef(d.buildProvenanceEvidenceRef, "/image/buildProvenanceEvidenceRef");
     if (Array.isArray(d.consumingResourceRefs)) {
       for (const ref of d.consumingResourceRefs) {
-        if (typeof ref === "string" && !recordsByRef.has(ref)) addIssue(issues, "INVALID_REFERENCE", "/image/consumingResourceRefs", record.inventoryRef);
+        refAllowedKinds(ref, IMAGE_CONSUMER_TYPES, "/image/consumingResourceRefs");
       }
     }
   } else if (record.recordType === "DATA_STORE") {
     evidenceRef(d.bindingEvidenceRef, "/dataStore/bindingEvidenceRef");
+  } else if (record.recordType === "OBJECT_STORE") {
+    if (Array.isArray(d.inventoryParityEvidenceRefs)) for (const ref of d.inventoryParityEvidenceRefs) evidenceRef(ref, "/objectStore/inventoryParityEvidenceRefs");
   }
 }
 
@@ -890,6 +962,12 @@ function blockersForRecord(record: ExactTargetRecord, workloadClass: ExactTarget
   for (const dimension of AUTHORITY_DIMENSIONS) {
     if (BLOCKING_VERDICTS.has(record.authority[dimension].verdict)) blockers.push(record.authority[dimension].verdict === "AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING");
   }
+  if ((record.recordType === "WORKER" || record.recordType === "SCHEDULER" || record.recordType === "QUEUE" || record.recordType === "DOMAIN" || record.recordType === "CALLBACK") && typeof record.detail.authorityVerdict === "string" && BLOCKING_VERDICTS.has(record.detail.authorityVerdict)) {
+    blockers.push(record.detail.authorityVerdict === "AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING");
+  }
+  if (record.recordType === "ROLLBACK_ASSET" && typeof record.detail.readinessVerdict === "string" && BLOCKING_VERDICTS.has(record.detail.readinessVerdict)) {
+    blockers.push(record.detail.readinessVerdict === "AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING");
+  }
   if (workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN") {
     for (const dimension of ["data", "worker", "queue"] as const) {
       if (record.authority[dimension].verdict !== "AUTHORITY_UNPROVEN") blockers.push("AUTHORITY_UNPROVEN");
@@ -899,8 +977,18 @@ function blockersForRecord(record: ExactTargetRecord, workloadClass: ExactTarget
   return uniqueCodes(blockers);
 }
 
-function compareCallerSummary(summary: ExactTargetValidationSummary, derived: ExactTargetDerivedState, issues: ExactTargetInventoryIssue[]) {
+function reconcileRecordAuthorization(records: ExactTargetRecord[], derived: ExactTargetDerivedState, issues: ExactTargetInventoryIssue[]) {
+  for (const record of records) {
+    const expected = (derived.recordBlockers[record.inventoryRef] ?? []).length > 0 ? "BLOCKED" : "INVENTORY_ONLY";
+    if (record.authority.authorizationState !== expected) {
+      addIssue(issues, "CLAIM_MISMATCH", "/records/authority/authorizationState", record.inventoryRef);
+    }
+  }
+}
+
+function compareCallerSummary(summary: ExactTargetValidationSummary, derived: ExactTargetDerivedState, records: ExactTargetRecord[], issues: ExactTargetInventoryIssue[]) {
   const rowsByClass = new Map(summary.completenessLedger.map((row) => [row.workloadClass, row]));
+  if (rowsByClass.size !== summary.completenessLedger.length) addIssue(issues, "DUPLICATE_IDENTITY", "/validationSummary/completenessLedger/workloadClass");
   for (const row of derived.completeness) {
     const caller = rowsByClass.get(row.workloadClass);
     if (!caller) {
@@ -908,6 +996,17 @@ function compareCallerSummary(summary: ExactTargetValidationSummary, derived: Ex
       continue;
     }
     if (caller.status !== row.status || !sameStringSet(caller.blockingGaps, row.blockerCodes)) addIssue(issues, "CLAIM_MISMATCH", "/validationSummary/completenessLedger");
+    const classRecords = records.filter((record) => workloadClassForRecordFromRecords(records, record) === row.workloadClass);
+    const expectedPolicyStatus = row.blockerCodes.includes("POLICY_PENDING") ? "POLICY_PENDING" : "SETTLED";
+    const expectedAuthorityGate = row.blockerCodes.includes("AUTHORITY_UNPROVEN") ? "AUTHORITY_UNPROVEN" : row.blockerCodes.includes("POLICY_PENDING") ? "POLICY_PENDING" : "PROVEN";
+    const decisions = uniqueStrings(classRecords.map((record) => record.disposition.decision));
+    const expectedDecision = decisions.length === 1 ? decisions[0] : "DECISION_REQUIRED";
+    if (caller.policyStatus !== expectedPolicyStatus || caller.authorityGate !== expectedAuthorityGate || caller.dispositionDecision !== expectedDecision) {
+      addIssue(issues, "CLAIM_MISMATCH", "/validationSummary/completenessLedger");
+    }
+  }
+  for (const caller of summary.completenessLedger) {
+    if (!EXACT_TARGET_WORKLOAD_CLASSES.includes(caller.workloadClass)) addIssue(issues, "CLAIM_MISMATCH", "/validationSummary/completenessLedger");
   }
   if (!sameStringSet(summary.blockerCodes, derived.blockerCodes)) addIssue(issues, "CLAIM_MISMATCH", "/validationSummary/blockerCodes");
 }
@@ -991,7 +1090,15 @@ function workloadClassForRecordFromRecords(records: ExactTargetRecord[], record:
   return typeof workload?.detail.workloadClass === "string" && WORKLOAD_CLASS_SET.has(workload.detail.workloadClass) ? workload.detail.workloadClass as ExactTargetWorkloadClass : "UNKNOWN";
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
 function requiredObject(value: JsonObject, key: string, path: string, ctx: ParseContext): JsonObject | null {
+  if (!Object.hasOwn(value, key)) {
+    addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
+    return null;
+  }
   const candidate = value[key];
   if (!isPlainObject(candidate)) {
     addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
@@ -1001,6 +1108,10 @@ function requiredObject(value: JsonObject, key: string, path: string, ctx: Parse
 }
 
 function requiredArray(value: JsonObject, key: string, path: string, ctx: ParseContext): JsonValue[] {
+  if (!Object.hasOwn(value, key)) {
+    addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
+    return [];
+  }
   const candidate = value[key];
   if (!Array.isArray(candidate)) {
     addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
@@ -1010,6 +1121,10 @@ function requiredArray(value: JsonObject, key: string, path: string, ctx: ParseC
 }
 
 function requiredString(value: JsonObject, key: string, path: string, ctx: ParseContext): string | undefined {
+  if (!Object.hasOwn(value, key)) {
+    addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
+    return undefined;
+  }
   const candidate = value[key];
   if (typeof candidate !== "string" || candidate.trim() !== candidate || candidate.length === 0 || candidate.length > MAX_STRING_LENGTH || /[|]/.test(candidate)) {
     addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
@@ -1019,6 +1134,10 @@ function requiredString(value: JsonObject, key: string, path: string, ctx: Parse
 }
 
 function requiredLooseString(value: JsonObject, key: string, path: string, ctx: ParseContext): string | undefined {
+  if (!Object.hasOwn(value, key)) {
+    addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
+    return undefined;
+  }
   const candidate = value[key];
   if (typeof candidate !== "string" || candidate.trim() !== candidate || candidate.length === 0 || candidate.length > MAX_STRING_LENGTH) {
     addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
@@ -1033,6 +1152,10 @@ function optionalString(value: JsonObject, key: string, path: string, ctx: Parse
 }
 
 function requiredStringArray(value: JsonObject, key: string, path: string, ctx: ParseContext): string[] {
+  if (!Object.hasOwn(value, key)) {
+    addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
+    return [];
+  }
   const candidate = value[key];
   if (!Array.isArray(candidate) || candidate.length > MAX_ARRAY_ITEMS) {
     addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
@@ -1052,6 +1175,10 @@ function requiredStringArray(value: JsonObject, key: string, path: string, ctx: 
 }
 
 function requiredInteger(value: JsonObject, key: string, path: string, ctx: ParseContext): number {
+  if (!Object.hasOwn(value, key)) {
+    addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
+    return 0;
+  }
   const candidate = value[key];
   if (!Number.isSafeInteger(candidate) || Number(candidate) < 1) {
     addIssue(ctx.issues, "REQUIRED_FIELD", joinPath(path, key));
@@ -1073,6 +1200,15 @@ function requiredDigest(value: JsonObject, key: string, path: string, ctx: Parse
   const candidate = requiredString(value, key, path, ctx);
   if (candidate && !/^[a-f0-9]{64}$/.test(candidate)) {
     addIssue(ctx.issues, "INVALID_DIGEST", joinPath(path, key));
+    return undefined;
+  }
+  return candidate;
+}
+
+function requiredEndpointFingerprint(value: JsonObject, key: string, path: string, ctx: ParseContext): string | undefined {
+  const candidate = requiredString(value, key, path, ctx);
+  if (candidate && !/^[a-f0-9]{64}$/.test(candidate)) {
+    addIssue(ctx.issues, "SECRET_SENTINEL", joinPath(path, key));
     return undefined;
   }
   return candidate;
