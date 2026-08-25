@@ -24,7 +24,7 @@ function authorityDimension(verdict: string) {
 }
 
 function authorityFor(workloadClass: string) {
-  const defaultVerdict = workloadClass === "CHIRONE" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING";
+  const defaultVerdict = workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING";
   return {
     authorizationState: "INVENTORY_ONLY",
     serving: authorityDimension(defaultVerdict),
@@ -39,7 +39,7 @@ function authorityFor(workloadClass: string) {
 }
 
 function dispositionFor(workloadClass: string) {
-  if (["ALUMIPRES", "STAGING_TEST_E2E", "DEMO"].includes(workloadClass)) {
+  if (["ACTIVE_CLIENT_DECISION_REQUIRED", "STAGING_TEST_E2E", "DEMO"].includes(workloadClass)) {
     return {
       decision: "DECISION_REQUIRED",
       status: "POLICY_PENDING",
@@ -57,7 +57,7 @@ function dispositionFor(workloadClass: string) {
         : workloadClass === "CORE_WEB" || workloadClass === "CORE_WORKER" || workloadClass === "MCP" || workloadClass === "PUBLIC_SITE"
           ? "REBUILD"
           : "ADOPT",
-    status: workloadClass === "CHIRONE" ? "EVIDENCE_PENDING" : "POLICY_PENDING",
+    status: workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "EVIDENCE_PENDING" : "POLICY_PENDING",
     decisionRef: "p0-05-offline-plan",
     decidedAt: timestamp,
     decisionOwner: "program-owner",
@@ -148,10 +148,10 @@ function exactInventory(overrides: Partial<JsonObject> = {}) {
         workloadClass,
         status: "BLOCKED",
         evidenceRefs: ["evidence-offline-plan"],
-        blockingGaps: workloadClass === "CHIRONE" ? ["AUTHORITY_UNPROVEN"] : ["POLICY_PENDING"],
+        blockingGaps: workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? ["AUTHORITY_UNPROVEN"] : ["POLICY_PENDING"],
         policyStatus: "POLICY_PENDING",
         dispositionDecision: dispositionFor(workloadClass).decision,
-        authorityGate: workloadClass === "CHIRONE" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING",
+        authorityGate: workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN" ? "AUTHORITY_UNPROVEN" : "POLICY_PENDING",
       })),
       blockerCodes: ["POLICY_PENDING", "AUTHORITY_UNPROVEN"],
       validatedAt: timestamp,
@@ -183,7 +183,7 @@ describe("exact target inventory", () => {
     expect(result.publicProjection.completeness).toHaveLength(EXACT_TARGET_WORKLOAD_CLASSES.length);
     expect(result.publicProjection.records).toHaveLength(EXACT_TARGET_WORKLOAD_CLASSES.length);
     expect(JSON.stringify(result.publicProjection)).not.toContain("LOCAL_RECOVERY|offline-account");
-    expect(JSON.stringify(result.publicProjection)).not.toContain("chirone");
+    expect(JSON.stringify(result.publicProjection)).not.toContain("active-client-authority-unproven");
     expect(JSON.stringify(result.publicProjection)).not.toContain("Development /_local-handoffs");
     if (result.ok) {
       expect(validateExactTargetInventory(result.canonicalJson)).toMatchObject({ ok: true, documentDigest: result.documentDigest });
@@ -224,11 +224,11 @@ describe("exact target inventory", () => {
     expect(JSON.stringify(result.publicProjection)).not.toContain(first.inventoryKey as string);
   });
 
-  it("preserves Chirone AUTHORITY_UNPROVEN and policy-pending DECISION_REQUIRED gates", () => {
+  it("preserves authority-unproven active-client and policy-pending decision-required gates", () => {
     const snapshot = exactInventory();
-    const chirone = (snapshot.records as JsonObject[]).find((record) => (record.workload as JsonObject).workloadClass === "CHIRONE")!;
-    chirone.authority = {
-      ...(chirone.authority as JsonObject),
+    const authorityUnproven = (snapshot.records as JsonObject[]).find((record) => (record.workload as JsonObject).workloadClass === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN")!;
+    authorityUnproven.authority = {
+      ...(authorityUnproven.authority as JsonObject),
       worker: authorityDimension("PROVEN"),
     };
     const demo = (snapshot.records as JsonObject[]).find((record) => (record.workload as JsonObject).workloadClass === "DEMO")!;
@@ -258,7 +258,7 @@ describe("exact target inventory", () => {
 
   it("rejects secret-bearing callback and credential content sentinels", () => {
     const snapshot = exactInventory();
-    const credential = workloadRecord("CRINA", 50);
+    const credential = workloadRecord(EXACT_TARGET_WORKLOAD_CLASSES[0], 50);
     credential.recordId = "00000000-0000-4000-8000-000000000050";
     credential.recordType = "CREDENTIAL_REF";
     credential.credentialRef = {

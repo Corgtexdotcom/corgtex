@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 export const EXACT_TARGET_INVENTORY_SCHEMA_VERSION = "1.0.0";
 
 export const EXACT_TARGET_WORKLOAD_CLASSES = [
-  "CRINA",
-  "CHIRONE",
-  "CORPORATE_REBELS",
-  "ALUMIPRES",
+  "ACTIVE_CLIENT_PRIMARY",
+  "ACTIVE_CLIENT_AUTHORITY_UNPROVEN",
+  "ACTIVE_CLIENT_CANARY",
+  "ACTIVE_CLIENT_DECISION_REQUIRED",
   "CORE_WEB",
   "CORE_WORKER",
   "MCP",
@@ -665,7 +665,7 @@ function validateInventorySemantics(snapshot: JsonObject, issues: ExactTargetInv
 function enforceWorkloadPolicy(workloadClassValue: JsonValue | undefined, record: JsonObject, path: string, issues: ExactTargetInventoryIssue[]) {
   if (typeof workloadClassValue !== "string" || !isObject(record.disposition) || !isObject(record.authority)) return;
   const inventoryRef = stringValue(record.inventoryRef);
-  if (workloadClassValue === "CHIRONE") {
+  if (workloadClassValue === "ACTIVE_CLIENT_AUTHORITY_UNPROVEN") {
     for (const dimension of ["data", "worker", "queue"] as const) {
       const value = record.authority[dimension];
       if (!isObject(value) || value.verdict !== "AUTHORITY_UNPROVEN") {
@@ -673,7 +673,7 @@ function enforceWorkloadPolicy(workloadClassValue: JsonValue | undefined, record
       }
     }
   }
-  if (["ALUMIPRES", "STAGING_TEST_E2E", "DEMO"].includes(workloadClassValue)) {
+  if (["ACTIVE_CLIENT_DECISION_REQUIRED", "STAGING_TEST_E2E", "DEMO"].includes(workloadClassValue)) {
     if (record.disposition.decision !== "DECISION_REQUIRED" || record.disposition.status !== "POLICY_PENDING") {
       issues.push({ code: "POLICY_PENDING", path: `${path}/disposition`, inventoryRef });
     }
