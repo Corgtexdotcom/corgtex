@@ -3457,7 +3457,7 @@ model ProductionValidationReceipt {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, outcome])
-  @@index([targetPullRequest, targetReleaseSha])
+  @@index([targetPullRequest, targetReleaseSha], map: "ProductionValidationReceipt_targetPullRequest_targetRelease_idx")
 }
 
 model WorkspacePermalink {

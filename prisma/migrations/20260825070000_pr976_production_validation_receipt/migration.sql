@@ -61,7 +61,7 @@ CREATE UNIQUE INDEX "ProductionValidationReceipt_agentCredentialId_key" ON "Prod
 CREATE INDEX "ProductionValidationReceipt_workspaceId_outcome_idx" ON "ProductionValidationReceipt"("workspaceId", "outcome");
 
 -- CreateIndex
-CREATE INDEX "ProductionValidationReceipt_targetPullRequest_targetReleaseSha_idx" ON "ProductionValidationReceipt"("targetPullRequest", "targetReleaseSha");
+CREATE INDEX "ProductionValidationReceipt_targetPullRequest_targetRelease_idx" ON "ProductionValidationReceipt"("targetPullRequest", "targetReleaseSha");
 
 -- AddForeignKey
 ALTER TABLE "ProductionValidationReceipt" ADD CONSTRAINT "ProductionValidationReceipt_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
