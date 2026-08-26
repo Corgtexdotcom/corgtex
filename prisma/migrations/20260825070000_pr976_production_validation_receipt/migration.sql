@@ -75,11 +75,11 @@ DECLARE
 BEGIN
     IF TG_TABLE_NAME = 'ActionChecklistItem' THEN
         referenced_action_id := NEW."actionId";
-    ELSIF TG_TABLE_NAME = 'WorkItemEvidence' AND NEW."entityType" = 'Action' THEN
+    ELSIF TG_TABLE_NAME = 'WorkItemEvidence' AND NEW."entityType" IS NOT DISTINCT FROM 'Action' THEN
         referenced_action_id := NEW."entityId";
-    ELSIF TG_TABLE_NAME = 'WorkspaceExternalResourceAttachment' AND NEW."entityType" = 'Action' THEN
+    ELSIF TG_TABLE_NAME = 'WorkspaceExternalResourceAttachment' AND NEW."entityType" IS NOT DISTINCT FROM 'Action' THEN
         referenced_action_id := NEW."entityId";
-    ELSIF TG_TABLE_NAME = 'DeliberationEntry' AND NEW."parentType" = 'ACTION' THEN
+    ELSIF TG_TABLE_NAME = 'DeliberationEntry' AND NEW."parentType" IS NOT DISTINCT FROM 'ACTION' THEN
         referenced_action_id := NEW."parentId";
     ELSE
         RETURN NEW;
@@ -146,6 +146,35 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION production_validation_reject_agent_identity_after_credential_cleanup()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    referenced_credential_id TEXT;
+BEGIN
+    referenced_credential_id := NEW."linkedCredentialId";
+
+    IF referenced_credential_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(referenced_credential_id));
+
+    IF EXISTS (
+        SELECT 1
+        FROM "ProductionValidationReceipt"
+        WHERE "agentCredentialId" = referenced_credential_id
+          AND "cleanupStartedAt" IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'production validation credential cleanup already started'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
 CREATE TRIGGER "ProductionValidationReceipt_action_checklist_cleanup_guard"
 BEFORE INSERT OR UPDATE OF "actionId" ON "ActionChecklistItem"
 FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
@@ -181,3 +210,7 @@ FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_c
 CREATE TRIGGER "ProductionValidationReceipt_goal_recognition_cleanup_guard"
 BEFORE INSERT OR UPDATE OF "goalId" ON "Recognition"
 FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_agent_identity_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "linkedCredentialId" ON "AgentIdentity"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_agent_identity_after_credential_cleanup();

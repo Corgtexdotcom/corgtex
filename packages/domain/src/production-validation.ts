@@ -599,6 +599,10 @@ async function terminalizeGoal(
 async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: ValidationReceipt) {
   if (receipt.credentialState === "CLEANED" || receipt.credentialState === "BLOCKED") return receipt.credentialState;
   if (!receipt.agentCredentialId) return "BLOCKED" as const;
+  await tx.$queryRaw`
+    SELECT true AS locked
+    FROM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(${receipt.agentCredentialId}))
+  `;
   const credential = await tx.agentCredential.findUnique({ where: { id: receipt.agentCredentialId } });
   if (!credential || credential.workspaceId !== receipt.workspaceId || credential.label !== `${PR976_SYNTHETIC_MARKER}:credential`) return "BLOCKED" as const;
   if (credential.isActive) {
@@ -607,10 +611,10 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
       data: { isActive: false },
     });
   }
-  const identity = await tx.agentIdentity.findFirst({
+  const identities = await tx.agentIdentity.findMany({
     where: { workspaceId: receipt.workspaceId, linkedCredentialId: credential.id },
   });
-  if (identity) {
+  for (const identity of identities) {
     const [assignments, roleHistory] = await Promise.all([
       tx.circleAgentAssignment.count({ where: { agentIdentityId: identity.id } }),
       tx.roleHolderHistory.count({ where: { agentIdentityId: identity.id, endedAt: null } }),
@@ -634,6 +638,17 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
       });
     }
   }
+  const remainingIdentity = await tx.agentIdentity.findFirst({
+    where: {
+      workspaceId: receipt.workspaceId,
+      linkedCredentialId: credential.id,
+      OR: [
+        { isActive: true },
+        { archivedAt: null },
+      ],
+    },
+  });
+  if (remainingIdentity) return "BLOCKED" as const;
   return "CLEANED" as const;
 }
 

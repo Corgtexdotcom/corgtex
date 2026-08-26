@@ -304,4 +304,64 @@ describe("ProductionValidationReceipt integration", () => {
       expect.objectContaining({ type: "TARGET_TERMINALIZED", target: "goal", state: "BLOCKED" }),
     ]));
   });
+
+  it("archives all linked validation agent identities and blocks new links after credential cleanup starts", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "102",
+      workflowRunAttempt: 1,
+    });
+    const credentialId = provisioned.receipt.agentCredentialId;
+    if (!credentialId) throw new Error("Provisioned receipt missing credential.");
+    const credential = await prisma.agentCredential.findUniqueOrThrow({ where: { id: credentialId } });
+    await prisma.agentIdentity.createMany({
+      data: [
+        {
+          workspaceId,
+          agentKey: "pr976-validation-a",
+          memberType: "EXTERNAL",
+          displayName: credential.label,
+          linkedCredentialId: credential.id,
+        },
+        {
+          workspaceId,
+          agentKey: "pr976-validation-b",
+          memberType: "EXTERNAL",
+          displayName: credential.label,
+          linkedCredentialId: credential.id,
+        },
+      ],
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "102",
+      workflowRunAttempt: 1,
+      mode: "credential",
+    });
+
+    expect(terminalized.receipt.credentialState).toBe("CLEANED");
+    await expect(prisma.agentCredential.findUniqueOrThrow({ where: { id: credential.id } })).resolves.toMatchObject({ isActive: false });
+    await expect(prisma.agentIdentity.count({
+      where: {
+        linkedCredentialId: credential.id,
+        OR: [
+          { isActive: true },
+          { archivedAt: null },
+        ],
+      },
+    })).resolves.toBe(0);
+    await expect(prisma.agentIdentity.create({
+      data: {
+        workspaceId,
+        agentKey: "pr976-validation-after-cleanup",
+        memberType: "EXTERNAL",
+        displayName: credential.label,
+        linkedCredentialId: credential.id,
+      },
+    })).rejects.toThrow(/production validation credential cleanup already started/);
+  });
 });

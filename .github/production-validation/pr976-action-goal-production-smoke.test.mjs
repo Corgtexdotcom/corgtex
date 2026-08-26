@@ -143,7 +143,7 @@ describe("pr976 action/goal production smoke workflow", () => {
     expect(workflow).not.toContain("PRODUCTION_DATABASE_URL");
   });
 
-  it("keeps the static nine-guard receipt cleanup inventory", async () => {
+  it("keeps the static receipt cleanup guard inventory", async () => {
     const migration = await readFile(new URL("../../prisma/migrations/20260825070000_pr976_production_validation_receipt/migration.sql", import.meta.url), "utf8");
     const guards = [
       "ProductionValidationReceipt_action_checklist_cleanup_guard",
@@ -155,11 +155,13 @@ describe("pr976 action/goal production smoke workflow", () => {
       "ProductionValidationReceipt_goal_update_cleanup_guard",
       "ProductionValidationReceipt_goal_link_cleanup_guard",
       "ProductionValidationReceipt_goal_recognition_cleanup_guard",
+      "ProductionValidationReceipt_agent_identity_cleanup_guard",
     ];
     for (const guard of guards) {
       expect(migration).toContain(`CREATE TRIGGER "${guard}"`);
     }
     expect(migration.match(/CREATE TRIGGER "ProductionValidationReceipt_/g)).toHaveLength(guards.length);
     expect(migration.match(/pg_advisory_xact_lock\(hashtext\('work_item_version'\)/g)).toHaveLength(2);
+    expect(migration.match(/pg_advisory_xact_lock\(hashtext\('production_validation_credential'\)/g)).toHaveLength(1);
   });
 });
