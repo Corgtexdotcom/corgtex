@@ -79,6 +79,21 @@ enum ActionStatus {
   COMPLETED
 }
 
+enum ProductionValidationLifecycleState {
+  PENDING
+  PROVISIONED
+  FEATURE_PROVEN
+  CLEANED
+  BLOCKED
+}
+
+enum ProductionValidationOutcome {
+  PENDING
+  COMPLETED
+  BLOCKED
+  FAILED
+}
+
 enum TensionStatus {
   DRAFT
   OPEN
@@ -770,6 +785,7 @@ model Workspace {
   modelUsage                     ModelUsage[]
   agentRuns                      AgentRun[]
   agentCreds                     AgentCredential[]
+  productionValidationReceipts   ProductionValidationReceipt[]
   notifications                  Notification[]
   notificationDeliveries         NotificationDelivery[]
   conversations                  ConversationSession[]
@@ -3399,6 +3415,50 @@ model WorkspaceArchiveRecord {
   @@index([workspaceId, entityType, archivedAt])
   @@index([workspaceId, restoredAt])
   @@index([entityType, entityId])
+}
+
+model ProductionValidationReceipt {
+  id                            String                             @id @default(uuid())
+  operationKey                  String
+  workspaceId                   String
+  targetPullRequest             Int
+  targetReleaseSha              String
+  deployedSha                   String
+  ancestorSha                   String
+  workflowRunId                 String
+  workflowRunAttempt            Int
+  syntheticMarker               String
+  actionId                      String?                            @unique
+  goalId                        String?                            @unique
+  agentCredentialId             String?                            @unique
+  actionBaselineVersion         Int?
+  goalBaselineVersion           Int?
+  actionExpectedDigest          String?
+  actionObservedDigest          String?
+  goalExpectedProgress          Int?
+  goalObservedProgress          Int?
+  actionState                   ProductionValidationLifecycleState @default(PENDING)
+  goalState                     ProductionValidationLifecycleState @default(PENDING)
+  credentialState               ProductionValidationLifecycleState @default(PENDING)
+  outcome                       ProductionValidationOutcome        @default(PENDING)
+  actionArchiveRecordId         String?
+  goalArchiveRecordId           String?
+  cleanupStartedAt              DateTime?
+  completedAt                   DateTime?
+  claimedAt                     DateTime                           @default(now())
+  featureProvenAt               DateTime?
+  terminalizedAt                DateTime?
+  failureCode                   String?
+  failureMessage                String?
+  transitions                   Json                               @default("[]")
+  createdAt                     DateTime                           @default(now())
+  updatedAt                     DateTime                           @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([operationKey, workflowRunId, workflowRunAttempt], name: "ProductionValidationReceipt_operationKey_workflowRunId_work_key", map: "ProductionValidationReceipt_operationKey_workflowRunId_work_key")
+  @@index([workspaceId, outcome])
+  @@index([targetPullRequest, targetReleaseSha], map: "ProductionValidationReceipt_targetPullRequest_targetRelease_idx")
 }
 
 model WorkspacePermalink {

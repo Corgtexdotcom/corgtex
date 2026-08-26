@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryRaw = vi.fn();
 const fsMock = vi.hoisted(() => ({
-  existsSync: vi.fn(() => false),
+  existsSync: vi.fn((_filePath?: unknown) => false),
+  readFileSync: vi.fn(() => ""),
   readdirSync: vi.fn((): Array<{ name: string; isDirectory: () => boolean }> => []),
 }));
 
@@ -18,6 +19,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 
 vi.mock("node:fs", () => ({
   existsSync: fsMock.existsSync,
+  readFileSync: fsMock.readFileSync,
   readdirSync: fsMock.readdirSync,
 }));
 
@@ -27,6 +29,7 @@ beforeEach(() => {
   delete process.env.CORGTEX_RELEASE_GIT_SHA;
   delete process.env.GITHUB_SHA;
   delete process.env.RAILWAY_GIT_COMMIT_SHA;
+  delete process.env.VERCEL_GIT_COMMIT_SHA;
   delete process.env.npm_package_version;
   delete process.env.REDIS_URL;
   delete process.env.R2_ACCOUNT_ID;
@@ -56,6 +59,7 @@ beforeEach(() => {
   delete process.env.CONTROL_PLANE_MODE;
   delete process.env.APP_URL;
   fsMock.existsSync.mockReturnValue(false);
+  fsMock.readFileSync.mockReturnValue("");
   fsMock.readdirSync.mockReturnValue([]);
 });
 
@@ -241,9 +245,10 @@ describe("GET /api/health", () => {
 
   it("reports release and runtime configuration for fleet probes", async () => {
     const { GET } = await import("./route");
+    const gitSha = "a".repeat(40);
     process.env.CORGTEX_RELEASE_VERSION = "0.1.0";
-    process.env.CORGTEX_RELEASE_IMAGE_TAG = "sha-abc";
-    process.env.CORGTEX_RELEASE_GIT_SHA = "abc";
+    process.env.CORGTEX_RELEASE_IMAGE_TAG = `sha-${gitSha}`;
+    process.env.CORGTEX_RELEASE_GIT_SHA = gitSha;
     process.env.REDIS_URL = "redis://redis:6379";
     process.env.S3_BUCKET_NAME = "customer-bucket";
     process.env.S3_ACCESS_KEY_ID = "access";
@@ -261,8 +266,8 @@ describe("GET /api/health", () => {
     await expect(response.json()).resolves.toMatchObject({
       release: {
         version: "0.1.0",
-        imageTag: "sha-abc",
-        gitSha: "abc",
+        imageTag: `sha-${gitSha}`,
+        gitSha,
         source: {
           version: "configured",
           imageTag: "configured",
@@ -270,13 +275,97 @@ describe("GET /api/health", () => {
         },
         configured: {
           version: "0.1.0",
-          imageTag: "sha-abc",
-          gitSha: "abc",
+          imageTag: `sha-${gitSha}`,
+          gitSha,
         },
       },
       runtime: {
         redis: "configured",
         storage: "configured",
+      },
+    });
+  });
+
+  it("reports a validated immutable image SHA stamp when present", async () => {
+    const { GET } = await import("./route");
+    const gitSha = "a".repeat(40);
+    fsMock.existsSync.mockImplementation((filePath?: unknown) => String(filePath).endsWith(".corgtex-release-git-sha"));
+    fsMock.readFileSync.mockReturnValue(`${gitSha}\n`);
+    process.env.CORGTEX_RELEASE_VERSION = `main-${gitSha.slice(0, 12)}`;
+    process.env.CORGTEX_RELEASE_IMAGE_TAG = `sha-${gitSha}`;
+    process.env.CORGTEX_RELEASE_GIT_SHA = gitSha;
+    process.env.RAILWAY_GIT_COMMIT_SHA = gitSha;
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      release: {
+        gitSha,
+        runtime: { gitSha, source: "railway" },
+        image: { gitSha, source: "image_stamp", valid: true },
+        drift: { imageGitSha: false },
+      },
+    });
+  });
+
+  it("fails closed when configured release SHA drifts from the image stamp", async () => {
+    const { GET } = await import("./route");
+    const imageSha = "a".repeat(40);
+    const configuredSha = "b".repeat(40);
+    fsMock.existsSync.mockImplementation((filePath?: unknown) => String(filePath).endsWith(".corgtex-release-git-sha"));
+    fsMock.readFileSync.mockReturnValue(`${imageSha}\n`);
+    process.env.CORGTEX_RELEASE_GIT_SHA = configuredSha;
+    process.env.RAILWAY_GIT_COMMIT_SHA = imageSha;
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      release: {
+        image: { gitSha: imageSha, source: "image_stamp", valid: false },
+        drift: {
+          imageGitSha: true,
+          details: expect.arrayContaining([
+            `configured.gitSha=${configuredSha} does not match image.gitSha=${imageSha}`,
+          ]),
+        },
+      },
+    });
+  });
+
+  it("fails closed when the image SHA stamp is invalid", async () => {
+    const { GET } = await import("./route");
+    fsMock.existsSync.mockImplementation((filePath?: unknown) => String(filePath).endsWith(".corgtex-release-git-sha"));
+    fsMock.readFileSync.mockReturnValue("not-a-git-sha\n");
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      release: {
+        image: { gitSha: null, source: "invalid", valid: false },
+        drift: {
+          imageGitSha: false,
+          details: expect.arrayContaining(["image git SHA stamp is missing or invalid"]),
+        },
       },
     });
   });

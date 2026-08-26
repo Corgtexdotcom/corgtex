@@ -29,6 +29,13 @@ ARG GITHUB_SHA
 ARG NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
 ARG REQUIRE_NEXT_SERVER_ACTIONS_KEY=false
 COPY . .
+RUN set -eu; \
+  release_sha="${CORGTEX_RELEASE_GIT_SHA:-${RAILWAY_GIT_COMMIT_SHA:-${GITHUB_SHA:-}}}"; \
+  if ! printf '%s' "$release_sha" | grep -Eiq '^[0-9a-f]{40}$'; then \
+    echo "CORGTEX release image SHA stamp requires a 40-hex git SHA" >&2; \
+    exit 1; \
+  fi; \
+  printf '%s\n' "$release_sha" > /app/.corgtex-release-git-sha
 RUN --mount=type=secret,id=next_server_actions_encryption_key \
   set -eu; \
   key="${NEXT_SERVER_ACTIONS_ENCRYPTION_KEY:-}"; \
@@ -52,5 +59,6 @@ COPY --from=build /app/packages ./packages
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/deploy ./deploy
+COPY --from=build /app/.corgtex-release-git-sha ./.corgtex-release-git-sha
 EXPOSE 3000
 CMD ["sh", "/app/deploy/entrypoint.sh"]

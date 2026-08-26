@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { env, prisma, resolveReleaseMetadata } from "@corgtex/shared";
@@ -9,6 +9,8 @@ import {
 } from "@corgtex/storage";
 
 const migrationsDir = path.resolve(process.cwd(), "..", "..", "prisma", "migrations");
+const imageShaPath = path.resolve(process.cwd(), ".corgtex-release-git-sha");
+const gitShaPattern = /^[0-9a-f]{40}$/i;
 
 function handleRouteError(error: unknown) {
   console.error("Healthcheck failed.", error);
@@ -29,7 +31,64 @@ function handleRouteError(error: unknown) {
 }
 
 function releaseFingerprint() {
-  return resolveReleaseMetadata(process.env, { service: "web" });
+  const release = resolveReleaseMetadata(process.env, { service: "web" });
+  const image = imageReleaseFingerprint();
+  return {
+    ...release,
+    image,
+    drift: {
+      ...release.drift,
+      imageGitSha: image.gitSha !== null
+        && (
+          release.configured.gitSha !== image.gitSha
+          || (release.runtime.gitSha !== null && release.runtime.gitSha !== image.gitSha)
+        ),
+      details: [
+        ...release.drift.details,
+        ...image.driftDetails,
+      ],
+    },
+  };
+}
+
+function imageReleaseFingerprint() {
+  if (!existsSync(imageShaPath)) {
+    return {
+      gitSha: null,
+      source: "missing" as const,
+      valid: false,
+      driftDetails: [] as string[],
+    };
+  }
+
+  const gitSha = readFileSync(imageShaPath, "utf8").trim();
+  if (!gitShaPattern.test(gitSha)) {
+    return {
+      gitSha: null,
+      source: "invalid" as const,
+      valid: false,
+      driftDetails: ["image git SHA stamp is missing or invalid"],
+    };
+  }
+
+  const driftDetails: string[] = [];
+  if (process.env.CORGTEX_RELEASE_GIT_SHA?.trim() !== gitSha) {
+    driftDetails.push(`configured.gitSha=${process.env.CORGTEX_RELEASE_GIT_SHA?.trim() ?? "missing"} does not match image.gitSha=${gitSha}`);
+  }
+  const runtimeGitSha = process.env.RAILWAY_GIT_COMMIT_SHA?.trim()
+    || process.env.VERCEL_GIT_COMMIT_SHA?.trim()
+    || process.env.GITHUB_SHA?.trim()
+    || null;
+  if (runtimeGitSha && runtimeGitSha !== gitSha) {
+    driftDetails.push(`runtime.gitSha=${runtimeGitSha} does not match image.gitSha=${gitSha}`);
+  }
+
+  return {
+    gitSha,
+    source: "image_stamp" as const,
+    valid: driftDetails.length === 0,
+    driftDetails,
+  };
 }
 
 function runtimeFingerprint() {
@@ -143,7 +202,8 @@ export async function GET() {
     }
 
     const runtime = runtimeFingerprint();
-    if (!runtime.workspaceScopeValid) {
+    const release = releaseFingerprint();
+    if (!runtime.workspaceScopeValid || !release.image.valid && release.image.source !== "missing") {
       return NextResponse.json({
         status: "degraded",
         service: "web",
@@ -151,7 +211,7 @@ export async function GET() {
         schema: "ready",
         app: "corgtex",
         auth: "password-session",
-        release: releaseFingerprint(),
+        release,
         runtime,
       }, { status: 503 });
     }
@@ -163,7 +223,7 @@ export async function GET() {
       schema: "ready",
       app: "corgtex",
       auth: "password-session",
-      release: releaseFingerprint(),
+      release,
       runtime,
       loginPath: "/login",
       apiLoginPath: "/api/auth/login",
