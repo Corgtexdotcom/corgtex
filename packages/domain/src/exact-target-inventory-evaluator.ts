@@ -281,7 +281,7 @@ class Reader {
   private readonly artifactPaths = new Map<string, string>();
   private readonly artifactDigests = new Map<string, string>();
   private readonly proofExpiries: string[] = [];
-  private readonly componentIds = new Set<string>();
+  private readonly componentKindById = new Map<string, ExactTargetInventoryComponent["kind"]>();
   private readonly targetIds = new Set<string>();
   private readonly now: number;
   private readonly generatedAt: number;
@@ -434,8 +434,6 @@ class Reader {
       this.add("TYPE_MISMATCH", "component");
       return null;
     }
-    if (this.componentIds.has(value.componentId)) this.add("COMPONENT_TOPOLOGY_INVALID", "component");
-    this.componentIds.add(value.componentId);
     if (value.dependencies.length > EXACT_TARGET_INVENTORY_MAX_DEPENDENCIES_PER_COMPONENT) this.add("LIMIT_EXCEEDED", "component");
     const dependencies = value.dependencies.map((item) => this.dependency(item, `${value.componentId}->${isRecord(item) && typeof item.componentId === "string" ? item.componentId : "invalid"}`)).filter((item): item is ExactTargetInventoryDependency => item !== null);
     const rollback = Object.hasOwn(value, "rollback") ? this.rollback(value.rollback, value.componentId) : undefined;
@@ -448,6 +446,17 @@ class Reader {
       dependencies,
       ...(rollback === undefined || rollback === null ? {} : { rollback }),
     };
+  }
+
+  public validateComponentIdentity(components: readonly ExactTargetInventoryComponent[]): void {
+    const targetComponentIds = new Set<string>();
+    for (const component of components) {
+      if (targetComponentIds.has(component.componentId)) this.add("COMPONENT_TOPOLOGY_INVALID", "component");
+      targetComponentIds.add(component.componentId);
+      const previousKind = this.componentKindById.get(component.componentId);
+      if (previousKind !== undefined && previousKind !== component.kind) this.add("COMPONENT_TOPOLOGY_INVALID", "component");
+      this.componentKindById.set(component.componentId, component.kind);
+    }
   }
 
   public target(value: unknown, workloadClass: ExactTargetInventoryWorkloadClass): ExactTargetInventoryTarget | null {
@@ -463,6 +472,7 @@ class Reader {
     this.targetIds.add(value.targetId);
     if (value.components.length === 0 || value.components.length > EXACT_TARGET_INVENTORY_MAX_COMPONENTS_PER_TARGET) this.add("LIMIT_EXCEEDED", "target");
     const components = value.components.map((item) => this.component(item)).filter((item): item is ExactTargetInventoryComponent => item !== null);
+    this.validateComponentIdentity(components);
     validateComponentTopology(components, this);
     const topology = targetTopology(components);
     const proofOwner = targetProofOwner(workloadClass, value.targetId);

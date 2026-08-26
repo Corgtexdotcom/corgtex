@@ -394,6 +394,91 @@ describe("exact target inventory evaluator", () => {
     expect(effectCount).toBe(8);
   });
 
+  it("allows one real same-kind component UUID across distinct target-local topologies", () => {
+    const value = fixture() as any;
+    const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+    const coreWorker = value.classes.find((item: any) => item.workloadClass === "CORE_WORKER");
+    const sharedDb = coreWeb.targets[0].components[1].componentId;
+    const workerApp = coreWorker.targets[0].components[0];
+    const workerDb = coreWorker.targets[0].components[1];
+    workerDb.componentId = sharedDb;
+    workerDb.rollback.predecessorRef = sharedDb;
+    workerDb.rollback.claim = claim(`${sharedDb}->${sharedDb}`, "ROLLBACK", "component-rollback");
+    workerApp.dependencies[0] = {
+      componentId: sharedDb,
+      kind: "DATABASE",
+      claim: claim(`${workerApp.componentId}->${sharedDb}`, "DEPENDENCY", "component-dependency"),
+    };
+    retopologize(coreWorker.targets[0]);
+
+    const webAdmission = admitThroughPublicBoundary(serialize(value), "CORE_WEB", true);
+    expect(webAdmission.result.artifactStatus).toBe("VALID");
+    expect(webAdmission.result.selection?.status).toBe("SELECTED");
+    expect(webAdmission.effectCount).toBe(8);
+
+    const workerAdmission = admitThroughPublicBoundary(serialize(value), "CORE_WORKER", true);
+    expect(workerAdmission.result.artifactStatus).toBe("VALID");
+    expect(workerAdmission.result.selection?.status).toBe("SELECTED");
+    expect(workerAdmission.effectCount).toBe(8);
+  });
+
+  it("rejects duplicate UUIDs inside one target with zero effects", () => {
+    const admission = admitThroughPublicBoundary(serialize((() => {
+      const value = fixture() as any;
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      coreWeb.targets[0].components[1].componentId = coreWeb.targets[0].components[0].componentId;
+      retopologize(coreWeb.targets[0]);
+      return value;
+    })()), "CORE_WEB", true);
+    expect(admission.result.artifactStatus).toBe("INVALID");
+    expect(admission.result.selection?.issueCodes).toContain("COMPONENT_TOPOLOGY_INVALID");
+    expect(admission.effectCount).toBe(0);
+  });
+
+  it("rejects cross-target UUID reuse with a different component kind and zero effects", () => {
+    const value = fixture() as any;
+    const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+    const coreWorker = value.classes.find((item: any) => item.workloadClass === "CORE_WORKER");
+    const sharedDb = coreWeb.targets[0].components[1].componentId;
+    const workerApp = coreWorker.targets[0].components[0];
+    const workerQueue = coreWorker.targets[0].components[1];
+    workerQueue.componentId = sharedDb;
+    workerQueue.kind = "QUEUE";
+    workerQueue.rollback.strategy = "PREVIOUS_CONFIG";
+    workerQueue.rollback.predecessorRef = sharedDb;
+    workerQueue.rollback.claim = claim(`${sharedDb}->${sharedDb}`, "ROLLBACK", "component-rollback");
+    workerApp.dependencies[0] = {
+      componentId: sharedDb,
+      kind: "QUEUE",
+      claim: claim(`${workerApp.componentId}->${sharedDb}`, "DEPENDENCY", "component-dependency"),
+    };
+    retopologize(coreWorker.targets[0]);
+
+    const admission = admitThroughPublicBoundary(serialize(value), "CORE_WORKER", true);
+    expect(admission.result.artifactStatus).toBe("INVALID");
+    expect(admission.result.selection?.issueCodes).toContain("COMPONENT_TOPOLOGY_INVALID");
+    expect(admission.effectCount).toBe(0);
+  });
+
+  it("keeps dependency endpoint resolution target-local with zero effects", () => {
+    const value = fixture() as any;
+    const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+    const coreWorker = value.classes.find((item: any) => item.workloadClass === "CORE_WORKER");
+    const remoteDb = coreWeb.targets[0].components[1].componentId;
+    const workerApp = coreWorker.targets[0].components[0];
+    workerApp.dependencies[0] = {
+      componentId: remoteDb,
+      kind: "DATABASE",
+      claim: claim(`${workerApp.componentId}->${remoteDb}`, "DEPENDENCY", "component-dependency"),
+    };
+    retopologize(coreWorker.targets[0]);
+
+    const admission = admitThroughPublicBoundary(serialize(value), "CORE_WORKER", true);
+    expect(admission.result.artifactStatus).toBe("INVALID");
+    expect(admission.result.selection?.issueCodes).toContain("DEPENDENCY_INVALID");
+    expect(admission.effectCount).toBe(0);
+  });
+
   it("blocks retirement and unresolved classes without invalidating the artifact", () => {
     const residual = evaluate(fixture(), "RESIDUAL_RAILWAY");
     expect(residual.artifactStatus).toBe("VALID");

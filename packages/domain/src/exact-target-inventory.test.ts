@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  EXACT_TARGET_INVENTORY_MAX_BYTES,
   EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES,
   evaluateExactTargetInventoryJson,
   exactTargetInventoryFieldOwnership,
@@ -146,16 +147,23 @@ describe("validate exact target inventory CLI static boundary", () => {
   it("imports only local file reading, path resolution, and the public evaluator", () => {
     const source = readFileSync(new URL("../../../scripts/validate-exact-target-inventory.ts", import.meta.url), "utf8");
     expect(source.match(/^import .*$/gm)).toEqual([
-      'import { readFileSync, statSync } from "node:fs";',
+      'import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";',
       'import { resolve } from "node:path";',
       "import {",
     ]);
     expect(source).toContain("from \"@corgtex/domain/exact-target-inventory\"");
     expect(source).not.toContain("from \"@corgtex/domain\"");
-    expect(source).not.toMatch(/fetch\(|@azure|prisma|DATABASE_URL|SECRET|TOKEN|scripts\/release|child_process|spawn|exec|https?:\/\//);
+    expect(source).not.toMatch(/readFileSync|\bstatSync\(|fetch\(|@azure|prisma|DATABASE_URL|SECRET|TOKEN|scripts\/release|child_process|spawn\(|exec\(|https?:\/\//);
     expect(source).not.toMatch(/process\.exit\(/);
     expect(source).toContain("process.exitCode = status;");
     expect(source).toContain("process.exitCode = result.ok ? 0 : 1;");
+    expect(source).toContain("fd = openSync(filePath, constants.O_RDONLY);");
+    expect(source).toContain("const stat = fstatSync(fd);");
+    expect(source).toContain("Buffer.allocUnsafe(EXACT_TARGET_INVENTORY_MAX_BYTES + 1)");
+    expect(source).toContain("readSync(fd, buffer, offset, buffer.length - offset, null)");
+    expect(source).toContain("if (bytesRead === 0) return buffer.subarray(0, offset).toString(\"utf8\");");
+    expect(source).toContain("finally");
+    expect(source).toContain("closeSync(fd);");
   });
 
   it("exposes and uses an offline exact-target package subpath without the domain barrel", () => {
@@ -191,6 +199,29 @@ describe("validate exact target inventory CLI static boundary", () => {
 
     output = runCli([join(dir, "missing.json")]).output;
     expect(output).toBe("{\"ok\":false,\"error\":\"READ_FAILED\"}\n");
+  }, 30_000);
+
+  it("distinguishes exact-limit evaluator input from descriptor-level read failures", () => {
+    const dir = mkdtempSync(join(tmpdir(), "exact-target-inventory-"));
+    const exactLimit = join(dir, "exact-limit.json");
+    const overLimit = join(dir, "over-limit.json");
+    writeFileSync(exactLimit, " ".repeat(EXACT_TARGET_INVENTORY_MAX_BYTES), "utf8");
+    writeFileSync(overLimit, " ".repeat(EXACT_TARGET_INVENTORY_MAX_BYTES + 1), "utf8");
+
+    const exact = runCli([exactLimit, "--now=2026-08-24T12:00:00.000Z"]);
+    expect(exact.status).toBe(1);
+    expect(exact.output).toContain("\"JSON_MALFORMED\"");
+    expect(exact.output).not.toContain(exactLimit);
+
+    const oversized = runCli([overLimit, "--now=2026-08-24T12:00:00.000Z"]);
+    expect(oversized.status).toBe(2);
+    expect(oversized.output).toBe("{\"ok\":false,\"error\":\"READ_FAILED\"}\n");
+    expect(oversized.output).not.toContain(overLimit);
+
+    const directory = runCli([dir, "--now=2026-08-24T12:00:00.000Z"]);
+    expect(directory.status).toBe(2);
+    expect(directory.output).toBe("{\"ok\":false,\"error\":\"READ_FAILED\"}\n");
+    expect(directory.output).not.toContain(dir);
   }, 30_000);
 
   it("returns non-zero when requested class admission is blocked", () => {

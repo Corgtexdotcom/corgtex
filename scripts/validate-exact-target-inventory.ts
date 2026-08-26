@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   EXACT_TARGET_INVENTORY_MAX_BYTES,
@@ -22,7 +22,7 @@ const canonicalInstant = (value: string): boolean => {
   return Number.isFinite(time) && new Date(time).toISOString() === value;
 };
 
-const parseArgs = (tokens: readonly string[]): {
+const parseArgs = (tokens: readonly string[], defaultNow: string): {
   readonly fileArg: string;
   readonly requested?: ExactTargetInventoryWorkloadClass;
   readonly now: string;
@@ -54,25 +54,47 @@ const parseArgs = (tokens: readonly string[]): {
       return null;
     }
   }
-  return { fileArg, ...(requested === undefined ? {} : { requested }), now: now ?? new Date().toISOString() };
+  return { fileArg, ...(requested === undefined ? {} : { requested }), now: now ?? defaultNow };
 };
 
-const parsed = parseArgs(args);
+const readExactTargetInventoryFile = (fileArg: string): string | null => {
+  let fd: number | null = null;
+  try {
+    const filePath = resolve(fileArg);
+    fd = openSync(filePath, constants.O_RDONLY);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > EXACT_TARGET_INVENTORY_MAX_BYTES) return null;
+    const buffer = Buffer.allocUnsafe(EXACT_TARGET_INVENTORY_MAX_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) return buffer.subarray(0, offset).toString("utf8");
+      offset += bytesRead;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The CLI has already failed closed; close errors must not leak local state.
+      }
+    }
+  }
+};
+
+const parsed = parseArgs(args, new Date().toISOString());
 
 if (parsed) {
   const { fileArg, requested, now } = parsed;
-  try {
-    const filePath = resolve(fileArg);
-    const stat = statSync(filePath);
-    if (!stat.isFile() || stat.size > EXACT_TARGET_INVENTORY_MAX_BYTES) {
-      closed("READ_FAILED");
-    } else {
-      const inputText = readFileSync(filePath, "utf8");
-      const result = evaluateExactTargetInventoryJson(inputText, { now, requestedWorkloadClass: requested });
-      process.stdout.write(`${JSON.stringify(result)}\n`);
-      process.exitCode = result.ok ? 0 : 1;
-    }
-  } catch {
+  const inputText = readExactTargetInventoryFile(fileArg);
+  if (inputText === null) {
     closed("READ_FAILED");
+  } else {
+    const result = evaluateExactTargetInventoryJson(inputText, { now, requestedWorkloadClass: requested });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exitCode = result.ok ? 0 : 1;
   }
 }
