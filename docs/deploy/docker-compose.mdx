@@ -54,6 +54,8 @@ Before starting, ensure your host machine has:
     printf '%s\n' "$CORGTEX_RELEASE_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'
     docker compose -f docker-compose.selfhost.yml up -d
     ```
+
+    Keep `CORGTEX_RELEASE_GIT_SHA` exported for both the Compose build arguments and the web runtime environment. If you check out a different revision before rebuilding or restarting the stack, export and validate the variable again so the image build, deployment ID, and `/api/health` release metadata all report the same immutable commit SHA.
   </Step>
 
   <Step title="Access the application">
