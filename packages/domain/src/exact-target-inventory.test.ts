@@ -66,7 +66,11 @@ const cliCanonicalJson = (value: unknown): string => {
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${cliCanonicalJson(record[key])}`).join(",")}}`;
 };
-const cliTarget = (index: number) => {
+const cliTargetProofOwner = (workloadClass: string, targetId: string) =>
+  `class-${workloadClass.toLowerCase().replaceAll("_", "-")}:${targetId}`;
+const cliTarget = (index: number, workloadClass: string) => {
+  const targetId = cliUuid(index * 100);
+  const proofOwner = cliTargetProofOwner(workloadClass, targetId);
   const app = cliUuid(index * 10 + 1);
   const db = cliUuid(index * 10 + 2);
   const components = [
@@ -93,17 +97,17 @@ const cliTarget = (index: number) => {
     rollback: { strategy: component.rollback.strategy, predecessorRef: component.rollback.predecessorRef },
   }));
   return {
-    targetId: cliUuid(index * 100),
-    lifecycleClaim: cliClaim(cliUuid(index * 100), "LIFECYCLE", "target-lifecycle"),
-    authorityClaim: cliClaim(cliUuid(index * 100), "AUTHORITY", "target-authority"),
+    targetId,
+    lifecycleClaim: cliClaim(proofOwner, "LIFECYCLE", "target-lifecycle"),
+    authorityClaim: cliClaim(proofOwner, "AUTHORITY", "target-authority"),
     completenessClaim: {
-      ...cliClaim(cliUuid(index * 100), "COMPLETENESS", "target-completeness"),
+      ...cliClaim(proofOwner, "COMPLETENESS", "target-completeness"),
       topologyDigest: cliHash(cliCanonicalJson(normalized)),
       componentCount: 2,
       dependencyCount: 1,
       rollbackCount: 2,
     },
-    policyClaim: cliClaim(cliUuid(index * 100), "POLICY", "target-policy"),
+    policyClaim: cliClaim(proofOwner, "POLICY", "target-policy"),
     components,
   };
 };
@@ -119,7 +123,7 @@ const cliValidFixture = () => {
         workloadClass,
         disposition,
         rootClaim: cliClaim(`class-${workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", "target-authority"),
-        targets: disposition === "SELECTABLE" ? [cliTarget(index + 1)] : [],
+        targets: disposition === "SELECTABLE" ? [cliTarget(index + 1, workloadClass)] : [],
       };
     }),
   });

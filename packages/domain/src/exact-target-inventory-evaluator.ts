@@ -92,6 +92,9 @@ const boundedPath = (value: unknown): value is string => {
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
+const targetProofOwner = (workloadClass: ExactTargetInventoryWorkloadClass, targetId: string): string =>
+  `class-${workloadClass.toLowerCase().replaceAll("_", "-")}:${targetId}`;
+
 const issue = (
   code: ExactTargetInventoryIssueCode,
   scope: ExactTargetInventoryIssue["scope"],
@@ -447,7 +450,7 @@ class Reader {
     };
   }
 
-  public target(value: unknown): ExactTargetInventoryTarget | null {
+  public target(value: unknown, workloadClass: ExactTargetInventoryWorkloadClass): ExactTargetInventoryTarget | null {
     if (!isRecord(value) || !exactKeys(value, ["targetId", "lifecycleClaim", "authorityClaim", "completenessClaim", "policyClaim", "components"])) {
       this.add("UNKNOWN_KEY", "target");
       return null;
@@ -462,10 +465,11 @@ class Reader {
     const components = value.components.map((item) => this.component(item)).filter((item): item is ExactTargetInventoryComponent => item !== null);
     validateComponentTopology(components, this);
     const topology = targetTopology(components);
-    const lifecycleClaim = this.claim(value.lifecycleClaim, value.targetId, "LIFECYCLE", exactTargetInventoryUseSiteProofRequirements.lifecycleClaim.purpose);
-    const authorityClaim = this.claim(value.authorityClaim, value.targetId, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
-    const completenessClaim = this.completenessClaim(value.completenessClaim, value.targetId, topology);
-    const policyClaim = this.claim(value.policyClaim, value.targetId, "POLICY", exactTargetInventoryUseSiteProofRequirements.policyClaim.purpose);
+    const proofOwner = targetProofOwner(workloadClass, value.targetId);
+    const lifecycleClaim = this.claim(value.lifecycleClaim, proofOwner, "LIFECYCLE", exactTargetInventoryUseSiteProofRequirements.lifecycleClaim.purpose);
+    const authorityClaim = this.claim(value.authorityClaim, proofOwner, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
+    const completenessClaim = this.completenessClaim(value.completenessClaim, proofOwner, topology);
+    const policyClaim = this.claim(value.policyClaim, proofOwner, "POLICY", exactTargetInventoryUseSiteProofRequirements.policyClaim.purpose);
     if (lifecycleClaim === null || authorityClaim === null || completenessClaim === null || policyClaim === null) return null;
     return { targetId: value.targetId, lifecycleClaim, authorityClaim, completenessClaim, policyClaim, components };
   }
@@ -479,13 +483,14 @@ class Reader {
       this.add("TYPE_MISMATCH", "class");
       return null;
     }
-    if (value.disposition !== requiredDispositions[value.workloadClass]) this.add("DISPOSITION_MISMATCH", "class", value.workloadClass);
-    if (value.targets.length > EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS) this.add("LIMIT_EXCEEDED", "class", value.workloadClass);
-    if (value.disposition === "SELECTABLE" && value.targets.length > 1) this.add("TARGET_CARDINALITY_INVALID", "target", value.workloadClass);
-    const rootClaim = this.claim(value.rootClaim, `class-${value.workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
-    const targets = value.targets.map((item) => this.target(item)).filter((item): item is ExactTargetInventoryTarget => item !== null);
+    const workloadClass = value.workloadClass;
+    if (value.disposition !== requiredDispositions[workloadClass]) this.add("DISPOSITION_MISMATCH", "class", workloadClass);
+    if (value.targets.length > EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS) this.add("LIMIT_EXCEEDED", "class", workloadClass);
+    if (value.disposition === "SELECTABLE" && value.targets.length > 1) this.add("TARGET_CARDINALITY_INVALID", "target", workloadClass);
+    const rootClaim = this.claim(value.rootClaim, `class-${workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
+    const targets = value.targets.map((item) => this.target(item, workloadClass)).filter((item): item is ExactTargetInventoryTarget => item !== null);
     if (rootClaim === null) return null;
-    return { workloadClass: value.workloadClass, disposition: value.disposition, rootClaim, targets };
+    return { workloadClass, disposition: value.disposition, rootClaim, targets };
   }
 }
 

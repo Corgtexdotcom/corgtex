@@ -75,7 +75,12 @@ const claim = (owner: string, kind: string, purpose: string) => {
   };
 };
 
+const targetProofOwner = (workloadClass: ExactTargetInventoryWorkloadClass, targetId: string) =>
+  `class-${workloadClass.toLowerCase().replaceAll("_", "-")}:${targetId}`;
+
 const target = (targetId: string, componentPrefix: string) => {
+  const workloadClass = componentPrefix as ExactTargetInventoryWorkloadClass;
+  const proofOwner = targetProofOwner(workloadClass, targetId);
   const seed = exactTargetInventoryWorkloadClasses.indexOf(componentPrefix as ExactTargetInventoryWorkloadClass) + 1;
   const appComponent = uuid(seed * 10 + 1);
   const dbComponent = uuid(seed * 10 + 2);
@@ -109,13 +114,13 @@ const target = (targetId: string, componentPrefix: string) => {
   ];
   return {
     targetId,
-    lifecycleClaim: claim(targetId, "LIFECYCLE", "target-lifecycle"),
-    authorityClaim: claim(targetId, "AUTHORITY", "target-authority"),
+    lifecycleClaim: claim(proofOwner, "LIFECYCLE", "target-lifecycle"),
+    authorityClaim: claim(proofOwner, "AUTHORITY", "target-authority"),
     completenessClaim: {
-      ...claim(targetId, "COMPLETENESS", "target-completeness"),
+      ...claim(proofOwner, "COMPLETENESS", "target-completeness"),
       ...topology(components),
     },
-    policyClaim: claim(targetId, "POLICY", "target-policy"),
+    policyClaim: claim(proofOwner, "POLICY", "target-policy"),
     components,
   };
 };
@@ -235,6 +240,31 @@ describe("exact target inventory evaluator", () => {
     expect(blocked.result.issueCodes).toEqual([]);
     expect(blocked.result.selection).toEqual({ workloadClass: "DUPLICATE_AZURE", status: "BLOCKED", issueCodes: ["RETIREMENT_BLOCKED"] });
     expect(blocked.effectCount).toBe(0);
+  });
+
+  it("rejects selectable target-array swaps before another class target can be selected", () => {
+    const baseline = fixture() as any;
+    const baselineWorkerSelection = evaluate(baseline, "CORE_WORKER").selection;
+    const coreWorker = baseline.classes.find((item: any) => item.workloadClass === "CORE_WORKER");
+    const coreWeb = baseline.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+    expect(baselineWorkerSelection?.status).toBe("SELECTED");
+    expect(coreWorker?.targets[0]?.targetId).not.toBe(coreWeb?.targets[0]?.targetId);
+
+    const swapped = fixture() as any;
+    const swappedWorker = swapped.classes.find((item: any) => item.workloadClass === "CORE_WORKER");
+    const swappedWeb = swapped.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+    if (swappedWorker && swappedWeb) {
+      const swappedWorkerTargets = swappedWorker.targets;
+      swappedWorker.targets = swappedWeb.targets;
+      swappedWeb.targets = swappedWorkerTargets;
+    }
+
+    const admission = admitThroughPublicBoundary(serialize(swapped), "CORE_WEB", true);
+    expect(admission.result.artifactStatus).toBe("INVALID");
+    expect(admission.result.selection?.status).toBe("INVALID");
+    expect(admission.result.selection?.issueCodes).toContain("PROOF_INVALID");
+    expect(admission.result.selection).not.toMatchObject({ opaqueTargetId: baselineWorkerSelection?.opaqueTargetId });
+    expect(admission.effectCount).toBe(0);
   });
 
   it("preserves zero-selectable-target semantics as artifact-valid and class-blocked", () => {
@@ -420,6 +450,16 @@ describe("exact target inventory evaluator", () => {
       if (coreWorker && coreWeb) coreWorker.targets = coreWeb.targets as never;
       return value;
     }, "TARGET_IDENTITY_REUSED");
+    expectOracle("swapped selectable class targets cannot select another class target", (value) => {
+      const coreWorker = value.classes.find((item: any) => item.workloadClass === "CORE_WORKER");
+      const coreWeb = value.classes.find((item: any) => item.workloadClass === "CORE_WEB");
+      if (coreWorker && coreWeb) {
+        const coreWorkerTargets = coreWorker.targets;
+        coreWorker.targets = coreWeb.targets;
+        coreWeb.targets = coreWorkerTargets;
+      }
+      return value;
+    }, "PROOF_INVALID");
     expectOracle("stale proof", (value) => {
       value.classes[0].rootClaim.proof.expiresAt = "2026-08-24T00:00:00.000Z";
       return value;
