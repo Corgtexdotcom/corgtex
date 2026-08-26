@@ -25,6 +25,11 @@ type TargetCleanupResult = {
   archiveRecordId: string | null;
 };
 
+type ActionDerivedWorkState = {
+  pendingJobIds: string[];
+  runningJobIds: string[];
+};
+
 type ExecutionIdentity = {
   operationKey: string;
   workflowRunId: string;
@@ -459,6 +464,72 @@ async function actionCleanupRelations(db: Pick<Prisma.TransactionClient, "action
   return { checklistItems, evidence, externalAttachments, deliberationEntries, adviceProcesses };
 }
 
+async function actionDerivedWorkState(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  actionId: string,
+): Promise<ActionDerivedWorkState> {
+  const rows = await tx.$queryRaw<Array<{ id: string; status: "PENDING" | "RUNNING" }>>`
+    SELECT "id", "status"
+    FROM "WorkflowJob"
+    WHERE "workspaceId" = ${workspaceId}
+      AND "status" IN ('PENDING', 'RUNNING')
+      AND (
+        ("type" = 'knowledge.sync.action' AND "payload" @> ${JSON.stringify({ actionId })}::jsonb)
+        OR ("type" = 'context-graph.sync' AND "payload" @> ${JSON.stringify({ sourceType: "ACTION", sourceId: actionId })}::jsonb)
+      )
+    ORDER BY "id" ASC
+    FOR UPDATE
+  `;
+  return {
+    pendingJobIds: rows.filter((row) => row.status === "PENDING").map((row) => row.id),
+    runningJobIds: rows.filter((row) => row.status === "RUNNING").map((row) => row.id),
+  };
+}
+
+async function clearActionDerivedWork(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  actionId: string,
+): Promise<"CLEARED" | "RUNNING_REQUEUED"> {
+  const jobs = await actionDerivedWorkState(tx, workspaceId, actionId);
+  if (jobs.runningJobIds.length > 0) {
+    await tx.workflowJob.updateMany({
+      where: { id: { in: jobs.runningJobIds }, workspaceId, status: "RUNNING" },
+      data: {
+        status: "PENDING",
+        lockedAt: null,
+        lockedBy: null,
+        startedAt: null,
+        error: "Requeued by production validation cleanup before synthetic Action archive.",
+      },
+    });
+    return "RUNNING_REQUEUED";
+  }
+  if (jobs.pendingJobIds.length > 0) {
+    await tx.workflowJob.updateMany({
+      where: { id: { in: jobs.pendingJobIds }, workspaceId, status: "PENDING" },
+      data: {
+        status: "CANCELLED",
+        completedAt: new Date(),
+        error: "Cancelled by production validation cleanup for synthetic Action.",
+        lockedAt: null,
+        lockedBy: null,
+      },
+    });
+  }
+  await tx.knowledgeChunk.deleteMany({
+    where: { workspaceId, sourceType: "ACTION", sourceId: actionId },
+  });
+  await tx.contextGraphRelationship.deleteMany({
+    where: { workspaceId, sourceEntityType: "Action", sourceEntityId: actionId },
+  });
+  await tx.contextGraphObject.deleteMany({
+    where: { workspaceId, sourceEntityType: "Action", sourceEntityId: actionId },
+  });
+  return "CLEARED";
+}
+
 async function goalCleanupRelations(db: Pick<Prisma.TransactionClient, "goal" | "goalUpdate" | "goalLink" | "keyResult" | "recognition">, goalId: string) {
   const [childGoals, keyResults, updates, links, recognitions] = await Promise.all([
     db.goal.count({ where: { parentGoalId: goalId } }),
@@ -516,6 +587,10 @@ async function terminalizeAction(
     && !action.archivedAt
     && allZero(counts);
   if (!canArchive) return { state: "BLOCKED" as const, archiveRecordId: null };
+  const derivedWork = await clearActionDerivedWork(tx, receipt.workspaceId, receipt.actionId);
+  if (derivedWork === "RUNNING_REQUEUED") {
+    return { state: receipt.actionState, archiveRecordId: receipt.actionArchiveRecordId };
+  }
   const archivedAt = new Date();
   await tx.action.update({
     where: { id: action.id, workspaceId: receipt.workspaceId, archivedAt: null, version: action.version },
@@ -606,29 +681,45 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
   `;
   const credential = await tx.agentCredential.findUnique({ where: { id: receipt.agentCredentialId } });
   if (!credential || credential.workspaceId !== receipt.workspaceId || credential.label !== `${PR976_SYNTHETIC_MARKER}:credential`) return "BLOCKED" as const;
-  const identities = await tx.agentIdentity.findMany({
-    where: { linkedCredentialId: credential.id },
-  });
+  const identities = await tx.$queryRaw<Array<{
+    id: string;
+    workspaceId: string;
+    displayName: string;
+    memberType: string;
+    isActive: boolean;
+    archivedAt: Date | null;
+  }>>`
+    SELECT
+      "id",
+      "workspaceId",
+      "displayName",
+      "memberType",
+      "isActive",
+      "archivedAt"
+    FROM "AgentIdentity"
+    WHERE "linkedCredentialId" = ${credential.id}
+    ORDER BY "id" ASC
+    FOR UPDATE
+  `;
   if (identities.some((identity) => identity.workspaceId !== receipt.workspaceId)) return "BLOCKED" as const;
-  if (credential.isActive) {
-    await tx.agentCredential.update({
-      where: { id: credential.id },
-      data: { isActive: false },
-    });
-  }
-  for (const identity of identities) {
+  const identityPreflight = await Promise.all(identities.map(async (identity) => {
     const [assignments, roleHistory] = await Promise.all([
       tx.circleAgentAssignment.count({ where: { agentIdentityId: identity.id } }),
       tx.roleHolderHistory.count({ where: { agentIdentityId: identity.id, endedAt: null } }),
     ]);
-    if (
-      identity.displayName !== credential.label
-      || identity.memberType !== "EXTERNAL"
-      || assignments !== 0
-      || roleHistory !== 0
-    ) {
-      return "BLOCKED" as const;
-    }
+    return { identity, assignments, roleHistory };
+  }));
+  const canArchiveIdentities = identityPreflight.every(({ identity, assignments, roleHistory }) => (
+    identity.workspaceId === receipt.workspaceId
+    && identity.displayName === credential.label
+    && identity.memberType === "EXTERNAL"
+    && assignments === 0
+    && roleHistory === 0
+  ));
+  if (!canArchiveIdentities) return "BLOCKED" as const;
+  const activeRemainingBeforeMutation = identities.some((identity) => identity.isActive || !identity.archivedAt);
+  if (!credential.isActive && activeRemainingBeforeMutation) return "BLOCKED" as const;
+  for (const identity of identities) {
     if (identity.isActive || !identity.archivedAt) {
       await tx.agentIdentity.update({
         where: { id: identity.id },
@@ -639,6 +730,12 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
         },
       });
     }
+  }
+  if (credential.isActive) {
+    await tx.agentCredential.update({
+      where: { id: credential.id },
+      data: { isActive: false },
+    });
   }
   const remainingIdentity = await tx.agentIdentity.findFirst({
     where: {

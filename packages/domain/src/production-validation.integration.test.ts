@@ -471,6 +471,225 @@ describe("ProductionValidationReceipt integration", () => {
     })).resolves.toBe(2);
   });
 
+  it("blocks credential cleanup byte-for-byte before mutating any linked identity with a late blocker", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "106",
+      workflowRunAttempt: 1,
+    });
+    const credentialId = provisioned.receipt.agentCredentialId;
+    if (!credentialId) throw new Error("Provisioned receipt missing credential.");
+    const credential = await prisma.agentCredential.findUniqueOrThrow({ where: { id: credentialId } });
+    await prisma.agentIdentity.createMany({
+      data: [
+        {
+          workspaceId,
+          agentKey: "pv-clean-before-blocker",
+          memberType: "EXTERNAL",
+          displayName: credential.label,
+          linkedCredentialId: credential.id,
+        },
+        {
+          workspaceId,
+          agentKey: "pv-late-blocker",
+          memberType: "EXTERNAL",
+          displayName: "changed display name",
+          linkedCredentialId: credential.id,
+        },
+      ],
+    });
+    const beforeCredential = await prisma.agentCredential.findUniqueOrThrow({ where: { id: credential.id } });
+    const beforeIdentities = await prisma.agentIdentity.findMany({
+      where: { linkedCredentialId: credential.id },
+      orderBy: { agentKey: "asc" },
+      select: {
+        agentKey: true,
+        displayName: true,
+        isActive: true,
+        archivedAt: true,
+        archiveReason: true,
+        linkedCredentialId: true,
+      },
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "106",
+      workflowRunAttempt: 1,
+      mode: "credential",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("BLOCKED");
+    expect(terminalized.receipt.credentialState).toBe("BLOCKED");
+    const afterCredential = await prisma.agentCredential.findUniqueOrThrow({ where: { id: credential.id } });
+    const afterIdentities = await prisma.agentIdentity.findMany({
+      where: { linkedCredentialId: credential.id },
+      orderBy: { agentKey: "asc" },
+      select: {
+        agentKey: true,
+        displayName: true,
+        isActive: true,
+        archivedAt: true,
+        archiveReason: true,
+        linkedCredentialId: true,
+      },
+    });
+    expect(afterCredential.isActive).toBe(beforeCredential.isActive);
+    expect(afterCredential.tokenHash).toBe(beforeCredential.tokenHash);
+    expect(afterIdentities).toEqual(beforeIdentities);
+  });
+
+  it("cancels pending Action-derived jobs and removes exact Action knowledge and graph outputs before cleanup", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "107");
+    const actionId = provisioned.receipt.actionId;
+    if (!actionId) throw new Error("Provisioned receipt missing Action.");
+    const circle = await prisma.circle.create({
+      data: {
+        workspaceId,
+        name: "Shared circle",
+      },
+    });
+    const actionObject = await prisma.contextGraphObject.create({
+      data: {
+        workspaceId,
+        objectType: "Task",
+        title: "Synthetic action object",
+        sourceEntityType: "Action",
+        sourceEntityId: actionId,
+      },
+    });
+    const circleObject = await prisma.contextGraphObject.create({
+      data: {
+        workspaceId,
+        objectType: "Team",
+        title: "Shared circle object",
+        sourceEntityType: "Circle",
+        sourceEntityId: circle.id,
+      },
+    });
+    await prisma.contextGraphRelationship.create({
+      data: {
+        workspaceId,
+        sourceObjectId: actionObject.id,
+        targetObjectId: circleObject.id,
+        relationshipType: "part_of",
+        sourceEntityType: "Action",
+        sourceEntityId: actionId,
+      },
+    });
+    await prisma.knowledgeChunk.create({
+      data: {
+        workspaceId,
+        sourceType: "ACTION",
+        accessDomain: "WORKSPACE",
+        sourceId: actionId,
+        sourceTitle: "Synthetic action",
+        content: "Synthetic action content",
+      },
+    });
+    await prisma.workflowJob.createMany({
+      data: [
+        {
+          workspaceId,
+          type: "knowledge.sync.action",
+          payload: { actionId },
+          status: "PENDING",
+          dedupeKey: "pv-action-knowledge-pending",
+        },
+        {
+          workspaceId,
+          type: "context-graph.sync",
+          payload: { sourceType: "ACTION", sourceId: actionId },
+          status: "PENDING",
+          dedupeKey: "pv-action-graph-pending",
+        },
+        {
+          workspaceId,
+          type: "knowledge.sync.action",
+          payload: { actionId: "other-action" },
+          status: "PENDING",
+          dedupeKey: "pv-other-action-knowledge-pending",
+        },
+      ],
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "107",
+      workflowRunAttempt: 1,
+      mode: "action",
+    });
+
+    expect(terminalized.receipt.actionState).toBe("CLEANED");
+    await expect(prisma.workflowJob.findMany({
+      where: { dedupeKey: { in: ["pv-action-knowledge-pending", "pv-action-graph-pending"] } },
+      select: { status: true },
+      orderBy: { dedupeKey: "asc" },
+    })).resolves.toEqual([{ status: "CANCELLED" }, { status: "CANCELLED" }]);
+    await expect(prisma.workflowJob.findUniqueOrThrow({
+      where: { dedupeKey: "pv-other-action-knowledge-pending" },
+      select: { status: true },
+    })).resolves.toEqual({ status: "PENDING" });
+    await expect(prisma.knowledgeChunk.count({
+      where: { workspaceId, sourceType: "ACTION", sourceId: actionId },
+    })).resolves.toBe(0);
+    await expect(prisma.contextGraphRelationship.count({
+      where: { workspaceId, sourceEntityType: "Action", sourceEntityId: actionId },
+    })).resolves.toBe(0);
+    await expect(prisma.contextGraphObject.count({
+      where: { workspaceId, sourceEntityType: "Action", sourceEntityId: actionId },
+    })).resolves.toBe(0);
+    await expect(prisma.contextGraphObject.count({
+      where: { workspaceId, sourceEntityType: "Circle", sourceEntityId: circle.id },
+    })).resolves.toBe(1);
+  });
+
+  it("requeues running Action-derived jobs and leaves the Action uncleaned for a later retry", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "108");
+    const actionId = provisioned.receipt.actionId;
+    if (!actionId) throw new Error("Provisioned receipt missing Action.");
+    await prisma.workflowJob.create({
+      data: {
+        workspaceId,
+        type: "knowledge.sync.action",
+        payload: { actionId },
+        status: "RUNNING",
+        startedAt: new Date(),
+        lockedAt: new Date(),
+        lockedBy: "worker-1",
+        dedupeKey: "pv-action-knowledge-running",
+      },
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "108",
+      workflowRunAttempt: 1,
+      mode: "action",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("PENDING");
+    expect(terminalized.receipt.actionState).toBe("FEATURE_PROVEN");
+    await expect(prisma.action.findUniqueOrThrow({
+      where: { id: actionId },
+      select: { archivedAt: true },
+    })).resolves.toEqual({ archivedAt: null });
+    await expect(prisma.workflowJob.findUniqueOrThrow({
+      where: { dedupeKey: "pv-action-knowledge-running" },
+      select: { status: true, lockedAt: true, lockedBy: true, startedAt: true },
+    })).resolves.toEqual({
+      status: "PENDING",
+      lockedAt: null,
+      lockedBy: null,
+      startedAt: null,
+    });
+  });
+
   it("allows failure-only cleanup but requires both proofs for successful all-mode cleanup", async () => {
     const { actor } = await createValidationAdmin();
     await provisionPr976ActionGoalValidation(actor, {

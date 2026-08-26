@@ -254,7 +254,7 @@ export async function handleActionKnowledgeSync(jobId: string, payload: { action
     where: { id: payload.actionId },
     include: { author: { select: { displayName: true } }, assigneeMember: { include: { user: { select: { displayName: true } } } }, circle: { select: { name: true } } },
   });
-  if (!action || action.workspaceId !== workspaceId) return;
+  if (!action || action.workspaceId !== workspaceId || action.archivedAt) return;
 
   const content = [
     `# Action: ${action.title}`,

@@ -81,7 +81,7 @@ export async function handleContextGraphSync(
 
   if (payload.sourceType === "ACTION") {
     const action = await prisma.action.findFirst({
-      where: { id: payload.sourceId, workspaceId },
+      where: { id: payload.sourceId, workspaceId, archivedAt: null },
       include: {
         assigneeMember: { include: { user: { select: { displayName: true, email: true } } } },
         circle: { select: { id: true, name: true, purposeMd: true } },
