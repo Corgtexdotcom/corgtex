@@ -321,14 +321,14 @@ describe("ProductionValidationReceipt integration", () => {
       data: [
         {
           workspaceId,
-          agentKey: "pr976-validation-a",
+          agentKey: "pv-a",
           memberType: "EXTERNAL",
           displayName: credential.label,
           linkedCredentialId: credential.id,
         },
         {
           workspaceId,
-          agentKey: "pr976-validation-b",
+          agentKey: "pv-b",
           memberType: "EXTERNAL",
           displayName: credential.label,
           linkedCredentialId: credential.id,
@@ -363,5 +363,45 @@ describe("ProductionValidationReceipt integration", () => {
         linkedCredentialId: credential.id,
       },
     })).rejects.toThrow(/production validation credential cleanup already started/);
+  });
+
+  it("allows non-action deliberation entries while blocking action relations after cleanup starts", async () => {
+    const { actor, workspaceId, userId } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "103",
+      workflowRunAttempt: 1,
+    });
+    const actionId = provisioned.receipt.actionId;
+    if (!actionId) throw new Error("Provisioned receipt missing Action.");
+
+    await prisma.productionValidationReceipt.update({
+      where: { id: provisioned.receipt.id },
+      data: { cleanupStartedAt: new Date() },
+    });
+
+    await expect(prisma.deliberationEntry.create({
+      data: {
+        workspaceId,
+        parentType: "TENSION",
+        parentId: actionId,
+        authorUserId: userId,
+        entryType: "REACTION",
+        bodyMd: "Non-action deliberation remains allowed after action cleanup starts.",
+      },
+    })).resolves.toMatchObject({ parentType: "TENSION", parentId: actionId });
+
+    await expect(prisma.deliberationEntry.create({
+      data: {
+        workspaceId,
+        parentType: "ACTION",
+        parentId: actionId,
+        authorUserId: userId,
+        entryType: "REACTION",
+        bodyMd: "Action deliberation should be blocked after action cleanup starts.",
+      },
+    })).rejects.toThrow(/production validation Action cleanup already started/);
   });
 });

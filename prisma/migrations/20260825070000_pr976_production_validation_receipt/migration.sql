@@ -75,11 +75,20 @@ DECLARE
 BEGIN
     IF TG_TABLE_NAME = 'ActionChecklistItem' THEN
         referenced_action_id := NEW."actionId";
-    ELSIF TG_TABLE_NAME = 'WorkItemEvidence' AND NEW."entityType" IS NOT DISTINCT FROM 'Action' THEN
+    ELSIF TG_TABLE_NAME = 'WorkItemEvidence' THEN
+        IF NEW."entityType" IS DISTINCT FROM 'Action' THEN
+            RETURN NEW;
+        END IF;
         referenced_action_id := NEW."entityId";
-    ELSIF TG_TABLE_NAME = 'WorkspaceExternalResourceAttachment' AND NEW."entityType" IS NOT DISTINCT FROM 'Action' THEN
+    ELSIF TG_TABLE_NAME = 'WorkspaceExternalResourceAttachment' THEN
+        IF NEW."entityType" IS DISTINCT FROM 'Action' THEN
+            RETURN NEW;
+        END IF;
         referenced_action_id := NEW."entityId";
-    ELSIF TG_TABLE_NAME = 'DeliberationEntry' AND NEW."parentType" IS NOT DISTINCT FROM 'ACTION' THEN
+    ELSIF TG_TABLE_NAME = 'DeliberationEntry' THEN
+        IF NEW."parentType" IS DISTINCT FROM 'ACTION' THEN
+            RETURN NEW;
+        END IF;
         referenced_action_id := NEW."parentId";
     ELSE
         RETURN NEW;
