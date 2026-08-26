@@ -10,7 +10,9 @@ import {
   PR976_TARGET_PULL_REQUEST,
   PR976_TARGET_RELEASE_SHA,
   PR976_VALIDATION_WORKSPACE_SLUG,
+  getPr976ActionGoalValidationStatus,
   provisionPr976ActionGoalValidation,
+  recordPr976ActionGoalFeatureProof,
   terminalizePr976ActionGoalValidation,
 } from "./production-validation";
 
@@ -50,7 +52,7 @@ async function createValidationAdmin(): Promise<{ actor: AppActor; workspaceId: 
 }
 
 describe("ProductionValidationReceipt integration", () => {
-  it("enforces a durable one-time operation claim in PostgreSQL", async () => {
+  it("enforces a durable one-time execution tuple in PostgreSQL", async () => {
     const workspace = await createValidationWorkspace();
     await prisma.productionValidationReceipt.create({
       data: {
@@ -60,6 +62,8 @@ describe("ProductionValidationReceipt integration", () => {
         targetReleaseSha: PR976_TARGET_RELEASE_SHA,
         deployedSha: "1".repeat(40),
         ancestorSha: PR976_TARGET_RELEASE_SHA,
+        workflowRunId: "100",
+        workflowRunAttempt: 1,
         syntheticMarker: PR976_SYNTHETIC_MARKER,
       },
     });
@@ -72,13 +76,29 @@ describe("ProductionValidationReceipt integration", () => {
         targetReleaseSha: PR976_TARGET_RELEASE_SHA,
         deployedSha: "2".repeat(40),
         ancestorSha: PR976_TARGET_RELEASE_SHA,
+        workflowRunId: "100",
+        workflowRunAttempt: 1,
         syntheticMarker: PR976_SYNTHETIC_MARKER,
       },
     })).rejects.toMatchObject({ code: "P2002" });
 
+    await prisma.productionValidationReceipt.create({
+      data: {
+        operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+        workspaceId: workspace.id,
+        targetPullRequest: PR976_TARGET_PULL_REQUEST,
+        targetReleaseSha: PR976_TARGET_RELEASE_SHA,
+        deployedSha: "1".repeat(40),
+        ancestorSha: PR976_TARGET_RELEASE_SHA,
+        workflowRunId: "100",
+        workflowRunAttempt: 2,
+        syntheticMarker: PR976_SYNTHETIC_MARKER,
+      },
+    });
+
     await expect(prisma.productionValidationReceipt.count({
       where: { operationKey: PR976_ACTION_GOAL_OPERATION_KEY },
-    })).resolves.toBe(1);
+    })).resolves.toBe(2);
   });
 
   it("cascades only with the owning validation workspace", async () => {
@@ -91,6 +111,8 @@ describe("ProductionValidationReceipt integration", () => {
         targetReleaseSha: PR976_TARGET_RELEASE_SHA,
         deployedSha: "1".repeat(40),
         ancestorSha: PR976_TARGET_RELEASE_SHA,
+        workflowRunId: "100",
+        workflowRunAttempt: 1,
         syntheticMarker: PR976_SYNTHETIC_MARKER,
       },
     });
@@ -135,6 +157,93 @@ describe("ProductionValidationReceipt integration", () => {
     })).resolves.toBe(1);
   });
 
+  it("creates a distinct synthetic set for a later workflow attempt", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const first = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "200",
+      workflowRunAttempt: 1,
+    });
+    const replay = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "200",
+      workflowRunAttempt: 1,
+    });
+    const rerun = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "200",
+      workflowRunAttempt: 2,
+    });
+
+    expect(first.credentialToken).toMatch(/^agentc-/);
+    expect(replay.receipt.id).toBe(first.receipt.id);
+    expect(replay.credentialToken).toBeNull();
+    expect(rerun.receipt.id).not.toBe(first.receipt.id);
+    expect(rerun.credentialToken).toMatch(/^agentc-/);
+    await expect(prisma.productionValidationReceipt.count({
+      where: { operationKey: PR976_ACTION_GOAL_OPERATION_KEY },
+    })).resolves.toBe(2);
+    await expect(prisma.action.count({
+      where: { workspaceId, title: `${PR976_SYNTHETIC_MARKER}:Action` },
+    })).resolves.toBe(2);
+    await expect(prisma.goal.count({
+      where: { workspaceId, title: `${PR976_SYNTHETIC_MARKER}:Goal` },
+    })).resolves.toBe(2);
+    await expect(prisma.agentCredential.count({
+      where: { workspaceId, label: `${PR976_SYNTHETIC_MARKER}:credential` },
+    })).resolves.toBe(2);
+  });
+
+  it("rejects cross-tuple status, proof, and terminalize requests with zero effects", async () => {
+    const { actor } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "201",
+      workflowRunAttempt: 1,
+    });
+    const wrongTuple = {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "201",
+      workflowRunAttempt: 2,
+    };
+
+    await expect(getPr976ActionGoalValidationStatus(actor, wrongTuple)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(recordPr976ActionGoalFeatureProof(actor, {
+      ...wrongTuple,
+      actionObservedBodyMd: PR976_ACTION_PROVEN_BODY,
+      actionObservedVersion: 2,
+      goalObservedProgress: PR976_GOAL_PROVEN_PROGRESS,
+      goalObservedVersion: 2,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(terminalizePr976ActionGoalValidation(actor, {
+      ...wrongTuple,
+      mode: "all",
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const unchanged = await prisma.productionValidationReceipt.findUniqueOrThrow({
+      where: {
+        operationKey_workflowRunId_workflowRunAttempt: {
+          operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+          workflowRunId: "201",
+          workflowRunAttempt: 1,
+        },
+      },
+    });
+    expect(unchanged.id).toBe(provisioned.receipt.id);
+    expect(unchanged.outcome).toBe("PENDING");
+    expect(unchanged.actionState).toBe("PROVISIONED");
+    expect(unchanged.goalState).toBe("PROVISIONED");
+    expect(unchanged.credentialState).toBe("PROVISIONED");
+  });
+
   it("keeps prior target cleanup committed when a later target blocks", async () => {
     const { actor, memberId } = await createValidationAdmin();
     const provisioned = await provisionPr976ActionGoalValidation(actor, {
@@ -166,6 +275,8 @@ describe("ProductionValidationReceipt integration", () => {
 
     const terminalized = await terminalizePr976ActionGoalValidation(actor, {
       operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "101",
+      workflowRunAttempt: 1,
       mode: "all",
     });
 
@@ -180,7 +291,13 @@ describe("ProductionValidationReceipt integration", () => {
       where: { entityType: "Action", entityId: actionId },
     })).resolves.toBe(1);
     const receipt = await prisma.productionValidationReceipt.findUniqueOrThrow({
-      where: { operationKey: PR976_ACTION_GOAL_OPERATION_KEY },
+      where: {
+        operationKey_workflowRunId_workflowRunAttempt: {
+          operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+          workflowRunId: "101",
+          workflowRunAttempt: 1,
+        },
+      },
     });
     expect(receipt.transitions).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "TARGET_TERMINALIZED", target: "action", state: "CLEANED" }),

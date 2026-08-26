@@ -11,7 +11,7 @@ import {
   TARGET_SHA,
   assertActionNoEffect,
   assertActionProofResponse,
-  assertGoalNoEffect,
+  assertGoalStatusProof,
   assertGoalProofResponse,
   expectConflict,
   expectMcpConflict,
@@ -93,11 +93,14 @@ describe("pr976 action/goal production smoke driver", () => {
     expect(() => assertActionNoEffect({ action: { id: "action-1", bodyMd: `${ACTION_PROVEN_BODY}:forbidden-stale`, version: 2 } }, "action-1", 2)).toThrow("ACTION_STALE_NO_EFFECT_UNPROVEN");
   });
 
-  it("proves Goal stale writes are exact no-effect writes", () => {
-    assertGoalProofResponse({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 2 } }, "goal-1", 1);
-    assertGoalNoEffect({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 2 } }, "goal-1", 2);
-    expect(() => assertGoalNoEffect({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 3 } }, "goal-1", 2)).toThrow("GOAL_STALE_NO_EFFECT_UNPROVEN");
-    expect(() => assertGoalNoEffect({ goal: { id: "goal-1", progressPercent: 99, version: 2 } }, "goal-1", 2)).toThrow("GOAL_STALE_NO_EFFECT_UNPROVEN");
+  it("validates the real top-level Goal acknowledgement and proves status-read progress", () => {
+    assertGoalProofResponse({ id: "goal-1", status: "DRAFT", version: 2 }, "goal-1", 1);
+    assertGoalStatusProof({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 2 } }, "goal-1", GOAL_PROGRESS, 2);
+    expect(() => assertGoalProofResponse({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 2 } }, "goal-1", 1)).toThrow("GOAL_PROOF_WRITE_UNPROVEN");
+    expect(() => assertGoalProofResponse({ id: "goal-1", status: "DRAFT" }, "goal-1", 1)).toThrow("GOAL_PROOF_WRITE_UNPROVEN");
+    expect(() => assertGoalProofResponse({ id: "goal-1", status: "PUBLISHED", version: 2 }, "goal-1", 1)).toThrow("GOAL_PROOF_WRITE_UNPROVEN");
+    expect(() => assertGoalStatusProof({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 3 } }, "goal-1", GOAL_PROGRESS, 2)).toThrow("GOAL_STATUS_PROOF_UNPROVEN");
+    expect(() => assertGoalStatusProof({ goal: { id: "goal-1", progressPercent: 99, version: 2 } }, "goal-1", GOAL_PROGRESS, 2)).toThrow("GOAL_STATUS_PROOF_UNPROVEN");
   });
 });
 

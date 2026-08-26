@@ -53,7 +53,19 @@ describe("POST /api/internal/smoke/pr976-action-goal", () => {
     expect(mocks.provision).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), expect.objectContaining({
       operationKey: "pr976-action-goal-production-validation",
       ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+      workflowRunId: "123",
+      workflowRunAttempt: 1,
     }));
+    expect(mocks.status).not.toHaveBeenCalled();
+  });
+
+  it("requires the immutable execution tuple for status reads", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(request({
+      operation: "status",
+      operationKey: "pr976-action-goal-production-validation",
+    }));
+    expect(response.status).toBe(400);
     expect(mocks.status).not.toHaveBeenCalled();
   });
 
@@ -73,6 +85,8 @@ describe("POST /api/internal/smoke/pr976-action-goal", () => {
     const response = await POST(request({
       operation: "terminalize",
       operationKey: "pr976-action-goal-production-validation",
+      workflowRunId: "123",
+      workflowRunAttempt: 1,
       mode: "all",
       actionId: "client-supplied-id",
     }));
@@ -86,6 +100,8 @@ describe("POST /api/internal/smoke/pr976-action-goal", () => {
     const response = await POST(request({
       operation: "feature_proof",
       operationKey: "pr976-action-goal-production-validation",
+      workflowRunId: "123",
+      workflowRunAttempt: 1,
       actionObservedBodyMd: "corgtex:production-validation:pr976:action-goal:action:proven",
       actionObservedVersion: 2,
       goalObservedProgress: 37,

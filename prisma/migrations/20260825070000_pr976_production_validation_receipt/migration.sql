@@ -13,8 +13,8 @@ CREATE TABLE "ProductionValidationReceipt" (
     "targetReleaseSha" TEXT NOT NULL,
     "deployedSha" TEXT NOT NULL,
     "ancestorSha" TEXT NOT NULL,
-    "workflowRunId" TEXT,
-    "workflowRunAttempt" INTEGER,
+    "workflowRunId" TEXT NOT NULL,
+    "workflowRunAttempt" INTEGER NOT NULL,
     "syntheticMarker" TEXT NOT NULL,
     "actionId" TEXT,
     "goalId" TEXT,
@@ -46,7 +46,7 @@ CREATE TABLE "ProductionValidationReceipt" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ProductionValidationReceipt_operationKey_key" ON "ProductionValidationReceipt"("operationKey");
+CREATE UNIQUE INDEX "ProductionValidationReceipt_operationKey_workflowRunId_workflowRunAttempt_key" ON "ProductionValidationReceipt"("operationKey", "workflowRunId", "workflowRunAttempt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ProductionValidationReceipt_actionId_key" ON "ProductionValidationReceipt"("actionId");

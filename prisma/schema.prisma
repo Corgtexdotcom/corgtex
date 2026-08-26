@@ -3419,14 +3419,14 @@ model WorkspaceArchiveRecord {
 
 model ProductionValidationReceipt {
   id                            String                             @id @default(uuid())
-  operationKey                  String                             @unique
+  operationKey                  String
   workspaceId                   String
   targetPullRequest             Int
   targetReleaseSha              String
   deployedSha                   String
   ancestorSha                   String
-  workflowRunId                 String?
-  workflowRunAttempt            Int?
+  workflowRunId                 String
+  workflowRunAttempt            Int
   syntheticMarker               String
   actionId                      String?                            @unique
   goalId                        String?                            @unique
@@ -3456,6 +3456,7 @@ model ProductionValidationReceipt {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
+  @@unique([operationKey, workflowRunId, workflowRunAttempt])
   @@index([workspaceId, outcome])
   @@index([targetPullRequest, targetReleaseSha], map: "ProductionValidationReceipt_targetPullRequest_targetRelease_idx")
 }

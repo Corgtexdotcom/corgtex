@@ -25,16 +25,24 @@ type TargetCleanupResult = {
   archiveRecordId: string | null;
 };
 
+type ExecutionIdentity = {
+  operationKey: string;
+  workflowRunId: string;
+  workflowRunAttempt: number;
+};
+
 export type Pr976ProvisionInput = {
   operationKey: string;
   deployedSha: string;
   ancestorSha: string;
-  workflowRunId?: string | null;
-  workflowRunAttempt?: number | null;
+  workflowRunId: string;
+  workflowRunAttempt: number;
 };
 
 export type Pr976FeatureProofInput = {
   operationKey: string;
+  workflowRunId: string;
+  workflowRunAttempt: number;
   actionObservedBodyMd: string;
   actionObservedVersion: number;
   goalObservedProgress: number;
@@ -43,6 +51,8 @@ export type Pr976FeatureProofInput = {
 
 export type Pr976TerminalizeInput = {
   operationKey: string;
+  workflowRunId: string;
+  workflowRunAttempt: number;
   mode?: TerminalizeMode;
   failureCode?: string | null;
   failureMessage?: string | null;
@@ -117,7 +127,13 @@ async function requireValidationAdmin(actor: AppActor) {
 function assertFixedProvisionInput(input: Pr976ProvisionInput) {
   invariant(input.operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
   invariant(input.deployedSha.length === 40 && input.ancestorSha === PR976_TARGET_RELEASE_SHA, 400, "INVALID_TARGET", "Invalid production validation target.");
-  invariant(input.workflowRunAttempt == null || Number.isInteger(input.workflowRunAttempt), 400, "INVALID_INPUT", "workflowRunAttempt must be an integer.");
+  assertExecutionIdentity(input);
+}
+
+function assertExecutionIdentity(input: ExecutionIdentity) {
+  invariant(input.operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
+  invariant(input.workflowRunId.length > 0 && input.workflowRunId.length <= 80, 400, "INVALID_INPUT", "workflowRunId is required.");
+  invariant(Number.isInteger(input.workflowRunAttempt) && input.workflowRunAttempt > 0 && input.workflowRunAttempt <= 100, 400, "INVALID_INPUT", "workflowRunAttempt must be a positive integer.");
 }
 
 function assertReceiptClaim(receipt: { operationKey: string; targetPullRequest: number; targetReleaseSha: string; syntheticMarker: string }) {
@@ -137,8 +153,8 @@ function assertImmutableReceiptClaim(
   invariant(
     receipt.deployedSha === input.deployedSha
     && receipt.ancestorSha === input.ancestorSha
-    && receipt.workflowRunId === (input.workflowRunId ?? null)
-    && receipt.workflowRunAttempt === (input.workflowRunAttempt ?? null),
+    && receipt.workflowRunId === input.workflowRunId
+    && receipt.workflowRunAttempt === input.workflowRunAttempt,
     409,
     "RECEIPT_ALREADY_CLAIMED",
     "Production validation receipt is already claimed for a different run.",
@@ -153,9 +169,14 @@ async function readLockedReceiptById(tx: Prisma.TransactionClient, receiptId: st
   return tx.productionValidationReceipt.findUniqueOrThrow({ where: { id: receiptId } });
 }
 
-async function readLockedReceiptByOperation(tx: Prisma.TransactionClient, operationKey: string) {
+async function readLockedReceiptByExecution(tx: Prisma.TransactionClient, input: ExecutionIdentity) {
+  assertExecutionIdentity(input);
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT "id" FROM "ProductionValidationReceipt" WHERE "operationKey" = ${operationKey} FOR UPDATE
+    SELECT "id" FROM "ProductionValidationReceipt"
+    WHERE "operationKey" = ${input.operationKey}
+      AND "workflowRunId" = ${input.workflowRunId}
+      AND "workflowRunAttempt" = ${input.workflowRunAttempt}
+    FOR UPDATE
   `;
   invariant(rows.length === 1, 404, "NOT_FOUND", "Production validation receipt not found.");
   return tx.productionValidationReceipt.findUniqueOrThrow({ where: { id: rows[0]!.id } });
@@ -186,15 +207,15 @@ async function createReceipt(
           targetReleaseSha: PR976_TARGET_RELEASE_SHA,
           deployedSha: input.deployedSha,
           ancestorSha: input.ancestorSha,
-          workflowRunId: input.workflowRunId ?? null,
-          workflowRunAttempt: input.workflowRunAttempt ?? null,
+          workflowRunId: input.workflowRunId,
+          workflowRunAttempt: input.workflowRunAttempt,
           syntheticMarker: PR976_SYNTHETIC_MARKER,
           transitions: appendTransition({ transitions: [] }, {
             type: "CLAIMED",
             actor: actorLabel(actor),
             deployedSha: input.deployedSha,
-            workflowRunId: input.workflowRunId ?? null,
-            workflowRunAttempt: input.workflowRunAttempt ?? null,
+            workflowRunId: input.workflowRunId,
+            workflowRunAttempt: input.workflowRunAttempt,
           }),
         },
       }),
@@ -203,7 +224,13 @@ async function createReceipt(
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       const existing = await prisma.productionValidationReceipt.findUniqueOrThrow({
-        where: { operationKey: PR976_ACTION_GOAL_OPERATION_KEY },
+        where: {
+          operationKey_workflowRunId_workflowRunAttempt: {
+            operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+            workflowRunId: input.workflowRunId,
+            workflowRunAttempt: input.workflowRunAttempt,
+          },
+        },
       });
       assertReceiptClaim(existing);
       return { receipt: existing, created: false };
@@ -320,11 +347,17 @@ export async function provisionPr976ActionGoalValidation(actor: AppActor, input:
   });
 }
 
-export async function getPr976ActionGoalValidationStatus(actor: AppActor, operationKey: string) {
-  invariant(operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
+export async function getPr976ActionGoalValidationStatus(actor: AppActor, input: ExecutionIdentity) {
+  assertExecutionIdentity(input);
   const { workspace } = await requireValidationAdmin(actor);
   const receipt = await prisma.productionValidationReceipt.findUnique({
-    where: { operationKey },
+    where: {
+      operationKey_workflowRunId_workflowRunAttempt: {
+        operationKey: input.operationKey,
+        workflowRunId: input.workflowRunId,
+        workflowRunAttempt: input.workflowRunAttempt,
+      },
+    },
   });
   invariant(receipt && receipt.workspaceId === workspace.id, 404, "NOT_FOUND", "Production validation receipt not found.");
   assertReceiptClaim(receipt);
@@ -371,10 +404,10 @@ export async function getPr976ActionGoalValidationStatus(actor: AppActor, operat
 }
 
 export async function recordPr976ActionGoalFeatureProof(actor: AppActor, input: Pr976FeatureProofInput) {
-  invariant(input.operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
+  assertExecutionIdentity(input);
   const { workspace } = await requireValidationAdmin(actor);
   return prisma.$transaction(async (tx) => {
-    const receipt = await readLockedReceiptByOperation(tx, input.operationKey);
+    const receipt = await readLockedReceiptByExecution(tx, input);
     assertReceiptClaim(receipt);
     invariant(receipt.workspaceId === workspace.id, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
     invariant(receipt.outcome === "PENDING", 409, "RECEIPT_TERMINAL", "Receipt is already terminal.");
@@ -600,12 +633,12 @@ function boundedFailureMessage(error: unknown) {
 }
 
 async function markTargetBlocked(
-  operationKey: string,
+  input: ExecutionIdentity,
   target: ReceiptTarget,
   error: unknown,
 ): Promise<TargetCleanupResult> {
   return prisma.$transaction(async (tx) => {
-    const receipt = await readLockedReceiptByOperation(tx, operationKey);
+    const receipt = await readLockedReceiptByExecution(tx, input);
     const stateField = target === "action" ? "actionState" : target === "goal" ? "goalState" : "credentialState";
     const failureMessage = boundedFailureMessage(error);
     await tx.productionValidationReceipt.update({
@@ -628,12 +661,12 @@ async function markTargetBlocked(
 
 async function runTargetCleanup(
   actor: AppActor,
-  operationKey: string,
+  input: ExecutionIdentity,
   target: ReceiptTarget,
 ): Promise<TargetCleanupResult> {
   try {
     return await prisma.$transaction(async (tx) => {
-      const receipt = await readLockedReceiptByOperation(tx, operationKey);
+      const receipt = await readLockedReceiptByExecution(tx, input);
       const result = target === "action"
         ? await terminalizeAction(tx, actor, receipt)
         : target === "goal"
@@ -657,17 +690,17 @@ async function runTargetCleanup(
       return result;
     });
   } catch (error) {
-    return markTargetBlocked(operationKey, target, error);
+    return markTargetBlocked(input, target, error);
   }
 }
 
 export async function terminalizePr976ActionGoalValidation(actor: AppActor, input: Pr976TerminalizeInput) {
-  invariant(input.operationKey === PR976_ACTION_GOAL_OPERATION_KEY, 400, "INVALID_OPERATION", "Unsupported production validation operation.");
+  assertExecutionIdentity(input);
   const { workspace } = await requireValidationAdmin(actor);
   const mode = input.mode ?? "all";
 
   await prisma.$transaction(async (tx) => {
-    const receipt = await readLockedReceiptByOperation(tx, input.operationKey);
+    const receipt = await readLockedReceiptByExecution(tx, input);
     assertReceiptClaim(receipt);
     invariant(receipt.workspaceId === workspace.id, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
     invariant(receipt.actionState === "FEATURE_PROVEN" || receipt.actionState === "CLEANED" || mode !== "action", 409, "FEATURE_NOT_PROVEN", "Action feature proof is incomplete.");
@@ -685,17 +718,17 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
   });
 
   if (mode === "all" || mode === "action") {
-    await runTargetCleanup(actor, input.operationKey, "action");
+    await runTargetCleanup(actor, input, "action");
   }
   if (mode === "all" || mode === "goal") {
-    await runTargetCleanup(actor, input.operationKey, "goal");
+    await runTargetCleanup(actor, input, "goal");
   }
   if (mode === "all" || mode === "credential") {
-    await runTargetCleanup(actor, input.operationKey, "credential");
+    await runTargetCleanup(actor, input, "credential");
   }
 
   const finalized = await prisma.$transaction(async (tx) => {
-    const receipt = await readLockedReceiptByOperation(tx, input.operationKey);
+    const receipt = await readLockedReceiptByExecution(tx, input);
     const outcome = terminalOutcome({
       actionState: receipt.actionState,
       goalState: receipt.goalState,

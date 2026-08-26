@@ -137,7 +137,7 @@ describe("PR 976 production validation receipt authority", () => {
     }));
   });
 
-  it("serializes provisioning on the claimed receipt row and rejects tuple rewrites", async () => {
+  it("serializes provisioning on the claimed receipt row and rejects immutable release rewrites", async () => {
     const { provisionPr976ActionGoalValidation } = await import("./production-validation");
     const existing = {
       id: "receipt-1",
@@ -191,11 +191,20 @@ describe("PR 976 production validation receipt authority", () => {
         operationKey: "pr976-action-goal-production-validation",
         deployedSha: "2".repeat(40),
         ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
-        workflowRunId: "11",
+        workflowRunId: "10",
         workflowRunAttempt: 1,
       },
     )).rejects.toMatchObject({ code: "RECEIPT_ALREADY_CLAIMED" });
 
+    expect(prisma.productionValidationReceipt.findUniqueOrThrow).toHaveBeenCalledWith({
+      where: {
+        operationKey_workflowRunId_workflowRunAttempt: {
+          operationKey: "pr976-action-goal-production-validation",
+          workflowRunId: "10",
+          workflowRunAttempt: 1,
+        },
+      },
+    });
     expect(tx.$queryRaw).toHaveBeenCalled();
     expect(tx.productionValidationReceipt.update).not.toHaveBeenCalled();
     expect(tx.action.create).not.toHaveBeenCalled();
@@ -211,6 +220,8 @@ describe("PR 976 production validation receipt authority", () => {
         operationKey: "other-operation",
         deployedSha: "1".repeat(40),
         ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+        workflowRunId: "10",
+        workflowRunAttempt: 1,
       },
     )).rejects.toMatchObject({ code: "INVALID_OPERATION" });
     expect(prisma.workspace.findUnique).not.toHaveBeenCalled();

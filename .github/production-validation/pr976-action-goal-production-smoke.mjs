@@ -193,21 +193,21 @@ export function assertActionNoEffect(status, actionId, provenVersion) {
 
 export function assertGoalProofResponse(result, goalId, baselineVersion) {
   if (
-    result?.goal?.id !== goalId
-    || result.goal.progressPercent !== GOAL_PROGRESS
-    || result.goal.version !== baselineVersion + 1
+    result?.id !== goalId
+    || result.status !== "DRAFT"
+    || result.version !== baselineVersion + 1
   ) {
     throw Object.assign(new Error("GOAL_PROOF_WRITE_UNPROVEN"), { body: result });
   }
 }
 
-export function assertGoalNoEffect(status, goalId, provenVersion) {
+export function assertGoalStatusProof(status, goalId, progressPercent, provenVersion) {
   if (
     status?.goal?.id !== goalId
-    || status.goal.progressPercent !== GOAL_PROGRESS
+    || status.goal.progressPercent !== progressPercent
     || status.goal.version !== provenVersion
   ) {
-    throw Object.assign(new Error("GOAL_STALE_NO_EFFECT_UNPROVEN"), { body: status });
+    throw Object.assign(new Error("GOAL_STATUS_PROOF_UNPROVEN"), { body: status });
   }
 }
 
@@ -249,6 +249,11 @@ export async function run() {
   const deployedSha = requireEnv(["EXPECTED_DEPLOYED_SHA", "GITHUB_SHA"]);
   const outDir = process.env.OUT_DIR || ".artifacts/production-validation/pr976-action-goal";
   const evidence = { operationKey: OPERATION_KEY, targetPullRequest: TARGET_PR, deployedSha, steps: [] };
+  const execution = {
+    operationKey: OPERATION_KEY,
+    workflowRunId: process.env.GITHUB_RUN_ID || "",
+    workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT || 1),
+  };
   let cookie;
   let token;
   try {
@@ -259,11 +264,9 @@ export async function run() {
     cookie = await login(baseUrl, email, password);
     const provision = await internal(baseUrl, cookie, {
       operation: "provision",
-      operationKey: OPERATION_KEY,
+      ...execution,
       deployedSha,
       ancestorSha: TARGET_SHA,
-      workflowRunId: process.env.GITHUB_RUN_ID ?? null,
-      workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT || 1),
     }, 45_000);
     token = provision.credentialToken;
     if (!token) throw new Error("CREDENTIAL_TOKEN_NOT_RETURNED_FOR_NEW_CLAIM");
@@ -282,7 +285,7 @@ export async function run() {
     } catch (error) {
       expectConflict(error);
     }
-    const afterAction = await internal(baseUrl, cookie, { operation: "status", operationKey: OPERATION_KEY }, 20_000);
+    const afterAction = await internal(baseUrl, cookie, { operation: "status", ...execution }, 20_000);
     assertActionNoEffect(afterAction, actionId, action.action.version);
     const goalUpdate = await mcp(baseUrl, token, "update_goal", {
       goalId,
@@ -290,23 +293,25 @@ export async function run() {
       expectedVersion: goalBaselineVersion,
     });
     assertGoalProofResponse(goalUpdate, goalId, goalBaselineVersion);
+    const afterGoalWrite = await internal(baseUrl, cookie, { operation: "status", ...execution }, 20_000);
+    assertGoalStatusProof(afterGoalWrite, goalId, GOAL_PROGRESS, goalUpdate.version);
     const staleGoal = await mcp(baseUrl, token, "update_goal", {
       goalId,
       progressPercent: 99,
       expectedVersion: goalBaselineVersion,
     });
     expectMcpConflict(staleGoal);
-    const afterGoal = await internal(baseUrl, cookie, { operation: "status", operationKey: OPERATION_KEY }, 20_000);
-    assertGoalNoEffect(afterGoal, goalId, goalUpdate.goal.version);
+    const afterGoal = await internal(baseUrl, cookie, { operation: "status", ...execution }, 20_000);
+    assertGoalStatusProof(afterGoal, goalId, GOAL_PROGRESS, goalUpdate.version);
     await internal(baseUrl, cookie, {
       operation: "feature_proof",
-      operationKey: OPERATION_KEY,
+      ...execution,
       actionObservedBodyMd: ACTION_PROVEN_BODY,
       actionObservedVersion: afterAction.action.version,
       goalObservedProgress: GOAL_PROGRESS,
       goalObservedVersion: afterGoal.goal.version,
     }, 20_000);
-    const terminal = await internal(baseUrl, cookie, { operation: "terminalize", operationKey: OPERATION_KEY, mode: "all" }, CLEANUP_RESERVE_MS);
+    const terminal = await internal(baseUrl, cookie, { operation: "terminalize", ...execution, mode: "all" }, CLEANUP_RESERVE_MS);
     if (terminal.receipt.outcome !== "COMPLETED") throw new Error("TERMINAL_RECEIPT_INCOMPLETE");
     const terminalRelease = await verifyHealth(baseUrl, deployedSha);
     evidence.steps.push({ name: "feature-and-cleanup", status: "passed", receipt: terminal.receipt });
@@ -318,7 +323,7 @@ export async function run() {
       try {
         evidence.terminalizeAfterFailure = await internal(baseUrl, cookie, {
           operation: "terminalize",
-          operationKey: OPERATION_KEY,
+          ...execution,
           mode: "all",
           failureCode: "DRIVER_FAILURE",
           failureMessage: error.message,
