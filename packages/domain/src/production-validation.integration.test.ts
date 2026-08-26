@@ -51,6 +51,36 @@ async function createValidationAdmin(): Promise<{ actor: AppActor; workspaceId: 
   return { actor: { kind: "user", user }, workspaceId: workspace.id, userId: user.id, memberId: member.id };
 }
 
+async function proveProvisionedFeature(actor: AppActor, workflowRunId: string) {
+  const provisioned = await provisionPr976ActionGoalValidation(actor, {
+    operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+    deployedSha: "1".repeat(40),
+    ancestorSha: PR976_TARGET_RELEASE_SHA,
+    workflowRunId,
+    workflowRunAttempt: 1,
+  });
+  const { actionId, goalId } = provisioned.receipt;
+  if (!actionId || !goalId) throw new Error("Provisioned receipt missing Action or Goal.");
+  await prisma.action.update({
+    where: { id: actionId },
+    data: { bodyMd: PR976_ACTION_PROVEN_BODY, version: { increment: 1 } },
+  });
+  await prisma.goal.update({
+    where: { id: goalId },
+    data: { progressPercent: PR976_GOAL_PROVEN_PROGRESS, version: { increment: 1 } },
+  });
+  await recordPr976ActionGoalFeatureProof(actor, {
+    operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+    workflowRunId,
+    workflowRunAttempt: 1,
+    actionObservedBodyMd: PR976_ACTION_PROVEN_BODY,
+    actionObservedVersion: 2,
+    goalObservedProgress: PR976_GOAL_PROVEN_PROGRESS,
+    goalObservedVersion: 2,
+  });
+  return provisioned;
+}
+
 describe("ProductionValidationReceipt integration", () => {
   it("enforces a durable one-time execution tuple in PostgreSQL", async () => {
     const workspace = await createValidationWorkspace();
@@ -386,6 +416,61 @@ describe("ProductionValidationReceipt integration", () => {
     })).resolves.toMatchObject({ isActive: false });
   });
 
+  it("blocks credential cleanup before mutating when any linked identity belongs to another workspace", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "105",
+      workflowRunAttempt: 1,
+    });
+    const credentialId = provisioned.receipt.agentCredentialId;
+    if (!credentialId) throw new Error("Provisioned receipt missing credential.");
+    const foreignWorkspace = await prisma.workspace.create({
+      data: {
+        slug: "foreign-workspace",
+        name: "Foreign Workspace",
+      },
+    });
+    await prisma.agentIdentity.createMany({
+      data: [
+        {
+          workspaceId,
+          agentKey: "pv-local",
+          memberType: "EXTERNAL",
+          displayName: `${PR976_SYNTHETIC_MARKER}:credential`,
+          linkedCredentialId: credentialId,
+        },
+        {
+          workspaceId: foreignWorkspace.id,
+          agentKey: "pv-foreign",
+          memberType: "EXTERNAL",
+          displayName: `${PR976_SYNTHETIC_MARKER}:credential`,
+          linkedCredentialId: credentialId,
+        },
+      ],
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "105",
+      workflowRunAttempt: 1,
+      mode: "credential",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("BLOCKED");
+    expect(terminalized.receipt.credentialState).toBe("BLOCKED");
+    await expect(prisma.agentCredential.findUniqueOrThrow({ where: { id: credentialId } })).resolves.toMatchObject({ isActive: true });
+    await expect(prisma.agentIdentity.count({
+      where: {
+        linkedCredentialId: credentialId,
+        isActive: true,
+        archivedAt: null,
+      },
+    })).resolves.toBe(2);
+  });
+
   it("allows failure-only cleanup but requires both proofs for successful all-mode cleanup", async () => {
     const { actor } = await createValidationAdmin();
     await provisionPr976ActionGoalValidation(actor, {
@@ -415,6 +500,33 @@ describe("ProductionValidationReceipt integration", () => {
     expect(failed.receipt.outcome).toBe("FAILED");
     expect(failed.receipt.completedAt).toBeNull();
     expect(failed.receipt.failureCode).toBe("DRIVER_FAILURE");
+  });
+
+  it("clears retryable cleanup diagnostics when a later all-target cleanup succeeds", async () => {
+    const { actor } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "108");
+    await prisma.productionValidationReceipt.update({
+      where: { id: provisioned.receipt.id },
+      data: {
+        failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED",
+        failureMessage: "transient database disconnect",
+      },
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "108",
+      workflowRunAttempt: 1,
+      mode: "all",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("COMPLETED");
+    expect(terminalized.receipt.actionState).toBe("CLEANED");
+    expect(terminalized.receipt.goalState).toBe("CLEANED");
+    expect(terminalized.receipt.credentialState).toBe("CLEANED");
+    expect(terminalized.receipt.failureCode).toBeNull();
+    expect(terminalized.receipt.failureMessage).toBeNull();
+    expect(terminalized.receipt.completedAt).toBeTruthy();
   });
 
   it("allows non-action deliberation entries while blocking action relations after cleanup starts", async () => {
@@ -453,6 +565,95 @@ describe("ProductionValidationReceipt integration", () => {
         authorUserId: userId,
         entryType: "REACTION",
         bodyMd: "Action deliberation should be blocked after action cleanup starts.",
+      },
+    })).rejects.toThrow(/production validation Action cleanup already started/);
+  });
+
+  it("counts existing Action advice processes as cleanup relations", async () => {
+    const { actor, workspaceId, memberId } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "106");
+    const actionId = provisioned.receipt.actionId;
+    if (!actionId) throw new Error("Provisioned receipt missing Action.");
+    await prisma.adviceProcess.create({
+      data: {
+        workspaceId,
+        authorMemberId: memberId,
+        subjectType: "ACTION",
+        subjectId: actionId,
+      },
+    });
+
+    const status = await getPr976ActionGoalValidationStatus(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "106",
+      workflowRunAttempt: 1,
+    });
+    expect(status.action?.relationCounts).toMatchObject({ adviceProcesses: 1 });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "106",
+      workflowRunAttempt: 1,
+      mode: "action",
+    });
+    expect(terminalized.receipt.actionState).toBe("BLOCKED");
+    await expect(prisma.action.findUniqueOrThrow({ where: { id: actionId } })).resolves.toMatchObject({ archivedAt: null });
+  });
+
+  it("blocks Action advice process inserts and subject updates after cleanup starts while allowing unrelated subjects", async () => {
+    const { actor, workspaceId, memberId } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "107",
+      workflowRunAttempt: 1,
+    });
+    const actionId = provisioned.receipt.actionId;
+    if (!actionId) throw new Error("Provisioned receipt missing Action.");
+    await prisma.productionValidationReceipt.update({
+      where: { id: provisioned.receipt.id },
+      data: { cleanupStartedAt: new Date() },
+    });
+
+    await expect(prisma.adviceProcess.create({
+      data: {
+        workspaceId,
+        authorMemberId: memberId,
+        subjectType: "PROPOSAL",
+        subjectId: actionId,
+      },
+    })).resolves.toMatchObject({ subjectType: "PROPOSAL", subjectId: actionId });
+    await expect(prisma.adviceProcess.create({
+      data: {
+        workspaceId,
+        authorMemberId: memberId,
+        subjectType: "ACTION",
+        subjectId: "unrelated-action",
+      },
+    })).resolves.toMatchObject({ subjectType: "ACTION", subjectId: "unrelated-action" });
+    await expect(prisma.adviceProcess.create({
+      data: {
+        workspaceId,
+        authorMemberId: memberId,
+        subjectType: "ACTION",
+        subjectId: actionId,
+      },
+    })).rejects.toThrow(/production validation Action cleanup already started/);
+
+    const existing = await prisma.adviceProcess.create({
+      data: {
+        workspaceId,
+        authorMemberId: memberId,
+        subjectType: "PROPOSAL",
+        subjectId: "proposal-subject",
+      },
+    });
+    await expect(prisma.adviceProcess.update({
+      where: { id: existing.id },
+      data: {
+        subjectType: "ACTION",
+        subjectId: actionId,
       },
     })).rejects.toThrow(/production validation Action cleanup already started/);
   });

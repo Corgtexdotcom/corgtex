@@ -156,6 +156,13 @@ describe("POST /api/internal/smoke/pr976-action-goal", () => {
     expect(formData.get("actionId")).toBe("action-from-receipt");
     expect(formData.get("bodyMd")).toBe("corgtex:production-validation:pr976:action-goal:action:proven");
     expect(formData.get("expectedVersion")).toBe("7");
+    await expect(response.json()).resolves.toEqual({
+      action: {
+        id: "action-from-receipt",
+        bodyMd: "corgtex:production-validation:pr976:action-goal:action:proven",
+        version: 8,
+      },
+    });
   });
 
   it("maps Action stale proof conflicts without mutating arbitrary target ids", async () => {

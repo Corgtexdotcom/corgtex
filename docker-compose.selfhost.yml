@@ -17,6 +17,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.web
+      args:
+        CORGTEX_RELEASE_GIT_SHA: ${CORGTEX_RELEASE_GIT_SHA:?set CORGTEX_RELEASE_GIT_SHA to a 40-hex git SHA}
     ports:
       - "3000:3000"
     depends_on:
@@ -30,6 +32,7 @@ services:
       WORKSPACE_NAME: Corgtex Demo
       WORKSPACE_SLUG: corgtex-demo
       APP_URL: http://localhost:3000
+      CORGTEX_RELEASE_GIT_SHA: ${CORGTEX_RELEASE_GIT_SHA:?set CORGTEX_RELEASE_GIT_SHA to a 40-hex git SHA}
 
   worker:
     build:

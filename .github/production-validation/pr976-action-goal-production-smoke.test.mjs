@@ -152,6 +152,7 @@ describe("pr976 action/goal production smoke workflow", () => {
       "ProductionValidationReceipt_action_evidence_cleanup_guard",
       "ProductionValidationReceipt_action_external_attachment_cleanup_guard",
       "ProductionValidationReceipt_action_deliberation_cleanup_guard",
+      "ProductionValidationReceipt_action_advice_process_cleanup_guard",
       "ProductionValidationReceipt_goal_parent_cleanup_guard",
       "ProductionValidationReceipt_goal_key_result_cleanup_guard",
       "ProductionValidationReceipt_goal_update_cleanup_guard",

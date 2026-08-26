@@ -50,6 +50,8 @@ Before starting, ensure your host machine has:
     Run the self-host compose file. This file starts the PostgreSQL database, the Next.js Web server, and the background Worker process.
 
     ```bash
+    export CORGTEX_RELEASE_GIT_SHA="$(git rev-parse --verify HEAD)"
+    printf '%s\n' "$CORGTEX_RELEASE_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'
     docker compose -f docker-compose.selfhost.yml up -d
     ```
   </Step>

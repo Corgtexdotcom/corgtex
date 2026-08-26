@@ -448,14 +448,15 @@ export async function recordPr976ActionGoalFeatureProof(actor: AppActor, input: 
   });
 }
 
-async function actionCleanupRelations(db: Pick<Prisma.TransactionClient, "actionChecklistItem" | "workItemEvidence" | "workspaceExternalResourceAttachment" | "deliberationEntry">, workspaceId: string, actionId: string) {
-  const [checklistItems, evidence, externalAttachments, deliberationEntries] = await Promise.all([
+async function actionCleanupRelations(db: Pick<Prisma.TransactionClient, "actionChecklistItem" | "workItemEvidence" | "workspaceExternalResourceAttachment" | "deliberationEntry" | "adviceProcess">, workspaceId: string, actionId: string) {
+  const [checklistItems, evidence, externalAttachments, deliberationEntries, adviceProcesses] = await Promise.all([
     db.actionChecklistItem.count({ where: { workspaceId, actionId } }),
     db.workItemEvidence.count({ where: { workspaceId, entityType: "Action", entityId: actionId } }),
     db.workspaceExternalResourceAttachment.count({ where: { workspaceId, entityType: "Action", entityId: actionId } }),
     db.deliberationEntry.count({ where: { workspaceId, parentType: "ACTION", parentId: actionId } }),
+    db.adviceProcess.count({ where: { workspaceId, subjectType: "ACTION", subjectId: actionId } }),
   ]);
-  return { checklistItems, evidence, externalAttachments, deliberationEntries };
+  return { checklistItems, evidence, externalAttachments, deliberationEntries, adviceProcesses };
 }
 
 async function goalCleanupRelations(db: Pick<Prisma.TransactionClient, "goal" | "goalUpdate" | "goalLink" | "keyResult" | "recognition">, goalId: string) {
@@ -605,15 +606,16 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
   `;
   const credential = await tx.agentCredential.findUnique({ where: { id: receipt.agentCredentialId } });
   if (!credential || credential.workspaceId !== receipt.workspaceId || credential.label !== `${PR976_SYNTHETIC_MARKER}:credential`) return "BLOCKED" as const;
+  const identities = await tx.agentIdentity.findMany({
+    where: { linkedCredentialId: credential.id },
+  });
+  if (identities.some((identity) => identity.workspaceId !== receipt.workspaceId)) return "BLOCKED" as const;
   if (credential.isActive) {
     await tx.agentCredential.update({
       where: { id: credential.id },
       data: { isActive: false },
     });
   }
-  const identities = await tx.agentIdentity.findMany({
-    where: { workspaceId: receipt.workspaceId, linkedCredentialId: credential.id },
-  });
   for (const identity of identities) {
     const [assignments, roleHistory] = await Promise.all([
       tx.circleAgentAssignment.count({ where: { agentIdentityId: identity.id } }),
@@ -640,7 +642,6 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
   }
   const remainingIdentity = await tx.agentIdentity.findFirst({
     where: {
-      workspaceId: receipt.workspaceId,
       linkedCredentialId: credential.id,
       OR: [
         { isActive: true },
@@ -654,6 +655,10 @@ async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: Vali
 
 function boundedFailureMessage(error: unknown) {
   return error instanceof Error ? error.message.slice(0, 500) : "Unknown production validation cleanup failure.";
+}
+
+function isRetryableCleanupFailureCode(code: string | null) {
+  return code === "RETRYABLE_TARGET_CLEANUP_FAILED";
 }
 
 async function markTargetBlocked(
@@ -694,8 +699,6 @@ async function markTargetRetryable(
     await tx.productionValidationReceipt.update({
       where: { id: receipt.id },
       data: {
-        failureCode: receipt.failureCode ?? "RETRYABLE_TARGET_CLEANUP_FAILED",
-        failureMessage: receipt.failureMessage ?? failureMessage,
         transitions: appendTransition(receipt, {
           type: "TARGET_CLEANUP_RETRYABLE",
           target,
@@ -758,7 +761,8 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
     const receipt = await readLockedReceiptByExecution(tx, input);
     assertReceiptClaim(receipt);
     invariant(receipt.workspaceId === workspace.id, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
-    const hasFailure = Boolean(explicitFailureCode ?? receipt.failureCode?.trim());
+    const existingFailureCode = receipt.failureCode?.trim() || null;
+    const hasFailure = Boolean(explicitFailureCode ?? (isRetryableCleanupFailureCode(existingFailureCode) ? null : existingFailureCode));
     invariant(
       hasFailure
       || mode !== "all"
@@ -775,8 +779,8 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
       where: { id: receipt.id },
       data: {
         cleanupStartedAt: receipt.cleanupStartedAt ?? new Date(),
-        failureCode: explicitFailureCode ?? receipt.failureCode,
-        failureMessage: input.failureMessage?.slice(0, 500) ?? receipt.failureMessage,
+        failureCode: explicitFailureCode ?? (isRetryableCleanupFailureCode(existingFailureCode) ? null : receipt.failureCode),
+        failureMessage: input.failureMessage?.slice(0, 500) ?? (isRetryableCleanupFailureCode(existingFailureCode) ? null : receipt.failureMessage),
         transitions: appendTransition(receipt, { type: "TERMINALIZE_STARTED", mode }),
       },
     });
@@ -798,7 +802,7 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
       actionState: receipt.actionState,
       goalState: receipt.goalState,
       credentialState: receipt.credentialState,
-      hasFailure: Boolean(receipt.failureCode),
+      hasFailure: Boolean(receipt.failureCode && !isRetryableCleanupFailureCode(receipt.failureCode)),
     });
     return tx.productionValidationReceipt.update({
       where: { id: receipt.id },

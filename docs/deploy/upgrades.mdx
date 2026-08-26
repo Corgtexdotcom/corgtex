@@ -31,6 +31,8 @@ Use the following sequence to safely upgrade your environment.
   <Step title="Rebuild and deploy">
     Rebuild the Docker images and recreate the containers in detached mode.
     ```bash
+    export CORGTEX_RELEASE_GIT_SHA="$(git rev-parse --verify HEAD)"
+    printf '%s\n' "$CORGTEX_RELEASE_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'
     docker compose -f docker-compose.selfhost.yml up -d --build
     ```
   </Step>

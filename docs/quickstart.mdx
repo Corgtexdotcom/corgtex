@@ -19,6 +19,8 @@ You can spin up a fully operational Corgtex instance with sample data in a few m
     We use Docker Compose to run the local PostgreSQL instance, the web application, and the worker process all at once.
 
     ```bash
+    export CORGTEX_RELEASE_GIT_SHA="$(git rev-parse --verify HEAD)"
+    printf '%s\n' "$CORGTEX_RELEASE_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'
     docker compose -f docker-compose.selfhost.yml up -d
     ```
     

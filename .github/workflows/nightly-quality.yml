@@ -32,6 +32,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_nightly?schema=public
       SHADOW_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres?schema=public
+      CORGTEX_RELEASE_GIT_SHA: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v5
@@ -91,6 +92,7 @@ jobs:
       MODEL_PROVIDER: fake
       WORKER_POLL_INTERVAL_MS: 500
       WORKER_MAX_POLL_INTERVAL_MS: 1500
+      CORGTEX_RELEASE_GIT_SHA: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v5
@@ -123,6 +125,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          printf '%s\n' "$GITHUB_SHA" > .corgtex-release-git-sha
           npm --workspace @corgtex/web run start:next > web.log 2>&1 &
           echo $! > web.pid
           npm --workspace @corgtex/worker run start > worker.log 2>&1 &

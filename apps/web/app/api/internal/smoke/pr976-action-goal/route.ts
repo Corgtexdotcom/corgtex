@@ -106,7 +106,7 @@ async function runFixedServerAction(actor: Awaited<ReturnType<typeof resolveRequ
       return NextResponse.json({ status: "VERSION_CONFLICT" });
     }
     const after = await getPr976ActionGoalValidationStatus(actor, body);
-    return NextResponse.json(after.action);
+    return NextResponse.json({ action: after.action });
   }
 
   try {

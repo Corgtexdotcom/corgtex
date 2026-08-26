@@ -90,6 +90,11 @@ BEGIN
             RETURN NEW;
         END IF;
         referenced_action_id := NEW."parentId";
+    ELSIF TG_TABLE_NAME = 'AdviceProcess' THEN
+        IF NEW."subjectType" IS DISTINCT FROM 'ACTION' THEN
+            RETURN NEW;
+        END IF;
+        referenced_action_id := NEW."subjectId";
     ELSE
         RETURN NEW;
     END IF;
@@ -248,6 +253,10 @@ FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after
 
 CREATE TRIGGER "ProductionValidationReceipt_action_deliberation_cleanup_guard"
 BEFORE INSERT OR UPDATE OF "parentType", "parentId" ON "DeliberationEntry"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_action_advice_process_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "subjectType", "subjectId" ON "AdviceProcess"
 FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
 
 CREATE TRIGGER "ProductionValidationReceipt_goal_parent_cleanup_guard"
