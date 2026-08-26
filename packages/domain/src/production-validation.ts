@@ -1,7 +1,7 @@
 import { Prisma, type ProductionValidationLifecycleState, type ProductionValidationOutcome } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
-import { invariant } from "./errors";
+import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
 import { acquireWorkItemAdvisoryLock } from "./work-item-versions";
 
@@ -192,6 +192,10 @@ function actorLabel(actor: AppActor) {
     : (actor.label || actor.authProvider || "agent");
 }
 
+function requireUserActor(actor: AppActor) {
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "Production validation requires a user ADMIN session.");
+}
+
 async function createReceipt(
   actor: AppActor,
   input: Pr976ProvisionInput,
@@ -225,7 +229,7 @@ async function createReceipt(
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       const existing = await prisma.productionValidationReceipt.findUniqueOrThrow({
         where: {
-          operationKey_workflowRunId_workflowRunAttempt: {
+          ProductionValidationReceipt_operationKey_workflowRunId_work_key: {
             operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
             workflowRunId: input.workflowRunId,
             workflowRunAttempt: input.workflowRunAttempt,
@@ -333,6 +337,7 @@ async function ensureProvisionedResources(
 
 export async function provisionPr976ActionGoalValidation(actor: AppActor, input: Pr976ProvisionInput) {
   assertFixedProvisionInput(input);
+  requireUserActor(actor);
   const { workspace, membership } = await requireValidationAdmin(actor);
   const claim = await createReceipt(actor, input, workspace.id);
 
@@ -352,7 +357,7 @@ export async function getPr976ActionGoalValidationStatus(actor: AppActor, input:
   const { workspace } = await requireValidationAdmin(actor);
   const receipt = await prisma.productionValidationReceipt.findUnique({
     where: {
-      operationKey_workflowRunId_workflowRunAttempt: {
+      ProductionValidationReceipt_operationKey_workflowRunId_work_key: {
         operationKey: input.operationKey,
         workflowRunId: input.workflowRunId,
         workflowRunAttempt: input.workflowRunAttempt,
@@ -478,6 +483,10 @@ function terminalOutcome(states: {
   if (states.actionState === "CLEANED" && states.goalState === "CLEANED" && states.credentialState === "CLEANED") return "COMPLETED";
   if (states.actionState === "BLOCKED" || states.goalState === "BLOCKED" || states.credentialState === "BLOCKED") return "BLOCKED";
   return "PENDING";
+}
+
+function isConfirmedCleanupBlocker(error: unknown) {
+  return error instanceof AppError;
 }
 
 async function terminalizeAction(
@@ -659,6 +668,33 @@ async function markTargetBlocked(
   });
 }
 
+async function markTargetRetryable(
+  input: ExecutionIdentity,
+  target: ReceiptTarget,
+  error: unknown,
+): Promise<TargetCleanupResult> {
+  return prisma.$transaction(async (tx) => {
+    const receipt = await readLockedReceiptByExecution(tx, input);
+    const failureMessage = boundedFailureMessage(error);
+    await tx.productionValidationReceipt.update({
+      where: { id: receipt.id },
+      data: {
+        failureCode: receipt.failureCode ?? "RETRYABLE_TARGET_CLEANUP_FAILED",
+        failureMessage: receipt.failureMessage ?? failureMessage,
+        transitions: appendTransition(receipt, {
+          type: "TARGET_CLEANUP_RETRYABLE",
+          target,
+          code: "RETRYABLE_TARGET_CLEANUP_FAILED",
+          message: failureMessage,
+        }),
+      },
+    });
+    const state = target === "action" ? receipt.actionState : target === "goal" ? receipt.goalState : receipt.credentialState;
+    const archiveRecordId = target === "action" ? receipt.actionArchiveRecordId : target === "goal" ? receipt.goalArchiveRecordId : null;
+    return { state, archiveRecordId };
+  });
+}
+
 async function runTargetCleanup(
   actor: AppActor,
   input: ExecutionIdentity,
@@ -690,7 +726,10 @@ async function runTargetCleanup(
       return result;
     });
   } catch (error) {
-    return markTargetBlocked(input, target, error);
+    if (isConfirmedCleanupBlocker(error)) {
+      return markTargetBlocked(input, target, error);
+    }
+    return markTargetRetryable(input, target, error);
   }
 }
 
@@ -739,7 +778,7 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
       where: { id: receipt.id },
       data: {
         outcome,
-        terminalizedAt: new Date(),
+        terminalizedAt: outcome === "PENDING" ? null : new Date(),
         completedAt: outcome === "COMPLETED" ? new Date() : null,
         transitions: appendTransition(receipt, {
           type: "TERMINALIZED",

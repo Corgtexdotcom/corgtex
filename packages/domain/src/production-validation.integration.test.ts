@@ -230,7 +230,7 @@ describe("ProductionValidationReceipt integration", () => {
 
     const unchanged = await prisma.productionValidationReceipt.findUniqueOrThrow({
       where: {
-        operationKey_workflowRunId_workflowRunAttempt: {
+        ProductionValidationReceipt_operationKey_workflowRunId_work_key: {
           operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
           workflowRunId: "201",
           workflowRunAttempt: 1,
@@ -292,7 +292,7 @@ describe("ProductionValidationReceipt integration", () => {
     })).resolves.toBe(1);
     const receipt = await prisma.productionValidationReceipt.findUniqueOrThrow({
       where: {
-        operationKey_workflowRunId_workflowRunAttempt: {
+        ProductionValidationReceipt_operationKey_workflowRunId_work_key: {
           operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
           workflowRunId: "101",
           workflowRunAttempt: 1,

@@ -3456,7 +3456,7 @@ model ProductionValidationReceipt {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@unique([operationKey, workflowRunId, workflowRunAttempt])
+  @@unique([operationKey, workflowRunId, workflowRunAttempt], name: "ProductionValidationReceipt_operationKey_workflowRunId_work_key", map: "ProductionValidationReceipt_operationKey_workflowRunId_work_key")
   @@index([workspaceId, outcome])
   @@index([targetPullRequest, targetReleaseSha], map: "ProductionValidationReceipt_targetPullRequest_targetRelease_idx")
 }

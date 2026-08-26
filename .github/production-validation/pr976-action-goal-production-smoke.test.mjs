@@ -13,6 +13,7 @@ import {
   assertActionProofResponse,
   assertGoalStatusProof,
   assertGoalProofResponse,
+  assertReleaseRuntime,
   expectConflict,
   expectMcpConflict,
 } from "./pr976-action-goal-production-smoke.mjs";
@@ -70,6 +71,30 @@ describe("pr976 action/goal production smoke driver", () => {
     expect(PR976_FILES).toContain("apps/web/app/[locale]/workspaces/[workspaceId]/goals/actions.ts");
   });
 
+  it("requires aggregate and runtime release SHAs, runtime source, and zero drift", () => {
+    const expected = "1".repeat(40);
+    expect(() => assertReleaseRuntime({
+      gitSha: expected,
+      runtime: { gitSha: expected, source: "container" },
+      drift: { gitSha: false, imageTag: false, version: false },
+    }, expected)).not.toThrow();
+    expect(() => assertReleaseRuntime({
+      gitSha: expected,
+      runtime: { gitSha: "2".repeat(40), source: "container" },
+      drift: { gitSha: false, imageTag: false, version: false },
+    }, expected)).toThrow("SERVING_RUNTIME_SHA_MISMATCH");
+    expect(() => assertReleaseRuntime({
+      gitSha: expected,
+      runtime: { gitSha: expected },
+      drift: { gitSha: false, imageTag: false, version: false },
+    }, expected)).toThrow("SERVING_RUNTIME_SOURCE_MISSING");
+    expect(() => assertReleaseRuntime({
+      gitSha: expected,
+      runtime: { gitSha: expected, source: "container" },
+      drift: { gitSha: true, imageTag: false, version: false },
+    }, expected)).toThrow("SERVING_RELEASE_DRIFT");
+  });
+
   it("fails closed when PR 976 file equality drifts", () => {
     expect(() => verifyGitLineage("0000000000000000000000000000000000000000")).toThrow(/Command failed/);
   });
@@ -116,5 +141,25 @@ describe("pr976 action/goal production smoke workflow", () => {
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("expected_deployed_sha");
     expect(workflow).not.toContain("PRODUCTION_DATABASE_URL");
+  });
+
+  it("keeps the static nine-guard receipt cleanup inventory", async () => {
+    const migration = await readFile(new URL("../../prisma/migrations/20260825070000_pr976_production_validation_receipt/migration.sql", import.meta.url), "utf8");
+    const guards = [
+      "ProductionValidationReceipt_action_checklist_cleanup_guard",
+      "ProductionValidationReceipt_action_evidence_cleanup_guard",
+      "ProductionValidationReceipt_action_external_attachment_cleanup_guard",
+      "ProductionValidationReceipt_action_deliberation_cleanup_guard",
+      "ProductionValidationReceipt_goal_parent_cleanup_guard",
+      "ProductionValidationReceipt_goal_key_result_cleanup_guard",
+      "ProductionValidationReceipt_goal_update_cleanup_guard",
+      "ProductionValidationReceipt_goal_link_cleanup_guard",
+      "ProductionValidationReceipt_goal_recognition_cleanup_guard",
+    ];
+    for (const guard of guards) {
+      expect(migration).toContain(`CREATE TRIGGER "${guard}"`);
+    }
+    expect(migration.match(/CREATE TRIGGER "ProductionValidationReceipt_/g)).toHaveLength(guards.length);
+    expect(migration.match(/pg_advisory_xact_lock\(hashtext\('work_item_version'\)/g)).toHaveLength(2);
   });
 });

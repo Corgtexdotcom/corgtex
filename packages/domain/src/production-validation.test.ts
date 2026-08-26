@@ -198,7 +198,7 @@ describe("PR 976 production validation receipt authority", () => {
 
     expect(prisma.productionValidationReceipt.findUniqueOrThrow).toHaveBeenCalledWith({
       where: {
-        operationKey_workflowRunId_workflowRunAttempt: {
+        ProductionValidationReceipt_operationKey_workflowRunId_work_key: {
           operationKey: "pr976-action-goal-production-validation",
           workflowRunId: "10",
           workflowRunAttempt: 1,
@@ -226,5 +226,95 @@ describe("PR 976 production validation receipt authority", () => {
     )).rejects.toMatchObject({ code: "INVALID_OPERATION" });
     expect(prisma.workspace.findUnique).not.toHaveBeenCalled();
     expect(prisma.productionValidationReceipt.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-user actors before workspace authorization or receipt creation", async () => {
+    const { provisionPr976ActionGoalValidation } = await import("./production-validation");
+    await expect(provisionPr976ActionGoalValidation(
+      { kind: "agent", label: "validation-agent" } as any,
+      {
+        operationKey: "pr976-action-goal-production-validation",
+        deployedSha: "1".repeat(40),
+        ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+        workflowRunId: "10",
+        workflowRunAttempt: 1,
+      },
+    )).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prisma.workspace.findUnique).not.toHaveBeenCalled();
+    expect(auth.requireWorkspaceMembership).not.toHaveBeenCalled();
+    expect(prisma.productionValidationReceipt.create).not.toHaveBeenCalled();
+  });
+
+  it("records unexpected cleanup exceptions as retryable without terminal timestamps", async () => {
+    const { terminalizePr976ActionGoalValidation } = await import("./production-validation");
+    const receipt = {
+      id: "receipt-1",
+      operationKey: "pr976-action-goal-production-validation",
+      workspaceId: "workspace-1",
+      targetPullRequest: 976,
+      targetReleaseSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+      deployedSha: "1".repeat(40),
+      ancestorSha: "086cec6d25f3457ce7b6858aa8c8f31ceb0cc771",
+      workflowRunId: "10",
+      workflowRunAttempt: 1,
+      syntheticMarker: "corgtex:production-validation:pr976:action-goal",
+      actionId: "action-1",
+      goalId: "goal-1",
+      agentCredentialId: "cred-1",
+      actionBaselineVersion: 1,
+      goalBaselineVersion: 1,
+      actionExpectedDigest: "sha256:expected",
+      actionObservedDigest: "sha256:observed",
+      goalExpectedProgress: 37,
+      goalObservedProgress: 37,
+      actionState: "FEATURE_PROVEN",
+      goalState: "CLEANED",
+      credentialState: "CLEANED",
+      outcome: "PENDING",
+      actionArchiveRecordId: null,
+      goalArchiveRecordId: "goal-archive-1",
+      cleanupStartedAt: null,
+      completedAt: null,
+      claimedAt: new Date(),
+      featureProvenAt: new Date(),
+      terminalizedAt: null,
+      failureCode: null,
+      failureMessage: null,
+      transitions: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    tx.$queryRaw.mockResolvedValue([{ id: "receipt-1" }]);
+    tx.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue(receipt);
+    tx.productionValidationReceipt.update.mockImplementation(async ({ data }) => ({ ...receipt, ...data }));
+    prisma.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue({ ...receipt, failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED" });
+
+    const result = await terminalizePr976ActionGoalValidation(
+      { kind: "user", user: { id: "user-1", email: "admin@example.com" } } as any,
+      {
+        operationKey: "pr976-action-goal-production-validation",
+        workflowRunId: "10",
+        workflowRunAttempt: 1,
+        mode: "action",
+      },
+    );
+
+    expect(result.receipt.failureCode).toBe("RETRYABLE_TARGET_CLEANUP_FAILED");
+    expect(tx.productionValidationReceipt.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED",
+        transitions: expect.arrayContaining([expect.objectContaining({ type: "TARGET_CLEANUP_RETRYABLE", target: "action" })]),
+      }),
+    }));
+    expect(tx.productionValidationReceipt.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        outcome: "PENDING",
+        terminalizedAt: null,
+        completedAt: null,
+      }),
+    }));
+    expect(tx.productionValidationReceipt.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ actionState: "BLOCKED" }),
+    }));
   });
 });

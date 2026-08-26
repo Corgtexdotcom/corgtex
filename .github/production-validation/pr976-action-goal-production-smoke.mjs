@@ -220,19 +220,29 @@ function releaseDriftBlocker(release) {
   return null;
 }
 
+export function assertReleaseRuntime(release, expectedGitSha) {
+  if (release?.gitSha !== expectedGitSha) {
+    throw Object.assign(new Error("SERVING_SHA_MISMATCH"), { body: { release } });
+  }
+  if (release?.runtime?.gitSha !== expectedGitSha || !/^[0-9a-f]{40}$/i.test(release.runtime.gitSha)) {
+    throw Object.assign(new Error("SERVING_RUNTIME_SHA_MISMATCH"), { body: { release } });
+  }
+  if (!release.runtime.source) {
+    throw Object.assign(new Error("SERVING_RUNTIME_SOURCE_MISSING"), { body: { release } });
+  }
+  const drift = releaseDriftBlocker(release);
+  if (drift) {
+    throw Object.assign(new Error("SERVING_RELEASE_DRIFT"), { body: { drift, release } });
+  }
+}
+
 async function verifyHealth(baseUrl, expectedGitSha) {
   const health = await fetchJson(`${baseUrl}/api/health`, {}, { timeoutMs: 20_000 });
   const body = health.body;
   if (body?.status !== "ok" || body?.database !== "up" || body?.schema !== "ready") {
     throw Object.assign(new Error("HEALTH_NOT_READY"), { body });
   }
-  if (body?.release?.gitSha !== expectedGitSha) {
-    throw Object.assign(new Error("SERVING_SHA_MISMATCH"), { body });
-  }
-  const drift = releaseDriftBlocker(body.release);
-  if (drift) {
-    throw Object.assign(new Error("SERVING_RELEASE_DRIFT"), { body: { drift } });
-  }
+  assertReleaseRuntime(body.release, expectedGitSha);
   return body.release;
 }
 

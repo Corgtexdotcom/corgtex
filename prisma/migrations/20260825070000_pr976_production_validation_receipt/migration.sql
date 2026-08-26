@@ -46,7 +46,7 @@ CREATE TABLE "ProductionValidationReceipt" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ProductionValidationReceipt_operationKey_workflowRunId_workflowRunAttempt_key" ON "ProductionValidationReceipt"("operationKey", "workflowRunId", "workflowRunAttempt");
+CREATE UNIQUE INDEX "ProductionValidationReceipt_operationKey_workflowRunId_work_key" ON "ProductionValidationReceipt"("operationKey", "workflowRunId", "workflowRunAttempt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ProductionValidationReceipt_actionId_key" ON "ProductionValidationReceipt"("actionId");
@@ -65,3 +65,119 @@ CREATE INDEX "ProductionValidationReceipt_targetPullRequest_targetRelease_idx" O
 
 -- AddForeignKey
 ALTER TABLE "ProductionValidationReceipt" ADD CONSTRAINT "ProductionValidationReceipt_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+CREATE OR REPLACE FUNCTION production_validation_reject_action_relation_after_cleanup()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    referenced_action_id TEXT;
+BEGIN
+    IF TG_TABLE_NAME = 'ActionChecklistItem' THEN
+        referenced_action_id := NEW."actionId";
+    ELSIF TG_TABLE_NAME = 'WorkItemEvidence' AND NEW."entityType" = 'Action' THEN
+        referenced_action_id := NEW."entityId";
+    ELSIF TG_TABLE_NAME = 'WorkspaceExternalResourceAttachment' AND NEW."entityType" = 'Action' THEN
+        referenced_action_id := NEW."entityId";
+    ELSIF TG_TABLE_NAME = 'DeliberationEntry' AND NEW."parentType" = 'ACTION' THEN
+        referenced_action_id := NEW."parentId";
+    ELSE
+        RETURN NEW;
+    END IF;
+
+    IF referenced_action_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('work_item_version'), hashtext('Action:' || referenced_action_id));
+
+    IF EXISTS (
+        SELECT 1
+        FROM "ProductionValidationReceipt"
+        WHERE "actionId" = referenced_action_id
+          AND "cleanupStartedAt" IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'production validation Action cleanup already started'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION production_validation_reject_goal_relation_after_cleanup()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    referenced_goal_id TEXT;
+BEGIN
+    IF TG_TABLE_NAME = 'Goal' THEN
+        referenced_goal_id := NEW."parentGoalId";
+    ELSIF TG_TABLE_NAME = 'KeyResult' THEN
+        referenced_goal_id := NEW."goalId";
+    ELSIF TG_TABLE_NAME = 'GoalUpdate' THEN
+        referenced_goal_id := NEW."goalId";
+    ELSIF TG_TABLE_NAME = 'GoalLink' THEN
+        referenced_goal_id := NEW."goalId";
+    ELSIF TG_TABLE_NAME = 'Recognition' THEN
+        referenced_goal_id := NEW."goalId";
+    ELSE
+        RETURN NEW;
+    END IF;
+
+    IF referenced_goal_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('work_item_version'), hashtext('Goal:' || referenced_goal_id));
+
+    IF EXISTS (
+        SELECT 1
+        FROM "ProductionValidationReceipt"
+        WHERE "goalId" = referenced_goal_id
+          AND "cleanupStartedAt" IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'production validation Goal cleanup already started'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER "ProductionValidationReceipt_action_checklist_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "actionId" ON "ActionChecklistItem"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_action_evidence_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "entityType", "entityId" ON "WorkItemEvidence"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_action_external_attachment_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "entityType", "entityId" ON "WorkspaceExternalResourceAttachment"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_action_deliberation_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "parentType", "parentId" ON "DeliberationEntry"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_action_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_goal_parent_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "parentGoalId" ON "Goal"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_goal_key_result_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "goalId" ON "KeyResult"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_goal_update_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "goalId" ON "GoalUpdate"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_goal_link_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "goalId" ON "GoalLink"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_goal_recognition_cleanup_guard"
+BEFORE INSERT OR UPDATE OF "goalId" ON "Recognition"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_cleanup();
