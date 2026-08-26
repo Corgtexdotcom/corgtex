@@ -160,22 +160,72 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    referenced_credential_id TEXT;
+    old_credential_id TEXT;
+    new_credential_id TEXT;
 BEGIN
-    referenced_credential_id := NEW."linkedCredentialId";
+    IF TG_OP = 'INSERT' THEN
+        old_credential_id := NULL;
+    ELSE
+        old_credential_id := NULLIF(OLD."linkedCredentialId", '');
+    END IF;
+    new_credential_id := NULLIF(NEW."linkedCredentialId", '');
 
-    IF referenced_credential_id IS NULL THEN
+    IF old_credential_id IS NULL AND new_credential_id IS NULL THEN
         RETURN NEW;
     END IF;
 
-    PERFORM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(referenced_credential_id));
+    IF old_credential_id IS NOT NULL AND (new_credential_id IS NULL OR old_credential_id <= new_credential_id) THEN
+        PERFORM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(old_credential_id));
+    END IF;
+    IF new_credential_id IS NOT NULL AND new_credential_id IS DISTINCT FROM old_credential_id THEN
+        PERFORM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(new_credential_id));
+    END IF;
+    IF old_credential_id IS NOT NULL AND new_credential_id IS NOT NULL AND old_credential_id > new_credential_id THEN
+        PERFORM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(old_credential_id));
+    END IF;
 
     IF EXISTS (
         SELECT 1
         FROM "ProductionValidationReceipt"
-        WHERE "agentCredentialId" = referenced_credential_id
+        WHERE "agentCredentialId" IN (old_credential_id, new_credential_id)
           AND "cleanupStartedAt" IS NOT NULL
     ) THEN
+        RAISE EXCEPTION 'production validation credential cleanup already started'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION production_validation_reject_credential_update_after_cleanup()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    active_to_inactive BOOLEAN;
+BEGIN
+    IF OLD."id" IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(OLD."id"));
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM "ProductionValidationReceipt"
+        WHERE "agentCredentialId" = OLD."id"
+          AND "cleanupStartedAt" IS NOT NULL
+    ) THEN
+        RETURN NEW;
+    END IF;
+
+    active_to_inactive := OLD."isActive" = true AND NEW."isActive" = false;
+    IF active_to_inactive AND NEW."tokenHash" IS NOT DISTINCT FROM OLD."tokenHash" THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW."tokenHash" IS DISTINCT FROM OLD."tokenHash" OR NEW."isActive" = true THEN
         RAISE EXCEPTION 'production validation credential cleanup already started'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
@@ -223,3 +273,7 @@ FOR EACH ROW EXECUTE FUNCTION production_validation_reject_goal_relation_after_c
 CREATE TRIGGER "ProductionValidationReceipt_agent_identity_cleanup_guard"
 BEFORE INSERT OR UPDATE OF "linkedCredentialId" ON "AgentIdentity"
 FOR EACH ROW EXECUTE FUNCTION production_validation_reject_agent_identity_after_credential_cleanup();
+
+CREATE TRIGGER "ProductionValidationReceipt_agent_credential_cleanup_guard"
+BEFORE UPDATE OF "tokenHash", "isActive" ON "AgentCredential"
+FOR EACH ROW EXECUTE FUNCTION production_validation_reject_credential_update_after_cleanup();

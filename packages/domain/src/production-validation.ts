@@ -752,11 +752,22 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
   assertExecutionIdentity(input);
   const { workspace } = await requireValidationAdmin(actor);
   const mode = input.mode ?? "all";
+  const explicitFailureCode = input.failureCode?.trim() || null;
 
   await prisma.$transaction(async (tx) => {
     const receipt = await readLockedReceiptByExecution(tx, input);
     assertReceiptClaim(receipt);
     invariant(receipt.workspaceId === workspace.id, 403, "FORBIDDEN", "Receipt is outside the validation workspace.");
+    const hasFailure = Boolean(explicitFailureCode ?? receipt.failureCode?.trim());
+    invariant(
+      hasFailure
+      || mode !== "all"
+      || ((receipt.actionState === "FEATURE_PROVEN" || receipt.actionState === "CLEANED")
+        && (receipt.goalState === "FEATURE_PROVEN" || receipt.goalState === "CLEANED")),
+      409,
+      "FEATURE_NOT_PROVEN",
+      "Action and Goal feature proofs are required before successful cleanup.",
+    );
     invariant(receipt.actionState === "FEATURE_PROVEN" || receipt.actionState === "CLEANED" || mode !== "action", 409, "FEATURE_NOT_PROVEN", "Action feature proof is incomplete.");
     invariant(receipt.goalState === "FEATURE_PROVEN" || receipt.goalState === "CLEANED" || mode !== "goal", 409, "FEATURE_NOT_PROVEN", "Goal feature proof is incomplete.");
 
@@ -764,7 +775,7 @@ export async function terminalizePr976ActionGoalValidation(actor: AppActor, inpu
       where: { id: receipt.id },
       data: {
         cleanupStartedAt: receipt.cleanupStartedAt ?? new Date(),
-        failureCode: input.failureCode ?? receipt.failureCode,
+        failureCode: explicitFailureCode ?? receipt.failureCode,
         failureMessage: input.failureMessage?.slice(0, 500) ?? receipt.failureMessage,
         transitions: appendTransition(receipt, { type: "TERMINALIZE_STARTED", mode }),
       },

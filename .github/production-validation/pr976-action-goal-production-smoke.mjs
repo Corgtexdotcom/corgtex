@@ -55,8 +55,13 @@ function assertTrustedRef() {
   }
 }
 
-export function verifyGitLineage(servingSha) {
+function currentGitHead() {
+  return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+}
+
+export function verifyGitLineage(servingSha, trustedMainSha = currentGitHead()) {
   execFileSync("git", ["merge-base", "--is-ancestor", TARGET_SHA, servingSha], { stdio: "pipe" });
+  execFileSync("git", ["merge-base", "--is-ancestor", servingSha, trustedMainSha], { stdio: "pipe" });
   for (const file of PR976_FILES) {
     const expected = execFileSync("git", ["show", `${TARGET_SHA}:${file}`]);
     const observed = execFileSync("git", ["show", `${servingSha}:${file}`]);
@@ -129,45 +134,9 @@ async function internal(baseUrl, cookie, body, timeoutMs) {
   }, { timeoutMs })).body;
 }
 
-async function patchAction(baseUrl, cookie, workspaceId, actionId, body) {
-  return (await fetchJson(`${baseUrl}/api/workspaces/${workspaceId}/actions/${actionId}`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify(body),
-  })).body;
-}
-
-async function mcp(baseUrl, token, name, args) {
-  const response = await fetchJson(`${baseUrl}/api/mcp`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-    },
-    body: JSON.stringify({ jsonrpc: "2.0", id: `${Date.now()}`, method: "tools/call", params: { name, arguments: args } }),
-  });
-  const body = response.body;
-  if (!body || typeof body !== "object") throw new Error("MCP_BAD_ENVELOPE");
-  if (body.error) throw Object.assign(new Error(body.error.code || "MCP_ERROR"), { body });
-  if (body.result?.isError) throw Object.assign(new Error("MCP_TOOL_ERROR"), { body });
-  if (body.result?.structuredContent && typeof body.result.structuredContent === "object") return body.result.structuredContent;
-  const text = body.result?.content?.[0]?.text;
-  if (typeof text !== "string") throw Object.assign(new Error("MCP_BAD_TOOL_RESULT"), { body });
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw Object.assign(new Error("MCP_BAD_TOOL_JSON"), { body });
-  }
-}
-
-export function expectConflict(error, expectedCode = "VERSION_CONFLICT") {
-  if (error?.status !== 409 || error?.body?.error?.code !== expectedCode) throw error;
-}
-
-export function expectMcpConflict(result) {
+export function expectVersionConflictStatus(result) {
   if (result?.status !== "VERSION_CONFLICT") {
-    throw Object.assign(new Error("MCP_VERSION_CONFLICT_NOT_RETURNED"), { body: result });
+    throw Object.assign(new Error("VERSION_CONFLICT_NOT_RETURNED"), { body: result });
   }
 }
 
@@ -230,6 +199,13 @@ export function assertReleaseRuntime(release, expectedGitSha) {
   if (!release.runtime.source) {
     throw Object.assign(new Error("SERVING_RUNTIME_SOURCE_MISSING"), { body: { release } });
   }
+  if (
+    release?.image?.gitSha !== expectedGitSha
+    || release.image.source !== "image_stamp"
+    || release.image.valid !== true
+  ) {
+    throw Object.assign(new Error("SERVING_IMAGE_SHA_MISMATCH"), { body: { release } });
+  }
   const drift = releaseDriftBlocker(release);
   if (drift) {
     throw Object.assign(new Error("SERVING_RELEASE_DRIFT"), { body: { drift, release } });
@@ -281,36 +257,18 @@ export async function run() {
     token = provision.credentialToken;
     if (!token) throw new Error("CREDENTIAL_TOKEN_NOT_RETURNED_FOR_NEW_CLAIM");
     const { workspaceId, actionId, goalId, actionBaselineVersion, goalBaselineVersion } = provision.receipt;
-    const action = await patchAction(baseUrl, cookie, workspaceId, actionId, {
-      bodyMd: ACTION_PROVEN_BODY,
-      expectedVersion: actionBaselineVersion,
-    });
+    const action = await internal(baseUrl, cookie, { operation: "prove_action", ...execution }, 20_000);
     assertActionProofResponse(action, actionId, actionBaselineVersion);
-    try {
-      await patchAction(baseUrl, cookie, workspaceId, actionId, {
-        bodyMd: `${ACTION_PROVEN_BODY}:forbidden-stale`,
-        expectedVersion: actionBaselineVersion,
-      });
-      throw new Error("ACTION_STALE_WRITE_ACCEPTED");
-    } catch (error) {
-      expectConflict(error);
-    }
+    const staleAction = await internal(baseUrl, cookie, { operation: "prove_action_stale", ...execution }, 20_000);
+    expectVersionConflictStatus(staleAction);
     const afterAction = await internal(baseUrl, cookie, { operation: "status", ...execution }, 20_000);
     assertActionNoEffect(afterAction, actionId, action.action.version);
-    const goalUpdate = await mcp(baseUrl, token, "update_goal", {
-      goalId,
-      progressPercent: GOAL_PROGRESS,
-      expectedVersion: goalBaselineVersion,
-    });
+    const goalUpdate = await internal(baseUrl, cookie, { operation: "prove_goal", ...execution }, 20_000);
     assertGoalProofResponse(goalUpdate, goalId, goalBaselineVersion);
     const afterGoalWrite = await internal(baseUrl, cookie, { operation: "status", ...execution }, 20_000);
     assertGoalStatusProof(afterGoalWrite, goalId, GOAL_PROGRESS, goalUpdate.version);
-    const staleGoal = await mcp(baseUrl, token, "update_goal", {
-      goalId,
-      progressPercent: 99,
-      expectedVersion: goalBaselineVersion,
-    });
-    expectMcpConflict(staleGoal);
+    const staleGoal = await internal(baseUrl, cookie, { operation: "prove_goal_stale", ...execution }, 20_000);
+    expectVersionConflictStatus(staleGoal);
     const afterGoal = await internal(baseUrl, cookie, { operation: "status", ...execution }, 20_000);
     assertGoalStatusProof(afterGoal, goalId, GOAL_PROGRESS, goalUpdate.version);
     await internal(baseUrl, cookie, {

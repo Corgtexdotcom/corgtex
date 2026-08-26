@@ -9,7 +9,7 @@ import {
 } from "@corgtex/storage";
 
 const migrationsDir = path.resolve(process.cwd(), "..", "..", "prisma", "migrations");
-const imageShaPath = path.resolve(process.cwd(), ".corgtex-release-git-sha");
+const imageShaPath = path.resolve(process.cwd(), "..", "..", ".corgtex-release-git-sha");
 const gitShaPattern = /^[0-9a-f]{40}$/i;
 
 function handleRouteError(error: unknown) {
@@ -52,12 +52,13 @@ function releaseFingerprint() {
 }
 
 function imageReleaseFingerprint() {
+  const production = process.env.NODE_ENV === "production";
   if (!existsSync(imageShaPath)) {
     return {
       gitSha: null,
       source: "missing" as const,
-      valid: false,
-      driftDetails: [] as string[],
+      valid: !production,
+      driftDetails: production ? ["image git SHA stamp is missing in production"] : [] as string[],
     };
   }
 
@@ -203,7 +204,7 @@ export async function GET() {
 
     const runtime = runtimeFingerprint();
     const release = releaseFingerprint();
-    if (!runtime.workspaceScopeValid || !release.image.valid && release.image.source !== "missing") {
+    if (!runtime.workspaceScopeValid || !release.image.valid) {
       return NextResponse.json({
         status: "degraded",
         service: "web",

@@ -14,8 +14,7 @@ import {
   assertGoalStatusProof,
   assertGoalProofResponse,
   assertReleaseRuntime,
-  expectConflict,
-  expectMcpConflict,
+  expectVersionConflictStatus,
 } from "./pr976-action-goal-production-smoke.mjs";
 
 function server(handler) {
@@ -76,21 +75,31 @@ describe("pr976 action/goal production smoke driver", () => {
     expect(() => assertReleaseRuntime({
       gitSha: expected,
       runtime: { gitSha: expected, source: "container" },
+      image: { gitSha: expected, source: "image_stamp", valid: true },
       drift: { gitSha: false, imageTag: false, version: false },
     }, expected)).not.toThrow();
     expect(() => assertReleaseRuntime({
       gitSha: expected,
       runtime: { gitSha: "2".repeat(40), source: "container" },
+      image: { gitSha: expected, source: "image_stamp", valid: true },
       drift: { gitSha: false, imageTag: false, version: false },
     }, expected)).toThrow("SERVING_RUNTIME_SHA_MISMATCH");
     expect(() => assertReleaseRuntime({
       gitSha: expected,
       runtime: { gitSha: expected },
+      image: { gitSha: expected, source: "image_stamp", valid: true },
       drift: { gitSha: false, imageTag: false, version: false },
     }, expected)).toThrow("SERVING_RUNTIME_SOURCE_MISSING");
     expect(() => assertReleaseRuntime({
       gitSha: expected,
       runtime: { gitSha: expected, source: "container" },
+      image: { gitSha: null, source: "missing", valid: false },
+      drift: { gitSha: false, imageTag: false, version: false },
+    }, expected)).toThrow("SERVING_IMAGE_SHA_MISMATCH");
+    expect(() => assertReleaseRuntime({
+      gitSha: expected,
+      runtime: { gitSha: expected, source: "container" },
+      image: { gitSha: expected, source: "image_stamp", valid: true },
       drift: { gitSha: true, imageTag: false, version: false },
     }, expected)).toThrow("SERVING_RELEASE_DRIFT");
   });
@@ -99,16 +108,9 @@ describe("pr976 action/goal production smoke driver", () => {
     expect(() => verifyGitLineage("0000000000000000000000000000000000000000")).toThrow(/Command failed/);
   });
 
-  it("requires an exact HTTP stale-write conflict envelope", () => {
-    expect(() => expectConflict({ status: 409, body: { error: { code: "VERSION_CONFLICT" } } })).not.toThrow();
-    expect(() => expectConflict({ status: 409, body: { error: { code: "NOT_VERSION_CONFLICT" } } })).toThrow();
-    expect(() => expectConflict({ status: 400, body: { error: { code: "VERSION_CONFLICT" } } })).toThrow();
-    expect(() => expectConflict({ status: 409, body: { code: "VERSION_CONFLICT" } })).toThrow();
-  });
-
-  it("requires an exact MCP stale-write status", () => {
-    expect(() => expectMcpConflict({ status: "VERSION_CONFLICT" })).not.toThrow();
-    expect(() => expectMcpConflict({ status: "NOT_VERSION_CONFLICT" })).toThrow("MCP_VERSION_CONFLICT_NOT_RETURNED");
+  it("requires an exact internal stale-write status", () => {
+    expect(() => expectVersionConflictStatus({ status: "VERSION_CONFLICT" })).not.toThrow();
+    expect(() => expectVersionConflictStatus({ status: "NOT_VERSION_CONFLICT" })).toThrow("VERSION_CONFLICT_NOT_RETURNED");
   });
 
   it("proves Action stale writes are exact no-effect writes", () => {
@@ -156,12 +158,13 @@ describe("pr976 action/goal production smoke workflow", () => {
       "ProductionValidationReceipt_goal_link_cleanup_guard",
       "ProductionValidationReceipt_goal_recognition_cleanup_guard",
       "ProductionValidationReceipt_agent_identity_cleanup_guard",
+      "ProductionValidationReceipt_agent_credential_cleanup_guard",
     ];
     for (const guard of guards) {
       expect(migration).toContain(`CREATE TRIGGER "${guard}"`);
     }
     expect(migration.match(/CREATE TRIGGER "ProductionValidationReceipt_/g)).toHaveLength(guards.length);
     expect(migration.match(/pg_advisory_xact_lock\(hashtext\('work_item_version'\)/g)).toHaveLength(2);
-    expect(migration.match(/pg_advisory_xact_lock\(hashtext\('production_validation_credential'\)/g)).toHaveLength(1);
+    expect(migration.match(/pg_advisory_xact_lock\(hashtext\('production_validation_credential'\)/g)).toHaveLength(4);
   });
 });

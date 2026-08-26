@@ -272,6 +272,15 @@ describe("ProductionValidationReceipt integration", () => {
         newProgress: PR976_GOAL_PROVEN_PROGRESS,
       },
     });
+    await recordPr976ActionGoalFeatureProof(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "101",
+      workflowRunAttempt: 1,
+      actionObservedBodyMd: PR976_ACTION_PROVEN_BODY,
+      actionObservedVersion: 2,
+      goalObservedProgress: PR976_GOAL_PROVEN_PROGRESS,
+      goalObservedVersion: 2,
+    });
 
     const terminalized = await terminalizePr976ActionGoalValidation(actor, {
       operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
@@ -363,6 +372,49 @@ describe("ProductionValidationReceipt integration", () => {
         linkedCredentialId: credential.id,
       },
     })).rejects.toThrow(/production validation credential cleanup already started/);
+    await expect(prisma.agentCredential.update({
+      where: { id: credential.id },
+      data: { tokenHash: "rotated-after-cleanup" },
+    })).rejects.toThrow(/production validation credential cleanup already started/);
+    await expect(prisma.agentCredential.update({
+      where: { id: credential.id },
+      data: { isActive: true },
+    })).rejects.toThrow(/production validation credential cleanup already started/);
+    await expect(prisma.agentCredential.update({
+      where: { id: credential.id },
+      data: { isActive: false },
+    })).resolves.toMatchObject({ isActive: false });
+  });
+
+  it("allows failure-only cleanup but requires both proofs for successful all-mode cleanup", async () => {
+    const { actor } = await createValidationAdmin();
+    await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "104",
+      workflowRunAttempt: 1,
+    });
+
+    await expect(terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "104",
+      workflowRunAttempt: 1,
+      mode: "all",
+    })).rejects.toMatchObject({ code: "FEATURE_NOT_PROVEN" });
+
+    const failed = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "104",
+      workflowRunAttempt: 1,
+      mode: "all",
+      failureCode: "DRIVER_FAILURE",
+      failureMessage: "Driver failed before feature proof.",
+    });
+
+    expect(failed.receipt.outcome).toBe("FAILED");
+    expect(failed.receipt.completedAt).toBeNull();
+    expect(failed.receipt.failureCode).toBe("DRIVER_FAILURE");
   });
 
   it("allows non-action deliberation entries while blocking action relations after cleanup starts", async () => {

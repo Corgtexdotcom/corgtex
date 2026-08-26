@@ -23,7 +23,8 @@ vi.mock("node:fs", () => ({
   readdirSync: fsMock.readdirSync,
 }));
 
-beforeEach(() => {
+  beforeEach(() => {
+  vi.resetModules();
   delete process.env.CORGTEX_RELEASE_VERSION;
   delete process.env.CORGTEX_RELEASE_IMAGE_TAG;
   delete process.env.CORGTEX_RELEASE_GIT_SHA;
@@ -58,6 +59,7 @@ beforeEach(() => {
   delete process.env.WORKSPACE_SLUG;
   delete process.env.CONTROL_PLANE_MODE;
   delete process.env.APP_URL;
+  vi.stubEnv("NODE_ENV", "test");
   fsMock.existsSync.mockReturnValue(false);
   fsMock.readFileSync.mockReturnValue("");
   fsMock.readdirSync.mockReturnValue([]);
@@ -65,6 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("GET /api/health", () => {
@@ -310,6 +313,45 @@ describe("GET /api/health", () => {
         runtime: { gitSha, source: "railway" },
         image: { gitSha, source: "image_stamp", valid: true },
         drift: { imageGitSha: false },
+      },
+    });
+  });
+
+  it("looks for the image SHA stamp at the container root when running from the web app cwd", async () => {
+    const { GET } = await import("./route");
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    await GET();
+
+    expect(fsMock.existsSync).toHaveBeenCalledWith(expect.stringMatching(/\/\.corgtex-release-git-sha$/));
+    expect(fsMock.existsSync).not.toHaveBeenCalledWith(expect.stringMatching(/apps\/web\/\.corgtex-release-git-sha$/));
+  });
+
+  it("fails closed when the production image SHA stamp is missing", async () => {
+    const { GET } = await import("./route");
+    vi.stubEnv("NODE_ENV", "production");
+    process.env.CORGTEX_RELEASE_GIT_SHA = "a".repeat(40);
+    fsMock.existsSync.mockReturnValue(false);
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      release: {
+        image: { gitSha: null, source: "missing", valid: false },
+        drift: {
+          details: expect.arrayContaining(["image git SHA stamp is missing in production"]),
+        },
       },
     });
   });
