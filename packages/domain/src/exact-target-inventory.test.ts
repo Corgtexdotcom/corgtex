@@ -153,6 +153,9 @@ describe("validate exact target inventory CLI static boundary", () => {
     expect(source).toContain("from \"@corgtex/domain/exact-target-inventory\"");
     expect(source).not.toContain("from \"@corgtex/domain\"");
     expect(source).not.toMatch(/fetch\(|@azure|prisma|DATABASE_URL|SECRET|TOKEN|scripts\/release|child_process|spawn|exec|https?:\/\//);
+    expect(source).not.toMatch(/process\.exit\(/);
+    expect(source).toContain("process.exitCode = status;");
+    expect(source).toContain("process.exitCode = result.ok ? 0 : 1;");
   });
 
   it("exposes and uses an offline exact-target package subpath without the domain barrel", () => {
