@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks } = vi.hoisted(() => ({
+const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks, storageMock, leaseMocks, inventoryEvaluatorMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
@@ -92,6 +93,9 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       findUnique: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+    },
+    buildArtifactAsset: {
+      findUnique: vi.fn(),
     },
     clientMigrationRun: {
       create: vi.fn(),
@@ -355,6 +359,22 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     saveSlackInstallationForWorkspace: vi.fn(),
     validateSlackPostTarget: vi.fn(),
   },
+  storageMock: { get: vi.fn() },
+  inventoryEvaluatorMock: vi.fn(),
+  leaseMocks: {
+    abortManagedReleaseLease: vi.fn(),
+    acquireManagedReleaseLease: vi.fn(),
+    beginManagedReleaseMutation: vi.fn(),
+    claimManagedReleaseRecovery: vi.fn(),
+    finalizeManagedReleaseRollback: vi.fn(),
+    finalizeManagedReleaseSuccess: vi.fn(),
+    getManagedReleaseLeaseTarget: vi.fn(),
+    getManagedReleaseRollbackRecord: vi.fn(),
+    getManagedReleaseTargetPreflight: vi.fn(),
+    heartbeatManagedReleaseLease: vi.fn(),
+    markManagedReleaseRecoveryRequired: vi.fn(),
+    recordManagedReleaseRollbackRecord: vi.fn(),
+  },
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -390,6 +410,9 @@ vi.mock("./communication", () => ({
   saveSlackInstallationForWorkspace: communicationMocks.saveSlackInstallationForWorkspace,
   validateSlackPostTarget: communicationMocks.validateSlackPostTarget,
 }));
+vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
+vi.mock("./exact-target-inventory-evaluator", () => ({ evaluateExactTargetInventoryJson: inventoryEvaluatorMock }));
+vi.mock("./control-plane-release-lease", () => leaseMocks);
 
 const operatorActor: AppActor = {
   kind: "user",
@@ -8451,5 +8474,98 @@ describe("control plane domain", () => {
         }),
       }),
     }));
+  });
+});
+
+describe("managed Azure release control-plane boundary", () => {
+  const actor: AppActor = {
+    kind: "agent",
+    authProvider: "control-plane",
+    label: "managed-release",
+    scopes: ["control-plane:read", "control-plane:releases:write"],
+  };
+  const inventoryRef = "123e4567-e89b-42d3-a456-426614174000";
+  const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns only digest-pinned private Ops inventory bound to the deployment", async () => {
+    const bytes = Buffer.from('{"schemaVersion":"2.0.0"}', "utf8");
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const opaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_PRIMARY:${deploymentId}`).digest("hex").slice(0, 32);
+    prismaMock.buildArtifactAsset.findUnique.mockResolvedValue({
+      id: inventoryRef,
+      storageKey: "private/inventory.json",
+      mimeType: "application/json",
+      kind: "DOCUMENT",
+      sizeBytes: bytes.byteLength,
+      sha256: digest,
+      artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PRIVATE" },
+    });
+    storageMock.get.mockResolvedValue({ data: bytes, contentType: "application/json" });
+    inventoryEvaluatorMock.mockReturnValue({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-08-28T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId },
+    });
+    const { getControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId })).resolves.toEqual({
+      inventoryRef,
+      sha256: digest,
+      bytesBase64: bytes.toString("base64"),
+      evaluation: {
+        workloadClass: "ACTIVE_CLIENT_PRIMARY",
+        canonicalDigest: `sha256:${"b".repeat(64)}`,
+        validUntil: "2026-08-28T00:00:00.000Z",
+        opaqueTargetId,
+      },
+    });
+    expect(inventoryEvaluatorMock).toHaveBeenCalledWith(bytes.toString("utf8"), expect.objectContaining({ requestedWorkloadClass: "ACTIVE_CLIENT_PRIMARY" }));
+
+    prismaMock.buildArtifactAsset.findUnique.mockResolvedValueOnce({
+      id: inventoryRef,
+      storageKey: "private/inventory.json",
+      mimeType: "application/json",
+      kind: "DOCUMENT",
+      sizeBytes: bytes.byteLength,
+      sha256: digest,
+      artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PUBLIC_REVIEW" },
+    });
+    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId })).rejects.toMatchObject({
+      code: "MANAGED_RELEASE_INVENTORY_REJECTED",
+    });
+  });
+
+  it("routes read and mutation operations while requiring an audited reason for writes", async () => {
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValue({ deploymentId, phase: "PREFLIGHT" });
+    leaseMocks.acquireManagedReleaseLease.mockResolvedValue({ deploymentId, leaseId: "lease-1", fence: 1, capability: "private" });
+    const { runControlPlaneManagedReleaseLeaseOperation } = await import("./control-plane");
+
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
+      operation: "preflight",
+      deploymentId,
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).resolves.toEqual({ deploymentId, phase: "PREFLIGHT" });
+    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, { acrName: "acr12", acrServer: "acr12.azurecr.io" });
+
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
+      operation: "acquire",
+      deploymentId,
+      expectedImageTag: `sha-${"a".repeat(40)}`,
+      incomingImageTag: `sha-${"b".repeat(40)}`,
+      incomingVersion: "release-2",
+      owner: "workflow:42",
+      reason: "Approved exact-target release.",
+    })).resolves.toMatchObject({ fence: 1 });
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
+      operation: "acquire",
+      deploymentId,
+    })).rejects.toMatchObject({ code: "CONTROL_PLANE_REASON_REQUIRED" });
   });
 });

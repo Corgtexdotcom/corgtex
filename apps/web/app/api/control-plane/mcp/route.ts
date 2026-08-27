@@ -20,6 +20,7 @@ import {
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
   getControlPlaneMeetingOperationsReadiness,
+  getControlPlaneManagedReleaseInventory,
   getControlPlaneSlackSetupTarget,
   getControlPlaneProviderStatus,
   getControlPlaneReleaseStatus,
@@ -41,6 +42,7 @@ import {
   runControlPlaneClientMigrationDryRun,
   runControlPlaneContextOperation,
   runControlPlaneMeetingRecorderOperation,
+  runControlPlaneManagedReleaseLeaseOperation,
   runControlPlanePostDeployProbe,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
@@ -563,6 +565,46 @@ const tools = [
     },
   },
   {
+    name: "get_managed_release_inventory",
+    description: "Load one private immutable P0-05 inventory artifact and bind its selected primary target to one deployment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        inventoryRef: { type: "string" },
+        expectedSha256: { type: "string" },
+        deploymentId: { type: "string" },
+      },
+      required: ["inventoryRef", "expectedSha256", "deploymentId"],
+    },
+  },
+  {
+    name: "managed_release_lease",
+    description: "Run one exact fenced managed-Azure release lease transition.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string" },
+        deploymentId: { type: "string" },
+        leaseId: { type: "string" },
+        capability: { type: "string" },
+        fence: { type: "number" },
+        expectedLeaseId: { type: "string" },
+        expectedFence: { type: "number" },
+        expectedImageTag: { type: "string" },
+        incomingImageTag: { type: "string" },
+        incomingVersion: { type: "string" },
+        owner: { type: "string" },
+        acrName: { type: "string" },
+        acrServer: { type: "string" },
+        rollback: { type: "object" },
+        stage: { type: "string" },
+        code: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["operation"],
+    },
+  },
+  {
     name: "prepare_release_upgrade",
     description: "Record audited target release readiness evidence without deploying.",
     inputSchema: {
@@ -693,6 +735,8 @@ const toolScopes: Record<string, string> = {
   refresh_fleet_snapshots: "control-plane:fleet:write",
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
+  get_managed_release_inventory: "control-plane:releases:write",
+  managed_release_lease: "control-plane:releases:write",
   deploy_latest_release: "control-plane:releases:write",
   deploy_latest_release_bulk: "control-plane:releases:write",
   get_rollout_status: "control-plane:read",
@@ -1202,6 +1246,19 @@ export async function POST(request: NextRequest) {
         releaseVersion: argOptionalString(args, "releaseVersion"),
         reason: argString(args, "reason"),
         requireRemoteSupportAudit: argBoolean(args, "requireRemoteSupportAudit", false),
+      })));
+    }
+    if (name === "get_managed_release_inventory") {
+      return rpcResult(id, textContent(await getControlPlaneManagedReleaseInventory(actor, {
+        inventoryRef: argString(args, "inventoryRef"),
+        expectedSha256: argString(args, "expectedSha256"),
+        deploymentId: argString(args, "deploymentId"),
+      })));
+    }
+    if (name === "managed_release_lease") {
+      return rpcResult(id, textContent(await runControlPlaneManagedReleaseLeaseOperation(actor, {
+        ...args,
+        operation: argString(args, "operation"),
       })));
     }
     if (name === "enqueue_fleet_snapshot_jobs") {

@@ -39,10 +39,10 @@ function rollbackPayload() {
     },
     previous: {
       releaseVersion: "release-1",
-      web: { containerName: "web--old", image: `${ACR}/corgtex/web@${DIGESTS[0]}`, readyRevision: `${WEB}--rev-1` },
-      worker: { containerName: "worker--old", image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, readyRevision: `${WORKER}--rev-2` },
+      web: { containerName: "web--old", image: `${ACR}/corgtex/web@${DIGESTS[0]}`, readyRevision: `${WEB}--rev-1`, templateDigest: DIGESTS[2] },
+      worker: { containerName: "worker--old", image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, readyRevision: `${WORKER}--rev-2`, templateDigest: DIGESTS[3] },
     },
-    incoming: { webDigest: DIGESTS[2], workerDigest: DIGESTS[3] },
+    incoming: { webDigest: DIGESTS[0], workerDigest: DIGESTS[1] },
   };
 }
 function managedInput(suffix: string = randomUUID()) {
@@ -215,6 +215,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
 
   it("rejects generic, no-op, and mixed writes in every retained phase", async () => {
     for (const state of ["RESERVED", "MUTATING", "RECOVERY_REQUIRED", "EXPIRED"] as const) {
+      await truncateAllTables();
       const { deployment, handle } = await leasedState(state === "EXPIRED" ? "RESERVED" : state, state === "EXPIRED");
       if (state === "RESERVED") await expectDatabaseDiagnostic(deployment.id);
       const initial = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
@@ -261,6 +262,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
     expect(errorDetail(deleteError)).toContain("MANAGED_RELEASE_LEASE_DELETE_CONFLICT");
     expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: first.id } })).toEqual(beforeDelete);
 
+    await truncateAllTables();
     const second = await createManaged();
     const stale = await acquire(second.id);
     await expire(second.id);
