@@ -226,15 +226,73 @@ BEGIN
     END IF;
 
     active_to_inactive := OLD."isActive" = true AND NEW."isActive" = false;
-    IF active_to_inactive AND NEW."tokenHash" IS NOT DISTINCT FROM OLD."tokenHash" THEN
+    IF active_to_inactive
+       AND NEW."tokenHash" IS NOT DISTINCT FROM OLD."tokenHash"
+       AND NEW."lastUsedAt" IS NOT DISTINCT FROM OLD."lastUsedAt" THEN
         RETURN NEW;
     END IF;
 
-    IF NEW."tokenHash" IS DISTINCT FROM OLD."tokenHash" OR NEW."isActive" = true THEN
-        RAISE EXCEPTION 'production validation credential cleanup already started'
+    RAISE EXCEPTION 'production validation credential cleanup already started'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION production_validation_guard_action_goal_target_after_cleanup()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    target_id TEXT;
+    target_label TEXT;
+    target_state "ProductionValidationLifecycleState";
+    target_archive_record_id TEXT;
+    allowed_archive_reason TEXT := 'Archived by pr976-action-goal-production-validation.';
+BEGIN
+    IF TG_TABLE_NAME = 'Action' THEN
+        target_id := NEW."id";
+        target_label := 'Action';
+        SELECT "actionState", "actionArchiveRecordId"
+        INTO target_state, target_archive_record_id
+        FROM "ProductionValidationReceipt"
+        WHERE "actionId" = target_id
+          AND "cleanupStartedAt" IS NOT NULL
+        LIMIT 1;
+    ELSIF TG_TABLE_NAME = 'Goal' THEN
+        target_id := NEW."id";
+        target_label := 'Goal';
+        SELECT "goalState", "goalArchiveRecordId"
+        INTO target_state, target_archive_record_id
+        FROM "ProductionValidationReceipt"
+        WHERE "goalId" = target_id
+          AND "cleanupStartedAt" IS NOT NULL
+        LIMIT 1;
+    ELSE
+        RETURN NEW;
+    END IF;
+
+    IF target_state IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtext('work_item' || '_version'), hashtext(target_label || ':' || target_id));
+
+    IF target_state = 'CLEANED' THEN
+        RAISE EXCEPTION 'production validation % cleanup already started', target_label
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
 
+    IF target_state IN ('PROVISIONED', 'FEATURE_PROVEN')
+       AND target_archive_record_id IS NULL
+       AND OLD."archivedAt" IS NULL
+       AND NEW."archivedAt" IS NOT NULL
+       AND NEW."archiveReason" IS NOT DISTINCT FROM allowed_archive_reason
+       AND (to_jsonb(NEW) - 'archivedAt' - 'archivedByUserId' - 'archiveReason' - 'updatedAt')
+           = (to_jsonb(OLD) - 'archivedAt' - 'archivedByUserId' - 'archiveReason' - 'updatedAt') THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'production validation % cleanup already started', target_label
+        USING ERRCODE = 'integrity_constraint_violation';
     RETURN NEW;
 END;
 $$;
@@ -284,5 +342,13 @@ BEFORE INSERT OR UPDATE OF "linkedCredentialId" ON "AgentIdentity"
 FOR EACH ROW EXECUTE FUNCTION production_validation_reject_agent_identity_after_credential_cleanup();
 
 CREATE TRIGGER "ProductionValidationReceipt_agent_credential_cleanup_guard"
-BEFORE UPDATE OF "tokenHash", "isActive" ON "AgentCredential"
+BEFORE UPDATE OF "tokenHash", "isActive", "lastUsedAt" ON "AgentCredential"
 FOR EACH ROW EXECUTE FUNCTION production_validation_reject_credential_update_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationTarget_action_cleanup_guard"
+BEFORE UPDATE ON "Action"
+FOR EACH ROW EXECUTE FUNCTION production_validation_guard_action_goal_target_after_cleanup();
+
+CREATE TRIGGER "ProductionValidationTarget_goal_cleanup_guard"
+BEFORE UPDATE ON "Goal"
+FOR EACH ROW EXECUTE FUNCTION production_validation_guard_action_goal_target_after_cleanup();

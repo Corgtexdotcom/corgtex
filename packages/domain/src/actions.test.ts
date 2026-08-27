@@ -513,6 +513,8 @@ describe("action domain lifecycle", () => {
       status: "DRAFT",
       isPrivate: false,
       publishedAt: null,
+      archivedAt: null,
+      version: 1,
     });
     prismaMock.action.update.mockResolvedValue({
       id: "action-1",
@@ -535,13 +537,85 @@ describe("action domain lifecycle", () => {
     });
 
     expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: "action-1" }),
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "DRAFT",
+        isPrivate: false,
+        version: 1,
+      }),
       data: expect.objectContaining({
         status: "OPEN",
         isPrivate: false,
         publishedAt: expect.any(Date),
       }),
     }));
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.action.findUnique.mock.invocationCallOrder[0]);
+  });
+
+  it("rejects archived draft actions before publishing side effects", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "DRAFT",
+      isPrivate: false,
+      publishedAt: null,
+      archivedAt: new Date("2026-08-26T12:00:00.000Z"),
+      version: 1,
+    });
+
+    const { publishAction } = await import("./actions");
+    await expect(publishAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
+    });
+
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
+  });
+
+  it("maps stale conditional publish updates to conflicts", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "DRAFT",
+      isPrivate: false,
+      publishedAt: null,
+      archivedAt: null,
+      version: 1,
+    });
+    prismaMock.action.update.mockRejectedValueOnce({ code: "P2025" });
+
+    const { publishAction } = await import("./actions");
+    await expect(publishAction(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "DRAFT",
+        isPrivate: false,
+        version: 1,
+      }),
+    }));
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("returns an open action to draft for the draft owner", async () => {
@@ -554,6 +628,7 @@ describe("action domain lifecycle", () => {
       isPrivate: false,
       publishedAt: new Date("2026-04-26T12:00:00.000Z"),
       archivedAt: null,
+      version: 1,
     });
     prismaMock.action.update.mockResolvedValue({
       id: "action-1",
@@ -576,7 +651,14 @@ describe("action domain lifecycle", () => {
     });
 
     expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: "action-1" }),
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      }),
       data: expect.objectContaining({
         status: "DRAFT",
         isPrivate: true,
@@ -584,6 +666,7 @@ describe("action domain lifecycle", () => {
         completedVia: null,
       }),
     }));
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.action.findUnique.mock.invocationCallOrder[0]);
   });
 
   it("returns a completed action to draft and clears completion state", async () => {
@@ -597,6 +680,7 @@ describe("action domain lifecycle", () => {
       isPrivate: false,
       publishedAt: new Date("2026-04-26T12:00:00.000Z"),
       archivedAt: null,
+      version: 1,
     });
     prismaMock.action.update.mockResolvedValue({
       id: "action-1",
@@ -618,7 +702,14 @@ describe("action domain lifecycle", () => {
     });
 
     expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: "action-1" }),
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "COMPLETED",
+        isPrivate: false,
+        version: 1,
+      }),
       data: expect.objectContaining({
         status: "DRAFT",
         isPrivate: true,
@@ -626,6 +717,70 @@ describe("action domain lifecycle", () => {
         completedVia: null,
       }),
     }));
+  });
+
+  it("rejects archived actions before returning to draft side effects", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-04-26T12:00:00.000Z"),
+      archivedAt: new Date("2026-08-26T12:00:00.000Z"),
+      version: 1,
+    });
+
+    const { returnActionToDraft } = await import("./actions");
+    await expect(returnActionToDraft(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_STATE",
+    });
+
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
+  });
+
+  it("maps stale conditional return-to-draft updates to conflicts", async () => {
+    prismaMock.action.findUnique.mockResolvedValue({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      authorUserId: "user-1",
+      title: "Follow up",
+      status: "OPEN",
+      isPrivate: false,
+      publishedAt: new Date("2026-04-26T12:00:00.000Z"),
+      archivedAt: null,
+      version: 1,
+    });
+    prismaMock.action.update.mockRejectedValueOnce({ code: "P2025" });
+
+    const { returnActionToDraft } = await import("./actions");
+    await expect(returnActionToDraft(actor, {
+      workspaceId: "workspace-1",
+      actionId: "action-1",
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    });
+
+    expect(prismaMock.action.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "action-1",
+        workspaceId: "workspace-1",
+        archivedAt: null,
+        status: "OPEN",
+        isPrivate: false,
+        version: 1,
+      }),
+    }));
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("allows an author to edit an open action and snapshots the previous version", async () => {
@@ -1453,6 +1608,7 @@ describe("action domain lifecycle", () => {
       }),
       data: { updatedAt: expect.any(Date) },
     });
+    expect(prismaMock.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.action.findFirst.mock.invocationCallOrder[0]);
     expect(prismaMock.actionChecklistItem.create).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
     expect(appendEvents).not.toHaveBeenCalled();

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 import { getPrismaClient } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
+import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
 import {
   PR976_ACTION_GOAL_OPERATION_KEY,
   PR976_ACTION_PROVEN_BODY,
@@ -411,8 +412,12 @@ describe("ProductionValidationReceipt integration", () => {
     })).rejects.toThrow(/production validation credential cleanup already started/);
     await expect(prisma.agentCredential.update({
       where: { id: credential.id },
+      data: { lastUsedAt: new Date("2026-08-26T12:00:00.000Z") },
+    })).rejects.toThrow(/production validation credential cleanup already started/);
+    await expect(prisma.agentCredential.update({
+      where: { id: credential.id },
       data: { isActive: false },
-    })).resolves.toMatchObject({ isActive: false });
+    })).rejects.toThrow(/production validation credential cleanup already started/);
   });
 
   it("cleans a canonical receipt credential with zero linked identities", async () => {
@@ -825,6 +830,103 @@ describe("ProductionValidationReceipt integration", () => {
     expect(terminalized.receipt.failureCode).toBeNull();
     expect(terminalized.receipt.failureMessage).toBeNull();
     expect(terminalized.receipt.completedAt).toBeTruthy();
+  });
+
+  it("rejects restoring or mutating cleaned receipt Action and Goal targets", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "109");
+    const { actionId, goalId } = provisioned.receipt;
+    if (!actionId || !goalId) throw new Error("Provisioned receipt missing Action or Goal.");
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "109",
+      workflowRunAttempt: 1,
+      mode: "all",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("COMPLETED");
+    expect(terminalized.receipt.actionState).toBe("CLEANED");
+    expect(terminalized.receipt.goalState).toBe("CLEANED");
+    await expect(restoreWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "Action",
+      entityId: actionId,
+    })).rejects.toThrow(/production validation Action cleanup already started/);
+    await expect(restoreWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "Goal",
+      entityId: goalId,
+    })).rejects.toThrow(/production validation Goal cleanup already started/);
+    await expect(prisma.action.update({
+      where: { id: actionId },
+      data: { status: "OPEN", isPrivate: false },
+    })).rejects.toThrow(/production validation Action cleanup already started/);
+    await expect(prisma.goal.update({
+      where: { id: goalId },
+      data: { progressPercent: 12, version: { increment: 1 } },
+    })).rejects.toThrow(/production validation Goal cleanup already started/);
+    await expect(prisma.action.findUniqueOrThrow({
+      where: { id: actionId },
+      select: { archivedAt: true },
+    })).resolves.toMatchObject({ archivedAt: expect.any(Date) });
+    await expect(prisma.goal.findUniqueOrThrow({
+      where: { id: goalId },
+      select: { archivedAt: true },
+    })).resolves.toMatchObject({ archivedAt: expect.any(Date) });
+    await expect(prisma.workspaceArchiveRecord.count({
+      where: { entityType: "Action", entityId: actionId, restoredAt: null },
+    })).resolves.toBe(1);
+    await expect(prisma.workspaceArchiveRecord.count({
+      where: { entityType: "Goal", entityId: goalId, restoredAt: null },
+    })).resolves.toBe(1);
+  });
+
+  it("allows ordinary non-receipt Action and Goal restore", async () => {
+    const { actor, workspaceId, userId } = await createValidationAdmin();
+    const action = await prisma.action.create({
+      data: {
+        workspaceId,
+        authorUserId: userId,
+        title: "Ordinary action",
+        status: "DRAFT",
+        isPrivate: true,
+      },
+    });
+    const goal = await prisma.goal.create({
+      data: {
+        workspaceId,
+        authorUserId: userId,
+        title: "Ordinary goal",
+        descriptionMd: "Non-receipt goal",
+        status: "DRAFT",
+        isPrivate: true,
+      },
+    });
+
+    await archiveWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "Action",
+      entityId: action.id,
+      reason: "ordinary restore proof",
+    });
+    await archiveWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "Goal",
+      entityId: goal.id,
+      reason: "ordinary restore proof",
+    });
+
+    await expect(restoreWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "Action",
+      entityId: action.id,
+    })).resolves.toMatchObject({ archivedAt: null });
+    await expect(restoreWorkspaceArtifact(actor, {
+      workspaceId,
+      entityType: "Goal",
+      entityId: goal.id,
+    })).resolves.toMatchObject({ archivedAt: null });
   });
 
   it("allows non-action deliberation entries while blocking action relations after cleanup starts", async () => {
