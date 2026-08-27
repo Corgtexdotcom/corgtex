@@ -9,8 +9,8 @@ const fixture = () => ({
   target: { subscriptionId: "123e4567-e89b-12d3-a456-426614174000", resourceGroup: "rg.Safe_1", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-app", workerAppName: "worker-app" },
   previous: {
     releaseVersion: "v1.2.3+build",
-    web: { containerName: "web--old", image: `acr12.azurecr.io/corgtex/web@sha256:${HEX_A}`, readyRevision: "web-app--rev-1" },
-    worker: { containerName: "worker--old", image: `acr12.azurecr.io/corgtex/worker@sha256:${HEX_B}`, readyRevision: "worker-app--rev-2" },
+    web: { containerName: "web--old", image: `acr12.azurecr.io/corgtex/web@sha256:${HEX_A}`, readyRevision: "web-app--rev-1", templateDigest: `sha256:${HEX_C}` },
+    worker: { containerName: "worker--old", image: `acr12.azurecr.io/corgtex/worker@sha256:${HEX_B}`, readyRevision: "worker-app--rev-2", templateDigest: `sha256:${HEX_D}` },
   },
   incoming: { webDigest: `sha256:${HEX_C}`, workerDigest: `sha256:${HEX_D}` },
 });
@@ -32,7 +32,7 @@ describe("managed Azure rollback payload canonicalizer", () => {
     const input = fixture(); const output = canonicalizeManagedAzureRollbackPayloadV1(input);
     expect(output).toEqual(input); expect(output).not.toBe(input); expect(output.target).not.toBe(input.target); expect(output.previous.web).not.toBe(input.previous.web);
     expect(Object.keys(output)).toEqual(["schemaVersion", "target", "previous", "incoming"]); expect(Object.keys(output.target)).toEqual(["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
-    expect(Object.keys(output.previous)).toEqual(["releaseVersion", "web", "worker"]); expect(Object.keys(output.previous.web)).toEqual(["containerName", "image", "readyRevision"]); expect(Object.keys(output.incoming)).toEqual(["webDigest", "workerDigest"]);
+    expect(Object.keys(output.previous)).toEqual(["releaseVersion", "web", "worker"]); expect(Object.keys(output.previous.web)).toEqual(["containerName", "image", "readyRevision", "templateDigest"]); expect(Object.keys(output.incoming)).toEqual(["webDigest", "workerDigest"]);
     [output, output.target, output.previous, output.previous.web, output.previous.worker, output.incoming].forEach((record) => expect(Object.isFrozen(record)).toBe(true));
     const reversed = canonicalizeManagedAzureRollbackPayloadV1(reversedNull(fixture())); expect(JSON.stringify(reversed)).toBe(JSON.stringify(output)); expect(reversed).not.toBe(output);
     input.target.acrName = "later12"; input.previous.web.containerName = "later"; expect(output.target.acrName).toBe("acr12"); expect(output.previous.web.containerName).toBe("web--old");
@@ -74,6 +74,7 @@ describe("managed Azure rollback payload canonicalizer", () => {
       (v) => { v.previous.web.containerName = "-web"; }, (v) => { v.previous.web.containerName = "web-"; }, (v) => { v.previous.web.containerName = "Web"; }, (v) => { v.previous.web.containerName = "w".repeat(64); },
       (v) => { v.previous.web.image = `other1.azurecr.io/corgtex/web@sha256:${HEX_A}`; }, (v) => { v.previous.web.image = `acr12.azurecr.io/corgtex/worker@sha256:${HEX_A}`; }, (v) => { v.previous.web.image = `acr12.azurecr.io/corgtex/web:sha-${HEX_A}`; }, (v) => { v.previous.web.image += "?private=1"; },
       (v) => { v.previous.web.readyRevision = "worker-app--rev-1"; }, (v) => { v.previous.web.readyRevision = "web-app--"; }, (v) => { v.previous.web.readyRevision = "web-app--rev--two"; }, (v) => { v.previous.web.readyRevision = `web-app--${"r".repeat(65)}`; },
+      (v) => { v.previous.web.templateDigest = HEX_C; }, (v) => { v.previous.worker.templateDigest = `sha256:${HEX_D.toUpperCase()}`; },
       (v) => { v.previous.releaseVersion = ""; }, (v) => { v.previous.releaseVersion = " v1"; }, (v) => { v.previous.releaseVersion = "version/private"; }, (v) => { v.previous.releaseVersion = "TOKEN=private"; }, (v) => { v.previous.releaseVersion = `v${"x".repeat(128)}`; },
       (v) => { v.incoming.webDigest = HEX_C; }, (v) => { v.incoming.webDigest = `sha-${HEX_C}`; }, (v) => { v.incoming.webDigest = `acr12.azurecr.io/corgtex/web@sha256:${HEX_C}`; }, (v) => { v.incoming.workerDigest = `sha256:${HEX_D.toUpperCase()}`; },
       (v) => { (v.previous as unknown as Record<string, unknown>).third = v.previous.web; },

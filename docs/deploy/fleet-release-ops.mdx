@@ -62,7 +62,7 @@ Azure targets must include:
 - `azure.webAppName`
 - `azure.workerAppName`
 
-Only `selfserve` Azure targets are mutable in PR1. Azure managed-customer, core, backup, and Ops targets are shown with blockers and remain non-mutable until the generic Azure executor lands in PR3; they never inherit selfserve resource defaults.
+Only `selfserve` Azure targets are mutable through the generic fleet workflow. Azure managed-customer, core, backup, and Ops targets remain non-mutable there and never inherit selfserve resource defaults. The separate exact-target workflow below is the only repository path for one already-authoritative managed Azure production target.
 
 Set `deploymentStatus` or `provisioningStatus` to `RETIRED` or `SUSPENDED`, or set `releaseEligible: false`, as soon as a target cannot receive releases. Default and `all` selections exclude those targets. A specific workload selection reports them as blockers and a real run fails before provider mutation.
 
@@ -87,6 +87,43 @@ Dry-runs use the lightweight preflight workflow by default. That path validates 
 10. If any target fails, stop at the failed ring unless an operator explicitly supplies a force reason.
 
 `MISSING_SUPPORT_SCOPE` means the support connector credential needs an audited scope repair. It is not customer OAuth/sign-in reauthorization.
+
+## Managed Azure Single-Target Release
+
+`managed-azure-release.yml` is a manual-only path for exactly one existing managed Azure production deployment. It is not a fleet selector, provider cutover, migration-completion claim, or authorization to retire Railway. Merging the workflow does not activate it against Azure.
+
+Configure the protected GitHub environment `managed-azure-release-production` with required reviewers and these values:
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `CONTROL_PLANE_AGENT_API_KEY` | Secret | Calls the private control-plane inventory and fenced lease tools. |
+| `GHCR_IMPORT_TOKEN` | Secret, optional | Pull authorization for Azure Container Registry import. The workflow token is the bounded fallback. |
+| `CONTROL_PLANE_URL` | Variable | Exact Ops control-plane origin. |
+| `AZURE_CLIENT_ID` | Variable | Workload identity client for the approved Azure scope. |
+| `AZURE_TENANT_ID` | Variable | Azure tenant for workload identity. |
+| `AZURE_SUBSCRIPTION_ID` | Variable | Azure subscription admitted by the workflow identity. |
+| `MANAGED_AZURE_ACR_NAME` | Variable | Exact destination registry name recorded for the managed target. |
+
+The inventory input is an opaque Build Artifact UUID from the private `Corgtexdotcom/corgtex-ops` repository, paired with the SHA-256 of its exact bytes. The asset must be private JSON, at most 96 KB, classified `INTERNAL` or `CLIENT_PRIVATE`, and typed `DOCUMENT` or `OTHER`. The server reloads and hashes the stored bytes, evaluates P0-05, requires exactly one `ACTIVE_CLIENT_PRIMARY` deployment, and verifies its opaque target identity against the requested deployment UUID. Do not put inventory bytes, target JSON, credentials, or customer-private facts in workflow inputs or logs.
+
+Before any live run:
+
+1. Confirm the workflow is running from the current `main` head and both digest-pinned release images exist for the exact 40-character release SHA.
+2. Confirm the deployment is already the authoritative managed Azure production target; this workflow does not perform a provider cutover or data migration.
+3. Confirm both Container Apps use Single revision mode, each has one expected role container, and `latestRevisionName` equals `latestReadyRevisionName`.
+4. Confirm the current and incoming application versions are mixed-version compatible for the web-then-worker update order.
+5. Name one operator who owns recovery and establish a one-writer window from baseline capture through verified success or completed compensation. Pause every other Azure writer for the two apps during that window.
+6. Dispatch the workflow with the exact inventory reference, inventory hash, deployment UUID, release SHA, release version, and audited reason. Leave `execute` false first.
+7. Review the bounded `DRY_RUN_READY` result. A dry-run reads inventory, control-plane state, source images, the destination registry, and both Container Apps, but does not acquire a lease, import images, or write Azure.
+8. Obtain separate exact-target approval through the protected environment, then dispatch the same immutable inputs with `execute` true while the one-writer window remains active.
+
+Execution acquires the database-clock lease, rechecks the target, stores complete rollback templates, imports digest-pinned images, and creates fresh web then worker revisions. Each Azure operation must reach a terminal result and exact readback before progress continues. The result is one of:
+
+- `SUCCEEDED`: both apps and health evidence match the incoming release; the release record is finalized and lease capability state is cleared.
+- `ROLLED_BACK`: both apps are proven on fresh rollback revisions derived from the recorded baseline; the lease is cleared.
+- `RECOVERY_REQUIRED`: any drift, timeout, lost fence, crash, ambiguous ARM result, unknown partial state, or failed compensation retains the fenced lease, rollback record, and bounded recovery code. Keep the one-writer window in place, assign the named recovery owner, and do not retry the workflow as a new release. Use the fenced recovery claim only after the retained lease expires and after classifying both apps from fresh Azure reads.
+
+Repository rollback is to disable the workflow or merge a normal protected revert. Live rollback is never inferred from an error response; it is complete only after terminal Azure operations and exact baseline readback for both apps.
 
 ## Gate For Next Work
 

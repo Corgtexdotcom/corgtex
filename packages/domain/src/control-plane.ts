@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
+import { defaultStorage } from "@corgtex/storage";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
 import { createMember, deactivateMember, listMembersEnriched, resendMemberAccessLink, sendMemberSetupEmail, updateMember } from "./members";
@@ -46,6 +48,21 @@ import {
   getRequiredScopesForPostDeployReadProbes,
   POST_DEPLOY_CUSTOMER_READ_PROBES,
 } from "./post-deploy-probe-contract";
+import { evaluateExactTargetInventoryJson } from "./exact-target-inventory-evaluator";
+import {
+  abortManagedReleaseLease,
+  acquireManagedReleaseLease,
+  beginManagedReleaseMutation,
+  claimManagedReleaseRecovery,
+  finalizeManagedReleaseRollback,
+  finalizeManagedReleaseSuccess,
+  getManagedReleaseLeaseTarget,
+  getManagedReleaseRollbackRecord,
+  getManagedReleaseTargetPreflight,
+  heartbeatManagedReleaseLease,
+  markManagedReleaseRecoveryRequired,
+  recordManagedReleaseRollbackRecord,
+} from "./control-plane-release-lease";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
@@ -10917,6 +10934,158 @@ export async function recordBreakGlassSupportNote(actor: AppActor, params: {
       resultSummary: { recorded: true },
     },
   });
+}
+
+const MANAGED_RELEASE_INVENTORY_MAX_BYTES = 96_000;
+const MANAGED_RELEASE_READ_OPERATIONS = new Set(["preflight", "get_target", "get_rollback"]);
+
+function managedReleaseHandle(params: Record<string, unknown>) {
+  return {
+    deploymentId: params.deploymentId as string,
+    leaseId: params.leaseId as string,
+    capability: params.capability as string,
+    fence: params.fence as number,
+  };
+}
+
+function managedReleaseAcr(params: Record<string, unknown>) {
+  return {
+    acrName: params.acrName as string,
+    acrServer: params.acrServer as string,
+  };
+}
+
+export async function getControlPlaneManagedReleaseInventory(actor: AppActor, params: {
+  inventoryRef: string;
+  expectedSha256: string;
+  deploymentId: string;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  await requireControlPlaneAccess(actor);
+  invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(params.inventoryRef),
+    400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  invariant(/^[0-9a-f]{64}$/.test(params.expectedSha256),
+    400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(params.deploymentId),
+    400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+
+  const asset = await prisma.buildArtifactAsset.findUnique({
+    where: { id: params.inventoryRef },
+    select: {
+      id: true,
+      storageKey: true,
+      mimeType: true,
+      kind: true,
+      sizeBytes: true,
+      sha256: true,
+      artifact: {
+        select: {
+          repositoryOwner: true,
+          repositoryName: true,
+          classification: true,
+          visibility: true,
+        },
+      },
+    },
+  });
+  invariant(asset
+    && asset.artifact.repositoryOwner.toLowerCase() === "corgtexdotcom"
+    && asset.artifact.repositoryName.toLowerCase() === "corgtex-ops"
+    && asset.artifact.visibility === "PRIVATE"
+    && ["INTERNAL", "CLIENT_PRIVATE"].includes(asset.artifact.classification)
+    && ["DOCUMENT", "OTHER"].includes(asset.kind)
+    && asset.mimeType === "application/json"
+    && asset.sizeBytes > 0
+    && asset.sizeBytes <= MANAGED_RELEASE_INVENTORY_MAX_BYTES
+    && asset.sha256 === params.expectedSha256,
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+
+  const stored = await defaultStorage.get(asset.storageKey);
+  invariant(stored && stored.data.byteLength === asset.sizeBytes && stored.data.byteLength <= MANAGED_RELEASE_INVENTORY_MAX_BYTES,
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const byteDigest = createHash("sha256").update(stored.data).digest("hex");
+  invariant(byteDigest === params.expectedSha256,
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const inventoryText = stored.data.toString("utf8");
+  invariant(Buffer.from(inventoryText, "utf8").equals(stored.data),
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const evaluation = evaluateExactTargetInventoryJson(inventoryText, {
+    now: new Date(),
+    requestedWorkloadClass: "ACTIVE_CLIENT_PRIMARY",
+  });
+  const expectedOpaqueTargetId = createHash("sha256")
+    .update(`ACTIVE_CLIENT_PRIMARY:${params.deploymentId}`)
+    .digest("hex")
+    .slice(0, 32);
+  invariant(evaluation.ok
+    && evaluation.artifactStatus === "VALID"
+    && evaluation.selection?.status === "SELECTED"
+    && evaluation.selection.opaqueTargetId === expectedOpaqueTargetId
+    && evaluation.canonicalDigest
+    && evaluation.validUntil,
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  return {
+    inventoryRef: asset.id,
+    sha256: byteDigest,
+    bytesBase64: stored.data.toString("base64"),
+    evaluation: {
+      workloadClass: "ACTIVE_CLIENT_PRIMARY" as const,
+      canonicalDigest: evaluation.canonicalDigest,
+      validUntil: evaluation.validUntil,
+      opaqueTargetId: evaluation.selection.opaqueTargetId,
+    },
+  };
+}
+
+export async function runControlPlaneManagedReleaseLeaseOperation(
+  actor: AppActor,
+  params: Record<string, unknown> & { operation: string },
+) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  await requireControlPlaneAccess(actor);
+  if (!MANAGED_RELEASE_READ_OPERATIONS.has(params.operation)) requireMutationReason(params.reason as string | null | undefined);
+  switch (params.operation) {
+    case "preflight":
+      return getManagedReleaseTargetPreflight(params.deploymentId as string, managedReleaseAcr(params));
+    case "acquire":
+      return acquireManagedReleaseLease({
+        deploymentId: params.deploymentId as string,
+        expectedImageTag: params.expectedImageTag as string,
+        incomingImageTag: params.incomingImageTag as string,
+        incomingVersion: params.incomingVersion as string,
+        owner: params.owner as string,
+      });
+    case "heartbeat":
+      return heartbeatManagedReleaseLease(managedReleaseHandle(params));
+    case "get_target":
+      return getManagedReleaseLeaseTarget(managedReleaseHandle(params), managedReleaseAcr(params));
+    case "get_rollback":
+      return getManagedReleaseRollbackRecord(managedReleaseHandle(params));
+    case "record_rollback":
+      return recordManagedReleaseRollbackRecord(managedReleaseHandle(params), params.rollback);
+    case "begin":
+      return beginManagedReleaseMutation(managedReleaseHandle(params));
+    case "abort":
+      return abortManagedReleaseLease(managedReleaseHandle(params));
+    case "finalize_success":
+      return finalizeManagedReleaseSuccess(managedReleaseHandle(params));
+    case "finalize_rollback":
+      return finalizeManagedReleaseRollback(managedReleaseHandle(params));
+    case "mark_recovery":
+      return markManagedReleaseRecoveryRequired(managedReleaseHandle(params), {
+        stage: params.stage as "INVENTORY" | "PREFLIGHT" | "IMPORT" | "WEB" | "WORKER" | "READBACK" | "OBSERVATION" | "ROLLBACK" | "FENCING",
+        code: params.code as string,
+      });
+    case "claim_recovery":
+      return claimManagedReleaseRecovery({
+        deploymentId: params.deploymentId as string,
+        expectedLeaseId: params.expectedLeaseId as string,
+        expectedFence: params.expectedFence as number,
+        owner: params.owner as string,
+      });
+    default:
+      throw new AppError(400, "MANAGED_RELEASE_INVALID_OPERATION", "Managed release lease operation is invalid.");
+  }
 }
 
 export async function resolveControlPlaneAgentFromBearer(token: string): Promise<AppActor | null> {

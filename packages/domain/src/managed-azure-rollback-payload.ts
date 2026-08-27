@@ -13,8 +13,8 @@ export type ManagedAzureRollbackPayloadV1 = {
   };
   readonly previous: {
     readonly releaseVersion: string | null;
-    readonly web: { readonly containerName: string; readonly image: string; readonly readyRevision: string };
-    readonly worker: { readonly containerName: string; readonly image: string; readonly readyRevision: string };
+    readonly web: { readonly containerName: string; readonly image: string; readonly readyRevision: string; readonly templateDigest: string };
+    readonly worker: { readonly containerName: string; readonly image: string; readonly readyRevision: string; readonly templateDigest: string };
   };
   readonly incoming: {
     readonly webDigest: string;
@@ -32,8 +32,8 @@ export function canonicalizeManagedAzureRollbackPayloadV1(
   const rawRoot = reader.exactRecord(value, ["schemaVersion", "target", "previous", "incoming"] as const);
   const rawTarget = reader.exactRecord(rawRoot.target, ["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"] as const);
   const rawPrevious = reader.exactRecord(rawRoot.previous, ["releaseVersion", "web", "worker"] as const);
-  const rawWeb = reader.exactRecord(rawPrevious.web, ["containerName", "image", "readyRevision"] as const);
-  const rawWorker = reader.exactRecord(rawPrevious.worker, ["containerName", "image", "readyRevision"] as const);
+  const rawWeb = reader.exactRecord(rawPrevious.web, ["containerName", "image", "readyRevision", "templateDigest"] as const);
+  const rawWorker = reader.exactRecord(rawPrevious.worker, ["containerName", "image", "readyRevision", "templateDigest"] as const);
   const rawIncoming = reader.exactRecord(rawRoot.incoming, ["webDigest", "workerDigest"] as const);
 
   const acrName = reader.azureAcrName(rawTarget.acrName);
@@ -50,12 +50,14 @@ export function canonicalizeManagedAzureRollbackPayloadV1(
     containerName: reader.azureContainerName(rawWeb.containerName),
     image: webImage.image,
     readyRevision: reader.azureRevision(rawWeb.readyRevision, webAppName),
-  }, ["containerName", "image", "readyRevision"] as const);
+    templateDigest: reader.digest(rawWeb.templateDigest),
+  }, ["containerName", "image", "readyRevision", "templateDigest"] as const);
   const worker = reader.exactRecord({
     containerName: reader.azureContainerName(rawWorker.containerName),
     image: workerImage.image,
     readyRevision: reader.azureRevision(rawWorker.readyRevision, workerAppName),
-  }, ["containerName", "image", "readyRevision"] as const);
+    templateDigest: reader.digest(rawWorker.templateDigest),
+  }, ["containerName", "image", "readyRevision", "templateDigest"] as const);
   const target = reader.exactRecord({
     subscriptionId: reader.uuid(rawTarget.subscriptionId),
     resourceGroup: reader.azureResourceGroup(rawTarget.resourceGroup),

@@ -1,20 +1,53 @@
-name: Managed Azure Release Observation (Synthetic)
+name: Managed Azure Single-Target Release
 
 on:
-  repository_dispatch:
-    types: [managed-azure-observation-synthetic-v1]
+  workflow_dispatch:
+    inputs:
+      inventory_ref:
+        description: Immutable private Ops inventory asset ID
+        required: true
+        type: string
+      inventory_sha256:
+        description: SHA-256 of the exact inventory bytes
+        required: true
+        type: string
+      deployment_id:
+        description: Exact managed Azure deployment UUID
+        required: true
+        type: string
+      release_sha:
+        description: Full 40-character Git release SHA
+        required: true
+        type: string
+      release_version:
+        description: Bounded release version label
+        required: true
+        type: string
+      reason:
+        description: Audited reason for this exact-target release
+        required: true
+        type: string
+      execute:
+        description: Apply the release after all gates pass
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  id-token: write
+  packages: read
 
 concurrency:
-  group: managed-azure-observation-00000000-0000-4000-8000-000000000001
+  group: managed-azure-release-${{ inputs.deployment_id }}
   cancel-in-progress: false
 
 jobs:
-  synthetic-observation:
-    if: github.ref == 'refs/heads/main'
+  dry-run:
+    if: github.ref == 'refs/heads/main' && inputs.execute != true
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: managed-azure-release-production
     steps:
       - uses: actions/checkout@v5
         with:
@@ -23,13 +56,59 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22.22.0
-      - name: Verify synthetic managed Azure observation
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify exact target without effects
         env:
-          RELEASE_SHA: ${{ github.event.client_payload.release_sha }}
-          WINDOW_MINUTES: ${{ github.event.client_payload.window_minutes }}
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          GHCR_IMPORT_USERNAME: ${{ github.actor }}
+          GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
+          MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
         run: >-
-          node scripts/release/managed-azure-observation.mjs
-          --synthetic --dry-run
-          --deployment-id 00000000-0000-4000-8000-000000000001
-          --release-sha "$RELEASE_SHA"
-          --window-minutes "$WINDOW_MINUTES"
+          node scripts/release/managed-azure-release-transaction.mjs
+          --inventory-ref "${{ inputs.inventory_ref }}"
+          --inventory-sha256 "${{ inputs.inventory_sha256 }}"
+          --deployment-id "${{ inputs.deployment_id }}"
+          --release-sha "${{ inputs.release_sha }}"
+          --release-version "${{ inputs.release_version }}"
+          --reason "${{ inputs.reason }}"
+          --execute false
+
+  execute:
+    if: github.ref == 'refs/heads/main' && inputs.execute == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: managed-azure-release-production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Execute approved exact-target release
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          GHCR_IMPORT_USERNAME: ${{ github.actor }}
+          GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
+          MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
+        run: >-
+          node scripts/release/managed-azure-release-transaction.mjs
+          --inventory-ref "${{ inputs.inventory_ref }}"
+          --inventory-sha256 "${{ inputs.inventory_sha256 }}"
+          --deployment-id "${{ inputs.deployment_id }}"
+          --release-sha "${{ inputs.release_sha }}"
+          --release-version "${{ inputs.release_version }}"
+          --reason "${{ inputs.reason }}"
+          --execute true

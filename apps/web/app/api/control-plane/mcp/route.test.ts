@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   getControlPlaneProviderStatus: vi.fn(),
   getControlPlaneSlackSetupTarget: vi.fn(),
   getControlPlaneMeetingOperationsReadiness: vi.fn(),
+  getControlPlaneManagedReleaseInventory: vi.fn(),
+  runControlPlaneManagedReleaseLeaseOperation: vi.fn(),
   enqueueControlPlaneAgendaPreparation: vi.fn(),
   recordCustomerSupportAudit: vi.fn(),
 }));
@@ -35,6 +37,7 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneMeetingOperationsReadiness: mocks.getControlPlaneMeetingOperationsReadiness, getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
+  getControlPlaneManagedReleaseInventory: mocks.getControlPlaneManagedReleaseInventory,
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
   listControlPlaneCustomerSummaries: mocks.listControlPlaneCustomerSummaries,
@@ -51,7 +54,7 @@ vi.mock("@corgtex/domain", () => ({
   refreshControlPlaneFleetSnapshots: vi.fn(),
   rollbackControlPlaneClientMigration: vi.fn(),
   revokeControlPlaneAgentCredential: vi.fn(),
-  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneClientMigrationDryRun: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneClientMigrationDryRun: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneManagedReleaseLeaseOperation: mocks.runControlPlaneManagedReleaseLeaseOperation, runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
   planControlPlaneClientMigration: vi.fn(),
   validateControlPlaneRailwayReleaseExecutor: vi.fn(),
   setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneAgentCredentialScopes: vi.fn(), updateControlPlaneAgentPolicy: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(), updateControlPlaneModelBudget: vi.fn(),
@@ -91,6 +94,8 @@ describe("/api/control-plane/mcp", () => {
     mocks.getControlPlaneProviderStatus.mockResolvedValue({ deploymentId: "dep-azure", adapter: { kind: "azure_read_model" } });
     mocks.getControlPlaneSlackSetupTarget.mockResolvedValue({ deploymentId: "dep-slack", managedWorkspaceId: "ws-slack" });
     mocks.getControlPlaneMeetingOperationsReadiness.mockResolvedValue({ deploymentId: "inst-1", agenda: { status: "ready" }, recorder: { status: "ready" } });
+    mocks.getControlPlaneManagedReleaseInventory.mockResolvedValue({ inventoryRef: "inventory-1", sha256: "a".repeat(64) });
+    mocks.runControlPlaneManagedReleaseLeaseOperation.mockResolvedValue({ phase: "RESERVED" });
     mocks.enqueueControlPlaneAgendaPreparation.mockResolvedValue({ deploymentId: "inst-1", workflowJobId: "job-1" });
     mocks.recordCustomerSupportAudit.mockResolvedValue({ id: "op-audit", status: "COMPLETED" });
   });
@@ -163,6 +168,8 @@ describe("/api/control-plane/mcp", () => {
       "refresh_fleet_snapshots",
       "run_post_deploy_probe",
       "enqueue_fleet_snapshot_jobs",
+      "get_managed_release_inventory",
+      "managed_release_lease",
       "prepare_release_upgrade",
       "deploy_latest_release",
       "deploy_latest_release_bulk",
@@ -170,6 +177,46 @@ describe("/api/control-plane/mcp", () => {
       "run_customer_support_operation",
       "record_customer_support_audit",
     ]);
+  });
+
+  it("requires release scope and forwards bounded managed release operations", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
+    const { POST } = await import("./route");
+    const inventory = await POST(request({
+      jsonrpc: "2.0",
+      id: 41,
+      method: "tools/call",
+      params: { name: "get_managed_release_inventory", arguments: {
+        inventoryRef: "123e4567-e89b-42d3-a456-426614174000",
+        expectedSha256: "a".repeat(64),
+        deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+      } },
+    }) as never);
+    expect(inventory.status).toBe(200);
+    expect(mocks.getControlPlaneManagedReleaseInventory).toHaveBeenCalledWith(expect.anything(), {
+      inventoryRef: "123e4567-e89b-42d3-a456-426614174000",
+      expectedSha256: "a".repeat(64),
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+    });
+
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
+    const lease = await POST(request({
+      jsonrpc: "2.0",
+      id: 42,
+      method: "tools/call",
+      params: { name: "managed_release_lease", arguments: { operation: "preflight", deploymentId: "deployment-1", acrName: "acr12", acrServer: "acr12.azurecr.io" } },
+    }) as never);
+    expect(lease.status).toBe(200);
+    expect(mocks.runControlPlaneManagedReleaseLeaseOperation).toHaveBeenCalledWith(expect.anything(), {
+      operation: "preflight",
+      deploymentId: "deployment-1",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    });
+
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:read"] });
+    const denied = await POST(request({ jsonrpc: "2.0", id: 43, method: "tools/call", params: { name: "managed_release_lease", arguments: { operation: "preflight" } } }) as never);
+    expect(denied.status).toBe(403);
   });
 
   it("returns a compatible lean customer array from list_customers", async () => {
