@@ -129,6 +129,13 @@ describe("pr976 action/goal production smoke driver", () => {
     expect(() => assertGoalStatusProof({ goal: { id: "goal-1", progressPercent: GOAL_PROGRESS, version: 3 } }, "goal-1", GOAL_PROGRESS, 2)).toThrow("GOAL_STATUS_PROOF_UNPROVEN");
     expect(() => assertGoalStatusProof({ goal: { id: "goal-1", progressPercent: 99, version: 2 } }, "goal-1", GOAL_PROGRESS, 2)).toThrow("GOAL_STATUS_PROOF_UNPROVEN");
   });
+
+  it("never uses the provisioned credential token as driver authorization", async () => {
+    const driver = await readFile(new URL("./pr976-action-goal-production-smoke.mjs", import.meta.url), "utf8");
+    expect(driver).toContain("provision.credentialToken");
+    expect(driver).not.toMatch(/authorization["']?\s*:/i);
+    expect(driver).not.toMatch(/Bearer\s+\$\{?provision\.credentialToken/i);
+  });
 });
 
 describe("pr976 action/goal production smoke workflow", () => {

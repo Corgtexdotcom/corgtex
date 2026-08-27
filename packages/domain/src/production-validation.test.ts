@@ -287,7 +287,11 @@ describe("PR 976 production validation receipt authority", () => {
     tx.$queryRaw.mockResolvedValue([{ id: "receipt-1" }]);
     tx.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue(receipt);
     tx.productionValidationReceipt.update.mockImplementation(async ({ data }) => ({ ...receipt, ...data }));
-    prisma.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue({ ...receipt, failureCode: null, failureMessage: null });
+    prisma.productionValidationReceipt.findUniqueOrThrow.mockResolvedValue({
+      ...receipt,
+      failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED",
+      failureMessage: "tx.$executeRaw is not a function",
+    });
 
     const result = await terminalizePr976ActionGoalValidation(
       { kind: "user", user: { id: "user-1", email: "admin@example.com" } } as any,
@@ -299,14 +303,14 @@ describe("PR 976 production validation receipt authority", () => {
       },
     );
 
-    expect(result.receipt.failureCode).toBeNull();
-    expect(result.receipt.failureMessage).toBeNull();
+    expect(result.receipt.failureCode).toBe("RETRYABLE_TARGET_CLEANUP_FAILED");
+    expect(result.receipt.failureMessage).toBe("tx.$executeRaw is not a function");
     expect(tx.productionValidationReceipt.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         transitions: expect.arrayContaining([expect.objectContaining({ type: "TARGET_CLEANUP_RETRYABLE", target: "action" })]),
       }),
     }));
-    expect(tx.productionValidationReceipt.update).not.toHaveBeenCalledWith(expect.objectContaining({
+    expect(tx.productionValidationReceipt.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED" }),
     }));
     expect(tx.productionValidationReceipt.update).toHaveBeenCalledWith(expect.objectContaining({

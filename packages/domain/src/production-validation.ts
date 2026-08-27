@@ -491,20 +491,10 @@ async function clearActionDerivedWork(
   tx: Prisma.TransactionClient,
   workspaceId: string,
   actionId: string,
-): Promise<"CLEARED" | "RUNNING_REQUEUED"> {
+): Promise<"CLEARED"> {
   const jobs = await actionDerivedWorkState(tx, workspaceId, actionId);
   if (jobs.runningJobIds.length > 0) {
-    await tx.workflowJob.updateMany({
-      where: { id: { in: jobs.runningJobIds }, workspaceId, status: "RUNNING" },
-      data: {
-        status: "PENDING",
-        lockedAt: null,
-        lockedBy: null,
-        startedAt: null,
-        error: "Requeued by production validation cleanup before synthetic Action archive.",
-      },
-    });
-    return "RUNNING_REQUEUED";
+    throw new Error("Action-derived workflow job is still running; retry cleanup after the worker releases it.");
   }
   if (jobs.pendingJobIds.length > 0) {
     await tx.workflowJob.updateMany({
@@ -587,10 +577,7 @@ async function terminalizeAction(
     && !action.archivedAt
     && allZero(counts);
   if (!canArchive) return { state: "BLOCKED" as const, archiveRecordId: null };
-  const derivedWork = await clearActionDerivedWork(tx, receipt.workspaceId, receipt.actionId);
-  if (derivedWork === "RUNNING_REQUEUED") {
-    return { state: receipt.actionState, archiveRecordId: receipt.actionArchiveRecordId };
-  }
+  await clearActionDerivedWork(tx, receipt.workspaceId, receipt.actionId);
   const archivedAt = new Date();
   await tx.action.update({
     where: { id: action.id, workspaceId: receipt.workspaceId, archivedAt: null, version: action.version },
@@ -675,78 +662,66 @@ async function terminalizeGoal(
 async function terminalizeCredential(tx: Prisma.TransactionClient, receipt: ValidationReceipt) {
   if (receipt.credentialState === "CLEANED" || receipt.credentialState === "BLOCKED") return receipt.credentialState;
   if (!receipt.agentCredentialId) return "BLOCKED" as const;
-  await tx.$queryRaw`
-    SELECT true AS locked
-    FROM pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(${receipt.agentCredentialId}))
-  `;
-  const credential = await tx.agentCredential.findUnique({ where: { id: receipt.agentCredentialId } });
-  if (!credential || credential.workspaceId !== receipt.workspaceId || credential.label !== `${PR976_SYNTHETIC_MARKER}:credential`) return "BLOCKED" as const;
-  const identities = await tx.$queryRaw<Array<{
+  const credentials = await tx.$queryRaw<Array<{
     id: string;
     workspaceId: string;
-    displayName: string;
-    memberType: string;
+    catalogItemId: string | null;
+    label: string;
+    scopes: string[];
+    reasonMd: string | null;
+    monthlyBudgetCents: number | null;
+    dailyCallLimit: number | null;
     isActive: boolean;
-    archivedAt: Date | null;
+    lastUsedAt: Date | null;
   }>>`
     SELECT
       "id",
       "workspaceId",
-      "displayName",
-      "memberType",
+      "catalogItemId",
+      "label",
+      "scopes",
+      "reasonMd",
+      "monthlyBudgetCents",
+      "dailyCallLimit",
       "isActive",
-      "archivedAt"
-    FROM "AgentIdentity"
-    WHERE "linkedCredentialId" = ${credential.id}
-    ORDER BY "id" ASC
+      "lastUsedAt"
+    FROM "AgentCredential"
+    WHERE "id" = ${receipt.agentCredentialId}
     FOR UPDATE
   `;
-  if (identities.some((identity) => identity.workspaceId !== receipt.workspaceId)) return "BLOCKED" as const;
-  const identityPreflight = await Promise.all(identities.map(async (identity) => {
-    const [assignments, roleHistory] = await Promise.all([
-      tx.circleAgentAssignment.count({ where: { agentIdentityId: identity.id } }),
-      tx.roleHolderHistory.count({ where: { agentIdentityId: identity.id, endedAt: null } }),
-    ]);
-    return { identity, assignments, roleHistory };
-  }));
-  const canArchiveIdentities = identityPreflight.every(({ identity, assignments, roleHistory }) => (
-    identity.workspaceId === receipt.workspaceId
-    && identity.displayName === credential.label
-    && identity.memberType === "EXTERNAL"
-    && assignments === 0
-    && roleHistory === 0
-  ));
-  if (!canArchiveIdentities) return "BLOCKED" as const;
-  const activeRemainingBeforeMutation = identities.some((identity) => identity.isActive || !identity.archivedAt);
-  if (!credential.isActive && activeRemainingBeforeMutation) return "BLOCKED" as const;
-  for (const identity of identities) {
-    if (identity.isActive || !identity.archivedAt) {
-      await tx.agentIdentity.update({
-        where: { id: identity.id },
-        data: {
-          isActive: false,
-          archivedAt: identity.archivedAt ?? new Date(),
-          archiveReason: `Archived by ${PR976_ACTION_GOAL_OPERATION_KEY}.`,
-        },
+  const credential = credentials[0];
+  if (!credential) return "BLOCKED" as const;
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(${credential.id}))
+  `;
+  const linkedIdentityCount = await tx.agentIdentity.count({
+    where: { linkedCredentialId: credential.id },
+  });
+  const canonicalScopes = ["goals:read", "goals:write"];
+  const isCanonicalCredential = credential.workspaceId === receipt.workspaceId
+    && credential.label === `${PR976_SYNTHETIC_MARKER}:credential`
+    && credential.catalogItemId === null
+    && credential.reasonMd === `Temporary credential for ${PR976_ACTION_GOAL_OPERATION_KEY}.`
+    && credential.monthlyBudgetCents === 0
+    && credential.dailyCallLimit === 10
+    && credential.isActive
+    && credential.lastUsedAt === null
+    && credential.scopes.length === canonicalScopes.length
+    && credential.scopes.every((scope, index) => scope === canonicalScopes[index])
+    && linkedIdentityCount === 0;
+  if (!isCanonicalCredential) {
+    if (credential.isActive) {
+      await tx.agentCredential.update({
+        where: { id: credential.id },
+        data: { isActive: false },
       });
     }
+    return "BLOCKED" as const;
   }
-  if (credential.isActive) {
-    await tx.agentCredential.update({
-      where: { id: credential.id },
-      data: { isActive: false },
-    });
-  }
-  const remainingIdentity = await tx.agentIdentity.findFirst({
-    where: {
-      linkedCredentialId: credential.id,
-      OR: [
-        { isActive: true },
-        { archivedAt: null },
-      ],
-    },
+  await tx.agentCredential.update({
+    where: { id: credential.id },
+    data: { isActive: false },
   });
-  if (remainingIdentity) return "BLOCKED" as const;
   return "CLEANED" as const;
 }
 
@@ -796,6 +771,8 @@ async function markTargetRetryable(
     await tx.productionValidationReceipt.update({
       where: { id: receipt.id },
       data: {
+        failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED",
+        failureMessage,
         transitions: appendTransition(receipt, {
           type: "TARGET_CLEANUP_RETRYABLE",
           target,

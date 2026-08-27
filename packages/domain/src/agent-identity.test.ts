@@ -340,9 +340,37 @@ describe("agent-identity", () => {
       code: "NOT_FOUND",
     });
 
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
     expect(prisma.circleAgentAssignment.upsert).not.toHaveBeenCalled();
     expect(prisma.roleHolderHistory.create).not.toHaveBeenCalled();
+  });
+
+  it("locks and validates the identity row before credential and assignment advisory locks", async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([{
+      id: "ai-1",
+      workspaceId: wsId,
+      isActive: true,
+      archivedAt: null,
+      linkedCredentialId: "cred-1",
+    }] as any);
+    vi.mocked(prisma.circle.findFirst).mockResolvedValue({ id: "c-1", workspaceId: wsId } as any);
+    vi.mocked(prisma.circleAgentAssignment.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.circleAgentAssignment.upsert).mockResolvedValue({ id: "ca-1", circleId: "c-1", agentIdentityId: "ai-1", roleId: null } as any);
+
+    await assignAgentToCircle(adminActor, {
+      workspaceId: wsId,
+      agentIdentityId: "ai-1",
+      circleId: "c-1",
+    });
+
+    expect(prisma.$queryRaw).toHaveBeenCalled();
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(prisma.$queryRaw).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0]!,
+    );
+    expect(vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[1]!,
+    );
   });
 
   it("removes an agent from a circle", async () => {

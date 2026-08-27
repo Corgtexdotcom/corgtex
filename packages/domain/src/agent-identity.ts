@@ -280,16 +280,6 @@ export async function assignAgentToCircle(
   }
 
   return prisma.$transaction(async (tx) => {
-    const initialIdentity = await tx.agentIdentity.findUnique({
-      where: { id: params.agentIdentityId },
-      select: { linkedCredentialId: true },
-    });
-    invariant(initialIdentity, 404, "NOT_FOUND", "Agent identity not found.");
-    if (initialIdentity.linkedCredentialId) {
-      await tx.$executeRaw`
-        SELECT pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(${initialIdentity.linkedCredentialId}))
-      `;
-    }
     const identities = await tx.$queryRaw<Array<{
       id: string;
       workspaceId: string;
@@ -317,6 +307,11 @@ export async function assignAgentToCircle(
       "NOT_FOUND",
       "Agent identity not found.",
     );
+    if (identity.linkedCredentialId) {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext('production_validation_credential'), hashtext(${identity.linkedCredentialId}))
+      `;
+    }
 
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext('circle_agent_assignment'), hashtext(${`${params.circleId}:${params.agentIdentityId}`}))

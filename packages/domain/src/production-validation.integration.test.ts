@@ -344,7 +344,7 @@ describe("ProductionValidationReceipt integration", () => {
     ]));
   });
 
-  it("archives all linked validation agent identities and blocks new links after credential cleanup starts", async () => {
+  it("revokes and blocks credential cleanup when linked validation agent identities remain", async () => {
     const { actor, workspaceId } = await createValidationAdmin();
     const provisioned = await provisionPr976ActionGoalValidation(actor, {
       operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
@@ -382,17 +382,16 @@ describe("ProductionValidationReceipt integration", () => {
       mode: "credential",
     });
 
-    expect(terminalized.receipt.credentialState).toBe("CLEANED");
+    expect(terminalized.receipt.outcome).toBe("BLOCKED");
+    expect(terminalized.receipt.credentialState).toBe("BLOCKED");
     await expect(prisma.agentCredential.findUniqueOrThrow({ where: { id: credential.id } })).resolves.toMatchObject({ isActive: false });
     await expect(prisma.agentIdentity.count({
       where: {
         linkedCredentialId: credential.id,
-        OR: [
-          { isActive: true },
-          { archivedAt: null },
-        ],
+        isActive: true,
+        archivedAt: null,
       },
-    })).resolves.toBe(0);
+    })).resolves.toBe(2);
     await expect(prisma.agentIdentity.create({
       data: {
         workspaceId,
@@ -414,6 +413,64 @@ describe("ProductionValidationReceipt integration", () => {
       where: { id: credential.id },
       data: { isActive: false },
     })).resolves.toMatchObject({ isActive: false });
+  });
+
+  it("cleans a canonical receipt credential with zero linked identities", async () => {
+    const { actor } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "102b",
+      workflowRunAttempt: 1,
+    });
+    const credentialId = provisioned.receipt.agentCredentialId;
+    if (!credentialId) throw new Error("Provisioned receipt missing credential.");
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "102b",
+      workflowRunAttempt: 1,
+      mode: "credential",
+    });
+
+    expect(terminalized.receipt.credentialState).toBe("CLEANED");
+    await expect(prisma.agentCredential.findUniqueOrThrow({ where: { id: credentialId } })).resolves.toMatchObject({ isActive: false });
+  });
+
+  it("revokes and blocks credential cleanup when lastUsedAt or scopes drift", async () => {
+    const { actor } = await createValidationAdmin();
+    const provisioned = await provisionPr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      deployedSha: "1".repeat(40),
+      ancestorSha: PR976_TARGET_RELEASE_SHA,
+      workflowRunId: "102c",
+      workflowRunAttempt: 1,
+    });
+    const credentialId = provisioned.receipt.agentCredentialId;
+    if (!credentialId) throw new Error("Provisioned receipt missing credential.");
+    await prisma.agentCredential.update({
+      where: { id: credentialId },
+      data: { lastUsedAt: new Date("2026-08-26T00:00:00.000Z"), scopes: ["goals:read"] },
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "102c",
+      workflowRunAttempt: 1,
+      mode: "credential",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("BLOCKED");
+    expect(terminalized.receipt.credentialState).toBe("BLOCKED");
+    await expect(prisma.agentCredential.findUniqueOrThrow({
+      where: { id: credentialId },
+      select: { isActive: true, lastUsedAt: true, scopes: true },
+    })).resolves.toMatchObject({
+      isActive: false,
+      lastUsedAt: new Date("2026-08-26T00:00:00.000Z"),
+      scopes: ["goals:read"],
+    });
   });
 
   it("blocks credential cleanup before mutating when any linked identity belongs to another workspace", async () => {
@@ -461,7 +518,7 @@ describe("ProductionValidationReceipt integration", () => {
 
     expect(terminalized.receipt.outcome).toBe("BLOCKED");
     expect(terminalized.receipt.credentialState).toBe("BLOCKED");
-    await expect(prisma.agentCredential.findUniqueOrThrow({ where: { id: credentialId } })).resolves.toMatchObject({ isActive: true });
+    await expect(prisma.agentCredential.findUniqueOrThrow({ where: { id: credentialId } })).resolves.toMatchObject({ isActive: false });
     await expect(prisma.agentIdentity.count({
       where: {
         linkedCredentialId: credentialId,
@@ -471,7 +528,7 @@ describe("ProductionValidationReceipt integration", () => {
     })).resolves.toBe(2);
   });
 
-  it("blocks credential cleanup byte-for-byte before mutating any linked identity with a late blocker", async () => {
+  it("revokes credential drift while preserving linked identities byte-for-byte", async () => {
     const { actor, workspaceId } = await createValidationAdmin();
     const provisioned = await provisionPr976ActionGoalValidation(actor, {
       operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
@@ -537,7 +594,7 @@ describe("ProductionValidationReceipt integration", () => {
         linkedCredentialId: true,
       },
     });
-    expect(afterCredential.isActive).toBe(beforeCredential.isActive);
+    expect(afterCredential.isActive).toBe(false);
     expect(afterCredential.tokenHash).toBe(beforeCredential.tokenHash);
     expect(afterIdentities).toEqual(beforeIdentities);
   });
@@ -648,7 +705,7 @@ describe("ProductionValidationReceipt integration", () => {
     })).resolves.toBe(1);
   });
 
-  it("requeues running Action-derived jobs and leaves the Action uncleaned for a later retry", async () => {
+  it("leaves running Action-derived jobs unchanged and leaves the Action uncleaned for a later retry", async () => {
     const { actor, workspaceId } = await createValidationAdmin();
     const provisioned = await proveProvisionedFeature(actor, "108");
     const actionId = provisioned.receipt.actionId;
@@ -675,6 +732,7 @@ describe("ProductionValidationReceipt integration", () => {
 
     expect(terminalized.receipt.outcome).toBe("PENDING");
     expect(terminalized.receipt.actionState).toBe("FEATURE_PROVEN");
+    expect(terminalized.receipt.failureCode).toBe("RETRYABLE_TARGET_CLEANUP_FAILED");
     await expect(prisma.action.findUniqueOrThrow({
       where: { id: actionId },
       select: { archivedAt: true },
@@ -682,12 +740,33 @@ describe("ProductionValidationReceipt integration", () => {
     await expect(prisma.workflowJob.findUniqueOrThrow({
       where: { dedupeKey: "pv-action-knowledge-running" },
       select: { status: true, lockedAt: true, lockedBy: true, startedAt: true },
-    })).resolves.toEqual({
-      status: "PENDING",
-      lockedAt: null,
-      lockedBy: null,
-      startedAt: null,
+    })).resolves.toMatchObject({
+      status: "RUNNING",
+      lockedBy: "worker-1",
     });
+    await prisma.workflowJob.update({
+      where: { dedupeKey: "pv-action-knowledge-running" },
+      data: {
+        status: "FAILED",
+        completedAt: new Date(),
+        error: "Worker finished before cleanup retry.",
+      },
+    });
+
+    const retried = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "108",
+      workflowRunAttempt: 1,
+      mode: "action",
+    });
+
+    expect(retried.receipt.outcome).toBe("PENDING");
+    expect(retried.receipt.actionState).toBe("CLEANED");
+    expect(retried.receipt.failureCode).toBeNull();
+    await expect(prisma.action.findUniqueOrThrow({
+      where: { id: actionId },
+      select: { archivedAt: true },
+    })).resolves.toMatchObject({ archivedAt: expect.any(Date) });
   });
 
   it("allows failure-only cleanup but requires both proofs for successful all-mode cleanup", async () => {
