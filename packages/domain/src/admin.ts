@@ -5,7 +5,7 @@ import type { AppActor } from "@corgtex/shared";
 import type { CustomerDeploymentCloudProvider, MemberRole, Prisma } from "@prisma/client";
 import { AppError, invariant } from "./errors";
 import { requestPasswordReset } from "./password-reset";
-import { createMember } from "./members";
+import { createMember, deactivateMember, removeMember, resendMemberAccessLink, updateMember } from "./members";
 import { requireGlobalOperator } from "./auth";
 import { createWorkspace } from "./workspaces";
 import {
@@ -397,12 +397,11 @@ export async function adminAddToWorkspace(actor: AppActor, params: {
 }
 
 export async function adminRemoveFromWorkspace(actor: AppActor, params: {
+  workspaceId: string;
   memberId: string;
 }) {
   requireGlobalOperator(actor);
-  await prisma.member.delete({
-    where: { id: params.memberId },
-  });
+  return removeMember(actor, params);
 }
 
 const NOTIFICATION_DELIVERY_HEALTH_WINDOW_DAYS = 30;
@@ -612,10 +611,7 @@ export async function adminUpdateMember(actor: AppActor, params: {
   role: MemberRole;
 }) {
   requireGlobalOperator(actor);
-  await prisma.member.update({
-    where: { id: params.memberId },
-    data: { role: params.role }
-  });
+  return updateMember(actor, params);
 }
 
 export async function adminDeactivateMember(actor: AppActor, params: {
@@ -623,10 +619,7 @@ export async function adminDeactivateMember(actor: AppActor, params: {
   memberId: string;
 }) {
   requireGlobalOperator(actor);
-  await prisma.member.update({
-    where: { id: params.memberId },
-    data: { isActive: false }
-  });
+  return deactivateMember(actor, params);
 }
 
 export async function adminBulkInvite(actor: AppActor, params: {
@@ -650,12 +643,7 @@ export async function adminResendAccessLink(actor: AppActor, params: {
   memberId: string;
 }) {
   requireGlobalOperator(actor);
-  const member = await prisma.member.findUniqueOrThrow({
-    where: { id: params.memberId },
-    include: { user: true }
-  });
-  const token = await requestPasswordReset(member.user.email);
-  return { user: member.user, token: token?.token };
+  return resendMemberAccessLink(actor, params);
 }
 
 export async function adminCreateWorkspace(actor: AppActor, params: {

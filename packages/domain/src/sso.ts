@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
 import { randomBytes } from "node:crypto";
+import { assertNonReservedWorkspaceSystemEmail } from "./workspaces";
 
 export async function getSsoConfigByWorkspace(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
@@ -97,6 +98,7 @@ export async function linkOrProvisionSsoUser(params: {
   displayName?: string | null;
 }) {
   const email = params.email.trim().toLowerCase();
+  assertNonReservedWorkspaceSystemEmail(email);
   const existingIdentity = await prisma.userSsoIdentity.findUnique({
     where: {
       provider_providerSubjectId: {

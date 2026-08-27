@@ -1,7 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks } = vi.hoisted(() => ({
+const {
+  prismaMock,
+  encryptSecretMock,
+  decryptSecretMock,
+  memberMocks,
+  communicationMocks,
+  assertNonReservedWorkspaceSystemEmailMock,
+  createCanonicalWorkspaceMock,
+} = vi.hoisted(() => ({
+  assertNonReservedWorkspaceSystemEmailMock: vi.fn(),
+  createCanonicalWorkspaceMock: vi.fn(),
   prismaMock: {
     $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
@@ -357,6 +367,11 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
   },
 }));
 
+vi.mock("./workspaces", () => ({
+  assertNonReservedWorkspaceSystemEmail: assertNonReservedWorkspaceSystemEmailMock,
+  createCanonicalWorkspace: createCanonicalWorkspaceMock,
+}));
+
 vi.mock("@corgtex/shared", () => ({
   env: {
     CONTROL_PLANE_AGENT_API_KEY: "agent-secret",
@@ -456,6 +471,12 @@ describe("control plane domain", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();
+    createCanonicalWorkspaceMock.mockResolvedValue({
+      id: "ws-1",
+      slug: "acme",
+      name: "Acme",
+      description: null,
+    });
     prismaMock.$transaction.mockImplementation(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
     ));
@@ -667,12 +688,12 @@ describe("control plane domain", () => {
       initialAdmins: [{ email: "admin@example.com", displayName: "Admin" }],
     });
 
-    expect(prismaMock.workspace.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        name: "Acme",
-        slug: "acme",
-      }),
+    expect(createCanonicalWorkspaceMock).toHaveBeenCalledWith(prismaMock, {
+      name: "Acme",
+      slug: "acme",
+      description: null,
     });
+    expect(assertNonReservedWorkspaceSystemEmailMock).toHaveBeenCalledWith("admin@example.com");
     expect(prismaMock.customerDeployment.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         customerSlug: "acme",
@@ -696,6 +717,30 @@ describe("control plane domain", () => {
       deployment: { id: "dep-1", deploymentKind: "SHARED_WORKSPACE" },
       readiness: { status: "ready" },
     });
+  });
+
+  it("rejects another workspace's reserved system address as a shared-workspace admin", async () => {
+    assertNonReservedWorkspaceSystemEmailMock.mockImplementationOnce((email: string) => {
+      if (/^system\+[^@]*@corgtex\.local$/i.test(email)) {
+        throw Object.assign(new Error("Reserved workspace system identity cannot be used as a human member."), {
+          code: "CANONICAL_SYSTEM_ACTOR_COLLISION",
+        });
+      }
+    });
+    const { createControlPlaneClient } = await import("./control-plane");
+
+    await expect(createControlPlaneClient(operatorActor, {
+      mode: "shared_workspace",
+      label: "Acme",
+      customerSlug: "acme",
+      reason: "Approved onboarding.",
+      initialAdmins: [{ email: "SYSTEM+FOREIGN-WORKSPACE@CORGTEX.LOCAL" }],
+    })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+
+    expect(assertNonReservedWorkspaceSystemEmailMock)
+      .toHaveBeenCalledWith("system+foreign-workspace@corgtex.local");
+    expect(createCanonicalWorkspaceMock).not.toHaveBeenCalled();
+    expect(memberMocks.createMember).not.toHaveBeenCalled();
   });
 
   it("rejects raw runtime variables in hosted client creation", async () => {

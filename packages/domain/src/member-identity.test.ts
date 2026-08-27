@@ -22,19 +22,23 @@ describe("member identity classification", () => {
     expect(isSystemMemberIdentity({ user: { email: "support@example.com", displayName: "Corgtex Support" } })).toBe(true);
   });
 
+  it("treats persisted human kind as authoritative over user-controlled identity fields", () => {
+    expect(classifyMemberIdentity({
+      kind: "HUMAN",
+      user: { email: "support+person@example.com", displayName: "Corgtex Support" },
+    })).toBe("HUMAN");
+  });
+
   it("does not classify people as system identities just because agent appears in their name or email", () => {
     expect(isHumanMemberIdentity({ user: { email: "agentina@example.com", displayName: "Agentina Example" } })).toBe(true);
   });
 
   it("exposes reusable Prisma filters for member queries", () => {
-    expect(systemMemberIdentityWhere()).toMatchObject({
-      OR: expect.arrayContaining([{ kind: "SYSTEM" }]),
+    expect(systemMemberIdentityWhere()).toEqual({ kind: "SYSTEM" });
+    expect(humanMemberIdentityWhere()).toEqual({
+      kind: "HUMAN",
+      NOT: [{ OR: [{ kind: "SYSTEM" }] }],
     });
-    expect(humanMemberIdentityWhere()).toMatchObject({
-      NOT: [systemMemberIdentityWhere()],
-    });
-    expect(systemActorMemberIdentityWhere()).toMatchObject({
-      user: { email: { startsWith: "system+" } },
-    });
+    expect(systemActorMemberIdentityWhere()).toEqual({ kind: "SYSTEM" });
   });
 });

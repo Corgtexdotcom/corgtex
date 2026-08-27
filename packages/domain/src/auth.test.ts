@@ -15,8 +15,10 @@ const { prismaMock, envMock, verifyPasswordMock } = vi.hoisted(() => ({
     },
     member: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
     },
     workspace: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
@@ -33,6 +35,7 @@ vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash-password:${value}`),
   randomOpaqueToken: vi.fn(() => "plain-token"),
+  normalizeWorkspaceSlug: (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-"),
   sha256: vi.fn((value: string) => `hash:${value}`),
   verifyPassword: verifyPasswordMock,
 }));
@@ -147,6 +150,18 @@ describe("auth domain", () => {
         code: "INVALID_INPUT",
       });
     });
+
+    it("rejects a canonical workspace system identity before password verification", async () => {
+      const { loginUserWithPassword } = await import("./auth");
+      await expect(loginUserWithPassword({
+        email: " System+Workspace-1@Corgtex.Local ",
+        password: "password123",
+      })).rejects.toMatchObject({ status: 401, code: "UNAUTHENTICATED" });
+
+      expect(prismaMock.user.findUnique).not.toHaveBeenCalled();
+      expect(verifyPasswordMock).not.toHaveBeenCalled();
+      expect(prismaMock.session.create).not.toHaveBeenCalled();
+    });
   });
 
   describe("registerUser", () => {
@@ -195,6 +210,92 @@ describe("auth domain", () => {
         code: "INVALID_INPUT",
       });
     });
+
+    it("rejects registration in the canonical workspace system namespace", async () => {
+      const { registerUser } = await import("./auth");
+      await expect(registerUser({
+        email: "system+workspace-1@corgtex.local",
+        password: "password123",
+      })).rejects.toMatchObject({ code: "CANONICAL_SYSTEM_ACTOR_COLLISION" });
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("createSession", () => {
+    it("rejects a canonical workspace system identity before issuing a token", async () => {
+      prismaMock.user.findUnique.mockResolvedValue({ email: "system+workspace-1@corgtex.local" });
+      const { createSession } = await import("./auth");
+
+      await expect(createSession("system-user-1")).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
+      expect(prismaMock.session.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("actorUserIdForWorkspace", () => {
+    it("authorizes the agent independently and returns only the exact inactive canonical system administrator", async () => {
+      prismaMock.workspace.findUnique.mockResolvedValue({ slug: "workspace-1" });
+      prismaMock.member.findFirst.mockResolvedValue({ userId: "system-user-1" });
+
+      const { actorUserIdForWorkspace } = await import("./auth");
+      await expect(actorUserIdForWorkspace(agentActor, "workspace-1")).resolves.toBe("system-user-1");
+
+      expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
+        where: {
+          workspaceId: "workspace-1",
+          isActive: false,
+          role: "ADMIN",
+          kind: "SYSTEM",
+          mergedAt: null,
+          mergedIntoMemberId: null,
+          user: {
+            email: "system+workspace-1@corgtex.local",
+            globalRole: "USER",
+            passwordHash: "disabled$canonical-workspace-system-actor-v1",
+            ssoIdentities: { none: {} },
+            oauthConnections: { none: {} },
+            externalMcpConnections: { none: {} },
+            memberships: {
+              none: {
+                workspaceId: { not: "workspace-1" },
+              },
+            },
+          },
+        },
+        select: { userId: true },
+      });
+    });
+
+    it("rejects an unauthorized agent before looking up the attribution principal", async () => {
+      const { actorUserIdForWorkspace } = await import("./auth");
+
+      await expect(actorUserIdForWorkspace({
+        ...agentActor,
+        workspaceIds: ["workspace-other"],
+      }, "workspace-1")).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+
+      expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("fails closed instead of falling back to a human administrator", async () => {
+      prismaMock.workspace.findUnique.mockResolvedValue({ slug: "workspace-1" });
+      prismaMock.member.findFirst.mockResolvedValue(null);
+
+      const { actorUserIdForWorkspace } = await import("./auth");
+      await expect(actorUserIdForWorkspace(agentActor, "workspace-1")).rejects.toMatchObject({
+        status: 500,
+        code: "CONFIG_ERROR",
+      });
+
+      expect(prismaMock.member.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns a human actor directly without a workspace lookup", async () => {
+      const { actorUserIdForWorkspace } = await import("./auth");
+      await expect(actorUserIdForWorkspace(userActor, "workspace-1")).resolves.toBe("user-1");
+      expect(prismaMock.workspace.findUnique).not.toHaveBeenCalled();
+      expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
+    });
   });
 
   describe("resolveSessionActor", () => {
@@ -231,6 +332,23 @@ describe("auth domain", () => {
 
       const { resolveSessionActor } = await import("./auth");
       await expect(resolveSessionActor("plain-token")).resolves.toBeNull();
+    });
+
+    it("returns null for a canonical workspace system session without refreshing it", async () => {
+      prismaMock.session.findUnique.mockResolvedValue({
+        id: "session-1",
+        expiresAt: new Date("2026-04-25T12:00:00.000Z"),
+        lastSeenAt: new Date("2026-04-24T11:00:00.000Z"),
+        user: {
+          id: "system-user-1",
+          email: "system+workspace-1@corgtex.local",
+          displayName: "Workspace System",
+        },
+      });
+
+      const { resolveSessionActor } = await import("./auth");
+      await expect(resolveSessionActor("plain-token")).resolves.toBeNull();
+      expect(prismaMock.session.updateMany).not.toHaveBeenCalled();
     });
   });
 

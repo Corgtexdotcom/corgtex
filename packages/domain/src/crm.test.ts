@@ -4,6 +4,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const archiveWorkspaceArtifact = vi.fn().mockResolvedValue({ id: "archive-1" });
 const lockWorkspaceArchiveArtifact = vi.fn().mockResolvedValue(undefined);
+const workspaceMocks = vi.hoisted(() => ({
+  createCanonicalWorkspace: vi.fn(),
+  ensureCanonicalWorkspace: vi.fn(),
+}));
+
+vi.mock("./workspaces", () => workspaceMocks);
 
 vi.mock("@corgtex/shared", () => {
   return {
@@ -312,6 +318,8 @@ const targetWorkspaceSlug = ["cr", "ina"].join("");
 describe("CRM domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    workspaceMocks.ensureCanonicalWorkspace.mockResolvedValue({ id: "ws-1", slug: "corgtex", name: "Corgtex" });
+    workspaceMocks.createCanonicalWorkspace.mockResolvedValue({ id: "ws-new", slug: "demo-123", name: "Demo Workspace" });
   });
 
   describe("captureDemoLead", () => {
@@ -320,6 +328,12 @@ describe("CRM domain", () => {
       const { captureDemoLead } = await import("./crm");
 
       await captureDemoLead({ email: "Demo@Example.com" });
+
+      expect(workspaceMocks.ensureCanonicalWorkspace).toHaveBeenCalledWith(expect.anything(), {
+        slug: "corgtex",
+        name: "Corgtex",
+        description: "Internal company operating environment for Corgtex",
+      });
 
       expect(appendEvents).toHaveBeenCalledWith(expect.anything(), [
         expect.objectContaining({
@@ -2695,6 +2709,10 @@ describe("CRM domain", () => {
           targetWorkspaceId: "ws-new",
           status: "ACTIVE",
         }),
+      });
+      expect(workspaceMocks.createCanonicalWorkspace).toHaveBeenCalledWith(tx, {
+        name: "Demo Workspace (demo@acme.com)",
+        slug: expect.stringMatching(/^demo-\d+$/),
       });
       expect(customerAccountUpsert).not.toHaveBeenCalled();
       expect(customerDeploymentUpsert).not.toHaveBeenCalled();

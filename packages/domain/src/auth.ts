@@ -2,7 +2,11 @@ import type { MemberRole, Prisma } from "@prisma/client";
 import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
-import { systemActorMemberIdentityWhere } from "./member-identity";
+import {
+  CANONICAL_WORKSPACE_SYSTEM_PASSWORD_HASH,
+  canonicalWorkspaceSystemEmail,
+  isCanonicalWorkspaceSystemEmail,
+} from "./workspaces";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
@@ -36,6 +40,9 @@ export async function loginUserWithPassword(params: {
   const email = params.email.trim().toLowerCase();
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
   invariant(params.password.length >= 8, 400, "INVALID_INPUT", "Password must be at least 8 characters.");
+  if (isCanonicalWorkspaceSystemEmail(email)) {
+    throw new AppError(401, "UNAUTHENTICATED", "Invalid email or password.");
+  }
 
   const user = await prisma.user.findUnique({
     where: { email },
@@ -73,6 +80,14 @@ export async function createSession(
   userId: string,
   meta: { ipAddress?: string | null; userAgent?: string | null } = {}
 ) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+  if (!user || isCanonicalWorkspaceSystemEmail(user.email)) {
+    throw new AppError(401, "UNAUTHENTICATED", "This account cannot create an interactive session.");
+  }
+
   const token = randomOpaqueToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
@@ -93,6 +108,9 @@ export async function registerUser(params: { email: string; password: string; di
   const email = params.email.trim().toLowerCase();
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
   invariant(params.password.length >= 8, 400, "INVALID_INPUT", "Password must be at least 8 characters.");
+  if (isCanonicalWorkspaceSystemEmail(email)) {
+    throw new AppError(409, "CANONICAL_SYSTEM_ACTOR_COLLISION", "Reserved workspace system identity cannot be registered.");
+  }
 
   const existing = await prisma.user.findUnique({ where: { email } });
   invariant(!existing, 409, "ALREADY_EXISTS", "A user with that email already exists.");
@@ -127,7 +145,7 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
     },
   });
 
-  if (!session || session.expiresAt <= now) {
+  if (!session || session.expiresAt <= now || isCanonicalWorkspaceSystemEmail(session.user.email)) {
     return null;
   }
 
@@ -244,35 +262,43 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
     return actor.user.id;
   }
 
+  await requireWorkspaceMembership({ actor, workspaceId });
+
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true },
+  });
+  invariant(workspace, 500, "CONFIG_ERROR", "Workspace is unavailable for system action attribution.");
+
   const systemMember = await prisma.member.findFirst({
     where: {
       workspaceId,
-      isActive: true,
+      isActive: false,
       role: "ADMIN",
-      ...systemActorMemberIdentityWhere(),
+      kind: "SYSTEM",
+      mergedAt: null,
+      mergedIntoMemberId: null,
+      user: {
+        email: canonicalWorkspaceSystemEmail(workspace.slug),
+        globalRole: "USER",
+        passwordHash: CANONICAL_WORKSPACE_SYSTEM_PASSWORD_HASH,
+        ssoIdentities: { none: {} },
+        oauthConnections: { none: {} },
+        externalMcpConnections: { none: {} },
+        memberships: {
+          none: {
+            workspaceId: { not: workspaceId },
+          },
+        },
+      },
     },
     select: {
       userId: true,
     },
   });
 
-  if (systemMember) {
-    return systemMember.userId;
-  }
-
-  const fallbackAdmin = await prisma.member.findFirst({
-    where: {
-      workspaceId,
-      isActive: true,
-      role: "ADMIN",
-    },
-    select: {
-      userId: true,
-    },
-  });
-
-  invariant(fallbackAdmin, 500, "CONFIG_ERROR", "Workspace has no admin member available for system actions.");
-  return fallbackAdmin.userId;
+  invariant(systemMember, 500, "CONFIG_ERROR", "Workspace has no canonical system actor available for system actions.");
+  return systemMember.userId;
 }
 
 export async function listActorWorkspaces(actor: AppActor) {

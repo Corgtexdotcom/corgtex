@@ -1,4 +1,8 @@
 import { PrismaClient } from "@prisma/client";
+import {
+  assertNonReservedWorkspaceSystemEmail,
+  ensureCanonicalWorkspace,
+} from "../packages/domain/src/workspaces.ts";
 import { randomBytes, scryptSync } from "node:crypto";
 
 const prisma = new PrismaClient();
@@ -56,16 +60,17 @@ async function main() {
   const controlPlaneTesterEmail = process.env.CONTROL_PLANE_TESTER_EMAIL?.trim().toLowerCase();
   const controlPlaneTesterPassword = process.env.CONTROL_PLANE_TESTER_PASSWORD?.trim();
   const controlPlaneTesterDisplayName = process.env.CONTROL_PLANE_TESTER_DISPLAY_NAME?.trim() || "Control Plane Test Operator";
+  assertNonReservedWorkspaceSystemEmail(adminEmail);
+  if (controlPlaneTesterEmail) {
+    assertNonReservedWorkspaceSystemEmail(controlPlaneTesterEmail);
+  }
 
-  const workspace = await prisma.workspace.upsert({
-    where: { slug: workspaceSlug },
+  const workspace = await prisma.$transaction((tx) => ensureCanonicalWorkspace(tx, {
+    slug: workspaceSlug,
+    name: workspaceName,
+    description: "Default workspace for Corgtex.",
     update: { name: workspaceName },
-    create: {
-      slug: workspaceSlug,
-      name: workspaceName,
-      description: "Default workspace for Corgtex.",
-    },
-  });
+  }));
 
   const existingAdminUser = await prisma.user.findUnique({
     where: { email: adminEmail },
@@ -126,78 +131,6 @@ async function main() {
       resetPasswords,
     });
   }
-
-  const systemEmail = `system+${workspace.slug}@corgtex.local`;
-  const existingSystemUser = await prisma.user.findUnique({
-    where: { email: systemEmail },
-    select: { id: true },
-  });
-  const shouldSetSystemPassword = resetPasswords || !existingSystemUser;
-  if (shouldSetSystemPassword && !adminPassword) {
-    throw new Error("Missing required environment variable: ADMIN_PASSWORD");
-  }
-
-  const systemUser = existingSystemUser
-    ? await prisma.user.update({
-        where: { email: systemEmail },
-        data: {
-          displayName: `${workspace.name} System`,
-          ...(resetPasswords ? { passwordHash: hashPassword(adminPassword) } : {}),
-        },
-      })
-    : await prisma.user.create({
-        data: {
-          email: systemEmail,
-          displayName: `${workspace.name} System`,
-          passwordHash: hashPassword(adminPassword),
-        },
-      });
-
-  await prisma.member.upsert({
-    where: {
-      workspaceId_userId: {
-        workspaceId: workspace.id,
-        userId: systemUser.id,
-      },
-    },
-    update: {
-      role: "ADMIN",
-      kind: "SYSTEM",
-      isActive: true,
-    },
-    create: {
-      workspaceId: workspace.id,
-      userId: systemUser.id,
-      role: "ADMIN",
-      kind: "SYSTEM",
-      isActive: true,
-    },
-  });
-
-  await prisma.approvalPolicy.upsert({
-    where: {
-      workspaceId_subjectType: {
-        workspaceId: workspace.id,
-        subjectType: "PROPOSAL",
-      },
-    },
-    update: {
-      mode: "CONSENT",
-      quorumPercent: 0,
-      minApproverCount: 1,
-      decisionWindowHours: 72,
-      requireProposalLink: false,
-    },
-    create: {
-      workspaceId: workspace.id,
-      subjectType: "PROPOSAL",
-      mode: "CONSENT",
-      quorumPercent: 0,
-      minApproverCount: 1,
-      decisionWindowHours: 72,
-      requireProposalLink: false,
-    },
-  });
 
   await prisma.circle.upsert({
     where: { id: `${workspace.id}-general-circle` },

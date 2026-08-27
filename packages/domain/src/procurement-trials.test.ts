@@ -7,6 +7,7 @@ const {
   prismaMock,
   randomOpaqueTokenMock,
   sendEmailMock,
+  createCanonicalWorkspaceMock,
 } = vi.hoisted(() => {
   const prisma = {
     $transaction: vi.fn(),
@@ -87,8 +88,14 @@ const {
     prismaMock: prisma,
     randomOpaqueTokenMock: vi.fn(),
     sendEmailMock: vi.fn(),
+    createCanonicalWorkspaceMock: vi.fn(),
   };
 });
+
+vi.mock("./workspaces", () => ({
+  assertNonReservedWorkspaceSystemEmail: vi.fn(),
+  createCanonicalWorkspace: createCanonicalWorkspaceMock,
+}));
 
 vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
@@ -149,6 +156,7 @@ describe("procurement trials", () => {
     prismaMock.procurementTrial.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workspace.findUnique.mockResolvedValue(null);
     prismaMock.workspace.create.mockResolvedValue({ id: "ws-1", name: "Acme", slug: "acme" });
+    createCanonicalWorkspaceMock.mockResolvedValue({ id: "ws-1", name: "Acme", slug: "acme" });
     prismaMock.workspace.update.mockResolvedValue({ id: "ws-1" });
     prismaMock.workspace.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.workspaceFeatureFlag.createMany.mockResolvedValue({ count: 10 });
@@ -207,7 +215,7 @@ describe("procurement trials", () => {
     expect(prismaMock.modelUsageBudget.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ monthlyCostCapUsd: 5 }),
     }));
-    expect(prismaMock.workspace.create).toHaveBeenCalledWith(expect.objectContaining({
+    expect(createCanonicalWorkspaceMock).toHaveBeenCalledWith(prismaMock, expect.objectContaining({
       data: expect.objectContaining({
         plan: "TRIAL",
         trialEndsAt: expect.any(Date),

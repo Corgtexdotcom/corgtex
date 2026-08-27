@@ -2,6 +2,12 @@ import { PrismaClient } from "@prisma/client";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { tsImport } from "tsx/esm/api";
+
+const {
+  canonicalWorkspaceSystemEmail,
+  ensureCanonicalWorkspace,
+} = await tsImport("../packages/domain/src/workspaces.ts", import.meta.url);
 
 export const CONTRACT = Object.freeze({
   databaseHost: "corgtex-corporate-rebels-prod-pg.postgres.database.azure.com",
@@ -89,6 +95,8 @@ function indexBody(rows) {
 async function verifySeed(db, workspaceId, rows, releaseGitSha) {
   const workspace = await db.workspace.findUnique({ where: { id: workspaceId }, select: { id: true,
     name: true, slug: true, plan: true,
+    members: { select: { role: true, kind: true, isActive: true,
+      user: { select: { email: true } } } },
     _count: { select: { members: true, memberInviteRequests: true, brainSources: true, brainArticles: true } } } });
   const article = await db.brainArticle.findUnique({ where: { workspaceId_slug: { workspaceId,
     slug: "corporate-rebels-curated-source-index-2026-08-13" } }, select: { slug: true, title: true,
@@ -113,7 +121,10 @@ async function verifySeed(db, workspaceId, rows, releaseGitSha) {
     title: "Corporate Rebels Curated Source Index — 2026-08-13", type: "DIGEST", bodyMd: indexBody(rows) };
   const sourceIds = seeded.map((source) => source.id).sort();
   if (!workspace || workspace.name !== CONTRACT.name || workspace.slug !== CONTRACT.slug
-    || workspace.plan !== "ENTERPRISE_MANAGED" || workspace._count.members
+    || workspace.plan !== "ENTERPRISE_MANAGED" || workspace._count.members !== 1
+    || workspace.members.length !== 1 || workspace.members[0].role !== "ADMIN"
+    || workspace.members[0].kind !== "SYSTEM" || workspace.members[0].isActive
+    || workspace.members[0].user.email !== canonicalWorkspaceSystemEmail(CONTRACT.slug)
     || workspace._count.memberInviteRequests || workspace._count.brainSources !== 25
     || workspace._count.brainArticles !== 1 || seeded.length !== expected.size || seen.size !== expected.size
     || invalidSource || article?.slug !== expectedArticle.slug || article.title !== expectedArticle.title
@@ -137,11 +148,10 @@ async function seedDedicated(prisma, rows, releaseGitSha, execute) {
   if (!execute) return { mode: "preflight", phase: "seed-dedicated", manifestCount: rows.length };
   return prisma.$transaction(async (tx) => {
     if ((await tx.workspace.findMany({ select: { id: true } })).length) fail("Dedicated target drifted.");
-    const workspace = await tx.workspace.create({ data: { name: CONTRACT.name, slug: CONTRACT.slug,
-      description: "Private dedicated Azure Corporate Rebels client workspace.", plan: "ENTERPRISE_MANAGED" } });
+    const workspace = await ensureCanonicalWorkspace(tx, { name: CONTRACT.name, slug: CONTRACT.slug,
+      description: "Private dedicated Azure Corporate Rebels client workspace.",
+      data: { plan: "ENTERPRISE_MANAGED" } });
     const seeded = sources(rows);
-    await tx.approvalPolicy.create({ data: { workspaceId: workspace.id, subjectType: "PROPOSAL",
-      mode: "CONSENT", quorumPercent: 0, minApproverCount: 1, decisionWindowHours: 72 } });
     await tx.brainSource.createMany({ data: seeded.map((source) => ({ ...source, workspaceId: workspace.id })) });
     await tx.brainArticle.create({ data: { workspaceId: workspace.id,
       slug: "corporate-rebels-curated-source-index-2026-08-13",

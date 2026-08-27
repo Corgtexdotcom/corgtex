@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { CONTRACT, loadManifest, parseCsv,
@@ -17,20 +18,26 @@ const databaseUrl = `postgresql://user:pass@${CONTRACT.databaseHost}/${CONTRACT.
 
 function fake(options = {}) {
   const state = { workspaces: options.workspaces ?? [],
-    sources: [], articles: [], receipts: [], policies: [] };
-  const counts = () => ({ members: options.members ?? 0, memberInviteRequests: options.invites ?? 0,
+    users: [], members: [], sources: [], articles: [], receipts: [], policies: [] };
+  const counts = () => ({ members: state.members.length, memberInviteRequests: options.invites ?? 0,
     brainSources: state.sources.length, brainArticles: state.articles.length });
   const workspace = {
     findMany: async ({ where, select }) => state.workspaces.filter((item) => !where
       || item.slug === CONTRACT.slug || item.name === CONTRACT.name)
       .map((item) => Object.fromEntries(Object.keys(select).map((key) => [key, item[key]]))),
     findUnique: async ({ where }) => { const row = state.workspaces.find((item) => item.id === where.id);
-      return row ? { ...row, _count: counts() } : null; },
-    create: async ({ data }) => { const row = { id: "11111111-1111-4111-8111-111111111111", ...data };
+      return row ? { ...row, members: state.members.map((member) => ({ ...member,
+        user: state.users.find((user) => user.id === member.userId) })), _count: counts() } : null; },
+    upsert: async ({ where, update, create }) => { const existing = state.workspaces.find((item) => item.slug === where.slug);
+      if (existing) { Object.assign(existing, update); return existing; }
+      const row = { id: "11111111-1111-4111-8111-111111111111", ...create };
       state.workspaces.push(row); return row; },
   };
   const tx = { workspace,
-    approvalPolicy: { create: async ({ data }) => { state.policies.push(data); } },
+    user: { findMany: async () => [], create: async ({ data }) => { const user = {
+      id: "22222222-2222-4222-8222-222222222222", ...data }; state.users.push(user); return user; } },
+    member: { upsert: async ({ create }) => { state.members.push(create); return create; } },
+    approvalPolicy: { createMany: async ({ data }) => { state.policies.push(...data); } },
     brainSource: { createMany: async ({ data }) => { state.sources.push(...data); },
       findMany: async ({ where }) => state.sources.filter((row) => row.workspaceId === where.workspaceId) },
     brainArticle: { create: async ({ data }) => { state.articles.push(data); },
@@ -45,6 +52,13 @@ const run = (target, extra = {}) => runCorporateRebelsDedicatedSeed({ phase: "se
   fetchFn: healthy, prisma: target.prisma, databaseUrl, ...extra });
 
 describe("Corporate Rebels dedicated seed", () => {
+  it("loads through the plain Node operational entrypoint", () => {
+    expect(() => execFileSync(process.execPath, ["-e",
+      'import("./scripts/corporate-rebels-dedicated-seed.mjs")'], {
+      cwd: new URL("..", import.meta.url), stdio: "pipe",
+    })).not.toThrow();
+  });
+
   it("pins the 25-row manifest and parses quoted commas", async () => {
     expect(await loadManifest()).toHaveLength(25);
     expect(parseCsv('a,b\n"one, two",three\n')).toEqual([{ a: "one, two", b: "three" }]);
@@ -66,8 +80,12 @@ describe("Corporate Rebels dedicated seed", () => {
   it("creates one private workspace seed and resumes without duplicates", async () => {
     const target = fake();
     const receipt = await run(target);
-    expect(receipt.workspace._count).toEqual({ members: 0, memberInviteRequests: 0,
+    expect(receipt.workspace._count).toEqual({ members: 1, memberInviteRequests: 0,
       brainSources: 25, brainArticles: 1 });
+    expect(receipt.workspace.members).toEqual([expect.objectContaining({
+      role: "ADMIN", kind: "SYSTEM", isActive: false,
+      user: expect.objectContaining({ email: "system+corporate-rebels@corgtex.local" }),
+    })]);
     expect(target.state.articles[0]).toMatchObject({ authority: "DRAFT", isPrivate: true, publishedAt: null });
     expect(target.state.sources[0].metadata.sourceUrl).toBe(target.state.sources[0].metadata.canonicalUrl);
     expect(target.state.receipts[0].meta).toEqual({ sourceCount: 25, releaseGitSha: SHA,

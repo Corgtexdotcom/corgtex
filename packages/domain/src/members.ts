@@ -9,7 +9,8 @@ import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
 import { maybeCaptureSelfServeSetupEmail } from "./self-serve-ops";
 import { renderAccountSetupEmail } from "./email-templates";
-import { humanMemberIdentityWhere, inferMemberKindFromUserIdentity, systemMemberIdentityWhere } from "./member-identity";
+import { humanMemberIdentityWhere, systemMemberIdentityWhere } from "./member-identity";
+import { assertNonReservedWorkspaceSystemEmail } from "./workspaces";
 
 export type MemberInvitePolicy = "ADMINS_ONLY" | "MEMBERS_CAN_INVITE" | "MEMBERS_CAN_REQUEST";
 
@@ -28,6 +29,16 @@ function normalizeEmail(email: string) {
 
 function normalizeDisplayName(displayName?: string | null) {
   return displayName?.trim() || null;
+}
+
+function assertGenericMemberMutationAllowed(member: { kind: MemberKind; user: { email: string } }) {
+  assertNonReservedWorkspaceSystemEmail(member.user.email);
+  invariant(
+    member.kind !== "SYSTEM",
+    409,
+    "SYSTEM_MEMBER_PROTECTED",
+    "System members can be changed only by trusted server workflows.",
+  );
 }
 
 export async function sendMemberSetupEmail(params: {
@@ -360,6 +371,10 @@ export async function createMember(actor: AppActor, params: {
   kind?: MemberKind;
   skipAdminCheck?: boolean;
 }) {
+  const email = normalizeEmail(params.email);
+  assertNonReservedWorkspaceSystemEmail(email);
+  invariant(params.kind !== "SYSTEM", 400, "INVALID_INPUT", "Member kind is assigned by trusted server workflows.");
+
   if (!params.skipAdminCheck) {
     await requireWorkspaceMembership({
       actor,
@@ -368,13 +383,31 @@ export async function createMember(actor: AppActor, params: {
     });
   }
 
-  const email = normalizeEmail(params.email);
   const displayName = normalizeDisplayName(params.displayName);
-  const kind = params.kind ?? inferMemberKindFromUserIdentity({ email, displayName });
+  const kind: MemberKind = "HUMAN";
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
   await assertTrialMemberCapacity(params.workspaceId);
 
   return prisma.$transaction(async (tx) => {
+    const existingSystemMember = await tx.member.findFirst({
+      where: {
+        kind: "SYSTEM",
+        user: {
+          email: {
+            equals: email,
+            mode: "insensitive",
+          },
+        },
+      },
+      select: { id: true },
+    });
+    invariant(
+      !existingSystemMember,
+      409,
+      "SYSTEM_MEMBER_PROTECTED",
+      "System members cannot be attached or converted by generic member workflows.",
+    );
+
     const randomPassword = randomOpaqueToken();
     const user = await tx.user.upsert({
       where: { email },
@@ -455,6 +488,8 @@ export async function inviteMember(actor: AppActor, params: {
   email: string;
   displayName?: string | null;
 }) {
+  assertNonReservedWorkspaceSystemEmail(normalizeEmail(params.email));
+
   const membership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -484,6 +519,14 @@ export async function updateMember(actor: AppActor, params: {
   displayName?: string | null;
   email?: string | null;
 }) {
+  const normalizedEmail = params.email !== undefined && params.email !== null
+    ? normalizeEmail(params.email)
+    : undefined;
+  if (normalizedEmail !== undefined) {
+    assertNonReservedWorkspaceSystemEmail(normalizedEmail);
+  }
+  invariant(params.kind === undefined, 400, "INVALID_INPUT", "Member kind is assigned by trusted server workflows.");
+
   await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -507,10 +550,10 @@ export async function updateMember(actor: AppActor, params: {
     });
 
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    assertGenericMemberMutationAllowed(member);
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
-    if (params.kind !== undefined) memberData.kind = params.kind;
     if (params.isActive !== undefined) memberData.isActive = params.isActive;
     if (params.isActive === false && !member.isActive) {
       throw new AppError(400, "INVALID_STATE", "Member is already deactivated.");
@@ -524,15 +567,13 @@ export async function updateMember(actor: AppActor, params: {
           workspaceId: params.workspaceId,
           role: "ADMIN",
           isActive: true,
+          kind: "HUMAN",
           id: { not: member.id },
         },
       });
       invariant(otherAdminCount > 0, 400, "LAST_ADMIN", "Workspace must keep at least one active admin.");
     }
 
-    const normalizedEmail = params.email !== undefined && params.email !== null
-      ? normalizeEmail(params.email)
-      : undefined;
     if (normalizedEmail !== undefined) {
       invariant(normalizedEmail.length > 0, 400, "INVALID_INPUT", "Email is required.");
     }
@@ -569,17 +610,6 @@ export async function updateMember(actor: AppActor, params: {
     if (emailChanged) {
       userData.email = normalizedEmail;
     }
-    if (params.kind === undefined && (normalizedEmail !== undefined || nextDisplayName !== undefined)) {
-      const inferredKind = inferMemberKindFromUserIdentity({
-        email: normalizedEmail ?? member.user.email,
-        displayName: nextDisplayName !== undefined ? nextDisplayName : member.user.displayName,
-      });
-      const currentKind = member.kind ?? inferMemberKindFromUserIdentity(member.user);
-      if (inferredKind !== currentKind) {
-        memberData.kind = inferredKind;
-      }
-    }
-
     if (Object.keys(userData).length > 0) {
       await tx.user.update({
         where: { id: member.userId },
@@ -662,6 +692,41 @@ export async function deactivateMember(actor: AppActor, params: {
   return updateMember(actor, { ...params, isActive: false });
 }
 
+export async function removeMember(actor: AppActor, params: {
+  workspaceId: string;
+  memberId: string;
+}) {
+  await requireWorkspaceMembership({
+    actor,
+    workspaceId: params.workspaceId,
+    allowedRoles: ["ADMIN"],
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const member = await tx.member.findUnique({
+      where: { id: params.memberId },
+      include: { user: { select: { email: true } } },
+    });
+    invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    assertGenericMemberMutationAllowed(member);
+
+    if (member.kind === "HUMAN" && member.role === "ADMIN" && member.isActive) {
+      const otherAdminCount = await tx.member.count({
+        where: {
+          workspaceId: params.workspaceId,
+          role: "ADMIN",
+          isActive: true,
+          kind: "HUMAN",
+          id: { not: member.id },
+        },
+      });
+      invariant(otherAdminCount > 0, 400, "LAST_ADMIN", "Workspace must keep at least one active admin.");
+    }
+
+    return tx.member.delete({ where: { id: member.id } });
+  });
+}
+
 export async function resendMemberAccessLink(actor: AppActor, params: {
   workspaceId: string;
   memberId: string;
@@ -678,6 +743,7 @@ export async function resendMemberAccessLink(actor: AppActor, params: {
       include: { user: { select: { id: true, email: true, displayName: true } } },
     });
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    assertGenericMemberMutationAllowed(member);
 
     const token = await issueSetupToken(tx, member.userId);
     await tx.auditLog.create({
@@ -700,6 +766,9 @@ export async function requestMemberInvite(actor: AppActor, params: {
   email: string;
   displayName?: string | null;
 }) {
+  const email = normalizeEmail(params.email);
+  assertNonReservedWorkspaceSystemEmail(email);
+
   const requesterMembership = await requireWorkspaceMembership({
     actor,
     workspaceId: params.workspaceId,
@@ -715,7 +784,6 @@ export async function requestMemberInvite(actor: AppActor, params: {
     throw new AppError(403, "FORBIDDEN", "Invite requests are not enabled for this workspace.");
   }
 
-  const email = normalizeEmail(params.email);
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
 
   const [existingActiveMember, existingPendingRequest] = await Promise.all([
@@ -787,6 +855,7 @@ export async function approveMemberInviteRequest(actor: AppActor, params: {
   });
   invariant(request && request.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Invite request not found.");
   invariant(request.status === "PENDING", 400, "INVALID_STATE", "Invite request is already decided.");
+  assertNonReservedWorkspaceSystemEmail(request.email);
 
   const result = await createMember(actor, {
     workspaceId: params.workspaceId,

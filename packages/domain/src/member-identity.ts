@@ -34,7 +34,7 @@ export function inferMemberKindFromUserIdentity(user: MemberIdentityUser): Membe
 }
 
 export function classifyMemberIdentity(input: MemberIdentityInput): MemberKind {
-  if (input?.kind === "SYSTEM") return "SYSTEM";
+  if (input?.kind) return input.kind;
   const user = identityUser(input);
   if (inferMemberKindFromUserIdentity(user) === "SYSTEM") return "SYSTEM";
   return "HUMAN";
@@ -49,29 +49,16 @@ export function isHumanMemberIdentity(input: MemberIdentityInput) {
 }
 
 export function systemMemberIdentityWhere(): Prisma.MemberWhereInput {
-  return {
-    OR: [
-      { kind: "SYSTEM" },
-      { user: { email: { startsWith: "system+", mode: "insensitive" } } },
-      { user: { email: { startsWith: "support+", mode: "insensitive" } } },
-      { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
-    ],
-  };
+  return { kind: "SYSTEM" };
 }
 
 export function systemActorMemberIdentityWhere(): Prisma.MemberWhereInput {
-  return {
-    user: {
-      email: {
-        startsWith: "system+",
-        mode: "insensitive",
-      },
-    },
-  };
+  return { kind: "SYSTEM" };
 }
 
 export function humanMemberIdentityWhere(): Prisma.MemberWhereInput {
   return {
-    NOT: [systemMemberIdentityWhere()],
+    kind: "HUMAN",
+    NOT: [{ OR: [{ kind: "SYSTEM" }] }],
   };
 }

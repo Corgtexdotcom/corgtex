@@ -7,12 +7,22 @@ function rootDir() {
     : process.cwd();
 }
 
+export function stableClientSeedCommand(root = rootDir()) {
+  return {
+    command: process.execPath,
+    args: [
+      path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+      path.join(root, "scripts", "seed-client-stable.mjs"),
+    ],
+  };
+}
+
 export async function runStableClientSeed(config: Record<string, unknown>, env: Record<string, string>) {
   const root = rootDir();
-  const seedScript = path.join(root, "scripts", "seed-client-stable.mjs");
+  const seed = stableClientSeedCommand(root);
 
   await new Promise<void>((resolve, reject) => {
-    execFile(process.execPath, [seedScript], {
+    execFile(seed.command, seed.args, {
       cwd: root,
       env: {
         ...process.env,

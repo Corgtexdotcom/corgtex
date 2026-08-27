@@ -14,6 +14,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.doUnmock("@corgtex/shared");
   vi.doUnmock("node:dns/promises");
+  vi.doUnmock("./workspaces");
   vi.clearAllMocks();
   vi.resetModules();
 });
@@ -35,6 +36,9 @@ function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record
     randomOpaqueToken: vi.fn(() => "opaque-token"),
     sha256: vi.fn((value: string) => `sha:${value}`),
     verifyPassword: vi.fn(() => true),
+  }));
+  vi.doMock("./workspaces", () => ({
+    isCanonicalWorkspaceSystemEmail: (email: string) => /^system\+[a-z0-9-]+@corgtex\.local$/i.test(email.trim()),
   }));
 }
 
@@ -775,6 +779,9 @@ describe("MCP OAuth workspace membership revalidation", () => {
         }),
         update: updateMock,
       },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ email: "user@example.com" }),
+      },
       member: {
         findUnique: vi.fn().mockResolvedValue(null),
       },
@@ -791,6 +798,135 @@ describe("MCP OAuth workspace membership revalidation", () => {
       code: "NOT_A_MEMBER",
     });
     expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects canonical identities before issuing MCP authorization codes", async () => {
+    const prismaMock = {
+      mcpOAuthAuthorizationCode: { create: vi.fn() },
+    };
+    installSharedMock(prismaMock);
+    const { issueMcpAuthorizationCode } = await import("./mcp-connector");
+
+    await expect(issueMcpAuthorizationCode({
+      kind: "user",
+      user: { id: "system-user-1", email: "system+workspace-1@corgtex.local", displayName: "System" },
+    }, {
+      clientId: "mcp_client_test",
+      workspaceId: "ws-1",
+      redirectUri: "https://client.example/callback",
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prismaMock.mcpOAuthAuthorizationCode.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects canonical MCP authorization codes before consuming them", async () => {
+    const updateMock = vi.fn();
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "client-db-1",
+          clientId: "mcp_client_test",
+          isActive: true,
+          redirectUris: ["https://client.example/callback"],
+          scopes: ["workspace:read"],
+        }),
+      },
+      mcpOAuthAuthorizationCode: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "code-1",
+          clientId: "client-db-1",
+          userId: "system-user-1",
+          workspaceId: "ws-1",
+          instanceSlug: "corgtex",
+          redirectUri: "https://client.example/callback",
+          scopes: ["workspace:read"],
+          resource: "https://app.test/mcp",
+          codeChallenge: "challenge",
+          codeChallengeMethod: "S256",
+          usedAt: null,
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+        update: updateMock,
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ email: "system+workspace-1@corgtex.local" }),
+      },
+    };
+    installSharedMock(prismaMock);
+    const { exchangeMcpAuthorizationCode } = await import("./mcp-connector");
+
+    await expect(exchangeMcpAuthorizationCode({
+      code: "mcp_code_value",
+      clientId: "mcp_client_test",
+      redirectUri: "https://client.example/callback",
+      codeVerifier: "verifier",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects canonical MCP refresh tokens before rotation", async () => {
+    const updateMock = vi.fn();
+    const prismaMock = {
+      mcpOAuthClient: {
+        findUnique: vi.fn().mockResolvedValue({ id: "client-db-1", clientId: "mcp_client_test", isActive: true }),
+      },
+      mcpOAuthAccessToken: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "token-1",
+          clientId: "client-db-1",
+          userId: "system-user-1",
+          workspaceId: "ws-1",
+          instanceSlug: "corgtex",
+          scopes: ["workspace:read"],
+          refreshExpiresAt: new Date(Date.now() + 60_000),
+          revokedAt: null,
+        }),
+        update: updateMock,
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ email: "system+workspace-1@corgtex.local" }),
+      },
+    };
+    installSharedMock(prismaMock);
+    const { refreshMcpAccessToken } = await import("./mcp-connector");
+
+    await expect(refreshMcpAccessToken({
+      refreshToken: "mcp_rt_value",
+      clientId: "mcp_client_test",
+    })).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves canonical MCP access tokens to null before membership checks", async () => {
+    const memberLookup = vi.fn();
+    const prismaMock = {
+      mcpOAuthAccessToken: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "token-1",
+          userId: "system-user-1",
+          workspaceId: "ws-1",
+          instanceSlug: "corgtex",
+          scopes: ["workspace:read"],
+          resource: "https://app.test/mcp",
+          expiresAt: new Date(Date.now() + 60_000),
+          revokedAt: null,
+          client: { clientId: "mcp_client_test", name: "Client", redirectUris: [], isActive: true },
+          user: {
+            id: "system-user-1",
+            email: "system+workspace-1@corgtex.local",
+            displayName: "System",
+            globalRole: "USER",
+          },
+        }),
+      },
+      member: { findUnique: memberLookup },
+    };
+    installSharedMock(prismaMock);
+    const { resolveMcpOAuthAccessToken } = await import("./mcp-connector");
+
+    await expect(resolveMcpOAuthAccessToken("mcp_at_value")).resolves.toBeNull();
+    expect(memberLookup).not.toHaveBeenCalled();
   });
 });
 

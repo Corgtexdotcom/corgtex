@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
+import { isCanonicalWorkspaceSystemEmail } from "./workspaces";
 
 const DEFAULT_GPT_OAUTH_SCOPES = ["chat", "read", "write"];
 const GPT_OAUTH_SCOPES = new Set(DEFAULT_GPT_OAUTH_SCOPES);
@@ -141,6 +142,9 @@ export async function issueAuthorizationCode(actor: AppActor, params: {
   if (actor.kind !== "user") {
     throw new AppError(403, "FORBIDDEN", "Only users can complete OAuth flows");
   }
+  if (isCanonicalWorkspaceSystemEmail(actor.user.email)) {
+    throw new AppError(403, "FORBIDDEN", "Workspace system identities cannot complete OAuth flows.");
+  }
 
   const app = await getOAuthAppByClientId(params.clientId);
 
@@ -216,6 +220,14 @@ export async function exchangeAuthorizationCode(params: {
 
   if (authCode.redirectUri !== params.redirectUri) {
     throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
+  }
+
+  const authCodeUser = await prisma.user.findUnique({
+    where: { id: authCode.userId },
+    select: { email: true },
+  });
+  if (!authCodeUser || isCanonicalWorkspaceSystemEmail(authCodeUser.email)) {
+    throw new AppError(400, "INVALID_INPUT", "Invalid authorization code.");
   }
 
   // Mark code as used
@@ -301,6 +313,14 @@ export async function refreshAccessToken(params: {
     throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
   }
 
+  const tokenUser = await prisma.user.findUnique({
+    where: { id: token.userId },
+    select: { email: true },
+  });
+  if (!tokenUser || isCanonicalWorkspaceSystemEmail(tokenUser.email)) {
+    throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+  }
+
   const accessTokenToken = `at_${randomOpaqueToken()}`;
   const refreshTokenToken = `rt_${randomOpaqueToken()}`; // Optional: rotating refresh tokens
 
@@ -359,7 +379,7 @@ export async function resolveOAuthAccessToken(tokenString: string) {
     where: { id: token.userId },
   });
 
-  if (!user) return null;
+  if (!user || isCanonicalWorkspaceSystemEmail(user.email)) return null;
 
   const actor: AppActor = {
     kind: "user",

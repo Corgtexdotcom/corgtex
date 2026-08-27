@@ -42,6 +42,9 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    user: {
+      findUnique: vi.fn(),
+    },
     auditLog: {
       create: vi.fn(),
     },
@@ -220,6 +223,43 @@ function assignmentFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function liveAppUserFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "user-1",
+    email: "user@example.com",
+    displayName: "User",
+    memberships: [{
+      id: "member-1",
+      role: "ADMIN",
+      kind: "HUMAN",
+      isActive: true,
+      mergedAt: null,
+      mergedIntoMemberId: null,
+    }],
+    ...overrides,
+  };
+}
+
+function appSessionFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "session-1",
+    workspaceId: "workspace-1",
+    appInstallationId: "installation-1",
+    actorUserId: "user-1",
+    audience: "finance-suite",
+    tokenHash: "hash:launch-token",
+    scopes: ["finance:read"],
+    payloadJson: { ok: true },
+    expiresAt: new Date(now.getTime() + 60_000),
+    consumedAt: null,
+    revokedAt: null,
+    createdAt: now,
+    lastUsedAt: null,
+    appInstallation: installationFixture(),
+    ...overrides,
+  };
+}
+
 describe("enterprise app platform", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -254,6 +294,7 @@ describe("enterprise app platform", () => {
     prismaMock.appSession.create.mockResolvedValue({ id: "session-1" });
     prismaMock.appSession.update.mockResolvedValue({});
     prismaMock.appSession.updateMany.mockResolvedValue({ count: 2 });
+    prismaMock.user.findUnique.mockResolvedValue(liveAppUserFixture());
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       if (url.includes(".well-known")) {
         return Response.json({
@@ -1263,6 +1304,52 @@ describe("enterprise app platform", () => {
         scopes: ["workspace:read", "brain:read", "finance:read", "finance:write"],
       }),
     }));
+    expect(prismaMock.user.findUnique).toHaveBeenCalledWith({
+      where: { id: "user-1" },
+      select: expect.objectContaining({
+        email: true,
+        memberships: expect.objectContaining({
+          where: { workspaceId: "workspace-1" },
+        }),
+      }),
+    });
+  });
+
+  it("revalidates stale user input immediately before issuing an app session", async () => {
+    const { issueEnterpriseAppSession } = await import("./enterprise-apps");
+    prismaMock.user.findUnique.mockResolvedValueOnce(liveAppUserFixture({
+      email: "system+workspace-1@corgtex.local",
+    }));
+
+    await expect(issueEnterpriseAppSession(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+    })).rejects.toMatchObject({ code: "INVALID_APP_SESSION_ACTOR" });
+
+    expect(prismaMock.appSession.create).not.toHaveBeenCalled();
+  });
+
+  it("preserves app sessions for an active noncanonical support member", async () => {
+    const { issueEnterpriseAppSession } = await import("./enterprise-apps");
+    prismaMock.user.findUnique.mockResolvedValueOnce(liveAppUserFixture({
+      email: "support+session@corgtex.local",
+      memberships: [{
+        id: "support-member-1",
+        role: "ADMIN",
+        kind: "SYSTEM",
+        isActive: true,
+        mergedAt: null,
+        mergedIntoMemberId: null,
+      }],
+    }));
+
+    await expect(issueEnterpriseAppSession(actor, {
+      workspaceId: "workspace-1",
+      appInstallationId: "installation-1",
+    })).resolves.toMatchObject({
+      payload: { user: { id: "user-1", role: "ADMIN" } },
+    });
+    expect(prismaMock.appSession.create).toHaveBeenCalledTimes(1);
   });
 
   it("invokes installed app MCP with a scoped app session and audit", async () => {
@@ -1509,5 +1596,99 @@ describe("enterprise app platform", () => {
       appInstallation: installationFixture(),
     });
     await expect(consumeEnterpriseAppSessionToken({ token: "revoked" })).rejects.toMatchObject({ code: "TOKEN_REVOKED" });
+  });
+
+  it("rejects app tokens after their user loses current workspace eligibility", async () => {
+    const { consumeEnterpriseAppSessionToken } = await import("./enterprise-apps");
+    const invalidActors = [
+      liveAppUserFixture({ email: "system+workspace-1@corgtex.local" }),
+      liveAppUserFixture({
+        memberships: [{
+          id: "member-1",
+          role: "ADMIN",
+          kind: "HUMAN",
+          isActive: false,
+          mergedAt: null,
+          mergedIntoMemberId: null,
+        }],
+      }),
+      liveAppUserFixture({
+        memberships: [{
+          id: "member-1",
+          role: "ADMIN",
+          kind: "HUMAN",
+          isActive: true,
+          mergedAt: now,
+          mergedIntoMemberId: "member-2",
+        }],
+      }),
+      liveAppUserFixture({ memberships: [] }),
+    ];
+
+    for (const invalidActor of invalidActors) {
+      prismaMock.appSession.findUnique.mockResolvedValueOnce(appSessionFixture());
+      prismaMock.user.findUnique.mockResolvedValueOnce(invalidActor);
+      await expect(consumeEnterpriseAppSessionToken({
+        token: "launch-token",
+        audience: "finance-suite",
+      })).rejects.toMatchObject({ code: "INVALID_APP_SESSION_ACTOR" });
+    }
+
+    expect(prismaMock.appSession.update).not.toHaveBeenCalled();
+  });
+
+  it("returns current user identity and role when consuming an existing app token", async () => {
+    const { consumeEnterpriseAppSessionToken } = await import("./enterprise-apps");
+    prismaMock.appSession.findUnique.mockResolvedValueOnce(appSessionFixture({
+      payloadJson: {
+        workspaceId: "workspace-1",
+        user: {
+          id: "user-1",
+          email: "old@example.com",
+          displayName: "Old Name",
+          role: "ADMIN",
+        },
+      },
+    }));
+    prismaMock.user.findUnique.mockResolvedValueOnce(liveAppUserFixture({
+      email: "current@example.com",
+      displayName: "Current Name",
+      memberships: [{
+        id: "member-1",
+        role: "CONTRIBUTOR",
+        kind: "HUMAN",
+        isActive: true,
+        mergedAt: null,
+        mergedIntoMemberId: null,
+      }],
+    }));
+
+    await expect(consumeEnterpriseAppSessionToken({
+      token: "launch-token",
+      audience: "finance-suite",
+    })).resolves.toMatchObject({
+      payload: {
+        workspaceId: "workspace-1",
+        user: {
+          id: "user-1",
+          email: "current@example.com",
+          displayName: "Current Name",
+          role: "CONTRIBUTOR",
+        },
+      },
+    });
+  });
+
+  it("preserves enterprise app tokens that have no user actor", async () => {
+    const { consumeEnterpriseAppSessionToken } = await import("./enterprise-apps");
+    prismaMock.appSession.findUnique.mockResolvedValueOnce(appSessionFixture({ actorUserId: null }));
+
+    await expect(consumeEnterpriseAppSessionToken({
+      token: "launch-token",
+      audience: "finance-suite",
+    })).resolves.toMatchObject({ sessionId: "session-1" });
+
+    expect(prismaMock.user.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.appSession.update).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,8 @@
 import { PrismaClient } from "@prisma/client";
+import {
+  assertNonReservedWorkspaceSystemEmail,
+  ensureCanonicalWorkspace,
+} from "../packages/domain/src/workspaces.ts";
 import { randomBytes, scryptSync } from "node:crypto";
 
 const prisma = new PrismaClient();
@@ -2332,13 +2336,17 @@ async function refreshAdviceDeliberationEntries(proposal, records) {
 
 async function main() {
   console.log("Starting J&J Demo Workspace Seed...");
+  for (const teamMember of TEAM_MEMBERS) {
+    assertNonReservedWorkspaceSystemEmail(teamMember.email);
+  }
 
   // 1. Create Workspace
-  const workspace = await prisma.workspace.upsert({
-    where: { slug: WORKSPACE_SLUG },
+  const workspace = await prisma.$transaction((tx) => ensureCanonicalWorkspace(tx, {
+    slug: WORKSPACE_SLUG,
+    name: WORKSPACE_NAME,
+    description: WORKSPACE_DESC,
     update: { name: WORKSPACE_NAME, description: WORKSPACE_DESC },
-    create: { slug: WORKSPACE_SLUG, name: WORKSPACE_NAME, description: WORKSPACE_DESC }
-  });
+  }));
   const wsId = workspace.id;
   console.log(`✅ Workspace created: ${WORKSPACE_NAME}`);
 

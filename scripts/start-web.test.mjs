@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import path from "node:path";
 import {
   configuredSeedScripts,
   flagEnabled,
   localMigrationNames,
   resolveStartupMode,
+  seedCommand,
   startupPlanForMode,
   verifyMigrations,
 } from "./start-web.mjs";
@@ -105,6 +107,19 @@ describe("start-web startup modes", () => {
       "scripts/seed-b.mjs",
       "scripts/seed-jnj-demo.mjs",
     ]);
+  });
+
+  it("runs base and explicit seeds through the pinned tsx runtime", () => {
+    expect(seedCommand("prisma/seed.mjs", "/app")).toEqual({
+      command: process.execPath,
+      args: [
+        path.join("/app", "node_modules", "tsx", "dist", "cli.mjs"),
+        path.join("/app", "prisma", "seed.mjs"),
+      ],
+    });
+    expect(seedCommand("scripts/seed-jnj-demo.mjs", "/app").args[1]).toBe(
+      path.join("/app", "scripts", "seed-jnj-demo.mjs"),
+    );
   });
 
   it("does not add the internal validation seed implicitly for production web startup", () => {

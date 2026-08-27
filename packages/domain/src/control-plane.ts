@@ -40,6 +40,7 @@ import { isKnownScope, type AgentScope } from "./agent-auth";
 import { compareAndSetFinanceConfig, financeConfigIdentity, FINANCE_PARENT_FLAG } from "./finance";
 import { getModuleManifests, listModuleFlagKeys, listWorkspaceFeatureFlagDefinitions } from "./modules";
 import type { FeatureFlagDefinition, WorkspaceFeatureFlagKey } from "./modules";
+import { assertNonReservedWorkspaceSystemEmail, createCanonicalWorkspace } from "./workspaces";
 import {
   getMissingPostDeployReadProbeScopes,
   getRequiredScopesForPostDeployReadProbe,
@@ -1313,31 +1314,11 @@ async function createSharedClientWorkspace(params: {
   description?: string | null;
 }) {
   return prisma.$transaction(async (tx) => {
-    const existing = await tx.workspace.findUnique({ where: { slug: params.slug } });
-    invariant(!existing, 409, "CONFLICT", "A workspace with this slug already exists.");
-
-    const workspace = await tx.workspace.create({
-      data: {
-        name: params.label,
-        slug: params.slug,
-        description: params.description ?? null,
-      },
+    return createCanonicalWorkspace(tx, {
+      name: params.label,
+      slug: params.slug,
+      description: params.description,
     });
-
-    await tx.approvalPolicy.createMany({
-      data: [
-        {
-          workspaceId: workspace.id,
-          subjectType: "PROPOSAL",
-          mode: "CONSENT",
-          quorumPercent: 0,
-          minApproverCount: 1,
-          decisionWindowHours: 72,
-        },
-      ],
-    });
-
-    return workspace;
   });
 }
 
@@ -1476,6 +1457,9 @@ export async function createControlPlaneClient(actor: AppActor, params: {
 
   if (mode === "shared_workspace") {
     const initialAdmins = normalizeInitialAdmins(params.initialAdmins);
+    for (const admin of initialAdmins) {
+      assertNonReservedWorkspaceSystemEmail(admin.email);
+    }
     const workspace = await createSharedClientWorkspace({
       label,
       slug: customerSlug,
