@@ -317,6 +317,36 @@ describe("GET /api/health", () => {
     });
   });
 
+  it("fails closed when the image SHA stamp is present but configured release SHA is missing", async () => {
+    const { GET } = await import("./route");
+    const gitSha = "a".repeat(40);
+    fsMock.existsSync.mockImplementation((filePath?: unknown) => String(filePath).endsWith(".corgtex-release-git-sha"));
+    fsMock.readFileSync.mockReturnValue(`${gitSha}\n`);
+    process.env.RAILWAY_GIT_COMMIT_SHA = gitSha;
+    queryRaw
+      .mockResolvedValueOnce([{ ok: 1 }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      status: "degraded",
+      release: {
+        configured: { gitSha: null },
+        image: { gitSha, source: "image_stamp", valid: false },
+        drift: {
+          imageGitSha: true,
+          details: expect.arrayContaining([
+            `configured.gitSha=missing does not match image.gitSha=${gitSha}`,
+          ]),
+        },
+      },
+    });
+  });
+
   it("looks for the image SHA stamp at the container root when running from the web app cwd", async () => {
     const { GET } = await import("./route");
     queryRaw

@@ -30,14 +30,14 @@ services:
       context: .
       dockerfile: deploy/Dockerfile.web
       args:
-        CORGTEX_RELEASE_GIT_SHA: ${CORGTEX_RELEASE_GIT_SHA:?set CORGTEX_RELEASE_GIT_SHA to a 40-hex git SHA}
+        CORGTEX_RELEASE_GIT_SHA: "${CORGTEX_RELEASE_GIT_SHA:-}"
     ports:
       - "3000:3000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/corgtex?schema=public
       REDIS_URL: redis://redis:6379
       APP_URL: http://localhost:3000
-      CORGTEX_RELEASE_GIT_SHA: ${CORGTEX_RELEASE_GIT_SHA:?set CORGTEX_RELEASE_GIT_SHA to a 40-hex git SHA}
+      CORGTEX_RELEASE_GIT_SHA: "${CORGTEX_RELEASE_GIT_SHA:-}"
       SESSION_COOKIE_SECRET: docker-dev-secret-change-in-production
       MODEL_PROVIDER: fake
       AGENT_KILL_SWITCH: "false"

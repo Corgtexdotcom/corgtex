@@ -3,8 +3,11 @@ import type { AppActor } from "@corgtex/shared";
 import { getPrismaClient } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { archiveWorkspaceArtifact, restoreWorkspaceArtifact } from "./archive";
+import { updateAction } from "./actions";
+import { updateGoal } from "./goals";
 import {
   PR976_ACTION_GOAL_OPERATION_KEY,
+  PR976_ACTION_BASELINE_BODY,
   PR976_ACTION_PROVEN_BODY,
   PR976_GOAL_PROVEN_PROGRESS,
   PR976_SYNTHETIC_MARKER,
@@ -62,13 +65,17 @@ async function proveProvisionedFeature(actor: AppActor, workflowRunId: string) {
   });
   const { actionId, goalId } = provisioned.receipt;
   if (!actionId || !goalId) throw new Error("Provisioned receipt missing Action or Goal.");
-  await prisma.action.update({
-    where: { id: actionId },
-    data: { bodyMd: PR976_ACTION_PROVEN_BODY, version: { increment: 1 } },
+  await updateAction(actor, {
+    workspaceId: provisioned.receipt.workspaceId,
+    actionId,
+    bodyMd: PR976_ACTION_PROVEN_BODY,
+    expectedVersion: provisioned.receipt.actionBaselineVersion ?? undefined,
   });
-  await prisma.goal.update({
-    where: { id: goalId },
-    data: { progressPercent: PR976_GOAL_PROVEN_PROGRESS, version: { increment: 1 } },
+  await updateGoal(actor, {
+    workspaceId: provisioned.receipt.workspaceId,
+    goalId,
+    progressPercent: PR976_GOAL_PROVEN_PROGRESS,
+    expectedVersion: provisioned.receipt.goalBaselineVersion ?? undefined,
   });
   await recordPr976ActionGoalFeatureProof(actor, {
     operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
@@ -80,6 +87,85 @@ async function proveProvisionedFeature(actor: AppActor, workflowRunId: string) {
     goalObservedVersion: 2,
   });
   return provisioned;
+}
+
+async function expectCanonicalTargetVersion(params: {
+  workspaceId: string;
+  entityType: "Action" | "Goal";
+  entityId: string;
+  expectedPreviousState: Record<string, unknown>;
+  changedFields: string[];
+}) {
+  const rows = await prisma.workItemVersion.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      entityType: params.entityType,
+      entityId: params.entityId,
+    },
+    orderBy: { version: "asc" },
+  });
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    workspaceId: params.workspaceId,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    version: 1,
+    changedFields: params.changedFields,
+    source: "WEB",
+  });
+  expect(rows[0]?.previousState).toEqual(params.expectedPreviousState);
+  return rows[0]!;
+}
+
+async function expectCanonicalProofVersions(workspaceId: string, actionId: string, goalId: string, userId: string) {
+  const action = await prisma.action.findUniqueOrThrow({ where: { id: actionId } });
+  const goal = await prisma.goal.findUniqueOrThrow({ where: { id: goalId } });
+  await expectCanonicalTargetVersion({
+    workspaceId,
+    entityType: "Action",
+    entityId: actionId,
+    changedFields: ["bodyMd"],
+    expectedPreviousState: {
+      id: actionId,
+      workspaceId,
+      title: `${PR976_SYNTHETIC_MARKER}:Action`,
+      bodyMd: PR976_ACTION_BASELINE_BODY,
+      priority: 0,
+      circleId: null,
+      assigneeMemberId: null,
+      dueAt: null,
+      proposalId: null,
+      status: "DRAFT",
+      version: 1,
+    },
+  });
+  await expectCanonicalTargetVersion({
+    workspaceId,
+    entityType: "Goal",
+    entityId: goalId,
+    changedFields: ["progressPercent"],
+    expectedPreviousState: {
+      id: goalId,
+      workspaceId,
+      title: `${PR976_SYNTHETIC_MARKER}:Goal`,
+      descriptionMd: PR976_SYNTHETIC_MARKER,
+      level: "COMPANY",
+      cadence: "QUARTERLY",
+      progressPercent: 0,
+      targetDate: null,
+      startDate: null,
+      parentGoalId: null,
+      circleId: null,
+      ownerMemberId: null,
+      authorUserId: userId,
+      isPrivate: true,
+      publishedAt: null,
+      status: "DRAFT",
+      version: 1,
+    },
+  });
+  expect(action.version).toBe(2);
+  expect(goal.version).toBe(2);
 }
 
 describe("ProductionValidationReceipt integration", () => {
@@ -276,7 +362,7 @@ describe("ProductionValidationReceipt integration", () => {
   });
 
   it("keeps prior target cleanup committed when a later target blocks", async () => {
-    const { actor, memberId } = await createValidationAdmin();
+    const { actor, workspaceId, userId, memberId } = await createValidationAdmin();
     const provisioned = await provisionPr976ActionGoalValidation(actor, {
       operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
       deployedSha: "1".repeat(40),
@@ -287,13 +373,17 @@ describe("ProductionValidationReceipt integration", () => {
     const { actionId, goalId } = provisioned.receipt;
     if (!actionId || !goalId) throw new Error("Provisioned receipt missing Action or Goal.");
 
-    await prisma.action.update({
-      where: { id: actionId },
-      data: { bodyMd: PR976_ACTION_PROVEN_BODY, version: { increment: 1 } },
+    await updateAction(actor, {
+      workspaceId: provisioned.receipt.workspaceId,
+      actionId,
+      bodyMd: PR976_ACTION_PROVEN_BODY,
+      expectedVersion: provisioned.receipt.actionBaselineVersion ?? undefined,
     });
-    await prisma.goal.update({
-      where: { id: goalId },
-      data: { progressPercent: PR976_GOAL_PROVEN_PROGRESS, version: { increment: 1 } },
+    await updateGoal(actor, {
+      workspaceId: provisioned.receipt.workspaceId,
+      goalId,
+      progressPercent: PR976_GOAL_PROVEN_PROGRESS,
+      expectedVersion: provisioned.receipt.goalBaselineVersion ?? undefined,
     });
     await prisma.goalUpdate.create({
       data: {
@@ -312,6 +402,7 @@ describe("ProductionValidationReceipt integration", () => {
       goalObservedProgress: PR976_GOAL_PROVEN_PROGRESS,
       goalObservedVersion: 2,
     });
+    await expectCanonicalProofVersions(workspaceId, actionId, goalId, userId);
 
     const terminalized = await terminalizePr976ActionGoalValidation(actor, {
       operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
@@ -329,6 +420,12 @@ describe("ProductionValidationReceipt integration", () => {
     expect(goal.archivedAt).toBeNull();
     await expect(prisma.workspaceArchiveRecord.count({
       where: { entityType: "Action", entityId: actionId },
+    })).resolves.toBe(1);
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Action", entityId: actionId },
+    })).resolves.toBe(0);
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Goal", entityId: goalId },
     })).resolves.toBe(1);
     const receipt = await prisma.productionValidationReceipt.findUniqueOrThrow({
       where: {
@@ -738,6 +835,9 @@ describe("ProductionValidationReceipt integration", () => {
     expect(terminalized.receipt.outcome).toBe("PENDING");
     expect(terminalized.receipt.actionState).toBe("FEATURE_PROVEN");
     expect(terminalized.receipt.failureCode).toBe("RETRYABLE_TARGET_CLEANUP_FAILED");
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Action", entityId: actionId },
+    })).resolves.toBe(1);
     await expect(prisma.action.findUniqueOrThrow({
       where: { id: actionId },
       select: { archivedAt: true },
@@ -768,10 +868,100 @@ describe("ProductionValidationReceipt integration", () => {
     expect(retried.receipt.outcome).toBe("PENDING");
     expect(retried.receipt.actionState).toBe("CLEANED");
     expect(retried.receipt.failureCode).toBeNull();
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Action", entityId: actionId },
+    })).resolves.toBe(0);
     await expect(prisma.action.findUniqueOrThrow({
       where: { id: actionId },
       select: { archivedAt: true },
     })).resolves.toMatchObject({ archivedAt: expect.any(Date) });
+  });
+
+  it("deletes only canonical receipt Action and Goal version rows after successful cleanup", async () => {
+    const { actor, workspaceId, userId } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "118");
+    const { actionId, goalId } = provisioned.receipt;
+    if (!actionId || !goalId) throw new Error("Provisioned receipt missing Action or Goal.");
+    await expectCanonicalProofVersions(workspaceId, actionId, goalId, userId);
+    const unrelatedAction = await prisma.action.create({
+      data: {
+        workspaceId,
+        authorUserId: userId,
+        title: "Unrelated action",
+        bodyMd: "before",
+        status: "DRAFT",
+        isPrivate: true,
+      },
+    });
+    await prisma.workItemVersion.create({
+      data: {
+        workspaceId,
+        entityType: "Action",
+        entityId: unrelatedAction.id,
+        version: 1,
+        changedFields: ["bodyMd"],
+        previousState: { bodyMd: "before" },
+        actorUserId: userId,
+        actorLabel: "Production Validation Admin",
+        source: "WEB",
+      },
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "118",
+      workflowRunAttempt: 1,
+      mode: "all",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("COMPLETED");
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Action", entityId: actionId },
+    })).resolves.toBe(0);
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Goal", entityId: goalId },
+    })).resolves.toBe(0);
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Action", entityId: unrelatedAction.id },
+    })).resolves.toBe(1);
+  });
+
+  it("blocks target cleanup without archive or history deletion when receipt target history is unexpected", async () => {
+    const { actor, workspaceId } = await createValidationAdmin();
+    const provisioned = await proveProvisionedFeature(actor, "119");
+    const actionId = provisioned.receipt.actionId;
+    if (!actionId) throw new Error("Provisioned receipt missing Action.");
+    await prisma.workItemVersion.create({
+      data: {
+        workspaceId,
+        entityType: "Action",
+        entityId: actionId,
+        version: 2,
+        changedFields: ["priority"],
+        previousState: { priority: 0 },
+        source: "WEB",
+      },
+    });
+
+    const terminalized = await terminalizePr976ActionGoalValidation(actor, {
+      operationKey: PR976_ACTION_GOAL_OPERATION_KEY,
+      workflowRunId: "119",
+      workflowRunAttempt: 1,
+      mode: "action",
+    });
+
+    expect(terminalized.receipt.outcome).toBe("BLOCKED");
+    expect(terminalized.receipt.actionState).toBe("BLOCKED");
+    await expect(prisma.workspaceArchiveRecord.count({
+      where: { workspaceId, entityType: "Action", entityId: actionId },
+    })).resolves.toBe(0);
+    await expect(prisma.action.findUniqueOrThrow({
+      where: { id: actionId },
+      select: { archivedAt: true },
+    })).resolves.toEqual({ archivedAt: null });
+    await expect(prisma.workItemVersion.count({
+      where: { workspaceId, entityType: "Action", entityId: actionId },
+    })).resolves.toBe(2);
   });
 
   it("allows failure-only cleanup but requires both proofs for successful all-mode cleanup", async () => {

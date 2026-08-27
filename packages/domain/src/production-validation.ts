@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { Prisma, type ProductionValidationLifecycleState, type ProductionValidationOutcome } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
@@ -23,6 +24,10 @@ type ValidationReceipt = Prisma.ProductionValidationReceiptGetPayload<Record<str
 type TargetCleanupResult = {
   state: ProductionValidationLifecycleState;
   archiveRecordId: string | null;
+};
+
+type CleanupTargetHistory = {
+  id: string | null;
 };
 
 type ActionDerivedWorkState = {
@@ -535,6 +540,65 @@ function allZero(values: Record<string, number>) {
   return Object.values(values).every((value) => value === 0);
 }
 
+function jsonEqual(left: unknown, right: unknown) {
+  return isDeepStrictEqual(left, JSON.parse(JSON.stringify(right)));
+}
+
+async function readCanonicalTargetHistory(
+  tx: Prisma.TransactionClient,
+  params: {
+    workspaceId: string;
+    entityType: "Action" | "Goal";
+    entityId: string;
+    baselineVersion: number | null;
+    changedFields: string[];
+    previousState: Prisma.InputJsonValue;
+    required: boolean;
+  },
+): Promise<CleanupTargetHistory | null> {
+  await acquireWorkItemAdvisoryLock(tx, params.entityType, params.entityId);
+  const history = await tx.workItemVersion.findMany({
+    where: {
+      workspaceId: params.workspaceId,
+      entityType: params.entityType,
+      entityId: params.entityId,
+    },
+    orderBy: { version: "asc" },
+    select: {
+      id: true,
+      workspaceId: true,
+      entityType: true,
+      entityId: true,
+      version: true,
+      changedFields: true,
+      previousState: true,
+      source: true,
+    },
+  });
+  if (!params.required) return history.length === 0 ? { id: null } : null;
+  if (params.baselineVersion === null) return null;
+  if (history.length !== 1) return null;
+  const [row] = history;
+  if (!row) return null;
+  const canonical = row.workspaceId === params.workspaceId
+    && row.entityType === params.entityType
+    && row.entityId === params.entityId
+    && row.version === params.baselineVersion
+    && row.source === "WEB"
+    && jsonEqual(row.changedFields, params.changedFields)
+    && jsonEqual(row.previousState, params.previousState);
+  return canonical ? { id: row.id } : null;
+}
+
+async function deleteCanonicalTargetHistory(
+  tx: Prisma.TransactionClient,
+  history: CleanupTargetHistory,
+) {
+  if (history.id === null) return;
+  const deleted = await tx.workItemVersion.deleteMany({ where: { id: history.id } });
+  invariant(deleted.count === 1, 409, "TARGET_HISTORY_CHANGED", "Production validation target history changed during cleanup.");
+}
+
 function terminalOutcome(states: {
   actionState: ProductionValidationLifecycleState;
   goalState: ProductionValidationLifecycleState;
@@ -564,9 +628,31 @@ async function terminalizeAction(
   const action = await tx.action.findUnique({ where: { id: receipt.actionId } });
   const counts = await actionCleanupRelations(tx, receipt.workspaceId, receipt.actionId);
   const expectedBody = receipt.failureCode ? [PR976_ACTION_BASELINE_BODY, PR976_ACTION_PROVEN_BODY] : [PR976_ACTION_PROVEN_BODY];
+  const proven = action?.bodyMd === PR976_ACTION_PROVEN_BODY;
   const expectedVersion = receipt.failureCode && action?.bodyMd === PR976_ACTION_BASELINE_BODY
     ? receipt.actionBaselineVersion
     : receipt.actionBaselineVersion! + 1;
+  const targetHistory = action ? await readCanonicalTargetHistory(tx, {
+    workspaceId: receipt.workspaceId,
+    entityType: "Action",
+    entityId: receipt.actionId,
+    baselineVersion: receipt.actionBaselineVersion,
+    changedFields: ["bodyMd"],
+    previousState: {
+      id: action.id,
+      workspaceId: action.workspaceId,
+      title: action.title,
+      bodyMd: PR976_ACTION_BASELINE_BODY,
+      priority: action.priority,
+      circleId: action.circleId,
+      assigneeMemberId: action.assigneeMemberId,
+      dueAt: action.dueAt,
+      proposalId: action.proposalId,
+      status: action.status,
+      version: receipt.actionBaselineVersion,
+    },
+    required: proven,
+  }) : null;
   const canArchive = action
     && action.workspaceId === receipt.workspaceId
     && action.title === syntheticTitle("Action")
@@ -575,10 +661,12 @@ async function terminalizeAction(
     && action.isPrivate
     && action.version === expectedVersion
     && !action.archivedAt
-    && allZero(counts);
+    && allZero(counts)
+    && targetHistory;
   if (!canArchive) return { state: "BLOCKED" as const, archiveRecordId: null };
   await clearActionDerivedWork(tx, receipt.workspaceId, receipt.actionId);
   const archivedAt = new Date();
+  await deleteCanonicalTargetHistory(tx, targetHistory);
   await tx.action.update({
     where: { id: action.id, workspaceId: receipt.workspaceId, archivedAt: null, version: action.version },
     data: {
@@ -619,9 +707,37 @@ async function terminalizeGoal(
   const expectedProgress = receipt.failureCode && goal?.progressPercent === 0
     ? 0
     : PR976_GOAL_PROVEN_PROGRESS;
+  const proven = goal?.progressPercent === PR976_GOAL_PROVEN_PROGRESS;
   const expectedVersion = receipt.failureCode && goal?.progressPercent === 0
     ? receipt.goalBaselineVersion
     : receipt.goalBaselineVersion! + 1;
+  const targetHistory = goal ? await readCanonicalTargetHistory(tx, {
+    workspaceId: receipt.workspaceId,
+    entityType: "Goal",
+    entityId: receipt.goalId,
+    baselineVersion: receipt.goalBaselineVersion,
+    changedFields: ["progressPercent"],
+    previousState: {
+      id: goal.id,
+      workspaceId: goal.workspaceId,
+      title: goal.title,
+      descriptionMd: goal.descriptionMd,
+      level: goal.level,
+      cadence: goal.cadence,
+      progressPercent: 0,
+      targetDate: goal.targetDate,
+      startDate: goal.startDate,
+      parentGoalId: goal.parentGoalId,
+      circleId: goal.circleId,
+      ownerMemberId: goal.ownerMemberId,
+      authorUserId: goal.authorUserId,
+      isPrivate: goal.isPrivate,
+      publishedAt: goal.publishedAt,
+      status: goal.status,
+      version: receipt.goalBaselineVersion,
+    },
+    required: proven,
+  }) : null;
   const canArchive = goal
     && goal.workspaceId === receipt.workspaceId
     && goal.title === syntheticTitle("Goal")
@@ -631,9 +747,11 @@ async function terminalizeGoal(
     && goal.progressPercent === expectedProgress
     && goal.version === expectedVersion
     && !goal.archivedAt
-    && allZero(counts);
+    && allZero(counts)
+    && targetHistory;
   if (!canArchive) return { state: "BLOCKED" as const, archiveRecordId: null };
   const archivedAt = new Date();
+  await deleteCanonicalTargetHistory(tx, targetHistory);
   await tx.goal.update({
     where: { id: goal.id, workspaceId: receipt.workspaceId, archivedAt: null, version: goal.version },
     data: {
