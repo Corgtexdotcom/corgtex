@@ -54,9 +54,12 @@ function parseSetCookie(setCookie) {
   return setCookie.split(", ").find((part) => part.includes("corgtex"))?.split(";")[0] ?? setCookie.split(";")[0];
 }
 
-function parseToolResult(result) {
-  if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+export function parseToolResult(result) {
   const text = result?.content?.find?.((item) => item.type === "text")?.text;
+  if (result?.isError) {
+    throw new Error(`MCP tool returned error: ${text ?? JSON.stringify(result)}`);
+  }
+  if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
   assert(text, "MCP result did not include JSON text content.");
   return JSON.parse(text);
 }

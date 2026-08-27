@@ -8,7 +8,7 @@ on:
         required: true
         default: https://app.corgtex.com
       expected_git_sha:
-        description: Expected production release SHA. Defaults to the workflow ref SHA.
+        description: Expected production release SHA. Manual dispatch defaults to the workflow ref SHA.
         required: false
         default: ""
       pr_numbers:
@@ -918,7 +918,7 @@ jobs:
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          const requiredGitSha = expectedGitSha || checkedOutGitSha;
+          const requiredGitSha = expectedGitSha || (process.env.GITHUB_EVENT_NAME === "workflow_dispatch" ? checkedOutGitSha : "");
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${requiredGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);

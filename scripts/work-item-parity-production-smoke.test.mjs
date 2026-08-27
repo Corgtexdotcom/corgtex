@@ -5,6 +5,7 @@ import {
   cleanupFailureMessage,
   isHumanValidationMember,
   WorkItemParitySmoke,
+  parseToolResult,
   workItemExpectations,
   workItemParityHealthReleaseBlocker,
 } from "./work-item-parity-production-smoke.mjs";
@@ -165,6 +166,13 @@ describe("work-item parity production smoke helpers", () => {
         },
       },
     }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toContain("status degraded was not ok");
+  });
+
+  it("preserves MCP tool error text before JSON parsing", () => {
+    expect(() => parseToolResult({
+      isError: true,
+      content: [{ type: "text", text: "NOT_FOUND: goal not found" }],
+    })).toThrow("NOT_FOUND: goal not found");
   });
 
   it("accepts exactly one optimistic-concurrency winner and one version conflict", () => {
