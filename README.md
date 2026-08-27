@@ -49,6 +49,10 @@ cd corgtex
 
 2. Start the stack (Postgres + Web + Worker):
 ```bash
+if test -n "$(git status --porcelain=v1 --untracked-files=all)"; then
+  echo "Refusing to start self-hosted Compose from a dirty worktree." >&2
+  exit 1
+fi
 export CORGTEX_RELEASE_GIT_SHA="$(git rev-parse --verify HEAD)"
 printf '%s\n' "$CORGTEX_RELEASE_GIT_SHA" | grep -Eq '^[0-9a-f]{40}$'
 docker compose -f docker-compose.selfhost.yml up -d

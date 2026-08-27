@@ -15,6 +15,7 @@ import {
   assertGoalProofResponse,
   assertReleaseRuntime,
   expectVersionConflictStatus,
+  terminalizeUntilSettled,
 } from "./pr976-action-goal-production-smoke.mjs";
 
 function server(handler) {
@@ -28,6 +29,32 @@ function server(handler) {
       });
     });
   });
+}
+
+function retryablePendingReceipt() {
+  return { receipt: { outcome: "PENDING", failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED" } };
+}
+
+function terminalHarness(results, options = {}) {
+  let clock = options.startMs ?? 0;
+  const calls = [];
+  const sleeps = [];
+  return {
+    calls,
+    sleeps,
+    now: () => clock,
+    sleep: async (delayMs) => {
+      sleeps.push(delayMs);
+      clock += delayMs;
+    },
+    send: async (payload, timeoutMs) => {
+      calls.push({ payload, timeoutMs, at: clock });
+      if (options.callElapsedMs) clock += options.callElapsedMs;
+      const next = results.shift();
+      if (next instanceof Error) throw next;
+      return next;
+    },
+  };
 }
 
 describe("pr976 action/goal production smoke driver", () => {
@@ -135,6 +162,132 @@ describe("pr976 action/goal production smoke driver", () => {
     expect(driver).toContain("provision.credentialToken");
     expect(driver).not.toMatch(/authorization["']?\s*:/i);
     expect(driver).not.toMatch(/Bearer\s+\$\{?provision\.credentialToken/i);
+  });
+
+  it("retries retryable pending terminal cleanup until completed", async () => {
+    const harness = terminalHarness([
+      retryablePendingReceipt(),
+      { receipt: { outcome: "COMPLETED" } },
+    ]);
+    const result = await terminalizeUntilSettled({
+      send: harness.send,
+      payload: { operation: "terminalize", mode: "all" },
+      deadlineMs: 90_000,
+      acceptedOutcomes: ["COMPLETED"],
+      now: harness.now,
+      sleep: harness.sleep,
+    });
+    expect(result.receipt.outcome).toBe("COMPLETED");
+    expect(harness.calls.map((call) => call.timeoutMs)).toEqual([30_000, 30_000]);
+    expect(harness.sleeps).toEqual([500]);
+  });
+
+  it("clips retry backoff and request timeouts to remaining terminal cleanup deadline", async () => {
+    const harness = terminalHarness([
+      retryablePendingReceipt(),
+      retryablePendingReceipt(),
+      { receipt: { outcome: "COMPLETED" } },
+    ]);
+    await terminalizeUntilSettled({
+      send: harness.send,
+      payload: { operation: "terminalize", mode: "all" },
+      deadlineMs: 1_600,
+      acceptedOutcomes: ["COMPLETED"],
+      now: harness.now,
+      sleep: harness.sleep,
+    });
+    expect(harness.calls.map((call) => call.timeoutMs)).toEqual([1_600, 1_100, 100]);
+    expect(harness.sleeps).toEqual([500, 1_000]);
+  });
+
+  it("stops at the terminal cleanup deadline without a post-deadline call", async () => {
+    const harness = terminalHarness([
+      retryablePendingReceipt(),
+      retryablePendingReceipt(),
+      retryablePendingReceipt(),
+    ]);
+    await expect(terminalizeUntilSettled({
+      send: harness.send,
+      payload: { operation: "terminalize", mode: "all" },
+      deadlineMs: 600,
+      acceptedOutcomes: ["COMPLETED"],
+      now: harness.now,
+      sleep: harness.sleep,
+    })).rejects.toMatchObject({
+      message: "TERMINAL_CLEANUP_DEADLINE_EXCEEDED",
+      body: { lastReceipt: { outcome: "PENDING", failureCode: "RETRYABLE_TARGET_CLEANUP_FAILED" } },
+    });
+    expect(harness.calls).toHaveLength(2);
+    expect(harness.calls.map((call) => call.timeoutMs)).toEqual([600, 100]);
+    expect(harness.sleeps).toEqual([500, 100]);
+  });
+
+  it("fails terminal cleanup immediately for fatal responses", async () => {
+    const httpError = Object.assign(new Error("HTTP_503"), { status: 503 });
+    const httpHarness = terminalHarness([httpError]);
+    await expect(terminalizeUntilSettled({
+      send: httpHarness.send,
+      payload: { operation: "terminalize" },
+      deadlineMs: 90_000,
+      acceptedOutcomes: ["COMPLETED"],
+      now: httpHarness.now,
+    })).rejects.toThrow("HTTP_503");
+    const malformedHarness = terminalHarness([{ ok: true }]);
+    await expect(terminalizeUntilSettled({
+      send: malformedHarness.send,
+      payload: { operation: "terminalize" },
+      deadlineMs: 90_000,
+      acceptedOutcomes: ["COMPLETED"],
+      now: malformedHarness.now,
+    })).rejects.toThrow("TERMINAL_RECEIPT_MALFORMED");
+    const mismatchHarness = terminalHarness([{ receipt: { outcome: "FAILED" } }]);
+    await expect(terminalizeUntilSettled({
+      send: mismatchHarness.send,
+      payload: { operation: "terminalize" },
+      deadlineMs: 90_000,
+      acceptedOutcomes: ["COMPLETED"],
+      now: mismatchHarness.now,
+    })).rejects.toThrow("TERMINAL_RECEIPT_OUTCOME_UNEXPECTED");
+    const pendingHarness = terminalHarness([{ receipt: { outcome: "PENDING", failureCode: "PERMANENT_FAILURE" } }]);
+    await expect(terminalizeUntilSettled({
+      send: pendingHarness.send,
+      payload: { operation: "terminalize" },
+      deadlineMs: 90_000,
+      acceptedOutcomes: ["COMPLETED"],
+      now: pendingHarness.now,
+    })).rejects.toThrow("TERMINAL_RECEIPT_PENDING_NOT_RETRYABLE");
+  });
+
+  it("resends sanitized failure cleanup payload on every retry and accepts failed or blocked", async () => {
+    const payload = {
+      operation: "terminalize",
+      mode: "all",
+      failureCode: "DRIVER_FAILURE",
+      failureMessage: sanitize("failed with token raw-secret"),
+    };
+    for (const outcome of ["FAILED", "BLOCKED"]) {
+      const harness = terminalHarness([
+        retryablePendingReceipt(),
+        { receipt: { outcome } },
+      ]);
+      await expect(terminalizeUntilSettled({
+        send: harness.send,
+        payload,
+        deadlineMs: 90_000,
+        acceptedOutcomes: ["FAILED", "BLOCKED"],
+        now: harness.now,
+        sleep: harness.sleep,
+      })).resolves.toMatchObject({ receipt: { outcome } });
+      expect(harness.calls.map((call) => call.payload)).toEqual([payload, payload]);
+      expect(JSON.stringify(harness.calls)).not.toContain("raw-secret");
+    }
+  });
+
+  it("keeps one terminal cleanup deadline for normal terminalization and catch recovery", async () => {
+    const driver = await readFile(new URL("./pr976-action-goal-production-smoke.mjs", import.meta.url), "utf8");
+    expect(driver.match(/Date\.now\(\) \+ TERMINAL_CLEANUP_DEADLINE_MS/g)).toHaveLength(1);
+    expect(driver).toContain("terminalCleanupDeadline ??=");
+    expect(driver.match(/deadlineMs: terminalDeadline\(\)/g)).toHaveLength(2);
   });
 });
 

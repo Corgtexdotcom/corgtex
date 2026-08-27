@@ -25,7 +25,11 @@ export const PR976_FILES = Object.freeze([
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BODY_BYTES = 512_000;
-const CLEANUP_RESERVE_MS = 90_000;
+const TERMINAL_CLEANUP_DEADLINE_MS = 90_000;
+const TERMINAL_CALL_MAX_TIMEOUT_MS = 30_000;
+const TERMINAL_RETRY_BACKOFF_MS = Object.freeze([500, 1_000, 2_000, 4_000]);
+const TERMINAL_RETRY_BACKOFF_CAP_MS = 5_000;
+const RETRYABLE_TERMINAL_FAILURE_CODE = "RETRYABLE_TARGET_CLEANUP_FAILED";
 
 export function sanitize(value) {
   return JSON.parse(JSON.stringify(value, (key, inner) => {
@@ -134,6 +138,64 @@ async function internal(baseUrl, cookie, body, timeoutMs) {
   }, { timeoutMs })).body;
 }
 
+function terminalBackoffMs(retryIndex) {
+  return TERMINAL_RETRY_BACKOFF_MS[retryIndex] ?? TERMINAL_RETRY_BACKOFF_CAP_MS;
+}
+
+function requireTerminalReceipt(result) {
+  const receipt = result?.receipt;
+  if (!receipt || typeof receipt !== "object" || typeof receipt.outcome !== "string") {
+    throw Object.assign(new Error("TERMINAL_RECEIPT_MALFORMED"), { body: result });
+  }
+  return receipt;
+}
+
+function terminalCleanupDeadlineError(lastReceipt) {
+  return Object.assign(new Error("TERMINAL_CLEANUP_DEADLINE_EXCEEDED"), {
+    body: lastReceipt ? { lastReceipt: sanitize(lastReceipt) } : null,
+  });
+}
+
+export async function terminalizeUntilSettled({
+  send,
+  payload,
+  deadlineMs,
+  acceptedOutcomes,
+  now = () => Date.now(),
+  sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+}) {
+  let retryIndex = 0;
+  let lastReceipt = null;
+  for (;;) {
+    const remainingBeforeCall = deadlineMs - now();
+    if (remainingBeforeCall <= 0) {
+      throw terminalCleanupDeadlineError(lastReceipt);
+    }
+    const result = await send(payload, Math.min(TERMINAL_CALL_MAX_TIMEOUT_MS, remainingBeforeCall));
+    const receipt = requireTerminalReceipt(result);
+    lastReceipt = receipt;
+    if (acceptedOutcomes.includes(receipt.outcome)) {
+      return result;
+    }
+    if (receipt.outcome !== "PENDING") {
+      throw Object.assign(new Error("TERMINAL_RECEIPT_OUTCOME_UNEXPECTED"), { body: { receipt: sanitize(receipt) } });
+    }
+    if (receipt.failureCode !== RETRYABLE_TERMINAL_FAILURE_CODE) {
+      throw Object.assign(new Error("TERMINAL_RECEIPT_PENDING_NOT_RETRYABLE"), { body: { receipt: sanitize(receipt) } });
+    }
+    const remainingAfterCall = deadlineMs - now();
+    if (remainingAfterCall <= 0) {
+      throw terminalCleanupDeadlineError(lastReceipt);
+    }
+    const delayMs = Math.min(terminalBackoffMs(retryIndex), remainingAfterCall);
+    if (delayMs <= 0) {
+      throw terminalCleanupDeadlineError(lastReceipt);
+    }
+    retryIndex += 1;
+    await sleep(delayMs);
+  }
+}
+
 export function expectVersionConflictStatus(result) {
   if (result?.status !== "VERSION_CONFLICT") {
     throw Object.assign(new Error("VERSION_CONFLICT_NOT_RETURNED"), { body: result });
@@ -240,6 +302,11 @@ export async function run() {
     workflowRunId: process.env.GITHUB_RUN_ID || "",
     workflowRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT || 1),
   };
+  let terminalCleanupDeadline = null;
+  const terminalDeadline = () => {
+    terminalCleanupDeadline ??= Date.now() + TERMINAL_CLEANUP_DEADLINE_MS;
+    return terminalCleanupDeadline;
+  };
   let cookie;
   let token;
   try {
@@ -279,8 +346,12 @@ export async function run() {
       goalObservedProgress: GOAL_PROGRESS,
       goalObservedVersion: afterGoal.goal.version,
     }, 20_000);
-    const terminal = await internal(baseUrl, cookie, { operation: "terminalize", ...execution, mode: "all" }, CLEANUP_RESERVE_MS);
-    if (terminal.receipt.outcome !== "COMPLETED") throw new Error("TERMINAL_RECEIPT_INCOMPLETE");
+    const terminal = await terminalizeUntilSettled({
+      send: (payload, timeoutMs) => internal(baseUrl, cookie, payload, timeoutMs),
+      payload: { operation: "terminalize", ...execution, mode: "all" },
+      deadlineMs: terminalDeadline(),
+      acceptedOutcomes: ["COMPLETED"],
+    });
     const terminalRelease = await verifyHealth(baseUrl, deployedSha);
     evidence.steps.push({ name: "feature-and-cleanup", status: "passed", receipt: terminal.receipt });
     evidence.steps.push({ name: "post-cleanup-health", status: "passed", release: terminalRelease });
@@ -289,13 +360,18 @@ export async function run() {
     evidence.error = { message: error.message, status: error.status, body: sanitize(error.body ?? null) };
     if (cookie) {
       try {
-        evidence.terminalizeAfterFailure = await internal(baseUrl, cookie, {
-          operation: "terminalize",
-          ...execution,
-          mode: "all",
-          failureCode: "DRIVER_FAILURE",
-          failureMessage: error.message,
-        }, CLEANUP_RESERVE_MS);
+        evidence.terminalizeAfterFailure = await terminalizeUntilSettled({
+          send: (payload, timeoutMs) => internal(baseUrl, cookie, payload, timeoutMs),
+          payload: {
+            operation: "terminalize",
+            ...execution,
+            mode: "all",
+            failureCode: "DRIVER_FAILURE",
+            failureMessage: sanitize(error.message),
+          },
+          deadlineMs: terminalDeadline(),
+          acceptedOutcomes: ["FAILED", "BLOCKED"],
+        });
       } catch (cleanupError) {
         evidence.cleanupError = { message: cleanupError.message, status: cleanupError.status, body: sanitize(cleanupError.body ?? null) };
       }
