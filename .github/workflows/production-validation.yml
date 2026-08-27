@@ -8,7 +8,7 @@ on:
         required: true
         default: https://app.corgtex.com
       expected_git_sha:
-        description: Expected production release SHA. Defaults to the workflow ref SHA.
+        description: Expected production release SHA. Manual dispatch defaults to the workflow ref SHA.
         required: false
         default: ""
       pr_numbers:
@@ -864,6 +864,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 15
+    concurrency:
+      group: production-validation-work-item-parity-corgtex-validation
+      cancel-in-progress: false
     env:
       OUT_DIR: .artifacts/production-validation/work-item-parity
       PR_NUMBERS: ${{ needs.validation-context.outputs.pr_numbers }}
@@ -915,10 +918,11 @@ jobs:
           }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `base_url=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${expectedGitSha}\n`);
+          const requiredGitSha = expectedGitSha || (process.env.GITHUB_EVENT_NAME === "workflow_dispatch" ? checkedOutGitSha : "");
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_git_sha=${requiredGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `checked_out_git_sha=${checkedOutGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `BASE_URL=${baseUrl.origin}\n`);
-          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${expectedGitSha}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `EXPECTED_GIT_SHA=${requiredGitSha}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `CHECKED_OUT_GIT_SHA=${checkedOutGitSha}\n`);
           NODE
 

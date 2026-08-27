@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   assertFields,
+  assertVersionedConflictPair,
   cleanupFailureMessage,
   isHumanValidationMember,
   WorkItemParitySmoke,
+  parseToolResult,
   workItemExpectations,
   workItemParityHealthReleaseBlocker,
 } from "./work-item-parity-production-smoke.mjs";
@@ -84,6 +86,7 @@ describe("work-item parity production smoke helpers", () => {
       action: { id: "action-1", cleanupActionId: "archive:Action:action-1" },
       tension: { id: "tension-1", cleanupActionId: "archive:Tension:tension-1" },
       proposal: { id: "proposal-1", cleanupActionId: "archive:Proposal:proposal-1" },
+      goal: { id: "goal-1", cleanupActionId: "archive:Goal:goal-1" },
     };
 
     smoke.recordValidationPass();
@@ -92,16 +95,128 @@ describe("work-item parity production smoke helpers", () => {
     expect(smoke.validationRun.results.map((result) => result.prNumber)).toEqual([722, 723]);
     expect(smoke.validationRun.results[0]).toMatchObject({
       result: "pass",
-      createdRecordIds: ["action-1", "tension-1", "proposal-1"],
+      createdRecordIds: ["action-1", "tension-1", "proposal-1", "goal-1"],
     });
   });
 
   it("returns null when health release metadata matches", () => {
     expect(workItemParityHealthReleaseBlocker({
+      status: "ok",
       release: {
         gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        configuredGitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        runtime: {
+          gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          source: "railway",
+        },
+        configured: {
+          gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
       },
     }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBeNull();
+  });
+
+  it("rejects aggregate-only release SHA proof", () => {
+    expect(workItemParityHealthReleaseBlocker({
+      status: "ok",
+      release: {
+        gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        source: { gitSha: "configured" },
+        runtime: {
+          gitSha: null,
+          source: "missing",
+        },
+      },
+    }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toContain("release.runtime.gitSha was missing");
+  });
+
+  it("rejects configured-only runtime provenance", () => {
+    expect(workItemParityHealthReleaseBlocker({
+      status: "ok",
+      release: {
+        gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        runtime: {
+          gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          source: "configured",
+        },
+      },
+    }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toContain("was not provider-backed runtime provenance");
+  });
+
+  it("rejects runtime SHA drift even when aggregate SHA matches", () => {
+    expect(workItemParityHealthReleaseBlocker({
+      status: "ok",
+      release: {
+        gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        runtime: {
+          gitSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          source: "railway",
+        },
+      },
+    }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toContain("release.runtime.gitSha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb did not match expected");
+  });
+
+  it("rejects degraded health even when release metadata matches", () => {
+    expect(workItemParityHealthReleaseBlocker({
+      status: "degraded",
+      release: {
+        gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        runtime: {
+          gitSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          source: "railway",
+        },
+      },
+    }, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toContain("status degraded was not ok");
+  });
+
+  it("preserves MCP tool error text before JSON parsing", () => {
+    expect(() => parseToolResult({
+      isError: true,
+      content: [{ type: "text", text: "NOT_FOUND: goal not found" }],
+    })).toThrow("NOT_FOUND: goal not found");
+  });
+
+  it("accepts exactly one optimistic-concurrency winner and one version conflict", () => {
+    const result = assertVersionedConflictPair({
+      entity: "Action",
+      baselineVersion: 3,
+      attempts: [
+        { label: "first", title: "Accepted title" },
+        { label: "second", title: "Rejected title" },
+      ],
+      settlements: [
+        { status: "fulfilled", value: { id: "action-1", version: 4 } },
+        { status: "fulfilled", value: { status: "VERSION_CONFLICT" } },
+      ],
+      finalRecord: { id: "action-1", version: 4, title: "Accepted title" },
+      field: "title",
+      expectedValues: ["Accepted title", "Rejected title"],
+    });
+
+    expect(result).toMatchObject({
+      winner: "first",
+      conflict: "second",
+      baselineVersion: 3,
+      finalVersion: 4,
+      winningValue: "Accepted title",
+      losingValue: "Rejected title",
+    });
+  });
+
+  it("rejects a conflict pair when the losing value takes effect", () => {
+    expect(() => assertVersionedConflictPair({
+      entity: "Goal",
+      baselineVersion: 1,
+      attempts: [
+        { label: "first", progressPercent: 41 },
+        { label: "second", progressPercent: 73 },
+      ],
+      settlements: [
+        { status: "fulfilled", value: { id: "goal-1", version: 2 } },
+        { status: "fulfilled", value: { status: "VERSION_CONFLICT" } },
+      ],
+      finalRecord: { id: "goal-1", version: 2, progressPercent: 73 },
+      field: "progressPercent",
+      expectedValues: [41, 73],
+    })).toThrow("Goal final progressPercent did not match the winning update");
   });
 });

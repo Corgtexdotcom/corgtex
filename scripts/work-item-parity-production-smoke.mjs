@@ -24,6 +24,7 @@ import {
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_OUT_DIR = ".artifacts/work-item-parity-production-smoke";
+const GIT_SHA_PATTERN = /^[a-f0-9]{40}$/i;
 
 function usage() {
   return [
@@ -53,9 +54,12 @@ function parseSetCookie(setCookie) {
   return setCookie.split(", ").find((part) => part.includes("corgtex"))?.split(";")[0] ?? setCookie.split(";")[0];
 }
 
-function parseToolResult(result) {
-  if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+export function parseToolResult(result) {
   const text = result?.content?.find?.((item) => item.type === "text")?.text;
+  if (result?.isError) {
+    throw new Error(`MCP tool returned error: ${text ?? JSON.stringify(result)}`);
+  }
+  if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
   assert(text, "MCP result did not include JSON text content.");
   return JSON.parse(text);
 }
@@ -70,6 +74,24 @@ function validationRecordPrefix(run, fallback) {
 }
 
 export function workItemParityHealthReleaseBlocker(health, expectedGitSha = null) {
+  if (health?.status !== "ok") return `/api/health status ${health?.status ?? "missing"} was not ok.`;
+
+  const release = health?.release;
+  const runtimeGitSha = typeof release?.runtime?.gitSha === "string" ? release.runtime.gitSha : null;
+  const runtimeSource = typeof release?.runtime?.source === "string" ? release.runtime.source : null;
+  const aggregateGitSha = typeof release?.gitSha === "string" ? release.gitSha : null;
+
+  if (expectedGitSha) {
+    if (!GIT_SHA_PATTERN.test(expectedGitSha)) return `Expected git SHA ${expectedGitSha} is not a 40-character SHA.`;
+    if (!runtimeGitSha) return "/api/health release.runtime.gitSha was missing.";
+    if (!GIT_SHA_PATTERN.test(runtimeGitSha)) return `/api/health release.runtime.gitSha ${runtimeGitSha} was not a 40-character SHA.`;
+    if (runtimeGitSha !== expectedGitSha) return `/api/health release.runtime.gitSha ${runtimeGitSha} did not match expected ${expectedGitSha}`;
+    if (aggregateGitSha !== expectedGitSha) return `/api/health release.gitSha ${aggregateGitSha ?? "missing"} did not match expected ${expectedGitSha}`;
+    if (!runtimeSource || runtimeSource === "missing" || runtimeSource === "configured") {
+      return `/api/health release.runtime.source ${runtimeSource ?? "missing"} was not provider-backed runtime provenance.`;
+    }
+  }
+
   return healthReleaseMismatch(health, expectedGitSha)
     ?? healthConfiguredReleaseDrift(health, expectedGitSha);
 }
@@ -102,6 +124,62 @@ export function assertFields(actual, expected, label) {
       `${label} ${field} mismatch: expected ${JSON.stringify(value)}, got ${JSON.stringify(actual?.[field])}`,
     );
   }
+}
+
+function assertPositiveVersion(record, label) {
+  const version = Number(record?.version);
+  assert(Number.isSafeInteger(version) && version > 0, `${label} version must be a positive safe integer.`);
+  return version;
+}
+
+function isVersionConflictPayload(result) {
+  return result?.status === "VERSION_CONFLICT";
+}
+
+function fulfilledValue(result) {
+  return result.status === "fulfilled" ? result.value : null;
+}
+
+function rejectedReason(result) {
+  return result.status === "rejected" ? result.reason : null;
+}
+
+export function assertVersionedConflictPair({ entity, baselineVersion, attempts, settlements, finalRecord, field, expectedValues }) {
+  assert(attempts.length === 2 && settlements.length === 2, `${entity} concurrency proof requires exactly two attempts.`);
+  const rejected = settlements.map(rejectedReason).filter(Boolean);
+  assert(rejected.length === 0, `${entity} concurrency proof rejected unexpectedly: ${rejected.map((error) => error?.message ?? String(error)).join("; ")}`);
+
+  const winners = [];
+  const conflicts = [];
+  for (const [index, settlement] of settlements.entries()) {
+    const value = fulfilledValue(settlement);
+    if (isVersionConflictPayload(value)) {
+      conflicts.push({ attempt: attempts[index], value });
+    } else {
+      winners.push({ attempt: attempts[index], value });
+    }
+  }
+
+  assert(winners.length === 1, `${entity} concurrency proof expected exactly one successful update, got ${winners.length}.`);
+  assert(conflicts.length === 1, `${entity} concurrency proof expected exactly one VERSION_CONFLICT, got ${conflicts.length}.`);
+  const finalVersion = assertPositiveVersion(finalRecord, `${entity} final record`);
+  assert(finalVersion === baselineVersion + 1, `${entity} final version mismatch: expected ${baselineVersion + 1}, got ${finalVersion}.`);
+
+  const winningValue = winners[0].attempt[field];
+  const losingValue = conflicts[0].attempt[field];
+  assert(finalRecord?.[field] === winningValue, `${entity} final ${field} did not match the winning update.`);
+  assert(finalRecord?.[field] !== losingValue, `${entity} final ${field} matched the losing update.`);
+  assert(expectedValues.includes(finalRecord?.[field]), `${entity} final ${field} was not one of the attempted values.`);
+
+  return {
+    winner: winners[0].attempt.label,
+    conflict: conflicts[0].attempt.label,
+    baselineVersion,
+    finalVersion,
+    field,
+    winningValue,
+    losingValue,
+  };
 }
 
 export function workItemExpectations(member, {
@@ -197,6 +275,11 @@ export class WorkItemParitySmoke {
       action: null,
       tension: null,
       proposal: null,
+      goal: null,
+    };
+    this.concurrency = {
+      action: null,
+      goal: null,
     };
   }
 
@@ -248,8 +331,10 @@ export class WorkItemParitySmoke {
     const blocker = workItemParityHealthReleaseBlocker(health.body, this.expectedGitSha);
     assert(!blocker, blocker);
     this.record("health release metadata", {
-      runtimeGitSha: health.body?.release?.gitSha ?? null,
-      configuredGitSha: health.body?.release?.configuredGitSha ?? null,
+      gitSha: health.body?.release?.gitSha ?? null,
+      runtimeGitSha: health.body?.release?.runtime?.gitSha ?? null,
+      runtimeSource: health.body?.release?.runtime?.source ?? null,
+      configuredGitSha: health.body?.release?.configured?.gitSha ?? null,
     });
   }
 
@@ -271,10 +356,22 @@ export class WorkItemParitySmoke {
       workspaceSlug: this.workspaceSelector.workspaceSlug,
       purpose: "work-item parity production smoke",
     });
-    requireInternalValidationWorkspace(workspace, { purpose: "work-item parity production smoke writes" });
+    requireInternalValidationWorkspace(workspace, {
+      env: {},
+      purpose: "work-item parity production smoke writes",
+      allowCustomerEnv: "WORK_ITEM_PARITY_SMOKE_ALLOW_CUSTOMER_WRITES_DISABLED",
+    });
     this.workspaceId = workspace.id;
     this.validationRun.tenant = workspaceTenant(workspace);
     this.record("password login", { workspaceId: this.workspaceId, workspaceSlug: workspace.slug ?? null });
+  }
+
+  async verifyNoActiveWebhooks() {
+    const result = await this.sessionFetch(`/api/workspaces/${this.workspaceId}/webhooks`);
+    const endpoints = Array.isArray(result.body) ? result.body : [];
+    const active = endpoints.filter((endpoint) => endpoint?.status === "ACTIVE");
+    assert(active.length === 0, `Work-item parity smoke blocked: validation workspace has ${active.length} active outbound webhook endpoint(s).`);
+    this.record("outbound webhook preflight", { activeWebhookEndpoints: 0, webhookEndpoints: endpoints.length });
   }
 
   async issueCredential() {
@@ -290,6 +387,8 @@ export class WorkItemParitySmoke {
           "tensions:write",
           "proposals:read",
           "proposals:write",
+          "goals:read",
+          "goals:write",
         ],
         reasonMd: "Temporary credential for work-item parity production smoke.",
         dailyCallLimit: 100,
@@ -323,14 +422,30 @@ export class WorkItemParitySmoke {
     return member;
   }
 
-  addRecordCleanup({ type, id, title, endpoint }) {
+  addRecordCleanup({ type, id, title, endpoint, toolName = null, toolArgs = null }) {
     const cleanupActionId = `archive:${type}:${id}`;
     this.cleanupRegistry.add({
       id: cleanupActionId,
       action: "archive",
       target: { type, id, label: title },
       runner: async () => {
-        await this.sessionFetch(endpoint, { method: "DELETE" });
+        if (toolName) {
+          await this.callTool(toolName, toolArgs ?? {});
+          if (type === "Goal") {
+            await this.callTool("get_goal", { goalId: id }).then(
+              () => {
+                throw new Error(`Archived Goal ${id} was still readable as active.`);
+              },
+              (error) => {
+                const message = String(error?.message ?? error);
+                if (!message.includes("NOT_FOUND") && !message.includes("not found")) throw error;
+              },
+            );
+          }
+        } else {
+          assert(endpoint, `${type} cleanup requires an endpoint or MCP tool.`);
+          await this.sessionFetch(endpoint, { method: "DELETE" });
+        }
         return `${type} archived through product API.`;
       },
     });
@@ -342,6 +457,7 @@ export class WorkItemParitySmoke {
     const actionTitle = `${this.validationTag} action parity ${date}`;
     const tensionTitle = `${this.validationTag} tension parity ${date}`;
     const proposalTitle = `${this.validationTag} proposal parity ${date}`;
+    const goalTitle = `${this.validationTag} goal concurrency ${date}`;
 
     const action = await this.sessionFetch(`/api/workspaces/${this.workspaceId}/actions`, {
       method: "POST",
@@ -402,10 +518,28 @@ export class WorkItemParitySmoke {
     this.created.proposal = { ...proposalRecord, cleanupActionId: proposalCleanupId };
     assertFields(proposalRecord, workItemExpectations(member, { type: "proposal", priority: 1, priorityLabel: "Medium" }), "REST proposal create");
 
+    const goalRecord = await this.callTool("create_goal", {
+      title: goalTitle,
+      descriptionMd: "Temporary production validation goal. Archive after smoke.",
+      status: "DRAFT",
+      ownerMemberId: member.id,
+      duplicateResolution: "create_new",
+    });
+    const goalCleanupId = this.addRecordCleanup({
+      type: "Goal",
+      id: goalRecord.id,
+      title: goalTitle,
+      endpoint: null,
+      toolName: "archive_goal",
+      toolArgs: { goalId: goalRecord.id },
+    });
+    this.created.goal = { ...goalRecord, title: goalTitle, cleanupActionId: goalCleanupId };
+
     this.record("work items created with normalized REST responses", {
       actionId: actionRecord.id,
       tensionId: tensionRecord.id,
       proposalId: proposalRecord.id,
+      goalId: goalRecord.id,
     });
   }
 
@@ -490,6 +624,107 @@ export class WorkItemParitySmoke {
     throw new Error(`${label} did not include record ${recordId}.`);
   }
 
+  async verifyActionGoalConcurrency() {
+    const action = await this.findMcpListRecord({
+      toolName: "list_actions",
+      recordId: this.created.action.id,
+      label: "MCP action concurrency baseline",
+    });
+    const actionVersion = assertPositiveVersion(action, "MCP action concurrency baseline");
+    const actionAttempts = [
+      {
+        label: "action-title-a",
+        title: `${this.validationTag} action winner A`,
+      },
+      {
+        label: "action-title-b",
+        title: `${this.validationTag} action winner B`,
+      },
+    ];
+    const actionSettlements = await Promise.allSettled(actionAttempts.map((attempt) => this.callTool("update_action", {
+      actionId: action.id,
+      expectedVersion: actionVersion,
+      title: attempt.title,
+    })));
+    const finalAction = await this.findMcpListRecord({
+      toolName: "list_actions",
+      recordId: this.created.action.id,
+      label: "MCP action concurrency final",
+    });
+    this.concurrency.action = assertVersionedConflictPair({
+      entity: "Action",
+      baselineVersion: actionVersion,
+      attempts: actionAttempts,
+      settlements: actionSettlements,
+      finalRecord: finalAction,
+      field: "title",
+      expectedValues: actionAttempts.map((attempt) => attempt.title),
+    });
+
+    const goal = await this.callTool("get_goal", { goalId: this.created.goal.id });
+    const goalVersion = assertPositiveVersion(goal, "MCP goal concurrency baseline");
+    const goalAttempts = [
+      {
+        label: "goal-progress-a",
+        progressPercent: 41,
+      },
+      {
+        label: "goal-progress-b",
+        progressPercent: 73,
+      },
+    ];
+    const goalSettlements = await Promise.allSettled(goalAttempts.map((attempt) => this.callTool("update_goal", {
+      goalId: goal.id,
+      expectedVersion: goalVersion,
+      status: "ACTIVE",
+      progressPercent: attempt.progressPercent,
+    })));
+    const finalGoal = await this.callTool("get_goal", { goalId: goal.id });
+    this.concurrency.goal = assertVersionedConflictPair({
+      entity: "Goal",
+      baselineVersion: goalVersion,
+      attempts: goalAttempts,
+      settlements: goalSettlements,
+      finalRecord: finalGoal,
+      field: "progressPercent",
+      expectedValues: goalAttempts.map((attempt) => attempt.progressPercent),
+    });
+    assert(finalGoal.status === "ACTIVE", `Goal final status mismatch: expected ACTIVE, got ${finalGoal.status}.`);
+
+    this.record("Action and Goal optimistic concurrency", {
+      action: this.concurrency.action,
+      goal: this.concurrency.goal,
+    });
+  }
+
+  async verifyCleanupCompleted() {
+    if (this.created.action?.id) {
+      const action = await this.findRestListRecord({
+        path: `/api/workspaces/${this.workspaceId}/actions?archiveFilter=active`,
+        responseKey: "actions",
+        recordId: this.created.action.id,
+        label: "REST action archive verification",
+      }).catch((error) => {
+        if (String(error?.message ?? error).includes("did not include record")) return null;
+        throw error;
+      });
+      assert(!action, `Archived Action ${this.created.action.id} was still visible in active REST list.`);
+    }
+    if (this.credentialId) {
+      const result = await this.sessionFetch(`/api/workspaces/${this.workspaceId}/agent-credentials`);
+      const credential = result.body?.credentials?.find?.((item) => item.id === this.credentialId);
+      assert(credential && credential.isActive === false, `Temporary credential ${this.credentialId} was not verified inactive after cleanup.`);
+    }
+    for (const entry of this.cleanupRegistry.entries()) {
+      assert(entry.status === "completed" || entry.status === "skipped", `Cleanup action ${entry.id} ended with ${entry.status}.`);
+    }
+    this.record("cleanup verification", {
+      actionArchived: Boolean(this.created.action?.id),
+      goalArchived: Boolean(this.created.goal?.id),
+      credentialRevoked: Boolean(this.credentialId),
+    });
+  }
+
   recordValidationOutcome(result) {
     const coveredPrNumbers = this.validationRun.prNumbers.length > 0
       ? this.validationRun.prNumbers
@@ -504,19 +739,22 @@ export class WorkItemParitySmoke {
 
   recordValidationPass() {
     this.recordValidationOutcome({
-      intent: "Work-item owner/responsibility/priority parity across Action, Tension, and Proposal surfaces",
+      intent: "Work-item parity plus Action/Goal optimistic concurrency for PR #976 observed-version paths",
       method: "work-item-parity-production-smoke",
       result: "pass",
       evidence: [
         { type: "health", summary: "Production release metadata matched expected SHA." },
         { type: "rest-api", summary: "REST create and list responses returned normalized work-item fields." },
         { type: "mcp", summary: "MCP list tools returned the same normalized work-item fields." },
+        { type: "mcp", summary: "Concurrent Action and Goal updates produced exactly one success and one VERSION_CONFLICT with zero losing-write effect." },
+        { type: "cleanup", summary: "Created Action/Goal records were archived and the temporary MCP credential was revoked." },
       ],
-      createdRecordIds: [this.created.action?.id, this.created.tension?.id, this.created.proposal?.id].filter(Boolean),
+      createdRecordIds: [this.created.action?.id, this.created.tension?.id, this.created.proposal?.id, this.created.goal?.id].filter(Boolean),
       cleanupActionIds: [
         this.created.action?.cleanupActionId,
         this.created.tension?.cleanupActionId,
         this.created.proposal?.cleanupActionId,
+        this.created.goal?.cleanupActionId,
         this.credentialId ? `revoke:AgentCredential:${this.credentialId}` : null,
       ].filter(Boolean),
     });
@@ -525,12 +763,12 @@ export class WorkItemParitySmoke {
   recordValidationFailure(error) {
     if (this.validationRun.results.length > 0) return;
     this.recordValidationOutcome({
-      intent: "Work-item owner/responsibility/priority parity across Action, Tension, and Proposal surfaces",
+      intent: "Work-item parity plus Action/Goal optimistic concurrency for PR #976 observed-version paths",
       method: "work-item-parity-production-smoke",
       result: "partial",
       blocker: error instanceof Error ? error.message : String(error),
       evidence: this.results.map((item) => ({ type: "step", summary: `${item.name}: ${item.status}` })),
-      createdRecordIds: [this.created.action?.id, this.created.tension?.id, this.created.proposal?.id].filter(Boolean),
+      createdRecordIds: [this.created.action?.id, this.created.tension?.id, this.created.proposal?.id, this.created.goal?.id].filter(Boolean),
       cleanupActionIds: this.cleanupRegistry.entries().map((entry) => entry.id),
     });
   }
@@ -541,12 +779,13 @@ export class WorkItemParitySmoke {
     try {
       await this.verifyHealth();
       await this.login();
+      await this.verifyNoActiveWebhooks();
       await this.issueCredential();
       const member = await this.selectValidationMember();
       await this.createWorkItems(member);
       await this.verifyRestLists(member);
       await this.verifyMcpLists(member);
-      this.recordValidationPass();
+      await this.verifyActionGoalConcurrency();
     } catch (error) {
       runError = error;
       this.recordValidationFailure(error);
@@ -558,12 +797,24 @@ export class WorkItemParitySmoke {
         this.validationRun.results = [];
         this.recordValidationFailure(runError);
       }
+      if (!runError) {
+        try {
+          await this.verifyCleanupCompleted();
+          await this.verifyHealth();
+          this.recordValidationPass();
+        } catch (error) {
+          runError = error;
+          this.validationRun.results = [];
+          this.recordValidationFailure(runError);
+        }
+      }
       const resultsPath = path.join(this.outDir, "work-item-parity-production-smoke.json");
       await writeFile(resultsPath, `${JSON.stringify({
         runId: this.runId,
         results: this.results,
         cleanup,
         created: this.created,
+        concurrency: this.concurrency,
         error: runError ? { message: runError.message, stack: runError.stack } : null,
       }, null, 2)}\n`);
       await writeValidationArtifacts(this.validationRun, this.outDir, {
