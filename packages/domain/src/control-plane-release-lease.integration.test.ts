@@ -20,6 +20,8 @@ import {
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
 const SUBSCRIPTION = "123e4567-e89b-12d3-a456-426614174000"; const [RG, WEB, WORKER, ACR] = ["rg.Safe_1", "web-app", "worker-app", "acr12.azurecr.io"];
+const ARM_WEB = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
+const ARM_WORKER = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WORKER}`;
 const ACR_IDENTITY = { acrName: "acr12", acrServer: ACR };
 const DIGESTS = ["1", "2", "3", "4"].map((value) => `sha256:${value.repeat(64)}`);
 function rollbackPayload() {
@@ -322,6 +324,33 @@ describe("managed release lease CAS", () => {
     await deployment({ providerWorkerServiceId: "other-worker" });
     await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
+  });
+  it("projects Container App names from exact Azure resource IDs without mutating target state", async () => {
+    const target = await deployment({ providerWebServiceId: ARM_WEB, providerWorkerServiceId: ARM_WORKER });
+    const before = await releaseState(target.id);
+    await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
+      deploymentId: target.id,
+      origin: target.url,
+      release: { baselineImageTag: BASE, baselineVersion: "release-1" },
+      target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
+    });
+    expect(await releaseState(target.id)).toEqual(before);
+    const handle = await acquire(target.id);
+    await expect(recordManagedReleaseRollbackRecord(handle, rollbackPayload())).resolves.toMatchObject({ rollbackRecorded: true });
+    await expect(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).resolves.toMatchObject({
+      target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
+    });
+  });
+  it("rejects Azure resource IDs whose embedded target does not match the deployment row", async () => {
+    const wrongSubscription = `/subscriptions/${randomUUID()}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
+    const wrongResourceGroup = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-other/providers/Microsoft.App/containerApps/${WEB}`;
+    for (const providerWebServiceId of [wrongSubscription, wrongResourceGroup]) {
+      await truncateAllTables();
+      const target = await deployment({ providerWebServiceId, providerWorkerServiceId: ARM_WORKER });
+      const before = await releaseState(target.id);
+      await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+      expect(await releaseState(target.id)).toEqual(before);
+    }
   });
   it("atomically finalizes proven success or proven rollback and clears capability state", async () => {
     const forward = await deployment(); const forwardHandle = await acquire(forward.id);

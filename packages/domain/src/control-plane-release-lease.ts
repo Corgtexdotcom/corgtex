@@ -80,6 +80,16 @@ function canonicalOrigin(value: unknown) {
     || (value !== parsed.origin && value !== `${parsed.origin}/`)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
   return parsed.origin;
 }
+function azureDeploymentAppName(reader: ReturnType<typeof createManagedReleaseProofReader>, value: unknown, subscriptionId: string, resourceGroup: string) {
+  if (typeof value !== "string") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  const resourceId = /^\/subscriptions\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/resourceGroups\/([A-Za-z0-9][A-Za-z0-9_.()-]*)\/providers\/Microsoft\.App\/containerApps\/([a-z][a-z0-9-]*[a-z0-9])$/i.exec(value);
+  if (resourceId) {
+    if (reader.uuid(resourceId[1]!.toLowerCase()) !== subscriptionId) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (reader.azureResourceGroup(resourceId[2]) !== resourceGroup) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    return reader.azureAppName(resourceId[3]);
+  }
+  return reader.azureAppName(value);
+}
 function targetView(row: LockedDeployment, acrIdentity: AcrIdentity) {
   const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
   if (!row.releaseImageTag || !IMAGE_TAG.test(row.releaseImageTag)
@@ -99,8 +109,8 @@ function targetView(row: LockedDeployment, acrIdentity: AcrIdentity) {
       version: reader.version(incomingVersion) }, ["kind", "imageTag", "version"] as const);
   const subscriptionId = reader.uuid(row.providerSubscriptionId);
   const resourceGroup = reader.azureResourceGroup(row.providerResourceGroup);
-  const webAppName = reader.azureAppName(row.providerWebServiceId);
-  const workerAppName = reader.azureAppName(row.providerWorkerServiceId);
+  const webAppName = azureDeploymentAppName(reader, row.providerWebServiceId, subscriptionId, resourceGroup);
+  const workerAppName = azureDeploymentAppName(reader, row.providerWorkerServiceId, subscriptionId, resourceGroup);
   if (webAppName === workerAppName) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
   if (row.rollbackRecordPresent) {
     const payload = storedRollbackPayload(row);
@@ -117,10 +127,13 @@ function targetView(row: LockedDeployment, acrIdentity: AcrIdentity) {
   ["deploymentId", "leaseId", "fence", "phase", "release", "origin", "target"] as const)) as ManagedReleaseLeaseTarget;
 }
 function rollbackTargetMatches(row: CustomerDeployment, payload: Readonly<ManagedAzureRollbackPayloadV1>) {
-  return row.providerSubscriptionId === payload.target.subscriptionId
-    && row.providerResourceGroup === payload.target.resourceGroup
-    && row.providerWebServiceId === payload.target.webAppName
-    && row.providerWorkerServiceId === payload.target.workerAppName
+  const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
+  const subscriptionId = reader.uuid(row.providerSubscriptionId);
+  const resourceGroup = reader.azureResourceGroup(row.providerResourceGroup);
+  return subscriptionId === payload.target.subscriptionId
+    && resourceGroup === payload.target.resourceGroup
+    && azureDeploymentAppName(reader, row.providerWebServiceId, subscriptionId, resourceGroup) === payload.target.webAppName
+    && azureDeploymentAppName(reader, row.providerWorkerServiceId, subscriptionId, resourceGroup) === payload.target.workerAppName
     && row.releaseVersion === payload.previous.releaseVersion;
 }
 function storedRollbackPayload(row: CustomerDeployment) {
@@ -235,13 +248,15 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
     const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
     if (!row.releaseImageTag || !IMAGE_TAG.test(row.releaseImageTag) || !row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const acrName = reader.azureAcrName(input.acrIdentity.acrName);
+    const subscriptionId = reader.uuid(row.providerSubscriptionId);
+    const resourceGroup = reader.azureResourceGroup(row.providerResourceGroup);
     const target = reader.exactRecord({
-      subscriptionId: reader.uuid(row.providerSubscriptionId),
-      resourceGroup: reader.azureResourceGroup(row.providerResourceGroup),
+      subscriptionId,
+      resourceGroup,
       acrName,
       acrServer: reader.azureAcrServer(input.acrIdentity.acrServer, acrName),
-      webAppName: reader.azureAppName(row.providerWebServiceId),
-      workerAppName: reader.azureAppName(row.providerWorkerServiceId),
+      webAppName: azureDeploymentAppName(reader, row.providerWebServiceId, subscriptionId, resourceGroup),
+      workerAppName: azureDeploymentAppName(reader, row.providerWorkerServiceId, subscriptionId, resourceGroup),
     }, ["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"] as const);
     if (target.webAppName === target.workerAppName) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const release = reader.exactRecord({
