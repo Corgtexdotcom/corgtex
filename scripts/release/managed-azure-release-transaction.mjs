@@ -8,6 +8,7 @@ import {
 } from "./azure-release-managed-target.mjs";
 import { createManagedAzureArmImportTransport } from "./managed-azure-arm-import-transport.mjs";
 import {
+  ManagedAzureContainerAppError,
   assertManagedAzureTemplateDelta,
   buildManagedAzureReleaseTemplate,
   createManagedAzureContainerAppTransport,
@@ -32,6 +33,24 @@ class ManagedAzureReleaseError extends Error {
 
 function fail(code) { throw new ManagedAzureReleaseError(code); }
 function same(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+function failureMessage(error) { return typeof error?.message === "string" ? error.message : ""; }
+
+function failReleaseResolution(error) {
+  if (error instanceof ManagedAzureReleaseError) throw error;
+  const message = failureMessage(error);
+  if (message === "MANAGED_AZURE_SOURCE_MANIFEST_RESOLUTION_FAILED") fail("MANAGED_RELEASE_SOURCE_MANIFEST_FAILED");
+  if (message === "MANAGED_AZURE_PROVIDER_OBSERVATION_FAILED") fail("MANAGED_RELEASE_PROVIDER_OBSERVATION_FAILED");
+  fail("MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED");
+}
+
+async function readBaselineApp(deps, target, role, release) {
+  try {
+    return await deps.readApp({ target, role, release });
+  } catch (error) {
+    if (error instanceof ManagedAzureContainerAppError) fail(`MANAGED_RELEASE_BASELINE_${role.toUpperCase()}_${error.code}`);
+    fail(`MANAGED_RELEASE_BASELINE_${role.toUpperCase()}_READ_FAILED`);
+  }
+}
 
 function canonicalInput(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("MANAGED_RELEASE_INPUT_INVALID");
@@ -98,12 +117,17 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
   if (baselineRelease.imageTag === `sha-${input.releaseSha}`) fail("MANAGED_RELEASE_ALREADY_CURRENT");
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });
-  const releasePlan = await deps.resolveRelease({ deploymentId: input.deploymentId, target: preflight.target, gitSha: input.releaseSha });
+  let releasePlan;
+  try {
+    releasePlan = await deps.resolveRelease({ deploymentId: input.deploymentId, target: preflight.target, gitSha: input.releaseSha });
+  } catch (error) {
+    failReleaseResolution(error);
+  }
   if (!releasePlan || ROLES.some((role) => !/^sha256:[0-9a-f]{64}$/.test(releasePlan.roles?.[role]?.digest)
     || !["MATCH", "ABSENT"].includes(releasePlan.roles?.[role]?.destinationState))) fail("MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED");
 
   const baselines = {};
-  for (const role of ROLES) baselines[role] = await deps.readApp({ target: preflight.target, role, release: baselineRelease });
+  for (const role of ROLES) baselines[role] = await readBaselineApp(deps, preflight.target, role, baselineRelease);
   const rollback = {
     schemaVersion: 1,
     target: preflight.target,

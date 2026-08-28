@@ -249,6 +249,29 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).toHaveBeenCalledTimes(1); expect(deps.lease).toHaveBeenCalledWith("preflight", expect.anything());
   });
 
+  it("surfaces safe release-resolution stage failures before baseline reads", async () => {
+    for (const [error, code] of [
+      ["MANAGED_AZURE_SOURCE_MANIFEST_RESOLUTION_FAILED", "MANAGED_RELEASE_SOURCE_MANIFEST_FAILED"],
+      ["MANAGED_AZURE_PROVIDER_OBSERVATION_FAILED", "MANAGED_RELEASE_PROVIDER_OBSERVATION_FAILED"],
+      ["private dependency failure", "MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED"],
+    ]) {
+      const { deps } = dependencies();
+      deps.resolveRelease.mockRejectedValueOnce(new Error(error));
+      await expect(runManagedAzureReleaseTransaction(input, deps)).rejects.toThrow(code);
+      expect(deps.readApp).not.toHaveBeenCalled();
+      expect(deps.importRole).not.toHaveBeenCalled();
+      expect(deps.patchTemplate).not.toHaveBeenCalled();
+    }
+  });
+
+  it("surfaces safe baseline app read failures before dry-run readiness", async () => {
+    const { deps } = dependencies();
+    deps.readApp.mockRejectedValueOnce(new ManagedAzureContainerAppError("AZURE_READ_FAILED"));
+    await expect(runManagedAzureReleaseTransaction(input, deps)).rejects.toThrow("MANAGED_RELEASE_BASELINE_WEB_AZURE_READ_FAILED");
+    expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
   it("accepts health only with exact release, database, and schema proof", () => {
     const release = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
     const healthy = { status: "ok", service: "web", database: "up", schema: "ready", app: "corgtex", release };
