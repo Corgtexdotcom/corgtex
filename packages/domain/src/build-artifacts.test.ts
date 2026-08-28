@@ -183,6 +183,49 @@ describe("build artifacts", () => {
     expect(JSON.stringify(recordAudit.mock.calls)).not.toContain("public-token");
   });
 
+  it("indexes global-operator-created artifacts without a synthetic Brain author member", async () => {
+    prismaMock.buildArtifact.findFirst.mockReset();
+    requireWorkspaceMembership.mockResolvedValueOnce({
+      id: "global-operator",
+      workspaceId: "workspace-1",
+      userId: "operator-1",
+      role: "ADMIN",
+      isActive: true,
+    });
+    prismaMock.buildArtifact.findFirst
+      .mockResolvedValueOnce(artifactFixture({ classification: "INTERNAL", visibility: "PRIVATE", brainSourceId: "brain-1" }));
+    prismaMock.buildArtifact.create.mockResolvedValue(artifactFixture({ classification: "INTERNAL", visibility: "PRIVATE" }));
+    prismaMock.buildArtifact.findUnique.mockResolvedValue(artifactFixture({ classification: "INTERNAL", visibility: "PRIVATE" }));
+
+    const { upsertBuildArtifact } = await import("./build-artifacts");
+    await expect(upsertBuildArtifact({
+      kind: "user",
+      user: {
+        id: "operator-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    }, {
+      workspaceId: "workspace-1",
+      repositoryOwner: "puncar-dev",
+      repositoryName: "corgtex",
+      title: "Private proof",
+      classification: "INTERNAL",
+      visibility: "PRIVATE",
+    })).resolves.toMatchObject({
+      id: "artifact-1",
+      classification: "INTERNAL",
+      visibility: "PRIVATE",
+    });
+
+    expect(prismaMock.brainSource.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        authorMemberId: null,
+      }),
+    }));
+  });
+
   it("blocks public links unless the artifact is explicitly open-core and clean", async () => {
     const { upsertBuildArtifact } = await import("./build-artifacts");
 
