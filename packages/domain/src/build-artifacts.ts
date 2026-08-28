@@ -175,6 +175,10 @@ function canManageArtifact(
   return Boolean(artifact.createdByUserId && artifact.createdByUserId === actor.user.id);
 }
 
+function brainSourceAuthorMemberId(membership: MembershipSummary | null | undefined) {
+  return membership?.id === "global-operator" ? null : membership?.id ?? null;
+}
+
 function publicBaseUrl() {
   return env.APP_URL.replace(/\/$/, "");
 }
@@ -509,7 +513,7 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
         select: buildArtifactSelect,
       });
 
-    await syncBrainSource(tx, artifact.id, membership?.id ?? null);
+    await syncBrainSource(tx, artifact.id, brainSourceAuthorMemberId(membership));
     const refreshed = await getArtifactOrThrow(tx, params.workspaceId, artifact.id);
 
     await recordAudit(tx, actor, {
@@ -686,7 +690,7 @@ export async function addBuildArtifactAsset(actor: AppActor, params: {
       select: buildArtifactAssetSelect,
     });
 
-    await syncBrainSource(tx, params.artifactId, membership?.id ?? null);
+    await syncBrainSource(tx, params.artifactId, brainSourceAuthorMemberId(membership));
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -753,7 +757,7 @@ export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
       },
       select: buildArtifactSelect,
     });
-    await syncBrainSource(tx, artifact.id, membership?.id ?? null);
+    await syncBrainSource(tx, artifact.id, brainSourceAuthorMemberId(membership));
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
