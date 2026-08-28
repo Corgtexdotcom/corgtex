@@ -60,7 +60,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           password: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
       - uses: azure/login@v2
         with:
@@ -71,7 +71,7 @@ jobs:
         env:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
-          GHCR_IMPORT_USERNAME: ${{ github.actor }}
+          GHCR_IMPORT_USERNAME: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
         run: >-
@@ -101,7 +101,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           password: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
       - uses: azure/login@v2
         with:
@@ -112,7 +112,7 @@ jobs:
         env:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
-          GHCR_IMPORT_USERNAME: ${{ github.actor }}
+          GHCR_IMPORT_USERNAME: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
         run: >-
