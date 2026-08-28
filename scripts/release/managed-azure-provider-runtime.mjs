@@ -113,16 +113,19 @@ function digestObservation(value, tag) {
 function pullIdentity(value) {
   if (value === "system") return { kind: "SYSTEM_ASSIGNED", resourceId: null };
   if (typeof value !== "string" || value.length > 512) fail();
-  const match = /^\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resourceGroups\/([^/]{1,90})\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/([^/]{1,128})$/.exec(value);
+  const match = /^\/subscriptions\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/resource[Gg]roups\/([^/]{1,90})\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/([^/]{1,128})$/.exec(value);
   if (!match || !/^[A-Za-z0-9][A-Za-z0-9_.()-]*$/.test(match[2]) || match[2].endsWith(".")
     || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(match[3])) fail();
   return { kind: "USER_ASSIGNED", resourceId: value };
+}
+function absentCredential(value) {
+  return value === null || value === "";
 }
 function registryObservation(value, request, appName) {
   const rows = exactArray(value);
   if (rows.length !== 1) fail();
   const row = exactRecord(rows[0], ["server", "identity", "username", "passwordSecretRef"]);
-  if (row.server !== request.target.acrServer || row.username !== null || row.passwordSecretRef !== null) fail();
+  if (row.server !== request.target.acrServer || !absentCredential(row.username) || !absentCredential(row.passwordSecretRef)) fail();
   return { binding: { ...request.binding }, appName, registryServer: row.server, pullIdentity: pullIdentity(row.identity) };
 }
 function destinationArgs(request) {
