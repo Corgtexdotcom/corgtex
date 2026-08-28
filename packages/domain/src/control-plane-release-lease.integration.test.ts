@@ -22,6 +22,7 @@ const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
 const SUBSCRIPTION = "123e4567-e89b-12d3-a456-426614174000"; const [RG, WEB, WORKER, ACR] = ["rg.Safe_1", "web-app", "worker-app", "acr12.azurecr.io"];
 const ARM_WEB = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
 const ARM_WORKER = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WORKER}`;
+const ARM_WEB_UPPER_RG = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG.toUpperCase()}/providers/Microsoft.App/containerApps/${WEB}`;
 const ACR_IDENTITY = { acrName: "acr12", acrServer: ACR };
 const DIGESTS = ["1", "2", "3", "4"].map((value) => `sha256:${value.repeat(64)}`);
 function rollbackPayload() {
@@ -259,19 +260,26 @@ describe("managed release lease CAS", () => {
     await expectCode(getManagedReleaseLeaseTarget({ deploymentId: ineligible.id, leaseId: randomUUID(), capability: "synthetic", fence: 1 }, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_CONFLICT");
     expect(await releaseState(ineligible.id)).toEqual(ineligibleBefore);
     await truncateAllTables();
-    const unsafeCases: Array<{ overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput>; incomingVersion?: string }> = [
+    const unsafeCases: Array<{ overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput>; incomingVersion?: string; acquireCode?: string; acquireStatus?: number }> = [
       { overrides: { url: "https://Upper.example.test" } }, { overrides: { url: "https://path.example.test/private" } },
-      { overrides: { providerSubscriptionId: SUBSCRIPTION.toUpperCase() } }, { overrides: { providerResourceGroup: "bad." } },
-      { overrides: { providerWebServiceId: "Web-app" } }, { overrides: { providerWorkerServiceId: WEB } },
+      { overrides: { providerSubscriptionId: SUBSCRIPTION.toUpperCase() }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
+      { overrides: { providerResourceGroup: "bad." }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
+      { overrides: { providerWebServiceId: "Web-app" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { providerWorkerServiceId: WEB } },
       { overrides: { releaseVersion: "bad/version" } }, { overrides: {}, incomingVersion: "bad/version" },
     ];
     for (const unsafeCase of unsafeCases) {
       const unsafeRow = await deployment(unsafeCase.overrides);
-      const unsafeHandle = await acquire(unsafeRow.id, unsafeCase.incomingVersion ? { incomingVersion: unsafeCase.incomingVersion } : {});
       const unsafeBefore = await releaseState(unsafeRow.id);
-      await expectCode(getManagedReleaseLeaseTarget(unsafeHandle, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
-      expect(await releaseState(unsafeRow.id)).toEqual(unsafeBefore);
-      await abortManagedReleaseLease(unsafeHandle);
+      if (unsafeCase.acquireCode) {
+        await expectCode(acquire(unsafeRow.id, unsafeCase.incomingVersion ? { incomingVersion: unsafeCase.incomingVersion } : {}), unsafeCase.acquireCode, unsafeCase.acquireStatus ?? 409);
+        expect(await releaseState(unsafeRow.id)).toEqual(unsafeBefore);
+      } else {
+        const unsafeHandle = await acquire(unsafeRow.id, unsafeCase.incomingVersion ? { incomingVersion: unsafeCase.incomingVersion } : {});
+        const leasedBefore = await releaseState(unsafeRow.id);
+        await expectCode(getManagedReleaseLeaseTarget(unsafeHandle, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+        expect(await releaseState(unsafeRow.id)).toEqual(leasedBefore);
+        await abortManagedReleaseLease(unsafeHandle);
+      }
       await truncateAllTables();
     }
     const corrupt = await deployment(); const corruptHandle = await acquire(corrupt.id); await recordManagedReleaseRollbackRecord(corruptHandle, rollbackPayload());
@@ -326,7 +334,7 @@ describe("managed release lease CAS", () => {
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
   });
   it("projects Container App names from exact Azure resource IDs without mutating target state", async () => {
-    const target = await deployment({ providerWebServiceId: ARM_WEB, providerWorkerServiceId: ARM_WORKER });
+    const target = await deployment({ providerWebServiceId: ARM_WEB_UPPER_RG, providerWorkerServiceId: ARM_WORKER });
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
@@ -340,6 +348,12 @@ describe("managed release lease CAS", () => {
     await expect(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).resolves.toMatchObject({
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
     });
+  });
+  it("blocks overlapping Azure targets when rows mix Container App names and resource IDs", async () => {
+    const target = await deployment({ providerWebServiceId: ARM_WEB, providerWorkerServiceId: ARM_WORKER });
+    await deployment({ providerWebServiceId: WEB, providerWorkerServiceId: "other-worker" });
+    await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
   });
   it("rejects Azure resource IDs whose embedded target does not match the deployment row", async () => {
     const wrongSubscription = `/subscriptions/${randomUUID()}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
