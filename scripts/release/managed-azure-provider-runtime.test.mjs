@@ -13,6 +13,7 @@ const UUID = "12345678-1234-1234-1234-123456789abc";
 const TARGET = Object.freeze({ subscriptionId: UUID, resourceGroup: "managed-prod", acrName: "managedacr", acrServer: "managedacr.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" });
 const TAG = `sha-${SHA}`;
 const USER_IDENTITY = `/subscriptions/${UUID}/resourceGroups/identity-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/release-pull`;
+const LOWERCASE_GROUP_IDENTITY = `/subscriptions/${UUID}/resourcegroups/identity-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/release-pull`;
 
 function request(role, values = {}) {
   const gitSha = values.gitSha ?? SHA; const target = { ...TARGET, ...(values.target ?? {}) };
@@ -69,13 +70,15 @@ describe("managed Azure provider observation", () => {
   });
 
   it("returns one atomic exact two-role registry preflight with both pull identity kinds", async () => {
-    const web = registryRow(); const worker = registryRow(TARGET.acrServer, USER_IDENTITY); const webRequest = request("web"); const workerRequest = request("worker");
+    const web = registryRow(TARGET.acrServer, "system", { username: "", passwordSecretRef: "" });
+    const worker = registryRow(TARGET.acrServer, LOWERCASE_GROUP_IDENTITY, { username: "", passwordSecretRef: "" });
+    const webRequest = request("web"); const workerRequest = request("worker");
     const { observer, spawn } = harness([result(acrRows([web])), result(acrRows([worker]))], [200, 201]);
     const output = await observer.observeRegistryPreflight({ webRequest, workerRequest });
     expect(Object.keys(output)).toEqual(["schemaVersion", "deploymentId", "target", "observedAtMs", "web", "worker"]);
     expect(output).toMatchObject({ schemaVersion: 1, deploymentId: UUID, observedAtMs: 201,
       web: { appName: TARGET.webAppName, registryServer: TARGET.acrServer, pullIdentity: { kind: "SYSTEM_ASSIGNED", resourceId: null } },
-      worker: { appName: TARGET.workerAppName, registryServer: TARGET.acrServer, pullIdentity: { kind: "USER_ASSIGNED", resourceId: USER_IDENTITY } } });
+      worker: { appName: TARGET.workerAppName, registryServer: TARGET.acrServer, pullIdentity: { kind: "USER_ASSIGNED", resourceId: LOWERCASE_GROUP_IDENTITY } } });
     expect(Object.isFrozen(output)).toBe(true); expect(Object.isFrozen(output.worker.pullIdentity)).toBe(true);
     expect(output.web.binding).not.toBe(webRequest.binding); expect(output.worker.binding).not.toBe(workerRequest.binding);
     expect(spawn).toHaveBeenCalledTimes(2);
