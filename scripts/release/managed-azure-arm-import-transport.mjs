@@ -98,6 +98,13 @@ function pollLocation(raw, request) {
     return null;
   } catch { return null; }
 }
+function samePollOperation(left, right) {
+  try {
+    const a = new URL(left);
+    const b = new URL(right);
+    return a.origin === b.origin && a.pathname === b.pathname && a.searchParams.get("api-version") === b.searchParams.get("api-version");
+  } catch { return false; }
+}
 function retryDelay(raw) {
   if (raw === null) return DEFAULT_DELAY_MS;
   if (!/^(0|[1-9][0-9]*)$/.test(raw)) return null;
@@ -236,7 +243,7 @@ export function createManagedAzureArmImportTransport(dependencies) {
         return pair(outcome, reason, initial.status >= 400 && initial.status < 500 ? await readRejectionDetail(post.response) : {});
       }
       const asyncOperation = initial.asyncUrl !== null;
-      const location = pollLocation(asyncOperation ? initial.asyncUrl : initial.location, request);
+      let location = pollLocation(asyncOperation ? initial.asyncUrl : initial.location, request);
       let delay = retryDelay(initial.retryAfter);
       if (!location || delay === null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION"); polling = true;
       let refreshed = false;
@@ -264,8 +271,11 @@ export function createManagedAzureArmImportTransport(dependencies) {
           if (polled === FAILED || polled === TIMED_OUT) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
           pollResponse = polled.response;
           details = responseDetails(pollResponse, location);
-          if (!details || (details.location !== null && details.location !== location)
-            || (details.asyncUrl !== null && (!asyncOperation || details.asyncUrl !== location))) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
+          const nextLocation = details?.location === null ? null : pollLocation(details?.location, request);
+          const nextAsyncUrl = details?.asyncUrl === null ? null : pollLocation(details?.asyncUrl, request);
+          if (!details || (details.location !== null && (!nextLocation || !samePollOperation(location, nextLocation)))
+            || (details.asyncUrl !== null && (!asyncOperation || nextAsyncUrl !== location))) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
+          if (!asyncOperation && nextLocation) location = nextLocation;
           if (details.status !== 401 || refreshed || attempt === 1) break;
           refreshed = true;
         }
