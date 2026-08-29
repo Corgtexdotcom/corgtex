@@ -90,6 +90,13 @@ export function managedAzureCliResultAccepted(result, execute) {
   return execute ? result?.status === "SUCCEEDED" : result?.status === "DRY_RUN_READY";
 }
 
+export function writeManagedAzureCliResult(result, execute, writers = { stdout: process.stdout, stderr: process.stderr }) {
+  writers.stdout.write(`${JSON.stringify(result)}\n`);
+  if (managedAzureCliResultAccepted(result, execute)) return 0;
+  writers.stderr.write(`${result.status}${result.code ? `:${result.code}` : ""}\n`);
+  return 1;
+}
+
 function verifyInventoryResponse(inventory, input) {
   if (inventory?.inventoryRef !== input.inventoryRef || inventory.sha256 !== input.inventorySha256
     || typeof inventory.bytesBase64 !== "string"
@@ -174,7 +181,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   const compensate = async (stage, code, forwardTemplates, detail = {}) => {
     const classified = {};
     for (const role of ROLES) classified[role] = await classifyRole(role, forwardTemplates[role]);
-    if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code);
+    if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code, detail);
     await heartbeat();
     for (const role of ["worker", "web"]) {
       if (classified[role].kind !== "FORWARD") continue;
@@ -248,7 +255,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
 
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
-    if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS");
+    if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS",
+      webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
     if (!webPatch.succeeded) return compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates,
       webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
     await heartbeat();
@@ -261,7 +269,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await heartbeat();
 
     const workerPatch = await deps.patchTemplate({ target: preflight.target, role: "worker", location: baselines.worker.location, template: forwardTemplates.worker, onProgress: heartbeat });
-    if (!workerPatch.terminal) return markRecovery("WORKER", workerPatch.code ?? "WORKER_PATCH_AMBIGUOUS");
+    if (!workerPatch.terminal) return markRecovery("WORKER", workerPatch.code ?? "WORKER_PATCH_AMBIGUOUS",
+      workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
     if (!workerPatch.succeeded) return compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates,
       workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
     await heartbeat();
@@ -435,11 +444,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const input = cliInput(process.argv.slice(2), process.env);
   runManagedAzureReleaseTransaction(input, runtimeDependencies())
     .then((result) => {
-      process.stdout.write(`${JSON.stringify(result)}\n`);
-      if (!managedAzureCliResultAccepted(result, input.execute)) {
-        process.stderr.write(`${result.status}${result.code ? `:${result.code}` : ""}\n`);
-        process.exitCode = 1;
-      }
+      process.exitCode = writeManagedAzureCliResult(result, input.execute);
     })
     .catch((error) => {
       process.stderr.write(`${error instanceof ManagedAzureReleaseError ? error.code : "MANAGED_RELEASE_FAILED"}\n`);

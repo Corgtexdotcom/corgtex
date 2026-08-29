@@ -10,7 +10,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
-import { managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction } from "./managed-azure-release-transaction.mjs";
+import { managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
 
 const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
@@ -198,20 +198,20 @@ describe("managed Azure single-target transaction", () => {
 
   it("retains recovery instead of compensating unknown provider state", async () => {
     const { deps } = dependencies({
-      patchResults: [{ state: "UNKNOWN", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" } }],
+      patchResults: [{ state: "UNKNOWN", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
     expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ stage: "WEB", code: "AZURE_OPERATION_TIMEOUT" }));
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
   it("retains recovery for a non-terminal patch even when the last read still shows baseline", async () => {
     const { deps } = dependencies({
-      patchResults: [{ state: "BASELINE", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" } }],
+      patchResults: [{ state: "BASELINE", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
@@ -290,6 +290,13 @@ describe("managed Azure single-target transaction", () => {
     expect(managedAzureCliResultAccepted({ status: "SUCCEEDED" }, false)).toBe(false);
   });
 
+  it("writes the result and returns a failing exit code for rejected execute outcomes", () => {
+    const output = { stdout: "", stderr: "", writers: { stdout: { write: (value) => { output.stdout += value; } }, stderr: { write: (value) => { output.stderr += value; } } } };
+    expect(writeManagedAzureCliResult({ status: "ROLLED_BACK", code: "AZURE_PATCH_REJECTED" }, true, output.writers)).toBe(1);
+    expect(output.stdout).toContain('"status":"ROLLED_BACK"'); expect(output.stderr).toBe("ROLLED_BACK:AZURE_PATCH_REJECTED\n");
+    expect(writeManagedAzureCliResult({ status: "DRY_RUN_READY" }, false, output.writers)).toBe(0);
+  });
+
   it("keeps the workflow manual, exact-targeted, and false by default", () => {
     const workflow = readFileSync(new URL("../../.github/workflows/managed-azure-release.yml", import.meta.url), "utf8");
     expect(workflow).toContain("workflow_dispatch:");
@@ -362,8 +369,8 @@ describe("managed Azure Container Apps transport", () => {
 
   it("classifies confirmed rejection separately from operation ambiguity", async () => {
     const candidate = rawApp().properties.template;
-    const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "Rejected", message: "private-provider-message" } })), getAccessToken: async () => "token-value-with-enough-length" });
-    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "Rejected" });
+    const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "BadRequest", details: [{ code: "InvalidParameterValueInContainerTemplate", message: "private-provider-message" }] } })), getAccessToken: async () => "token-value-with-enough-length" });
+    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
     const rejectedResult = await rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate });
     expect(JSON.stringify(rejectedResult)).not.toContain("private-provider-message");
     const ambiguous = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockRejectedValue(new Error("private-provider-error")), getAccessToken: async () => "token-value-with-enough-length" });

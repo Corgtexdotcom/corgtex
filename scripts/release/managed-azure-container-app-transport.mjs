@@ -249,8 +249,9 @@ async function responseBody(response) {
 }
 
 function providerErrorCode(body) {
-  const code = body?.error?.code;
-  return typeof code === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(code) ? code : undefined;
+  const details = Array.isArray(body?.error?.details) ? body.error.details : [];
+  const codes = [...details.map((detail) => detail?.code), body?.error?.code];
+  return codes.find((code) => typeof code === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(code));
 }
 
 function patchResult(terminal, succeeded, code, body = null) {
