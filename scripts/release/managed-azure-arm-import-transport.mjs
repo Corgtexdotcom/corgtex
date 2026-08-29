@@ -255,7 +255,8 @@ export function createManagedAzureArmImportTransport(dependencies) {
           if (details.status !== 401 || refreshed || attempt === 1) break;
           refreshed = true;
         }
-        if ((details.status === 200 || details.status === 204) && !asyncOperation) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
+        if (details.status === 204) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
+        if (details.status === 200 && !asyncOperation) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
         if (details.status === 200 && asyncOperation) {
           let remaining;
           try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
