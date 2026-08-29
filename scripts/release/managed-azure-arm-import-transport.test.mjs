@@ -25,6 +25,9 @@ function asyncOperationUrl(change = (value) => value) {
 function operationStatusUrl(change = (value) => value) {
   return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ContainerRegistry/locations/CENTRALUS/operationStatuses/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
 }
+function signedPollUrl(change = (value) => value) {
+  return change(`${asyncOperationUrl()}&t=synthetic-time_ABC-123&c=synthetic-cert_ABC-123&s=synthetic-signature_ABC-123&h=synthetic-hash_ABC-123`);
+}
 function response(spec, requestedUrl) {
   const body = spec.body === undefined ? "" : JSON.stringify(spec.body);
   return { status: spec.status, redirected: spec.redirected ?? false, url: spec.url ?? requestedUrl, headers: new Headers(spec.headers),
@@ -166,6 +169,25 @@ describe("managed Azure ARM import transport", () => {
       expect(fixture.calls).toHaveLength(2);
       expect(fixture.calls[1]).toMatchObject({ url: location, options: { method: "GET", redirect: "manual" } });
     }
+  });
+
+  test("accepts Azure signed Location polling query parameters", async () => {
+    const location = signedPollUrl();
+    const fixture = rig([{ status: 202, headers: { Location: location, "Retry-After": "0" } }, { status: 204 }]);
+    await expect(fixture.transport.startManagedAzureImport(request()).completion).resolves.toMatchObject({
+      outcome: "CONFIRMED_SUCCESS",
+      reason: "ARM_COMPLETED",
+    });
+    expect(fixture.calls).toHaveLength(2);
+    expect(fixture.calls[1]).toMatchObject({ url: location, options: { method: "GET", redirect: "manual" } });
+  });
+
+  test("rejects malformed Azure signed Location query parameters", async () => {
+    const invalid = [signedPollUrl((value) => value.replace("&h=", "&extra=true&h=")),
+      signedPollUrl((value) => value.replace("?api-version=", "?api-version=2025-11-01&api-version=")),
+      signedPollUrl((value) => value.replace("&s=", "&s=&unused=")),
+      signedPollUrl((value) => value.replace("&t=", "&t=not allowed&h2="))];
+    for (const location of invalid) expect((await outcome([{ status: 202, headers: { Location: location } }])).result.reason).toBe("PROTOCOL_LOCATION_VIOLATION");
   });
 
   test("accepts bodyless Azure-AsyncOperation completion before digest readback", async () => {
