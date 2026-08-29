@@ -10,7 +10,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
-import { managedAzureHealthReady, runManagedAzureReleaseTransaction } from "./managed-azure-release-transaction.mjs";
+import { managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction } from "./managed-azure-release-transaction.mjs";
 
 const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
@@ -187,11 +187,11 @@ describe("managed Azure single-target transaction", () => {
     const { deps, events } = dependencies({
       patchResults: [
         null,
-        { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" } },
+        { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" } },
       ],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "WORKER", code: "AZURE_PATCH_REJECTED" });
+    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "WORKER", code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
     expect(events.filter((event) => event.startsWith("patch:"))).toEqual(["patch:web:forward", "patch:worker:forward", "patch:web:rollback"]);
     expect(events.at(-1)).toBe("lease:finalize_rollback");
   });
@@ -281,6 +281,15 @@ describe("managed Azure single-target transaction", () => {
     }
   });
 
+  it("accepts only the expected terminal result for each CLI mode", () => {
+    expect(managedAzureCliResultAccepted({ status: "DRY_RUN_READY" }, false)).toBe(true);
+    expect(managedAzureCliResultAccepted({ status: "SUCCEEDED" }, true)).toBe(true);
+    for (const result of [{ status: "ROLLED_BACK" }, { status: "RECOVERY_REQUIRED" }, { status: "DRY_RUN_READY" }]) {
+      expect(managedAzureCliResultAccepted(result, true)).toBe(false);
+    }
+    expect(managedAzureCliResultAccepted({ status: "SUCCEEDED" }, false)).toBe(false);
+  });
+
   it("keeps the workflow manual, exact-targeted, and false by default", () => {
     const workflow = readFileSync(new URL("../../.github/workflows/managed-azure-release.yml", import.meta.url), "utf8");
     expect(workflow).toContain("workflow_dispatch:");
@@ -353,8 +362,10 @@ describe("managed Azure Container Apps transport", () => {
 
   it("classifies confirmed rejection separately from operation ambiguity", async () => {
     const candidate = rawApp().properties.template;
-    const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "Rejected" } })), getAccessToken: async () => "token-value-with-enough-length" });
-    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
+    const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "Rejected", message: "private-provider-message" } })), getAccessToken: async () => "token-value-with-enough-length" });
+    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "Rejected" });
+    const rejectedResult = await rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate });
+    expect(JSON.stringify(rejectedResult)).not.toContain("private-provider-message");
     const ambiguous = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockRejectedValue(new Error("private-provider-error")), getAccessToken: async () => "token-value-with-enough-length" });
     await expect(ambiguous.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_PATCH_AMBIGUOUS" });
   });
