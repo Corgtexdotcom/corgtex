@@ -11,6 +11,7 @@ import {
   finalizeManagedReleaseRollback,
   finalizeManagedReleaseSuccess,
   getManagedReleaseLeaseTarget,
+  getManagedReleaseRecoveryStatus,
   getManagedReleaseRollbackRecord,
   getManagedReleaseTargetPreflight,
   heartbeatManagedReleaseLease,
@@ -391,6 +392,19 @@ describe("managed release lease CAS", () => {
     const retained = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
     expect(retained.releaseLeaseRecoveryEvidence).toEqual({ stage: "WORKER", code: "ARM_OPERATION_AMBIGUOUS" });
     expect(retained.releaseLeaseError).toBe("ARM_OPERATION_AMBIGUOUS");
+    const status = await getManagedReleaseRecoveryStatus(target.id, ACR_IDENTITY);
+    expect(status).toMatchObject({
+      deploymentId: target.id,
+      leaseId: stale.leaseId,
+      fence: stale.fence,
+      phase: "RECOVERY_REQUIRED",
+      rollbackRecorded: true,
+      recovery: { stage: "WORKER", code: "ARM_OPERATION_AMBIGUOUS" },
+      release: { baselineImageTag: BASE, baselineVersion: "release-1" },
+      target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
+    });
+    expect(JSON.stringify(status)).not.toContain(stale.capability);
+    expect(JSON.stringify(status)).not.toContain(retained.releaseLeaseTokenHash!);
     await expire(target.id);
     const claimed = await claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: stale.leaseId, expectedFence: stale.fence, owner: "recovery:test" });
     expect(claimed.fence).toBe(stale.fence + 1); expect(claimed.leaseId).not.toBe(stale.leaseId);

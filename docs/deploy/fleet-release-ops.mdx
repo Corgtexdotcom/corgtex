@@ -125,6 +125,14 @@ Execution acquires the database-clock lease, rechecks the target, stores complet
 - `ROLLED_BACK`: both apps are proven on fresh rollback revisions derived from the recorded baseline; the lease is cleared.
 - `RECOVERY_REQUIRED`: any drift, timeout, lost fence, crash, ambiguous ARM result, unknown partial state, or failed compensation retains the fenced lease, rollback record, and bounded recovery code. Keep the one-writer window in place, assign the named recovery owner, and do not retry the workflow as a new release. Use the fenced recovery claim only after the retained lease expires and after classifying both apps from fresh Azure reads.
 
+If a failure occurs before any Container App mutation and leaves `RECOVERY_REQUIRED`,
+use the manual `Managed Azure Release Recovery` workflow before any new release run.
+It claims the expired fenced recovery lease through the control plane, reads the
+stored rollback baseline, verifies both Container Apps still match that baseline,
+and then finalizes rollback to clear the lease. It does not import images, patch
+Container Apps, or mark the incoming release successful. Any baseline drift or
+ambiguous Azure read must stop as `RECOVERY_BLOCKED` for manual investigation.
+
 Repository rollback is to disable the workflow or merge a normal protected revert. Live rollback is never inferred from an error response; it is complete only after terminal Azure operations and exact baseline readback for both apps.
 
 ## Gate For Next Work
