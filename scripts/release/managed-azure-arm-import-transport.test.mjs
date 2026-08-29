@@ -182,6 +182,22 @@ describe("managed Azure ARM import transport", () => {
     expect(fixture.calls[1]).toMatchObject({ url: location, options: { method: "GET", redirect: "manual" } });
   });
 
+  test("follows Azure signed Location query rotation for the same operation", async () => {
+    const firstLocation = signedPollUrl();
+    const nextLocation = signedPollUrl((value) => value.replace("synthetic-signature_ABC-123", "synthetic-signature_DEF-456"));
+    const fixture = rig([{ status: 202, headers: { Location: firstLocation, "Retry-After": "0" } },
+      { status: 202, headers: { Location: nextLocation, "Retry-After": "0" } }, { status: 204 }]);
+    await expect(fixture.transport.startManagedAzureImport(request()).completion).resolves.toMatchObject({
+      outcome: "CONFIRMED_SUCCESS",
+      reason: "ARM_COMPLETED",
+    });
+    expect(fixture.calls.map((call) => call.url)).toStrictEqual([
+      `https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${ACR_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/acrmanaged/importImage?api-version=2025-11-01`,
+      firstLocation,
+      nextLocation,
+    ]);
+  });
+
   test("rejects malformed Azure signed Location query parameters", async () => {
     const invalid = [signedPollUrl((value) => value.replace("&h=", "&extra=true&h=")),
       signedPollUrl((value) => value.replace("?api-version=", "?api-version=2025-11-01&api-version=")),
