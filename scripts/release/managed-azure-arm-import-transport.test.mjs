@@ -19,6 +19,9 @@ function request(values = {}) {
 function pollUrl(change = (value) => value) {
   return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${ACR_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/locations/eastus/operationResults/operationStatuses/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
 }
+function asyncOperationUrl(change = (value) => value) {
+  return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ContainerRegistry/locations/CENTRALUS/operationResults/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
+}
 function response(spec, requestedUrl) {
   const body = spec.body === undefined ? "" : JSON.stringify(spec.body);
   return { status: spec.status, redirected: spec.redirected ?? false, url: spec.url ?? requestedUrl, headers: new Headers(spec.headers),
@@ -126,14 +129,14 @@ describe("managed Azure ARM import transport", () => {
     expect(blocked.result.providerCode).toBeUndefined();
   });
 
-  test("accepts only the exact documented immutable Location boundary", async () => {
+  test("accepts only the exact documented immutable monitor URL boundary", async () => {
     const invalid = [null, "/relative", pollUrl((value) => value.replace("management.azure.com", "example.com")),
       pollUrl((value) => value.replace(SUBSCRIPTION_ID, DEPLOYMENT_ID)), pollUrl((value) => value.replace(ACR_RESOURCE_GROUP, "rg-other")),
       pollUrl((value) => value.replace("Microsoft.ContainerRegistry", "microsoft.containerregistry")), pollUrl((value) => `${value}&extra=true`),
       pollUrl((value) => value.replace("https://", "https://user@")), pollUrl((value) => value.replace("management.azure.com", "management.azure.com:444")),
       pollUrl((value) => `${value}#fragment`), pollUrl((value) => value.replace("/eastus/", "/../")), `${pollUrl()}, ${pollUrl()}`];
     for (const location of invalid) expect((await outcome([{ status: 202, headers: location === null ? {} : { Location: location } }])).result.reason).toBe("PROTOCOL_LOCATION_VIOLATION");
-    expect((await outcome([{ status: 202, headers: { Location: pollUrl(), "Azure-AsyncOperation": pollUrl() } }])).result.reason).toBe("PROTOCOL_LOCATION_VIOLATION");
+    expect((await outcome([{ status: 202, headers: { Location: pollUrl(), "Azure-AsyncOperation": asyncOperationUrl((value) => value.replace(SUBSCRIPTION_ID, DEPLOYMENT_ID)) } }])).result.reason).toBe("PROTOCOL_LOCATION_VIOLATION");
   });
 
   test("polls only the immutable URL with fresh tokens, bounded delay, and one 401 refresh", async () => {
@@ -148,6 +151,44 @@ describe("managed Azure ARM import transport", () => {
     expect(fixture.sourceCalls()).toBe(1); expect(fixture.tokenCalls()).toBe(4); expect(fixture.sleeps.filter((value) => value !== 15_000)).toStrictEqual([2_000, 0]);
     const cased = rig([{ status: 202, headers: { Location: location } }, { status: 200 }]);
     await expect(cased.transport.startManagedAzureImport(request({ acrResourceGroup: ACR_RESOURCE_GROUP.toUpperCase() })).completion).resolves.toMatchObject({ outcome: "CONFIRMED_SUCCESS", reason: "ARM_COMPLETED" });
+  });
+
+  test("prefers Azure-AsyncOperation and requires a succeeded body before confirming import", async () => {
+    const location = pollUrl((value) => value.replace(ACR_RESOURCE_GROUP, "rg-other"));
+    const asyncLocation = asyncOperationUrl();
+    const fixture = rig([{ status: 202, headers: { Location: location, "Azure-AsyncOperation": asyncLocation, "Retry-After": "0" } },
+      { status: 200, headers: { "Retry-After": "0" }, body: { status: "Running" } }, { status: 200, body: { status: "Succeeded" } }]);
+    const result = await fixture.transport.startManagedAzureImport(request()).completion;
+    expect(result).toMatchObject({ outcome: "CONFIRMED_SUCCESS", reason: "ARM_COMPLETED" });
+    expect(fixture.calls).toHaveLength(3);
+    expect(fixture.calls.slice(1).every((call) => call.url === asyncLocation && call.options.method === "GET")).toBe(true);
+    expect(fixture.sleeps.filter((value) => value !== 15_000)).toStrictEqual([0, 0]);
+  });
+
+  test("keeps async body reads inside the overall polling deadline", async () => {
+    let now = 0; let fixture;
+    fixture = rig([{ status: 202, headers: { "Azure-AsyncOperation": asyncOperationUrl(), "Retry-After": "0" } },
+      (url) => { now = 119_500; return { status: 200, redirected: false, url, headers: new Headers(),
+        text: async () => { now = 121_000; return JSON.stringify({ status: "Succeeded" }); } }; }],
+    { clock: () => now });
+    const result = await fixture.transport.startManagedAzureImport(request()).completion;
+    expect(result).toMatchObject({ outcome: "UNVERIFIED", reason: "POLL_EXHAUSTION", completedAtMs: 121_000 });
+    expect(fixture.calls).toHaveLength(2);
+  });
+
+  test("rejects async headers that appear after selecting a Location poll", async () => {
+    const location = pollUrl();
+    const { result } = await outcome([{ status: 202, headers: { Location: location, "Retry-After": "0" } },
+      { status: 200, headers: { "Azure-AsyncOperation": location }, body: { status: "Running" } }]);
+    expect(result).toMatchObject({ outcome: "UNVERIFIED", reason: "PROTOCOL_LOCATION_VIOLATION" });
+  });
+
+  test("maps failed Azure-AsyncOperation bodies to confirmed poll rejection without provider message text", async () => {
+    const asyncLocation = asyncOperationUrl();
+    const { result } = await outcome([{ status: 202, headers: { "Azure-AsyncOperation": asyncLocation, "Retry-After": "0" } },
+      { status: 200, body: { status: "Failed", error: { code: "InvalidParameters", message: "private-provider-canary" } } }]);
+    expect(result).toMatchObject({ outcome: "CONFIRMED_POST_REJECTION", reason: "POLL_REJECTION", providerCode: "InvalidParameters" });
+    expect(JSON.stringify(result)).not.toMatch(/private-provider-canary|ghcr-user|ghcr-password/);
   });
 
   test("maps poll rejection, ambiguity, and protocol drift without retrying the POST", async () => {
