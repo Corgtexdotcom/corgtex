@@ -58,12 +58,26 @@ function responseDetails(response, expectedUrl) {
       retryAfter: header(response, "retry-after", 32), asyncUrl: header(response, "azure-asyncoperation", 8_192) };
   } catch { return null; }
 }
+function pollSearch(url) {
+  if (url.search === "?api-version=2025-11-01") return true;
+  const entries = [...url.searchParams.entries()];
+  if (entries.length !== 5) return false;
+  const seen = new Set();
+  for (const [key, value] of entries) {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (key === "api-version") {
+      if (value !== "2025-11-01") return false;
+    } else if (!["t", "c", "s", "h"].includes(key) || !/^[A-Za-z0-9._~-]{1,8192}$/.test(value)) return false;
+  }
+  return ["api-version", "t", "c", "s", "h"].every((key) => seen.has(key));
+}
 function pollLocation(raw, request) {
   try {
     if (typeof raw !== "string" || raw !== raw.trim() || raw.length === 0 || raw.length > 8_192) return null;
     const url = new URL(raw);
     if (url.href !== raw || url.origin !== "https://management.azure.com" || url.username || url.password || url.port
-      || url.hash || url.search !== "?api-version=2025-11-01") return null;
+      || url.hash || !pollSearch(url)) return null;
     const parts = url.pathname.split("/");
     const segment = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
     if (parts[0] !== "" || parts[1] !== "subscriptions" || parts[2] !== request.target.subscriptionId) return null;
