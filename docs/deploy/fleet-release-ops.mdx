@@ -120,6 +120,7 @@ Before any live run:
 Execution acquires the database-clock lease, rechecks the target, stores complete rollback templates, imports digest-pinned images, and creates fresh web then worker revisions. Each Azure operation must reach a terminal result and exact readback before progress continues. The result is one of:
 
 - `SUCCEEDED`: both apps and health evidence match the incoming release; the release record is finalized and lease capability state is cleared.
+- `REJECTED`: a pre-forward input or configuration rejection was confirmed before any Container App mutation, such as a source-image import rejection. The lease has been aborted or cleared, rollback templates were not applied, and operators may correct the rejected input or configuration only after returning to fresh dry-run evidence.
 - `ROLLED_BACK`: both apps are proven on fresh rollback revisions derived from the recorded baseline; the lease is cleared.
 - `RECOVERY_REQUIRED`: any drift, timeout, lost fence, crash, ambiguous ARM result, unknown partial state, or failed compensation retains the fenced lease, rollback record, and bounded recovery code. Keep the one-writer window in place, assign the named recovery owner, and do not retry the workflow as a new release. Use the fenced recovery claim only after the retained lease expires and after classifying both apps from fresh Azure reads.
 

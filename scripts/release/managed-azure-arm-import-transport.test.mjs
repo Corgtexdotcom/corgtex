@@ -110,6 +110,20 @@ describe("managed Azure ARM import transport", () => {
     expect(JSON.stringify(result)).not.toMatch(/private-provider-canary|ghcr-user|ghcr-password/);
   });
 
+  test("bounds import rejection body reads before accepting provider codes", async () => {
+    let cancelled = false;
+    const oversized = (url) => ({ status: 400, redirected: false, url, headers: new Headers(),
+      body: new ReadableStream({ start(stream) { stream.enqueue(new TextEncoder().encode("x".repeat(8_193))); },
+        cancel() { cancelled = true; } }) });
+    const large = await outcome([oversized]);
+    expect(large.result).toMatchObject({ outcome: "CONFIRMED_POST_REJECTION", reason: "POST_REJECTED", providerStatus: 400 });
+    expect(large.result.providerCode).toBeUndefined(); expect(cancelled).toBe(true);
+    const blocked = await outcome([(url) => ({ status: 400, redirected: false, url, headers: new Headers(), text: () => new Promise(() => {}) })],
+      { sleep: async (milliseconds) => { if (milliseconds === 15_000) return; return new Promise(() => {}); } });
+    expect(blocked.result).toMatchObject({ outcome: "CONFIRMED_POST_REJECTION", reason: "POST_REJECTED", providerStatus: 400 });
+    expect(blocked.result.providerCode).toBeUndefined();
+  });
+
   test("accepts only the exact documented immutable Location boundary", async () => {
     const invalid = [null, "/relative", pollUrl((value) => value.replace("management.azure.com", "example.com")),
       pollUrl((value) => value.replace(SUBSCRIPTION_ID, DEPLOYMENT_ID)), pollUrl((value) => value.replace("rg-managed", "rg-other")),
