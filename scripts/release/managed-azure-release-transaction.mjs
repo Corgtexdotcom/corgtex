@@ -233,9 +233,14 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       if (releasePlan.roles[role].destinationState !== "ABSENT") continue;
       const imported = await deps.importRole(releasePlan.roles[role]);
       if (!imported.terminal || !imported.succeeded) {
-        if (imported.ambiguous) return markRecovery("IMPORT", imported.code ?? "IMPORT_AMBIGUOUS");
+        const importDetail = {
+          role,
+          ...(Number.isInteger(imported.providerStatus) ? { providerStatus: imported.providerStatus } : {}),
+          ...(imported.providerCode ? { providerCode: imported.providerCode } : {}),
+        };
+        if (imported.ambiguous) return markRecovery("IMPORT", imported.code ?? "IMPORT_AMBIGUOUS", importDetail);
         await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
-        fail("MANAGED_RELEASE_IMPORT_REJECTED");
+        return safeResult(input, inventory, "REJECTED", { phase: "IMPORT", code: imported.code ?? "IMPORT_REJECTED", ...importDetail });
       }
       await heartbeat();
     }
@@ -408,15 +413,19 @@ function runtimeDependencies(env = process.env) {
     },
     importRole: async (rolePlan) => {
       const result = await importer.startManagedAzureImport(rolePlan.request).completion;
+      const detail = {
+        ...(Number.isInteger(result.providerStatus) ? { providerStatus: result.providerStatus } : {}),
+        ...(result.providerCode ? { providerCode: result.providerCode } : {}),
+      };
       if (result.outcome === "CONFIRMED_SUCCESS") {
         try {
           const observed = await provider.observeDestination(rolePlan.request);
           const compared = compareManagedAzureDestinationDigestV1({ expectedRequest: rolePlan.request, observedRequest: observed.request, destinationDigest: observed.digest });
           if (compared.state === "MATCH") return { terminal: true, succeeded: true, ambiguous: false, code: "IMPORT_VERIFIED" };
-          return { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_DIGEST_MISMATCH" };
-        } catch { return { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_AMBIGUOUS" }; }
+          return { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_DIGEST_MISMATCH", ...detail };
+        } catch { return { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_AMBIGUOUS", ...detail }; }
       }
-      return { terminal: result.outcome !== "UNVERIFIED", succeeded: false, ambiguous: result.outcome === "UNVERIFIED", code: result.reason };
+      return { terminal: result.outcome !== "UNVERIFIED", succeeded: false, ambiguous: result.outcome === "UNVERIFIED", code: result.reason, ...detail };
     },
   };
 }
