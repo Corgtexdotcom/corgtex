@@ -12,7 +12,7 @@ const SPAWN_OPTIONS = Object.freeze({
   maxStdoutBytes: MAX_JSON_BYTES,
   maxStderrBytes: 4_096,
 });
-const TARGET_KEYS = Object.freeze(["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
+const TARGET_KEYS = Object.freeze(["subscriptionId", "resourceGroup", "acrResourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
 
 function fail() { throw new Error(FAILURE); }
 function hasEnumerable(prototype) {
@@ -128,11 +128,19 @@ function registryObservation(value, request, appName) {
   if (row.server !== request.target.acrServer || !absentCredential(row.username) || !absentCredential(row.passwordSecretRef)) fail();
   return { binding: { ...request.binding }, appName, registryServer: row.server, pullIdentity: pullIdentity(row.identity) };
 }
+function registryResourceObservation(value, request) {
+  const row = exactRecord(value, ["name", "loginServer"]);
+  if (row.name !== request.target.acrName || row.loginServer !== request.target.acrServer) fail();
+}
 function destinationArgs(request) {
   const tag = imageTag(request);
   return ["acr", "manifest", "list-metadata", "--registry", request.target.acrName, "--name", request.binding.destinationRepository,
     "--query", `[?tags!=null && contains(tags, '${tag}')].{digest:digest,tags:tags}`, "--subscription", request.target.subscriptionId,
     "--output", "json", "--only-show-errors"];
+}
+function registryResourceArgs(request) {
+  return ["acr", "show", "--name", request.target.acrName, "--resource-group", request.target.acrResourceGroup,
+    "--subscription", request.target.subscriptionId, "--query", "{name:name,loginServer:loginServer}", "--output", "json", "--only-show-errors"];
 }
 function registryArgs(request, appName) {
   return ["containerapp", "registry", "list", "--subscription", request.target.subscriptionId, "--resource-group",
@@ -159,6 +167,7 @@ export function createManagedAzureProviderObservation(value) {
         || webRequest.deploymentId !== workerRequest.deploymentId || !sameTarget(webRequest.target, workerRequest.target)
         || webRequest.mode !== workerRequest.mode || requestSha(webRequest) !== requestSha(workerRequest)) fail();
       const startedAt = time(dependencies.clock());
+      registryResourceObservation(await runRead(dependencies.spawn, registryResourceArgs(webRequest)), webRequest);
       const web = registryObservation(await runRead(dependencies.spawn, registryArgs(webRequest, webRequest.target.webAppName)), webRequest, webRequest.target.webAppName);
       const worker = registryObservation(await runRead(dependencies.spawn, registryArgs(workerRequest, workerRequest.target.workerAppName)), workerRequest, workerRequest.target.workerAppName);
       const observedAtMs = time(dependencies.clock()); if (observedAtMs < startedAt) fail();

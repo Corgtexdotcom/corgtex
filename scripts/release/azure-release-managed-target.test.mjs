@@ -8,7 +8,7 @@ const target = {
   deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure",
   group: "managed-customers", workload: "managed-customers",
   azure: { subscriptionId: "bbbbbbbb-bbbb-0bbb-fbbb-bbbbbbbb0102", resourceGroup: "rg-managed",
-    acrName: "acrmanaged", acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
+    acrResourceGroup: "rg-acr", acrName: "acrmanaged", acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
 };
 function input() {
   return { deploymentId: DEPLOYMENT_ID, deployments: [structuredClone(target)], gitSha: SHA,
@@ -36,7 +36,7 @@ describe("managed Azure release intent primitives", () => {
   test("builds fresh exact frozen intent and role requests", () => {
     const firstInput = input(); const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(firstInput);
     expect(Object.keys(intent)).toStrictEqual(["schemaVersion", "deploymentId", "target", "gitSha", "imageTag", "roles"]);
-    expect(Object.keys(intent.target)).toStrictEqual(["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
+    expect(Object.keys(intent.target)).toStrictEqual(["subscriptionId", "resourceGroup", "acrResourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
     expect(Object.keys(intent.roles)).toStrictEqual(["web", "worker"]);
     expect(Object.keys(intent.roles.web)).toStrictEqual(["role", "sourceTag", "sourceDigest", "sourceDigestRef", "destinationRepository", "destinationTag"]);
     expect(intent.roles.web).toStrictEqual({ role: "web", sourceTag: firstInput.manifests.web.sourceTag, sourceDigest: WEB_DIGEST,
@@ -103,6 +103,7 @@ describe("managed Azure release intent primitives", () => {
       (value) => { value.gitSha = SHA.toUpperCase(); },
       (value) => { value.gitSha = "a".repeat(39); },
       (value) => { value.deployments[0].azure.subscriptionId = "not-a-uuid"; },
+      (value) => { value.deployments[0].azure.acrResourceGroup = "bad."; },
       (value) => { value.deployments[0].azure.acrServer = "foreign.azurecr.io"; },
       (value) => { value.deployments[0].azure.workerAppName = "managed-web"; },
       (value) => { value.manifests.web.sourceTag = value.manifests.worker.sourceTag; },
@@ -160,6 +161,7 @@ describe("managed Azure release intent primitives", () => {
       (value) => { value.binding.destinationTag = "corgtex/web:latest"; },
       (value) => { value.binding.sourceDigestRef = 1n; },
       (value) => { value.target.acrServer = "foreign.azurecr.io"; },
+      (value) => { value.target.acrResourceGroup = ".bad"; },
       (value) => { value.extension = true; },
     ];
     for (const mutate of mutations) { const candidate = structuredClone(request); mutate(candidate); expectInvalid(() => releaseModule.canonicalizeManagedAzureImportRequestValueV1(candidate)); }

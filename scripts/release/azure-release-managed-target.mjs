@@ -76,14 +76,15 @@ function deepFreeze(value) {
   return value;
 }
 function targetProjection(value) {
-  const raw = exactRecord(value, ["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
+  const raw = exactRecord(value, ["subscriptionId", "resourceGroup", "acrResourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
   const acrName = text(raw.acrName, /^[a-z0-9]{5,50}$/, 50);
   const resourceGroup = text(raw.resourceGroup, /^[A-Za-z0-9][A-Za-z0-9_.()-]*$/, 90);
+  const acrResourceGroup = text(raw.acrResourceGroup, /^[A-Za-z0-9][A-Za-z0-9_.()-]*$/, 90);
   const webAppName = text(raw.webAppName, /^[a-z][a-z0-9-]{0,29}[a-z0-9]$/, 31);
   const workerAppName = text(raw.workerAppName, /^[a-z][a-z0-9-]{0,29}[a-z0-9]$/, 31);
-  const target = { subscriptionId: uuid(raw.subscriptionId), resourceGroup, acrName,
+  const target = { subscriptionId: uuid(raw.subscriptionId), resourceGroup, acrResourceGroup, acrName,
     acrServer: text(raw.acrServer, /^[a-z0-9]{5,50}\.azurecr\.io$/, 64), webAppName, workerAppName };
-  if (resourceGroup.endsWith(".") || target.acrServer !== `${acrName}.azurecr.io`
+  if (resourceGroup.endsWith(".") || acrResourceGroup.endsWith(".") || target.acrServer !== `${acrName}.azurecr.io`
     || webAppName.includes("--") || workerAppName.includes("--") || webAppName === workerAppName) invalid();
   return target;
 }

@@ -100,6 +100,7 @@ describe("managed Azure observation verifier", () => {
     expect(workflow.match(/if: github\.ref == 'refs\/heads\/main'/g)).toHaveLength(2); expect(workflow.match(/ref: \$\{\{ github\.sha \}\}\n          persist-credentials: false/g)).toHaveLength(2); expect(workflow).toContain("inputs.inventory_ref"); expect(workflow).toContain("inputs.inventory_sha256"); expect(workflow).toContain("inputs.deployment_id"); expect(workflow).toContain("inputs.release_sha");
     expect(workflow).toContain("permissions:\n  contents: read\n  id-token: write\n  packages: read\n"); expect(workflow).toContain("cancel-in-progress: false"); expect(workflow).toContain("default: false"); expect(workflow.match(/environment: managed-azure-release-production/g)).toHaveLength(2); expect(workflow).toContain("--execute false"); expect(workflow).toContain("--execute true");
     expect(workflow.match(/username: \$\{\{ secrets\.GHCR_IMPORT_TOKEN && vars\.GHCR_IMPORT_USERNAME \|\| github\.actor \}\}/g)).toHaveLength(2); expect(workflow.match(/GHCR_IMPORT_USERNAME: \$\{\{ secrets\.GHCR_IMPORT_TOKEN && vars\.GHCR_IMPORT_USERNAME \|\| github\.actor \}\}/g)).toHaveLength(2); expect(workflow.match(/password: \$\{\{ secrets\.GHCR_IMPORT_TOKEN \|\| github\.token \}\}/g)).toHaveLength(2);
-    expect(workflow).not.toMatch(/repository_dispatch:|workflow_call:|\n\s+push:|pull_request:|schedule:|workflow_run:|targets:|matrix:|subscription_id:|resource_group:|app_name:/i);
+    expect(workflow.match(/MANAGED_AZURE_ACR_RESOURCE_GROUP: \$\{\{ vars\.MANAGED_AZURE_ACR_RESOURCE_GROUP \}\}/g)).toHaveLength(2);
+    expect(workflow).not.toMatch(/\n\s+(?:repository_dispatch|workflow_call|push|pull_request|schedule|workflow_run|targets|matrix|subscription_id|resource_group|app_name):/);
   });
 });

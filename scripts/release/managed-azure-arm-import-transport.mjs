@@ -66,7 +66,7 @@ function pollLocation(raw, request) {
       || url.hash || url.search !== "?api-version=2025-11-01") return null;
     const parts = url.pathname.split("/");
     if (parts.length !== 12 || parts[0] !== "" || parts[1] !== "subscriptions" || parts[2] !== request.target.subscriptionId
-      || parts[3] !== "resourceGroups" || parts[4] !== request.target.resourceGroup || parts[5] !== "providers"
+      || parts[3] !== "resourceGroups" || parts[4].toLowerCase() !== request.target.acrResourceGroup.toLowerCase() || parts[5] !== "providers"
       || parts[6] !== "Microsoft.ContainerRegistry" || parts[7] !== "locations" || parts[9] !== "operationResults"
       || parts[10] !== "operationStatuses") return null;
     const segment = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
@@ -178,7 +178,7 @@ export function createManagedAzureArmImportTransport(dependencies) {
       const source = await invoke(getSourceCredentials, credentials);
       if (source === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT");
       if (source === FAILED || source === TIMED_OUT) return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY");
-      const url = `https://management.azure.com/subscriptions/${request.target.subscriptionId}/resourceGroups/${request.target.resourceGroup}/providers/Microsoft.ContainerRegistry/registries/${request.target.acrName}/importImage?api-version=2025-11-01`;
+      const url = `https://management.azure.com/subscriptions/${request.target.subscriptionId}/resourceGroups/${request.target.acrResourceGroup}/providers/Microsoft.ContainerRegistry/registries/${request.target.acrName}/importImage?api-version=2025-11-01`;
       let body;
       try { body = postBody(request, source.result); } catch { return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY"); }
       const post = await send(url, { method: "POST", headers: nullRecord({ Authorization: `Bearer ${azure.result}`, "Content-Type": "application/json" }),

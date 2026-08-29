@@ -5,17 +5,19 @@ import * as transportModule from "./managed-azure-arm-import-transport.mjs";
 const SHA = "a".repeat(40); const DIGEST = `sha256:${"b".repeat(64)}`;
 const DEPLOYMENT_ID = "aaaaaaaa-aaaa-faaa-0aaa-aaaaaaaa0101";
 const SUBSCRIPTION_ID = "bbbbbbbb-bbbb-0bbb-fbbb-bbbbbbbb0102";
+const APP_RESOURCE_GROUP = "rg-managed";
+const ACR_RESOURCE_GROUP = "rg-acr";
 const SOURCE_CREDENTIALS = { username: "ghcr-user-canary", password: "ghcr-password-canary" };
-function request() {
+function request(values = {}) {
   return canonicalizeManagedAzureImportRequestValueV1({ schemaVersion: 1, deploymentId: DEPLOYMENT_ID,
-    target: { subscriptionId: SUBSCRIPTION_ID, resourceGroup: "rg-managed", acrName: "acrmanaged",
-      acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
+    target: { subscriptionId: SUBSCRIPTION_ID, resourceGroup: APP_RESOURCE_GROUP, acrResourceGroup: values.acrResourceGroup ?? ACR_RESOURCE_GROUP,
+      acrName: "acrmanaged", acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
     binding: { role: "web", sourceTag: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`, sourceDigest: DIGEST,
       sourceDigestRef: `ghcr.io/corgtexdotcom/corgtex/web@${DIGEST}`, destinationRepository: "corgtex/web",
       destinationTag: `corgtex/web:sha-${SHA}` }, mode: "NoForce" });
 }
 function pollUrl(change = (value) => value) {
-  return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/rg-managed/providers/Microsoft.ContainerRegistry/locations/eastus/operationResults/operationStatuses/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
+  return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${ACR_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/locations/eastus/operationResults/operationStatuses/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
 }
 function response(spec, requestedUrl) {
   const body = spec.body === undefined ? "" : JSON.stringify(spec.body);
@@ -82,7 +84,7 @@ describe("managed Azure ARM import transport", () => {
     expect(Object.keys(fixture.transport)).toStrictEqual(["startManagedAzureImport"]); expect(Object.isFrozen(fixture.transport)).toBe(true);
     expect(Object.keys(operation)).toStrictEqual(["completion", "abort"]); expect(Object.isFrozen(operation)).toBe(true);
     const result = await operation.completion; const call = fixture.calls[0]; const body = JSON.parse(call.options.body);
-    expect(call.url).toBe(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/rg-managed/providers/Microsoft.ContainerRegistry/registries/acrmanaged/importImage?api-version=2025-11-01`);
+    expect(call.url).toBe(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${ACR_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/acrmanaged/importImage?api-version=2025-11-01`);
     expect(call.options).toMatchObject({ method: "POST", redirect: "manual", headers: { Authorization: "Bearer azure-token-canary-1", "Content-Type": "application/json" } });
     expect(call.options.signal).toBeInstanceOf(AbortSignal); expect(body).toStrictEqual({ source: { registryUri: "ghcr.io",
       sourceImage: `corgtexdotcom/corgtex/web@${DIGEST}`, credentials: SOURCE_CREDENTIALS }, targetTags: [`corgtex/web:sha-${SHA}`], mode: "NoForce" });
@@ -126,7 +128,7 @@ describe("managed Azure ARM import transport", () => {
 
   test("accepts only the exact documented immutable Location boundary", async () => {
     const invalid = [null, "/relative", pollUrl((value) => value.replace("management.azure.com", "example.com")),
-      pollUrl((value) => value.replace(SUBSCRIPTION_ID, DEPLOYMENT_ID)), pollUrl((value) => value.replace("rg-managed", "rg-other")),
+      pollUrl((value) => value.replace(SUBSCRIPTION_ID, DEPLOYMENT_ID)), pollUrl((value) => value.replace(ACR_RESOURCE_GROUP, "rg-other")),
       pollUrl((value) => value.replace("Microsoft.ContainerRegistry", "microsoft.containerregistry")), pollUrl((value) => `${value}&extra=true`),
       pollUrl((value) => value.replace("https://", "https://user@")), pollUrl((value) => value.replace("management.azure.com", "management.azure.com:444")),
       pollUrl((value) => `${value}#fragment`), pollUrl((value) => value.replace("/eastus/", "/../")), `${pollUrl()}, ${pollUrl()}`];
@@ -144,6 +146,8 @@ describe("managed Azure ARM import transport", () => {
     expect(fixture.calls.slice(1).map((call) => call.options.headers.Authorization)).toStrictEqual([
       "Bearer azure-token-canary-2", "Bearer azure-token-canary-3", "Bearer azure-token-canary-4"]);
     expect(fixture.sourceCalls()).toBe(1); expect(fixture.tokenCalls()).toBe(4); expect(fixture.sleeps.filter((value) => value !== 15_000)).toStrictEqual([2_000, 0]);
+    const cased = rig([{ status: 202, headers: { Location: location } }, { status: 200 }]);
+    await expect(cased.transport.startManagedAzureImport(request({ acrResourceGroup: ACR_RESOURCE_GROUP.toUpperCase() })).completion).resolves.toMatchObject({ outcome: "CONFIRMED_SUCCESS", reason: "ARM_COMPLETED" });
   });
 
   test("maps poll rejection, ambiguity, and protocol drift without retrying the POST", async () => {
