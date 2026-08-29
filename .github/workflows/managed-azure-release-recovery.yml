@@ -44,7 +44,9 @@ jobs:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
+          RECOVERY_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RECOVERY_REASON: ${{ inputs.reason }}
         run: >-
           node scripts/release/managed-azure-release-recovery.mjs
-          --deployment-id "${{ inputs.deployment_id }}"
-          --reason "${{ inputs.reason }}"
+          --deployment-id "$RECOVERY_DEPLOYMENT_ID"
+          --reason "$RECOVERY_REASON"

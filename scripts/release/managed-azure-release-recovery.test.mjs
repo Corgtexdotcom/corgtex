@@ -151,6 +151,12 @@ describe("managed Azure release recovery", () => {
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("id-token: write");
     expect(workflow).toContain("scripts/release/managed-azure-release-recovery.mjs");
+    expect(workflow).toContain("RECOVERY_DEPLOYMENT_ID: ${{ inputs.deployment_id }}");
+    expect(workflow).toContain("RECOVERY_REASON: ${{ inputs.reason }}");
+    expect(workflow).toContain('--deployment-id "$RECOVERY_DEPLOYMENT_ID"');
+    expect(workflow).toContain('--reason "$RECOVERY_REASON"');
+    expect(workflow).not.toContain('--deployment-id "${{ inputs.deployment_id }}"');
+    expect(workflow).not.toContain('--reason "${{ inputs.reason }}"');
     expect(workflow).not.toContain("GHCR_IMPORT_TOKEN");
   });
 });
