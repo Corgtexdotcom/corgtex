@@ -57,6 +57,7 @@ import {
   finalizeManagedReleaseRollback,
   finalizeManagedReleaseSuccess,
   getManagedReleaseLeaseTarget,
+  getManagedReleaseRecoveryStatus,
   getManagedReleaseRollbackRecord,
   getManagedReleaseTargetPreflight,
   heartbeatManagedReleaseLease,
@@ -10937,7 +10938,7 @@ export async function recordBreakGlassSupportNote(actor: AppActor, params: {
 }
 
 const MANAGED_RELEASE_INVENTORY_MAX_BYTES = 96_000;
-const MANAGED_RELEASE_READ_OPERATIONS = new Set(["preflight", "get_target", "get_rollback"]);
+const MANAGED_RELEASE_READ_OPERATIONS = new Set(["preflight", "get_target", "get_rollback", "get_recovery"]);
 
 function managedReleaseHandle(params: Record<string, unknown>) {
   return {
@@ -11061,6 +11062,8 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
       return getManagedReleaseLeaseTarget(managedReleaseHandle(params), managedReleaseAcr(params));
     case "get_rollback":
       return getManagedReleaseRollbackRecord(managedReleaseHandle(params));
+    case "get_recovery":
+      return getManagedReleaseRecoveryStatus(params.deploymentId as string, managedReleaseAcr(params));
     case "record_rollback":
       return recordManagedReleaseRollbackRecord(managedReleaseHandle(params), params.rollback);
     case "begin":

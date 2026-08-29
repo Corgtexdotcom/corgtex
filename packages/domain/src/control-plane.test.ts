@@ -369,6 +369,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     finalizeManagedReleaseRollback: vi.fn(),
     finalizeManagedReleaseSuccess: vi.fn(),
     getManagedReleaseLeaseTarget: vi.fn(),
+    getManagedReleaseRecoveryStatus: vi.fn(),
     getManagedReleaseRollbackRecord: vi.fn(),
     getManagedReleaseTargetPreflight: vi.fn(),
     heartbeatManagedReleaseLease: vi.fn(),
@@ -8553,6 +8554,15 @@ describe("managed Azure release control-plane boundary", () => {
       acrServer: "acr12.azurecr.io",
     })).resolves.toEqual({ deploymentId, phase: "PREFLIGHT" });
     expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, { acrName: "acr12", acrServer: "acr12.azurecr.io" });
+
+    leaseMocks.getManagedReleaseRecoveryStatus.mockResolvedValue({ deploymentId, phase: "RECOVERY_REQUIRED", leaseId: "lease-1", fence: 1 });
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
+      operation: "get_recovery",
+      deploymentId,
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).resolves.toMatchObject({ phase: "RECOVERY_REQUIRED" });
+    expect(leaseMocks.getManagedReleaseRecoveryStatus).toHaveBeenCalledWith(deploymentId, { acrName: "acr12", acrServer: "acr12.azurecr.io" });
 
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
       operation: "acquire",

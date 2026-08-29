@@ -338,6 +338,34 @@ export async function getManagedReleaseRollbackRecord(handle: LeaseHandle) {
   });
 }
 
+export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrIdentity: AcrIdentity) {
+  requireInput(typeof deploymentId === "string" && UUID.test(deploymentId));
+  const input = targetInputs({ deploymentId, leaseId: "00000000-0000-4000-8000-000000000000", capability: "recovery-status", fence: 1 }, acrIdentity);
+  return transact(async (tx) => {
+    const row = await lock(tx, deploymentId);
+    if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
+    if ((row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") || !row.rollbackRecordPresent) {
+      reject("MANAGED_RELEASE_RECOVERY_REQUIRED");
+    }
+    const target = targetView(row, input.acrIdentity);
+    const recovery = row.releaseLeaseRecoveryEvidence && typeof row.releaseLeaseRecoveryEvidence === "object" && !Array.isArray(row.releaseLeaseRecoveryEvidence)
+      ? validateRecoveryEvidence(row.releaseLeaseRecoveryEvidence as RecoveryEvidence)
+      : null;
+    return {
+      deploymentId: row.id,
+      leaseId: row.releaseLeaseId!,
+      fence: row.releaseLeaseFence,
+      phase: row.releaseLeasePhase,
+      expiresAt: row.releaseLeaseExpiresAt!,
+      recovery,
+      rollbackRecorded: true,
+      release: target.release,
+      origin: target.origin,
+      target: target.target,
+    };
+  });
+}
+
 export async function recordManagedReleaseRollbackRecord(handle: LeaseHandle, payload: unknown) {
   const canonicalPayload = canonicalizeManagedAzureRollbackPayloadV1(payload);
   return transact(async (tx) => {
