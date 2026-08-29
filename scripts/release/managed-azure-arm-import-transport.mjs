@@ -65,12 +65,20 @@ function pollLocation(raw, request) {
     if (url.href !== raw || url.origin !== "https://management.azure.com" || url.username || url.password || url.port
       || url.hash || url.search !== "?api-version=2025-11-01") return null;
     const parts = url.pathname.split("/");
-    if (parts.length !== 12 || parts[0] !== "" || parts[1] !== "subscriptions" || parts[2] !== request.target.subscriptionId
-      || parts[3] !== "resourceGroups" || parts[4].toLowerCase() !== request.target.acrResourceGroup.toLowerCase() || parts[5] !== "providers"
-      || parts[6] !== "Microsoft.ContainerRegistry" || parts[7] !== "locations" || parts[9] !== "operationResults"
-      || parts[10] !== "operationStatuses") return null;
     const segment = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
-    return segment.test(parts[8]) && segment.test(parts[11]) ? raw : null;
+    if (parts[0] !== "" || parts[1] !== "subscriptions" || parts[2] !== request.target.subscriptionId) return null;
+    let providerIndex = 3;
+    if (parts[3] === "resourceGroups") {
+      if (parts[4]?.toLowerCase() !== request.target.acrResourceGroup.toLowerCase()) return null;
+      providerIndex = 5;
+    }
+    if (parts[providerIndex] !== "providers" || parts[providerIndex + 1] !== "Microsoft.ContainerRegistry"
+      || parts[providerIndex + 2] !== "locations" || !segment.test(parts[providerIndex + 3])
+      || parts[providerIndex + 4] !== "operationResults") return null;
+    if (parts.length === providerIndex + 6) return segment.test(parts[providerIndex + 5]) ? raw : null;
+    if (parts.length === providerIndex + 7 && parts[providerIndex + 5] === "operationStatuses")
+      return segment.test(parts[providerIndex + 6]) ? raw : null;
+    return null;
   } catch { return null; }
 }
 function retryDelay(raw) {
@@ -128,6 +136,19 @@ async function rejectionDetail(response) {
   const providerCode = providerErrorCode(parsed);
   return providerCode ? { ...detail, providerCode } : detail;
 }
+async function asyncOperationDetail(response) {
+  const text = await boundedResponseText(response);
+  if (typeof text !== "string" || text.trim().length === 0) return { kind: "INVALID" };
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return { kind: "INVALID" }; }
+  if (parsed?.status === "Succeeded") return { kind: "SUCCEEDED" };
+  if (parsed?.status === "Failed" || parsed?.status === "Canceled") {
+    const providerCode = providerErrorCode(parsed);
+    return providerCode ? { kind: "FAILED", providerCode } : { kind: "FAILED" };
+  }
+  return typeof parsed?.status === "string" && /^[A-Za-z][A-Za-z0-9 ._-]{0,127}$/.test(parsed.status)
+    ? { kind: "PENDING" } : { kind: "INVALID" };
+}
 export function createManagedAzureArmImportTransport(dependencies) {
   const raw = exactRecord(dependencies, ["fetchImpl", "getAzureAccessToken", "getSourceCredentials", "clock", "sleep"]);
   if (Object.values(raw).some((value) => typeof value !== "function")) invalid();
@@ -162,6 +183,11 @@ export function createManagedAzureArmImportTransport(dependencies) {
       const settled = await timed(task, REQUEST_TIMEOUT_MS);
       return settled === ABORTED || settled === FAILED || settled === TIMED_OUT ? { providerStatus: response.status } : settled.result;
     };
+    const readAsyncOperationDetail = async (response, milliseconds) => {
+      const task = Promise.resolve().then(() => asyncOperationDetail(response)).then((result) => ({ result }), () => FAILED);
+      const settled = await timed(task, milliseconds);
+      return settled === ABORTED || settled === FAILED || settled === TIMED_OUT ? { kind: "INVALID" } : settled.result;
+    };
     const finish = ([outcome, reason, detail = {}]) => {
       if (terminal) return terminal;
       if (aborted) { outcome = "UNVERIFIED"; reason = "LOCAL_ABORT"; }
@@ -192,7 +218,8 @@ export function createManagedAzureArmImportTransport(dependencies) {
         const [outcome, reason] = initialMapping(initial.status);
         return pair(outcome, reason, initial.status >= 400 && initial.status < 500 ? await readRejectionDetail(post.response) : {});
       }
-      const location = initial.asyncUrl === null ? pollLocation(initial.location, request) : null;
+      const asyncOperation = initial.asyncUrl !== null;
+      const location = pollLocation(asyncOperation ? initial.asyncUrl : initial.location, request);
       let delay = retryDelay(initial.retryAfter);
       if (!location || delay === null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION"); polling = true;
       let refreshed = false;
@@ -205,6 +232,7 @@ export function createManagedAzureArmImportTransport(dependencies) {
         try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
         if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
         let details;
+        let pollResponse;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           let remaining = DEADLINE_MS - (current - startedAt);
           if (REQUEST_TIMEOUT_MS * 2 > remaining) return pair("UNVERIFIED", "POLL_EXHAUSTION");
@@ -217,13 +245,27 @@ export function createManagedAzureArmImportTransport(dependencies) {
           if (polled === ABORTED) return pair("UNVERIFIED", "LOCAL_ABORT"); try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
           if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
           if (polled === FAILED || polled === TIMED_OUT) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
-          details = responseDetails(polled.response, location);
-          if (!details || (details.location !== null && details.location !== location) || details.asyncUrl !== null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
+          pollResponse = polled.response;
+          details = responseDetails(pollResponse, location);
+          if (!details || (details.location !== null && details.location !== location)
+            || (details.asyncUrl !== null && (!asyncOperation || details.asyncUrl !== location))) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
           if (details.status !== 401 || refreshed || attempt === 1) break;
           refreshed = true;
         }
-        if (details.status === 200) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
-        if (details.status !== 202) return pollMapping(details.status);
+        if (details.status === 200 && !asyncOperation) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
+        if (details.status === 200 && asyncOperation) {
+          let remaining;
+          try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
+          if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
+          remaining = DEADLINE_MS - (current - startedAt);
+          const operation = await readAsyncOperationDetail(pollResponse, Math.min(REQUEST_TIMEOUT_MS, remaining));
+          try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
+          if (current - startedAt >= DEADLINE_MS) return pair("UNVERIFIED", "POLL_EXHAUSTION");
+          if (operation.kind === "SUCCEEDED") return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
+          if (operation.kind === "FAILED") return pair("CONFIRMED_POST_REJECTION", "POLL_REJECTION",
+            operation.providerCode ? { providerCode: operation.providerCode } : {});
+          if (operation.kind !== "PENDING") return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
+        } else if (details.status !== 202) return pollMapping(details.status);
         delay = retryDelay(details.retryAfter);
         if (delay === null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
       }
