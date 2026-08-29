@@ -22,6 +22,9 @@ function pollUrl(change = (value) => value) {
 function asyncOperationUrl(change = (value) => value) {
   return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ContainerRegistry/locations/CENTRALUS/operationResults/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
 }
+function operationStatusUrl(change = (value) => value) {
+  return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ContainerRegistry/locations/CENTRALUS/operationStatuses/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
+}
 function response(spec, requestedUrl) {
   const body = spec.body === undefined ? "" : JSON.stringify(spec.body);
   return { status: spec.status, redirected: spec.redirected ?? false, url: spec.url ?? requestedUrl, headers: new Headers(spec.headers),
@@ -151,6 +154,18 @@ describe("managed Azure ARM import transport", () => {
     expect(fixture.sourceCalls()).toBe(1); expect(fixture.tokenCalls()).toBe(4); expect(fixture.sleeps.filter((value) => value !== 15_000)).toStrictEqual([2_000, 0]);
     const cased = rig([{ status: 202, headers: { Location: location } }, { status: 200 }]);
     await expect(cased.transport.startManagedAzureImport(request({ acrResourceGroup: ACR_RESOURCE_GROUP.toUpperCase() })).completion).resolves.toMatchObject({ outcome: "CONFIRMED_SUCCESS", reason: "ARM_COMPLETED" });
+  });
+
+  test("accepts documented Location completion shapes without a response body", async () => {
+    for (const location of [pollUrl(), operationStatusUrl()]) {
+      const fixture = rig([{ status: 202, headers: { Location: location, "Retry-After": "0" } }, { status: 204 }]);
+      await expect(fixture.transport.startManagedAzureImport(request()).completion).resolves.toMatchObject({
+        outcome: "CONFIRMED_SUCCESS",
+        reason: "ARM_COMPLETED",
+      });
+      expect(fixture.calls).toHaveLength(2);
+      expect(fixture.calls[1]).toMatchObject({ url: location, options: { method: "GET", redirect: "manual" } });
+    }
   });
 
   test("prefers Azure-AsyncOperation and requires a succeeded body before confirming import", async () => {

@@ -73,11 +73,14 @@ function pollLocation(raw, request) {
       providerIndex = 5;
     }
     if (parts[providerIndex] !== "providers" || parts[providerIndex + 1] !== "Microsoft.ContainerRegistry"
-      || parts[providerIndex + 2] !== "locations" || !segment.test(parts[providerIndex + 3])
-      || parts[providerIndex + 4] !== "operationResults") return null;
-    if (parts.length === providerIndex + 6) return segment.test(parts[providerIndex + 5]) ? raw : null;
-    if (parts.length === providerIndex + 7 && parts[providerIndex + 5] === "operationStatuses")
-      return segment.test(parts[providerIndex + 6]) ? raw : null;
+      || parts[providerIndex + 2] !== "locations" || !segment.test(parts[providerIndex + 3])) return null;
+    if (parts[providerIndex + 4] === "operationResults") {
+      if (parts.length === providerIndex + 6) return segment.test(parts[providerIndex + 5]) ? raw : null;
+      if (parts.length === providerIndex + 7 && parts[providerIndex + 5] === "operationStatuses")
+        return segment.test(parts[providerIndex + 6]) ? raw : null;
+    }
+    if (parts[providerIndex + 4] === "operationStatuses" && parts.length === providerIndex + 6)
+      return segment.test(parts[providerIndex + 5]) ? raw : null;
     return null;
   } catch { return null; }
 }
@@ -252,7 +255,7 @@ export function createManagedAzureArmImportTransport(dependencies) {
           if (details.status !== 401 || refreshed || attempt === 1) break;
           refreshed = true;
         }
-        if (details.status === 200 && !asyncOperation) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
+        if ((details.status === 200 || details.status === 204) && !asyncOperation) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
         if (details.status === 200 && asyncOperation) {
           let remaining;
           try { current = now(); } catch { return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY"); }
