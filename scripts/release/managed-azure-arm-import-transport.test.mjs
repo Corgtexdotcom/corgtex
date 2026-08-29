@@ -168,6 +168,17 @@ describe("managed Azure ARM import transport", () => {
     }
   });
 
+  test("accepts bodyless Azure-AsyncOperation completion before digest readback", async () => {
+    const asyncLocation = operationStatusUrl();
+    const fixture = rig([{ status: 202, headers: { "Azure-AsyncOperation": asyncLocation, "Retry-After": "0" } }, { status: 204 }]);
+    await expect(fixture.transport.startManagedAzureImport(request()).completion).resolves.toMatchObject({
+      outcome: "CONFIRMED_SUCCESS",
+      reason: "ARM_COMPLETED",
+    });
+    expect(fixture.calls).toHaveLength(2);
+    expect(fixture.calls[1]).toMatchObject({ url: asyncLocation, options: { method: "GET", redirect: "manual" } });
+  });
+
   test("prefers Azure-AsyncOperation and requires a succeeded body before confirming import", async () => {
     const location = pollUrl((value) => value.replace(ACR_RESOURCE_GROUP, "rg-other"));
     const asyncLocation = asyncOperationUrl();
