@@ -86,6 +86,17 @@ function safeResult(input, inventory, status, detail = {}) {
   });
 }
 
+export function managedAzureCliResultAccepted(result, execute) {
+  return execute ? result?.status === "SUCCEEDED" : result?.status === "DRY_RUN_READY";
+}
+
+export function writeManagedAzureCliResult(result, execute, writers = { stdout: process.stdout, stderr: process.stderr }) {
+  writers.stdout.write(`${JSON.stringify(result)}\n`);
+  if (managedAzureCliResultAccepted(result, execute)) return 0;
+  writers.stderr.write(`${result.status}${result.code ? `:${result.code}` : ""}\n`);
+  return 1;
+}
+
 function verifyInventoryResponse(inventory, input) {
   if (inventory?.inventoryRef !== input.inventoryRef || inventory.sha256 !== input.inventorySha256
     || typeof inventory.bytesBase64 !== "string"
@@ -150,9 +161,9 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   let handle;
   let mutationBegun = false;
   const heartbeat = () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
-  const markRecovery = async (stage, code) => {
+  const markRecovery = async (stage, code, detail = {}) => {
     if (handle) await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason: input.reason })).catch(() => undefined);
-    return safeResult(input, inventory, "RECOVERY_REQUIRED", { phase: stage, code });
+    return safeResult(input, inventory, "RECOVERY_REQUIRED", { phase: stage, code, ...detail });
   };
 
   const classifyRole = async (role, forwardTemplate) => {
@@ -167,10 +178,10 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     return { kind: "UNKNOWN", state: null };
   };
 
-  const compensate = async (stage, code, forwardTemplates) => {
+  const compensate = async (stage, code, forwardTemplates, detail = {}) => {
     const classified = {};
     for (const role of ROLES) classified[role] = await classifyRole(role, forwardTemplates[role]);
-    if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code);
+    if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code, detail);
     await heartbeat();
     for (const role of ["worker", "web"]) {
       if (classified[role].kind !== "FORWARD") continue;
@@ -184,15 +195,16 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       });
       assertManagedAzureTemplateDelta(classified[role].state, template, { role, image: baselines[role].image, release: baselineRelease, revisionSuffix: suffix });
       const patched = await deps.patchTemplate({ target: preflight.target, role, location: classified[role].state.location, template, onProgress: heartbeat });
-      if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code);
+      const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
+      if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code, rollbackDetail);
       await heartbeat();
       try {
         await deps.waitForState({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest, expectedTemplate: template, onProgress: heartbeat });
-      } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS"); }
+      } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS", rollbackDetail); }
       await heartbeat();
     }
     await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
-    return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code });
+    return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code, ...detail });
   };
 
   try {
@@ -243,8 +255,10 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
 
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
-    if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS");
-    if (!webPatch.succeeded) return compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates);
+    if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS",
+      webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
+    if (!webPatch.succeeded) return compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates,
+      webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
     await heartbeat();
     try { await deps.waitForState({ target: preflight.target, role: "web", release: nextRelease, imageDigest: releasePlan.roles.web.digest, expectedTemplate: forwardTemplates.web, onProgress: heartbeat }); }
     catch { return compensate("WEB", "WEB_READBACK_AMBIGUOUS", forwardTemplates); }
@@ -255,8 +269,10 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await heartbeat();
 
     const workerPatch = await deps.patchTemplate({ target: preflight.target, role: "worker", location: baselines.worker.location, template: forwardTemplates.worker, onProgress: heartbeat });
-    if (!workerPatch.terminal) return markRecovery("WORKER", workerPatch.code ?? "WORKER_PATCH_AMBIGUOUS");
-    if (!workerPatch.succeeded) return compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates);
+    if (!workerPatch.terminal) return markRecovery("WORKER", workerPatch.code ?? "WORKER_PATCH_AMBIGUOUS",
+      workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
+    if (!workerPatch.succeeded) return compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates,
+      workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
     await heartbeat();
     try {
       await deps.waitForState({ target: preflight.target, role: "worker", release: nextRelease, imageDigest: releasePlan.roles.worker.digest, expectedTemplate: forwardTemplates.worker, onProgress: heartbeat });
@@ -425,8 +441,11 @@ function cliInput(argv, env) {
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
-  runManagedAzureReleaseTransaction(cliInput(process.argv.slice(2), process.env), runtimeDependencies())
-    .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+  const input = cliInput(process.argv.slice(2), process.env);
+  runManagedAzureReleaseTransaction(input, runtimeDependencies())
+    .then((result) => {
+      process.exitCode = writeManagedAzureCliResult(result, input.execute);
+    })
     .catch((error) => {
       process.stderr.write(`${error instanceof ManagedAzureReleaseError ? error.code : "MANAGED_RELEASE_FAILED"}\n`);
       process.exitCode = 1;

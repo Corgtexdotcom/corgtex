@@ -10,7 +10,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
-import { managedAzureHealthReady, runManagedAzureReleaseTransaction } from "./managed-azure-release-transaction.mjs";
+import { managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
 
 const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
@@ -149,6 +149,7 @@ function dependencies(options = {}) {
     }),
     waitForState: vi.fn(async ({ role, release, expectedTemplate }) => {
       events.push(`wait:${role}:${release.imageTag === `sha-${baseSha}` ? "base" : "next"}`);
+      if (options.rollbackReadbackFails && release.imageTag === `sha-${baseSha}`) throw new Error("rollback readback failed");
       current[role] = release.imageTag === `sha-${baseSha}` ? "BASELINE" : "FORWARD";
       currentTemplates[role] = expectedTemplate;
       return state(role, current[role], expectedTemplate);
@@ -187,32 +188,41 @@ describe("managed Azure single-target transaction", () => {
     const { deps, events } = dependencies({
       patchResults: [
         null,
-        { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" } },
+        { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" } },
       ],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "WORKER", code: "AZURE_PATCH_REJECTED" });
+    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "WORKER", code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
     expect(events.filter((event) => event.startsWith("patch:"))).toEqual(["patch:web:forward", "patch:worker:forward", "patch:web:rollback"]);
     expect(events.at(-1)).toBe("lease:finalize_rollback");
   });
 
   it("retains recovery instead of compensating unknown provider state", async () => {
     const { deps } = dependencies({
-      patchResults: [{ state: "UNKNOWN", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" } }],
+      patchResults: [{ state: "UNKNOWN", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
     expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ stage: "WEB", code: "AZURE_OPERATION_TIMEOUT" }));
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
   it("retains recovery for a non-terminal patch even when the last read still shows baseline", async () => {
     const { deps } = dependencies({
-      patchResults: [{ state: "BASELINE", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" } }],
+      patchResults: [{ state: "BASELINE", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+
+  it("retains the forward provider diagnostic when rollback readback is ambiguous", async () => {
+    const { deps } = dependencies({
+      rollbackReadbackFails: true,
+      patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" } }],
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "ROLLBACK", code: "ROLLBACK_READBACK_AMBIGUOUS", providerCode: "InvalidParameterValueInContainerTemplate" });
   });
 
   it("aborts a pre-mutation reservation when the leased target differs from preflight", async () => {
@@ -279,6 +289,22 @@ describe("managed Azure single-target transaction", () => {
     for (const changed of [{ database: "down" }, { schema: "stale" }, { release: { ...release, gitSha: baseSha } }]) {
       expect(managedAzureHealthReady({ ...healthy, ...changed }, release)).toBe(false);
     }
+  });
+
+  it("accepts only the expected terminal result for each CLI mode", () => {
+    expect(managedAzureCliResultAccepted({ status: "DRY_RUN_READY" }, false)).toBe(true);
+    expect(managedAzureCliResultAccepted({ status: "SUCCEEDED" }, true)).toBe(true);
+    for (const result of [{ status: "ROLLED_BACK" }, { status: "RECOVERY_REQUIRED" }, { status: "DRY_RUN_READY" }]) {
+      expect(managedAzureCliResultAccepted(result, true)).toBe(false);
+    }
+    expect(managedAzureCliResultAccepted({ status: "SUCCEEDED" }, false)).toBe(false);
+  });
+
+  it("writes the result and returns a failing exit code for rejected execute outcomes", () => {
+    const output = { stdout: "", stderr: "", writers: { stdout: { write: (value) => { output.stdout += value; } }, stderr: { write: (value) => { output.stderr += value; } } } };
+    expect(writeManagedAzureCliResult({ status: "ROLLED_BACK", code: "AZURE_PATCH_REJECTED" }, true, output.writers)).toBe(1);
+    expect(output.stdout).toContain('"status":"ROLLED_BACK"'); expect(output.stderr).toBe("ROLLED_BACK:AZURE_PATCH_REJECTED\n");
+    expect(writeManagedAzureCliResult({ status: "DRY_RUN_READY" }, false, output.writers)).toBe(0);
   });
 
   it("keeps the workflow manual, exact-targeted, and false by default", () => {
@@ -353,8 +379,10 @@ describe("managed Azure Container Apps transport", () => {
 
   it("classifies confirmed rejection separately from operation ambiguity", async () => {
     const candidate = rawApp().properties.template;
-    const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "Rejected" } })), getAccessToken: async () => "token-value-with-enough-length" });
-    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
+    const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "BadRequest", details: [{ code: "InvalidParameterValueInContainerTemplate", message: "private-provider-message" }] } })), getAccessToken: async () => "token-value-with-enough-length" });
+    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
+    const rejectedResult = await rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate });
+    expect(JSON.stringify(rejectedResult)).not.toContain("private-provider-message");
     const ambiguous = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockRejectedValue(new Error("private-provider-error")), getAccessToken: async () => "token-value-with-enough-length" });
     await expect(ambiguous.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_PATCH_AMBIGUOUS" });
   });

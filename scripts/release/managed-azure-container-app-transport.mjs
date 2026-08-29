@@ -248,6 +248,17 @@ async function responseBody(response) {
   }
 }
 
+function providerErrorCode(body) {
+  const details = Array.isArray(body?.error?.details) ? body.error.details : [];
+  const codes = [...details.map((detail) => detail?.code), body?.error?.code];
+  return codes.find((code) => typeof code === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(code));
+}
+
+function patchResult(terminal, succeeded, code, body = null) {
+  const providerCode = providerErrorCode(body);
+  return Object.freeze({ terminal, succeeded, code, ...(providerCode ? { providerCode } : {}) });
+}
+
 export function createManagedAzureContainerAppTransport(dependencies = {}) {
   const fetchImpl = dependencies.fetchImpl ?? fetch;
   const getAccessToken = dependencies.getAccessToken ?? defaultAccessToken;
@@ -295,12 +306,12 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     }
     if (response.status === 200) {
       await responseBody(response);
-      return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
+      return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
     }
     if (response.status !== 202) {
-      await responseBody(response).catch(() => null);
-      return Object.freeze({ terminal: response.status >= 400 && response.status < 500, succeeded: false,
-        code: response.status >= 400 && response.status < 500 ? "AZURE_PATCH_REJECTED" : "AZURE_PATCH_AMBIGUOUS" });
+      const body = await responseBody(response).catch(() => null);
+      return patchResult(response.status >= 400 && response.status < 500, false,
+        response.status >= 400 && response.status < 500 ? "AZURE_PATCH_REJECTED" : "AZURE_PATCH_AMBIGUOUS", body);
     }
     try { await responseBody(response); } catch {
       return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
@@ -328,13 +339,13 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
         return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
       }
       if (polled.status === 202) continue;
-      if (polled.status === 204) return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
-      if (polled.status !== 200) return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
+      if (polled.status === 204) return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
+      if (polled.status !== 200) return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", body);
       const status = body?.status ?? body?.properties?.provisioningState;
-      if (status === "Succeeded") return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
-      if (["Failed", "Canceled", "Cancelled"].includes(status)) return Object.freeze({ terminal: true, succeeded: false, code: "AZURE_PATCH_FAILED" });
-      if (status === undefined) return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
-      if (!["InProgress", "Running", "Accepted"].includes(status)) return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
+      if (status === "Succeeded") return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
+      if (["Failed", "Canceled", "Cancelled"].includes(status)) return patchResult(true, false, "AZURE_PATCH_FAILED", body);
+      if (status === undefined) return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
+      if (!["InProgress", "Running", "Accepted"].includes(status)) return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", body);
     }
     return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" });
   }
