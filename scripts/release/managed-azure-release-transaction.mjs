@@ -195,12 +195,12 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       });
       assertManagedAzureTemplateDelta(classified[role].state, template, { role, image: baselines[role].image, release: baselineRelease, revisionSuffix: suffix });
       const patched = await deps.patchTemplate({ target: preflight.target, role, location: classified[role].state.location, template, onProgress: heartbeat });
-      if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code,
-        patched.providerCode ? { providerCode: patched.providerCode } : {});
+      const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
+      if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code, rollbackDetail);
       await heartbeat();
       try {
         await deps.waitForState({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest, expectedTemplate: template, onProgress: heartbeat });
-      } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS"); }
+      } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS", rollbackDetail); }
       await heartbeat();
     }
     await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));

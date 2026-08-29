@@ -149,6 +149,7 @@ function dependencies(options = {}) {
     }),
     waitForState: vi.fn(async ({ role, release, expectedTemplate }) => {
       events.push(`wait:${role}:${release.imageTag === `sha-${baseSha}` ? "base" : "next"}`);
+      if (options.rollbackReadbackFails && release.imageTag === `sha-${baseSha}`) throw new Error("rollback readback failed");
       current[role] = release.imageTag === `sha-${baseSha}` ? "BASELINE" : "FORWARD";
       currentTemplates[role] = expectedTemplate;
       return state(role, current[role], expectedTemplate);
@@ -213,6 +214,15 @@ describe("managed Azure single-target transaction", () => {
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
     expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+
+  it("retains the forward provider diagnostic when rollback readback is ambiguous", async () => {
+    const { deps } = dependencies({
+      rollbackReadbackFails: true,
+      patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" } }],
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "ROLLBACK", code: "ROLLBACK_READBACK_AMBIGUOUS", providerCode: "InvalidParameterValueInContainerTemplate" });
   });
 
   it("aborts a pre-mutation reservation when the leased target differs from preflight", async () => {
