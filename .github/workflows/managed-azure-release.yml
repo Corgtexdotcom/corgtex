@@ -74,6 +74,7 @@ jobs:
           GHCR_IMPORT_USERNAME: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
+          MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ vars.MANAGED_AZURE_ACR_RESOURCE_GROUP }}
         run: >-
           node scripts/release/managed-azure-release-transaction.mjs
           --inventory-ref "${{ inputs.inventory_ref }}"
@@ -115,6 +116,7 @@ jobs:
           GHCR_IMPORT_USERNAME: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
+          MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ vars.MANAGED_AZURE_ACR_RESOURCE_GROUP }}
         run: >-
           node scripts/release/managed-azure-release-transaction.mjs
           --inventory-ref "${{ inputs.inventory_ref }}"

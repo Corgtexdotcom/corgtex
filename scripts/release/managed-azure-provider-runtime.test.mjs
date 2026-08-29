@@ -10,7 +10,7 @@ const SHA = "1234567890abcdef1234567890abcdef12345678";
 const OTHER_SHA = "abcdef1234567890abcdef1234567890abcdef12";
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const UUID = "12345678-1234-1234-1234-123456789abc";
-const TARGET = Object.freeze({ subscriptionId: UUID, resourceGroup: "managed-prod", acrName: "managedacr", acrServer: "managedacr.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" });
+const TARGET = Object.freeze({ subscriptionId: UUID, resourceGroup: "managed-prod", acrResourceGroup: "managed-acr", acrName: "managedacr", acrServer: "managedacr.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" });
 const TAG = `sha-${SHA}`;
 const USER_IDENTITY = `/subscriptions/${UUID}/resourceGroups/identity-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/release-pull`;
 const LOWERCASE_GROUP_IDENTITY = `/subscriptions/${UUID}/resourcegroups/identity-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/release-pull`;
@@ -34,6 +34,7 @@ function harness(values, times = [1_000, 1_001]) {
   return { spawn, clock, observer: createManagedAzureProviderObservation({ spawn, clock }) };
 }
 function acrRows(rows) { return `${JSON.stringify(rows)}\n`; }
+function acrResource(values = {}) { return `${JSON.stringify({ name: TARGET.acrName, loginServer: TARGET.acrServer, ...values })}\n`; }
 function registryRow(server = TARGET.acrServer, identity = "system", values = {}) {
   return { server, identity, username: null, passwordSecretRef: null, ...values };
 }
@@ -73,7 +74,7 @@ describe("managed Azure provider observation", () => {
     const web = registryRow(TARGET.acrServer, "system", { username: "", passwordSecretRef: "" });
     const worker = registryRow(TARGET.acrServer, LOWERCASE_GROUP_IDENTITY, { username: "", passwordSecretRef: "" });
     const webRequest = request("web"); const workerRequest = request("worker");
-    const { observer, spawn } = harness([result(acrRows([web])), result(acrRows([worker]))], [200, 201]);
+    const { observer, spawn } = harness([result(acrResource()), result(acrRows([web])), result(acrRows([worker]))], [200, 201]);
     const output = await observer.observeRegistryPreflight({ webRequest, workerRequest });
     expect(Object.keys(output)).toEqual(["schemaVersion", "deploymentId", "target", "observedAtMs", "web", "worker"]);
     expect(output).toMatchObject({ schemaVersion: 1, deploymentId: UUID, observedAtMs: 201,
@@ -81,9 +82,11 @@ describe("managed Azure provider observation", () => {
       worker: { appName: TARGET.workerAppName, registryServer: TARGET.acrServer, pullIdentity: { kind: "USER_ASSIGNED", resourceId: LOWERCASE_GROUP_IDENTITY } } });
     expect(Object.isFrozen(output)).toBe(true); expect(Object.isFrozen(output.worker.pullIdentity)).toBe(true);
     expect(output.web.binding).not.toBe(webRequest.binding); expect(output.worker.binding).not.toBe(workerRequest.binding);
-    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(spawn).toHaveBeenCalledTimes(3);
+    expect(spawn.mock.calls[0][1]).toEqual(["acr", "show", "--name", TARGET.acrName, "--resource-group", TARGET.acrResourceGroup, "--subscription", UUID, "--query", "{name:name,loginServer:loginServer}", "--output", "json", "--only-show-errors"]);
     for (const [index, app] of [TARGET.webAppName, TARGET.workerAppName].entries()) {
-      const [command, args, options] = spawn.mock.calls[index]; expect(command).toBe("az"); expect(subscriptionCount(args)).toBe(1); expect(args).toEqual(["containerapp", "registry", "list", "--subscription", UUID, "--resource-group", TARGET.resourceGroup, "--name", app, "--query", "[].{server:server,identity:identity,username:username,passwordSecretRef:passwordSecretRef}", "--output", "json", "--only-show-errors"]); expect(options).not.toHaveProperty("env");
+      const callIndex = index + 1;
+      const [command, args, options] = spawn.mock.calls[callIndex]; expect(command).toBe("az"); expect(subscriptionCount(args)).toBe(1); expect(args).toEqual(["containerapp", "registry", "list", "--subscription", UUID, "--resource-group", TARGET.resourceGroup, "--name", app, "--query", "[].{server:server,identity:identity,username:username,passwordSecretRef:passwordSecretRef}", "--output", "json", "--only-show-errors"]); expect(options).not.toHaveProperty("env");
     }
     expect(JSON.stringify(output)).not.toMatch(/username|password|secret|token/i);
   });
@@ -120,7 +123,11 @@ describe("managed Azure provider observation", () => {
       [registryRow(TARGET.acrServer, null)], [registryRow(TARGET.acrServer, "secretref:canary")], [registryRow(TARGET.acrServer, `${USER_IDENTITY},${USER_IDENTITY}`)], [registryRow(TARGET.acrServer, "system", { password: "canary" })],
       [registryRow(), registryRow()], [],
     ];
-    for (const rows of bad) { const { observer } = harness([result(acrRows([registryRow()])), result(acrRows(rows))]); await rejects(observer.observeRegistryPreflight({ webRequest: request("web"), workerRequest: request("worker") })); }
+    for (const rows of bad) { const { observer } = harness([result(acrResource()), result(acrRows([registryRow()])), result(acrRows(rows))]); await rejects(observer.observeRegistryPreflight({ webRequest: request("web"), workerRequest: request("worker") })); }
+    for (const stdout of [acrRows([]), acrRows([{ name: TARGET.acrName, loginServer: TARGET.acrServer }]), acrResource({ name: "otheracr" }), acrResource({ loginServer: "other.azurecr.io" }), acrResource({ extra: true })]) {
+      const { observer } = harness([result(stdout)]);
+      await rejects(observer.observeRegistryPreflight({ webRequest: request("web"), workerRequest: request("worker") }));
+    }
   });
 
   it("sanitizes every process lifecycle failure and aborts the exact timed-out operation", async () => {
@@ -144,6 +151,6 @@ describe("managed Azure provider observation", () => {
     const source = readFileSync(new URL("./managed-azure-provider-runtime.mjs", import.meta.url), "utf8");
     expect(source.match(/\bexport\b/g)).toHaveLength(1); expect(source).toContain("canonicalizeManagedAzureImportRequestValueV1");
     expect(source).not.toMatch(/node:child_process|\bprocess\b|\bfetch\s*\(|node:fs|setTimeout|setInterval|console\.|Math\.random|dynamic import|az login|acr import|containerapp update|MATCH|CONFLICT/);
-    expect(source.match(/"--subscription"/g)?.length).toBe(2); expect(source.match(/spawn\("az"/g)).toHaveLength(1);
+    expect(source.match(/"--subscription"/g)?.length).toBe(3); expect(source.match(/spawn\("az"/g)).toHaveLength(1);
   });
 });

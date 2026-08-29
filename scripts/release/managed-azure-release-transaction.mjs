@@ -33,6 +33,7 @@ class ManagedAzureReleaseError extends Error {
 
 function fail(code) { throw new ManagedAzureReleaseError(code); }
 function same(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+function releaseTargetWithAcrGroup(target, acrResourceGroup) { return Object.freeze({ ...target, acrResourceGroup }); }
 function failureMessage(error) { return typeof error?.message === "string" ? error.message : ""; }
 
 function failReleaseResolution(error) {
@@ -54,13 +55,14 @@ async function readBaselineApp(deps, target, role, release) {
 
 function canonicalInput(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("MANAGED_RELEASE_INPUT_INVALID");
-  const keys = ["inventoryRef", "inventorySha256", "deploymentId", "releaseSha", "releaseVersion", "reason", "execute", "acrName"];
+  const keys = ["inventoryRef", "inventorySha256", "deploymentId", "releaseSha", "releaseVersion", "reason", "execute", "acrName", "acrResourceGroup"];
   if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail("MANAGED_RELEASE_INPUT_INVALID");
   if (!UUID.test(value.inventoryRef) || !SHA256.test(value.inventorySha256) || !UUID.test(value.deploymentId)
     || !SHA.test(value.releaseSha) || typeof value.releaseVersion !== "string"
     || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(value.releaseVersion)
     || typeof value.reason !== "string" || value.reason.trim().length < 8 || value.reason.length > 256
-    || typeof value.execute !== "boolean" || !/^[a-z0-9]{5,50}$/.test(value.acrName)) fail("MANAGED_RELEASE_INPUT_INVALID");
+    || typeof value.execute !== "boolean" || !/^[a-z0-9]{5,50}$/.test(value.acrName)
+    || !/^[A-Za-z0-9][A-Za-z0-9_.()-]{0,89}$/.test(value.acrResourceGroup) || value.acrResourceGroup.endsWith(".")) fail("MANAGED_RELEASE_INPUT_INVALID");
   return Object.freeze({ ...value, reason: value.reason.trim(), acrServer: `${value.acrName}.azurecr.io` });
 }
 
@@ -130,7 +132,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });
   let releasePlan;
   try {
-    releasePlan = await deps.resolveRelease({ deploymentId: input.deploymentId, target: preflight.target, gitSha: input.releaseSha });
+    releasePlan = await deps.resolveRelease({ deploymentId: input.deploymentId,
+      target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: input.releaseSha });
   } catch (error) {
     failReleaseResolution(error);
   }
@@ -446,6 +449,7 @@ function cliInput(argv, env) {
     reason: values.reason,
     execute: values.execute === "true" ? true : values.execute === "false" ? false : fail("MANAGED_RELEASE_INPUT_INVALID"),
     acrName: env.MANAGED_AZURE_ACR_NAME,
+    acrResourceGroup: env.MANAGED_AZURE_ACR_RESOURCE_GROUP,
   };
 }
 

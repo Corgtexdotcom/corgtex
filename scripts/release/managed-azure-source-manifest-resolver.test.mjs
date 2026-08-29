@@ -107,7 +107,7 @@ describe("managed Azure source manifest resolver", () => {
     const intent = canonicalizeManagedAzureReleaseIntentV1({ deploymentId, gitSha: SHA, manifests: observed.manifests, deployments: [{
       deploymentId, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE",
       provisioningStatus: "active", releaseEligible: true, provider: "azure", group: "managed-customers", workload: "managed-customers",
-      azure: { subscriptionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", resourceGroup: "managed-prod", acrName: "managedacr",
+      azure: { subscriptionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", resourceGroup: "managed-prod", acrResourceGroup: "managed-acr", acrName: "managedacr",
         acrServer: "managedacr.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
     }] });
     expect(intent.roles.web.sourceDigest).toBe(DIGESTS.web); expect(intent.roles.worker.sourceDigest).toBe(DIGESTS.worker);

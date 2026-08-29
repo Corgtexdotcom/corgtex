@@ -103,6 +103,7 @@ Configure the protected GitHub environment `managed-azure-release-production` wi
 | `AZURE_TENANT_ID` | Variable | Azure tenant for workload identity. |
 | `AZURE_SUBSCRIPTION_ID` | Variable | Azure subscription admitted by the workflow identity. |
 | `MANAGED_AZURE_ACR_NAME` | Variable | Exact destination registry name recorded for the managed target. |
+| `MANAGED_AZURE_ACR_RESOURCE_GROUP` | Variable | Exact resource group containing the destination registry. This may differ from the Container Apps resource group recorded on the managed target. |
 
 The inventory input is an opaque Build Artifact UUID from the private `Corgtexdotcom/corgtex-ops` repository, paired with the SHA-256 of its exact bytes. The asset must be private JSON, at most 96 KB, classified `INTERNAL` or `CLIENT_PRIVATE`, and typed `DOCUMENT` or `OTHER`. The server reloads and hashes the stored bytes, evaluates P0-05, requires exactly one `ACTIVE_CLIENT_PRIMARY` deployment, and verifies its opaque target identity against the requested deployment UUID. Do not put inventory bytes, target JSON, credentials, or customer-private facts in workflow inputs or logs.
 

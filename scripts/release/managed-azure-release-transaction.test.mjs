@@ -18,7 +18,7 @@ const leaseId = "123e4567-e89b-42d3-a456-426614174003";
 const baseSha = "a".repeat(40); const nextSha = "b".repeat(40);
 const inventoryBytesBase64 = "e30=";
 const inventorySha256 = createHash("sha256").update(Buffer.from(inventoryBytesBase64, "base64")).digest("hex");
-const input = Object.freeze({ inventoryRef, inventorySha256, deploymentId, releaseSha: nextSha, releaseVersion: "release-2", reason: "Approved exact target release.", execute: false, acrName: "acr12" });
+const input = Object.freeze({ inventoryRef, inventorySha256, deploymentId, releaseSha: nextSha, releaseVersion: "release-2", reason: "Approved exact target release.", execute: false, acrName: "acr12", acrResourceGroup: "rg-acr" });
 const target = Object.freeze({ subscriptionId: "123e4567-e89b-42d3-a456-426614174000", resourceGroup: "rg.Safe_1", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-app", workerAppName: "worker-app" });
 const digests = { web: `sha256:${"1".repeat(64)}`, worker: `sha256:${"2".repeat(64)}`, nextWeb: `sha256:${"3".repeat(64)}`, nextWorker: `sha256:${"4".repeat(64)}` };
 const transportBaseRelease = Object.freeze({ gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" });
@@ -167,6 +167,8 @@ describe("managed Azure single-target transaction", () => {
     expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
     expect(deps.importRole).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
     expect(deps.healthProbe).toHaveBeenCalledTimes(1);
+    expect(deps.resolveRelease).toHaveBeenCalledWith({ deploymentId, target: { ...target, acrResourceGroup: input.acrResourceGroup }, gitSha: input.releaseSha });
+    expect(deps.readApp).toHaveBeenCalledWith(expect.objectContaining({ target }));
     expect(JSON.stringify(result)).not.toContain("private-capability"); expect(JSON.stringify(result)).not.toContain(target.resourceGroup);
   });
 
