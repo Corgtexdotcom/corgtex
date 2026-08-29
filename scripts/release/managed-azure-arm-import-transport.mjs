@@ -5,6 +5,7 @@ const DEADLINE_MS = 120_000;
 const MAX_POLLS = 12;
 const DEFAULT_DELAY_MS = 1_000;
 const MAX_RETRY_AFTER_MS = 30_000;
+const MAX_REJECTION_BODY_CHARS = 8_192;
 const ABORTED = Object.freeze({ kind: "ABORTED" });
 const FAILED = Object.freeze({ kind: "FAILED" });
 const TIMED_OUT = Object.freeze({ kind: "TIMED_OUT" });
@@ -78,7 +79,7 @@ function retryDelay(raw) {
   const milliseconds = Number(raw) * 1_000;
   return Number.isSafeInteger(milliseconds) && milliseconds <= MAX_RETRY_AFTER_MS ? milliseconds : null;
 }
-function pair(outcome, reason) { return Object.freeze([outcome, reason]); }
+function pair(outcome, reason, detail = {}) { return Object.freeze([outcome, reason, detail]); }
 function initialMapping(status) {
   if (status >= 400 && status <= 499 && status !== 408 && status !== 429) return pair("CONFIRMED_POST_REJECTION", "POST_REJECTED");
   if (status === 408 || status === 429 || status >= 500) return pair("UNVERIFIED", "POST_TRANSPORT_AMBIGUITY");
@@ -88,6 +89,44 @@ function pollMapping(status) {
   if (status >= 400 && status <= 499 && status !== 408 && status !== 429) return pair("UNVERIFIED", "POLL_REJECTION");
   if (status === 408 || status === 429 || status >= 500) return pair("UNVERIFIED", "POLL_TRANSPORT_AMBIGUITY");
   return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
+}
+function providerErrorCode(body) {
+  const details = Array.isArray(body?.error?.details) ? body.error.details : [];
+  const codes = [...details.map((detail) => detail?.code), body?.error?.code];
+  return codes.find((code) => typeof code === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(code));
+}
+async function boundedResponseText(response) {
+  if (response.body && typeof response.body.getReader === "function") {
+    let reader;
+    try { reader = response.body.getReader(); } catch { return null; }
+    const decoder = new TextDecoder(); let text = "";
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk === null || typeof chunk !== "object") return null;
+        if (chunk.done === true) break;
+        if (!(chunk.value instanceof Uint8Array)) return null;
+        text += decoder.decode(chunk.value, { stream: true });
+        if (text.length > MAX_REJECTION_BODY_CHARS) { try { await reader.cancel(); } catch {} return null; }
+      }
+      text += decoder.decode();
+      return text.length > MAX_REJECTION_BODY_CHARS ? null : text;
+    } catch { return null; }
+  }
+  if (typeof response.text !== "function") return null;
+  try {
+    const text = await response.text();
+    return typeof text === "string" && text.length <= MAX_REJECTION_BODY_CHARS ? text : null;
+  } catch { return null; }
+}
+async function rejectionDetail(response) {
+  const detail = { providerStatus: response.status };
+  const text = await boundedResponseText(response);
+  if (typeof text !== "string" || text.trim().length === 0) return detail;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return detail; }
+  const providerCode = providerErrorCode(parsed);
+  return providerCode ? { ...detail, providerCode } : detail;
 }
 export function createManagedAzureArmImportTransport(dependencies) {
   const raw = exactRecord(dependencies, ["fetchImpl", "getAzureAccessToken", "getSourceCredentials", "clock", "sleep"]);
@@ -118,12 +157,17 @@ export function createManagedAzureArmImportTransport(dependencies) {
       const settled = await timed(task, milliseconds);
       if (settled === TIMED_OUT) controller.abort(); return settled;
     };
-    const finish = ([outcome, reason]) => {
+    const readRejectionDetail = async (response) => {
+      const task = Promise.resolve().then(() => rejectionDetail(response)).then((result) => ({ result }), () => FAILED);
+      const settled = await timed(task, REQUEST_TIMEOUT_MS);
+      return settled === ABORTED || settled === FAILED || settled === TIMED_OUT ? { providerStatus: response.status } : settled.result;
+    };
+    const finish = ([outcome, reason, detail = {}]) => {
       if (terminal) return terminal;
       if (aborted) { outcome = "UNVERIFIED"; reason = "LOCAL_ABORT"; }
       let completedAtMs = lastTime < 0 ? 0 : lastTime;
       try { completedAtMs = now(); } catch { if (!aborted) { outcome = "UNVERIFIED"; reason = polling ? "POLL_TRANSPORT_AMBIGUITY" : "POST_TRANSPORT_AMBIGUITY"; } }
-      terminal = Object.freeze({ schemaVersion: 1, request, outcome, reason, completedAtMs });
+      terminal = Object.freeze({ schemaVersion: 1, request, outcome, reason, ...detail, completedAtMs });
       return terminal;
     };
     const run = async () => {
@@ -144,7 +188,10 @@ export function createManagedAzureArmImportTransport(dependencies) {
       const initial = responseDetails(post.response, url);
       if (!initial) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION");
       if (initial.status === 200) return pair("CONFIRMED_SUCCESS", "ARM_COMPLETED");
-      if (initial.status !== 202) return initialMapping(initial.status);
+      if (initial.status !== 202) {
+        const [outcome, reason] = initialMapping(initial.status);
+        return pair(outcome, reason, initial.status >= 400 && initial.status < 500 ? await readRejectionDetail(post.response) : {});
+      }
       const location = initial.asyncUrl === null ? pollLocation(initial.location, request) : null;
       let delay = retryDelay(initial.retryAfter);
       if (!location || delay === null) return pair("UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION"); polling = true;

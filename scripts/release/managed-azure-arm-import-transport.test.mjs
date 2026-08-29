@@ -18,7 +18,9 @@ function pollUrl(change = (value) => value) {
   return change(`https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/rg-managed/providers/Microsoft.ContainerRegistry/locations/eastus/operationResults/operationStatuses/registries-cccccccc-cccc-4ccc-8ccc-cccccccc0103?api-version=2025-11-01`);
 }
 function response(spec, requestedUrl) {
-  return { status: spec.status, redirected: spec.redirected ?? false, url: spec.url ?? requestedUrl, headers: new Headers(spec.headers) };
+  const body = spec.body === undefined ? "" : JSON.stringify(spec.body);
+  return { status: spec.status, redirected: spec.redirected ?? false, url: spec.url ?? requestedUrl, headers: new Headers(spec.headers),
+    text: async () => body };
 }
 function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
 function rig(items = [{ status: 200 }], overrides = {}) {
@@ -91,7 +93,7 @@ describe("managed Azure ARM import transport", () => {
     expect(await operation.abort()).toBe(result); expect(await operation.abort()).toBe(result); expect(fixture.calls).toHaveLength(1); expect(liveTimeouts).toBe(0);
   });
 
-  test("maps every initial response class without reading or echoing response bodies", async () => {
+  test("maps every initial response class without echoing response bodies", async () => {
     const cases = [[400, "CONFIRMED_POST_REJECTION", "POST_REJECTED"], [401, "CONFIRMED_POST_REJECTION", "POST_REJECTED"],
       [408, "UNVERIFIED", "POST_TRANSPORT_AMBIGUITY"], [429, "UNVERIFIED", "POST_TRANSPORT_AMBIGUITY"],
       [500, "UNVERIFIED", "POST_TRANSPORT_AMBIGUITY"], [201, "UNVERIFIED", "PROTOCOL_LOCATION_VIOLATION"],
@@ -100,6 +102,26 @@ describe("managed Azure ARM import transport", () => {
     expect((await outcome([new Error("private-provider-canary")])).result).toMatchObject({ outcome: "UNVERIFIED", reason: "POST_TRANSPORT_AMBIGUITY" });
     for (const spec of [{ status: 200, redirected: true }, { status: 200, url: "https://management.azure.com/drift" }])
       expect((await outcome([spec])).result.reason).toBe("PROTOCOL_LOCATION_VIOLATION");
+  });
+
+  test("keeps only safe provider status and code from import rejection bodies", async () => {
+    const { result } = await outcome([{ status: 400, body: { error: { code: "BadRequest", details: [{ code: "InvalidSourceRegistryCredentials", message: "private-provider-canary" }] } } }]);
+    expect(result).toMatchObject({ outcome: "CONFIRMED_POST_REJECTION", reason: "POST_REJECTED", providerStatus: 400, providerCode: "InvalidSourceRegistryCredentials" });
+    expect(JSON.stringify(result)).not.toMatch(/private-provider-canary|ghcr-user|ghcr-password/);
+  });
+
+  test("bounds import rejection body reads before accepting provider codes", async () => {
+    let cancelled = false;
+    const oversized = (url) => ({ status: 400, redirected: false, url, headers: new Headers(),
+      body: new ReadableStream({ start(stream) { stream.enqueue(new TextEncoder().encode("x".repeat(8_193))); },
+        cancel() { cancelled = true; } }) });
+    const large = await outcome([oversized]);
+    expect(large.result).toMatchObject({ outcome: "CONFIRMED_POST_REJECTION", reason: "POST_REJECTED", providerStatus: 400 });
+    expect(large.result.providerCode).toBeUndefined(); expect(cancelled).toBe(true);
+    const blocked = await outcome([(url) => ({ status: 400, redirected: false, url, headers: new Headers(), text: () => new Promise(() => {}) })],
+      { sleep: async (milliseconds) => { if (milliseconds === 15_000) return; return new Promise(() => {}); } });
+    expect(blocked.result).toMatchObject({ outcome: "CONFIRMED_POST_REJECTION", reason: "POST_REJECTED", providerStatus: 400 });
+    expect(blocked.result.providerCode).toBeUndefined();
   });
 
   test("accepts only the exact documented immutable Location boundary", async () => {

@@ -233,8 +233,10 @@ describe("managed Azure single-target transaction", () => {
   });
 
   it("aborts an unmutated lease on confirmed import rejection", async () => {
-    const { deps } = dependencies({ webDestination: "ABSENT", importResult: { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_REJECTED" } });
-    await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).rejects.toThrow("MANAGED_RELEASE_IMPORT_REJECTED");
+    const { deps } = dependencies({ webDestination: "ABSENT",
+      importResult: { terminal: true, succeeded: false, ambiguous: false, code: "POST_REJECTED", providerStatus: 400, providerCode: "InvalidSourceRegistryCredentials" } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "REJECTED", phase: "IMPORT", role: "web", code: "POST_REJECTED", providerStatus: 400, providerCode: "InvalidSourceRegistryCredentials" });
     expect(deps.lease).toHaveBeenCalledWith("abort", expect.anything());
     expect(deps.lease).not.toHaveBeenCalledWith("begin", expect.anything());
     expect(deps.patchTemplate).not.toHaveBeenCalled();
@@ -304,6 +306,9 @@ describe("managed Azure single-target transaction", () => {
     const output = { stdout: "", stderr: "", writers: { stdout: { write: (value) => { output.stdout += value; } }, stderr: { write: (value) => { output.stderr += value; } } } };
     expect(writeManagedAzureCliResult({ status: "ROLLED_BACK", code: "AZURE_PATCH_REJECTED" }, true, output.writers)).toBe(1);
     expect(output.stdout).toContain('"status":"ROLLED_BACK"'); expect(output.stderr).toBe("ROLLED_BACK:AZURE_PATCH_REJECTED\n");
+    output.stdout = ""; output.stderr = "";
+    expect(writeManagedAzureCliResult({ status: "REJECTED", code: "POST_REJECTED", providerCode: "InvalidSourceRegistryCredentials" }, true, output.writers)).toBe(1);
+    expect(output.stdout).toContain('"providerCode":"InvalidSourceRegistryCredentials"'); expect(output.stderr).toBe("REJECTED:POST_REJECTED\n");
     expect(writeManagedAzureCliResult({ status: "DRY_RUN_READY" }, false, output.writers)).toBe(0);
   });
 
