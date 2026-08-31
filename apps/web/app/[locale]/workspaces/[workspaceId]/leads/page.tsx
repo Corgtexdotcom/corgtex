@@ -18,10 +18,13 @@ import { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
 import { ArrowRight, ExternalLink } from "lucide-react";
 import { normalizeVisibleWorkItemColumns, toggleWorkItemColumnVisibility } from "@/lib/work-item-view";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 
 import {
   archiveContactAction,
   archiveCrmAccountAction,
+  archiveDealAction,
+  archiveActivityAction,
   approveQualificationAction,
   completeActivityAction,
   createConversationMessageAction,
@@ -48,7 +51,7 @@ import { splitRelationshipReminders } from "./relationship-reminders";
 import {
   CRM_DEAL_STAGES,
   CRM_CREATABLE_DEAL_STAGES,
-  accountHref,
+  accountNavigationState,
   activePipelineValueCents,
   labelFromCrmCode,
   normalizeRelationshipView,
@@ -228,9 +231,10 @@ export default async function LeadsPage({
   };
 
   const accountLink = (account?: { id: string; name: string; archivedAt?: Date | string | null } | null) => {
-    if (!account) return <span className="muted">{t("emptyAccount")}</span>;
-    if (account.archivedAt) return <span className="muted">{account.name}</span>;
-    return <a href={accountHref(workspaceId, account.id)}>{account.name}</a>;
+    const nav = accountNavigationState(workspaceId, account);
+    if (nav.isMissing) return <span className="muted">{t("emptyAccount")}</span>;
+    if (nav.isArchived) return <span className="muted">{account?.name || t("archivedAccount")}</span>;
+    return <a href={nav.href ?? nav.fallbackHref}>{account!.name}</a>;
   };
 
   const activityIcon = (type: string) => {
@@ -409,11 +413,20 @@ export default async function LeadsPage({
                       <td data-label={t("colAccount")}>{activity.account ? accountLink(activity.account) : t("emptyAccount")}</td>
                       <td data-label={t("colUpdated")} className="muted">{dueText(activity.dueAt)}</td>
                       <td data-label={t("colActions")} className="nr-table-cell-right">
-                        <form action={completeActivityAction}>
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="activityId" value={activity.id} />
-                          <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
-                        </form>
+                        <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+                          <form action={completeActivityAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="activityId" value={activity.id} />
+                            <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                          </form>
+                          <form action={archiveActivityAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="activityId" value={activity.id} />
+                            <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
+                              {t("btnArchiveActivity")}
+                            </ConfirmSubmitButton>
+                          </form>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -480,10 +493,15 @@ export default async function LeadsPage({
                   <tbody>
                     {dashboardAccountRows.map((summary) => {
                       const account = summary.account;
+                      const accountNav = accountNavigationState(workspaceId, account);
                       return (
                         <tr key={account.id}>
                           <td data-label={t("colAccount")}>
-                            <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
+                            {accountNav.isArchived ? (
+                            <span className="nr-work-item-table-title muted">{account.name}</span>
+                          ) : (
+                            <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-work-item-table-title">{account.name}</a>
+                          )}
                             <div className="nr-work-item-table-meta">{account.domain || t("noDomain")}</div>
                           </td>
                           <td data-label={t("colRelationship")}>
@@ -495,9 +513,18 @@ export default async function LeadsPage({
                           </td>
                           <td data-label={t("accountPipeline")}><strong>{formatCurrency(summary.pipelineValueCents)}</strong></td>
                           <td data-label={t("colActions")} className="nr-table-cell-right">
-                            <a href={accountHref(workspaceId, account.id)} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
-                              <ExternalLink size={15} aria-hidden="true" />
-                            </a>
+                            <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+                              <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                                <ExternalLink size={15} aria-hidden="true" />
+                              </a>
+                              <form action={archiveCrmAccountAction}>
+                                <input type="hidden" name="workspaceId" value={workspaceId} />
+                                <input type="hidden" name="accountId" value={account.id} />
+                                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                                  {t("btnArchiveAccount")}
+                                </ConfirmSubmitButton>
+                              </form>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -526,7 +553,9 @@ export default async function LeadsPage({
                     </tr>
                   </thead>
                   <tbody>
-                    {dashboardDealRows.map((deal) => (
+                    {dashboardDealRows.map((deal) => {
+                      const accountNav = deal.account ? accountNavigationState(workspaceId, deal.account) : null;
+                      return (
                       <tr key={deal.id}>
                         <td data-label={t("fullPipelineTitle")}>
                           <div className="nr-work-item-table-main">
@@ -541,7 +570,7 @@ export default async function LeadsPage({
                         <td data-label={t("dashboardDealValue")}><strong>{formatCurrency(deal.valueCents ?? 0)}</strong></td>
                         <td data-label={t("colActions")} className="nr-table-cell-right">
                           {deal.account ? (
-                            <a href={accountHref(workspaceId, deal.account.id)} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                            <a href={accountNav?.href ?? accountNav?.fallbackHref} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
                               <ExternalLink size={15} aria-hidden="true" />
                             </a>
                           ) : (
@@ -549,9 +578,16 @@ export default async function LeadsPage({
                               <ExternalLink size={15} aria-hidden="true" />
                             </a>
                           )}
+                          <form action={archiveDealAction} style={{ width: "100%", whiteSpace: "nowrap" }}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="dealId" value={deal.id} />
+                            <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
+                              {t("btnArchiveDeal")}
+                            </ConfirmSubmitButton>
+                          </form>
                         </td>
                       </tr>
-                    ))}
+                    )})}
                     {dashboardDealRows.length === 0 && (
                       <tr><td colSpan={4} className="nr-table-cell-center muted">{t("dashboardNoPipeline")}</td></tr>
                     )}
@@ -576,7 +612,9 @@ export default async function LeadsPage({
                     </tr>
                   </thead>
                   <tbody>
-                    {dashboardActivityRows.map((activity) => (
+                    {dashboardActivityRows.map((activity) => {
+                      const accountNav = activity.account ? accountNavigationState(workspaceId, activity.account) : null;
+                      return (
                       <tr key={activity.id}>
                         <td data-label={t("fullActivityTitle")}>
                           <div className="nr-work-item-table-main">
@@ -591,7 +629,7 @@ export default async function LeadsPage({
                         <td data-label={t("colUpdated")} className="muted">{ageText(activity.createdAt)}</td>
                         <td data-label={t("colActions")} className="nr-table-cell-right">
                           {activity.account ? (
-                            <a href={accountHref(workspaceId, activity.account.id)} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                            <a href={accountNav?.href ?? accountNav?.fallbackHref} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
                               <ExternalLink size={15} aria-hidden="true" />
                             </a>
                           ) : (
@@ -599,9 +637,16 @@ export default async function LeadsPage({
                               <ExternalLink size={15} aria-hidden="true" />
                             </a>
                           )}
+                          <form action={archiveActivityAction} style={{ width: "100%", whiteSpace: "nowrap" }}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="activityId" value={activity.id} />
+                            <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
+                              {t("btnArchiveActivity")}
+                            </ConfirmSubmitButton>
+                          </form>
                         </td>
                       </tr>
-                    ))}
+                    )})}
                     {dashboardActivityRows.length === 0 && (
                       <tr><td colSpan={4} className="nr-table-cell-center muted">{t("noActivity")}</td></tr>
                     )}
@@ -663,6 +708,7 @@ export default async function LeadsPage({
                   const accountDeals = dealsByAccountId.get(account.id) ?? [];
                   const accountPipelineValue = activePipelineValueCents(accountDeals);
                   const lastActivity = lastActivityByAccountId.get(account.id);
+                  const accountNav = accountNavigationState(workspaceId, account);
                   return (
                     <div
                       key={account.id}
@@ -671,7 +717,11 @@ export default async function LeadsPage({
                     >
                       <div className="row" style={{ alignItems: "flex-start", gap: 12 }}>
                         <div>
-                          <a href={accountHref(workspaceId, account.id)} className="nr-work-item-table-title">{account.name}</a>
+                        {accountNav.isArchived ? (
+                          <span className="nr-work-item-table-title muted">{account.name}</span>
+                        ) : (
+                          <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-work-item-table-title">{account.name}</a>
+                        )}
                           <div className="muted" style={{ fontSize: "0.82rem", marginTop: 4 }}>
                             {account.domain || t("noDomain")}
                           </div>
@@ -693,11 +743,15 @@ export default async function LeadsPage({
                           : t("accountNoActivity")}
                       </div>
                       <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
-                        <a href={accountHref(workspaceId, account.id)} className="link-button small">{t("openDetail")}</a>
+                        <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
+                          <ExternalLink size={15} aria-hidden="true" />
+                        </a>
                         <form action={archiveCrmAccountAction}>
                           <input type="hidden" name="workspaceId" value={workspaceId} />
                           <input type="hidden" name="accountId" value={account.id} />
-                          <button type="submit" className="danger small">{t("btnArchiveAccount")}</button>
+                          <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                            {t("btnArchiveAccount")}
+                          </ConfirmSubmitButton>
                         </form>
                       </div>
                     </div>
@@ -749,10 +803,12 @@ export default async function LeadsPage({
                               {t("btnContactActions")}
                             </summary>
                             <div style={{ position: "absolute", right: 0, top: "100%", background: "white", padding: 8, border: "1px solid var(--line)", borderRadius: 8, zIndex: 10, boxShadow: "var(--shadow-md)" }}>
-                              <form action={archiveContactAction}>
+                              <form action={archiveContactAction} style={{ width: "100%", whiteSpace: "nowrap" }}>
                                 <input type="hidden" name="workspaceId" value={workspaceId} />
                                 <input type="hidden" name="contactId" value={contact.id} />
-                                <button type="submit" className="danger small" style={{ width: "100%", whiteSpace: "nowrap" }}>{t("btnArchiveContact")}</button>
+                                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveContact")}>
+                                  {t("btnArchiveContact")}
+                                </ConfirmSubmitButton>
                               </form>
                             </div>
                           </details>
@@ -790,6 +846,8 @@ export default async function LeadsPage({
                 stageAgeToday: t("pipelineStageAgeToday"),
                 stageAgeYesterday: t("pipelineStageAgeYesterday"),
                 stageAgeDays: (days) => t("pipelineStageAgeDays", { days }),
+                archiveDeal: t("btnArchiveDeal"),
+                confirmArchiveDeal: t("confirmArchiveDeal"),
               }}
               workItemLabels={{
                 settingsLabel: tWork("columnSettings"),
