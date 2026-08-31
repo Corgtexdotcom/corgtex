@@ -239,6 +239,8 @@ function validOperationPath(url, target) {
   if (parts[providerIndex + 2] !== "locations" || !segment.test(parts[providerIndex + 3])) return false;
   if (parts[providerIndex + 4] === "operationStatuses" && parts.length === providerIndex + 6)
     return segment.test(parts[providerIndex + 5]);
+  if (parts[providerIndex + 4] === "containerappOperationResults" && parts.length === providerIndex + 6)
+    return segment.test(parts[providerIndex + 5]);
   if (parts[providerIndex + 4] === "operationResults") {
     if (parts.length === providerIndex + 6) return segment.test(parts[providerIndex + 5]);
     if (parts.length === providerIndex + 7 && parts[providerIndex + 5] === "operationStatuses")
