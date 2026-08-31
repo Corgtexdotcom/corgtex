@@ -181,9 +181,19 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code: patched.code ?? "WORKER_PATCH_AMBIGUOUS", reason: input.reason })).catch(() => undefined);
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: patched.code ?? "WORKER_PATCH_AMBIGUOUS" });
       }
-      await deps.waitForState({ target: status.target, role: "worker", release: incoming, imageDigest: rollback.incoming.workerDigest, expectedTemplate: template,
-        onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
-      await deps.readApp({ target: status.target, role: "web", release: incoming, imageDigest: rollback.incoming.webDigest, ambiguous: true });
+      try {
+        await deps.waitForState({ target: status.target, role: "worker", release: incoming, imageDigest: rollback.incoming.workerDigest, expectedTemplate: template,
+          onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
+      } catch (error) {
+        const code = error instanceof ManagedAzureContainerAppError ? error.code : "WORKER_READBACK_AMBIGUOUS";
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code, reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code });
+      }
+      const webAfter = await classifyForwardRole(deps, status, rollback, "web", baseline, incoming);
+      if (webAfter.kind !== "FORWARD") {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code: "WEB_READBACK_MISMATCH", reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: "WEB_READBACK_MISMATCH" });
+      }
       const health = await deps.healthProbe({ origin: status.origin, release: incoming });
       if (!health.ok) {
         await deps.lease("mark_recovery", leaseArgs(handle, { stage: "OBSERVATION", code: health.code ?? "HEALTH_PROBE_FAILED", reason: input.reason })).catch(() => undefined);

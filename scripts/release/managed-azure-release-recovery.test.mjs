@@ -227,6 +227,68 @@ describe("managed Azure release recovery", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
+  it("records worker readback failures after patching during forward completion", async () => {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", {
+        revisionName: `${target.webAppName}--${webSuffix}`,
+        revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image,
+        imageDigest: rollback.incoming.webDigest,
+        template: webTemplate,
+        templateDigest: managedAzureTemplateDigest(webTemplate),
+      });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps, calls } = rig({ readApp, waitForState: vi.fn(async () => { throw new Error("timeout"); }) });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "WORKER_READBACK_AMBIGUOUS" });
+    expect(calls.map(([operation]) => operation)).toContain("mark_recovery");
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
+  it("revalidates the exact web forward revision after worker readback", async () => {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const driftedTemplate = template("web", rollback.incoming.webDigest, "manual-forward", incoming);
+    let forwardWebReads = 0;
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) {
+        forwardWebReads += 1;
+        return forwardWebReads === 1
+          ? state("web", {
+            revisionName: `${target.webAppName}--${webSuffix}`,
+            revisionSuffix: webSuffix,
+            image: webTemplate.containers[0].image,
+            imageDigest: rollback.incoming.webDigest,
+            template: webTemplate,
+            templateDigest: managedAzureTemplateDigest(webTemplate),
+          })
+          : state("web", {
+            revisionName: `${target.webAppName}--manual-forward`,
+            revisionSuffix: "manual-forward",
+            image: driftedTemplate.containers[0].image,
+            imageDigest: rollback.incoming.webDigest,
+            template: driftedTemplate,
+            templateDigest: managedAzureTemplateDigest(driftedTemplate),
+          });
+      }
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps, calls } = rig({ readApp });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "WEB_READBACK_MISMATCH" });
+    expect(forwardWebReads).toBe(2);
+    expect(calls.map(([operation]) => operation)).toContain("mark_recovery");
+    expect(deps.healthProbe).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
   it("records observation failure when both roles are already forward", async () => {
     const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
     const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
@@ -267,6 +329,7 @@ describe("managed Azure release recovery", () => {
     const workflow = readFileSync(new URL("../../.github/workflows/managed-azure-release-recovery.yml", import.meta.url), "utf8");
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("environment: managed-azure-release-production");
+    expect(workflow).toContain("timeout-minutes: 30");
     expect(workflow).toContain("group: managed-azure-release-${{ inputs.deployment_id }}");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("id-token: write");
