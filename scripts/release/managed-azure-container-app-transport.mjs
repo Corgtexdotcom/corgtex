@@ -206,17 +206,53 @@ function resourceUrl(target, appName) {
   return `${MANAGEMENT_ORIGIN}/subscriptions/${target.subscriptionId}/resourceGroups/${encodeURIComponent(target.resourceGroup)}/providers/Microsoft.App/containerApps/${appName}?api-version=${API_VERSION}`;
 }
 
+function validOperationSearch(url) {
+  const entries = [...url.searchParams.entries()];
+  if (entries.length !== 1 && entries.length !== 2) return false;
+  const seen = new Set();
+  for (const [key, value] of entries) {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (key === "api-version") {
+      if (!/^20[0-9]{2}-[0-9]{2}-[0-9]{2}(?:-preview)?$/.test(value)) return false;
+    } else if (key !== "monitor" || value !== "true") return false;
+  }
+  return seen.has("api-version");
+}
+
+function validOperationPath(url, target) {
+  const parts = url.pathname.split("/");
+  const segment = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
+  if (parts[0] !== "" || parts[1] !== "subscriptions" || parts[2] !== target.subscriptionId) return false;
+  let providerIndex = 3;
+  if (parts[3] === "resourceGroups") {
+    try {
+      if (decodeURIComponent(parts[4]).toLowerCase() !== target.resourceGroup.toLowerCase()) return false;
+    } catch {
+      return false;
+    }
+    providerIndex = 5;
+  }
+  if (parts[providerIndex] !== "providers" || parts[providerIndex + 1] !== "Microsoft.App") return false;
+  if (parts[providerIndex + 2] === "containerApps" && parts.length === providerIndex + 4)
+    return [target.webAppName, target.workerAppName].includes(parts[providerIndex + 3]);
+  if (parts[providerIndex + 2] !== "locations" || !segment.test(parts[providerIndex + 3])) return false;
+  if (parts[providerIndex + 4] === "operationStatuses" && parts.length === providerIndex + 6)
+    return segment.test(parts[providerIndex + 5]);
+  if (parts[providerIndex + 4] === "operationResults") {
+    if (parts.length === providerIndex + 6) return segment.test(parts[providerIndex + 5]);
+    if (parts.length === providerIndex + 7 && parts[providerIndex + 5] === "operationStatuses")
+      return segment.test(parts[providerIndex + 6]);
+  }
+  return false;
+}
+
 function operationUrl(raw, target) {
   try {
-    if (typeof raw !== "string" || raw.length === 0 || raw.length > 8_192) fail("AZURE_OPERATION_LOCATION_INVALID", true);
+    if (typeof raw !== "string" || raw !== raw.trim() || raw.length === 0 || raw.length > 8_192) fail("AZURE_OPERATION_LOCATION_INVALID", true);
     const url = new URL(raw);
-    const queryKeys = [...url.searchParams.keys()];
-    const apiVersion = url.searchParams.get("api-version");
-    if (url.origin !== MANAGEMENT_ORIGIN || url.username || url.password || url.port || url.hash
-      || !url.pathname.startsWith(`/subscriptions/${target.subscriptionId}/`)
-      || !url.pathname.toLowerCase().includes("/providers/microsoft.app/")
-      || queryKeys.length !== 1 || queryKeys[0] !== "api-version"
-      || typeof apiVersion !== "string" || !/^20[0-9]{2}-[0-9]{2}-[0-9]{2}(?:-preview)?$/.test(apiVersion)) fail("AZURE_OPERATION_LOCATION_INVALID", true);
+    if (url.href !== raw || url.origin !== MANAGEMENT_ORIGIN || url.username || url.password || url.port || url.hash
+      || !validOperationSearch(url) || !validOperationPath(url, target)) fail("AZURE_OPERATION_LOCATION_INVALID", true);
     return url.href;
   } catch (error) {
     if (error instanceof ManagedAzureContainerAppError) throw error;

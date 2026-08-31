@@ -361,15 +361,15 @@ describe("managed Azure Container Apps transport", () => {
     expect(forward).not.toBe(rollback); expect(forward).toMatch(/^[a-z0-9-]+$/); expect(rollback).toHaveLength(forward.length);
   });
 
-  it("sends one exact JSON PATCH and waits for an asynchronous terminal operation", async () => {
+  it("sends one exact JSON PATCH and waits for an asynchronous terminal Location operation", async () => {
     let now = 1_000;
     const baseline = canonicalizeManagedAzureContainerAppState(rawApp(), { target, role: "web", imageDigest: digests.web, release: transportBaseRelease });
     const revisionSuffix = managedAzureRevisionSuffix({ leaseId, fence: 1, role: "web", phase: "forward" });
     const image = `${target.acrServer}/corgtex/web@${digests.nextWeb}`;
     const candidate = buildManagedAzureReleaseTemplate({ baseline, role: "web", image, release: transportNextRelease, revisionSuffix });
-    const location = `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/operationStatuses/op-1?api-version=2024-03-01`;
+    const location = `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/operationStatuses/op-1?monitor=true&api-version=2025-01-01`;
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(transportResponse(202, null, { "azure-asyncoperation": location, "retry-after": "0" }))
+      .mockResolvedValueOnce(transportResponse(202, null, { location, "retry-after": "0" }))
       .mockResolvedValueOnce(transportResponse(202, { status: "InProgress" }, { "retry-after": "2" }))
       .mockResolvedValueOnce(transportResponse(200, { status: "Succeeded" }));
     const sleep = vi.fn(async () => { now += 1_000; });
@@ -382,6 +382,27 @@ describe("managed Azure Container Apps transport", () => {
     expect(JSON.parse(init.body)).toEqual({ location: "West US", properties: { template: candidate } });
     expect(fetchImpl.mock.calls.slice(1).every(([pollUrl, pollInit]) => pollUrl === location && pollInit.method === "GET")).toBe(true);
     expect(sleep).toHaveBeenNthCalledWith(1, 0); expect(sleep).toHaveBeenNthCalledWith(2, 2_000); expect(onProgress).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects unsafe asynchronous operation locations before polling", async () => {
+    const candidate = rawApp().properties.template;
+    const operationPath = `/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/operationStatuses/op-1`;
+    const unsafeLocations = [
+      `https://example.com${operationPath}?api-version=2025-01-01`,
+      `https://user@management.azure.com${operationPath}?api-version=2025-01-01`,
+      `https://management.azure.com${operationPath}?api-version=2025-01-01#fragment`,
+      `https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.App/locations/westus/operationStatuses/op-1?api-version=2025-01-01`,
+      `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/private/op-1?api-version=2025-01-01`,
+      `https://management.azure.com${operationPath}?api-version=2025-01-01&monitor=false`,
+      `https://management.azure.com${operationPath}?api-version=2025-01-01&api-version=2025-01-01`,
+      `https://management.azure.com/subscriptions/${target.subscriptionId}/resourceGroups/other-rg/providers/Microsoft.App/locations/westus/operationStatuses/op-1?api-version=2025-01-01`,
+    ];
+    for (const location of unsafeLocations) {
+      const fetchImpl = vi.fn().mockResolvedValueOnce(transportResponse(202, null, { location, "retry-after": "0" }));
+      const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: vi.fn().mockResolvedValue("token-value-with-enough-length") });
+      await expect(transport.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_OPERATION_LOCATION_INVALID" });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("classifies confirmed rejection separately from operation ambiguity", async () => {
