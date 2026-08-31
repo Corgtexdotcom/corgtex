@@ -448,6 +448,21 @@ describe("managed Azure Container Apps transport", () => {
     expect(fetchImpl.mock.calls[1]).toMatchObject([operation, expect.objectContaining({ method: "GET" })]);
   });
 
+  it("accepts Container Apps Azure-AsyncOperation status locations", async () => {
+    const candidate = rawApp().properties.template;
+    const operation = `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus3/containerappOperationStatuses/op-1?api-version=2026-01-01`;
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(transportResponse(202, null, { "azure-asyncoperation": operation, "retry-after": "0" }))
+      .mockResolvedValueOnce(transportResponse(200, { status: "Succeeded" }));
+    const transport = createManagedAzureContainerAppTransport({
+      fetchImpl,
+      getAccessToken: vi.fn().mockResolvedValue("token-value-with-enough-length"),
+      sleep: vi.fn(async () => undefined),
+    });
+    await expect(transport.patchTemplate({ target, role: "web", location: "West US 3", template: candidate })).resolves.toEqual({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
+    expect(fetchImpl.mock.calls[1]).toMatchObject([operation, expect.objectContaining({ method: "GET" })]);
+  });
+
   it("rejects unsafe asynchronous operation locations before polling", async () => {
     const candidate = rawApp().properties.template;
     const operationPath = `/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/operationStatuses/op-1`;
@@ -457,9 +472,11 @@ describe("managed Azure Container Apps transport", () => {
       `https://management.azure.com${operationPath}?api-version=2025-01-01#fragment`,
       `https://management.azure.com/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.App/locations/westus/operationStatuses/op-1?api-version=2025-01-01`,
       `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/private/op-1?api-version=2025-01-01`,
+      `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.Web/locations/westus3/containerappOperationStatuses/op-1?api-version=2026-01-01`,
       `https://management.azure.com${operationPath}?api-version=2025-01-01&monitor=false`,
       `https://management.azure.com${operationPath}?api-version=2025-01-01&api-version=2025-01-01`,
       `https://management.azure.com/subscriptions/${target.subscriptionId}/resourceGroups/other-rg/providers/Microsoft.App/locations/westus/operationStatuses/op-1?api-version=2025-01-01`,
+      `https://management.azure.com/subscriptions/${target.subscriptionId}/resourceGroups/other-rg/providers/Microsoft.App/locations/westus3/containerappOperationStatuses/op-1?api-version=2026-01-01`,
     ];
     for (const location of unsafeLocations) {
       const fetchImpl = vi.fn().mockResolvedValueOnce(transportResponse(202, null, { location, "retry-after": "0" }));
