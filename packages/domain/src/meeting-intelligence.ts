@@ -153,6 +153,24 @@ function isCollectiveAssigneeHint(value: string | null | undefined) {
 type AssigneeMemberCandidate = { id: string; user: { displayName: string | null; email: string } };
 type MemberDirectoryLoader = () => Promise<AssigneeMemberCandidate[]>;
 
+async function loadMeetingActionVersion(workspaceId: string, actionId: string) {
+  const action = await prisma.action.findFirst({
+    where: { id: actionId, workspaceId, archivedAt: null },
+    select: { id: true, version: true },
+  });
+  invariant(action, 404, "NOT_FOUND", "Action not found.");
+  return action.version;
+}
+
+async function loadMeetingTensionVersion(workspaceId: string, tensionId: string) {
+  const tension = await prisma.tension.findFirst({
+    where: { id: tensionId, workspaceId, archivedAt: null },
+    select: { id: true, version: true },
+  });
+  invariant(tension, 404, "NOT_FOUND", "Tension not found.");
+  return tension.version;
+}
+
 // Returns a memoized loader for the workspace member directory. Used to avoid
 // re-reading the full member table for every assignee-hint insight applied in a
 // single auto-apply run; the member set is invariant across that loop.
@@ -977,19 +995,23 @@ export async function applyInsight(
     invariant(insight.targetEntityType && insight.targetEntityId, 400, "INVALID_STATE", "Resolved insight must point to a target record.");
 
     if (insight.targetEntityType === "Action") {
+      const expectedVersion = await loadMeetingActionVersion(params.workspaceId, insight.targetEntityId);
       await updateAction(actor, {
         workspaceId: params.workspaceId,
         actionId: insight.targetEntityId,
         status: "COMPLETED",
+        expectedVersion,
       });
       appliedEntityType = "Action";
       appliedEntityId = insight.targetEntityId;
     } else if (insight.targetEntityType === "Tension") {
+      const expectedVersion = await loadMeetingTensionVersion(params.workspaceId, insight.targetEntityId);
       await updateTension(actor, {
         workspaceId: params.workspaceId,
         tensionId: insight.targetEntityId,
         status: "RESOLVED",
         resolvedVia: `Meeting: ${insight.meeting.title || insight.meetingId}`,
+        expectedVersion,
       });
       appliedEntityType = "Tension";
       appliedEntityId = insight.targetEntityId;
@@ -1084,13 +1106,8 @@ export async function applyInsight(
         isPrivate: false,
         duplicateGuard: { resolution: "create_new" },
       });
-      const opened = await updateAction(actor, {
-        workspaceId: params.workspaceId,
-        actionId: action.id,
-        status: "OPEN",
-      });
       appliedEntityType = "Action";
-      appliedEntityId = opened.id;
+      appliedEntityId = action.id;
     } else if (insight.type === "TENSION") {
       const tension = await createTension(actor, {
         workspaceId: params.workspaceId,
@@ -1101,13 +1118,8 @@ export async function applyInsight(
         isPrivate: false,
         duplicateGuard: { resolution: "create_new" },
       });
-      const opened = await updateTension(actor, {
-        workspaceId: params.workspaceId,
-        tensionId: tension.id,
-        status: "OPEN",
-      });
       appliedEntityType = "Tension";
-      appliedEntityId = opened.id;
+      appliedEntityId = tension.id;
     } else if (insight.type === "PROPOSAL") {
       const proposal = insight.targetEntityType === "Tension" && insight.targetEntityId
         ? await createProposalFromTension(actor, {

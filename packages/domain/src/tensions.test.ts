@@ -352,7 +352,7 @@ describe("tensions domain", () => {
       select: { id: true },
     });
     expect(prismaMock.tension.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ id: "t-duplicate" }),
+      where: expect.objectContaining({ id: "t-duplicate", version: 1 }),
       data: expect.objectContaining({
         proposalId: "proposal-1",
         priority: 4,
@@ -368,6 +368,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       raisedByMemberId: "raised-member-1",
+      expectedVersion: 1,
     });
 
     expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
@@ -412,6 +413,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       assigneeMemberId: "responsible-member-1",
+      expectedVersion: 1,
     });
 
     expect(prismaMock.member.findFirst).toHaveBeenCalledWith({
@@ -455,6 +457,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       raisedByMemberId: null,
+      expectedVersion: 1,
     });
 
     expect(prismaMock.member.findFirst).not.toHaveBeenCalled();
@@ -471,6 +474,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-1",
       raisedByMemberId: null,
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-1",
       version: 1,
@@ -506,6 +510,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "New title",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-open",
       version: 2,
@@ -566,6 +571,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "Assigned update",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-open",
       version: 2,
@@ -618,6 +624,7 @@ describe("tensions domain", () => {
       workspaceId: "ws-1",
       tensionId: "t-open",
       title: "Member edit",
+      expectedVersion: 1,
     })).resolves.toMatchObject({
       id: "t-open",
       version: 2,
@@ -734,6 +741,38 @@ describe("tensions domain", () => {
     expect(prismaMock.workItemVersion.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.auditLog.create).toHaveBeenCalledTimes(1);
     expect(prismaMock.event.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects omitted expectedVersion for content intent before side effects, including same-value no-ops", async () => {
+    prismaMock.tension.findUnique.mockResolvedValue({
+      id: "t-1",
+      workspaceId: "ws-1",
+      authorUserId: "u-1",
+      title: "Old title",
+      status: "OPEN",
+      version: 1,
+      isPrivate: false,
+      publishedAt: new Date("2026-06-01T00:00:00.000Z"),
+      archivedAt: null,
+    });
+    const { updateTension } = await import("./tensions");
+
+    for (const params of [
+      { title: "New title" },
+      { title: "Old title" },
+      { title: "New title", status: "RESOLVED" as const, resolvedVia: "Done" },
+    ]) {
+      await expect(updateTension(actor, {
+        workspaceId: "ws-1",
+        tensionId: "t-1",
+        ...params,
+      })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    }
+
+    expect(prismaMock.tension.update).not.toHaveBeenCalled();
+    expect(prismaMock.workItemVersion.create).not.toHaveBeenCalled();
+    expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    expect(prismaMock.event.createMany).not.toHaveBeenCalled();
   });
 
   it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {

@@ -49,6 +49,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
         findUniqueOrThrow: vi.fn(),
       },
       action: {
+        findFirst: vi.fn(),
         findMany: vi.fn().mockResolvedValue([]),
       },
       tension: {
@@ -210,6 +211,8 @@ describe("meeting-intelligence", () => {
     updateTensionMock.mockResolvedValue({ id: "tension-1" });
     postDeliberationEntryMock.mockResolvedValue({ id: "deliberation-1" });
     (prisma.meeting.findFirst as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(null);
+    (prisma.action.findFirst as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(null);
+    (prisma.tension.findFirst as ReturnType<typeof vi.fn>).mockReset().mockResolvedValue(null);
     (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mockResolvedValue({ count: 1 });
     (prisma.workspaceFeatureFlag.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
   });
@@ -787,11 +790,7 @@ describe("meeting-intelligence", () => {
       expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
         bodyMd: expect.stringContaining("### Current reality"),
       }));
-      expect(updateTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
-        workspaceId: "ws-1",
-        tensionId: "tension-1",
-        status: "OPEN",
-      }));
+      expect(updateTensionMock).not.toHaveBeenCalled();
       expect(createTensionMock).toHaveBeenCalledWith(mockActor, expect.not.objectContaining({
         assigneeMemberId: "member-raised",
       }));
@@ -860,6 +859,64 @@ describe("meeting-intelligence", () => {
         proposalId: "proposal-1",
         outcome: "ADOPTED",
         decisionMd: expect.stringContaining("Created from meeting"),
+      }));
+    });
+
+    it("passes the selected Action version into meeting resolve updates", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-action-resolve",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "ACTION_ITEM",
+        operation: "RESOLVE",
+        targetEntityType: "Action",
+        targetEntityId: "action-1",
+        status: "SUGGESTED",
+        title: "Follow-up completed",
+        bodyMd: "The customer follow-up was completed.",
+        meeting: { id: "meeting-1", title: "Weekly sync" },
+      });
+      (prisma.action.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "action-1", version: 7 });
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-action-resolve",
+      });
+
+      expect(updateActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        actionId: "action-1",
+        status: "COMPLETED",
+        expectedVersion: 7,
+      }));
+    });
+
+    it("passes the selected Tension version into meeting resolve updates", async () => {
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "insight-tension-resolve",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "TENSION",
+        operation: "RESOLVE",
+        targetEntityType: "Tension",
+        targetEntityId: "tension-1",
+        status: "SUGGESTED",
+        title: "Ownership clarified",
+        bodyMd: "The owner was clarified.",
+        meeting: { id: "meeting-1", title: "Weekly sync" },
+      });
+      (prisma.tension.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "tension-1", version: 5 });
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1",
+        insightId: "insight-tension-resolve",
+      });
+
+      expect(updateTensionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        tensionId: "tension-1",
+        status: "RESOLVED",
+        expectedVersion: 5,
       }));
     });
 
