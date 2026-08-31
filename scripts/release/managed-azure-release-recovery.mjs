@@ -180,8 +180,15 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       const image = `${status.target.acrServer}/corgtex/worker@${rollback.incoming.workerDigest}`;
       const template = buildManagedAzureReleaseTemplate({ baseline: worker.state, role: "worker", image, release: incoming, revisionSuffix });
       assertManagedAzureTemplateDelta(worker.state, template, { role: "worker", image, release: incoming, revisionSuffix });
-      const patched = await deps.patchTemplate({ target: status.target, role: "worker", location: worker.state.location, template,
-        onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
+      let patched;
+      try {
+        patched = await deps.patchTemplate({ target: status.target, role: "worker", location: worker.state.location, template,
+          onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
+      } catch (error) {
+        const code = error instanceof ManagedAzureContainerAppError ? error.code : "WORKER_PATCH_AMBIGUOUS";
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code, reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code });
+      }
       if (!patched.terminal || !patched.succeeded) {
         await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code: patched.code ?? "WORKER_PATCH_AMBIGUOUS", reason: input.reason })).catch(() => undefined);
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: patched.code ?? "WORKER_PATCH_AMBIGUOUS" });

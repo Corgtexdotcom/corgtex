@@ -287,6 +287,30 @@ describe("managed Azure release recovery", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
+  it("records worker patch exceptions during forward completion", async () => {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", {
+        revisionName: `${target.webAppName}--${webSuffix}`,
+        revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image,
+        imageDigest: rollback.incoming.webDigest,
+        template: webTemplate,
+        templateDigest: managedAzureTemplateDigest(webTemplate),
+      });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps, calls } = rig({ readApp, patchTemplate: vi.fn(async () => { throw new Error("ambiguous patch"); }) });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "WORKER_PATCH_AMBIGUOUS" });
+    expect(calls.map(([operation]) => operation)).toContain("mark_recovery");
+    expect(deps.waitForState).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
   it("revalidates the exact web forward revision after worker readback", async () => {
     const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
     const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
