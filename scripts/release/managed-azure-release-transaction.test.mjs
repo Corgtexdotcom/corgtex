@@ -361,7 +361,7 @@ describe("managed Azure Container Apps transport", () => {
     expect(forward).not.toBe(rollback); expect(forward).toMatch(/^[a-z0-9-]+$/); expect(rollback).toHaveLength(forward.length);
   });
 
-  it("sends one exact merge PATCH and waits for an asynchronous terminal operation", async () => {
+  it("sends one exact JSON PATCH and waits for an asynchronous terminal operation", async () => {
     let now = 1_000;
     const baseline = canonicalizeManagedAzureContainerAppState(rawApp(), { target, role: "web", imageDigest: digests.web, release: transportBaseRelease });
     const revisionSuffix = managedAzureRevisionSuffix({ leaseId, fence: 1, role: "web", phase: "forward" });
@@ -378,7 +378,7 @@ describe("managed Azure Container Apps transport", () => {
     await expect(transport.patchTemplate({ target, role: "web", location: "West US", template: candidate, onProgress })).resolves.toEqual({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(`https://management.azure.com/subscriptions/${target.subscriptionId}/resourceGroups/rg.Safe_1/providers/Microsoft.App/containerApps/web-app?api-version=2025-01-01`);
-    expect(init).toMatchObject({ method: "PATCH", redirect: "error", headers: expect.objectContaining({ authorization: "Bearer token-value-with-enough-length", "content-type": "application/merge-patch+json" }) });
+    expect(init).toMatchObject({ method: "PATCH", redirect: "error", headers: expect.objectContaining({ authorization: "Bearer token-value-with-enough-length", "content-type": "application/json" }) });
     expect(JSON.parse(init.body)).toEqual({ location: "West US", properties: { template: candidate } });
     expect(fetchImpl.mock.calls.slice(1).every(([pollUrl, pollInit]) => pollUrl === location && pollInit.method === "GET")).toBe(true);
     expect(sleep).toHaveBeenNthCalledWith(1, 0); expect(sleep).toHaveBeenNthCalledWith(2, 2_000); expect(onProgress).toHaveBeenCalledTimes(2);
