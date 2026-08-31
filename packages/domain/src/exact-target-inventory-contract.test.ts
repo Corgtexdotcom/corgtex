@@ -5,6 +5,7 @@ import {
   EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
   exactTargetInventoryClassDispositions,
   exactTargetInventoryFieldOwnership,
+  exactTargetInventoryAllowedDispositions,
   exactTargetInventoryUseSiteProofRequirements,
   exactTargetInventoryWorkloadClasses,
 } from "./exact-target-inventory-contract";
@@ -65,6 +66,8 @@ describe("exact target inventory v2 phase 0 contract evidence", () => {
     });
     expect(Object.isFrozen(exactTargetInventoryUseSiteProofRequirements)).toBe(true);
     expect(Object.isFrozen(exactTargetInventoryUseSiteProofRequirements.dependencyClaim)).toBe(true);
+    expect(exactTargetInventoryAllowedDispositions.ACTIVE_CLIENT_PRIMARY).toBe("SELECTABLE");
+    expect(exactTargetInventoryAllowedDispositions.ACTIVE_CLIENT_CANARY).toBe("BLOCKED");
   });
 
   it("records the exact 14-class phase 0 disposition matrix without granting retirement or release authority", () => {

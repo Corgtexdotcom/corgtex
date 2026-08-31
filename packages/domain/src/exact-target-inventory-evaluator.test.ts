@@ -291,6 +291,67 @@ describe("exact target inventory evaluator", () => {
     expect(requested.effectCount).toBe(0);
   });
 
+  it("allows one explicit active-client canary target only for managed-release preflight", () => {
+    const value = fixture() as any;
+    const canary = value.classes.find((item: any) => item.workloadClass === "ACTIVE_CLIENT_CANARY");
+    canary.disposition = "SELECTABLE";
+    canary.targets = [target(uuid(300), "ACTIVE_CLIENT_CANARY")];
+
+    const admitted = admitThroughPublicBoundary(serialize(value), "ACTIVE_CLIENT_CANARY", true);
+    expect(admitted.result.artifactStatus).toBe("INVALID");
+    expect(admitted.result.selection?.status).toBe("INVALID");
+    expect(admitted.result.issueCodes).toContain("DISPOSITION_MISMATCH");
+    expect(admitted.effectCount).toBe(0);
+
+    const preflight = evaluateExactTargetInventoryJson(serialize(value), {
+      now: NOW,
+      requestedWorkloadClass: "ACTIVE_CLIENT_CANARY",
+      purpose: "managed-release-preflight",
+    });
+    expect(preflight.artifactStatus).toBe("VALID");
+    expect(preflight.selection).toEqual({
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      status: "SELECTED",
+      opaqueTargetId: createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${uuid(300)}`).digest("hex").slice(0, 32),
+      issueCodes: [],
+    });
+
+    const duplicate = structuredClone(value);
+    duplicate.classes.find((item: any) => item.workloadClass === "ACTIVE_CLIENT_CANARY").targets.push(target(uuid(301), "ACTIVE_CLIENT_CANARY"));
+    const rejected = evaluateExactTargetInventoryJson(serialize(duplicate), {
+      now: NOW,
+      requestedWorkloadClass: "ACTIVE_CLIENT_CANARY",
+      purpose: "managed-release-preflight",
+    });
+    expect(rejected.artifactStatus).toBe("INVALID");
+    expect(rejected.selection?.status).toBe("INVALID");
+    expect(rejected.selection?.issueCodes).toContain("TARGET_CARDINALITY_INVALID");
+  });
+
+  it("allows managed-release preflight consumers to effect one explicit canary selection", () => {
+    const value = fixture() as any;
+    const canary = value.classes.find((item: any) => item.workloadClass === "ACTIVE_CLIENT_CANARY");
+    canary.disposition = "SELECTABLE";
+    canary.targets = [target(uuid(300), "ACTIVE_CLIENT_CANARY")];
+    const effects = Array.from({ length: 8 }, () => vi.fn());
+    const admitted = evaluateExactTargetInventoryJson(serialize(value), {
+      now: NOW,
+      requestedWorkloadClass: "ACTIVE_CLIENT_CANARY",
+      purpose: "managed-release-preflight",
+    });
+    expect(admitted.artifactStatus).toBe("VALID");
+    if (admitted.ok && admitted.artifactStatus === "VALID" && admitted.selection?.status === "SELECTED") {
+      effects.forEach((effect) => effect(admitted.selection?.opaqueTargetId));
+    }
+    expect(admitted.selection).toEqual({
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      status: "SELECTED",
+      opaqueTargetId: createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${uuid(300)}`).digest("hex").slice(0, 32),
+      issueCodes: [],
+    });
+    expect(effects.reduce((count, effect) => count + effect.mock.calls.length, 0)).toBe(8);
+  });
+
   it("bounds hostile requested-class handling without reflecting raw caller input", () => {
     const hostile = `SECRET_${"x".repeat(12_000)}`;
     const result = evaluateExactTargetInventoryJson(serialize(fixture()), { now: NOW, requestedWorkloadClass: hostile as ExactTargetInventoryWorkloadClass });

@@ -97,19 +97,24 @@ function overlapsTarget(target, value) {
   } catch { return false; }
 }
 function deployment(value) {
-  const row = exactRecord(value, [
+  const keys = [
     "deploymentId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
     "provisioningStatus", "releaseEligible", "provider", "group", "workload", "azure",
-  ]);
+  ];
+  const object = objectValue(value);
+  const row = exactRecord(value, Object.hasOwn(object, "workloadClass") ? [...keys.slice(0, -1), "workloadClass", "azure"] : keys);
   safeTopology(row);
   uuid(row.deploymentId);
-  return row;
+  return Object.hasOwn(row, "workloadClass") ? row : { ...row, workloadClass: "ACTIVE_CLIENT_PRIMARY" };
 }
 function targetFromDeployment(row, deploymentId) {
-  if (uuid(row.deploymentId) !== deploymentId || row.deploymentKind !== "REMOTE_MANAGED"
-    || row.cloudProvider !== "AZURE" || row.environment !== "production" || row.deploymentStatus !== "ACTIVE"
-    || row.provisioningStatus !== "active" || row.releaseEligible !== true || row.provider !== "azure"
-    || row.group !== "managed-customers" || row.workload !== "managed-customers") invalid();
+  if (uuid(row.deploymentId) !== deploymentId || row.cloudProvider !== "AZURE" || row.environment !== "production"
+    || row.deploymentStatus !== "ACTIVE" || row.provisioningStatus !== "active" || row.provider !== "azure") invalid();
+  const primary = row.workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "REMOTE_MANAGED"
+    && row.releaseEligible === true && row.group === "managed-customers" && row.workload === "managed-customers";
+  const canary = row.workloadClass === "ACTIVE_CLIENT_CANARY" && row.deploymentKind === "HOSTED_DEDICATED"
+    && row.group === "hosted-dedicated" && row.workload === "active-client-canary";
+  if (!primary && !canary) invalid();
   return targetProjection(row.azure);
 }
 function manifestDigest(raw) {

@@ -8492,10 +8492,10 @@ describe("managed Azure release control-plane boundary", () => {
     vi.clearAllMocks();
   });
 
-  it("returns only digest-pinned private Ops inventory bound to the deployment", async () => {
+  it("returns only digest-pinned private Ops inventory bound to the deployment and workload class", async () => {
     const bytes = Buffer.from('{"schemaVersion":"2.0.0"}', "utf8");
     const digest = createHash("sha256").update(bytes).digest("hex");
-    const opaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_PRIMARY:${deploymentId}`).digest("hex").slice(0, 32);
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
     prismaMock.buildArtifactAsset.findUnique.mockResolvedValue({
       id: inventoryRef,
       storageKey: "private/inventory.json",
@@ -8511,22 +8511,36 @@ describe("managed Azure release control-plane boundary", () => {
       artifactStatus: "VALID",
       canonicalDigest: `sha256:${"b".repeat(64)}`,
       validUntil: "2026-08-28T00:00:00.000Z",
-      selection: { status: "SELECTED", opaqueTargetId },
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
     });
     const { getControlPlaneManagedReleaseInventory } = await import("./control-plane");
 
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId })).resolves.toEqual({
+    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY" })).resolves.toEqual({
       inventoryRef,
       sha256: digest,
       bytesBase64: bytes.toString("base64"),
       evaluation: {
-        workloadClass: "ACTIVE_CLIENT_PRIMARY",
+        workloadClass: "ACTIVE_CLIENT_CANARY",
         canonicalDigest: `sha256:${"b".repeat(64)}`,
         validUntil: "2026-08-28T00:00:00.000Z",
-        opaqueTargetId,
+        opaqueTargetId: canaryOpaqueTargetId,
       },
     });
-    expect(inventoryEvaluatorMock).toHaveBeenCalledWith(bytes.toString("utf8"), expect.objectContaining({ requestedWorkloadClass: "ACTIVE_CLIENT_PRIMARY" }));
+    expect(inventoryEvaluatorMock).toHaveBeenCalledWith(bytes.toString("utf8"), expect.objectContaining({
+      requestedWorkloadClass: "ACTIVE_CLIENT_CANARY",
+      purpose: "managed-release-preflight",
+    }));
+
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-08-28T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY" })).rejects.toMatchObject({
+      code: "MANAGED_RELEASE_INVENTORY_REJECTED",
+    });
 
     prismaMock.buildArtifactAsset.findUnique.mockResolvedValueOnce({
       id: inventoryRef,
@@ -8537,7 +8551,7 @@ describe("managed Azure release control-plane boundary", () => {
       sha256: digest,
       artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PUBLIC_REVIEW" },
     });
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId })).rejects.toMatchObject({
+    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY" })).rejects.toMatchObject({
       code: "MANAGED_RELEASE_INVENTORY_REJECTED",
     });
   });
@@ -8550,10 +8564,11 @@ describe("managed Azure release control-plane boundary", () => {
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
       operation: "preflight",
       deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
       acrName: "acr12",
       acrServer: "acr12.azurecr.io",
     })).resolves.toEqual({ deploymentId, phase: "PREFLIGHT" });
-    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, { acrName: "acr12", acrServer: "acr12.azurecr.io" });
+    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, { acrName: "acr12", acrServer: "acr12.azurecr.io" }, "ACTIVE_CLIENT_CANARY");
 
     leaseMocks.getManagedReleaseRecoveryStatus.mockResolvedValue({ deploymentId, phase: "RECOVERY_REQUIRED", leaseId: "lease-1", fence: 1 });
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {

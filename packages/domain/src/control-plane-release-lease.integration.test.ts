@@ -20,6 +20,7 @@ import {
 } from "./control-plane-release-lease";
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
+const SYNTHETIC_CANARY_PREFLIGHT_DEPLOYMENT_ID = "123e4567-e89b-42d3-a456-426614174099";
 const SUBSCRIPTION = "123e4567-e89b-12d3-a456-426614174000"; const [RG, WEB, WORKER, ACR] = ["rg.Safe_1", "web-app", "worker-app", "acr12.azurecr.io"];
 const ARM_WEB = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
 const ARM_WORKER = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WORKER}`;
@@ -74,7 +75,16 @@ async function expire(deploymentId: string) {
     releaseLeaseAcquiredAt: new Date(now - 600_000), releaseLeaseHeartbeatAt: new Date(now - 360_000), releaseLeaseExpiresAt: new Date(now - 60_000),
   } });
 }
-beforeEach(async () => truncateAllTables());
+const originalCanaryPreflightDeploymentId = process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID;
+
+beforeEach(async () => {
+  if (originalCanaryPreflightDeploymentId === undefined) {
+    delete process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID;
+  } else {
+    process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID = originalCanaryPreflightDeploymentId;
+  }
+  await truncateAllTables();
+});
 describe("managed release lease CAS", () => {
   it("validates exact targeting, eligibility, and baseline before reserving", async () => {
     const eligible = await deployment();
@@ -333,6 +343,30 @@ describe("managed release lease CAS", () => {
     await deployment({ providerWorkerServiceId: "other-worker" });
     await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
+  });
+  it("admits only the exact hosted-dedicated canary for read-only preflight and never mutating lease acquisition", async () => {
+    process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID = SYNTHETIC_CANARY_PREFLIGHT_DEPLOYMENT_ID;
+    const canary = await deployment({
+      id: SYNTHETIC_CANARY_PREFLIGHT_DEPLOYMENT_ID,
+      deploymentKind: "HOSTED_DEDICATED",
+    });
+    const before = await releaseState(canary.id);
+    await expect(getManagedReleaseTargetPreflight(canary.id, ACR_IDENTITY, "ACTIVE_CLIENT_CANARY")).resolves.toEqual({
+      deploymentId: canary.id,
+      origin: canary.url,
+      release: { baselineImageTag: BASE, baselineVersion: "release-1" },
+      target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
+    });
+    expect(await releaseState(canary.id)).toEqual(before);
+    await expectCode(acquire(canary.id), "MANAGED_RELEASE_TARGET_INELIGIBLE");
+
+    await truncateAllTables();
+    const otherCanary = await deployment({
+      deploymentKind: "HOSTED_DEDICATED",
+    });
+    await expectCode(getManagedReleaseTargetPreflight(otherCanary.id, ACR_IDENTITY, "ACTIVE_CLIENT_CANARY"), "MANAGED_RELEASE_TARGET_INELIGIBLE");
+    delete process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID;
+    await expectCode(getManagedReleaseTargetPreflight(otherCanary.id, ACR_IDENTITY, "ACTIVE_CLIENT_CANARY"), "MANAGED_RELEASE_TARGET_INELIGIBLE");
   });
   it("projects Container App names from exact Azure resource IDs without mutating target state", async () => {
     const target = await deployment({ providerWebServiceId: ARM_WEB_UPPER_RG, providerWorkerServiceId: ARM_WORKER });

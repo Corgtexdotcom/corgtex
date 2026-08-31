@@ -8,15 +8,17 @@ import {
   EXACT_TARGET_INVENTORY_MAX_OUTPUT_BYTES,
   EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS,
   EXACT_TARGET_INVENTORY_SCHEMA_VERSION,
+  exactTargetInventoryAllowedDispositions,
   exactTargetInventoryClassDispositions,
+  exactTargetInventoryEvaluationPurposes,
   exactTargetInventoryClaimKinds,
   exactTargetInventoryComponentKinds,
   exactTargetInventoryProofPurposes,
-  exactTargetInventoryRequiredDispositions,
   exactTargetInventoryUseSiteProofRequirements,
   exactTargetInventoryWorkloadClasses,
   type ExactTargetInventoryArtifactIdentity,
   type ExactTargetInventoryClassBundle,
+  type ExactTargetInventoryClassDisposition,
   type ExactTargetInventoryClassProjection,
   type ExactTargetInventoryClaim,
   type ExactTargetInventoryComponent,
@@ -24,6 +26,7 @@ import {
   type ExactTargetInventoryDependency,
   type ExactTargetInventoryDocument,
   type ExactTargetInventoryEvaluationOptions,
+  type ExactTargetInventoryEvaluationPurpose,
   type ExactTargetInventoryEvaluationResult,
   type ExactTargetInventoryIssue,
   type ExactTargetInventoryIssueCode,
@@ -48,6 +51,7 @@ type RequestedWorkloadClass =
 type NormalizedOptions = {
   readonly evaluatedAt: string;
   readonly requested: RequestedWorkloadClass;
+  readonly purpose: ExactTargetInventoryEvaluationPurpose;
 };
 type OptionsResult =
   | { readonly ok: true; readonly options: NormalizedOptions }
@@ -57,8 +61,21 @@ const workloadClasses = Object.freeze([...exactTargetInventoryWorkloadClasses]);
 const workloadClassSet = new Set<string>(workloadClasses);
 const componentKinds = Object.freeze([...exactTargetInventoryComponentKinds]);
 const classDispositions = Object.freeze([...exactTargetInventoryClassDispositions]);
-const requiredDispositions = Object.freeze({ ...exactTargetInventoryRequiredDispositions });
+const evaluationPurposes = Object.freeze([...exactTargetInventoryEvaluationPurposes]);
+const allowedDispositions = Object.freeze({ ...exactTargetInventoryAllowedDispositions });
 const rollbackStrategies = Object.freeze(["PREVIOUS_IMAGE", "PREVIOUS_CONFIG", "RESTORE_SNAPSHOT"] as const);
+
+const dispositionAllowedFor = (
+  workloadClass: ExactTargetInventoryWorkloadClass,
+  disposition: ExactTargetInventoryClassDisposition,
+  purpose: ExactTargetInventoryEvaluationPurpose,
+): boolean => {
+  if (purpose === "managed-release-preflight" && workloadClass === "ACTIVE_CLIENT_CANARY") {
+    return disposition === "BLOCKED" || disposition === "SELECTABLE";
+  }
+  const allowed = allowedDispositions[workloadClass];
+  return Array.isArray(allowed) ? allowed.includes(disposition) : allowed === disposition;
+};
 
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
   const actual = Object.keys(value);
@@ -77,6 +94,11 @@ const requestedWorkloadClass = (requested: unknown): RequestedWorkloadClass => {
     return { status: "VALID", workloadClass: requested as ExactTargetInventoryWorkloadClass };
   }
   return { status: "INVALID" };
+};
+
+const evaluationPurpose = (purpose: unknown): ExactTargetInventoryEvaluationPurpose | null => {
+  if (purpose === undefined) return "standard";
+  return enumHas(evaluationPurposes, purpose) ? purpose : null;
 };
 
 const boundedId = (value: unknown): value is string =>
@@ -166,22 +188,27 @@ const normalizeOptions = (value: ExactTargetInventoryEvaluationOptions): Options
     if (!isRecord(value)) return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
     const descriptors = Object.getOwnPropertyDescriptors(value);
     const keys = Object.keys(descriptors);
-    if (!keys.includes("now") || keys.some((key) => key !== "now" && key !== "requestedWorkloadClass")) {
+    if (!keys.includes("now") || keys.some((key) => key !== "now" && key !== "requestedWorkloadClass" && key !== "purpose")) {
       return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
     }
     const nowDescriptor = descriptors.now;
     const requestedDescriptor = descriptors.requestedWorkloadClass;
+    const purposeDescriptor = descriptors.purpose;
     if (nowDescriptor === undefined || !Object.hasOwn(nowDescriptor, "value")
-      || (requestedDescriptor !== undefined && !Object.hasOwn(requestedDescriptor, "value"))) {
+      || (requestedDescriptor !== undefined && !Object.hasOwn(requestedDescriptor, "value"))
+      || (purposeDescriptor !== undefined && !Object.hasOwn(purposeDescriptor, "value"))) {
       return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
     }
     const evaluatedAt = normalizeNowValue(nowDescriptor.value);
     if (evaluatedAt === null) return { ok: false, evaluatedAt: "1970-01-01T00:00:00.000Z" };
+    const purpose = evaluationPurpose(purposeDescriptor?.value);
+    if (purpose === null) return { ok: false, evaluatedAt };
     return {
       ok: true,
       options: {
         evaluatedAt,
         requested: requestedWorkloadClass(requestedDescriptor?.value),
+        purpose,
       },
     };
   } catch {
@@ -484,7 +511,7 @@ class Reader {
     return { targetId: value.targetId, lifecycleClaim, authorityClaim, completenessClaim, policyClaim, components };
   }
 
-  public classBundle(value: unknown): ExactTargetInventoryClassBundle | null {
+  public classBundle(value: unknown, purpose: ExactTargetInventoryEvaluationPurpose): ExactTargetInventoryClassBundle | null {
     if (!isRecord(value) || !exactKeys(value, ["workloadClass", "disposition", "rootClaim", "targets"])) {
       this.add("UNKNOWN_KEY", "class");
       return null;
@@ -494,7 +521,7 @@ class Reader {
       return null;
     }
     const workloadClass = value.workloadClass;
-    if (value.disposition !== requiredDispositions[workloadClass]) this.add("DISPOSITION_MISMATCH", "class", workloadClass);
+    if (!dispositionAllowedFor(workloadClass, value.disposition, purpose)) this.add("DISPOSITION_MISMATCH", "class", workloadClass);
     if (value.targets.length > EXACT_TARGET_INVENTORY_MAX_TARGETS_PER_CLASS) this.add("LIMIT_EXCEEDED", "class", workloadClass);
     if (value.disposition === "SELECTABLE" && value.targets.length > 1) this.add("TARGET_CARDINALITY_INVALID", "target", workloadClass);
     const rootClaim = this.claim(value.rootClaim, `class-${workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", exactTargetInventoryUseSiteProofRequirements.authorityClaim.purpose);
@@ -547,7 +574,7 @@ const validateComponentTopology = (components: readonly ExactTargetInventoryComp
   }
 };
 
-const readDocument = (value: unknown, nowIso: string): { document: ExactTargetInventoryDocument | null; reader: Reader } => {
+const readDocument = (value: unknown, nowIso: string, purpose: ExactTargetInventoryEvaluationPurpose): { document: ExactTargetInventoryDocument | null; reader: Reader } => {
   const generatedAt = isRecord(value) && typeof value.generatedAt === "string" ? value.generatedAt : "";
   const reader = new Reader(nowIso, generatedAt);
   if (!isRecord(value) || !exactKeys(value, ["schemaVersion", "inventoryId", "generatedAt", "classes"])) {
@@ -559,7 +586,7 @@ const readDocument = (value: unknown, nowIso: string): { document: ExactTargetIn
     return { document: null, reader };
   }
   if (depthOf(value) > EXACT_TARGET_INVENTORY_MAX_DEPTH) reader.add("LIMIT_EXCEEDED", "artifact");
-  const classes = value.classes.map((item) => reader.classBundle(item)).filter((item): item is ExactTargetInventoryClassBundle => item !== null);
+  const classes = value.classes.map((item) => reader.classBundle(item, purpose)).filter((item): item is ExactTargetInventoryClassBundle => item !== null);
   const classNames = classes.map((item) => item.workloadClass);
   const expected = new Set(workloadClasses);
   if (classes.length !== workloadClasses.length
@@ -657,7 +684,7 @@ export function evaluateExactTargetInventoryJson(
 ): ExactTargetInventoryEvaluationResult {
   const normalized = normalizeOptions(options);
   if (!normalized.ok) return failInvalidOptions(normalized.evaluatedAt);
-  const { evaluatedAt, requested } = normalized.options;
+  const { evaluatedAt, requested, purpose } = normalized.options;
   if (typeof inputText !== "string") return fail("INPUT_NOT_STRING", "input", normalized.options);
   if (Buffer.byteLength(inputText, "utf8") > EXACT_TARGET_INVENTORY_MAX_BYTES) return fail("INPUT_TOO_LARGE", "input", normalized.options);
   if (detectDuplicateJsonKeys(inputText)) return fail("DUPLICATE_JSON_KEY", "input", normalized.options);
@@ -667,7 +694,7 @@ export function evaluateExactTargetInventoryJson(
   } catch {
     return fail("JSON_MALFORMED", "input", normalized.options);
   }
-  const { document, reader } = readDocument(parsed, evaluatedAt);
+  const { document, reader } = readDocument(parsed, evaluatedAt, purpose);
   const artifactIssues = reader.issues;
   const artifactValid = document !== null && artifactIssues.length === 0;
   const classes = artifactValid ? document.classes.map(publicClassProjection) : [];

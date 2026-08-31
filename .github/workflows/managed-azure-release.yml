@@ -15,6 +15,10 @@ on:
         description: Exact managed Azure deployment UUID
         required: true
         type: string
+      workload_class:
+        description: Exact workload class for inventory target binding
+        required: true
+        type: string
       release_sha:
         description: Full 40-character Git release SHA
         required: true
@@ -80,6 +84,7 @@ jobs:
           --inventory-ref "${{ inputs.inventory_ref }}"
           --inventory-sha256 "${{ inputs.inventory_sha256 }}"
           --deployment-id "${{ inputs.deployment_id }}"
+          --workload-class "${{ inputs.workload_class }}"
           --release-sha "${{ inputs.release_sha }}"
           --release-version "${{ inputs.release_version }}"
           --reason "${{ inputs.reason }}"
@@ -122,6 +127,7 @@ jobs:
           --inventory-ref "${{ inputs.inventory_ref }}"
           --inventory-sha256 "${{ inputs.inventory_sha256 }}"
           --deployment-id "${{ inputs.deployment_id }}"
+          --workload-class "${{ inputs.workload_class }}"
           --release-sha "${{ inputs.release_sha }}"
           --release-version "${{ inputs.release_version }}"
           --reason "${{ inputs.reason }}"

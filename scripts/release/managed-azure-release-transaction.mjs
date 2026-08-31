@@ -22,6 +22,7 @@ const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const ROLES = Object.freeze(["web", "worker"]);
+const WORKLOAD_CLASSES = Object.freeze(["ACTIVE_CLIENT_PRIMARY", "ACTIVE_CLIENT_CANARY"]);
 
 class ManagedAzureReleaseError extends Error {
   constructor(code) {
@@ -55,9 +56,10 @@ async function readBaselineApp(deps, target, role, release) {
 
 function canonicalInput(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("MANAGED_RELEASE_INPUT_INVALID");
-  const keys = ["inventoryRef", "inventorySha256", "deploymentId", "releaseSha", "releaseVersion", "reason", "execute", "acrName", "acrResourceGroup"];
+  const keys = ["inventoryRef", "inventorySha256", "deploymentId", "workloadClass", "releaseSha", "releaseVersion", "reason", "execute", "acrName", "acrResourceGroup"];
   if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail("MANAGED_RELEASE_INPUT_INVALID");
   if (!UUID.test(value.inventoryRef) || !SHA256.test(value.inventorySha256) || !UUID.test(value.deploymentId)
+    || !WORKLOAD_CLASSES.includes(value.workloadClass)
     || !SHA.test(value.releaseSha) || typeof value.releaseVersion !== "string"
     || !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(value.releaseVersion)
     || typeof value.reason !== "string" || value.reason.trim().length < 8 || value.reason.length > 256
@@ -93,11 +95,13 @@ function safeResult(input, inventory, status, detail = {}) {
   return Object.freeze({
     status,
     deploymentId: input.deploymentId,
+    workloadClass: input.workloadClass,
     inventoryRef: input.inventoryRef,
     inventorySha256: input.inventorySha256,
     inventoryCanonicalDigest: inventory.evaluation.canonicalDigest,
     releaseSha: input.releaseSha,
     releaseImageTag: `sha-${input.releaseSha}`,
+    executionAllowed: input.workloadClass === "ACTIVE_CLIENT_PRIMARY",
     ...detail,
   });
 }
@@ -116,6 +120,7 @@ export function writeManagedAzureCliResult(result, execute, writers = { stdout: 
 function verifyInventoryResponse(inventory, input) {
   if (inventory?.inventoryRef !== input.inventoryRef || inventory.sha256 !== input.inventorySha256
     || typeof inventory.bytesBase64 !== "string"
+    || inventory.evaluation?.workloadClass !== input.workloadClass
     || !/^sha256:[0-9a-f]{64}$/.test(inventory.evaluation?.canonicalDigest)) fail("MANAGED_RELEASE_INVENTORY_INVALID");
   let bytes;
   try { bytes = Buffer.from(inventory.bytesBase64, "base64"); } catch { fail("MANAGED_RELEASE_INVENTORY_INVALID"); }
@@ -139,7 +144,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   const input = canonicalInput(rawInput);
   const deps = dependencies;
   const inventory = verifyInventoryResponse(await deps.loadInventory(input), input);
-  const preflight = await deps.lease("preflight", { deploymentId: input.deploymentId, acrName: input.acrName, acrServer: input.acrServer });
+  if (input.execute && input.workloadClass === "ACTIVE_CLIENT_CANARY") fail("MANAGED_RELEASE_EXECUTION_NOT_ALLOWED");
+  const preflight = await deps.lease("preflight", { deploymentId: input.deploymentId, workloadClass: input.workloadClass, acrName: input.acrName, acrServer: input.acrServer });
   if (preflight.deploymentId !== input.deploymentId || preflight.target?.acrName !== input.acrName || preflight.target?.acrServer !== input.acrServer) fail("MANAGED_RELEASE_TARGET_INVALID");
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
   if (baselineRelease.imageTag === `sha-${input.releaseSha}`) fail("MANAGED_RELEASE_ALREADY_CURRENT");
@@ -147,7 +153,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   let releasePlan;
   try {
     releasePlan = await deps.resolveRelease({ deploymentId: input.deploymentId,
-      target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: input.releaseSha });
+      target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: input.releaseSha, workloadClass: input.workloadClass });
   } catch (error) {
     failReleaseResolution(error);
   }
@@ -401,7 +407,12 @@ function runtimeDependencies(env = process.env) {
   const runtime = {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}`,
     templateDigest: managedAzureTemplateDigest,
-    loadInventory: (input) => callControlPlane("get_managed_release_inventory", { inventoryRef: input.inventoryRef, expectedSha256: input.inventorySha256, deploymentId: input.deploymentId }, env),
+    loadInventory: (input) => callControlPlane("get_managed_release_inventory", {
+      inventoryRef: input.inventoryRef,
+      expectedSha256: input.inventorySha256,
+      deploymentId: input.deploymentId,
+      workloadClass: input.workloadClass,
+    }, env),
     lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
     readApp: apps.readApp,
     patchTemplate: apps.patchTemplate,
@@ -415,9 +426,11 @@ function runtimeDependencies(env = process.env) {
         return { ok: managedAzureHealthReady(body, release), code: "HEALTH_RELEASE_MISMATCH" };
       } catch { return { ok: false, code: "HEALTH_PROBE_AMBIGUOUS" }; }
     },
-    resolveRelease: async ({ deploymentId, target, gitSha }) => {
+    resolveRelease: async ({ deploymentId, target, gitSha, workloadClass }) => {
       const manifests = await sourceResolver.resolveManagedAzureSourceManifests({ gitSha });
-      const deployment = { deploymentId, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: "managed-customers", workload: "managed-customers", azure: target };
+      const deployment = workloadClass === "ACTIVE_CLIENT_CANARY"
+        ? { deploymentId, deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: false, provider: "azure", group: "hosted-dedicated", workload: "active-client-canary", workloadClass, azure: target }
+        : { deploymentId, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: "managed-customers", workload: "managed-customers", workloadClass, azure: target };
       const intent = canonicalizeManagedAzureReleaseIntentV1({ deploymentId, deployments: [deployment], gitSha, manifests: manifests.manifests });
       const requests = { web: canonicalizeManagedAzureImportRequestV1({ intent, role: "web" }), worker: canonicalizeManagedAzureImportRequestV1({ intent, role: "worker" }) };
       await provider.observeRegistryPreflight({ webRequest: requests.web, workerRequest: requests.worker });
@@ -466,6 +479,7 @@ function cliInput(argv, env) {
     inventoryRef: values["inventory-ref"],
     inventorySha256: values["inventory-sha256"],
     deploymentId: values["deployment-id"],
+    workloadClass: values["workload-class"],
     releaseSha: values["release-sha"],
     releaseVersion: values["release-version"],
     reason: values.reason,
