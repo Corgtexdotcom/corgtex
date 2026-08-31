@@ -126,6 +126,10 @@ function dependencies(options = {}) {
       worker: { role: "worker", digest: digests.nextWorker, image: `${target.acrServer}/corgtex/worker@${digests.nextWorker}`, destinationState: options.workerDestination ?? "MATCH" },
     } })),
     importRole: vi.fn(async (role) => { events.push(`import:${role.role}`); return options.importResult ?? { terminal: true, succeeded: true, ambiguous: false, code: "IMPORT_VERIFIED" }; }),
+    verifyImport: vi.fn(async (role) => {
+      events.push(`verifyImport:${role.role}`);
+      return options.verifyImportResult ?? { terminal: true, succeeded: true, ambiguous: false, code: "IMPORT_VERIFIED" };
+    }),
     readApp: vi.fn(async ({ role, release }) => {
       events.push(`read:${role}:${release.imageTag === `sha-${baseSha}` ? "base" : "next"}`);
       if (current[role] === "UNKNOWN") throw new Error("private-provider-state");
@@ -184,6 +188,51 @@ describe("managed Azure single-target transaction", () => {
     const recorded = deps.lease.mock.calls.find(([operation]) => operation === "record_rollback")[1].rollback;
     expect(recorded.previous.web).toMatchObject({ image: `${target.acrServer}/corgtex/web@${digests.web}`, templateDigest: expect.stringMatching(/^sha256:/) });
     expect(JSON.stringify(recorded)).not.toContain("private-capability");
+  });
+
+  it("continues when an ambiguous import is proven by exact destination digest readback", async () => {
+    const { deps, events } = dependencies({ webDestination: "ABSENT",
+      importResult: { terminal: false, succeeded: false, ambiguous: true, code: "POLL_EXHAUSTION" } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "SUCCEEDED", phase: "COMPLETE" });
+    expect(events).toContain("import:web");
+    expect(events).toContain("verifyImport:web");
+    expect(events.indexOf("verifyImport:web")).toBeLessThan(events.indexOf("lease:heartbeat"));
+    expect(events.indexOf("patch:web:forward")).toBeGreaterThan(events.indexOf("verifyImport:web"));
+    expect(deps.lease).toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
+  it("keeps ambiguous import readback failures before app mutation in recovery", async () => {
+    const { deps } = dependencies({ webDestination: "ABSENT",
+      importResult: { terminal: false, succeeded: false, ambiguous: true, code: "POLL_EXHAUSTION" },
+      verifyImportResult: { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_ABSENT" } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "IMPORT", role: "web", code: "IMPORT_READBACK_ABSENT" });
+    expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ stage: "IMPORT", code: "IMPORT_READBACK_ABSENT" }));
+    expect(deps.lease).not.toHaveBeenCalledWith("begin", expect.anything());
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it("preserves confirmed provider import success when a retry proves digest mismatch", async () => {
+    const { deps } = dependencies({ webDestination: "ABSENT",
+      importResult: { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_AMBIGUOUS", confirmedProviderSuccess: true },
+      verifyImportResult: { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_ABSENT" } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "REJECTED", phase: "IMPORT", role: "web", code: "IMPORT_DIGEST_MISMATCH" });
+    expect(deps.lease).toHaveBeenCalledWith("abort", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("begin", expect.anything());
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a definitive destination digest conflict before app mutation", async () => {
+    const { deps } = dependencies({ webDestination: "ABSENT",
+      importResult: { terminal: false, succeeded: false, ambiguous: true, code: "POLL_EXHAUSTION" },
+      verifyImportResult: { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_DESTINATION_CONFLICT" } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "REJECTED", phase: "IMPORT", role: "web", code: "IMPORT_DESTINATION_CONFLICT" });
+    expect(deps.lease).toHaveBeenCalledWith("abort", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("begin", expect.anything());
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
   });
 
   it("uses a fresh compensating revision after a classified worker failure", async () => {
