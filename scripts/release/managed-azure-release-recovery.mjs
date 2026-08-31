@@ -78,6 +78,23 @@ function verifyRole(role, state, rollback) {
     || state.templateDigest !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
 }
 
+function verifyRollbackRole(role, state, rollback, baseline, expectedRevisionSuffix) {
+  const expected = rollback.previous[role];
+  if (!expected || typeof expected !== "object"
+    || state.containerName !== expected.containerName
+    || state.image !== expected.image
+    || state.imageDigest !== digestFromImage(expected.image)
+    || state.revisionSuffix !== expectedRevisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+  const reconstructedBaseline = buildManagedAzureReleaseTemplate({
+    baseline: state,
+    role,
+    image: expected.image,
+    release: baseline,
+    revisionSuffix: baselineRevisionSuffix(role, state, rollback),
+  });
+  if (managedAzureTemplateDigest(reconstructedBaseline) !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+}
+
 function baselineRevisionSuffix(role, state, rollback) {
   const expected = rollback.previous[role];
   if (!expected || typeof expected.readyRevision !== "string" || typeof state.appName !== "string") fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
@@ -110,11 +127,18 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
   });
 }
 
-async function classifyBaselineRole(deps, status, rollback, role, baseline) {
+async function classifyBaselineRole(deps, status, rollback, role, baseline, expectedRollbackRevisionSuffix) {
   try {
     const state = await deps.readApp({ target: status.target, role, release: baseline, imageDigest: digestFromImage(rollback.previous[role].image), ambiguous: true });
-    verifyRole(role, state, rollback);
-    return { kind: "BASELINE", state };
+    try {
+      verifyRole(role, state, rollback);
+      return { kind: "BASELINE", state };
+    } catch {
+      if (expectedRollbackRevisionSuffix) {
+        verifyRollbackRole(role, state, rollback, baseline, expectedRollbackRevisionSuffix);
+        return { kind: "BASELINE", state };
+      }
+    }
   } catch { /* Unknown live state remains blocked unless it matches the recorded forward revision. */ }
   return { kind: "UNKNOWN", state: null };
 }
@@ -159,8 +183,17 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     const rollback = await deps.lease("get_rollback", leaseArgs(handle));
     const baseline = releaseIdentity(status.release?.baselineImageTag, rollback?.previous?.releaseVersion);
     if (!same(rollback.target, status.target)) fail("MANAGED_RELEASE_RECOVERY_TARGET_DRIFT");
-    let web = await classifyBaselineRole(deps, status, rollback, "web", baseline);
-    let worker = await classifyBaselineRole(deps, status, rollback, "worker", baseline);
+    const originatingLease = originatingReleaseLease(status);
+    const forwardSuffixes = {
+      web: managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "forward" }),
+      worker: managedAzureRevisionSuffix({ ...originatingLease, role: "worker", phase: "forward" }),
+    };
+    const rollbackSuffixes = {
+      web: managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "rollback" }),
+      worker: managedAzureRevisionSuffix({ ...originatingLease, role: "worker", phase: "rollback" }),
+    };
+    let web = await classifyBaselineRole(deps, status, rollback, "web", baseline, rollbackSuffixes.web);
+    let worker = await classifyBaselineRole(deps, status, rollback, "worker", baseline, rollbackSuffixes.worker);
     if (web.kind === "BASELINE" && worker.kind === "BASELINE") {
       const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
       if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
@@ -175,11 +208,6 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       });
     }
     const incoming = incomingReleaseIdentity(status);
-    const originatingLease = originatingReleaseLease(status);
-    const forwardSuffixes = {
-      web: managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "forward" }),
-      worker: managedAzureRevisionSuffix({ ...originatingLease, role: "worker", phase: "forward" }),
-    };
     if (web.kind !== "BASELINE") web = await classifyForwardRole(deps, status, rollback, "web", baseline, incoming, forwardSuffixes.web);
     if (worker.kind !== "BASELINE") worker = await classifyForwardRole(deps, status, rollback, "worker", baseline, incoming, forwardSuffixes.worker);
     if (web.kind === "FORWARD" && worker.kind === "BASELINE") {

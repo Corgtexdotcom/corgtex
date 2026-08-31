@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { managedAzureRevisionSuffix, managedAzureTemplateDigest } from "./managed-azure-container-app-transport.mjs";
+import { buildManagedAzureReleaseTemplate, managedAzureRevisionSuffix, managedAzureTemplateDigest } from "./managed-azure-container-app-transport.mjs";
 import {
   managedAzureRecoveryCliResultAccepted,
   runManagedAzureReleaseRecovery,
@@ -206,6 +206,43 @@ describe("managed Azure release recovery", () => {
     expect(deps.waitForState).toHaveBeenCalledWith(expect.objectContaining({ role: "worker", release: incoming, imageDigest: rollback.incoming.workerDigest }));
     expect(deps.healthProbe).toHaveBeenCalledWith({ origin: "https://selfserve.example", release: incoming });
     expect(managedAzureRecoveryCliResultAccepted(result)).toBe(true);
+  });
+
+  it("completes forward recovery when the missing role is already transaction-rolled back", async () => {
+    const baseline = { gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" };
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const workerRollbackSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "worker", phase: "rollback" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const workerRollbackTemplate = buildManagedAzureReleaseTemplate({
+      baseline: state("worker"),
+      role: "worker",
+      image: rollback.previous.worker.image,
+      release: baseline,
+      revisionSuffix: workerRollbackSuffix,
+    });
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", {
+        revisionName: `${target.webAppName}--${webSuffix}`,
+        revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image,
+        imageDigest: rollback.incoming.webDigest,
+        template: webTemplate,
+        templateDigest: managedAzureTemplateDigest(webTemplate),
+      });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker", {
+        revisionName: `${target.workerAppName}--${workerRollbackSuffix}`,
+        revisionSuffix: workerRollbackSuffix,
+        template: workerRollbackTemplate,
+        templateDigest: managedAzureTemplateDigest(workerRollbackTemplate),
+      });
+      throw new Error("state mismatch");
+    });
+    const { deps } = rig({ readApp });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "FORWARD_COMPLETED" });
+    expect(deps.patchTemplate).toHaveBeenCalledWith(expect.objectContaining({ role: "worker" }));
+    expect(deps.lease).toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
   it("blocks a forward image that is not the transaction-owned revision", async () => {

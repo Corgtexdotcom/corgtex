@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { Prisma, type CustomerDeployment } from "@prisma/client";
+import { Prisma, type CustomerDeployment, type CustomerDeploymentEvent } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError } from "./errors";
 import { canonicalizeManagedAzureRollbackPayloadV1, type ManagedAzureRollbackPayloadV1 } from "./managed-azure-rollback-payload";
@@ -14,6 +14,7 @@ const TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PHASES = ["RESERVED", "MUTATING", "RECOVERY_REQUIRED"] as const;
 const RECOVERY_STAGES = ["INVENTORY", "PREFLIGHT", "IMPORT", "WEB", "WORKER", "READBACK", "OBSERVATION", "ROLLBACK", "FENCING"] as const;
 const ROLLBACK_ENVELOPE_KEYS = new Set(["version", "deploymentId", "leaseId", "fence", "expectedImageTag", "incomingImageTag", "incomingVersion", "payload"]);
+const ORIGINATING_LEASE_EVENT_ACTION = "control_plane.release_lease.rollback_recorded";
 type LockedDeployment = CustomerDeployment & { databaseNow: Date; rollbackRecordPresent: boolean };
 type LeaseHandle = { deploymentId: string; leaseId: string; capability: string; fence: number };
 type AcrIdentity = { acrName: string; acrServer: string };
@@ -164,6 +165,27 @@ function storedRollbackEnvelope(row: CustomerDeployment) {
 }
 function storedRollbackPayload(row: CustomerDeployment) {
   return storedRollbackEnvelope(row).payload;
+}
+function originatingLeaseFromEvent(row: CustomerDeployment, event: CustomerDeploymentEvent) {
+  if (!event.meta || typeof event.meta !== "object" || Array.isArray(event.meta)) return null;
+  const meta = event.meta as Record<string, unknown>;
+  if (meta.expectedImageTag !== row.releaseLeaseExpectedImageTag
+    || meta.incomingImageTag !== row.releaseLeaseIncomingImageTag
+    || meta.incomingVersion !== row.releaseLeaseIncomingVersion
+    || typeof meta.leaseId !== "string" || !UUID.test(meta.leaseId)
+    || !Number.isSafeInteger(meta.fence) || (meta.fence as number) < 1 || (meta.fence as number) > row.releaseLeaseFence) return null;
+  return { leaseId: meta.leaseId, fence: meta.fence as number };
+}
+async function originatingRollbackEnvelope(tx: Prisma.TransactionClient, row: CustomerDeployment) {
+  const envelope = storedRollbackEnvelope(row);
+  if (row.releaseLeasePhase !== "RECOVERY_REQUIRED") return envelope;
+  const events = await tx.customerDeploymentEvent.findMany({
+    where: { deploymentId: row.id, action: ORIGINATING_LEASE_EVENT_ACTION },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
+  const origin = events.map((eventRecord) => originatingLeaseFromEvent(row, eventRecord)).find(Boolean);
+  return origin ? { ...envelope, leaseId: origin.leaseId, fence: origin.fence } satisfies RollbackEnvelope : envelope;
 }
 function rollbackEnvelope(
   row: CustomerDeployment,
@@ -357,7 +379,7 @@ export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrI
       reject("MANAGED_RELEASE_RECOVERY_REQUIRED");
     }
     const target = targetView(row, input.acrIdentity);
-    const rollbackRecord = storedRollbackEnvelope(row);
+    const rollbackRecord = await originatingRollbackEnvelope(tx, row);
     const recovery = row.releaseLeaseRecoveryEvidence && typeof row.releaseLeaseRecoveryEvidence === "object" && !Array.isArray(row.releaseLeaseRecoveryEvidence)
       ? validateRecoveryEvidence(row.releaseLeaseRecoveryEvidence as RecoveryEvidence)
       : null;
@@ -490,7 +512,7 @@ export async function claimManagedReleaseRecovery(params: {
     if (row.releaseLeaseId !== params.expectedLeaseId || row.releaseLeaseFence !== params.expectedFence) reject("MANAGED_RELEASE_LEASE_CONFLICT");
     if ((row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED")
       || !row.releaseLeaseExpiresAt || row.releaseLeaseExpiresAt > row.databaseNow || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_RECOVERY_REQUIRED");
-    const storedEnvelope = storedRollbackEnvelope(row);
+    const storedEnvelope = await originatingRollbackEnvelope(tx, row);
     const rollbackPayload = storedEnvelope.payload;
     const capability = randomOpaqueToken(32);
     const leaseId = randomUUID();
