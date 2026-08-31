@@ -8,6 +8,7 @@ const MANAGEMENT_ORIGIN = "https://management.azure.com";
 const MAX_JSON_BYTES = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 20_000;
 const OPERATION_TIMEOUT_MS = 180_000;
+const PATCH_CONTENT_TYPE = "application/json";
 const RELEASE_ENV = Object.freeze([
   "CORGTEX_RELEASE_GIT_SHA",
   "CORGTEX_RELEASE_IMAGE_TAG",
@@ -300,7 +301,7 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     if (typeof input.location !== "string" || !/^[A-Za-z0-9 ._-]{1,128}$/.test(input.location)) fail("AZURE_TARGET_INVALID");
     let response;
     try {
-      response = await request(url, { method: "PATCH", headers: { "content-type": "application/merge-patch+json" }, body: JSON.stringify({ location: input.location, properties: { template } }) }, true);
+      response = await request(url, { method: "PATCH", headers: { "content-type": PATCH_CONTENT_TYPE }, body: JSON.stringify({ location: input.location, properties: { template } }) }, true);
     } catch {
       return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_PATCH_AMBIGUOUS" });
     }
