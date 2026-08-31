@@ -436,6 +436,68 @@ describe("fleet release runner", () => {
     });
   });
 
+  it("scopes canary preflight deployment id propagation to explicit Ops releases", async () => {
+    const manifest = {
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    };
+    const env = {
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
+    };
+
+    expect(releaseVariables(manifest, env)).not.toHaveProperty("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+    expect(azureReleaseVariables(manifest, env)).not.toHaveProperty("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+    expect(releaseVariables(manifest, env, {
+      includeCanaryPreflightDeploymentId: true,
+    })).toMatchObject({
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
+    });
+  });
+
+  it("clears blank canary preflight deployment ids during explicit Ops releases", async () => {
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "",
+    }, {
+      includeCanaryPreflightDeploymentId: true,
+    })).toMatchObject({
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "",
+    });
+  });
+
+  it("rejects malformed canary preflight deployment ids before promotion", async () => {
+    const env = {
+      FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "not-a-uuid",
+    };
+
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--dry-run",
+    ], {
+      env,
+      runCommand: vi.fn(),
+    })).rejects.toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+
+    expect(() => releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "not-a-uuid",
+    }, {
+      includeCanaryPreflightDeploymentId: true,
+    })).toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+  });
+
   it("uses migrate-and-web startup for Azure releases", async () => {
     expect(azureReleaseVariables({
       releaseVersion: "main-c9077ff031e",

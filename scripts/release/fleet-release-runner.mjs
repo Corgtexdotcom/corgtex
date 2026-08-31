@@ -225,6 +225,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   validateOptionalBoolean("POSTHOG_ENABLED", env, invalid);
   validateOptionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env, invalid);
   validateOptionalBoolean("POSTHOG_CAPTURE_DEBUG", env, invalid);
+  validateOptionalCanaryPreflightDeploymentId(selectedGroups, env, invalid);
 
   if (selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
     missing.push("FLEET_RELEASE_TARGETS_JSON or CONTROL_PLANE_AGENT_API_KEY");
@@ -303,6 +304,28 @@ function validateOptionalBoolean(name, env, invalid) {
       reason: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+function validateOptionalCanaryPreflightDeploymentId(selectedGroups, env, invalid) {
+  if (!selectedGroups.includes("ops") || !Object.hasOwn(env, CANARY_PREFLIGHT_DEPLOYMENT_ID)) {
+    return;
+  }
+  const value = optionalText(env[CANARY_PREFLIGHT_DEPLOYMENT_ID]);
+  if (!value) return;
+  validateCanaryPreflightDeploymentId(value, invalid);
+}
+
+function validateCanaryPreflightDeploymentId(value, invalid = null) {
+  if (UUID.test(value)) return true;
+  const reason = "must be a lowercase UUID matching the managed-release canary preflight deployment id grammar";
+  if (invalid) {
+    invalid.push({
+      name: CANARY_PREFLIGHT_DEPLOYMENT_ID,
+      reason,
+    });
+    return false;
+  }
+  throw new Error(`${CANARY_PREFLIGHT_DEPLOYMENT_ID}: ${reason}`);
 }
 
 function optionalBoolean(name, env) {
@@ -676,6 +699,7 @@ async function deployRailwayTarget(target, manifest, deps) {
       serviceId: service.serviceId,
       variables: releaseVariables(manifest, deps.env ?? process.env, {
         includePostHogInstanceId: target.group !== "managed-customers",
+        includeCanaryPreflightDeploymentId: target.group === "ops",
       }),
     }, deps);
   }
@@ -705,6 +729,8 @@ const AZURE_OBSERVABILITY_SECRET_NAMES = {
   APPLICATIONINSIGHTS_CONNECTION_STRING: "ai-conn-secret",
   POSTHOG_PROJECT_TOKEN: "posthog-token",
 };
+const CANARY_PREFLIGHT_DEPLOYMENT_ID = "MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function optionalRuntimeObservabilityVariables(env, options = {}) {
   const variables = {};
@@ -770,9 +796,10 @@ export function releaseVariables(manifest, env = process.env, options = {}) {
     SEED_SCRIPTS: "",
     ...optionalRuntimeObservabilityVariables(env, options),
   };
-  const canaryPreflightDeploymentId = optionalText(env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID);
-  if (canaryPreflightDeploymentId) {
-    variables.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID = canaryPreflightDeploymentId;
+  if (options.includeCanaryPreflightDeploymentId === true && Object.hasOwn(env, CANARY_PREFLIGHT_DEPLOYMENT_ID)) {
+    const canaryPreflightDeploymentId = optionalText(env[CANARY_PREFLIGHT_DEPLOYMENT_ID]);
+    if (canaryPreflightDeploymentId) validateCanaryPreflightDeploymentId(canaryPreflightDeploymentId);
+    variables[CANARY_PREFLIGHT_DEPLOYMENT_ID] = canaryPreflightDeploymentId ?? "";
   }
   return variables;
 }
