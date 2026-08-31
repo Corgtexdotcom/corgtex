@@ -384,6 +384,21 @@ describe("managed Azure Container Apps transport", () => {
     expect(sleep).toHaveBeenNthCalledWith(1, 0); expect(sleep).toHaveBeenNthCalledWith(2, 2_000); expect(onProgress).toHaveBeenCalledTimes(2);
   });
 
+  it("accepts documented Container Apps Azure-AsyncOperation result locations", async () => {
+    const candidate = rawApp().properties.template;
+    const operation = `https://management.azure.com/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus3/containerappOperationResults/op-1?api-version=2026-01-01`;
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(transportResponse(202, null, { "azure-asyncoperation": operation, "retry-after": "0" }))
+      .mockResolvedValueOnce(transportResponse(200, { status: "Succeeded" }));
+    const transport = createManagedAzureContainerAppTransport({
+      fetchImpl,
+      getAccessToken: vi.fn().mockResolvedValue("token-value-with-enough-length"),
+      sleep: vi.fn(async () => undefined),
+    });
+    await expect(transport.patchTemplate({ target, role: "worker", location: "West US 3", template: candidate })).resolves.toEqual({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" });
+    expect(fetchImpl.mock.calls[1]).toMatchObject([operation, expect.objectContaining({ method: "GET" })]);
+  });
+
   it("rejects unsafe asynchronous operation locations before polling", async () => {
     const candidate = rawApp().properties.template;
     const operationPath = `/subscriptions/${target.subscriptionId}/providers/Microsoft.App/locations/westus/operationStatuses/op-1`;
