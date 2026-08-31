@@ -1214,6 +1214,7 @@ describe("fleet release runner", () => {
         APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
         POSTHOG_ENABLED: "true",
         POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
       },
       runCommand: vi.fn(),
       fetchImpl,
@@ -1253,6 +1254,7 @@ describe("fleet release runner", () => {
         CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
         CORGTEX_RELEASE_GIT_SHA: SHA,
         CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
+        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
       });
     }
     const deployAndWaitCalls = railwayCalls

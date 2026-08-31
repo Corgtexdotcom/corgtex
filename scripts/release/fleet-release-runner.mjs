@@ -760,7 +760,7 @@ function clearPostHogInstanceId(variables, env, options) {
 }
 
 export function releaseVariables(manifest, env = process.env, options = {}) {
-  return {
+  const variables = {
     CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
     CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
     CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
@@ -770,6 +770,11 @@ export function releaseVariables(manifest, env = process.env, options = {}) {
     SEED_SCRIPTS: "",
     ...optionalRuntimeObservabilityVariables(env, options),
   };
+  const canaryPreflightDeploymentId = optionalText(env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID);
+  if (canaryPreflightDeploymentId) {
+    variables.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID = canaryPreflightDeploymentId;
+  }
+  return variables;
 }
 
 export function azureReleaseVariables(manifest, env = process.env) {
