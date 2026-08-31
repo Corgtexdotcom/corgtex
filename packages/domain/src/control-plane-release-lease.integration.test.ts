@@ -399,6 +399,7 @@ describe("managed release lease CAS", () => {
       fence: stale.fence,
       phase: "RECOVERY_REQUIRED",
       rollbackRecorded: true,
+      originatingLease: { leaseId: stale.leaseId, fence: stale.fence },
       recovery: { stage: "WORKER", code: "ARM_OPERATION_AMBIGUOUS" },
       release: { baselineImageTag: BASE, baselineVersion: "release-1" },
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
@@ -408,6 +409,15 @@ describe("managed release lease CAS", () => {
     await expire(target.id);
     const claimed = await claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: stale.leaseId, expectedFence: stale.fence, owner: "recovery:test" });
     expect(claimed.fence).toBe(stale.fence + 1); expect(claimed.leaseId).not.toBe(stale.leaseId);
+    const claimedRow = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
+    expect(claimedRow.releaseLeaseId).toBe(claimed.leaseId);
+    expect(claimedRow.releaseLeaseFence).toBe(claimed.fence);
+    expect(claimedRow.releaseLeaseRollbackRecord).toMatchObject({ leaseId: stale.leaseId, fence: stale.fence });
+    await expect(getManagedReleaseRecoveryStatus(target.id, ACR_IDENTITY)).resolves.toMatchObject({
+      leaseId: claimed.leaseId,
+      fence: claimed.fence,
+      originatingLease: { leaseId: stale.leaseId, fence: stale.fence },
+    });
     await expectCode(getManagedReleaseRollbackRecord(stale), "MANAGED_RELEASE_LEASE_CONFLICT");
     const currentHandle = { deploymentId: target.id, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
     await expect(getManagedReleaseRollbackRecord(currentHandle)).resolves.toEqual(rollback);

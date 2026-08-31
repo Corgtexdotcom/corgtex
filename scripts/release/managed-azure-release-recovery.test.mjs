@@ -94,6 +94,7 @@ function rig(overrides = {}) {
       release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },
       origin: "https://selfserve.example",
       target,
+      originatingLease: { leaseId: previousLeaseId, fence: 7 },
       recovery: { stage: "IMPORT", code: "PROTOCOL_LOCATION_VIOLATION" },
     },
     rollbackPayload = rollback,
@@ -151,6 +152,7 @@ describe("managed Azure release recovery", () => {
         release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "ROLLBACK", imageTag: `sha-${baseSha}`, version: "release-1" } },
         origin: "https://selfserve.example",
         target,
+        originatingLease: { leaseId: previousLeaseId, fence: 7 },
         recovery: { stage: "ROLLBACK", code: "ROLLBACK_READBACK_AMBIGUOUS" },
       },
     });
@@ -228,7 +230,40 @@ describe("managed Azure release recovery", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
-  it("keeps using the observed transaction suffix after a later recovery claim expires", async () => {
+  it("blocks forward recovery when recovery status omits the originating transaction lease", async () => {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const recoveryStatus = {
+      deploymentId,
+      leaseId: previousLeaseId,
+      fence: 7,
+      phase: "RECOVERY_REQUIRED",
+      release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },
+      origin: "https://selfserve.example",
+      target,
+      recovery: { stage: "IMPORT", code: "PROTOCOL_LOCATION_VIOLATION" },
+    };
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", {
+        revisionName: `${target.webAppName}--${webSuffix}`,
+        revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image,
+        imageDigest: rollback.incoming.webDigest,
+        template: webTemplate,
+        templateDigest: managedAzureTemplateDigest(webTemplate),
+      });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps } = rig({ recoveryStatus, readApp });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "MANAGED_RELEASE_RECOVERY_STATUS_INVALID" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
+  it("keeps using the originating transaction suffix after a later recovery claim expires", async () => {
     const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
     const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
     const laterStatusSuffix = managedAzureRevisionSuffix({ leaseId: laterRecoveryLeaseId, fence: 11, role: "web", phase: "forward" });
@@ -254,6 +289,7 @@ describe("managed Azure release recovery", () => {
         release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },
         origin: "https://selfserve.example",
         target,
+        originatingLease: { leaseId: previousLeaseId, fence: 7 },
         recovery: { stage: "OBSERVATION", code: "HEALTH_RELEASE_MISMATCH" },
       },
       readApp,
