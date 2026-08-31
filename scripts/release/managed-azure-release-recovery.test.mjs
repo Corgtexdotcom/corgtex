@@ -11,6 +11,7 @@ const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const previousLeaseId = "123e4567-e89b-42d3-a456-426614174002";
 const claimedLeaseId = "123e4567-e89b-42d3-a456-426614174003";
 const baseSha = "a".repeat(40);
+const nextSha = "b".repeat(40);
 const target = Object.freeze({
   subscriptionId: "123e4567-e89b-42d3-a456-426614174000",
   resourceGroup: "rg.Safe_1",
@@ -24,16 +25,16 @@ const digests = {
   worker: `sha256:${"2".repeat(64)}`,
 };
 
-function template(role, digest, suffix) {
+function template(role, digest, suffix, release = { gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" }) {
   return {
     revisionSuffix: suffix,
     containers: [{
       name: `${role}--old`,
       image: `${target.acrServer}/corgtex/${role}@${digest}`,
       env: [
-        { name: "CORGTEX_RELEASE_GIT_SHA", value: baseSha },
-        { name: "CORGTEX_RELEASE_IMAGE_TAG", value: `sha-${baseSha}` },
-        { name: "CORGTEX_RELEASE_VERSION", value: "release-1" },
+        { name: "CORGTEX_RELEASE_GIT_SHA", value: release.gitSha },
+        { name: "CORGTEX_RELEASE_IMAGE_TAG", value: release.imageTag },
+        { name: "CORGTEX_RELEASE_VERSION", value: release.version },
       ],
     }],
   };
@@ -92,16 +93,23 @@ function rig(overrides = {}) {
         leaseId: previousLeaseId,
         fence: 7,
         phase: "RECOVERY_REQUIRED",
-        release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" },
+        release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: `sha-${nextSha}`, version: "release-2" } },
+        origin: "https://selfserve.example",
         target,
         recovery: { stage: "IMPORT", code: "PROTOCOL_LOCATION_VIOLATION" },
       };
       if (operation === "claim_recovery") return { deploymentId, leaseId: claimedLeaseId, fence: 8, capability: "private-capability" };
       if (operation === "get_rollback") return rollback;
       if (operation === "finalize_rollback") return { deploymentId, fence: 8, status: "ROLLED_BACK", releaseImageTag: `sha-${baseSha}`, releaseVersion: "release-1" };
+      if (operation === "heartbeat") return { deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
+      if (operation === "mark_recovery") return { deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
+      if (operation === "finalize_success") return { deploymentId, fence: 8, status: "SUCCEEDED", releaseImageTag: `sha-${nextSha}`, releaseVersion: "release-2" };
       throw new Error("unexpected lease operation");
     }),
     readApp: vi.fn(async ({ role }) => state(role)),
+    patchTemplate: vi.fn(async () => ({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" })),
+    waitForState: vi.fn(async () => undefined),
+    healthProbe: vi.fn(async () => ({ ok: true })),
     ...overrides,
   };
   return { deps, calls };
@@ -130,17 +138,55 @@ describe("managed Azure release recovery", () => {
   it("stops before finalize when fresh Azure state does not match rollback baseline", async () => {
     const { deps } = rig({ readApp: vi.fn(async ({ role }) => state(role, role === "web" ? { revisionName: `${target.webAppName}--drift` } : {})) });
     const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Clear failed import recovery.", acrName: "acr12" }, deps);
-    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "MANAGED_RELEASE_RECOVERY_WEB_DRIFT" });
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
     expect(writeManagedAzureRecoveryCliResult(result, { stdout: { write: vi.fn() }, stderr: { write: vi.fn() } })).toBe(1);
   });
 
-  it("keeps recovery script source free of secret output and Container App patching", () => {
+  it("completes a recorded forward release when web is forward and worker is still baseline", async () => {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webTemplate = template("web", rollback.incoming.webDigest, "web-forward", incoming);
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", {
+        revisionName: `${target.webAppName}--web-forward`,
+        revisionSuffix: "web-forward",
+        image: webTemplate.containers[0].image,
+        imageDigest: rollback.incoming.webDigest,
+        template: webTemplate,
+        templateDigest: managedAzureTemplateDigest(webTemplate),
+      });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps, calls } = rig({ readApp });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toEqual({
+      status: "RECOVERY_CLEARED",
+      deploymentId,
+      previousLeaseId,
+      previousFence: 7,
+      fence: 8,
+      releaseImageTag: `sha-${nextSha}`,
+      releaseVersion: "release-2",
+      resolution: "FORWARD_COMPLETED",
+    });
+    expect(calls.map(([operation]) => operation)).toEqual(["get_recovery", "claim_recovery", "get_rollback", "heartbeat", "finalize_success"]);
+    expect(deps.patchTemplate).toHaveBeenCalledTimes(1);
+    expect(deps.patchTemplate.mock.calls[0][0]).toMatchObject({ role: "worker", target, location: "West US" });
+    expect(deps.patchTemplate.mock.calls[0][0].template.containers[0].image).toBe(`${target.acrServer}/corgtex/worker@${rollback.incoming.workerDigest}`);
+    expect(deps.waitForState).toHaveBeenCalledWith(expect.objectContaining({ role: "worker", release: incoming, imageDigest: rollback.incoming.workerDigest }));
+    expect(deps.healthProbe).toHaveBeenCalledWith({ origin: "https://selfserve.example", release: incoming });
+    expect(managedAzureRecoveryCliResultAccepted(result)).toBe(true);
+  });
+
+  it("keeps recovery script source free of secret output and image import", () => {
     const source = readFileSync(new URL("./managed-azure-release-recovery.mjs", import.meta.url), "utf8");
-    expect(source).not.toMatch(/patchTemplate|PATCH|beginManagedReleaseMutation|finalize_success|console\./);
+    expect(source).not.toMatch(/startManagedAzureImport|GHCR_IMPORT_TOKEN|beginManagedReleaseMutation|console\./);
     expect(source).not.toContain("releaseLeaseTokenHash");
     expect(source).toContain("claim_recovery");
     expect(source).toContain("finalize_rollback");
+    expect(source).toContain("finalize_success");
+    expect(source).toContain("patchTemplate");
   });
 
   it("keeps the workflow manual, protected, and on the existing release concurrency key", () => {
