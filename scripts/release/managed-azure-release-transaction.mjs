@@ -71,6 +71,20 @@ function releaseIdentity(imageTag, version) {
   return Object.freeze({ gitSha: imageTag.slice(4), imageTag, version });
 }
 
+async function verifyImportedRole(deps, rolePlan) {
+  try {
+    return await deps.verifyImport(rolePlan);
+  } catch {
+    return { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_AMBIGUOUS" };
+  }
+}
+
+function confirmedImportReadbackResult(verified) {
+  if (verified.succeeded) return verified;
+  if (verified.code === "IMPORT_READBACK_ABSENT") return { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_DIGEST_MISMATCH" };
+  return verified;
+}
+
 function leaseArgs(handle, extra = {}) {
   return { deploymentId: handle.deploymentId, leaseId: handle.leaseId, capability: handle.capability, fence: handle.fence, ...extra };
 }
@@ -234,7 +248,11 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await deps.lease("record_rollback", leaseArgs(handle, { rollback, reason: input.reason }));
     for (const role of ROLES) {
       if (releasePlan.roles[role].destinationState !== "ABSENT") continue;
-      const imported = await deps.importRole(releasePlan.roles[role]);
+      let imported = await deps.importRole(releasePlan.roles[role]);
+      if ((!imported.terminal || !imported.succeeded) && imported.ambiguous) {
+        const verified = await verifyImportedRole(deps, releasePlan.roles[role]);
+        imported = imported.confirmedProviderSuccess ? confirmedImportReadbackResult(verified) : verified;
+      }
       if (!imported.terminal || !imported.succeeded) {
         const importDetail = {
           role,
@@ -380,7 +398,7 @@ function runtimeDependencies(env = process.env) {
     }),
   });
   const apps = createManagedAzureContainerAppTransport();
-  return {
+  const runtime = {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}`,
     templateDigest: managedAzureTemplateDigest,
     loadInventory: (input) => callControlPlane("get_managed_release_inventory", { inventoryRef: input.inventoryRef, expectedSha256: input.inventorySha256, deploymentId: input.deploymentId }, env),
@@ -414,6 +432,13 @@ function runtimeDependencies(env = process.env) {
       }
       return { intent, roles };
     },
+    verifyImport: async (rolePlan) => {
+      const observed = await provider.observeDestination(rolePlan.request);
+      const compared = compareManagedAzureDestinationDigestV1({ expectedRequest: rolePlan.request, observedRequest: observed.request, destinationDigest: observed.digest });
+      if (compared.state === "MATCH") return { terminal: true, succeeded: true, ambiguous: false, code: "IMPORT_VERIFIED" };
+      if (compared.state === "CONFLICT") return { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_DESTINATION_CONFLICT" };
+      return { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_ABSENT" };
+    },
     importRole: async (rolePlan) => {
       const result = await importer.startManagedAzureImport(rolePlan.request).completion;
       const detail = {
@@ -421,16 +446,13 @@ function runtimeDependencies(env = process.env) {
         ...(result.providerCode ? { providerCode: result.providerCode } : {}),
       };
       if (result.outcome === "CONFIRMED_SUCCESS") {
-        try {
-          const observed = await provider.observeDestination(rolePlan.request);
-          const compared = compareManagedAzureDestinationDigestV1({ expectedRequest: rolePlan.request, observedRequest: observed.request, destinationDigest: observed.digest });
-          if (compared.state === "MATCH") return { terminal: true, succeeded: true, ambiguous: false, code: "IMPORT_VERIFIED" };
-          return { terminal: true, succeeded: false, ambiguous: false, code: "IMPORT_DIGEST_MISMATCH", ...detail };
-        } catch { return { terminal: false, succeeded: false, ambiguous: true, code: "IMPORT_READBACK_AMBIGUOUS", ...detail }; }
+        const verified = await verifyImportedRole(runtime, rolePlan);
+        return { ...confirmedImportReadbackResult(verified), ...(verified.ambiguous ? { confirmedProviderSuccess: true } : {}), ...detail };
       }
       return { terminal: result.outcome !== "UNVERIFIED", succeeded: false, ambiguous: result.outcome === "UNVERIFIED", code: result.reason, ...detail };
     },
   };
+  return runtime;
 }
 
 function cliInput(argv, env) {
