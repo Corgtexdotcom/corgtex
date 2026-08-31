@@ -2,8 +2,13 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import {
   ManagedAzureContainerAppError,
+  assertManagedAzureTemplateDelta,
+  buildManagedAzureReleaseTemplate,
   createManagedAzureContainerAppTransport,
+  managedAzureTemplateDigest,
+  managedAzureRevisionSuffix,
 } from "./managed-azure-container-app-transport.mjs";
+import { managedAzureHealthReady } from "./managed-azure-release-transaction.mjs";
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const SHA_IMAGE_TAG = /^sha-([0-9a-f]{40})$/;
@@ -36,6 +41,19 @@ function releaseIdentity(imageTag, version) {
   return Object.freeze({ gitSha: matched[1], imageTag, version });
 }
 
+function incomingReleaseIdentity(status) {
+  if (status.release?.target?.kind !== "FORWARD") fail("MANAGED_RELEASE_RECOVERY_TARGET_INVALID");
+  return releaseIdentity(status.release.target.imageTag, status.release.target.version);
+}
+
+function originatingReleaseLease(status) {
+  if (!UUID.test(status.originatingLease?.leaseId)
+    || !Number.isSafeInteger(status.originatingLease?.fence)
+    || status.originatingLease.fence < 1
+    || status.originatingLease.fence > status.fence) fail("MANAGED_RELEASE_RECOVERY_STATUS_INVALID");
+  return Object.freeze({ leaseId: status.originatingLease.leaseId, fence: status.originatingLease.fence });
+}
+
 function digestFromImage(image) {
   const matched = typeof image === "string" ? DIGEST_REF.exec(image) : null;
   if (!matched) fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
@@ -58,6 +76,81 @@ function verifyRole(role, state, rollback) {
     || state.image !== expected.image
     || state.revisionName !== expected.readyRevision
     || state.templateDigest !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+}
+
+function verifyRollbackRole(role, state, rollback, baseline, expectedRevisionSuffix) {
+  const expected = rollback.previous[role];
+  if (!expected || typeof expected !== "object"
+    || state.containerName !== expected.containerName
+    || state.image !== expected.image
+    || state.imageDigest !== digestFromImage(expected.image)
+    || state.revisionSuffix !== expectedRevisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+  const reconstructedBaseline = buildManagedAzureReleaseTemplate({
+    baseline: state,
+    role,
+    image: expected.image,
+    release: baseline,
+    revisionSuffix: baselineRevisionSuffix(role, state, rollback),
+  });
+  if (managedAzureTemplateDigest(reconstructedBaseline) !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+}
+
+function baselineRevisionSuffix(role, state, rollback) {
+  const expected = rollback.previous[role];
+  if (!expected || typeof expected.readyRevision !== "string" || typeof state.appName !== "string") fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
+  const prefix = `${state.appName}--`;
+  if (!expected.readyRevision.startsWith(prefix)) fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
+  return expected.readyRevision.slice(prefix.length);
+}
+
+function verifyForwardRole(role, state, status, rollback, baseline, incoming, expectedRevisionSuffix) {
+  const key = role === "web" ? "webDigest" : "workerDigest";
+  const digest = rollback.incoming?.[key];
+  const revisionSuffix = expectedRevisionSuffix;
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)
+    || state.imageDigest !== digest
+    || state.image !== `${status.target.acrServer}/corgtex/${role}@${digest}`
+    || state.revisionSuffix !== revisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+  const reconstructedBaseline = buildManagedAzureReleaseTemplate({
+    baseline: state,
+    role,
+    image: rollback.previous[role].image,
+    release: baseline,
+    revisionSuffix: baselineRevisionSuffix(role, state, rollback),
+  });
+  if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+  assertManagedAzureTemplateDelta({ ...state, template: reconstructedBaseline }, state.template, {
+    role,
+    image: `${status.target.acrServer}/corgtex/${role}@${digest}`,
+    release: incoming,
+    revisionSuffix,
+  });
+}
+
+async function classifyBaselineRole(deps, status, rollback, role, baseline, expectedRollbackRevisionSuffix) {
+  try {
+    const state = await deps.readApp({ target: status.target, role, release: baseline, imageDigest: digestFromImage(rollback.previous[role].image), ambiguous: true });
+    try {
+      verifyRole(role, state, rollback);
+      return { kind: "BASELINE", state };
+    } catch {
+      if (expectedRollbackRevisionSuffix) {
+        verifyRollbackRole(role, state, rollback, baseline, expectedRollbackRevisionSuffix);
+        return { kind: "BASELINE", state };
+      }
+    }
+  } catch { /* Unknown live state remains blocked unless it matches the recorded forward revision. */ }
+  return { kind: "UNKNOWN", state: null };
+}
+
+async function classifyForwardRole(deps, status, rollback, role, baseline, incoming, expectedRevisionSuffix) {
+  try {
+    const key = role === "web" ? "webDigest" : "workerDigest";
+    const state = await deps.readApp({ target: status.target, role, release: incoming, imageDigest: rollback.incoming[key], ambiguous: true });
+    verifyForwardRole(role, state, status, rollback, baseline, incoming, expectedRevisionSuffix);
+    return { kind: "FORWARD", state };
+  } catch { /* Unknown live state remains blocked for manual investigation. */ }
+  return { kind: "UNKNOWN", state: null };
 }
 
 export function managedAzureRecoveryCliResultAccepted(result) {
@@ -90,21 +183,103 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     const rollback = await deps.lease("get_rollback", leaseArgs(handle));
     const baseline = releaseIdentity(status.release?.baselineImageTag, rollback?.previous?.releaseVersion);
     if (!same(rollback.target, status.target)) fail("MANAGED_RELEASE_RECOVERY_TARGET_DRIFT");
-    const web = await deps.readApp({ target: status.target, role: "web", release: baseline, imageDigest: digestFromImage(rollback.previous.web.image), ambiguous: true });
-    verifyRole("web", web, rollback);
-    const worker = await deps.readApp({ target: status.target, role: "worker", release: baseline, imageDigest: digestFromImage(rollback.previous.worker.image), ambiguous: true });
-    verifyRole("worker", worker, rollback);
-    const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
-    if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
-    return Object.freeze({
-      status: "RECOVERY_CLEARED",
-      deploymentId: input.deploymentId,
-      previousLeaseId: status.leaseId,
-      previousFence: status.fence,
-      fence: finalized.fence,
-      releaseImageTag: finalized.releaseImageTag,
-      releaseVersion: finalized.releaseVersion,
-    });
+    const originatingLease = originatingReleaseLease(status);
+    const forwardSuffixes = {
+      web: managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "forward" }),
+      worker: managedAzureRevisionSuffix({ ...originatingLease, role: "worker", phase: "forward" }),
+    };
+    const rollbackSuffixes = {
+      web: managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "rollback" }),
+      worker: managedAzureRevisionSuffix({ ...originatingLease, role: "worker", phase: "rollback" }),
+    };
+    let web = await classifyBaselineRole(deps, status, rollback, "web", baseline, rollbackSuffixes.web);
+    let worker = await classifyBaselineRole(deps, status, rollback, "worker", baseline, rollbackSuffixes.worker);
+    if (web.kind === "BASELINE" && worker.kind === "BASELINE") {
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
+      return Object.freeze({
+        status: "RECOVERY_CLEARED",
+        deploymentId: input.deploymentId,
+        previousLeaseId: status.leaseId,
+        previousFence: status.fence,
+        fence: finalized.fence,
+        releaseImageTag: finalized.releaseImageTag,
+        releaseVersion: finalized.releaseVersion,
+      });
+    }
+    const incoming = incomingReleaseIdentity(status);
+    if (web.kind !== "BASELINE") web = await classifyForwardRole(deps, status, rollback, "web", baseline, incoming, forwardSuffixes.web);
+    if (worker.kind !== "BASELINE") worker = await classifyForwardRole(deps, status, rollback, "worker", baseline, incoming, forwardSuffixes.worker);
+    if (web.kind === "FORWARD" && worker.kind === "BASELINE") {
+      await deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
+      const revisionSuffix = forwardSuffixes.worker;
+      const image = `${status.target.acrServer}/corgtex/worker@${rollback.incoming.workerDigest}`;
+      const template = buildManagedAzureReleaseTemplate({ baseline: worker.state, role: "worker", image, release: incoming, revisionSuffix });
+      assertManagedAzureTemplateDelta(worker.state, template, { role: "worker", image, release: incoming, revisionSuffix });
+      let patched;
+      try {
+        patched = await deps.patchTemplate({ target: status.target, role: "worker", location: worker.state.location, template,
+          onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
+      } catch (error) {
+        const code = error instanceof ManagedAzureContainerAppError ? error.code : "WORKER_PATCH_AMBIGUOUS";
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code, reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code });
+      }
+      if (!patched.terminal || !patched.succeeded) {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code: patched.code ?? "WORKER_PATCH_AMBIGUOUS", reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: patched.code ?? "WORKER_PATCH_AMBIGUOUS" });
+      }
+      try {
+        await deps.waitForState({ target: status.target, role: "worker", release: incoming, imageDigest: rollback.incoming.workerDigest, expectedTemplate: template,
+          onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
+      } catch (error) {
+        const code = error instanceof ManagedAzureContainerAppError ? error.code : "WORKER_READBACK_AMBIGUOUS";
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code, reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code });
+      }
+      const webAfter = await classifyForwardRole(deps, status, rollback, "web", baseline, incoming, forwardSuffixes.web);
+      if (webAfter.kind !== "FORWARD") {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code: "WEB_READBACK_MISMATCH", reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: "WEB_READBACK_MISMATCH" });
+      }
+      const health = await deps.healthProbe({ origin: status.origin, release: incoming });
+      if (!health.ok) {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "OBSERVATION", code: health.code ?? "HEALTH_PROBE_FAILED", reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: health.code ?? "HEALTH_PROBE_FAILED" });
+      }
+      const finalized = await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
+      if (finalized?.status !== "SUCCEEDED") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
+      return Object.freeze({
+        status: "RECOVERY_CLEARED",
+        deploymentId: input.deploymentId,
+        previousLeaseId: status.leaseId,
+        previousFence: status.fence,
+        fence: finalized.fence,
+        releaseImageTag: finalized.releaseImageTag,
+        releaseVersion: finalized.releaseVersion,
+        resolution: "FORWARD_COMPLETED",
+      });
+    }
+    if (web.kind === "FORWARD" && worker.kind === "FORWARD") {
+      const health = await deps.healthProbe({ origin: status.origin, release: incoming });
+      if (!health.ok) {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "OBSERVATION", code: health.code ?? "HEALTH_PROBE_FAILED", reason: input.reason })).catch(() => undefined);
+        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: health.code ?? "HEALTH_PROBE_FAILED" });
+      }
+      const finalized = await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
+      if (finalized?.status !== "SUCCEEDED") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
+      return Object.freeze({
+        status: "RECOVERY_CLEARED",
+        deploymentId: input.deploymentId,
+        previousLeaseId: status.leaseId,
+        previousFence: status.fence,
+        fence: finalized.fence,
+        releaseImageTag: finalized.releaseImageTag,
+        releaseVersion: finalized.releaseVersion,
+        resolution: "FORWARD_ALREADY_COMPLETE",
+      });
+    }
+    fail("MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
   } catch (error) {
     if (error instanceof ManagedAzureRecoveryError) {
       return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: error.code });
@@ -181,6 +356,17 @@ function runtimeDependencies(env = process.env) {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}:recovery`,
     lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
     readApp: apps.readApp,
+    patchTemplate: apps.patchTemplate,
+    waitForState: apps.waitForState,
+    healthProbe: async ({ origin, release }) => {
+      try {
+        const response = await fetch(`${origin}/api/health`, { method: "GET", redirect: "error", signal: AbortSignal.timeout(20_000) });
+        const text = await response.text();
+        if (!response.ok || Buffer.byteLength(text, "utf8") > 32_768) return { ok: false, code: "HEALTH_PROBE_FAILED" };
+        const body = JSON.parse(text);
+        return { ok: managedAzureHealthReady(body, release), code: "HEALTH_RELEASE_MISMATCH" };
+      } catch { return { ok: false, code: "HEALTH_PROBE_AMBIGUOUS" }; }
+    },
   };
 }
 

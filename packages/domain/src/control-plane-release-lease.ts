@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { Prisma, type CustomerDeployment } from "@prisma/client";
+import { Prisma, type CustomerDeployment, type CustomerDeploymentEvent } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError } from "./errors";
 import { canonicalizeManagedAzureRollbackPayloadV1, type ManagedAzureRollbackPayloadV1 } from "./managed-azure-rollback-payload";
@@ -14,10 +14,12 @@ const TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PHASES = ["RESERVED", "MUTATING", "RECOVERY_REQUIRED"] as const;
 const RECOVERY_STAGES = ["INVENTORY", "PREFLIGHT", "IMPORT", "WEB", "WORKER", "READBACK", "OBSERVATION", "ROLLBACK", "FENCING"] as const;
 const ROLLBACK_ENVELOPE_KEYS = new Set(["version", "deploymentId", "leaseId", "fence", "expectedImageTag", "incomingImageTag", "incomingVersion", "payload"]);
+const ORIGINATING_LEASE_EVENT_ACTION = "control_plane.release_lease.rollback_recorded";
 type LockedDeployment = CustomerDeployment & { databaseNow: Date; rollbackRecordPresent: boolean };
 type LeaseHandle = { deploymentId: string; leaseId: string; capability: string; fence: number };
 type AcrIdentity = { acrName: string; acrServer: string };
 type RecoveryEvidence = { stage: typeof RECOVERY_STAGES[number]; code: string };
+type RollbackEnvelope = Readonly<{ leaseId: string; fence: number; payload: Readonly<ManagedAzureRollbackPayloadV1> }>;
 type ManagedReleaseLeaseTarget = Readonly<{
   deploymentId: string; leaseId: string; fence: number; phase: typeof ACTIVE_PHASES[number];
   release: Readonly<{ baselineImageTag: string; baselineVersion: string | null; target:
@@ -142,19 +144,48 @@ function rollbackTargetMatches(row: CustomerDeployment, payload: Readonly<Manage
     && workerAppName === payload.target.workerAppName
     && row.releaseVersion === payload.previous.releaseVersion;
 }
-function storedRollbackPayload(row: CustomerDeployment) {
+function storedRollbackEnvelope(row: CustomerDeployment) {
   const value = row.releaseLeaseRollbackRecord;
   if (!value || typeof value !== "object" || Array.isArray(value)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
   if (keys.length !== ROLLBACK_ENVELOPE_KEYS.size || keys.some((key) => !ROLLBACK_ENVELOPE_KEYS.has(key))
-    || record.version !== 1 || record.deploymentId !== row.id || record.leaseId !== row.releaseLeaseId
-    || record.fence !== row.releaseLeaseFence || record.expectedImageTag !== row.releaseLeaseExpectedImageTag
+    || record.version !== 1 || record.deploymentId !== row.id
+    || typeof record.leaseId !== "string" || !UUID.test(record.leaseId)
+    || !Number.isSafeInteger(record.fence) || (record.fence as number) < 1 || (record.fence as number) > MAX_INT
+    || record.expectedImageTag !== row.releaseLeaseExpectedImageTag
     || record.incomingImageTag !== row.releaseLeaseIncomingImageTag || record.incomingVersion !== row.releaseLeaseIncomingVersion) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  const currentLease = record.leaseId === row.releaseLeaseId && record.fence === row.releaseLeaseFence;
+  const originatingRecoveryLease = row.releaseLeasePhase === "RECOVERY_REQUIRED" && (record.fence as number) <= row.releaseLeaseFence;
+  if (!currentLease && !originatingRecoveryLease) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
   let payload: Readonly<ManagedAzureRollbackPayloadV1>;
   try { payload = canonicalizeManagedAzureRollbackPayloadV1(record.payload); } catch { reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"); }
   if (!rollbackTargetMatches(row, payload)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
-  return payload;
+  return { leaseId: record.leaseId, fence: record.fence as number, payload } satisfies RollbackEnvelope;
+}
+function storedRollbackPayload(row: CustomerDeployment) {
+  return storedRollbackEnvelope(row).payload;
+}
+function originatingLeaseFromEvent(row: CustomerDeployment, event: CustomerDeploymentEvent) {
+  if (!event.meta || typeof event.meta !== "object" || Array.isArray(event.meta)) return null;
+  const meta = event.meta as Record<string, unknown>;
+  if (meta.expectedImageTag !== row.releaseLeaseExpectedImageTag
+    || meta.incomingImageTag !== row.releaseLeaseIncomingImageTag
+    || meta.incomingVersion !== row.releaseLeaseIncomingVersion
+    || typeof meta.leaseId !== "string" || !UUID.test(meta.leaseId)
+    || !Number.isSafeInteger(meta.fence) || (meta.fence as number) < 1 || (meta.fence as number) > row.releaseLeaseFence) return null;
+  return { leaseId: meta.leaseId, fence: meta.fence as number };
+}
+async function originatingRollbackEnvelope(tx: Prisma.TransactionClient, row: CustomerDeployment) {
+  const envelope = storedRollbackEnvelope(row);
+  if (row.releaseLeasePhase !== "RECOVERY_REQUIRED") return envelope;
+  const events = await tx.customerDeploymentEvent.findMany({
+    where: { deploymentId: row.id, action: ORIGINATING_LEASE_EVENT_ACTION },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
+  const origin = events.map((eventRecord) => originatingLeaseFromEvent(row, eventRecord)).find(Boolean);
+  return origin ? { ...envelope, leaseId: origin.leaseId, fence: origin.fence } satisfies RollbackEnvelope : envelope;
 }
 function rollbackEnvelope(
   row: CustomerDeployment,
@@ -348,6 +379,7 @@ export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrI
       reject("MANAGED_RELEASE_RECOVERY_REQUIRED");
     }
     const target = targetView(row, input.acrIdentity);
+    const rollbackRecord = await originatingRollbackEnvelope(tx, row);
     const recovery = row.releaseLeaseRecoveryEvidence && typeof row.releaseLeaseRecoveryEvidence === "object" && !Array.isArray(row.releaseLeaseRecoveryEvidence)
       ? validateRecoveryEvidence(row.releaseLeaseRecoveryEvidence as RecoveryEvidence)
       : null;
@@ -359,6 +391,7 @@ export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrI
       expiresAt: row.releaseLeaseExpiresAt!,
       recovery,
       rollbackRecorded: true,
+      originatingLease: { leaseId: rollbackRecord.leaseId, fence: rollbackRecord.fence },
       release: target.release,
       origin: target.origin,
       target: target.target,
@@ -479,7 +512,8 @@ export async function claimManagedReleaseRecovery(params: {
     if (row.releaseLeaseId !== params.expectedLeaseId || row.releaseLeaseFence !== params.expectedFence) reject("MANAGED_RELEASE_LEASE_CONFLICT");
     if ((row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED")
       || !row.releaseLeaseExpiresAt || row.releaseLeaseExpiresAt > row.databaseNow || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_RECOVERY_REQUIRED");
-    const rollbackPayload = storedRollbackPayload(row);
+    const storedEnvelope = await originatingRollbackEnvelope(tx, row);
+    const rollbackPayload = storedEnvelope.payload;
     const capability = randomOpaqueToken(32);
     const leaseId = randomUUID();
     const fence = row.releaseLeaseFence + 1;
@@ -493,7 +527,7 @@ export async function claimManagedReleaseRecovery(params: {
       releaseLeaseAcquiredAt: row.databaseNow,
       releaseLeaseHeartbeatAt: row.databaseNow,
       releaseLeaseExpiresAt: expiresAt,
-      releaseLeaseRollbackRecord: rollbackEnvelope(row, rollbackPayload, leaseId, fence) as unknown as Prisma.InputJsonValue,
+      releaseLeaseRollbackRecord: rollbackEnvelope(row, rollbackPayload, storedEnvelope.leaseId, storedEnvelope.fence) as unknown as Prisma.InputJsonValue,
     } }) as LockedDeployment;
     await event(tx, updated, "control_plane.release_lease.recovery_claimed");
     return { ...view({ ...updated, databaseNow: row.databaseNow }), expiresAt, capability };
