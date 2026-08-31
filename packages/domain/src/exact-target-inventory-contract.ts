@@ -195,6 +195,13 @@ export type ExactTargetInventorySelectionProjection = {
   readonly issueCodes: readonly ExactTargetInventoryIssueCode[];
 };
 
+export const exactTargetInventoryEvaluationPurposes = Object.freeze([
+  "standard",
+  "managed-release-preflight",
+] as const);
+
+export type ExactTargetInventoryEvaluationPurpose = typeof exactTargetInventoryEvaluationPurposes[number];
+
 export type ExactTargetInventoryEvaluationResult = {
   readonly ok: boolean;
   readonly schemaVersion: typeof EXACT_TARGET_INVENTORY_SCHEMA_VERSION;
@@ -211,6 +218,7 @@ export type ExactTargetInventoryEvaluationResult = {
 export type ExactTargetInventoryEvaluationOptions = {
   readonly now: string | Date;
   readonly requestedWorkloadClass?: ExactTargetInventoryWorkloadClass;
+  readonly purpose?: ExactTargetInventoryEvaluationPurpose;
 };
 
 export type ExactTargetInventoryFieldOwner = {
@@ -257,3 +265,7 @@ export const exactTargetInventoryRequiredDispositions = Object.freeze({
   RESIDUAL_RAILWAY: "RETIRE_ONLY",
   DUPLICATE_AZURE: "RETIRE_ONLY",
 } as const satisfies Record<ExactTargetInventoryWorkloadClass, ExactTargetInventoryClassDisposition>);
+
+export const exactTargetInventoryAllowedDispositions = Object.freeze({
+  ...exactTargetInventoryRequiredDispositions,
+} as const satisfies Record<ExactTargetInventoryWorkloadClass, ExactTargetInventoryClassDisposition | readonly ExactTargetInventoryClassDisposition[]>);

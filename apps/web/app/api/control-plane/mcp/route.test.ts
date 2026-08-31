@@ -190,6 +190,7 @@ describe("/api/control-plane/mcp", () => {
         inventoryRef: "123e4567-e89b-42d3-a456-426614174000",
         expectedSha256: "a".repeat(64),
         deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+        workloadClass: "ACTIVE_CLIENT_CANARY",
       } },
     }) as never);
     expect(inventory.status).toBe(200);
@@ -197,6 +198,7 @@ describe("/api/control-plane/mcp", () => {
       inventoryRef: "123e4567-e89b-42d3-a456-426614174000",
       expectedSha256: "a".repeat(64),
       deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+      workloadClass: "ACTIVE_CLIENT_CANARY",
     });
 
     mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
@@ -204,12 +206,13 @@ describe("/api/control-plane/mcp", () => {
       jsonrpc: "2.0",
       id: 42,
       method: "tools/call",
-      params: { name: "managed_release_lease", arguments: { operation: "preflight", deploymentId: "deployment-1", acrName: "acr12", acrServer: "acr12.azurecr.io" } },
+      params: { name: "managed_release_lease", arguments: { operation: "preflight", deploymentId: "deployment-1", workloadClass: "ACTIVE_CLIENT_CANARY", acrName: "acr12", acrServer: "acr12.azurecr.io" } },
     }) as never);
     expect(lease.status).toBe(200);
     expect(mocks.runControlPlaneManagedReleaseLeaseOperation).toHaveBeenCalledWith(expect.anything(), {
       operation: "preflight",
       deploymentId: "deployment-1",
+      workloadClass: "ACTIVE_CLIENT_CANARY",
       acrName: "acr12",
       acrServer: "acr12.azurecr.io",
     });

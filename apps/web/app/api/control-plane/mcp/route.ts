@@ -566,15 +566,16 @@ const tools = [
   },
   {
     name: "get_managed_release_inventory",
-    description: "Load one private immutable P0-05 inventory artifact and bind its selected primary target to one deployment.",
+    description: "Load one private immutable P0-05 inventory artifact and bind its selected workload-class target to one deployment.",
     inputSchema: {
       type: "object",
       properties: {
         inventoryRef: { type: "string" },
         expectedSha256: { type: "string" },
         deploymentId: { type: "string" },
+        workloadClass: { type: "string" },
       },
-      required: ["inventoryRef", "expectedSha256", "deploymentId"],
+      required: ["inventoryRef", "expectedSha256", "deploymentId", "workloadClass"],
     },
   },
   {
@@ -585,6 +586,7 @@ const tools = [
       properties: {
         operation: { type: "string" },
         deploymentId: { type: "string" },
+        workloadClass: { type: "string" },
         leaseId: { type: "string" },
         capability: { type: "string" },
         fence: { type: "number" },
@@ -1253,6 +1255,7 @@ export async function POST(request: NextRequest) {
         inventoryRef: argString(args, "inventoryRef"),
         expectedSha256: argString(args, "expectedSha256"),
         deploymentId: argString(args, "deploymentId"),
+        workloadClass: argString(args, "workloadClass") as never,
       })));
     }
     if (name === "managed_release_lease") {

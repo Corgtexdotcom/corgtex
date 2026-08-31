@@ -213,6 +213,23 @@ async function lock(tx: Prisma.TransactionClient, deploymentId: string) {
 function eligible(row: CustomerDeployment) {
   return Boolean(row.customerAccountId && row.deploymentKind === "REMOTE_MANAGED" && row.cloudProvider === "AZURE" && row.environment === "production" && row.deploymentStatus === "ACTIVE" && row.provisioningStatus === "active");
 }
+function allowedCanaryPreflightDeploymentId() {
+  const value = process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID?.trim();
+  return value && UUID.test(value) ? value : null;
+}
+function readOnlyPreflightEligible(row: CustomerDeployment, workloadClass: string) {
+  if (workloadClass === "ACTIVE_CLIENT_PRIMARY") return eligible(row);
+  const allowedCanaryId = allowedCanaryPreflightDeploymentId();
+  return Boolean(workloadClass === "ACTIVE_CLIENT_CANARY"
+    && allowedCanaryId
+    && row.id === allowedCanaryId
+    && row.customerAccountId
+    && row.deploymentKind === "HOSTED_DEDICATED"
+    && row.cloudProvider === "AZURE"
+    && row.environment === "production"
+    && row.deploymentStatus === "ACTIVE"
+    && row.provisioningStatus === "active");
+}
 async function owned(tx: Prisma.TransactionClient, handle: LeaseHandle, allowExpired = false) {
   validateHandle(handle);
   const row = await lock(tx, handle.deploymentId);
@@ -275,12 +292,13 @@ async function assertNoTargetOverlap(tx: Prisma.TransactionClient, row: Customer
   }
 }
 
-export async function getManagedReleaseTargetPreflight(deploymentId: string, acrIdentity: AcrIdentity) {
+export async function getManagedReleaseTargetPreflight(deploymentId: string, acrIdentity: AcrIdentity, workloadClass = "ACTIVE_CLIENT_PRIMARY") {
   requireInput(typeof deploymentId === "string" && UUID.test(deploymentId));
+  requireInput(workloadClass === "ACTIVE_CLIENT_PRIMARY" || workloadClass === "ACTIVE_CLIENT_CANARY");
   const input = targetInputs({ deploymentId, leaseId: "00000000-0000-4000-8000-000000000000", capability: "preflight", fence: 1 }, acrIdentity);
   return transact(async (tx) => {
     const row = await lock(tx, deploymentId);
-    if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
+    if (!readOnlyPreflightEligible(row, workloadClass)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
     if (row.releaseLeaseId) reject(row.releaseLeasePhase === "RESERVED" ? "MANAGED_RELEASE_LEASE_CONFLICT" : "MANAGED_RELEASE_RECOVERY_REQUIRED");
     await assertNoTargetOverlap(tx, row);
     const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));

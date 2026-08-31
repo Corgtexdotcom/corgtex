@@ -6,7 +6,7 @@ const WORKER_DIGEST = `sha256:${"c".repeat(64)}`; const DEPLOYMENT_ID = "aaaaaaa
 const target = {
   deploymentId: DEPLOYMENT_ID, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production",
   deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure",
-  group: "managed-customers", workload: "managed-customers",
+  group: "managed-customers", workload: "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY",
   azure: { subscriptionId: "bbbbbbbb-bbbb-0bbb-fbbb-bbbbbbbb0102", resourceGroup: "rg-managed",
     acrResourceGroup: "rg-acr", acrName: "acrmanaged", acrServer: "acrmanaged.azurecr.io", webAppName: "managed-web", workerAppName: "managed-worker" },
 };
@@ -92,11 +92,31 @@ describe("managed Azure release intent primitives", () => {
     for (const [path, value] of [
       ["deploymentKind", "SHARED_WORKSPACE"], ["cloudProvider", "RAILWAY"], ["environment", "staging"],
       ["deploymentStatus", "SUSPENDED"], ["provisioningStatus", "inactive"], ["releaseEligible", false],
-      ["provider", "Azure"], ["group", "selfserve"], ["workload", "managed-customers "],
+      ["provider", "Azure"], ["group", "selfserve"], ["workload", "managed-customers "], ["workloadClass", "ACTIVE_CLIENT_CANARY"],
     ]) {
       const candidate = input(); candidate.deployments[0][path] = value;
       expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
     }
+  });
+  test("accepts the exact class-qualified hosted-dedicated canary as a read-only release target shape", () => {
+    const candidate = input();
+    Object.assign(candidate.deployments[0], {
+      deploymentKind: "HOSTED_DEDICATED",
+      releaseEligible: false,
+      group: "hosted-dedicated",
+      workload: "active-client-canary",
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+    });
+    const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate);
+    expect(intent).toMatchObject({
+      deploymentId: DEPLOYMENT_ID,
+      target: {
+        acrName: "acrmanaged",
+        acrServer: "acrmanaged.azurecr.io",
+        webAppName: "managed-web",
+        workerAppName: "managed-worker",
+      },
+    });
   });
   test("rejects target, SHA, source tag, manifest, and digest near misses", () => {
     const mutations = [

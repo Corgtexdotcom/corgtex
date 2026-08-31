@@ -49,6 +49,7 @@ import {
   POST_DEPLOY_CUSTOMER_READ_PROBES,
 } from "./post-deploy-probe-contract";
 import { evaluateExactTargetInventoryJson } from "./exact-target-inventory-evaluator";
+import type { ExactTargetInventoryWorkloadClass } from "./exact-target-inventory-contract";
 import {
   abortManagedReleaseLease,
   acquireManagedReleaseLease,
@@ -10939,6 +10940,7 @@ export async function recordBreakGlassSupportNote(actor: AppActor, params: {
 
 const MANAGED_RELEASE_INVENTORY_MAX_BYTES = 96_000;
 const MANAGED_RELEASE_READ_OPERATIONS = new Set(["preflight", "get_target", "get_rollback", "get_recovery"]);
+const MANAGED_RELEASE_WORKLOAD_CLASSES = new Set<ExactTargetInventoryWorkloadClass>(["ACTIVE_CLIENT_PRIMARY", "ACTIVE_CLIENT_CANARY"]);
 
 function managedReleaseHandle(params: Record<string, unknown>) {
   return {
@@ -10960,6 +10962,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
   inventoryRef: string;
   expectedSha256: string;
   deploymentId: string;
+  workloadClass: ExactTargetInventoryWorkloadClass;
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   await requireControlPlaneAccess(actor);
@@ -10968,6 +10971,8 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
   invariant(/^[0-9a-f]{64}$/.test(params.expectedSha256),
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
   invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(params.deploymentId),
+    400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  invariant(MANAGED_RELEASE_WORKLOAD_CLASSES.has(params.workloadClass),
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
 
   const asset = await prisma.buildArtifactAsset.findUnique({
@@ -11012,10 +11017,11 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   const evaluation = evaluateExactTargetInventoryJson(inventoryText, {
     now: new Date(),
-    requestedWorkloadClass: "ACTIVE_CLIENT_PRIMARY",
+    requestedWorkloadClass: params.workloadClass,
+    purpose: "managed-release-preflight",
   });
   const expectedOpaqueTargetId = createHash("sha256")
-    .update(`ACTIVE_CLIENT_PRIMARY:${params.deploymentId}`)
+    .update(`${params.workloadClass}:${params.deploymentId}`)
     .digest("hex")
     .slice(0, 32);
   invariant(evaluation.ok
@@ -11030,7 +11036,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     sha256: byteDigest,
     bytesBase64: stored.data.toString("base64"),
     evaluation: {
-      workloadClass: "ACTIVE_CLIENT_PRIMARY" as const,
+      workloadClass: params.workloadClass,
       canonicalDigest: evaluation.canonicalDigest,
       validUntil: evaluation.validUntil,
       opaqueTargetId: evaluation.selection.opaqueTargetId,
@@ -11047,7 +11053,7 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
   if (!MANAGED_RELEASE_READ_OPERATIONS.has(params.operation)) requireMutationReason(params.reason as string | null | undefined);
   switch (params.operation) {
     case "preflight":
-      return getManagedReleaseTargetPreflight(params.deploymentId as string, managedReleaseAcr(params));
+      return getManagedReleaseTargetPreflight(params.deploymentId as string, managedReleaseAcr(params), params.workloadClass as string);
     case "acquire":
       return acquireManagedReleaseLease({
         deploymentId: params.deploymentId as string,

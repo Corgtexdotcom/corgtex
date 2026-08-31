@@ -18,7 +18,7 @@ const leaseId = "123e4567-e89b-42d3-a456-426614174003";
 const baseSha = "a".repeat(40); const nextSha = "b".repeat(40);
 const inventoryBytesBase64 = "e30=";
 const inventorySha256 = createHash("sha256").update(Buffer.from(inventoryBytesBase64, "base64")).digest("hex");
-const input = Object.freeze({ inventoryRef, inventorySha256, deploymentId, releaseSha: nextSha, releaseVersion: "release-2", reason: "Approved exact target release.", execute: false, acrName: "acr12", acrResourceGroup: "rg-acr" });
+const input = Object.freeze({ inventoryRef, inventorySha256, deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY", releaseSha: nextSha, releaseVersion: "release-2", reason: "Approved exact target release.", execute: false, acrName: "acr12", acrResourceGroup: "rg-acr" });
 const target = Object.freeze({ subscriptionId: "123e4567-e89b-42d3-a456-426614174000", resourceGroup: "rg.Safe_1", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-app", workerAppName: "worker-app" });
 const digests = { web: `sha256:${"1".repeat(64)}`, worker: `sha256:${"2".repeat(64)}`, nextWeb: `sha256:${"3".repeat(64)}`, nextWorker: `sha256:${"4".repeat(64)}` };
 const transportBaseRelease = Object.freeze({ gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" });
@@ -113,7 +113,7 @@ function dependencies(options = {}) {
   const deps = {
     owner: "github:42:1",
     templateDigest: managedAzureTemplateDigest,
-    loadInventory: vi.fn(async () => ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: { canonicalDigest: `sha256:${"d".repeat(64)}` } })),
+    loadInventory: vi.fn(async (request) => ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: { workloadClass: request.workloadClass, canonicalDigest: `sha256:${"d".repeat(64)}` } })),
     lease: vi.fn(async (operation, args) => {
       events.push(`lease:${operation}`);
       if (operation === "preflight") return { deploymentId, origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
@@ -167,13 +167,33 @@ describe("managed Azure single-target transaction", () => {
   it("keeps dry-run read-only while proving inventory, target, images, and both baselines", async () => {
     const { deps, events } = dependencies({ webDestination: "ABSENT" });
     const result = await runManagedAzureReleaseTransaction(input, deps);
-    expect(result).toMatchObject({ status: "DRY_RUN_READY", deploymentId, effects: 0, importsRequired: ["web"] });
+    expect(result).toMatchObject({ status: "DRY_RUN_READY", deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY", executionAllowed: true, effects: 0, importsRequired: ["web"] });
     expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
     expect(deps.importRole).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
     expect(deps.healthProbe).toHaveBeenCalledTimes(1);
-    expect(deps.resolveRelease).toHaveBeenCalledWith({ deploymentId, target: { ...target, acrResourceGroup: input.acrResourceGroup }, gitSha: input.releaseSha });
+    expect(deps.resolveRelease).toHaveBeenCalledWith({ deploymentId, target: { ...target, acrResourceGroup: input.acrResourceGroup }, gitSha: input.releaseSha, workloadClass: "ACTIVE_CLIENT_PRIMARY" });
     expect(deps.readApp).toHaveBeenCalledWith(expect.objectContaining({ target }));
     expect(JSON.stringify(result)).not.toContain("private-capability"); expect(JSON.stringify(result)).not.toContain(target.resourceGroup);
+  });
+  it("rejects canary execution before lease acquisition, imports, or Azure reads", async () => {
+    const { deps } = dependencies({ webDestination: "ABSENT", workerDestination: "ABSENT" });
+    await expect(runManagedAzureReleaseTransaction({ ...input, workloadClass: "ACTIVE_CLIENT_CANARY", execute: true }, deps))
+      .rejects.toMatchObject({ code: "MANAGED_RELEASE_EXECUTION_NOT_ALLOWED" });
+    expect(deps.loadInventory).toHaveBeenCalledTimes(1);
+    expect(deps.lease).not.toHaveBeenCalled();
+    expect(deps.resolveRelease).not.toHaveBeenCalled();
+    expect(deps.readApp).not.toHaveBeenCalled();
+    expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it("keeps canary dry-run read-only and reports execution disabled", async () => {
+    const { deps, events } = dependencies({ webDestination: "ABSENT" });
+    const result = await runManagedAzureReleaseTransaction({ ...input, workloadClass: "ACTIVE_CLIENT_CANARY" }, deps);
+    expect(result).toMatchObject({ status: "DRY_RUN_READY", deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY", executionAllowed: false, effects: 0 });
+    expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
+    expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
   });
 
   it("imports before mutation, updates web then worker, proves readback, and finalizes success", async () => {
