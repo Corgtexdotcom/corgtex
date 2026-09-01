@@ -63,6 +63,7 @@ import {
   claimManagedReleaseRecovery,
   finalizeManagedReleaseRollback,
   finalizeManagedReleaseSuccess,
+  getManagedReleaseBootstrapTarget,
   getManagedReleaseLeaseTarget,
   getManagedReleaseRecoveryStatus,
   getManagedReleaseRollbackRecord,
@@ -9605,6 +9606,7 @@ type CustomerDeploymentHealthPayload = {
   release?: {
     imageTag?: string | null;
     gitSha?: string | null;
+    version?: string | null;
   };
 };
 
@@ -9736,7 +9738,12 @@ function runtimeHealthErrors(health: CustomerDeploymentHealthPayload | null) {
 
 function observedReleaseMatches(health: CustomerDeploymentHealthPayload | null, releaseImageTag: string) {
   const release = health?.release;
-  return Boolean(release && (release.imageTag === releaseImageTag || release.gitSha === releaseImageTag));
+  return Boolean(release && (release.imageTag === releaseImageTag || release.gitSha === releaseImageTag || (release.gitSha && releaseImageTag === `sha-${release.gitSha}`)));
+}
+
+function observedReleaseVersionMatches(health: CustomerDeploymentHealthPayload | null, releaseVersion: string | null) {
+  if (releaseVersion === null) return true;
+  return health?.release?.version === releaseVersion;
 }
 
 function observedReleaseLabel(health: CustomerDeploymentHealthPayload | null) {
@@ -9747,11 +9754,83 @@ function observedReleaseLabel(health: CustomerDeploymentHealthPayload | null) {
   return values.length ? values.join(" / ") : "unknown";
 }
 
+function managedAzureAppName(value: string | null, subscriptionId: string, resourceGroup: string) {
+  if (!value) return null;
+  const resourceId = /^\/subscriptions\/([0-9a-f-]{36})\/resourceGroups\/([A-Za-z0-9][A-Za-z0-9_.()-]*)\/providers\/Microsoft\.App\/containerApps\/([a-z][a-z0-9-]*[a-z0-9])$/i.exec(value);
+  if (!resourceId) return value;
+  if (resourceId[1]!.toLowerCase() !== subscriptionId.toLowerCase() || resourceId[2]!.toLowerCase() !== resourceGroup.toLowerCase()) return null;
+  return resourceId[3]!;
+}
+
+type ManagedAzureRecordTarget = {
+  subscriptionId?: string | null;
+  resourceGroup?: string | null;
+  acrName?: string | null;
+  acrServer?: string | null;
+  webAppName?: string | null;
+  workerAppName?: string | null;
+  workloadClass?: string | null;
+};
+
+type LockedManagedAzureRecordDeployment = {
+  id: string;
+  customerAccountId: string | null;
+  deploymentKind: string;
+  cloudProvider: string;
+  environment: string;
+  deploymentStatus: string;
+  provisioningStatus: string;
+  providerSubscriptionId: string | null;
+  providerResourceGroup: string | null;
+  providerWebServiceId: string | null;
+  providerWorkerServiceId: string | null;
+  releaseLeaseId: string | null;
+};
+
+function allowedCanaryPreflightDeploymentId() {
+  const value = process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID?.trim();
+  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value) ? value : null;
+}
+
+function managedAzureRecordEligible(deployment: LockedManagedAzureRecordDeployment, workloadClass: string) {
+  if (!deployment.customerAccountId || deployment.cloudProvider !== "AZURE" || deployment.environment !== "production"
+    || deployment.deploymentStatus !== "ACTIVE" || deployment.provisioningStatus !== "active"
+    || deployment.releaseLeaseId) return false;
+  if (workloadClass === "ACTIVE_CLIENT_PRIMARY") return deployment.deploymentKind === "REMOTE_MANAGED";
+  return workloadClass === "ACTIVE_CLIENT_CANARY"
+    && deployment.id === allowedCanaryPreflightDeploymentId()
+    && deployment.deploymentKind === "HOSTED_DEDICATED";
+}
+
+function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecordDeployment, target: ManagedAzureRecordTarget) {
+  if (!target.subscriptionId || !target.resourceGroup || !target.acrName || !target.acrServer || !target.webAppName || !target.workerAppName) return false;
+  const workloadClass = target.workloadClass ?? "ACTIVE_CLIENT_PRIMARY";
+  if (!managedAzureRecordEligible(deployment, workloadClass)) return false;
+  if (!deployment.providerSubscriptionId || !deployment.providerResourceGroup || deployment.providerSubscriptionId.toLowerCase() !== target.subscriptionId.toLowerCase()
+    || deployment.providerResourceGroup.toLowerCase() !== target.resourceGroup.toLowerCase()) return false;
+  return managedAzureAppName(deployment.providerWebServiceId, target.subscriptionId, target.resourceGroup) === target.webAppName
+    && managedAzureAppName(deployment.providerWorkerServiceId, target.subscriptionId, target.resourceGroup) === target.workerAppName
+    && target.acrServer === `${target.acrName}.azurecr.io`;
+}
+
+async function lockManagedAzureRecordDeployment(tx: Prisma.TransactionClient, deploymentId: string) {
+  const [deployment] = await tx.$queryRaw<LockedManagedAzureRecordDeployment[]>`
+    SELECT "id", "customerAccountId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
+      "provisioningStatus", "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId",
+      "providerWorkerServiceId", "releaseLeaseId"
+    FROM "CustomerDeployment"
+    WHERE "id" = ${deploymentId}
+    FOR UPDATE
+  `;
+  return deployment ?? null;
+}
+
 export async function recordVerifiedControlPlaneRelease(actor: AppActor, params: {
   deploymentId: string;
   releaseImageTag: string;
   releaseVersion?: string | null;
   reason?: string | null;
+  managedAzureTarget?: ManagedAzureRecordTarget | null;
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
@@ -9782,6 +9861,12 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
       "RELEASE_MISMATCH",
       `Health reported release ${health?.release?.imageTag ?? health?.release?.gitSha ?? "unknown"}, not ${releaseImageTag}.`,
     );
+    invariant(
+      observedReleaseVersionMatches(health, releaseVersion),
+      409,
+      "RELEASE_VERSION_MISMATCH",
+      `Health reported release version ${health?.release?.version ?? "unknown"}, not ${releaseVersion}.`,
+    );
   } catch (probeError) {
     if (probeError instanceof AppError) {
       throw probeError;
@@ -9799,6 +9884,11 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
   };
 
   await prisma.$transaction(async (tx) => {
+    if (params.managedAzureTarget) {
+      const current = await lockManagedAzureRecordDeployment(tx, params.deploymentId);
+      invariant(current && managedAzureTargetMatchesDeployment(current, params.managedAzureTarget),
+        409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed before the release baseline could be recorded.");
+    }
     await tx.customerDeployment.update({
       where: { id: params.deploymentId },
       data: {
@@ -11430,6 +11520,22 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
       opaqueTargetId: evaluation.selection.opaqueTargetId,
     },
   };
+}
+
+export async function getControlPlaneManagedReleaseBootstrapTarget(actor: AppActor, params: {
+  deploymentId: string;
+  workloadClass: ExactTargetInventoryWorkloadClass;
+  acrName: string;
+  acrServer: string;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
+  invariant(MANAGED_RELEASE_WORKLOAD_CLASSES.has(params.workloadClass),
+    400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  return getManagedReleaseBootstrapTarget(params.deploymentId, managedReleaseAcr({
+    acrName: params.acrName,
+    acrServer: params.acrServer,
+  }), params.workloadClass);
 }
 
 export async function runControlPlaneManagedReleaseLeaseOperation(
