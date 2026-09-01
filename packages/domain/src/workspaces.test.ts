@@ -105,6 +105,19 @@ describe("workspaces domain", () => {
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 
+  it("createWorkspace rejects the managed-release operational slug before starting a transaction", async () => {
+    const { createWorkspace } = await import("./workspaces");
+    await expect(createWorkspace(actor, {
+      name: "Managed Release Ops",
+      slug: " Corgtex Managed Release Ops ",
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "WORKSPACE_SLUG_RESERVED",
+    });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
   it("createWorkspace rejects a missing name", async () => {
     const { createWorkspace } = await import("./workspaces");
     await expect(createWorkspace(actor, {
