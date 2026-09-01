@@ -61,6 +61,15 @@ function parseJson(stdout) {
   if (source.length === 0 || source !== source.trim()) fail();
   try { return JSON.parse(source); } catch { fail(); }
 }
+function acceptableAzureAdvisory(stderr) {
+  if (stderr === "") return true;
+  if (typeof stderr !== "string" || stderr.includes("\0")) return false;
+  const source = stderr.replace(/\n$/, "");
+  if (source.length === 0 || source !== source.trim()) return false;
+  const lines = source.split("\n");
+  return lines.length > 0 && lines.every((line) => line === "WARNING: The behavior of this command has been altered by the following extension: containerapp"
+    || /^WARNING: Command group 'containerapp(?: [^']+)?' is (?:experimental|in preview) and under development\.(?: Reference and support levels: https:\/\/aka\.ms\/CLI_refstatus)?$/.test(line));
+}
 function time(value) {
   if (!Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) fail();
   return value;
@@ -98,7 +107,7 @@ async function runRead(spawn, args) {
   }
   if (result.code !== 0 || result.signal !== null || result.stdoutOverflow !== false || result.stderrOverflow !== false
     || typeof result.stdout !== "string" || typeof result.stderr !== "string" || result.stdout.length > MAX_JSON_BYTES
-    || result.stderr.length > SPAWN_OPTIONS.maxStderrBytes || result.stderr !== "") fail();
+    || result.stderr.length > SPAWN_OPTIONS.maxStderrBytes || !acceptableAzureAdvisory(result.stderr)) fail();
   return parseJson(result.stdout);
 }
 function digestObservation(value, tag) {

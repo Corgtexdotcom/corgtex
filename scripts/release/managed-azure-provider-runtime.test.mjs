@@ -70,6 +70,18 @@ describe("managed Azure provider observation", () => {
     expect(JSON.stringify(observed)).not.toMatch(/MATCH|CONFLICT|credential|username|password/i);
   });
 
+  it("accepts known Azure CLI advisory stderr while keeping exact JSON stdout", async () => {
+    const advisory = "WARNING: The behavior of this command has been altered by the following extension: containerapp\n";
+    const preview = "WARNING: Command group 'containerapp registry' is in preview and under development. Reference and support levels: https://aka.ms/CLI_refstatus\n";
+    const { observer } = harness([
+      result(acrRows([]), { stderr: advisory }),
+      result(acrRows([]), { stderr: preview }),
+    ], [100, 101, 102, 103]);
+
+    await expect(observer.observeDestination(request("web"))).resolves.toMatchObject({ state: "ABSENT", digest: null });
+    await expect(observer.observeDestination(request("worker"))).resolves.toMatchObject({ state: "ABSENT", digest: null });
+  });
+
   it("returns one atomic exact two-role registry preflight with both pull identity kinds", async () => {
     const web = registryRow(TARGET.acrServer, "system", { username: "", passwordSecretRef: "" });
     const worker = registryRow(TARGET.acrServer, LOWERCASE_GROUP_IDENTITY, { username: "", passwordSecretRef: "" });
@@ -134,7 +146,9 @@ describe("managed Azure provider observation", () => {
     const canary = "credential-canary";
     const failures = [
       operation(Promise.reject(new Error(canary))), operation(result("[]", { code: 2 })), operation(result("[]", { signal: "SIGTERM" })),
-      operation(result("[]", { stdoutOverflow: true })), operation(result("[]", { stderr: canary })), operation(result("x".repeat(16_385))),
+      operation(result("[]", { stdoutOverflow: true })), operation(result("[]", { stderr: canary })), operation(result("[]", { stderr: "WARNING: credential-canary\n" })),
+      operation(result("[]", { stderr: "WARNING: Command group 'containerapp registry' is in preview and under development.ERROR: credential-canary\n" })),
+      operation(result("x".repeat(16_385))),
       { completion: Promise.resolve(result("[]")) }, { completion: "not-a-promise", abort: async () => undefined },
     ];
     for (const handle of failures) { const spawn = vi.fn(() => handle); const observer = createManagedAzureProviderObservation({ spawn, clock: () => 1 }); await expect(observer.observeDestination(request("web"))).rejects.toEqual(new Error(FAILURE)); }
