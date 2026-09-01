@@ -486,7 +486,7 @@ describe("runDailyDigest", () => {
       where: expect.objectContaining({
         workspaceId: "workspace-1",
         NOT: {
-          repositoryOwner: "Corgtexdotcom",
+          repositoryOwner: "corgtexdotcom",
           repositoryName: "corgtex-ops",
           pullRequestNumber: null,
         },

@@ -8549,7 +8549,7 @@ describe("managed Azure release control-plane boundary", () => {
       data: expect.objectContaining({
         workspaceId: "workspace-cr",
         createdByUserId: null,
-        repositoryOwner: "Corgtexdotcom",
+        repositoryOwner: "corgtexdotcom",
         repositoryName: "corgtex-ops",
         pullRequestNumber: null,
         classification: "CLIENT_PRIVATE",

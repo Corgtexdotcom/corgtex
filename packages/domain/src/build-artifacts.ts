@@ -24,7 +24,7 @@ import { AppError, invariant } from "./errors";
 const ARTIFACT_MANAGER_ROLES = new Set<MemberRole>(["ADMIN", "FACILITATOR"]);
 const PUBLIC_PROOF_URL_TTL_SECONDS = 60 * 10;
 const OPERATIONAL_ARTIFACT_FILTER = {
-  repositoryOwner: "Corgtexdotcom",
+  repositoryOwner: "corgtexdotcom",
   repositoryName: "corgtex-ops",
   pullRequestNumber: null,
 } as const;
@@ -154,6 +154,16 @@ function normalizePrNumber(value: number | null | undefined) {
   if (value === undefined || value === null) return null;
   invariant(Number.isInteger(value) && value > 0, 400, "INVALID_INPUT", "PR number must be a positive integer.");
   return value;
+}
+
+function isOperationalBuildArtifact(artifact: {
+  repositoryOwner: string;
+  repositoryName: string;
+  pullRequestNumber: number | null;
+}) {
+  return artifact.repositoryOwner === OPERATIONAL_ARTIFACT_FILTER.repositoryOwner
+    && artifact.repositoryName === OPERATIONAL_ARTIFACT_FILTER.repositoryName
+    && artifact.pullRequestNumber === null;
 }
 
 function normalizeUrl(value: string | null | undefined) {
@@ -424,7 +434,7 @@ export async function getBuildArtifact(actor: AppActor, params: {
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const artifact = await prisma.buildArtifact.findFirst({
-    where: { id: params.artifactId, workspaceId: params.workspaceId },
+    where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
     select: buildArtifactSelect,
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
@@ -439,11 +449,13 @@ export async function upsertBuildArtifact(actor: AppActor, params: ArtifactInput
   const pullRequestNumber = normalizePrNumber(params.pullRequestNumber);
   const classification = params.classification ?? "INTERNAL";
   const visibility = params.visibility ?? "PRIVATE";
+  invariant(!isOperationalBuildArtifact({ repositoryOwner, repositoryName, pullRequestNumber }),
+    404, "NOT_FOUND", "Build artifact not found.");
 
   return prisma.$transaction(async (tx) => {
     const existing = params.artifactId
       ? await tx.buildArtifact.findFirst({
-        where: { id: params.artifactId, workspaceId: params.workspaceId },
+        where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
         select: { id: true, createdByUserId: true, publicTokenEnc: true },
       })
       : pullRequestNumber
@@ -661,7 +673,7 @@ export async function addBuildArtifactAsset(actor: AppActor, params: {
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const artifact = await prisma.buildArtifact.findFirst({
-    where: { id: params.artifactId, workspaceId: params.workspaceId },
+    where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
     select: { id: true, workspaceId: true, createdByUserId: true },
   });
   invariant(artifact, 404, "NOT_FOUND", "Build artifact not found.");
@@ -731,7 +743,7 @@ export async function getBuildArtifactAssetSignedUrl(actor: AppActor, params: {
     where: {
       id: params.assetId,
       artifactId: params.artifactId,
-      artifact: { workspaceId: params.workspaceId },
+      artifact: { workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
     },
     select: { id: true, storageKey: true },
   });
@@ -748,7 +760,7 @@ export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   return prisma.$transaction(async (tx) => {
     const existing = await tx.buildArtifact.findFirst({
-      where: { id: params.artifactId, workspaceId: params.workspaceId },
+      where: { id: params.artifactId, workspaceId: params.workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
       select: { id: true, createdByUserId: true },
     });
     invariant(existing, 404, "NOT_FOUND", "Build artifact not found.");

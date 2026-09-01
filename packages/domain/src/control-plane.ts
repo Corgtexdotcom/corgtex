@@ -10948,7 +10948,7 @@ const MANAGED_RELEASE_INVENTORY_MAX_BYTES = 96_000;
 const MANAGED_RELEASE_READ_OPERATIONS = new Set(["preflight", "get_target", "get_rollback", "get_recovery"]);
 const MANAGED_RELEASE_WORKLOAD_CLASSES = new Set<ExactTargetInventoryWorkloadClass>(["ACTIVE_CLIENT_PRIMARY", "ACTIVE_CLIENT_CANARY"]);
 const MANAGED_RELEASE_INVENTORY_REPOSITORY = {
-  owner: "Corgtexdotcom",
+  owner: "corgtexdotcom",
   name: "corgtex-ops",
 } as const;
 type ManagedReleasePreflightProjection = {

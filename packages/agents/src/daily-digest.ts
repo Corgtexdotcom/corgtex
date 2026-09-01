@@ -1321,7 +1321,7 @@ export async function runDailyDigest(params: {
       workspaceId: params.workspaceId,
       updatedAt: { lte: generationDate },
       NOT: {
-        repositoryOwner: "Corgtexdotcom",
+        repositoryOwner: "corgtexdotcom",
         repositoryName: "corgtex-ops",
         pullRequestNumber: null,
       },
