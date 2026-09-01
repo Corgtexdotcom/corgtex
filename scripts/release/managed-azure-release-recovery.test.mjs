@@ -208,6 +208,47 @@ describe("managed Azure release recovery", () => {
     expect(managedAzureRecoveryCliResultAccepted(result)).toBe(true);
   });
 
+  it("reconstructs forward recovery when the recorded baseline used an Azure-generated revision suffix", async () => {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const workerSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "worker", phase: "forward" });
+    const webBaselineTemplate = template("web", digests.web, "");
+    const rollbackPayload = structuredClone(rollback);
+    rollbackPayload.previous.web = {
+      ...rollbackPayload.previous.web,
+      readyRevision: `${target.webAppName}--b8bc6lz`,
+      templateDigest: managedAzureTemplateDigest(webBaselineTemplate),
+    };
+    const webTemplate = buildManagedAzureReleaseTemplate({
+      baseline: state("web", {
+        revisionName: `${target.webAppName}--b8bc6lz`,
+        revisionSuffix: "",
+        template: webBaselineTemplate,
+        templateDigest: managedAzureTemplateDigest(webBaselineTemplate),
+      }),
+      role: "web",
+      image: `${target.acrServer}/corgtex/web@${rollback.incoming.webDigest}`,
+      release: incoming,
+      revisionSuffix: webSuffix,
+    });
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", {
+        revisionName: `${target.webAppName}--${webSuffix}`,
+        revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image,
+        imageDigest: rollback.incoming.webDigest,
+        template: webTemplate,
+        templateDigest: managedAzureTemplateDigest(webTemplate),
+      });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps } = rig({ rollbackPayload, readApp });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Complete partial forward recovery.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "FORWARD_COMPLETED" });
+    expect(deps.patchTemplate.mock.calls[0][0].template.revisionSuffix).toBe(workerSuffix);
+  });
+
   it("completes forward recovery when the missing role is already transaction-rolled back", async () => {
     const baseline = { gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" };
     const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };

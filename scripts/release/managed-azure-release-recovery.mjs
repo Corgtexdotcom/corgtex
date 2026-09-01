@@ -90,17 +90,32 @@ function verifyRollbackRole(role, state, rollback, baseline, expectedRevisionSuf
     role,
     image: expected.image,
     release: baseline,
-    revisionSuffix: baselineRevisionSuffix(role, state, rollback),
+    revisionSuffix: matchingBaselineRevisionSuffix(role, state, rollback, baseline, expected.templateDigest),
   });
   if (managedAzureTemplateDigest(reconstructedBaseline) !== expected.templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
 }
 
-function baselineRevisionSuffix(role, state, rollback) {
+function baselineRevisionSuffixes(role, state, rollback) {
   const expected = rollback.previous[role];
   if (!expected || typeof expected.readyRevision !== "string" || typeof state.appName !== "string") fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
   const prefix = `${state.appName}--`;
   if (!expected.readyRevision.startsWith(prefix)) fail("MANAGED_RELEASE_RECOVERY_BASELINE_INVALID");
-  return expected.readyRevision.slice(prefix.length);
+  const derived = expected.readyRevision.slice(prefix.length);
+  return derived === "" ? [""] : [derived, ""];
+}
+
+function matchingBaselineRevisionSuffix(role, state, rollback, baseline, expectedTemplateDigest) {
+  for (const revisionSuffix of baselineRevisionSuffixes(role, state, rollback)) {
+    const reconstructedBaseline = buildManagedAzureReleaseTemplate({
+      baseline: state,
+      role,
+      image: rollback.previous[role].image,
+      release: baseline,
+      revisionSuffix,
+    });
+    if (managedAzureTemplateDigest(reconstructedBaseline) === expectedTemplateDigest) return revisionSuffix;
+  }
+  fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
 }
 
 function verifyForwardRole(role, state, status, rollback, baseline, incoming, expectedRevisionSuffix) {
@@ -116,7 +131,7 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
     role,
     image: rollback.previous[role].image,
     release: baseline,
-    revisionSuffix: baselineRevisionSuffix(role, state, rollback),
+    revisionSuffix: matchingBaselineRevisionSuffix(role, state, rollback, baseline, rollback.previous[role].templateDigest),
   });
   if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
   assertManagedAzureTemplateDelta({ ...state, template: reconstructedBaseline }, state.template, {

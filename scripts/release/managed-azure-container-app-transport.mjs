@@ -124,6 +124,11 @@ function appNameFor(target, role) {
   return role === "web" ? target.webAppName : target.workerAppName;
 }
 
+function revisionNameMatches(appName, template, revisionName) {
+  if (template.revisionSuffix === "") return new RegExp(`^${appName.replaceAll(".", "\\.")}--[a-z0-9][a-z0-9-]*$`).test(revisionName);
+  return revisionName === `${appName}--${template.revisionSuffix}`;
+}
+
 export function canonicalizeManagedAzureContainerAppState(raw, input) {
   const target = targetValue(input.target);
   const release = releaseValue(input.release);
@@ -139,7 +144,7 @@ export function canonicalizeManagedAzureContainerAppState(raw, input) {
     || properties.latestRevisionName !== properties.latestReadyRevisionName
     || !Array.isArray(template.containers) || template.containers.length !== 1
     || typeof template.revisionSuffix !== "string"
-    || properties.latestRevisionName !== `${appName}--${template.revisionSuffix}`) fail("AZURE_BASELINE_NOT_READY");
+    || !revisionNameMatches(appName, template, properties.latestRevisionName)) fail("AZURE_BASELINE_NOT_READY");
   const container = template.containers[0];
   let imageDigest = input.imageDigest;
   if (imageDigest === undefined) {
@@ -177,7 +182,7 @@ export function managedAzureRevisionSuffix({ leaseId, fence, role, phase }) {
 export function buildManagedAzureReleaseTemplate({ baseline, role, image, release, revisionSuffix }) {
   const canonicalRelease = releaseValue(release);
   if (!baseline?.template || baseline.role !== role || typeof image !== "string" || !/^[a-z0-9]+\.azurecr\.io\/corgtex\/(web|worker)@sha256:[0-9a-f]{64}$/.test(image)
-    || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(revisionSuffix)) fail("AZURE_TEMPLATE_INVALID");
+    || !(revisionSuffix === "" || /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(revisionSuffix))) fail("AZURE_TEMPLATE_INVALID");
   const template = safeJsonClone(baseline.template);
   template.revisionSuffix = revisionSuffix;
   const container = template.containers[0];

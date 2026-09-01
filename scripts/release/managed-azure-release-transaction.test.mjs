@@ -432,6 +432,18 @@ describe("managed Azure Container Apps transport", () => {
     expect(() => canonicalizeManagedAzureContainerAppState(raw, { target, role: "web", imageDigest: digests.web, release: transportNextRelease })).toThrow("AZURE_RELEASE_IDENTITY_MISMATCH");
   });
 
+  it("accepts Azure-generated ready revision names when the template has no explicit suffix", () => {
+    const raw = rawApp("web", transportBaseRelease, digests.web, "");
+    raw.properties.latestRevisionName = "web-app--b8bc6lz";
+    raw.properties.latestReadyRevisionName = "web-app--b8bc6lz";
+    const baseline = canonicalizeManagedAzureContainerAppState(raw, { target, role: "web", imageDigest: digests.web, release: transportBaseRelease });
+    expect(baseline).toMatchObject({ revisionName: "web-app--b8bc6lz", revisionSuffix: "" });
+
+    raw.properties.latestRevisionName = "other-app--b8bc6lz";
+    raw.properties.latestReadyRevisionName = "other-app--b8bc6lz";
+    expect(() => canonicalizeManagedAzureContainerAppState(raw, { target, role: "web", imageDigest: digests.web, release: transportBaseRelease })).toThrow("AZURE_BASELINE_NOT_READY");
+  });
+
   it("changes only the revision suffix, target image, and release identity", () => {
     const baseline = canonicalizeManagedAzureContainerAppState(rawApp(), { target, role: "web", imageDigest: digests.web, release: transportBaseRelease });
     const revisionSuffix = managedAzureRevisionSuffix({ leaseId, fence: 7, role: "web", phase: "forward" });
