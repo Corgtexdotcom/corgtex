@@ -94,7 +94,11 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       upsert: vi.fn(),
       update: vi.fn(),
     },
+    buildArtifact: {
+      create: vi.fn(),
+    },
     buildArtifactAsset: {
+      create: vi.fn(),
       findUnique: vi.fn(),
     },
     clientMigrationRun: {
@@ -198,6 +202,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     },
     auditLog: {
       count: vi.fn(),
+      create: vi.fn(),
       findMany: vi.fn(),
     },
     event: {
@@ -359,7 +364,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     saveSlackInstallationForWorkspace: vi.fn(),
     validateSlackPostTarget: vi.fn(),
   },
-  storageMock: { get: vi.fn() },
+  storageMock: { get: vi.fn(), put: vi.fn() },
   inventoryEvaluatorMock: vi.fn(),
   leaseMocks: {
     abortManagedReleaseLease: vi.fn(),
@@ -8490,6 +8495,59 @@ describe("managed Azure release control-plane boundary", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("freezes a private Ops build-artifact inventory for an exact managed-release canary", async () => {
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      reason: "Freeze exact canary inventory.",
+    })).resolves.toMatchObject({
+      artifactId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      inventoryCanonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+    });
+
+    expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "workspace-cr",
+        repositoryOwner: "Corgtexdotcom",
+        repositoryName: "corgtex-ops",
+        classification: "CLIENT_PRIVATE",
+        visibility: "PRIVATE",
+      }),
+    }));
+    expect(storageMock.put).toHaveBeenCalledWith(expect.stringContaining("/managed-azure-inventory.json"), expect.any(Buffer), {
+      contentType: "application/json",
+    });
+    expect(prismaMock.buildArtifactAsset.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        artifactId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        kind: "DOCUMENT",
+        mimeType: "application/json",
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "workspace-cr",
+        action: "managed_release.inventory_frozen",
+        entityType: "BuildArtifactAsset",
+      }),
+    }));
   });
 
   it("returns only digest-pinned private Ops inventory bound to the deployment and workload class", async () => {

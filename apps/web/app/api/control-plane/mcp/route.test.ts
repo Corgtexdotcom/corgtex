@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   getControlPlaneProviderStatus: vi.fn(),
   getControlPlaneSlackSetupTarget: vi.fn(),
   getControlPlaneMeetingOperationsReadiness: vi.fn(),
+  freezeControlPlaneManagedReleaseInventory: vi.fn(),
   getControlPlaneManagedReleaseInventory: vi.fn(),
   runControlPlaneManagedReleaseLeaseOperation: vi.fn(),
   enqueueControlPlaneAgendaPreparation: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneDeployLatestPreflight: vi.fn(),
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneMeetingOperationsReadiness: mocks.getControlPlaneMeetingOperationsReadiness, getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
+  freezeControlPlaneManagedReleaseInventory: mocks.freezeControlPlaneManagedReleaseInventory,
   getControlPlaneManagedReleaseInventory: mocks.getControlPlaneManagedReleaseInventory,
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
@@ -168,6 +170,7 @@ describe("/api/control-plane/mcp", () => {
       "refresh_fleet_snapshots",
       "run_post_deploy_probe",
       "enqueue_fleet_snapshot_jobs",
+      "freeze_managed_release_inventory",
       "get_managed_release_inventory",
       "managed_release_lease",
       "prepare_release_upgrade",
@@ -182,6 +185,24 @@ describe("/api/control-plane/mcp", () => {
   it("requires release scope and forwards bounded managed release operations", async () => {
     mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
     const { POST } = await import("./route");
+    const freeze = await POST(request({
+      jsonrpc: "2.0",
+      id: 40,
+      method: "tools/call",
+      params: { name: "freeze_managed_release_inventory", arguments: {
+        deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+        workloadClass: "ACTIVE_CLIENT_CANARY",
+        reason: "Freeze exact canary inventory.",
+      } },
+    }) as never);
+    expect(freeze.status).toBe(200);
+    expect(mocks.freezeControlPlaneManagedReleaseInventory).toHaveBeenCalledWith(expect.anything(), {
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      reason: "Freeze exact canary inventory.",
+    });
+
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
     const inventory = await POST(request({
       jsonrpc: "2.0",
       id: 41,
