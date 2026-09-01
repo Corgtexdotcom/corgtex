@@ -436,6 +436,93 @@ describe("fleet release runner", () => {
     });
   });
 
+  it("scopes canary preflight deployment id propagation to explicit Ops releases", async () => {
+    const manifest = {
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    };
+    const env = {
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
+    };
+
+    expect(releaseVariables(manifest, env)).not.toHaveProperty("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+    expect(azureReleaseVariables(manifest, env)).not.toHaveProperty("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+    expect(releaseVariables(manifest, env, {
+      includeCanaryPreflightDeploymentId: true,
+    })).toMatchObject({
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
+    });
+  });
+
+  it("clears blank canary preflight deployment ids during explicit Ops releases", async () => {
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "",
+    }, {
+      includeCanaryPreflightDeploymentId: true,
+    })).toMatchObject({
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "",
+    });
+  });
+
+  it("rejects malformed canary preflight deployment ids before promotion", async () => {
+    const env = {
+      FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "not-a-uuid",
+    };
+
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--dry-run",
+    ], {
+      env,
+      runCommand: vi.fn(),
+    })).rejects.toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+
+    expect(() => releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {
+      MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "not-a-uuid",
+    }, {
+      includeCanaryPreflightDeploymentId: true,
+    })).toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+  });
+
+  it("rejects malformed canary preflight deployment ids before direct deploy provider calls", async () => {
+    const fetchImpl = vi.fn();
+
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        RAILWAY_API_TOKEN: "railway-token",
+        GITHUB_TOKEN: "github-token",
+        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "not-a-uuid",
+      },
+      fetchImpl,
+      runCommand: vi.fn(),
+    })).rejects.toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("uses migrate-and-web startup for Azure releases", async () => {
     expect(azureReleaseVariables({
       releaseVersion: "main-c9077ff031e",
@@ -1214,6 +1301,7 @@ describe("fleet release runner", () => {
         APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
         POSTHOG_ENABLED: "true",
         POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
       },
       runCommand: vi.fn(),
       fetchImpl,
@@ -1253,6 +1341,7 @@ describe("fleet release runner", () => {
         CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
         CORGTEX_RELEASE_GIT_SHA: SHA,
         CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
+        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
       });
     }
     const deployAndWaitCalls = railwayCalls
