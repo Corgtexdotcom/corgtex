@@ -8521,10 +8521,19 @@ describe("managed Azure release control-plane boundary", () => {
     storageMock.delete.mockResolvedValue(undefined);
   });
 
-  it("freezes a private Ops build-artifact inventory for an exact managed-release canary", async () => {
+  function mockOperationalInventoryWorkspace(workspaceId = "workspace-ops") {
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      {
+        id: "control-plane-deployment",
+        managedWorkspaceId: workspaceId,
+      },
+    ]);
+  }
+
+  it("freezes a private Ops build-artifact inventory for an exact managed-release canary without requiring a target workspace", async () => {
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
     leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
-    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    mockOperationalInventoryWorkspace();
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
       artifactStatus: "VALID",
@@ -8554,7 +8563,7 @@ describe("managed Azure release control-plane boundary", () => {
 
     expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        workspaceId: "workspace-cr",
+        workspaceId: "workspace-ops",
         createdByUserId: null,
         repositoryOwner: "corgtexdotcom",
         repositoryName: "corgtex-ops",
@@ -8578,7 +8587,7 @@ describe("managed Azure release control-plane boundary", () => {
     }));
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        workspaceId: "workspace-cr",
+        workspaceId: "workspace-ops",
         action: "managed_release.inventory_frozen",
         entityType: "BuildArtifactAsset",
         meta: expect.objectContaining({
@@ -8590,6 +8599,19 @@ describe("managed Azure release control-plane boundary", () => {
         }),
       }),
     }));
+    expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith({
+      where: {
+        deploymentKind: "CUSTOMER_CONTROL_PLANE",
+        deploymentStatus: "ACTIVE",
+        managedWorkspaceId: { not: null },
+      },
+      select: {
+        id: true,
+        managedWorkspaceId: true,
+      },
+      orderBy: { id: "asc" },
+      take: 2,
+    });
     expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.subscriptionId);
     expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.resourceGroup);
     expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.webAppName);
@@ -8607,7 +8629,7 @@ describe("managed Azure release control-plane boundary", () => {
     };
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
     leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
-    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    mockOperationalInventoryWorkspace();
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
       artifactStatus: "VALID",
@@ -8642,7 +8664,7 @@ describe("managed Azure release control-plane boundary", () => {
     };
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
     leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
-    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    mockOperationalInventoryWorkspace();
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
       artifactStatus: "VALID",
@@ -8680,6 +8702,45 @@ describe("managed Azure release control-plane boundary", () => {
     expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.webAppName);
   });
 
+  it("rejects inventory freeze when the operational inventory workspace is unavailable", async () => {
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([]);
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).rejects.toMatchObject({
+      code: "MANAGED_RELEASE_INVENTORY_REJECTED",
+    });
+
+    expect(storageMock.put).not.toHaveBeenCalled();
+  });
+
+  it("rejects inventory freeze when multiple operational inventory workspaces match", async () => {
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+      { id: "control-plane-a", managedWorkspaceId: "workspace-ops-a" },
+      { id: "control-plane-b", managedWorkspaceId: "workspace-ops-b" },
+    ]);
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).rejects.toMatchObject({
+      code: "MANAGED_RELEASE_INVENTORY_REJECTED",
+    });
+
+    expect(storageMock.put).not.toHaveBeenCalled();
+  });
+
   it("rejects inventory freeze without an audited reason before preflight or storage", async () => {
     const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
 
@@ -8714,7 +8775,7 @@ describe("managed Azure release control-plane boundary", () => {
       code: "MANAGED_RELEASE_TARGET_INELIGIBLE",
     });
 
-    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.findMany).not.toHaveBeenCalled();
     expect(storageMock.put).not.toHaveBeenCalled();
   });
 
