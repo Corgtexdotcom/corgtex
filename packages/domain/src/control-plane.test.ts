@@ -8758,6 +8758,7 @@ describe("managed Azure release control-plane boundary", () => {
       evaluation: {
         workloadClass: "ACTIVE_CLIENT_CANARY",
         canonicalDigest: `sha256:${"b".repeat(64)}`,
+        preflightDigest: canaryPreflightDigest,
         validUntil: "2026-08-28T00:00:00.000Z",
         opaqueTargetId: canaryOpaqueTargetId,
       },

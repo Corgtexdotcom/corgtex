@@ -137,6 +137,10 @@ describe("managed release lease CAS", () => {
     const target = await deployment();
     const old = await acquire(target.id);
     await expire(target.id);
+    await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toMatchObject({
+      deploymentId: target.id,
+      target: { acrName: "acr12", acrServer: ACR },
+    });
     const current = await acquire(target.id);
     expect(current.fence).toBe(old.fence + 1); expect(current.leaseId).not.toBe(old.leaseId);
     const stale = [

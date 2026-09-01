@@ -36,6 +36,32 @@ function fail(code) { throw new ManagedAzureReleaseError(code); }
 function same(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 function releaseTargetWithAcrGroup(target, acrResourceGroup) { return Object.freeze({ ...target, acrResourceGroup }); }
 function failureMessage(error) { return typeof error?.message === "string" ? error.message : ""; }
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+function preflightProjection(preflight) {
+  return Object.freeze({
+    deploymentId: preflight.deploymentId,
+    origin: preflight.origin,
+    release: {
+      baselineImageTag: preflight.release?.baselineImageTag,
+      baselineVersion: preflight.release?.baselineVersion ?? null,
+    },
+    target: {
+      subscriptionId: preflight.target?.subscriptionId,
+      resourceGroup: preflight.target?.resourceGroup,
+      acrName: preflight.target?.acrName,
+      acrServer: preflight.target?.acrServer,
+      webAppName: preflight.target?.webAppName,
+      workerAppName: preflight.target?.workerAppName,
+    },
+  });
+}
+function preflightDigest(preflight) {
+  return `sha256:${createHash("sha256").update(canonicalJson(preflightProjection(preflight))).digest("hex")}`;
+}
 
 function failReleaseResolution(error) {
   if (error instanceof ManagedAzureReleaseError) throw error;
@@ -121,7 +147,8 @@ function verifyInventoryResponse(inventory, input) {
   if (inventory?.inventoryRef !== input.inventoryRef || inventory.sha256 !== input.inventorySha256
     || typeof inventory.bytesBase64 !== "string"
     || inventory.evaluation?.workloadClass !== input.workloadClass
-    || !/^sha256:[0-9a-f]{64}$/.test(inventory.evaluation?.canonicalDigest)) fail("MANAGED_RELEASE_INVENTORY_INVALID");
+    || !/^sha256:[0-9a-f]{64}$/.test(inventory.evaluation?.canonicalDigest)
+    || !/^sha256:[0-9a-f]{64}$/.test(inventory.evaluation?.preflightDigest)) fail("MANAGED_RELEASE_INVENTORY_INVALID");
   let bytes;
   try { bytes = Buffer.from(inventory.bytesBase64, "base64"); } catch { fail("MANAGED_RELEASE_INVENTORY_INVALID"); }
   if (bytes.length === 0 || bytes.length > 96_000 || bytes.toString("base64") !== inventory.bytesBase64
@@ -143,10 +170,11 @@ export function managedAzureHealthReady(body, release) {
 export async function runManagedAzureReleaseTransaction(rawInput, dependencies) {
   const input = canonicalInput(rawInput);
   const deps = dependencies;
-  const inventory = verifyInventoryResponse(await deps.loadInventory(input), input);
   if (input.execute && input.workloadClass === "ACTIVE_CLIENT_CANARY") fail("MANAGED_RELEASE_EXECUTION_NOT_ALLOWED");
+  const inventory = verifyInventoryResponse(await deps.loadInventory(input), input);
   const preflight = await deps.lease("preflight", { deploymentId: input.deploymentId, workloadClass: input.workloadClass, acrName: input.acrName, acrServer: input.acrServer });
   if (preflight.deploymentId !== input.deploymentId || preflight.target?.acrName !== input.acrName || preflight.target?.acrServer !== input.acrServer) fail("MANAGED_RELEASE_TARGET_INVALID");
+  if (inventory.evaluation.preflightDigest !== preflightDigest(preflight)) fail("MANAGED_RELEASE_TARGET_INVALID");
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
   if (baselineRelease.imageTag === `sha-${input.releaseSha}`) fail("MANAGED_RELEASE_ALREADY_CURRENT");
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });

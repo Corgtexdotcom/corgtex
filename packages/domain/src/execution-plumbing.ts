@@ -24,6 +24,7 @@ import { recordAudit } from "./audit-trail";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { AppError, invariant } from "./errors";
 import { isKnownScope, type AgentScope } from "./agent-auth";
+import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 import { privacyFilter } from "./privacy";
 import { formatWorkItemPriority } from "./work-item-priority";
 
@@ -522,7 +523,10 @@ async function validateWritebackTarget(
       return { type, id: item.id, title: item.title, status: item.authority, webPath: `/brain/${item.slug}` };
     }
     case "BUILD_ARTIFACT": {
-      const item = await client.buildArtifact.findFirst({ where: { id: targetId, workspaceId }, select: { id: true, title: true, status: true } });
+      const item = await client.buildArtifact.findFirst({
+        where: { id: targetId, workspaceId, NOT: OPERATIONAL_ARTIFACT_FILTER },
+        select: { id: true, title: true, status: true },
+      });
       invariant(item, 404, "NOT_FOUND", "Build artifact write-back target not found.");
       return { type, id: item.id, title: item.title, status: item.status, webPath: `/build-artifacts/${item.id}` };
     }
@@ -999,7 +1003,7 @@ export async function listWritebackTargets(actor: AppActor, params: ListWritebac
   if (includeType("BUILD_ARTIFACT")) {
     requireExecutionScope(actor, "workspace:read");
     const records = await prisma.buildArtifact.findMany({
-      where: { workspaceId: params.workspaceId, ...(title ? { title } : {}) },
+      where: { workspaceId: params.workspaceId, ...(title ? { title } : {}), NOT: OPERATIONAL_ARTIFACT_FILTER },
       select: { id: true, title: true, status: true },
       orderBy: { updatedAt: "desc" },
       take,

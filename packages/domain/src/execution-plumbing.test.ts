@@ -632,6 +632,51 @@ describe("execution plumbing domain", () => {
     }));
   });
 
+  it("excludes operational build artifacts from execution write-back targets", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValueOnce([]);
+    const { createExecutionRequest, listWritebackTargets } = await import("./execution-plumbing");
+
+    await listWritebackTargets(agentActor, {
+      workspaceId: "workspace-1",
+      targetTypes: ["BUILD_ARTIFACT"],
+    });
+
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
+
+    prismaMock.executionRequest.findFirst.mockResolvedValueOnce(null);
+    prismaMock.buildArtifact.findFirst.mockResolvedValueOnce(null);
+    const buildAgent = { ...agentActor, scopes: [...(agentActor.scopes ?? []), "workspace:write"] };
+    await expect(createExecutionRequest(buildAgent, {
+      workspaceId: "workspace-1",
+      provider: "openwork",
+      goal: "Update release evidence",
+      writebackTargetType: "BUILD_ARTIFACT",
+      writebackTargetId: "artifact-operational",
+      idempotencyKey: "ops-artifact-target",
+    })).rejects.toThrow("Build artifact write-back target not found.");
+    expect(prismaMock.buildArtifact.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: "artifact-operational",
+        workspaceId: "workspace-1",
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      },
+    }));
+    expect(prismaMock.executionRequest.create).not.toHaveBeenCalled();
+  });
+
   it("requires content read scopes before returning company context", async () => {
     const { getCompanyContext } = await import("./execution-plumbing");
 

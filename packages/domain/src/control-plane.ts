@@ -11400,6 +11400,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     evaluation: {
       workloadClass: params.workloadClass,
       canonicalDigest: evaluation.canonicalDigest,
+      preflightDigest,
       validUntil: evaluation.validUntil,
       opaqueTargetId: evaluation.selection.opaqueTargetId,
     },
