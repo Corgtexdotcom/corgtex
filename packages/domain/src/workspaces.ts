@@ -1,6 +1,7 @@
 import { env, normalizeWorkspaceSlug, prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { invariant } from "./errors";
+import { assertCustomerAssignableWorkspaceSlug } from "./workspace-slugs";
 
 export async function createWorkspace(actor: AppActor, params: {
   name: string;
@@ -13,6 +14,7 @@ export async function createWorkspace(actor: AppActor, params: {
   const slug = normalizeWorkspaceSlug(params.slug);
   invariant(name.length > 0, 400, "INVALID_INPUT", "Workspace name is required.");
   invariant(slug.length > 0, 400, "INVALID_INPUT", "Workspace slug is required.");
+  assertCustomerAssignableWorkspaceSlug(slug);
 
   const deploymentSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
   invariant(

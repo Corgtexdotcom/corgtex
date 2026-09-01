@@ -71,6 +71,7 @@ import {
   markManagedReleaseRecoveryRequired,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
+import { assertCustomerAssignableWorkspaceSlug, MANAGED_RELEASE_OPERATIONAL_WORKSPACE_SLUG } from "./workspace-slugs";
 
 const SUPPORT_ACTOR_LABEL = "Corgtex Support";
 const DEFAULT_RECORDER_BOT_NAME = "Corgtex Recorder";
@@ -1337,6 +1338,7 @@ async function createSharedClientWorkspace(params: {
   slug: string;
   description?: string | null;
 }) {
+  assertCustomerAssignableWorkspaceSlug(params.slug);
   return prisma.$transaction(async (tx) => {
     const existing = await tx.workspace.findUnique({ where: { slug: params.slug } });
     invariant(!existing, 409, "CONFLICT", "A workspace with this slug already exists.");
@@ -10951,6 +10953,11 @@ const MANAGED_RELEASE_INVENTORY_REPOSITORY = {
   owner: "corgtexdotcom",
   name: "corgtex-ops",
 } as const;
+const MANAGED_RELEASE_OPERATIONAL_WORKSPACE = {
+  slug: MANAGED_RELEASE_OPERATIONAL_WORKSPACE_SLUG,
+  name: "Corgtex Managed Release Ops",
+  description: "Internal workspace for private managed-release operational artifacts.",
+} as const;
 type ManagedReleasePreflightProjection = {
   deploymentId: string;
   origin: string;
@@ -11177,22 +11184,26 @@ function managedReleaseInventoryDocument(params: {
 }
 
 async function requireManagedReleaseOperationalWorkspaceId() {
-  const deployments = await prisma.customerDeployment.findMany({
-    where: {
-      deploymentKind: "CUSTOMER_CONTROL_PLANE",
-      deploymentStatus: "ACTIVE",
-      managedWorkspaceId: { not: null },
+  const workspace = await prisma.workspace.upsert({
+    where: { slug: MANAGED_RELEASE_OPERATIONAL_WORKSPACE.slug },
+    create: {
+      slug: MANAGED_RELEASE_OPERATIONAL_WORKSPACE.slug,
+      name: MANAGED_RELEASE_OPERATIONAL_WORKSPACE.name,
+      description: MANAGED_RELEASE_OPERATIONAL_WORKSPACE.description,
     },
     select: {
       id: true,
-      managedWorkspaceId: true,
+      slug: true,
+      description: true,
+      _count: { select: { members: true } },
     },
-    orderBy: { id: "asc" },
-    take: 2,
+    update: {},
   });
-  invariant(deployments.length === 1 && deployments[0]?.managedWorkspaceId,
+  invariant(workspace.slug === MANAGED_RELEASE_OPERATIONAL_WORKSPACE.slug
+    && workspace.description === MANAGED_RELEASE_OPERATIONAL_WORKSPACE.description
+    && workspace._count.members === 0,
     409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
-  return deployments[0].managedWorkspaceId;
+  return workspace.id;
 }
 
 export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor, params: {

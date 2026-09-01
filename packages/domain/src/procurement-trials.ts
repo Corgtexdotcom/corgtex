@@ -23,6 +23,7 @@ import {
   applyTrialFeatureFlags,
 } from "./trial-entitlements";
 import { registerCustomerDeployment } from "./customer-lifecycle";
+import { assertCustomerAssignableWorkspaceSlug } from "./workspace-slugs";
 
 export const PROCUREMENT_TRIAL_TTL_DAYS = 30;
 export const PROCUREMENT_TRIAL_LIMITS = {
@@ -240,6 +241,7 @@ function normalizedInputFromTrial(trial: {
 
 async function findAvailableSlug(tx: Tx, companyName: string) {
   const base = slugFromCompany(companyName);
+  assertCustomerAssignableWorkspaceSlug(base);
   const existing = await tx.workspace.findUnique({
     where: { slug: base },
     select: { id: true },
@@ -250,6 +252,7 @@ async function findAvailableSlug(tx: Tx, companyName: string) {
     const suffix = sha256(`${base}:${companyName}:${attempt}`).slice(0, 6);
     const candidateBase = base.slice(0, Math.max(1, 64 - suffix.length - 1)).replace(/-$/g, "");
     const candidate = `${candidateBase}-${suffix}`;
+    assertCustomerAssignableWorkspaceSlug(candidate);
     const collision = await tx.workspace.findUnique({
       where: { slug: candidate },
       select: { id: true },

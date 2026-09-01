@@ -315,6 +315,27 @@ describe("procurement trials", () => {
     expect(prismaMock.agentCredential.create).not.toHaveBeenCalled();
   });
 
+  it("rejects trial workspace allocation for the managed-release operational slug", async () => {
+    const { createProcurementTrial } = await import("./procurement-trials");
+
+    await expect(createProcurementTrial({
+      idempotencyKey: "idem-reserved-slug",
+      origin: "https://app.test",
+      input: {
+        companyName: "Corgtex Managed Release Ops",
+        adminEmail: "admin@reserved-slug.test",
+        adminName: "Admin",
+        acceptedTermsVersion: "2026-04",
+      },
+    })).rejects.toMatchObject({
+      status: 403,
+      code: "WORKSPACE_SLUG_RESERVED",
+    });
+
+    expect(prismaMock.workspace.create).not.toHaveBeenCalled();
+    expect(prismaMock.agentCredential.create).not.toHaveBeenCalled();
+  });
+
   it("rejects same-key different-body idempotency misuse", async () => {
     prismaMock.procurementIdempotencyKey.findUnique.mockResolvedValueOnce({
       requestHash: "different-request",
