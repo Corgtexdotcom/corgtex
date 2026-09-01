@@ -396,6 +396,24 @@ describe("build artifacts", () => {
     }));
   });
 
+  it("excludes operational inventory artifacts from the customer build-artifact feed", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([]);
+
+    const { listBuildArtifacts } = await import("./build-artifacts");
+    await expect(listBuildArtifacts(actor, { workspaceId: "workspace-1" })).resolves.toEqual([]);
+
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        NOT: {
+          repositoryOwner: "Corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
+  });
+
   it("resolves GitHub repository allowlists from build artifact feature config", async () => {
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
       {

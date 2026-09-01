@@ -364,7 +364,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     saveSlackInstallationForWorkspace: vi.fn(),
     validateSlackPostTarget: vi.fn(),
   },
-  storageMock: { get: vi.fn(), put: vi.fn() },
+  storageMock: { delete: vi.fn(), get: vi.fn(), put: vi.fn() },
   inventoryEvaluatorMock: vi.fn(),
   leaseMocks: {
     abortManagedReleaseLease: vi.fn(),
@@ -8511,6 +8511,7 @@ describe("managed Azure release control-plane boundary", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    storageMock.delete.mockResolvedValue(undefined);
   });
 
   it("freezes a private Ops build-artifact inventory for an exact managed-release canary", async () => {
@@ -8547,10 +8548,14 @@ describe("managed Azure release control-plane boundary", () => {
     expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         workspaceId: "workspace-cr",
+        createdByUserId: null,
         repositoryOwner: "Corgtexdotcom",
         repositoryName: "corgtex-ops",
+        pullRequestNumber: null,
         classification: "CLIENT_PRIVATE",
         visibility: "PRIVATE",
+        status: "CLOSED",
+        closedAt: expect.any(Date),
       }),
     }));
     expect(storageMock.put).toHaveBeenCalledWith(expect.stringContaining("/managed-azure-inventory.json"), expect.any(Buffer), {
@@ -8571,13 +8576,101 @@ describe("managed Azure release control-plane boundary", () => {
         entityType: "BuildArtifactAsset",
         meta: expect.objectContaining({
           reason: "Freeze exact canary inventory.",
-          preflight: expect.objectContaining({
-            baselineImageTag: canaryPreflight.release.baselineImageTag,
-            target: canaryPreflight.target,
-          }),
+          actorLabel: "managed-release",
+          preflightDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+          baselineImageTag: canaryPreflight.release.baselineImageTag,
+          baselineVersion: canaryPreflight.release.baselineVersion,
         }),
       }),
     }));
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.subscriptionId);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.resourceGroup);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.webAppName);
+  });
+
+  it("attributes user inventory freezes and deletes uploaded bytes when persistence fails", async () => {
+    const userActor: AppActor = {
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    };
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    const failure = new Error("db unavailable");
+    prismaMock.$transaction.mockRejectedValueOnce(failure);
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(userActor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).rejects.toBe(failure);
+
+    expect(storageMock.delete).toHaveBeenCalledWith(expect.stringContaining("/managed-azure-inventory.json"));
+  });
+
+  it("attributes user inventory freeze audit records", async () => {
+    const userActor: AppActor = {
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    };
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await freezeControlPlaneManagedReleaseInventory(userActor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    });
+
+    expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        createdByUserId: "user-1",
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        actorUserId: "user-1",
+        meta: expect.objectContaining({
+          actorLabel: "operator@example.com",
+          preflightDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+          baselineImageTag: canaryPreflight.release.baselineImageTag,
+        }),
+      }),
+    }));
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.subscriptionId);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.resourceGroup);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.webAppName);
   });
 
   it("rejects inventory freeze without an audited reason before preflight or storage", async () => {

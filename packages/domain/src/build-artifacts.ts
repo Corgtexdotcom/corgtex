@@ -23,6 +23,11 @@ import { AppError, invariant } from "./errors";
 
 const ARTIFACT_MANAGER_ROLES = new Set<MemberRole>(["ADMIN", "FACILITATOR"]);
 const PUBLIC_PROOF_URL_TTL_SECONDS = 60 * 10;
+const OPERATIONAL_ARTIFACT_FILTER = {
+  repositoryOwner: "Corgtexdotcom",
+  repositoryName: "corgtex-ops",
+  pullRequestNumber: null,
+} as const;
 
 const buildArtifactAssetSelect = {
   id: true,
@@ -381,6 +386,7 @@ export async function listBuildArtifacts(actor: AppActor, params: {
     where: {
       workspaceId: params.workspaceId,
       ...(params.status ? { status: params.status } : {}),
+      NOT: OPERATIONAL_ARTIFACT_FILTER,
     },
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
     select: buildArtifactSelect,
