@@ -41,6 +41,9 @@ jobs:
         env:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
-        run: >-
-          node scripts/control-plane.mjs call freeze_managed_release_inventory
-          '{"deploymentId":"${{ inputs.deployment_id }}","workloadClass":"${{ inputs.workload_class }}","reason":"${{ inputs.reason }}"}'
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          args="$(node -e 'process.stdout.write(JSON.stringify({ deploymentId: process.env.DEPLOYMENT_ID, workloadClass: process.env.WORKLOAD_CLASS, reason: process.env.REASON }))')"
+          node scripts/control-plane.mjs call freeze_managed_release_inventory "$args"
