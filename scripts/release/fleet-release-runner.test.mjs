@@ -498,6 +498,31 @@ describe("fleet release runner", () => {
     })).toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
   });
 
+  it("rejects malformed canary preflight deployment ids before direct deploy provider calls", async () => {
+    const fetchImpl = vi.fn();
+
+    await expect(runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "ops",
+      "--reason",
+      "Deploy release.",
+    ], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        RAILWAY_API_TOKEN: "railway-token",
+        GITHUB_TOKEN: "github-token",
+        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "not-a-uuid",
+      },
+      fetchImpl,
+      runCommand: vi.fn(),
+    })).rejects.toThrow("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("uses migrate-and-web startup for Azure releases", async () => {
     expect(azureReleaseVariables({
       releaseVersion: "main-c9077ff031e",

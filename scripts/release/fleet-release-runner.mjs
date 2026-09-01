@@ -74,9 +74,11 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const env = deps.env ?? process.env;
+  const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
+  const selectedGroups = normalizeTargets(targetSelection);
+  validateOptionalCanaryPreflightDeploymentId(selectedGroups, env);
   validateRuntimeObservabilityEnvironment(env);
   const manifest = await resolveManifest(args, deps);
-  const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default"; const selectedGroups = normalizeTargets(targetSelection);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
   const failOnBlockers = parseBoolean(args.failOnBlockers ?? env.FLEET_RELEASE_FAIL_ON_BLOCKERS, false);
   const forceAfterFailure = parseBoolean(args.forceAfterFailure ?? env.FLEET_RELEASE_FORCE_AFTER_FAILURE, false);
