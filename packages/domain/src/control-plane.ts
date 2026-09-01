@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
@@ -49,7 +49,13 @@ import {
   POST_DEPLOY_CUSTOMER_READ_PROBES,
 } from "./post-deploy-probe-contract";
 import { evaluateExactTargetInventoryJson } from "./exact-target-inventory-evaluator";
-import type { ExactTargetInventoryWorkloadClass } from "./exact-target-inventory-contract";
+import {
+  exactTargetInventoryRequiredDispositions,
+  exactTargetInventoryWorkloadClasses,
+  type ExactTargetInventoryComponent,
+  type ExactTargetInventoryDocument,
+  type ExactTargetInventoryWorkloadClass,
+} from "./exact-target-inventory-contract";
 import {
   abortManagedReleaseLease,
   acquireManagedReleaseLease,
@@ -10941,6 +10947,26 @@ export async function recordBreakGlassSupportNote(actor: AppActor, params: {
 const MANAGED_RELEASE_INVENTORY_MAX_BYTES = 96_000;
 const MANAGED_RELEASE_READ_OPERATIONS = new Set(["preflight", "get_target", "get_rollback", "get_recovery"]);
 const MANAGED_RELEASE_WORKLOAD_CLASSES = new Set<ExactTargetInventoryWorkloadClass>(["ACTIVE_CLIENT_PRIMARY", "ACTIVE_CLIENT_CANARY"]);
+const MANAGED_RELEASE_INVENTORY_REPOSITORY = {
+  owner: "corgtexdotcom",
+  name: "corgtex-ops",
+} as const;
+type ManagedReleasePreflightProjection = {
+  deploymentId: string;
+  origin: string;
+  release: {
+    baselineImageTag: string;
+    baselineVersion: string | null;
+  };
+  target: {
+    subscriptionId: string;
+    resourceGroup: string;
+    acrName: string;
+    acrServer: string;
+    webAppName: string;
+    workerAppName: string;
+  };
+};
 
 function managedReleaseHandle(params: Record<string, unknown>) {
   return {
@@ -10958,11 +10984,340 @@ function managedReleaseAcr(params: Record<string, unknown>) {
   };
 }
 
+function managedReleasePreflightProjection(value: unknown): ManagedReleasePreflightProjection {
+  invariant(value && typeof value === "object" && !Array.isArray(value),
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const record = value as Record<string, unknown>;
+  invariant(typeof record.deploymentId === "string" && typeof record.origin === "string"
+    && record.release && typeof record.release === "object" && !Array.isArray(record.release)
+    && record.target && typeof record.target === "object" && !Array.isArray(record.target),
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const release = record.release as Record<string, unknown>;
+  const target = record.target as Record<string, unknown>;
+  invariant(typeof release.baselineImageTag === "string"
+    && (release.baselineVersion === null || typeof release.baselineVersion === "string")
+    && typeof target.subscriptionId === "string"
+    && typeof target.resourceGroup === "string"
+    && typeof target.acrName === "string"
+    && typeof target.acrServer === "string"
+    && typeof target.webAppName === "string"
+    && typeof target.workerAppName === "string",
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  return {
+    deploymentId: record.deploymentId,
+    origin: record.origin,
+    release: {
+      baselineImageTag: release.baselineImageTag,
+      baselineVersion: release.baselineVersion,
+    },
+    target: {
+      subscriptionId: target.subscriptionId,
+      resourceGroup: target.resourceGroup,
+      acrName: target.acrName,
+      acrServer: target.acrServer,
+      webAppName: target.webAppName,
+      workerAppName: target.workerAppName,
+    },
+  };
+}
+
+function managedReleaseProofInstant(offsetMs = 0) {
+  return new Date(Date.now() + offsetMs).toISOString();
+}
+
+function managedReleaseDigest(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function managedReleaseUuid(seed: string) {
+  const hex = managedReleaseDigest(seed);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function managedReleaseCanonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => managedReleaseCanonicalJson(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${managedReleaseCanonicalJson(record[key])}`).join(",")}}`;
+}
+
+function managedReleaseTopology(components: readonly ExactTargetInventoryComponent[]) {
+  const normalized = components.map((component) => ({
+    componentId: component.componentId,
+    kind: component.kind,
+    required: component.required,
+    dependencies: component.dependencies.map((dependency) => ({
+      componentId: dependency.componentId,
+      kind: dependency.kind,
+    })).sort((a, b) => a.componentId.localeCompare(b.componentId)),
+    rollback: component.rollback === undefined ? null : {
+      strategy: component.rollback.strategy,
+      predecessorRef: component.rollback.predecessorRef,
+    },
+  })).sort((a, b) => a.componentId.localeCompare(b.componentId));
+  return {
+    topologyDigest: `sha256:${managedReleaseDigest(managedReleaseCanonicalJson(normalized))}`,
+    componentCount: components.length,
+    dependencyCount: components.reduce((count, component) => count + component.dependencies.length, 0),
+    rollbackCount: components.reduce((count, component) => count + (component.rollback === undefined ? 0 : 1), 0),
+  };
+}
+
+function managedReleaseInventoryDocument(params: {
+  deploymentId: string;
+  workloadClass: ExactTargetInventoryWorkloadClass;
+  preflight: ManagedReleasePreflightProjection;
+  reason: string;
+  observedAt: string;
+  verifiedAt: string;
+  assertedAt: string;
+  generatedAt: string;
+  expiresAt: string;
+}) {
+  const evidenceSeed = managedReleaseCanonicalJson({
+    deploymentId: params.deploymentId,
+    workloadClass: params.workloadClass,
+    preflight: params.preflight,
+    reason: params.reason,
+  });
+  let proofCounter = 0;
+  const claim = (owner: string, kind: "LIFECYCLE" | "AUTHORITY" | "COMPLETENESS" | "DEPENDENCY" | "ROLLBACK" | "POLICY", purpose: "target-lifecycle" | "target-authority" | "target-completeness" | "component-dependency" | "component-rollback" | "target-policy") => {
+    proofCounter += 1;
+    const artifactSeed = `${evidenceSeed}:${owner}:${kind}:${purpose}:${proofCounter}`;
+    return {
+      kind,
+      owner,
+      assertedAt: params.assertedAt,
+      proof: {
+        purpose,
+        owner,
+        claimKind: kind,
+        finality: "SETTLED" as const,
+        artifact: {
+          path: `evidence/${managedReleaseDigest(artifactSeed).slice(0, 40)}.json`,
+          digest: `sha256:${managedReleaseDigest(`${artifactSeed}:proof`)}`,
+        },
+        observedAt: params.observedAt,
+        verifiedAt: params.verifiedAt,
+        expiresAt: params.expiresAt,
+      },
+    };
+  };
+  const target = (workloadClass: ExactTargetInventoryWorkloadClass, targetId: string) => {
+    const web = managedReleaseUuid(`${workloadClass}:${targetId}:web:${params.preflight.target.webAppName}`);
+    const worker = managedReleaseUuid(`${workloadClass}:${targetId}:worker:${params.preflight.target.workerAppName}`);
+    const database = managedReleaseUuid(`${workloadClass}:${targetId}:database:${params.deploymentId}`);
+    const registry = managedReleaseUuid(`${workloadClass}:${targetId}:registry:${params.preflight.target.acrServer}`);
+    const components: ExactTargetInventoryComponent[] = [
+      {
+        componentId: web,
+        kind: "WEB_APP",
+        required: true,
+        dependencies: [
+          { componentId: database, kind: "DATABASE", claim: claim(`${web}->${database}`, "DEPENDENCY", "component-dependency") },
+          { componentId: registry, kind: "REGISTRY", claim: claim(`${web}->${registry}`, "DEPENDENCY", "component-dependency") },
+        ],
+        rollback: { strategy: "PREVIOUS_IMAGE", predecessorRef: web, claim: claim(`${web}->${web}`, "ROLLBACK", "component-rollback") },
+      },
+      {
+        componentId: worker,
+        kind: "WORKER_APP",
+        required: true,
+        dependencies: [
+          { componentId: database, kind: "DATABASE", claim: claim(`${worker}->${database}`, "DEPENDENCY", "component-dependency") },
+          { componentId: registry, kind: "REGISTRY", claim: claim(`${worker}->${registry}`, "DEPENDENCY", "component-dependency") },
+        ],
+        rollback: { strategy: "PREVIOUS_IMAGE", predecessorRef: worker, claim: claim(`${worker}->${worker}`, "ROLLBACK", "component-rollback") },
+      },
+      {
+        componentId: database,
+        kind: "DATABASE",
+        required: true,
+        dependencies: [],
+        rollback: { strategy: "RESTORE_SNAPSHOT", predecessorRef: database, claim: claim(`${database}->${database}`, "ROLLBACK", "component-rollback") },
+      },
+      {
+        componentId: registry,
+        kind: "REGISTRY",
+        required: true,
+        dependencies: [],
+        rollback: { strategy: "PREVIOUS_CONFIG", predecessorRef: registry, claim: claim(`${registry}->${registry}`, "ROLLBACK", "component-rollback") },
+      },
+    ];
+    const owner = `class-${workloadClass.toLowerCase().replaceAll("_", "-")}:${targetId}`;
+    return {
+      targetId,
+      lifecycleClaim: claim(owner, "LIFECYCLE", "target-lifecycle"),
+      authorityClaim: claim(owner, "AUTHORITY", "target-authority"),
+      completenessClaim: {
+        ...claim(owner, "COMPLETENESS", "target-completeness"),
+        ...managedReleaseTopology(components),
+      },
+      policyClaim: claim(owner, "POLICY", "target-policy"),
+      components,
+    };
+  };
+  return {
+    schemaVersion: "2.0.0",
+    inventoryId: randomUUID(),
+    generatedAt: params.generatedAt,
+    classes: exactTargetInventoryWorkloadClasses.map((workloadClass) => {
+      const selected = workloadClass === params.workloadClass;
+      const disposition = selected ? "SELECTABLE" : exactTargetInventoryRequiredDispositions[workloadClass];
+      const selectable = disposition === "SELECTABLE";
+      const targetId = selected ? params.deploymentId : managedReleaseUuid(`${params.deploymentId}:${workloadClass}:target`);
+      return {
+        workloadClass,
+        disposition,
+        rootClaim: claim(`class-${workloadClass.toLowerCase().replaceAll("_", "-")}`, "AUTHORITY", "target-authority"),
+        targets: selectable ? [target(workloadClass, targetId)] : [],
+      };
+    }),
+  } satisfies ExactTargetInventoryDocument;
+}
+
+export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor, params: {
+  deploymentId: string;
+  workloadClass: ExactTargetInventoryWorkloadClass;
+  acrName: string;
+  acrServer: string;
+  reason: string;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
+  const reason = requireMutationReason(params.reason);
+  invariant(MANAGED_RELEASE_WORKLOAD_CLASSES.has(params.workloadClass),
+    400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  const preflight = managedReleasePreflightProjection(await getManagedReleaseTargetPreflight(params.deploymentId, managedReleaseAcr({
+    acrName: params.acrName,
+    acrServer: params.acrServer,
+  }), params.workloadClass));
+  const deployment = await prisma.customerDeployment.findUnique({
+    where: { id: params.deploymentId },
+    select: { id: true, managedWorkspaceId: true },
+  });
+  invariant(deployment?.managedWorkspaceId,
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+
+  const generatedAt = managedReleaseProofInstant();
+  const document = managedReleaseInventoryDocument({
+    deploymentId: params.deploymentId,
+    workloadClass: params.workloadClass,
+    preflight,
+    reason,
+    observedAt: managedReleaseProofInstant(-5 * 60_000),
+    verifiedAt: managedReleaseProofInstant(-4 * 60_000),
+    assertedAt: managedReleaseProofInstant(-2 * 60_000),
+    generatedAt,
+    expiresAt: managedReleaseProofInstant(7 * 24 * 60 * 60_000),
+  });
+  const bytes = Buffer.from(JSON.stringify(document), "utf8");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const preflightDigest = `sha256:${managedReleaseDigest(managedReleaseCanonicalJson(preflight))}`;
+  const evaluation = evaluateExactTargetInventoryJson(bytes.toString("utf8"), {
+    now: new Date(),
+    requestedWorkloadClass: params.workloadClass,
+    purpose: "managed-release-preflight",
+  });
+  const expectedOpaqueTargetId = createHash("sha256")
+    .update(`${params.workloadClass}:${params.deploymentId}`)
+    .digest("hex")
+    .slice(0, 32);
+  invariant(bytes.byteLength > 0 && bytes.byteLength <= MANAGED_RELEASE_INVENTORY_MAX_BYTES
+    && evaluation.ok
+    && evaluation.artifactStatus === "VALID"
+    && evaluation.selection?.status === "SELECTED"
+    && evaluation.selection.opaqueTargetId === expectedOpaqueTargetId
+    && evaluation.canonicalDigest
+    && evaluation.validUntil,
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+
+  const artifactId = randomUUID();
+  const assetId = randomUUID();
+  const storageKey = `workspaces/${deployment.managedWorkspaceId}/build-artifacts/${artifactId}/${assetId}/managed-azure-inventory.json`;
+  await defaultStorage.put(storageKey, bytes, { contentType: "application/json" });
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.buildArtifact.create({
+        data: {
+          id: artifactId,
+          workspaceId: deployment.managedWorkspaceId!,
+          createdByUserId: actorUserId(actor),
+          repositoryOwner: MANAGED_RELEASE_INVENTORY_REPOSITORY.owner,
+          repositoryName: MANAGED_RELEASE_INVENTORY_REPOSITORY.name,
+          pullRequestNumber: null,
+          pullRequestUrl: null,
+          branchName: null,
+          commitSha: null,
+          mergeCommitSha: null,
+          title: `Managed Azure inventory ${params.workloadClass}`,
+          summaryMd: "Private exact-target managed Azure release inventory generated by the control plane.",
+          status: "CLOSED",
+          classification: "CLIENT_PRIVATE",
+          visibility: "PRIVATE",
+          closedAt: new Date(),
+        },
+      });
+      await tx.buildArtifactAsset.create({
+        data: {
+          id: assetId,
+          artifactId,
+          kind: "DOCUMENT",
+          label: "Managed Azure exact-target inventory",
+          captionMd: `workloadClass=${params.workloadClass};preflightDigest=${preflightDigest}`,
+          storageKey,
+          mimeType: "application/json",
+          sizeBytes: bytes.byteLength,
+          width: null,
+          height: null,
+          sha256,
+          sortOrder: 0,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          workspaceId: deployment.managedWorkspaceId!,
+          actorUserId: actorUserId(actor),
+          action: "managed_release.inventory_frozen",
+          entityType: "BuildArtifactAsset",
+          entityId: assetId,
+          meta: {
+            deploymentId: params.deploymentId,
+            workloadClass: params.workloadClass,
+            artifactId,
+            sha256,
+            reason,
+            actorLabel: actorLabel(actor),
+            preflightDigest,
+            baselineImageTag: preflight.release.baselineImageTag,
+            baselineVersion: preflight.release.baselineVersion,
+          },
+        },
+      });
+    });
+  } catch (error) {
+    await defaultStorage.delete(storageKey).catch(() => undefined);
+    throw error;
+  }
+
+  return {
+    inventoryRef: assetId,
+    inventorySha256: sha256,
+    artifactId,
+    deploymentId: params.deploymentId,
+    workloadClass: params.workloadClass,
+    inventoryCanonicalDigest: evaluation.canonicalDigest,
+    validUntil: evaluation.validUntil,
+  };
+}
+
 export async function getControlPlaneManagedReleaseInventory(actor: AppActor, params: {
   inventoryRef: string;
   expectedSha256: string;
   deploymentId: string;
   workloadClass: ExactTargetInventoryWorkloadClass;
+  acrName: string;
+  acrServer: string;
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   await requireControlPlaneAccess(actor);
@@ -10974,6 +11329,11 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
   invariant(MANAGED_RELEASE_WORKLOAD_CLASSES.has(params.workloadClass),
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  const preflight = managedReleasePreflightProjection(await getManagedReleaseTargetPreflight(params.deploymentId, managedReleaseAcr({
+    acrName: params.acrName,
+    acrServer: params.acrServer,
+  }), params.workloadClass));
+  const preflightDigest = `sha256:${managedReleaseDigest(managedReleaseCanonicalJson(preflight))}`;
 
   const asset = await prisma.buildArtifactAsset.findUnique({
     where: { id: params.inventoryRef },
@@ -10982,6 +11342,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
       storageKey: true,
       mimeType: true,
       kind: true,
+      captionMd: true,
       sizeBytes: true,
       sha256: true,
       artifact: {
@@ -11000,6 +11361,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     && asset.artifact.visibility === "PRIVATE"
     && ["INTERNAL", "CLIENT_PRIVATE"].includes(asset.artifact.classification)
     && ["DOCUMENT", "OTHER"].includes(asset.kind)
+    && asset.captionMd === `workloadClass=${params.workloadClass};preflightDigest=${preflightDigest}`
     && asset.mimeType === "application/json"
     && asset.sizeBytes > 0
     && asset.sizeBytes <= MANAGED_RELEASE_INVENTORY_MAX_BYTES
@@ -11038,6 +11400,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     evaluation: {
       workloadClass: params.workloadClass,
       canonicalDigest: evaluation.canonicalDigest,
+      preflightDigest,
       validUntil: evaluation.validUntil,
       opaqueTargetId: evaluation.selection.opaqueTargetId,
     },

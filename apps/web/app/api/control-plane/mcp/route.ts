@@ -12,6 +12,7 @@ import {
   executeControlPlaneClientMigration,
   finalizeControlPlaneClientMigration,
   fetchCustomerSupportSnapshot,
+  freezeControlPlaneManagedReleaseInventory,
   enqueueControlPlaneAgendaPreparation,
   getControlPlaneClientMigrationStatus,
   getControlPlaneDeployLatestPreflight,
@@ -565,6 +566,21 @@ const tools = [
     },
   },
   {
+    name: "freeze_managed_release_inventory",
+    description: "Create one private immutable managed-Azure exact-target inventory asset for a deployment and workload class.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        workloadClass: { type: "string" },
+        acrName: { type: "string" },
+        acrServer: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["deploymentId", "workloadClass", "acrName", "acrServer", "reason"],
+    },
+  },
+  {
     name: "get_managed_release_inventory",
     description: "Load one private immutable P0-05 inventory artifact and bind its selected workload-class target to one deployment.",
     inputSchema: {
@@ -574,8 +590,10 @@ const tools = [
         expectedSha256: { type: "string" },
         deploymentId: { type: "string" },
         workloadClass: { type: "string" },
+        acrName: { type: "string" },
+        acrServer: { type: "string" },
       },
-      required: ["inventoryRef", "expectedSha256", "deploymentId", "workloadClass"],
+      required: ["inventoryRef", "expectedSha256", "deploymentId", "workloadClass", "acrName", "acrServer"],
     },
   },
   {
@@ -737,6 +755,7 @@ const toolScopes: Record<string, string> = {
   refresh_fleet_snapshots: "control-plane:fleet:write",
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
+  freeze_managed_release_inventory: "control-plane:releases:write",
   get_managed_release_inventory: "control-plane:releases:write",
   managed_release_lease: "control-plane:releases:write",
   deploy_latest_release: "control-plane:releases:write",
@@ -1256,6 +1275,17 @@ export async function POST(request: NextRequest) {
         expectedSha256: argString(args, "expectedSha256"),
         deploymentId: argString(args, "deploymentId"),
         workloadClass: argString(args, "workloadClass") as never,
+        acrName: argString(args, "acrName"),
+        acrServer: argString(args, "acrServer"),
+      })));
+    }
+    if (name === "freeze_managed_release_inventory") {
+      return rpcResult(id, textContent(await freezeControlPlaneManagedReleaseInventory(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        workloadClass: argString(args, "workloadClass") as never,
+        acrName: argString(args, "acrName"),
+        acrServer: argString(args, "acrServer"),
+        reason: argString(args, "reason"),
       })));
     }
     if (name === "managed_release_lease") {

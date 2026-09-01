@@ -21,6 +21,7 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { connectorReadinessManifest, listConnectorReadinessProfiles } from "./connector-readiness";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 
 const CREDENTIAL_PREFIX = "agentc-";
 const CATALOG_ADMIN_ROLES = new Set(["ADMIN"]);
@@ -459,7 +460,7 @@ async function ensureDerivedCatalogItems(workspaceId: string) {
       select: { agentKey: true, enabled: true },
     }),
     prisma.buildArtifact.findMany({
-      where: { workspaceId, visibility: { not: "REVOKED" } },
+      where: { workspaceId, visibility: { not: "REVOKED" }, NOT: OPERATIONAL_ARTIFACT_FILTER },
       select: {
         id: true,
         title: true,

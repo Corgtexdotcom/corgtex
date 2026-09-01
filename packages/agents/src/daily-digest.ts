@@ -1320,6 +1320,11 @@ export async function runDailyDigest(params: {
     where: {
       workspaceId: params.workspaceId,
       updatedAt: { lte: generationDate },
+      NOT: {
+        repositoryOwner: "corgtexdotcom",
+        repositoryName: "corgtex-ops",
+        pullRequestNumber: null,
+      },
       OR: [
         { updatedAt: windowRange },
         { mergedAt: windowRange },

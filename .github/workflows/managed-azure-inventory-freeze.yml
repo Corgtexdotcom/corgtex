@@ -1,0 +1,59 @@
+name: Managed Azure Inventory Freeze
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: Exact managed Azure deployment UUID
+        required: true
+        type: string
+      workload_class:
+        description: Exact workload class for inventory target binding
+        required: true
+        type: string
+      acr_name:
+        description: Exact Azure Container Registry name
+        required: true
+        type: string
+      acr_server:
+        description: Exact Azure Container Registry server
+        required: true
+        type: string
+      reason:
+        description: Audited reason for this inventory freeze
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-azure-inventory-freeze-${{ inputs.deployment_id }}
+  cancel-in-progress: false
+
+jobs:
+  freeze:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: managed-azure-release-production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Freeze exact private inventory
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          ACR_NAME: ${{ inputs.acr_name }}
+          ACR_SERVER: ${{ inputs.acr_server }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          args="$(node -e 'process.stdout.write(JSON.stringify({ deploymentId: process.env.DEPLOYMENT_ID, workloadClass: process.env.WORKLOAD_CLASS, acrName: process.env.ACR_NAME, acrServer: process.env.ACR_SERVER, reason: process.env.REASON }))')"
+          node scripts/control-plane.mjs call freeze_managed_release_inventory "$args"

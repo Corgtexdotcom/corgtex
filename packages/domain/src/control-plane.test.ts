@@ -94,7 +94,11 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       upsert: vi.fn(),
       update: vi.fn(),
     },
+    buildArtifact: {
+      create: vi.fn(),
+    },
     buildArtifactAsset: {
+      create: vi.fn(),
       findUnique: vi.fn(),
     },
     clientMigrationRun: {
@@ -198,6 +202,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     },
     auditLog: {
       count: vi.fn(),
+      create: vi.fn(),
       findMany: vi.fn(),
     },
     event: {
@@ -359,7 +364,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     saveSlackInstallationForWorkspace: vi.fn(),
     validateSlackPostTarget: vi.fn(),
   },
-  storageMock: { get: vi.fn() },
+  storageMock: { delete: vi.fn(), get: vi.fn(), put: vi.fn() },
   inventoryEvaluatorMock: vi.fn(),
   leaseMocks: {
     abortManagedReleaseLease: vi.fn(),
@@ -414,6 +419,13 @@ vi.mock("./communication", () => ({
 vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
 vi.mock("./exact-target-inventory-evaluator", () => ({ evaluateExactTargetInventoryJson: inventoryEvaluatorMock }));
 vi.mock("./control-plane-release-lease", () => leaseMocks);
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
 
 const operatorActor: AppActor = {
   kind: "user",
@@ -8487,20 +8499,237 @@ describe("managed Azure release control-plane boundary", () => {
   };
   const inventoryRef = "123e4567-e89b-42d3-a456-426614174000";
   const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
+  const canaryPreflight = {
+    deploymentId,
+    origin: "https://corporate-rebels.corgtex.com",
+    release: {
+      baselineImageTag: `sha-${"7".repeat(40)}`,
+      baselineVersion: "main-7721b9adc",
+    },
+    target: {
+      subscriptionId: "123e4567-e89b-42d3-a456-426614174010",
+      resourceGroup: "rg-corgtex-corporate-rebels-production-wus3",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      webAppName: "ca-cr-prod-web",
+      workerAppName: "ca-cr-prod-worker",
+    },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    storageMock.delete.mockResolvedValue(undefined);
+  });
+
+  it("freezes a private Ops build-artifact inventory for an exact managed-release canary", async () => {
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).resolves.toMatchObject({
+      artifactId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      inventoryCanonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+    });
+    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, {
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    }, "ACTIVE_CLIENT_CANARY");
+
+    expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "workspace-cr",
+        createdByUserId: null,
+        repositoryOwner: "corgtexdotcom",
+        repositoryName: "corgtex-ops",
+        pullRequestNumber: null,
+        classification: "CLIENT_PRIVATE",
+        visibility: "PRIVATE",
+        status: "CLOSED",
+        closedAt: expect.any(Date),
+      }),
+    }));
+    expect(storageMock.put).toHaveBeenCalledWith(expect.stringContaining("/managed-azure-inventory.json"), expect.any(Buffer), {
+      contentType: "application/json",
+    });
+    expect(prismaMock.buildArtifactAsset.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        artifactId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        kind: "DOCUMENT",
+        mimeType: "application/json",
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        workspaceId: "workspace-cr",
+        action: "managed_release.inventory_frozen",
+        entityType: "BuildArtifactAsset",
+        meta: expect.objectContaining({
+          reason: "Freeze exact canary inventory.",
+          actorLabel: "managed-release",
+          preflightDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+          baselineImageTag: canaryPreflight.release.baselineImageTag,
+          baselineVersion: canaryPreflight.release.baselineVersion,
+        }),
+      }),
+    }));
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.subscriptionId);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.resourceGroup);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.webAppName);
+  });
+
+  it("attributes user inventory freezes and deletes uploaded bytes when persistence fails", async () => {
+    const userActor: AppActor = {
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    };
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    const failure = new Error("db unavailable");
+    prismaMock.$transaction.mockRejectedValueOnce(failure);
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(userActor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).rejects.toBe(failure);
+
+    expect(storageMock.delete).toHaveBeenCalledWith(expect.stringContaining("/managed-azure-inventory.json"));
+  });
+
+  it("attributes user inventory freeze audit records", async () => {
+    const userActor: AppActor = {
+      kind: "user",
+      user: {
+        id: "user-1",
+        email: "operator@example.com",
+        displayName: "Operator",
+        globalRole: "OPERATOR",
+      },
+    };
+    const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
+    inventoryEvaluatorMock.mockReturnValueOnce({
+      ok: true,
+      artifactStatus: "VALID",
+      canonicalDigest: `sha256:${"b".repeat(64)}`,
+      validUntil: "2026-09-08T00:00:00.000Z",
+      selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
+    });
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await freezeControlPlaneManagedReleaseInventory(userActor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    });
+
+    expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        createdByUserId: "user-1",
+      }),
+    }));
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        actorUserId: "user-1",
+        meta: expect.objectContaining({
+          actorLabel: "operator@example.com",
+          preflightDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+          baselineImageTag: canaryPreflight.release.baselineImageTag,
+        }),
+      }),
+    }));
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.subscriptionId);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.resourceGroup);
+    expect(JSON.stringify(prismaMock.auditLog.create.mock.calls)).not.toContain(canaryPreflight.target.webAppName);
+  });
+
+  it("rejects inventory freeze without an audited reason before preflight or storage", async () => {
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "   ",
+    })).rejects.toMatchObject({
+      code: "CONTROL_PLANE_REASON_REQUIRED",
+    });
+
+    expect(leaseMocks.getManagedReleaseTargetPreflight).not.toHaveBeenCalled();
+    expect(storageMock.put).not.toHaveBeenCalled();
+  });
+
+  it("rejects inventory freeze when read-only preflight rejects the exact target", async () => {
+    leaseMocks.getManagedReleaseTargetPreflight.mockRejectedValueOnce(Object.assign(new Error("Managed release lease request was rejected."), {
+      code: "MANAGED_RELEASE_TARGET_INELIGIBLE",
+      status: 409,
+    }));
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).rejects.toMatchObject({
+      code: "MANAGED_RELEASE_TARGET_INELIGIBLE",
+    });
+
+    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+    expect(storageMock.put).not.toHaveBeenCalled();
   });
 
   it("returns only digest-pinned private Ops inventory bound to the deployment and workload class", async () => {
     const bytes = Buffer.from('{"schemaVersion":"2.0.0"}', "utf8");
     const digest = createHash("sha256").update(bytes).digest("hex");
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    const canaryPreflightDigest = `sha256:${createHash("sha256").update(canonicalJson(canaryPreflight)).digest("hex")}`;
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValue(canaryPreflight);
     prismaMock.buildArtifactAsset.findUnique.mockResolvedValue({
       id: inventoryRef,
       storageKey: "private/inventory.json",
       mimeType: "application/json",
       kind: "DOCUMENT",
+      captionMd: `workloadClass=ACTIVE_CLIENT_CANARY;preflightDigest=${canaryPreflightDigest}`,
       sizeBytes: bytes.byteLength,
       sha256: digest,
       artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PRIVATE" },
@@ -8515,13 +8744,21 @@ describe("managed Azure release control-plane boundary", () => {
     });
     const { getControlPlaneManagedReleaseInventory } = await import("./control-plane");
 
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY" })).resolves.toEqual({
+    await expect(getControlPlaneManagedReleaseInventory(actor, {
+      inventoryRef,
+      expectedSha256: digest,
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).resolves.toEqual({
       inventoryRef,
       sha256: digest,
       bytesBase64: bytes.toString("base64"),
       evaluation: {
         workloadClass: "ACTIVE_CLIENT_CANARY",
         canonicalDigest: `sha256:${"b".repeat(64)}`,
+        preflightDigest: canaryPreflightDigest,
         validUntil: "2026-08-28T00:00:00.000Z",
         opaqueTargetId: canaryOpaqueTargetId,
       },
@@ -8530,6 +8767,10 @@ describe("managed Azure release control-plane boundary", () => {
       requestedWorkloadClass: "ACTIVE_CLIENT_CANARY",
       purpose: "managed-release-preflight",
     }));
+    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, {
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    }, "ACTIVE_CLIENT_CANARY");
 
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
@@ -8538,7 +8779,14 @@ describe("managed Azure release control-plane boundary", () => {
       validUntil: "2026-08-28T00:00:00.000Z",
       selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
     });
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY" })).rejects.toMatchObject({
+    await expect(getControlPlaneManagedReleaseInventory(actor, {
+      inventoryRef,
+      expectedSha256: digest,
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_PRIMARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).rejects.toMatchObject({
       code: "MANAGED_RELEASE_INVENTORY_REJECTED",
     });
 
@@ -8547,11 +8795,19 @@ describe("managed Azure release control-plane boundary", () => {
       storageKey: "private/inventory.json",
       mimeType: "application/json",
       kind: "DOCUMENT",
+      captionMd: `workloadClass=ACTIVE_CLIENT_CANARY;preflightDigest=${canaryPreflightDigest}`,
       sizeBytes: bytes.byteLength,
       sha256: digest,
       artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PUBLIC_REVIEW" },
     });
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY" })).rejects.toMatchObject({
+    await expect(getControlPlaneManagedReleaseInventory(actor, {
+      inventoryRef,
+      expectedSha256: digest,
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).rejects.toMatchObject({
       code: "MANAGED_RELEASE_INVENTORY_REJECTED",
     });
   });

@@ -396,6 +396,82 @@ describe("build artifacts", () => {
     }));
   });
 
+  it("excludes operational inventory artifacts from the customer build-artifact feed", async () => {
+    prismaMock.buildArtifact.findMany.mockResolvedValue([]);
+
+    const { listBuildArtifacts } = await import("./build-artifacts");
+    await expect(listBuildArtifacts(actor, { workspaceId: "workspace-1" })).resolves.toEqual([]);
+
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
+  });
+
+  it("blocks direct workspace artifact APIs for operational inventory artifacts", async () => {
+    prismaMock.buildArtifact.findFirst.mockResolvedValue(null);
+    prismaMock.buildArtifactAsset.findFirst.mockResolvedValue(null);
+
+    const {
+      addBuildArtifactAsset,
+      getBuildArtifact,
+      getBuildArtifactAssetSignedUrl,
+      updateBuildArtifact,
+    } = await import("./build-artifacts");
+
+    await expect(getBuildArtifact(actor, {
+      workspaceId: "workspace-1",
+      artifactId: "artifact-ops",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.buildArtifact.findFirst).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        id: "artifact-ops",
+        workspaceId: "workspace-1",
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
+
+    await expect(updateBuildArtifact(actor, {
+      workspaceId: "workspace-1",
+      artifactId: "artifact-ops",
+      title: "Expose inventory",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    await expect(addBuildArtifactAsset(actor, {
+      workspaceId: "workspace-1",
+      artifactId: "artifact-ops",
+      fileBuffer: Buffer.from("extra"),
+      fileName: "extra.json",
+      mimeType: "application/json",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    await expect(getBuildArtifactAssetSignedUrl(actor, {
+      workspaceId: "workspace-1",
+      artifactId: "artifact-ops",
+      assetId: "asset-ops",
+    })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+    expect(prismaMock.buildArtifactAsset.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        artifact: {
+          workspaceId: "workspace-1",
+          NOT: {
+            repositoryOwner: "corgtexdotcom",
+            repositoryName: "corgtex-ops",
+            pullRequestNumber: null,
+          },
+        },
+      }),
+    }));
+  });
+
   it("resolves GitHub repository allowlists from build artifact feature config", async () => {
     prismaMock.workspaceFeatureFlag.findMany.mockResolvedValue([
       {

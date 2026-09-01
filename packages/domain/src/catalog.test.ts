@@ -292,6 +292,17 @@ describe("catalog domain", () => {
         archiveReason: null,
       }),
     }));
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        visibility: { not: "REVOKED" },
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
     expect(prismaMock.catalogSettings.upsert).toHaveBeenCalledWith({
       where: { workspaceId: "workspace-1" },
       create: { workspaceId: "workspace-1", approvalMode: "ADMIN" },

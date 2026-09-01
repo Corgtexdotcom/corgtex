@@ -24,6 +24,16 @@ const digests = { web: `sha256:${"1".repeat(64)}`, worker: `sha256:${"2".repeat(
 const transportBaseRelease = Object.freeze({ gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" });
 const transportNextRelease = Object.freeze({ gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" });
 
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function preflightDigest(preflight) {
+  return `sha256:${createHash("sha256").update(canonicalJson(preflight)).digest("hex")}`;
+}
+
 function template(role, releaseSha, version, imageDigest, suffix) {
   return {
     revisionSuffix: suffix,
@@ -110,13 +120,18 @@ function dependencies(options = {}) {
   const current = { web: "BASELINE", worker: "BASELINE" };
   const currentTemplates = { web: null, worker: null };
   let patchCount = 0;
+  const preflight = { deploymentId, origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const deps = {
     owner: "github:42:1",
     templateDigest: managedAzureTemplateDigest,
-    loadInventory: vi.fn(async (request) => ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: { workloadClass: request.workloadClass, canonicalDigest: `sha256:${"d".repeat(64)}` } })),
+    loadInventory: vi.fn(async (request) => ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: {
+      workloadClass: request.workloadClass,
+      canonicalDigest: `sha256:${"d".repeat(64)}`,
+      preflightDigest: options.inventoryPreflightDigest ?? preflightDigest(preflight),
+    } })),
     lease: vi.fn(async (operation, args) => {
       events.push(`lease:${operation}`);
-      if (operation === "preflight") return { deploymentId, origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+      if (operation === "preflight") return preflight;
       if (operation === "acquire") return { deploymentId, leaseId, capability: "private-capability", fence: 7 };
       if (operation === "get_target") return { deploymentId, target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
       return { deploymentId, operation, args };
@@ -179,7 +194,7 @@ describe("managed Azure single-target transaction", () => {
     const { deps } = dependencies({ webDestination: "ABSENT", workerDestination: "ABSENT" });
     await expect(runManagedAzureReleaseTransaction({ ...input, workloadClass: "ACTIVE_CLIENT_CANARY", execute: true }, deps))
       .rejects.toMatchObject({ code: "MANAGED_RELEASE_EXECUTION_NOT_ALLOWED" });
-    expect(deps.loadInventory).toHaveBeenCalledTimes(1);
+    expect(deps.loadInventory).not.toHaveBeenCalled();
     expect(deps.lease).not.toHaveBeenCalled();
     expect(deps.resolveRelease).not.toHaveBeenCalled();
     expect(deps.readApp).not.toHaveBeenCalled();
@@ -194,6 +209,14 @@ describe("managed Azure single-target transaction", () => {
     expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
     expect(deps.importRole).not.toHaveBeenCalled();
     expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it("rejects inventories frozen against a different preflight projection", async () => {
+    const { deps } = dependencies({ inventoryPreflightDigest: `sha256:${"9".repeat(64)}` });
+    await expect(runManagedAzureReleaseTransaction(input, deps)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_INVALID" });
+    expect(deps.lease).toHaveBeenCalledWith("preflight", expect.objectContaining({ deploymentId, acrName: input.acrName, acrServer: target.acrServer }));
+    expect(deps.resolveRelease).not.toHaveBeenCalled();
+    expect(deps.readApp).not.toHaveBeenCalled();
   });
 
   it("imports before mutation, updates web then worker, proves readback, and finalizes success", async () => {
@@ -321,7 +344,7 @@ describe("managed Azure single-target transaction", () => {
 
   it("hashes the returned inventory bytes before any target read", async () => {
     const { deps } = dependencies();
-    deps.loadInventory.mockResolvedValueOnce({ inventoryRef, sha256: input.inventorySha256, bytesBase64: "W10=", evaluation: { canonicalDigest: `sha256:${"d".repeat(64)}` } });
+    deps.loadInventory.mockResolvedValueOnce({ inventoryRef, sha256: input.inventorySha256, bytesBase64: "W10=", evaluation: { canonicalDigest: `sha256:${"d".repeat(64)}`, preflightDigest: preflightDigest({ deploymentId, origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target }) } });
     await expect(runManagedAzureReleaseTransaction(input, deps)).rejects.toThrow("MANAGED_RELEASE_INVENTORY_INVALID");
     expect(deps.lease).not.toHaveBeenCalled();
   });

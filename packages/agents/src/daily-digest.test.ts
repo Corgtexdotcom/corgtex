@@ -475,6 +475,25 @@ describe("runDailyDigest", () => {
     prismaMock.workspace.findUnique.mockResolvedValue({ name: "Workspace One" });
   });
 
+  it("excludes operational inventory artifacts from build-artifact digest inputs", async () => {
+    const { runDailyDigest } = await import("./daily-digest");
+    await runDailyDigest({
+      workspaceId: "workspace-1",
+      dateISO: "2026-04-30T12:00:00.000Z",
+    });
+
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
+  });
+
   it("includes recent active and merged build artifacts in the digest input", async () => {
     prismaMock.buildArtifact.findMany.mockResolvedValue([
       {
