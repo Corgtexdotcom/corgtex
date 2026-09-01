@@ -9605,6 +9605,7 @@ type CustomerDeploymentHealthPayload = {
   release?: {
     imageTag?: string | null;
     gitSha?: string | null;
+    version?: string | null;
   };
 };
 
@@ -9736,7 +9737,12 @@ function runtimeHealthErrors(health: CustomerDeploymentHealthPayload | null) {
 
 function observedReleaseMatches(health: CustomerDeploymentHealthPayload | null, releaseImageTag: string) {
   const release = health?.release;
-  return Boolean(release && (release.imageTag === releaseImageTag || release.gitSha === releaseImageTag));
+  return Boolean(release && (release.imageTag === releaseImageTag || release.gitSha === releaseImageTag || (release.gitSha && releaseImageTag === `sha-${release.gitSha}`)));
+}
+
+function observedReleaseVersionMatches(health: CustomerDeploymentHealthPayload | null, releaseVersion: string | null) {
+  if (releaseVersion === null) return true;
+  return health?.release?.version === releaseVersion;
 }
 
 function observedReleaseLabel(health: CustomerDeploymentHealthPayload | null) {
@@ -9756,7 +9762,7 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
   const releaseImageTag = params.releaseImageTag.trim();
-  invariant(releaseImageTag, 400, "INVALID_INPUT", "Release image tag is required.");
+  invariant(/^sha-[0-9a-f]{40}$/.test(releaseImageTag), 400, "INVALID_INPUT", "Release image tag must be sha-<40 lowercase hex>.");
   const releaseVersion = params.releaseVersion?.trim() || null;
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
   const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
@@ -9781,6 +9787,12 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
       409,
       "RELEASE_MISMATCH",
       `Health reported release ${health?.release?.imageTag ?? health?.release?.gitSha ?? "unknown"}, not ${releaseImageTag}.`,
+    );
+    invariant(
+      observedReleaseVersionMatches(health, releaseVersion),
+      409,
+      "RELEASE_VERSION_MISMATCH",
+      `Health reported release version ${health?.release?.version ?? "unknown"}, not ${releaseVersion}.`,
     );
   } catch (probeError) {
     if (probeError instanceof AppError) {

@@ -1,0 +1,185 @@
+name: Managed Azure Record Verified Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: Exact managed Azure deployment UUID
+        required: true
+        type: string
+      release_image_tag:
+        description: Already-live release image tag to record
+        required: true
+        type: string
+      release_version:
+        description: Already-live release version label to record
+        required: true
+        type: string
+      workload_class:
+        description: Exact managed-release workload class for target binding
+        required: true
+        type: string
+      acr_name:
+        description: Exact Azure Container Registry name used by this managed deployment
+        required: true
+        type: string
+      acr_server:
+        description: Exact Azure Container Registry server used by this managed deployment
+        required: true
+        type: string
+      reason:
+        description: Audited reason for recording this verified baseline
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: managed-azure-record-baseline-${{ inputs.deployment_id }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: managed-azure-release-production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Resolve trusted managed Azure target
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          ACR_NAME: ${{ inputs.acr_name }}
+          ACR_SERVER: ${{ inputs.acr_server }}
+        run: |
+          set -euo pipefail
+
+          node scripts/control-plane.mjs call managed_release_lease "$(node --input-type=module - <<'NODE'
+          const payload = {
+            operation: "preflight",
+            deploymentId: process.env.DEPLOYMENT_ID,
+            workloadClass: process.env.WORKLOAD_CLASS,
+            acrName: process.env.ACR_NAME,
+            acrServer: process.env.ACR_SERVER,
+          };
+          process.stdout.write(JSON.stringify(payload));
+          NODE
+          )" > "$RUNNER_TEMP/managed-azure-record-baseline-target.json"
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify already-live Azure release metadata
+        env:
+          RELEASE_IMAGE_TAG: ${{ inputs.release_image_tag }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          verify_role() {
+            local role="$1"
+            local app_name="$2"
+            local payload_file="$RUNNER_TEMP/managed-azure-record-baseline-${role}.json"
+            local target_file="$RUNNER_TEMP/managed-azure-record-baseline-target.json"
+            local resource_group
+            resource_group="$(node --input-type=module - "$target_file" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          process.stdout.write(String(payload.target.resourceGroup));
+          NODE
+          )"
+
+            az containerapp show \
+              --resource-group "$resource_group" \
+              --name "$app_name" \
+              --output json > "$payload_file"
+
+            node --input-type=module - "$payload_file" "$target_file" "$role" "$RELEASE_IMAGE_TAG" "$RELEASE_VERSION" <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const [payloadPath, targetPath, role, releaseImageTag, releaseVersion] = process.argv.slice(2);
+          const payload = JSON.parse(readFileSync(payloadPath, "utf8"));
+          const targetPayload = JSON.parse(readFileSync(targetPath, "utf8"));
+          const target = targetPayload.target;
+          const appName = role === "web" ? target.webAppName : target.workerAppName;
+          const properties = payload?.properties;
+          const template = properties?.template;
+          const containers = Array.isArray(template?.containers) ? template.containers : [];
+          const revisionSuffix = template?.revisionSuffix;
+
+          if (payload.name !== appName || properties?.configuration?.activeRevisionsMode !== "Single"
+            || properties?.provisioningState !== "Succeeded"
+            || typeof properties?.latestRevisionName !== "string"
+            || properties.latestRevisionName !== properties.latestReadyRevisionName
+            || containers.length !== 1
+            || typeof revisionSuffix !== "string"
+            || !(revisionSuffix === ""
+              ? properties.latestRevisionName.startsWith(`${appName}--`)
+              : properties.latestRevisionName === `${appName}--${revisionSuffix}`)) {
+            console.error(`::error::${role} Container App ready revision does not match the trusted baseline target`);
+            process.exit(1);
+          }
+
+          const matchingContainer = containers[0];
+          const image = String(matchingContainer?.image ?? "");
+          const expectedImage = new RegExp(`^${target.acrServer.replaceAll(".", "\\.")}\\/corgtex\\/${role}@sha256:[0-9a-f]{64}$`);
+          if (!expectedImage.test(image)) {
+            console.error(`::error::${role} image is not the digest-pinned managed Azure baseline form`);
+            process.exit(1);
+          }
+
+          const env = new Map((Array.isArray(matchingContainer.env) ? matchingContainer.env : []).map((entry) => [entry?.name, entry?.value]));
+          const expectedGitSha = releaseImageTag.startsWith("sha-") ? releaseImageTag.slice(4) : null;
+          const checks = [
+            ["CORGTEX_RELEASE_IMAGE_TAG", releaseImageTag],
+            ["CORGTEX_RELEASE_VERSION", releaseVersion],
+            ["CORGTEX_RELEASE_GIT_SHA", expectedGitSha],
+          ];
+
+          for (const [name, expected] of checks) {
+            if (!expected || env.get(name) !== expected) {
+              console.error(`::error::${role} release metadata does not match the requested verified baseline`);
+              process.exit(1);
+            }
+          }
+          NODE
+          }
+
+          WEB_APP_NAME="$(node --input-type=module - "$RUNNER_TEMP/managed-azure-record-baseline-target.json" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          process.stdout.write(String(payload.target.webAppName));
+          NODE
+          )"
+          WORKER_APP_NAME="$(node --input-type=module - "$RUNNER_TEMP/managed-azure-record-baseline-target.json" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          process.stdout.write(String(payload.target.workerAppName));
+          NODE
+          )"
+
+          verify_role web "$WEB_APP_NAME"
+          verify_role worker "$WORKER_APP_NAME"
+      - name: Record verified release baseline
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RELEASE_IMAGE_TAG: ${{ inputs.release_image_tag }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          node scripts/control-plane.mjs record-release "$DEPLOYMENT_ID" "$RELEASE_IMAGE_TAG" "$REASON" "$RELEASE_VERSION"
