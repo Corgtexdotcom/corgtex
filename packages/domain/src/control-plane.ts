@@ -11176,6 +11176,25 @@ function managedReleaseInventoryDocument(params: {
   } satisfies ExactTargetInventoryDocument;
 }
 
+async function requireManagedReleaseOperationalWorkspaceId() {
+  const deployments = await prisma.customerDeployment.findMany({
+    where: {
+      deploymentKind: "CUSTOMER_CONTROL_PLANE",
+      deploymentStatus: "ACTIVE",
+      managedWorkspaceId: { not: null },
+    },
+    select: {
+      id: true,
+      managedWorkspaceId: true,
+    },
+    orderBy: { id: "asc" },
+    take: 2,
+  });
+  invariant(deployments.length === 1 && deployments[0]?.managedWorkspaceId,
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  return deployments[0].managedWorkspaceId;
+}
+
 export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor, params: {
   deploymentId: string;
   workloadClass: ExactTargetInventoryWorkloadClass;
@@ -11192,12 +11211,7 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
     acrName: params.acrName,
     acrServer: params.acrServer,
   }), params.workloadClass));
-  const deployment = await prisma.customerDeployment.findUnique({
-    where: { id: params.deploymentId },
-    select: { id: true, managedWorkspaceId: true },
-  });
-  invariant(deployment?.managedWorkspaceId,
-    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const operationalWorkspaceId = await requireManagedReleaseOperationalWorkspaceId();
 
   const generatedAt = managedReleaseProofInstant();
   const document = managedReleaseInventoryDocument({
@@ -11234,14 +11248,14 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
 
   const artifactId = randomUUID();
   const assetId = randomUUID();
-  const storageKey = `workspaces/${deployment.managedWorkspaceId}/build-artifacts/${artifactId}/${assetId}/managed-azure-inventory.json`;
+  const storageKey = `workspaces/${operationalWorkspaceId}/build-artifacts/${artifactId}/${assetId}/managed-azure-inventory.json`;
   await defaultStorage.put(storageKey, bytes, { contentType: "application/json" });
   try {
     await prisma.$transaction(async (tx) => {
       await tx.buildArtifact.create({
         data: {
           id: artifactId,
-          workspaceId: deployment.managedWorkspaceId!,
+          workspaceId: operationalWorkspaceId,
           createdByUserId: actorUserId(actor),
           repositoryOwner: MANAGED_RELEASE_INVENTORY_REPOSITORY.owner,
           repositoryName: MANAGED_RELEASE_INVENTORY_REPOSITORY.name,
@@ -11276,7 +11290,7 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
       });
       await tx.auditLog.create({
         data: {
-          workspaceId: deployment.managedWorkspaceId!,
+          workspaceId: operationalWorkspaceId,
           actorUserId: actorUserId(actor),
           action: "managed_release.inventory_frozen",
           entityType: "BuildArtifactAsset",
