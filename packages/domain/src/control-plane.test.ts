@@ -8492,6 +8492,22 @@ describe("managed Azure release control-plane boundary", () => {
   };
   const inventoryRef = "123e4567-e89b-42d3-a456-426614174000";
   const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
+  const canaryPreflight = {
+    deploymentId,
+    origin: "https://corporate-rebels.corgtex.com",
+    release: {
+      baselineImageTag: `sha-${"7".repeat(40)}`,
+      baselineVersion: "main-7721b9adc",
+    },
+    target: {
+      subscriptionId: "123e4567-e89b-42d3-a456-426614174010",
+      resourceGroup: "rg-corgtex-corporate-rebels-production-wus3",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      webAppName: "ca-cr-prod-web",
+      workerAppName: "ca-cr-prod-worker",
+    },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -8499,6 +8515,7 @@ describe("managed Azure release control-plane boundary", () => {
 
   it("freezes a private Ops build-artifact inventory for an exact managed-release canary", async () => {
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
     prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ id: deploymentId, managedWorkspaceId: "workspace-cr" });
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
@@ -8512,6 +8529,8 @@ describe("managed Azure release control-plane boundary", () => {
     await expect(freezeControlPlaneManagedReleaseInventory(actor, {
       deploymentId,
       workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
       reason: "Freeze exact canary inventory.",
     })).resolves.toMatchObject({
       artifactId: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -8520,6 +8539,10 @@ describe("managed Azure release control-plane boundary", () => {
       inventoryCanonicalDigest: `sha256:${"b".repeat(64)}`,
       validUntil: "2026-09-08T00:00:00.000Z",
     });
+    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, {
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    }, "ACTIVE_CLIENT_CANARY");
 
     expect(prismaMock.buildArtifact.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
@@ -8546,8 +8569,53 @@ describe("managed Azure release control-plane boundary", () => {
         workspaceId: "workspace-cr",
         action: "managed_release.inventory_frozen",
         entityType: "BuildArtifactAsset",
+        meta: expect.objectContaining({
+          reason: "Freeze exact canary inventory.",
+          preflight: expect.objectContaining({
+            baselineImageTag: canaryPreflight.release.baselineImageTag,
+            target: canaryPreflight.target,
+          }),
+        }),
       }),
     }));
+  });
+
+  it("rejects inventory freeze without an audited reason before preflight or storage", async () => {
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "   ",
+    })).rejects.toMatchObject({
+      code: "CONTROL_PLANE_REASON_REQUIRED",
+    });
+
+    expect(leaseMocks.getManagedReleaseTargetPreflight).not.toHaveBeenCalled();
+    expect(storageMock.put).not.toHaveBeenCalled();
+  });
+
+  it("rejects inventory freeze when read-only preflight rejects the exact target", async () => {
+    leaseMocks.getManagedReleaseTargetPreflight.mockRejectedValueOnce(Object.assign(new Error("Managed release lease request was rejected."), {
+      code: "MANAGED_RELEASE_TARGET_INELIGIBLE",
+      status: 409,
+    }));
+    const { freezeControlPlaneManagedReleaseInventory } = await import("./control-plane");
+
+    await expect(freezeControlPlaneManagedReleaseInventory(actor, {
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+      reason: "Freeze exact canary inventory.",
+    })).rejects.toMatchObject({
+      code: "MANAGED_RELEASE_TARGET_INELIGIBLE",
+    });
+
+    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+    expect(storageMock.put).not.toHaveBeenCalled();
   });
 
   it("returns only digest-pinned private Ops inventory bound to the deployment and workload class", async () => {

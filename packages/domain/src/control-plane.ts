@@ -10951,6 +10951,22 @@ const MANAGED_RELEASE_INVENTORY_REPOSITORY = {
   owner: "Corgtexdotcom",
   name: "corgtex-ops",
 } as const;
+type ManagedReleasePreflightProjection = {
+  deploymentId: string;
+  origin: string;
+  release: {
+    baselineImageTag: string;
+    baselineVersion: string | null;
+  };
+  target: {
+    subscriptionId: string;
+    resourceGroup: string;
+    acrName: string;
+    acrServer: string;
+    webAppName: string;
+    workerAppName: string;
+  };
+};
 
 function managedReleaseHandle(params: Record<string, unknown>) {
   return {
@@ -10965,6 +10981,43 @@ function managedReleaseAcr(params: Record<string, unknown>) {
   return {
     acrName: params.acrName as string,
     acrServer: params.acrServer as string,
+  };
+}
+
+function managedReleasePreflightProjection(value: unknown): ManagedReleasePreflightProjection {
+  invariant(value && typeof value === "object" && !Array.isArray(value),
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const record = value as Record<string, unknown>;
+  invariant(typeof record.deploymentId === "string" && typeof record.origin === "string"
+    && record.release && typeof record.release === "object" && !Array.isArray(record.release)
+    && record.target && typeof record.target === "object" && !Array.isArray(record.target),
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  const release = record.release as Record<string, unknown>;
+  const target = record.target as Record<string, unknown>;
+  invariant(typeof release.baselineImageTag === "string"
+    && (release.baselineVersion === null || typeof release.baselineVersion === "string")
+    && typeof target.subscriptionId === "string"
+    && typeof target.resourceGroup === "string"
+    && typeof target.acrName === "string"
+    && typeof target.acrServer === "string"
+    && typeof target.webAppName === "string"
+    && typeof target.workerAppName === "string",
+  409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  return {
+    deploymentId: record.deploymentId,
+    origin: record.origin,
+    release: {
+      baselineImageTag: release.baselineImageTag,
+      baselineVersion: release.baselineVersion,
+    },
+    target: {
+      subscriptionId: target.subscriptionId,
+      resourceGroup: target.resourceGroup,
+      acrName: target.acrName,
+      acrServer: target.acrServer,
+      webAppName: target.webAppName,
+      workerAppName: target.workerAppName,
+    },
   };
 }
 
@@ -11013,16 +11066,24 @@ function managedReleaseTopology(components: readonly ExactTargetInventoryCompone
 function managedReleaseInventoryDocument(params: {
   deploymentId: string;
   workloadClass: ExactTargetInventoryWorkloadClass;
+  preflight: ManagedReleasePreflightProjection;
+  reason: string;
   observedAt: string;
   verifiedAt: string;
   assertedAt: string;
   generatedAt: string;
   expiresAt: string;
 }) {
+  const evidenceSeed = managedReleaseCanonicalJson({
+    deploymentId: params.deploymentId,
+    workloadClass: params.workloadClass,
+    preflight: params.preflight,
+    reason: params.reason,
+  });
   let proofCounter = 0;
   const claim = (owner: string, kind: "LIFECYCLE" | "AUTHORITY" | "COMPLETENESS" | "DEPENDENCY" | "ROLLBACK" | "POLICY", purpose: "target-lifecycle" | "target-authority" | "target-completeness" | "component-dependency" | "component-rollback" | "target-policy") => {
     proofCounter += 1;
-    const artifactSeed = `${params.deploymentId}:${owner}:${kind}:${purpose}:${proofCounter}`;
+    const artifactSeed = `${evidenceSeed}:${owner}:${kind}:${purpose}:${proofCounter}`;
     return {
       kind,
       owner,
@@ -11043,10 +11104,10 @@ function managedReleaseInventoryDocument(params: {
     };
   };
   const target = (workloadClass: ExactTargetInventoryWorkloadClass, targetId: string) => {
-    const web = managedReleaseUuid(`${workloadClass}:${targetId}:web`);
-    const worker = managedReleaseUuid(`${workloadClass}:${targetId}:worker`);
-    const database = managedReleaseUuid(`${workloadClass}:${targetId}:database`);
-    const registry = managedReleaseUuid(`${workloadClass}:${targetId}:registry`);
+    const web = managedReleaseUuid(`${workloadClass}:${targetId}:web:${params.preflight.target.webAppName}`);
+    const worker = managedReleaseUuid(`${workloadClass}:${targetId}:worker:${params.preflight.target.workerAppName}`);
+    const database = managedReleaseUuid(`${workloadClass}:${targetId}:database:${params.deploymentId}`);
+    const registry = managedReleaseUuid(`${workloadClass}:${targetId}:registry:${params.preflight.target.acrServer}`);
     const components: ExactTargetInventoryComponent[] = [
       {
         componentId: web,
@@ -11118,13 +11179,19 @@ function managedReleaseInventoryDocument(params: {
 export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor, params: {
   deploymentId: string;
   workloadClass: ExactTargetInventoryWorkloadClass;
+  acrName: string;
+  acrServer: string;
   reason: string;
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
-  const reason = normalizeReason(params.reason, "managed_release.freeze_inventory");
+  const reason = requireMutationReason(params.reason);
   invariant(MANAGED_RELEASE_WORKLOAD_CLASSES.has(params.workloadClass),
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  const preflight = managedReleasePreflightProjection(await getManagedReleaseTargetPreflight(params.deploymentId, managedReleaseAcr({
+    acrName: params.acrName,
+    acrServer: params.acrServer,
+  }), params.workloadClass));
   const deployment = await prisma.customerDeployment.findUnique({
     where: { id: params.deploymentId },
     select: { id: true, managedWorkspaceId: true },
@@ -11136,6 +11203,8 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
   const document = managedReleaseInventoryDocument({
     deploymentId: params.deploymentId,
     workloadClass: params.workloadClass,
+    preflight,
+    reason,
     observedAt: managedReleaseProofInstant(-5 * 60_000),
     verifiedAt: managedReleaseProofInstant(-4 * 60_000),
     assertedAt: managedReleaseProofInstant(-2 * 60_000),
@@ -11215,6 +11284,11 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
           artifactId,
           sha256,
           reason,
+          preflight: {
+            baselineImageTag: preflight.release.baselineImageTag,
+            baselineVersion: preflight.release.baselineVersion,
+            target: preflight.target,
+          },
         },
       },
     });

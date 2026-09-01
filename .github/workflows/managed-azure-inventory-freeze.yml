@@ -11,6 +11,14 @@ on:
         description: Exact workload class for inventory target binding
         required: true
         type: string
+      acr_name:
+        description: Exact Azure Container Registry name
+        required: true
+        type: string
+      acr_server:
+        description: Exact Azure Container Registry server
+        required: true
+        type: string
       reason:
         description: Audited reason for this inventory freeze
         required: true
@@ -43,7 +51,9 @@ jobs:
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
           DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          ACR_NAME: ${{ inputs.acr_name }}
+          ACR_SERVER: ${{ inputs.acr_server }}
           REASON: ${{ inputs.reason }}
         run: |
-          args="$(node -e 'process.stdout.write(JSON.stringify({ deploymentId: process.env.DEPLOYMENT_ID, workloadClass: process.env.WORKLOAD_CLASS, reason: process.env.REASON }))')"
+          args="$(node -e 'process.stdout.write(JSON.stringify({ deploymentId: process.env.DEPLOYMENT_ID, workloadClass: process.env.WORKLOAD_CLASS, acrName: process.env.ACR_NAME, acrServer: process.env.ACR_SERVER, reason: process.env.REASON }))')"
           node scripts/control-plane.mjs call freeze_managed_release_inventory "$args"

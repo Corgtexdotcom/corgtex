@@ -573,9 +573,11 @@ const tools = [
       properties: {
         deploymentId: { type: "string" },
         workloadClass: { type: "string" },
+        acrName: { type: "string" },
+        acrServer: { type: "string" },
         reason: { type: "string" },
       },
-      required: ["deploymentId", "workloadClass", "reason"],
+      required: ["deploymentId", "workloadClass", "acrName", "acrServer", "reason"],
     },
   },
   {
@@ -1277,6 +1279,8 @@ export async function POST(request: NextRequest) {
       return rpcResult(id, textContent(await freezeControlPlaneManagedReleaseInventory(actor, {
         deploymentId: argString(args, "deploymentId"),
         workloadClass: argString(args, "workloadClass") as never,
+        acrName: argString(args, "acrName"),
+        acrServer: argString(args, "acrServer"),
         reason: argString(args, "reason"),
       })));
     }

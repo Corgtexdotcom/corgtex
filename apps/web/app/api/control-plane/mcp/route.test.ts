@@ -192,6 +192,8 @@ describe("/api/control-plane/mcp", () => {
       params: { name: "freeze_managed_release_inventory", arguments: {
         deploymentId: "123e4567-e89b-42d3-a456-426614174001",
         workloadClass: "ACTIVE_CLIENT_CANARY",
+        acrName: "acr12",
+        acrServer: "acr12.azurecr.io",
         reason: "Freeze exact canary inventory.",
       } },
     }) as never);
@@ -199,6 +201,8 @@ describe("/api/control-plane/mcp", () => {
     expect(mocks.freezeControlPlaneManagedReleaseInventory).toHaveBeenCalledWith(expect.anything(), {
       deploymentId: "123e4567-e89b-42d3-a456-426614174001",
       workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
       reason: "Freeze exact canary inventory.",
     });
 
