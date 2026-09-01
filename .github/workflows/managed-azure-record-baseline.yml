@@ -1,0 +1,53 @@
+name: Managed Azure Record Verified Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: Exact managed Azure deployment UUID
+        required: true
+        type: string
+      release_image_tag:
+        description: Already-live release image tag to record
+        required: true
+        type: string
+      release_version:
+        description: Already-live release version label to record
+        required: true
+        type: string
+      reason:
+        description: Audited reason for recording this verified baseline
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-azure-record-baseline-${{ inputs.deployment_id }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: managed-azure-release-production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Record verified release baseline
+        env:
+          CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RELEASE_IMAGE_TAG: ${{ inputs.release_image_tag }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          node scripts/control-plane.mjs record-release "$DEPLOYMENT_ID" "$RELEASE_IMAGE_TAG" "$REASON" "$RELEASE_VERSION"
