@@ -590,8 +590,10 @@ const tools = [
         expectedSha256: { type: "string" },
         deploymentId: { type: "string" },
         workloadClass: { type: "string" },
+        acrName: { type: "string" },
+        acrServer: { type: "string" },
       },
-      required: ["inventoryRef", "expectedSha256", "deploymentId", "workloadClass"],
+      required: ["inventoryRef", "expectedSha256", "deploymentId", "workloadClass", "acrName", "acrServer"],
     },
   },
   {
@@ -1273,6 +1275,8 @@ export async function POST(request: NextRequest) {
         expectedSha256: argString(args, "expectedSha256"),
         deploymentId: argString(args, "deploymentId"),
         workloadClass: argString(args, "workloadClass") as never,
+        acrName: argString(args, "acrName"),
+        acrServer: argString(args, "acrServer"),
       })));
     }
     if (name === "freeze_managed_release_inventory") {

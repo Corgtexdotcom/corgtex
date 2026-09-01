@@ -1612,6 +1612,16 @@ describe("workspace briefing", () => {
       since: new Date("2026-04-29T00:00:00.000Z"),
       now: new Date("2026-04-30T12:00:00.000Z"),
     });
+    expect(prismaMock.buildArtifact.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "ws-1",
+        NOT: {
+          repositoryOwner: "corgtexdotcom",
+          repositoryName: "corgtex-ops",
+          pullRequestNumber: null,
+        },
+      }),
+    }));
 
     expect(candidates).toEqual(expect.arrayContaining([
       expect.objectContaining({

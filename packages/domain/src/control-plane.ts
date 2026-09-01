@@ -11213,6 +11213,7 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
   });
   const bytes = Buffer.from(JSON.stringify(document), "utf8");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const preflightDigest = `sha256:${managedReleaseDigest(managedReleaseCanonicalJson(preflight))}`;
   const evaluation = evaluateExactTargetInventoryJson(bytes.toString("utf8"), {
     now: new Date(),
     requestedWorkloadClass: params.workloadClass,
@@ -11263,7 +11264,7 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
           artifactId,
           kind: "DOCUMENT",
           label: "Managed Azure exact-target inventory",
-          captionMd: `workloadClass=${params.workloadClass}`,
+          captionMd: `workloadClass=${params.workloadClass};preflightDigest=${preflightDigest}`,
           storageKey,
           mimeType: "application/json",
           sizeBytes: bytes.byteLength,
@@ -11287,7 +11288,7 @@ export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor,
             sha256,
             reason,
             actorLabel: actorLabel(actor),
-            preflightDigest: `sha256:${managedReleaseDigest(managedReleaseCanonicalJson(preflight))}`,
+            preflightDigest,
             baselineImageTag: preflight.release.baselineImageTag,
             baselineVersion: preflight.release.baselineVersion,
           },
@@ -11315,6 +11316,8 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
   expectedSha256: string;
   deploymentId: string;
   workloadClass: ExactTargetInventoryWorkloadClass;
+  acrName: string;
+  acrServer: string;
 }) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   await requireControlPlaneAccess(actor);
@@ -11326,6 +11329,11 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
   invariant(MANAGED_RELEASE_WORKLOAD_CLASSES.has(params.workloadClass),
     400, "MANAGED_RELEASE_INVENTORY_INVALID", "Managed release inventory request is invalid.");
+  const preflight = managedReleasePreflightProjection(await getManagedReleaseTargetPreflight(params.deploymentId, managedReleaseAcr({
+    acrName: params.acrName,
+    acrServer: params.acrServer,
+  }), params.workloadClass));
+  const preflightDigest = `sha256:${managedReleaseDigest(managedReleaseCanonicalJson(preflight))}`;
 
   const asset = await prisma.buildArtifactAsset.findUnique({
     where: { id: params.inventoryRef },
@@ -11334,6 +11342,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
       storageKey: true,
       mimeType: true,
       kind: true,
+      captionMd: true,
       sizeBytes: true,
       sha256: true,
       artifact: {
@@ -11352,6 +11361,7 @@ export async function getControlPlaneManagedReleaseInventory(actor: AppActor, pa
     && asset.artifact.visibility === "PRIVATE"
     && ["INTERNAL", "CLIENT_PRIVATE"].includes(asset.artifact.classification)
     && ["DOCUMENT", "OTHER"].includes(asset.kind)
+    && asset.captionMd === `workloadClass=${params.workloadClass};preflightDigest=${preflightDigest}`
     && asset.mimeType === "application/json"
     && asset.sizeBytes > 0
     && asset.sizeBytes <= MANAGED_RELEASE_INVENTORY_MAX_BYTES

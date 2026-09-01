@@ -420,6 +420,13 @@ vi.mock("@corgtex/storage", () => ({ defaultStorage: storageMock }));
 vi.mock("./exact-target-inventory-evaluator", () => ({ evaluateExactTargetInventoryJson: inventoryEvaluatorMock }));
 vi.mock("./control-plane-release-lease", () => leaseMocks);
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+}
+
 const operatorActor: AppActor = {
   kind: "user",
   user: {
@@ -8715,11 +8722,14 @@ describe("managed Azure release control-plane boundary", () => {
     const bytes = Buffer.from('{"schemaVersion":"2.0.0"}', "utf8");
     const digest = createHash("sha256").update(bytes).digest("hex");
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
+    const canaryPreflightDigest = `sha256:${createHash("sha256").update(canonicalJson(canaryPreflight)).digest("hex")}`;
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValue(canaryPreflight);
     prismaMock.buildArtifactAsset.findUnique.mockResolvedValue({
       id: inventoryRef,
       storageKey: "private/inventory.json",
       mimeType: "application/json",
       kind: "DOCUMENT",
+      captionMd: `workloadClass=ACTIVE_CLIENT_CANARY;preflightDigest=${canaryPreflightDigest}`,
       sizeBytes: bytes.byteLength,
       sha256: digest,
       artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PRIVATE" },
@@ -8734,7 +8744,14 @@ describe("managed Azure release control-plane boundary", () => {
     });
     const { getControlPlaneManagedReleaseInventory } = await import("./control-plane");
 
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY" })).resolves.toEqual({
+    await expect(getControlPlaneManagedReleaseInventory(actor, {
+      inventoryRef,
+      expectedSha256: digest,
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).resolves.toEqual({
       inventoryRef,
       sha256: digest,
       bytesBase64: bytes.toString("base64"),
@@ -8749,6 +8766,10 @@ describe("managed Azure release control-plane boundary", () => {
       requestedWorkloadClass: "ACTIVE_CLIENT_CANARY",
       purpose: "managed-release-preflight",
     }));
+    expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, {
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    }, "ACTIVE_CLIENT_CANARY");
 
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
@@ -8757,7 +8778,14 @@ describe("managed Azure release control-plane boundary", () => {
       validUntil: "2026-08-28T00:00:00.000Z",
       selection: { status: "SELECTED", opaqueTargetId: canaryOpaqueTargetId },
     });
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY" })).rejects.toMatchObject({
+    await expect(getControlPlaneManagedReleaseInventory(actor, {
+      inventoryRef,
+      expectedSha256: digest,
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_PRIMARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).rejects.toMatchObject({
       code: "MANAGED_RELEASE_INVENTORY_REJECTED",
     });
 
@@ -8766,11 +8794,19 @@ describe("managed Azure release control-plane boundary", () => {
       storageKey: "private/inventory.json",
       mimeType: "application/json",
       kind: "DOCUMENT",
+      captionMd: `workloadClass=ACTIVE_CLIENT_CANARY;preflightDigest=${canaryPreflightDigest}`,
       sizeBytes: bytes.byteLength,
       sha256: digest,
       artifact: { repositoryOwner: "Corgtexdotcom", repositoryName: "corgtex-ops", classification: "CLIENT_PRIVATE", visibility: "PUBLIC_REVIEW" },
     });
-    await expect(getControlPlaneManagedReleaseInventory(actor, { inventoryRef, expectedSha256: digest, deploymentId, workloadClass: "ACTIVE_CLIENT_CANARY" })).rejects.toMatchObject({
+    await expect(getControlPlaneManagedReleaseInventory(actor, {
+      inventoryRef,
+      expectedSha256: digest,
+      deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    })).rejects.toMatchObject({
       code: "MANAGED_RELEASE_INVENTORY_REJECTED",
     });
   });

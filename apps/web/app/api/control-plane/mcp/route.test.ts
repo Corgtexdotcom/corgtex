@@ -216,6 +216,8 @@ describe("/api/control-plane/mcp", () => {
         expectedSha256: "a".repeat(64),
         deploymentId: "123e4567-e89b-42d3-a456-426614174001",
         workloadClass: "ACTIVE_CLIENT_CANARY",
+        acrName: "acr12",
+        acrServer: "acr12.azurecr.io",
       } },
     }) as never);
     expect(inventory.status).toBe(200);
@@ -224,6 +226,8 @@ describe("/api/control-plane/mcp", () => {
       expectedSha256: "a".repeat(64),
       deploymentId: "123e4567-e89b-42d3-a456-426614174001",
       workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
     });
 
     mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });

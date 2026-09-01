@@ -412,6 +412,8 @@ function runtimeDependencies(env = process.env) {
       expectedSha256: input.inventorySha256,
       deploymentId: input.deploymentId,
       workloadClass: input.workloadClass,
+      acrName: input.acrName,
+      acrServer: input.acrServer,
     }, env),
     lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
     readApp: apps.readApp,

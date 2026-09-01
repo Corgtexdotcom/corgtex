@@ -20,14 +20,10 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 
 const ARTIFACT_MANAGER_ROLES = new Set<MemberRole>(["ADMIN", "FACILITATOR"]);
 const PUBLIC_PROOF_URL_TTL_SECONDS = 60 * 10;
-const OPERATIONAL_ARTIFACT_FILTER = {
-  repositoryOwner: "corgtexdotcom",
-  repositoryName: "corgtex-ops",
-  pullRequestNumber: null,
-} as const;
 
 const buildArtifactAssetSelect = {
   id: true,

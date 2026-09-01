@@ -6,6 +6,7 @@ import {
   type NewspaperEmailSectionId,
   type NormalizedNewspaperDigest,
 } from "./newspaper-edition-rendering";
+import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 
 export type WorkspaceBriefingSourceType =
   | "MEETING"
@@ -1753,6 +1754,7 @@ export async function collectWorkspaceBriefingCandidates(params: {
       where: {
         workspaceId: params.workspaceId,
         updatedAt: beforeCutoff,
+        NOT: OPERATIONAL_ARTIFACT_FILTER,
         OR: [
           { status: "OPEN" },
           { updatedAt: windowRange },
