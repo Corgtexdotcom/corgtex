@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   getControlPlaneSlackSetupTarget: vi.fn(),
   getControlPlaneMeetingOperationsReadiness: vi.fn(),
   freezeControlPlaneManagedReleaseInventory: vi.fn(),
+  getControlPlaneManagedReleaseBootstrapTarget: vi.fn(),
   getControlPlaneManagedReleaseInventory: vi.fn(),
   runControlPlaneManagedReleaseLeaseOperation: vi.fn(),
   enqueueControlPlaneAgendaPreparation: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneMeetingOperationsReadiness: mocks.getControlPlaneMeetingOperationsReadiness, getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
   freezeControlPlaneManagedReleaseInventory: mocks.freezeControlPlaneManagedReleaseInventory,
+  getControlPlaneManagedReleaseBootstrapTarget: mocks.getControlPlaneManagedReleaseBootstrapTarget,
   getControlPlaneManagedReleaseInventory: mocks.getControlPlaneManagedReleaseInventory,
   listControlPlaneCustomerMembers: vi.fn(),
   listControlPlaneDeployments: mocks.listControlPlaneDeployments,
@@ -97,6 +99,7 @@ describe("/api/control-plane/mcp", () => {
     mocks.getControlPlaneSlackSetupTarget.mockResolvedValue({ deploymentId: "dep-slack", managedWorkspaceId: "ws-slack" });
     mocks.getControlPlaneMeetingOperationsReadiness.mockResolvedValue({ deploymentId: "inst-1", agenda: { status: "ready" }, recorder: { status: "ready" } });
     mocks.getControlPlaneManagedReleaseInventory.mockResolvedValue({ inventoryRef: "inventory-1", sha256: "a".repeat(64) });
+    mocks.getControlPlaneManagedReleaseBootstrapTarget.mockResolvedValue({ deploymentId: "deployment-1", target: { resourceGroup: "rg-managed" } });
     mocks.runControlPlaneManagedReleaseLeaseOperation.mockResolvedValue({ phase: "RESERVED" });
     mocks.enqueueControlPlaneAgendaPreparation.mockResolvedValue({ deploymentId: "inst-1", workflowJobId: "job-1" });
     mocks.recordCustomerSupportAudit.mockResolvedValue({ id: "op-audit", status: "COMPLETED" });
@@ -171,6 +174,7 @@ describe("/api/control-plane/mcp", () => {
       "run_post_deploy_probe",
       "enqueue_fleet_snapshot_jobs",
       "freeze_managed_release_inventory",
+      "get_managed_release_bootstrap_target",
       "get_managed_release_inventory",
       "managed_release_lease",
       "prepare_release_upgrade",
@@ -224,6 +228,26 @@ describe("/api/control-plane/mcp", () => {
     expect(mocks.getControlPlaneManagedReleaseInventory).toHaveBeenCalledWith(expect.anything(), {
       inventoryRef: "123e4567-e89b-42d3-a456-426614174000",
       expectedSha256: "a".repeat(64),
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+      workloadClass: "ACTIVE_CLIENT_CANARY",
+      acrName: "acr12",
+      acrServer: "acr12.azurecr.io",
+    });
+
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
+    const bootstrap = await POST(request({
+      jsonrpc: "2.0",
+      id: 44,
+      method: "tools/call",
+      params: { name: "get_managed_release_bootstrap_target", arguments: {
+        deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+        workloadClass: "ACTIVE_CLIENT_CANARY",
+        acrName: "acr12",
+        acrServer: "acr12.azurecr.io",
+      } },
+    }) as never);
+    expect(bootstrap.status).toBe(200);
+    expect(mocks.getControlPlaneManagedReleaseBootstrapTarget).toHaveBeenCalledWith(expect.anything(), {
       deploymentId: "123e4567-e89b-42d3-a456-426614174001",
       workloadClass: "ACTIVE_CLIENT_CANARY",
       acrName: "acr12",

@@ -6849,7 +6849,7 @@ describe("control plane domain", () => {
       managedWorkspaceId: null,
       managedWorkspace: null,
       supportCredentialEnc: null,
-      releaseImageTag: "sha-new",
+      releaseImageTag: `sha-${"2".repeat(40)}`,
       releaseVersion: "0.2.0",
       lastHealthStatus: null,
       lastHealthError: null,
@@ -6870,7 +6870,7 @@ describe("control plane domain", () => {
         database: "up",
         schema: "ready",
         runtime: { redis: "configured", storage: "configured" },
-        release: { imageTag: "ghcr.io/corgtex/web:stale", gitSha: "sha-new" },
+        release: { imageTag: "ghcr.io/corgtex/web:stale", gitSha: "2".repeat(40) },
       }),
     })) as any;
 
@@ -7038,6 +7038,10 @@ describe("control plane domain", () => {
 
   it("records a verified live release and clears release drift metadata", async () => {
     const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
+    const oldSha = "1".repeat(40);
+    const newSha = "2".repeat(40);
+    const oldTag = `sha-${oldSha}`;
+    const newTag = `sha-${newSha}`;
     const deployment = {
       id: "inst-1",
       label: "Acme Production",
@@ -7046,10 +7050,10 @@ describe("control plane domain", () => {
       managedWorkspaceId: null,
       managedWorkspace: null,
       supportCredentialEnc: null,
-      releaseImageTag: "sha-old",
+      releaseImageTag: oldTag,
       releaseVersion: "main-2026-05-15",
       lastHealthStatus: "degraded",
-      lastHealthError: "Release drift: expected sha-old, got sha-new",
+      lastHealthError: `Release drift: expected ${oldTag}, got ${newTag}`,
       lastHealthCheck: new Date("2026-05-20T00:00:00.000Z"),
       lastWorkerHealthStatus: "ok",
       lastWorkerHealthCheck: new Date("2026-05-20T00:00:00.000Z"),
@@ -7062,7 +7066,7 @@ describe("control plane domain", () => {
       .mockResolvedValueOnce(deployment)
       .mockResolvedValueOnce({
         ...deployment,
-        releaseImageTag: "sha-new",
+        releaseImageTag: newTag,
         releaseVersion: "main-2026-05-20",
         lastHealthStatus: "ok",
         lastHealthError: null,
@@ -7077,13 +7081,13 @@ describe("control plane domain", () => {
         database: "up",
         schema: "ready",
         runtime: { redis: "configured", storage: "configured" },
-        release: { gitSha: "sha-new" },
+        release: { gitSha: newSha, imageTag: newTag, version: "main-2026-05-20" },
       }),
     })) as any;
 
     const result = await recordVerifiedControlPlaneRelease(operatorActor, {
       deploymentId: "inst-1",
-      releaseImageTag: "sha-new",
+      releaseImageTag: newTag,
       releaseVersion: "main-2026-05-20",
       reason: "Verified live health after recovery deploy.",
     });
@@ -7091,7 +7095,7 @@ describe("control plane domain", () => {
     expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "inst-1" },
       data: expect.objectContaining({
-        releaseImageTag: "sha-new",
+        releaseImageTag: newTag,
         releaseVersion: "main-2026-05-20",
         lastHealthStatus: "ok",
         lastHealthError: null,
@@ -7103,7 +7107,7 @@ describe("control plane domain", () => {
       where: {
         deploymentId_targetReleaseImageTag: {
           deploymentId: "inst-1",
-          targetReleaseImageTag: "sha-new",
+          targetReleaseImageTag: newTag,
         },
       },
       update: expect.objectContaining({
@@ -7118,10 +7122,69 @@ describe("control plane domain", () => {
     }));
     expect(result).toMatchObject({
       recorded: true,
-      releaseImageTag: "sha-new",
+      releaseImageTag: newTag,
       releaseVersion: "main-2026-05-20",
-      observedRelease: { gitSha: "sha-new" },
+      observedRelease: { gitSha: newSha, imageTag: newTag, version: "main-2026-05-20" },
     });
+  });
+
+  it("rejects non-canonical verified release tags before probing health", async () => {
+    const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
+
+    await expect(recordVerifiedControlPlaneRelease(operatorActor, {
+      deploymentId: "inst-1",
+      releaseImageTag: "2".repeat(40),
+      releaseVersion: "main-2026-05-20",
+      reason: "Reject raw git SHA release record.",
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects verified release records when the supplied version differs from live health", async () => {
+    const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
+    const sha = "2".repeat(40);
+    const tag = `sha-${sha}`;
+    const deployment = {
+      id: "inst-1",
+      label: "Acme Production",
+      customerAccountId: "cust-1",
+      url: "https://customer.test",
+      managedWorkspaceId: null,
+      managedWorkspace: null,
+      supportCredentialEnc: null,
+      releaseImageTag: `sha-${"1".repeat(40)}`,
+      releaseVersion: "main-2026-05-15",
+      lastHealthStatus: "degraded",
+      lastHealthError: "Release drift.",
+      lastHealthCheck: new Date("2026-05-20T00:00:00.000Z"),
+      lastWorkerHealthStatus: "ok",
+      lastWorkerHealthCheck: new Date("2026-05-20T00:00:00.000Z"),
+      lastReleaseCheck: new Date("2026-05-20T00:00:00.000Z"),
+      provisioningStatus: "degraded",
+      bootstrapStatus: "completed",
+      lastProvisioningError: null,
+    };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        database: "up",
+        schema: "ready",
+        runtime: { redis: "configured", storage: "configured" },
+        release: { gitSha: sha, imageTag: tag, version: "main-2026-05-20" },
+      }),
+    })) as any;
+
+    await expect(recordVerifiedControlPlaneRelease(operatorActor, {
+      deploymentId: "inst-1",
+      releaseImageTag: tag,
+      releaseVersion: "main-2026-05-21",
+      reason: "Reject mismatched release version record.",
+    })).rejects.toMatchObject({ code: "RELEASE_VERSION_MISMATCH" });
+
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
   });
 
   it("records sanitized post-deploy probe evidence for customer-read surfaces", async () => {

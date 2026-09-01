@@ -325,6 +325,35 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
   });
 }
 
+export async function getManagedReleaseBootstrapTarget(deploymentId: string, acrIdentity: AcrIdentity, workloadClass = "ACTIVE_CLIENT_PRIMARY") {
+  requireInput(typeof deploymentId === "string" && UUID.test(deploymentId));
+  requireInput(workloadClass === "ACTIVE_CLIENT_PRIMARY" || workloadClass === "ACTIVE_CLIENT_CANARY");
+  const input = targetInputs({ deploymentId, leaseId: "00000000-0000-4000-8000-000000000000", capability: "bootstrap", fence: 1 }, acrIdentity);
+  return transact(async (tx) => {
+    const row = await lock(tx, deploymentId);
+    if (!readOnlyPreflightEligible(row, workloadClass)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
+    if (row.releaseLeaseId && (row.releaseLeasePhase !== "RESERVED" || row.releaseLeaseExpiresAt! > row.databaseNow)) {
+      reject(row.releaseLeasePhase === "RESERVED" ? "MANAGED_RELEASE_LEASE_CONFLICT" : "MANAGED_RELEASE_RECOVERY_REQUIRED");
+    }
+    await assertNoTargetOverlap(tx, row);
+    const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
+    if (!row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const acrName = reader.azureAcrName(input.acrIdentity.acrName);
+    const { subscriptionId, resourceGroup, webAppName, workerAppName } = projectedDeploymentTarget(row);
+    const target = reader.exactRecord({
+      subscriptionId,
+      resourceGroup,
+      acrName,
+      acrServer: reader.azureAcrServer(input.acrIdentity.acrServer, acrName),
+      webAppName,
+      workerAppName,
+    }, ["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"] as const);
+    if (target.webAppName === target.workerAppName) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    return reader.deepFreeze(reader.exactRecord({ deploymentId: row.id, origin: canonicalOrigin(row.url), target },
+      ["deploymentId", "origin", "target"] as const));
+  });
+}
+
 export async function acquireManagedReleaseLease(params: { deploymentId: string; expectedImageTag: string; incomingImageTag: string; incomingVersion: string; owner: string }) {
   requireInput(params && typeof params === "object" && !Array.isArray(params));
   requireInput(typeof params.deploymentId === "string" && UUID.test(params.deploymentId));
