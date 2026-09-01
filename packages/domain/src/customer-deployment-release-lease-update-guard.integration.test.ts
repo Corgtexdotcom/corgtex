@@ -295,7 +295,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
         database: "up",
         schema: "ready",
         runtime: { redis: "configured", storage: "configured" },
-        release: { imageTag: NEXT, gitSha: NEXT.slice(4) },
+        release: { imageTag: NEXT, gitSha: NEXT.slice(4), version: "release-2" },
       }),
     }));
     vi.stubGlobal("fetch", fetchMock);

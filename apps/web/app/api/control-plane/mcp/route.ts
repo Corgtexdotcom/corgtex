@@ -21,6 +21,7 @@ import {
   getControlPlaneDeployment,
   getControlPlaneIntegrationStatus,
   getControlPlaneMeetingOperationsReadiness,
+  getControlPlaneManagedReleaseBootstrapTarget,
   getControlPlaneManagedReleaseInventory,
   getControlPlaneSlackSetupTarget,
   getControlPlaneProviderStatus,
@@ -519,6 +520,7 @@ const tools = [
         releaseImageTag: { type: "string" },
         releaseVersion: { type: "string" },
         reason: { type: "string" },
+        managedAzureTarget: { type: "object" },
       },
       required: ["deploymentId", "releaseImageTag", "reason"],
     },
@@ -578,6 +580,20 @@ const tools = [
         reason: { type: "string" },
       },
       required: ["deploymentId", "workloadClass", "acrName", "acrServer", "reason"],
+    },
+  },
+  {
+    name: "get_managed_release_bootstrap_target",
+    description: "Resolve the trusted managed-Azure target for baseline bootstrap without requiring existing release metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deploymentId: { type: "string" },
+        workloadClass: { type: "string" },
+        acrName: { type: "string" },
+        acrServer: { type: "string" },
+      },
+      required: ["deploymentId", "workloadClass", "acrName", "acrServer"],
     },
   },
   {
@@ -756,6 +772,7 @@ const toolScopes: Record<string, string> = {
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
   freeze_managed_release_inventory: "control-plane:releases:write",
+  get_managed_release_bootstrap_target: "control-plane:releases:write",
   get_managed_release_inventory: "control-plane:releases:write",
   managed_release_lease: "control-plane:releases:write",
   deploy_latest_release: "control-plane:releases:write",
@@ -1250,6 +1267,7 @@ export async function POST(request: NextRequest) {
         deploymentId: argString(args, "deploymentId"),
         releaseImageTag: argString(args, "releaseImageTag"),
         releaseVersion: argOptionalString(args, "releaseVersion"),
+        managedAzureTarget: typeof args.managedAzureTarget === "object" && args.managedAzureTarget !== null && !Array.isArray(args.managedAzureTarget) ? args.managedAzureTarget as never : undefined,
         reason: argString(args, "reason"),
       })));
     }
@@ -1286,6 +1304,14 @@ export async function POST(request: NextRequest) {
         acrName: argString(args, "acrName"),
         acrServer: argString(args, "acrServer"),
         reason: argString(args, "reason"),
+      })));
+    }
+    if (name === "get_managed_release_bootstrap_target") {
+      return rpcResult(id, textContent(await getControlPlaneManagedReleaseBootstrapTarget(actor, {
+        deploymentId: argString(args, "deploymentId"),
+        workloadClass: argString(args, "workloadClass") as never,
+        acrName: argString(args, "acrName"),
+        acrServer: argString(args, "acrServer"),
       })));
     }
     if (name === "managed_release_lease") {

@@ -10,6 +10,7 @@ import {
   claimManagedReleaseRecovery,
   finalizeManagedReleaseRollback,
   finalizeManagedReleaseSuccess,
+  getManagedReleaseBootstrapTarget,
   getManagedReleaseLeaseTarget,
   getManagedReleaseRecoveryStatus,
   getManagedReleaseRollbackRecord,
@@ -388,10 +389,22 @@ describe("managed release lease CAS", () => {
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
     });
   });
+  it("resolves bootstrap targets without requiring existing release metadata", async () => {
+    const target = await deployment({ providerWebServiceId: ARM_WEB_UPPER_RG, providerWorkerServiceId: ARM_WORKER, releaseImageTag: null, releaseVersion: null });
+    const before = await releaseState(target.id);
+    await expect(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY)).resolves.toEqual({
+      deploymentId: target.id,
+      origin: target.url,
+      target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
+    });
+    expect(await releaseState(target.id)).toEqual(before);
+    await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  });
   it("blocks overlapping Azure targets when rows mix Container App names and resource IDs", async () => {
     const target = await deployment({ providerWebServiceId: ARM_WEB, providerWorkerServiceId: ARM_WORKER });
     await deployment({ providerWebServiceId: WEB, providerWorkerServiceId: "other-worker" });
     await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
   });
   it("rejects Azure resource IDs whose embedded target does not match the deployment row", async () => {
