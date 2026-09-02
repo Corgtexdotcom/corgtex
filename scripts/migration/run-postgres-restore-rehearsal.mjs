@@ -29,6 +29,8 @@ const FETCH_ROWS = 500;
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,62}$/u;
 const REQUIRED_DOMAINS = new Set(["core", "ops"]);
 const SOURCE_SSL_MODES = new Set(["require", "verify-ca", "verify-full"]);
+const TARGET_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
+const TARGET_CONNECTION_RETRY_DELAY_MS = 10 * 1000;
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -164,17 +166,58 @@ export const targetDatabaseConfigFromEnv = (environment, database, dockerHostOve
   return { host, dockerHost, port, user, password, database, sslmode: "verify-full" };
 };
 
-const nodeClientConfig = (config, applicationName) => ({
+const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => ({
   host: config.host,
   port: config.port,
   user: config.user,
   password: config.password,
   database: config.database,
   application_name: applicationName,
-  connectionTimeoutMillis: 30_000,
+  connectionTimeoutMillis,
+  ...(queryTimeoutMillis === null ? {} : { query_timeout: queryTimeoutMillis }),
   keepAlive: true,
   ssl: config.sslmode === "disable" ? false : { rejectUnauthorized: config.tlsRejectUnauthorized !== false },
 });
+
+const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+export async function waitForTargetConnection(options) {
+  const {
+    targetAdminConfig,
+    timeoutMs = TARGET_CONNECTION_TIMEOUT_MS,
+    retryDelayMs = TARGET_CONNECTION_RETRY_DELAY_MS,
+    now = () => Date.now(),
+    sleepFn = sleep,
+    clientFactory = (config) => new Client(config),
+  } = options;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) fail("INVALID_TARGET_CONNECTION_TIMEOUT");
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs <= 0) fail("INVALID_TARGET_CONNECTION_RETRY_DELAY");
+  const deadline = now() + timeoutMs;
+  let attempts = 0;
+  while (now() < deadline) {
+    attempts += 1;
+    const remainingMs = deadline - now();
+    let client = null;
+    try {
+      client = clientFactory(nodeClientConfig(
+        targetAdminConfig,
+        "corgtex_rehearsal_firewall_probe",
+        Math.max(1, Math.min(30_000, remainingMs)),
+        Math.max(1, remainingMs),
+      ));
+      await client.connect();
+      await client.query("SELECT 1");
+      return { attempts };
+    } catch {
+      // Azure PostgreSQL firewall changes are asynchronous; retry without exposing connection details.
+    } finally {
+      if (client !== null) await client.end().catch(() => {});
+    }
+    const delayMs = Math.min(retryDelayMs, Math.max(0, deadline - now()));
+    if (delayMs > 0) await sleepFn(delayMs);
+  }
+  fail("TARGET_FIREWALL_PROPAGATION_TIMEOUT");
+}
 
 export const serializePgServiceValue = (value) => {
   const normalized = assertNoControlCharacters(String(value), "INVALID_SERVICE_VALUE");
@@ -575,6 +618,7 @@ export async function runPostgresRestoreRehearsal(options) {
   let transactionOpen = false;
   let credentialsShredded = false;
   try {
+    await waitForTargetConnection({ targetAdminConfig });
     await sourceClient.connect();
     await sourceClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     transactionOpen = true;

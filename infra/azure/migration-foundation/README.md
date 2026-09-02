@@ -108,7 +108,11 @@ locale, ICU rules, encoding, collation, and character classification, and requir
 the target-computed collation version to match before reporting parity. The exported
 snapshot holder disables its statement, transaction, and idle-in-transaction
 timeouts, while dump, restore, and evidence clients disable statement and transaction
-timeouts; the workflow's bounded 180-minute job timeout remains the outer limit.
+timeouts. Before opening a source snapshot or creating the scratch database, the
+runner polls an authenticated, harmless target query for up to five minutes so the
+exact Azure firewall rule has reached the data plane; each connection attempt is
+bounded by the remaining deadline. The workflow's bounded 180-minute job timeout
+remains the outer limit.
 Because sequence values are not MVCC-protected, sequence parity is derived from the
 immutable custom archive: only exact `SEQUENCE SET` entries are replayed against the
 isolated scratch database, and their replay must be a no-op with complete sequence

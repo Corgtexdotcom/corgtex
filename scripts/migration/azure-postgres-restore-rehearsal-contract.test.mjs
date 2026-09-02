@@ -75,6 +75,10 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   });
 
   it("binds dump and source evidence to one exported read-only snapshot", () => {
+    expect(runner.indexOf("await waitForTargetConnection({ targetAdminConfig })"))
+      .toBeLessThan(runner.indexOf("await sourceClient.connect()"));
+    expect(runner).toContain('await client.query("SELECT 1")');
+    expect(runner).toContain("TARGET_FIREWALL_PROPAGATION_TIMEOUT");
     expect(runner).toContain("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(runner).toContain("SHOW transaction_read_only");
     expect(runner).toContain("SELECT pg_export_snapshot() AS snapshot");

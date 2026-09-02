@@ -6,6 +6,7 @@ import {
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
   serializePgServiceValue,
+  waitForTargetConnection,
 } from "./run-postgres-restore-rehearsal.mjs";
 
 describe("PostgreSQL restore rehearsal runner", () => {
@@ -60,6 +61,72 @@ describe("PostgreSQL restore rehearsal runner", () => {
     );
     expect(service.match(/sslmode=disable/gu)).toHaveLength(2);
     expect(service).not.toContain("sslrootcert");
+  });
+
+  it("waits for Azure firewall propagation before continuing", async () => {
+    let clock = 0;
+    let attempts = 0;
+    let queries = 0;
+    const result = await waitForTargetConnection({
+      targetAdminConfig: {
+        host: "target.example.test",
+        port: 5432,
+        user: "admin",
+        password: "secret",
+        database: "postgres",
+        sslmode: "verify-full",
+      },
+      timeoutMs: 5_000,
+      retryDelayMs: 1_000,
+      now: () => clock,
+      sleepFn: async (milliseconds) => { clock += milliseconds; },
+      clientFactory: () => ({
+        connect: async () => {
+          attempts += 1;
+          if (attempts < 3) throw new Error("not ready");
+        },
+        query: async (sql) => {
+          expect(sql).toBe("SELECT 1");
+          queries += 1;
+        },
+        end: async () => {},
+      }),
+    });
+    expect(result).toEqual({ attempts: 3 });
+    expect(queries).toBe(1);
+  });
+
+  it("fails closed at the bounded firewall propagation deadline", async () => {
+    let clock = 0;
+    const connectionTimeouts = [];
+    const queryTimeouts = [];
+    const promise = waitForTargetConnection({
+      targetAdminConfig: {
+        host: "target.example.test",
+        port: 5432,
+        user: "admin",
+        password: "secret",
+        database: "postgres",
+        sslmode: "verify-full",
+      },
+      timeoutMs: 2_500,
+      retryDelayMs: 1_000,
+      now: () => clock,
+      sleepFn: async (milliseconds) => { clock += milliseconds; },
+      clientFactory: (config) => {
+        connectionTimeouts.push(config.connectionTimeoutMillis);
+        queryTimeouts.push(config.query_timeout);
+        return {
+          connect: async () => { throw new Error("not ready"); },
+          query: async () => {},
+          end: async () => {},
+        };
+      },
+    });
+    await expect(promise).rejects.toThrow("TARGET_FIREWALL_PROPAGATION_TIMEOUT");
+    expect(clock).toBe(2_500);
+    expect(connectionTimeouts).toEqual([2_500, 1_500, 500]);
+    expect(queryTimeouts).toEqual([2_500, 1_500, 500]);
   });
 
   it("selects only exact sequence-set entries from a PostgreSQL archive TOC", () => {
