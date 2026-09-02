@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCreateDatabaseSql,
   buildPgServiceContents,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
@@ -58,6 +59,64 @@ describe("PostgreSQL restore rehearsal runner", () => {
     );
     expect(service.match(/sslmode=disable/gu)).toHaveLength(2);
     expect(service).not.toContain("sslrootcert");
+  });
+
+  it.each([
+    [
+      "libc",
+      { provider: "libc", providerLocale: null, icuRules: null },
+      "LOCALE_PROVIDER 'libc' LC_COLLATE 'C' LC_CTYPE 'C'",
+    ],
+    [
+      "icu",
+      { provider: "icu", providerLocale: "en-US", icuRules: "&a < b" },
+      "LOCALE_PROVIDER 'icu' LC_COLLATE 'C' LC_CTYPE 'C' ICU_LOCALE 'en-US' ICU_RULES '&a < b'",
+    ],
+    [
+      "builtin",
+      { provider: "builtin", providerLocale: "C.UTF-8", icuRules: null },
+      "LOCALE_PROVIDER 'builtin' LC_COLLATE 'C' LC_CTYPE 'C' BUILTIN_LOCALE 'C.UTF-8'",
+    ],
+  ])("builds an exact PostgreSQL 18 %s locale clause", (_label, locale, clause) => {
+    const sql = buildCreateDatabaseSql("corgtex_rehearsal_123_core", {
+      encoding: "UTF8",
+      collation: "C",
+      ctype: "C",
+      collationVersion: "1",
+      ...locale,
+    });
+    expect(sql).toContain("TEMPLATE template0 ENCODING 'UTF8'");
+    expect(sql).toContain(clause);
+    expect(sql).not.toContain("COLLATION_VERSION");
+  });
+
+  it("omits ICU rules when the source catalog has none", () => {
+    const sql = buildCreateDatabaseSql("corgtex_rehearsal_123_core", {
+      encoding: "UTF8",
+      collation: "C",
+      ctype: "C",
+      provider: "icu",
+      providerLocale: "en-US",
+      icuRules: null,
+      collationVersion: "153.128",
+    });
+    expect(sql).toContain("ICU_LOCALE 'en-US'");
+    expect(sql).not.toContain("ICU_RULES");
+  });
+
+  it.each([
+    { provider: "unknown", providerLocale: null, icuRules: null },
+    { provider: "libc", providerLocale: "en-US", icuRules: null },
+    { provider: "icu", providerLocale: null, icuRules: null },
+    { provider: "builtin", providerLocale: "C.UTF-8", icuRules: "rule" },
+  ])("rejects an invalid locale provider contract", (locale) => {
+    expect(() => buildCreateDatabaseSql("corgtex_rehearsal_123_core", {
+      encoding: "UTF8",
+      collation: "C",
+      ctype: "C",
+      collationVersion: null,
+      ...locale,
+    })).toThrow();
   });
 
   it.each(["value with spaces", "value#comment", "value;other", "value='quoted'", "line\nbreak"])(

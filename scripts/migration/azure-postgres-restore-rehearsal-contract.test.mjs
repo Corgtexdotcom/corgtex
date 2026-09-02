@@ -78,6 +78,8 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(runner).toContain("SHOW transaction_read_only");
     expect(runner).toContain("SELECT pg_export_snapshot() AS snapshot");
+    expect(runner).toContain("SET LOCAL idle_in_transaction_session_timeout = '0'");
+    expect(runner).toContain("SHOW idle_in_transaction_session_timeout");
     expect(runner).toContain('["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--snapshot", snapshot');
     expect(runner).toContain('["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", "--snapshot", snapshot');
     expect(runner).toContain("DECLARE ${quoteIdentifier(cursorName)} NO SCROLL CURSOR");
@@ -113,11 +115,33 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   it("consumes persisted intent in a protected exact-target recovery operation", () => {
     expect(workflow).toContain("actions/download-artifact@v5");
     expect(workflow).toContain("run-id: ${{ inputs.recovery_run_id }}");
-    expect(workflow).toContain('and .databaseState == {schemaVersion:"1.0.0",scratchName:$scratch_name,targetRef:$target_ref,phase:"ABSENCE_VERIFIED"}');
-    expect(workflow).toContain('and .firewallState == {schemaVersion:"1.0.0",name:$firewall_name,phase:"ABSENCE_VERIFIED"}');
+    expect(workflow).toContain("subscriptionId:$subscription_id");
+    expect(workflow).toContain("resourceId:$postgres_resource_id");
+    expect(workflow).toContain("--mode=recovery-intent");
+    expect(validator).toContain('status: "EXACT_RECOVERY_INTENT"');
+    expect(validator).toContain("RECOVERY_SUBSCRIPTION_MISMATCH");
+    expect(validator).toContain("RECOVERY_TARGET_RESOURCE_MISMATCH");
     expect(workflow).toContain("Remove the exact recovery scratch database");
     expect(workflow).toContain("Remove the exact recovery firewall rule");
+    expect(workflow).toContain("az postgres flexible-server db delete");
+    expect(workflow).toContain('--ids "$expected_id"');
+    expect(workflow).toContain('type | ascii_downcase) == "microsoft.dbforpostgresql/flexibleservers/databases"');
     expect(workflow).toContain('status:"POSTGRES_REHEARSAL_RECOVERED"');
+    const recoveryJob = workflow.slice(workflow.indexOf("  recovery:"));
+    expect(recoveryJob).not.toContain("TARGET_POSTGRES_ADMIN_PASSWORD");
+    expect(recoveryJob).not.toContain("--mode=cleanup");
+    expect(recoveryJob).not.toContain("firewall-rule create");
+    expect(recoveryJob).not.toContain("--yes --only-show-errors || true");
+  });
+
+  it("preserves and verifies the PostgreSQL 18 locale-provider contract", () => {
+    expect(runner).toContain("datlocprovider::text AS locale_provider");
+    expect(runner).toContain("datlocale AS provider_locale");
+    expect(runner).toContain("daticurules AS icu_rules");
+    expect(runner).toContain("datcollversion AS collation_version");
+    expect(runner).toContain("LOCALE_PROVIDER");
+    expect(runner).toContain("SCRATCH_DATABASE_LOCALE_MISMATCH");
+    expect(validator).toContain('compareExact(source.locale, destination.locale, "LOCALE_PARITY_MISMATCH")');
   });
 
   it("keeps dump bytes and credentials temporary while uploading only private evidence", () => {

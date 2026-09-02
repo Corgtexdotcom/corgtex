@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   validatePostgresRestoreRehearsal,
+  validateRecoveryIntent,
   validateRehearsalPrincipal,
 } from "./validate-postgres-restore-rehearsal.mjs";
 
@@ -14,12 +15,24 @@ const RESOURCE_GROUP = "rg-corgtex-migration-rehearsal";
 const SCOPE = `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`;
 const CONTRIBUTOR_ROLE_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c";
 const ROLE_ASSIGNMENT_ID = "44444444-4444-4444-8444-444444444444";
+const POSTGRES_SERVER = "corgtex-mig-reh-restore-pg";
+const POSTGRES_HOST = `${POSTGRES_SERVER}.postgres.database.azure.com`;
+const POSTGRES_RESOURCE_ID = `${SCOPE}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${POSTGRES_SERVER}`;
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const clone = (value) => structuredClone(value);
 
 const databaseEvidence = () => ({
   server: { majorVersion: 18 },
+  locale: {
+    encoding: "UTF8",
+    collation: "C",
+    ctype: "C",
+    provider: "builtin",
+    providerLocale: "C.UTF-8",
+    icuRules: null,
+    collationVersion: "1",
+  },
   extensions: [
     { name: "plpgsql", version: "1.0" },
     { name: "vector", version: "0.8.2" },
@@ -90,6 +103,47 @@ const principalInput = () => ({
   }],
 });
 
+const recoveryDocument = () => {
+  const runId = "123456789";
+  const runAttempt = "2";
+  const domain = "core";
+  const scratchName = `corgtex_rehearsal_${runId}_${runAttempt}_${domain}`;
+  const firewallName = `corgtex-rehearsal-${runId}-${runAttempt}`;
+  return {
+    intent: {
+      schemaVersion: "1.0.0",
+      runId,
+      runAttempt,
+      domain,
+      subscriptionId: SUBSCRIPTION_ID,
+      target: {
+        resourceGroup: RESOURCE_GROUP,
+        serverName: POSTGRES_SERVER,
+        resourceId: POSTGRES_RESOURCE_ID,
+      },
+      databaseState: {
+        schemaVersion: "1.0.0",
+        scratchName,
+        targetRef: `sha256:${sha256(`${POSTGRES_HOST}\0${scratchName}`).slice(0, 16)}`,
+        phase: "ABSENCE_VERIFIED",
+      },
+      firewallState: { schemaVersion: "1.0.0", name: firewallName, phase: "ABSENCE_VERIFIED" },
+    },
+    current: {
+      subscriptionId: SUBSCRIPTION_ID,
+      resourceGroup: RESOURCE_GROUP,
+      serverName: POSTGRES_SERVER,
+      postgresResourceId: POSTGRES_RESOURCE_ID,
+      postgresHost: POSTGRES_HOST,
+      runId,
+      runAttempt,
+      domain,
+      scratchName,
+      firewallName,
+    },
+  };
+};
+
 describe("validateRehearsalPrincipal", () => {
   it("accepts only the pinned UAMI with one exact RG-scoped Contributor assignment", () => {
     const receipt = validateRehearsalPrincipal(principalInput(), { expectedClientSha256: sha256(CLIENT_ID) });
@@ -108,6 +162,24 @@ describe("validateRehearsalPrincipal", () => {
     const input = principalInput();
     mutate(input);
     expect(() => validateRehearsalPrincipal(input, { expectedClientSha256: sha256(CLIENT_ID) })).toThrow(code);
+  });
+});
+
+describe("validateRecoveryIntent", () => {
+  it("accepts the exact persisted subscription, parent resource, and run-derived targets", () => {
+    expect(validateRecoveryIntent(recoveryDocument())).toMatchObject({ status: "EXACT_RECOVERY_INTENT" });
+  });
+
+  it.each([
+    ["missing subscription", (value) => { delete value.intent.subscriptionId; }, "INVALID_RECOVERY_INTENT"],
+    ["cross subscription", (value) => { value.intent.subscriptionId = "55555555-5555-4555-8555-555555555555"; }, "RECOVERY_SUBSCRIPTION_MISMATCH"],
+    ["foreign persisted parent", (value) => { value.intent.target.resourceId = value.intent.target.resourceId.replace(RESOURCE_GROUP, `${RESOURCE_GROUP}-foreign`); }, "RECOVERY_TARGET_RESOURCE_MISMATCH"],
+    ["fresh readback drift", (value) => { value.current.postgresResourceId = value.current.postgresResourceId.replace(POSTGRES_SERVER, `${POSTGRES_SERVER}-other`); }, "RECOVERY_POSTGRES_RESOURCE_MISMATCH"],
+    ["wrong server name", (value) => { value.intent.target.serverName = `${POSTGRES_SERVER}-other`; }, "RECOVERY_TARGET_NAME_MISMATCH"],
+  ])("rejects %s before cleanup", (_label, mutate, code) => {
+    const value = recoveryDocument();
+    mutate(value);
+    expect(() => validateRecoveryIntent(value)).toThrow(code);
   });
 });
 
@@ -139,6 +211,9 @@ describe("validatePostgresRestoreRehearsal", () => {
 
   it.each([
     ["server", (value) => { value.destination.server.majorVersion = 17; }, "DESTINATION_POSTGRES_VERSION_MISMATCH"],
+    ["locale provider", (value) => { value.destination.locale.provider = "icu"; }, "LOCALE_PARITY_MISMATCH"],
+    ["locale", (value) => { value.destination.locale.providerLocale = "PG_UNICODE_FAST"; }, "LOCALE_PARITY_MISMATCH"],
+    ["collation version", (value) => { value.destination.locale.collationVersion = "2"; }, "LOCALE_PARITY_MISMATCH"],
     ["extension", (value) => { value.destination.extensions[1].version = "0.9.0"; }, "EXTENSION_MISMATCH"],
     ["schema", (value) => { value.destination.schema.digest = HASH_B; }, "SCHEMA_DIGEST_MISMATCH"],
     ["table identity", (value) => { value.destination.tables[0].name = "EventCopy"; }, "TABLE_PARITY_MISMATCH"],

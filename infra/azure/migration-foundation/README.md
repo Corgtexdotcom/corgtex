@@ -103,7 +103,11 @@ containers, and data-plane role assignments. It then opens one run-named `/32`
 firewall rule, exports one repeatable-read read-only source snapshot, and binds both
 the immutable PostgreSQL 18.6 `pg_dump` and source evidence to that snapshot. The
 restore always targets a new run-derived database, never the Bicep-managed `corgtex`
-database.
+database. The workflow preserves the source PostgreSQL 18 locale provider, provider
+locale, ICU rules, encoding, collation, and character classification, and requires
+the target-computed collation version to match before reporting parity. The exported
+snapshot holder disables its idle-in-transaction timeout; the workflow's bounded
+180-minute job timeout remains the outer limit.
 
 Private evidence contains only schema/table identities, counts, and digests—never
 row values or dump bytes. The public receipt is limited to opaque source, target, and
@@ -119,10 +123,11 @@ material. Before either temporary resource can be created, the workflow uploads 
 firewall identities plus their absence-verified target. If the runner is terminated
 before `always()` cleanup, dispatch the same protected workflow with operation
 `recover`, the original domain, run ID, and run attempt. It downloads and validates
-that exact artifact, reconstructs the database cleanup state, removes only the two
-run-derived resources, and proves both absent. The intent never authorizes removal of
-the Bicep-managed `corgtex` database or another firewall rule. Any missing or failed
-cleanup is `RECOVERY_REQUIRED`.
+that exact artifact, deletes the exact database child through the Azure management
+plane without a PostgreSQL password or recovery-runner firewall, independently
+removes the run-derived firewall rule, and proves both absent. The intent never
+authorizes removal of the Bicep-managed `corgtex` database or another firewall rule.
+Any missing or failed cleanup is `RECOVERY_REQUIRED`.
 
 Local validation:
 

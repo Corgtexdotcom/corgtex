@@ -112,7 +112,6 @@ const main = async () => {
       "run", "--detach", "--name", sourceContainer, "--network", network,
       "--publish", `127.0.0.1:${sourcePort}:5432`,
       "--env", `POSTGRES_PASSWORD=${TEST_PASSWORD}`,
-      "--env", "POSTGRES_DB=source",
       SERVER_IMAGE,
     ], "SOURCE_CONTAINER_START_FAILED");
     sourceStarted = true;
@@ -123,7 +122,14 @@ const main = async () => {
       SERVER_IMAGE,
     ], "TARGET_CONTAINER_START_FAILED");
     targetStarted = true;
-    await Promise.all([waitForDatabase(sourcePort, "source"), waitForDatabase(targetPort, "postgres")]);
+    await Promise.all([waitForDatabase(sourcePort, "postgres"), waitForDatabase(targetPort, "postgres")]);
+
+    const sourceBootstrap = new Client(config(sourcePort, "postgres"));
+    await sourceBootstrap.connect();
+    await sourceBootstrap.query(
+      "CREATE DATABASE source TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER 'builtin' LC_COLLATE 'C' LC_CTYPE 'C' BUILTIN_LOCALE 'C.UTF-8'",
+    );
+    await sourceBootstrap.end();
 
     const sourceAdmin = new Client(config(sourcePort, "source"));
     await sourceAdmin.connect();
@@ -220,6 +226,9 @@ const main = async () => {
     });
 
     const evidence = JSON.parse(readFileSync(join(artifactDir, "postgres-restore-evidence.json"), "utf8"));
+    if (evidence.source.locale.provider !== "builtin" || JSON.stringify(evidence.source.locale) !== JSON.stringify(evidence.destination.locale)) {
+      fail("LOCALE_PROVIDER_PARITY_FAILED");
+    }
     const sourceEvent = evidence.source.tables.find((table) => table.name === "Event");
     const destinationEvent = evidence.destination.tables.find((table) => table.name === "Event");
     if (sourceEvent?.rowCount !== 1 || destinationEvent?.rowCount !== 1) fail("SNAPSHOT_BINDING_FAILED");

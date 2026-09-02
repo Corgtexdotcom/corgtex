@@ -94,6 +94,62 @@ export function validateRehearsalPrincipal(document, options = {}) {
   };
 }
 
+export function validateRecoveryIntent(document) {
+  expectExactKeys(document, ["intent", "current"], "INVALID_RECOVERY_DOCUMENT");
+  const { intent, current } = document;
+  expectExactKeys(current, ["subscriptionId", "resourceGroup", "serverName", "postgresResourceId", "postgresHost", "runId", "runAttempt", "domain", "scratchName", "firewallName"], "INVALID_RECOVERY_CURRENT");
+  const subscriptionId = normalizeUuid(current.subscriptionId, "INVALID_RECOVERY_SUBSCRIPTION");
+  if (typeof current.resourceGroup !== "string" || current.resourceGroup.length === 0) fail("INVALID_RECOVERY_RESOURCE_GROUP");
+  if (typeof current.serverName !== "string" || !/^[a-z0-9-]{3,63}$/u.test(current.serverName)) fail("INVALID_RECOVERY_SERVER_NAME");
+  if (typeof current.postgresHost !== "string" || current.postgresHost.length === 0) fail("INVALID_RECOVERY_POSTGRES_HOST");
+  if (!/^[1-9][0-9]*$/u.test(current.runId) || !/^[1-9][0-9]*$/u.test(current.runAttempt)) fail("INVALID_RECOVERY_RUN_IDENTITY");
+  if (!new Set(["core", "ops"]).has(current.domain)) fail("INVALID_DOMAIN");
+  const expectedScratchName = `corgtex_rehearsal_${current.runId}_${current.runAttempt}_${current.domain}`;
+  const expectedFirewallName = `corgtex-rehearsal-${current.runId}-${current.runAttempt}`;
+  if (current.scratchName !== expectedScratchName || !SAFE_IDENTIFIER_PATTERN.test(current.scratchName)) fail("INVALID_RECOVERY_SCRATCH_NAME");
+  if (current.firewallName !== expectedFirewallName) fail("INVALID_RECOVERY_FIREWALL_NAME");
+
+  const expectedPostgresResourceId = `${expectedResourceGroupId(subscriptionId, current.resourceGroup)}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${current.serverName}`;
+  if (normalizeResourceId(current.postgresResourceId) !== normalizeResourceId(expectedPostgresResourceId)) {
+    fail("RECOVERY_POSTGRES_RESOURCE_MISMATCH");
+  }
+
+  expectExactKeys(intent, ["schemaVersion", "runId", "runAttempt", "domain", "subscriptionId", "target", "databaseState", "firewallState"], "INVALID_RECOVERY_INTENT");
+  if (intent.schemaVersion !== "1.0.0") fail("RECOVERY_SCHEMA_VERSION_MISMATCH");
+  if (normalizeUuid(intent.subscriptionId, "INVALID_INTENT_SUBSCRIPTION") !== subscriptionId) fail("RECOVERY_SUBSCRIPTION_MISMATCH");
+  if (intent.runId !== current.runId || intent.runAttempt !== current.runAttempt || intent.domain !== current.domain) {
+    fail("RECOVERY_RUN_IDENTITY_MISMATCH");
+  }
+  expectExactKeys(intent.target, ["resourceGroup", "serverName", "resourceId"], "INVALID_RECOVERY_TARGET");
+  if (intent.target.resourceGroup !== current.resourceGroup || intent.target.serverName !== current.serverName) {
+    fail("RECOVERY_TARGET_NAME_MISMATCH");
+  }
+  if (normalizeResourceId(intent.target.resourceId) !== normalizeResourceId(current.postgresResourceId)) {
+    fail("RECOVERY_TARGET_RESOURCE_MISMATCH");
+  }
+  const targetRef = `sha256:${sha256(`${current.postgresHost}\0${current.scratchName}`).slice(0, 16)}`;
+  compareExact(intent.databaseState, {
+    schemaVersion: "1.0.0",
+    scratchName: current.scratchName,
+    targetRef,
+    phase: "ABSENCE_VERIFIED",
+  }, "INVALID_RECOVERY_DATABASE_STATE");
+  compareExact(intent.firewallState, {
+    schemaVersion: "1.0.0",
+    name: current.firewallName,
+    phase: "ABSENCE_VERIFIED",
+  }, "INVALID_RECOVERY_FIREWALL_STATE");
+
+  return {
+    schemaVersion: "1.0.0",
+    status: "EXACT_RECOVERY_INTENT",
+    subscriptionRef: `sha256:${sha256(subscriptionId).slice(0, 16)}`,
+    postgresResourceRef: `sha256:${sha256(normalizeResourceId(current.postgresResourceId)).slice(0, 16)}`,
+    scratchRef: `sha256:${sha256(current.scratchName).slice(0, 16)}`,
+    firewallRef: `sha256:${sha256(current.firewallName).slice(0, 16)}`,
+  };
+}
+
 const validateHash = (value, code) => {
   if (typeof value !== "string" || !SHA256_PATTERN.test(value)) fail(code);
   return value;
@@ -115,10 +171,26 @@ const compareExact = (left, right, code) => {
 
 const validateDatabaseEvidence = (value, side) => {
   const prefix = side.toUpperCase();
-  expectExactKeys(value, ["server", "extensions", "schema", "tables", "sequences", "largeObjects", "migrations", "queues"], `${prefix}_EVIDENCE_SHAPE_MISMATCH`);
+  expectExactKeys(value, ["server", "locale", "extensions", "schema", "tables", "sequences", "largeObjects", "migrations", "queues"], `${prefix}_EVIDENCE_SHAPE_MISMATCH`);
 
   expectExactKeys(value.server, ["majorVersion"], `${prefix}_SERVER_SHAPE_MISMATCH`);
   if (value.server.majorVersion !== 18) fail(`${prefix}_POSTGRES_VERSION_MISMATCH`);
+
+  expectExactKeys(value.locale, ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules", "collationVersion"], `${prefix}_LOCALE_SHAPE_MISMATCH`);
+  for (const key of ["encoding", "collation", "ctype"]) {
+    if (typeof value.locale[key] !== "string" || value.locale[key].length === 0) fail(`${prefix}_LOCALE_INVALID`);
+  }
+  if (!["builtin", "icu", "libc"].includes(value.locale.provider)) fail(`${prefix}_LOCALE_PROVIDER_INVALID`);
+  for (const key of ["providerLocale", "icuRules", "collationVersion"]) {
+    if (value.locale[key] !== null && (typeof value.locale[key] !== "string" || value.locale[key].length === 0)) {
+      fail(`${prefix}_LOCALE_INVALID`);
+    }
+  }
+  if (value.locale.provider === "libc" && (value.locale.providerLocale !== null || value.locale.icuRules !== null)) {
+    fail(`${prefix}_LOCALE_INVALID`);
+  }
+  if (value.locale.provider !== "libc" && value.locale.providerLocale === null) fail(`${prefix}_LOCALE_INVALID`);
+  if (value.locale.provider !== "icu" && value.locale.icuRules !== null) fail(`${prefix}_LOCALE_INVALID`);
 
   if (!Array.isArray(value.extensions) || value.extensions.length === 0) fail(`${prefix}_EXTENSIONS_INVALID`);
   const extensionKeys = new Set();
@@ -215,6 +287,7 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
   const destination = validateDatabaseEvidence(document.destination, "destination");
 
   compareExact(source.server, destination.server, "SERVER_VERSION_MISMATCH");
+  compareExact(source.locale, destination.locale, "LOCALE_PARITY_MISMATCH");
   compareExact(source.extensions, destination.extensions, "EXTENSION_MISMATCH");
   compareExact(source.schema, destination.schema, "SCHEMA_DIGEST_MISMATCH");
   compareExact(source.tables, destination.tables, "TABLE_PARITY_MISMATCH");
@@ -315,6 +388,8 @@ export function main(tokens = process.argv.slice(2)) {
   let receipt;
   if (mode === "principal" && args.size === 2 && args.has("input")) {
     receipt = validateRehearsalPrincipal(parseJsonFile(args.get("input")));
+  } else if (mode === "recovery-intent" && args.size === 2 && args.has("input")) {
+    receipt = validateRecoveryIntent(parseJsonFile(args.get("input")));
   } else if (mode === "parity" && args.size === 3 && args.has("input") && args.has("cleanup")) {
     receipt = validatePostgresRestoreRehearsal(parseJsonFile(args.get("input")), parseJsonFile(args.get("cleanup")));
   } else {

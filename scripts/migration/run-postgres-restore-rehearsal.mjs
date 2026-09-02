@@ -29,6 +29,11 @@ const FETCH_ROWS = 500;
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,62}$/u;
 const REQUIRED_DOMAINS = new Set(["core", "ops"]);
 const SOURCE_SSL_MODES = new Set(["require", "verify-ca", "verify-full"]);
+const LOCALE_PROVIDERS = new Map([
+  ["b", "builtin"],
+  ["c", "libc"],
+  ["i", "icu"],
+]);
 
 const fail = (code) => {
   const error = new Error(code);
@@ -45,6 +50,8 @@ const assertNoControlCharacters = (value, code) => {
   if (typeof value !== "string" || value.length === 0 || /[\u0000-\u001f\u007f]/u.test(value)) fail(code);
   return value;
 };
+
+const nullableText = (value, code) => value === null ? null : assertNoControlCharacters(value, code);
 
 const assertSafePath = (path, root, code) => {
   const resolvedPath = resolve(path);
@@ -255,24 +262,76 @@ const databaseSettings = async (client) => {
       current_setting('server_version_num')::integer AS server_version_num,
       pg_encoding_to_char(encoding) AS encoding,
       datcollate AS collation,
-      datctype AS ctype
+      datctype AS ctype,
+      datlocprovider::text AS locale_provider,
+      datlocale AS provider_locale,
+      daticurules AS icu_rules,
+      datcollversion AS collation_version
     FROM pg_database
     WHERE datname = current_database()
   `, [], "DATABASE_SETTINGS_UNAVAILABLE");
   const majorVersion = Math.floor(Number(row.server_version_num) / 10_000);
   if (majorVersion !== 18) fail("POSTGRES_18_REQUIRED");
+  const provider = LOCALE_PROVIDERS.get(row.locale_provider);
+  if (provider === undefined) fail("UNSUPPORTED_LOCALE_PROVIDER");
+  const providerLocale = nullableText(row.provider_locale, "INVALID_PROVIDER_LOCALE");
+  const icuRules = nullableText(row.icu_rules, "INVALID_ICU_RULES");
+  if (provider === "libc" && providerLocale !== null) fail("INVALID_LIBC_LOCALE");
+  if (provider !== "icu" && icuRules !== null) fail("INVALID_ICU_RULES");
+  if (provider !== "libc" && providerLocale === null) fail("MISSING_PROVIDER_LOCALE");
   return {
     majorVersion,
     encoding: assertNoControlCharacters(row.encoding, "INVALID_DATABASE_ENCODING"),
     collation: assertNoControlCharacters(row.collation, "INVALID_DATABASE_COLLATION"),
     ctype: assertNoControlCharacters(row.ctype, "INVALID_DATABASE_CTYPE"),
+    provider,
+    providerLocale,
+    icuRules,
+    collationVersion: nullableText(row.collation_version, "INVALID_COLLATION_VERSION"),
   };
 };
 
 const writeState = (stateFile, value) => writePrivateJson(stateFile, value);
 
-const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef }) => {
+export const buildCreateDatabaseSql = (scratchName, settings) => {
   if (!SAFE_NAME.test(scratchName) || !scratchName.startsWith("corgtex_rehearsal_")) fail("INVALID_SCRATCH_DATABASE_NAME");
+  const common = [
+    `CREATE DATABASE ${quoteIdentifier(scratchName)}`,
+    "TEMPLATE template0",
+    `ENCODING ${quoteLiteral(settings.encoding)}`,
+    `LOCALE_PROVIDER ${quoteLiteral(settings.provider)}`,
+    `LC_COLLATE ${quoteLiteral(settings.collation)}`,
+    `LC_CTYPE ${quoteLiteral(settings.ctype)}`,
+  ];
+  if (settings.provider === "libc") {
+    if (settings.providerLocale !== null || settings.icuRules !== null) fail("INVALID_LIBC_LOCALE");
+  } else if (settings.provider === "icu") {
+    if (typeof settings.providerLocale !== "string" || settings.providerLocale.length === 0) fail("MISSING_PROVIDER_LOCALE");
+    common.push(`ICU_LOCALE ${quoteLiteral(settings.providerLocale)}`);
+    if (settings.icuRules !== null) common.push(`ICU_RULES ${quoteLiteral(settings.icuRules)}`);
+  } else if (settings.provider === "builtin") {
+    if (typeof settings.providerLocale !== "string" || settings.providerLocale.length === 0 || settings.icuRules !== null) {
+      fail("INVALID_BUILTIN_LOCALE");
+    }
+    common.push(`BUILTIN_LOCALE ${quoteLiteral(settings.providerLocale)}`);
+  } else {
+    fail("UNSUPPORTED_LOCALE_PROVIDER");
+  }
+  return common.join(" ");
+};
+
+const localeSettings = (settings) => ({
+  encoding: settings.encoding,
+  collation: settings.collation,
+  ctype: settings.ctype,
+  provider: settings.provider,
+  providerLocale: settings.providerLocale,
+  icuRules: settings.icuRules,
+  collationVersion: settings.collationVersion,
+});
+
+const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef }) => {
+  const createSql = buildCreateDatabaseSql(scratchName, settings);
   const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
   await client.connect();
   try {
@@ -280,12 +339,20 @@ const createScratchDatabase = async ({ adminConfig, scratchName, settings, state
     const existing = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [scratchName]);
     if (existing.rowCount !== 0) fail("SCRATCH_DATABASE_ALREADY_EXISTS");
     writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "ABSENCE_VERIFIED" });
-    await client.query(
-      `CREATE DATABASE ${quoteIdentifier(scratchName)} TEMPLATE template0 ENCODING ${quoteLiteral(settings.encoding)} LC_COLLATE ${quoteLiteral(settings.collation)} LC_CTYPE ${quoteLiteral(settings.ctype)}`,
-    );
+    await client.query(createSql);
     writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "CREATED" });
   } finally {
     await client.end().catch(() => {});
+  }
+  const readbackClient = new Client(nodeClientConfig({ ...adminConfig, database: scratchName }, "corgtex_rehearsal_locale_readback"));
+  await readbackClient.connect();
+  try {
+    const readback = await databaseSettings(readbackClient);
+    if (JSON.stringify(localeSettings(readback)) !== JSON.stringify(localeSettings(settings))) {
+      fail("SCRATCH_DATABASE_LOCALE_MISMATCH");
+    }
+  } finally {
+    await readbackClient.end().catch(() => {});
   }
 };
 
@@ -453,6 +520,7 @@ const collectDatabaseEvidence = async (client, schemaDigest) => {
   const extensionsResult = await client.query("SELECT extname AS name, extversion AS version FROM pg_extension ORDER BY extname COLLATE \"C\"");
   return {
     server: { majorVersion: settings.majorVersion },
+    locale: localeSettings(settings),
     extensions: extensionsResult.rows,
     schema: { digest: schemaDigest },
     tables: await collectTables(client),
@@ -493,8 +561,10 @@ export async function runPostgresRestoreRehearsal(options) {
     transactionOpen = true;
     await sourceClient.query("SET LOCAL lock_timeout = '5s'");
     await sourceClient.query("SET LOCAL statement_timeout = '15min'");
-    await sourceClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
+    await sourceClient.query("SET LOCAL idle_in_transaction_session_timeout = '0'");
     await sourceClient.query("SET LOCAL timezone = 'UTC'");
+    const idleTimeout = await querySingle(sourceClient, "SHOW idle_in_transaction_session_timeout", [], "SOURCE_IDLE_TIMEOUT_UNPROVEN");
+    if (idleTimeout.idle_in_transaction_session_timeout !== "0") fail("SOURCE_IDLE_TIMEOUT_UNPROVEN");
     const readOnly = await querySingle(sourceClient, "SHOW transaction_read_only", [], "SOURCE_READ_ONLY_UNPROVEN");
     if (readOnly.transaction_read_only !== "on") fail("SOURCE_READ_ONLY_UNPROVEN");
     const snapshotRow = await querySingle(sourceClient, "SELECT pg_export_snapshot() AS snapshot", [], "SNAPSHOT_EXPORT_FAILED");
