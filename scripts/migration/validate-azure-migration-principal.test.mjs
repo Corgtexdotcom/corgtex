@@ -45,6 +45,7 @@ describe("Azure migration principal runtime boundary", () => {
     const receipt = validate(safeDocument());
     expect(receipt).toMatchObject({
       status: "EXACT_MIGRATION_PRINCIPAL",
+      conditionSha256: "cf37ae0f37eb8098474043d43a7545a69be6427972433938e04a599ed93b82de",
       effectiveRoleAssignmentCount: 2,
     });
     expect(receipt.clientRef).toMatch(/^sha256:[0-9a-f]{16}$/);
