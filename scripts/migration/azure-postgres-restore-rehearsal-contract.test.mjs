@@ -79,11 +79,31 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("SHOW transaction_read_only");
     expect(runner).toContain("SELECT pg_export_snapshot() AS snapshot");
     expect(runner).toContain("SET LOCAL idle_in_transaction_session_timeout = '0'");
-    expect(runner).toContain("SHOW idle_in_transaction_session_timeout");
+    expect(runner).toContain("current_setting('idle_in_transaction_session_timeout') AS idle_timeout");
+    expect(runner).toContain("SET LOCAL statement_timeout = '0'");
+    expect(runner).toContain("SET LOCAL transaction_timeout = '0'");
+    expect(runner).toContain("statement_timeout=0 -c transaction_timeout=0");
+    expect(runner).not.toContain("statement_timeout=15min");
+    expect(runner).not.toContain("statement_timeout=30min");
     expect(runner).toContain('["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--snapshot", snapshot');
     expect(runner).toContain('["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", "--snapshot", snapshot');
     expect(runner).toContain("DECLARE ${quoteIdentifier(cursorName)} NO SCROLL CURSOR");
     expect(runner).toContain("to_jsonb(t)::text AS canonical_row");
+  });
+
+  it("proves sequence state from the immutable archive instead of a later source read", () => {
+    expect(runner).toContain('`${tempDir}/snapshot.toc`');
+    expect(runner).toContain('`${tempDir}/sequence-set.list`');
+    expect(runner).toContain("SEQUENCE SET");
+    expect(runner).toContain('"--use-list=/work/sequence-set.list"');
+    expect(runner).toContain("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
+    expect(runner).toContain("ARCHIVE_SEQUENCE_REPLAY_MISMATCH");
+    expect(runner).toContain("chmodSync(archiveTocFile, 0o600)");
+    expect(runner).toContain("chmodSync(sequenceUseListFile, 0o600)");
+    expect(runner).toContain("temporaryFiles.push(dumpFile, archiveTocFile, sequenceUseListFile");
+    expect(runner).not.toMatch(/sourceEvidence\s*=\s*await collectDatabaseEvidence[\s\S]{0,300}collectSequences/u);
+    expect(validator).toContain("archiveSequences");
+    expect(validator).toContain('compareExact(beforeReplay, afterReplay, "ARCHIVE_SEQUENCE_REPLAY_MISMATCH")');
   });
 
   it("uses a unique scratch database and an exact /32 firewall with independent cleanup", () => {

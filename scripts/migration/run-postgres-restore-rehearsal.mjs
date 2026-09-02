@@ -241,8 +241,8 @@ const dockerClient = async ({ tempDir, serviceFile, passFile, service, args, cod
     "--env", "PGPASSFILE=/work/pgpass",
     "--env", `PGSERVICE=${service}`,
     "--env", service === "source"
-      ? "PGOPTIONS=-c default_transaction_read_only=on -c lock_timeout=5s -c statement_timeout=15min -c idle_in_transaction_session_timeout=20min"
-      : "PGOPTIONS=-c lock_timeout=5s -c statement_timeout=30min -c idle_in_transaction_session_timeout=20min",
+      ? "PGOPTIONS=-c default_transaction_read_only=on -c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min"
+      : "PGOPTIONS=-c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min",
     POSTGRES_CLIENT_IMAGE,
     ...args,
   );
@@ -363,6 +363,25 @@ const normalizeSchemaDump = (content) => content
   .filter((line) => line.trim() !== "")
   .join("\n")
   .trim();
+
+export const buildSequenceUseList = (content) => {
+  if (typeof content !== "string") fail("INVALID_ARCHIVE_TOC");
+  const selected = [];
+  const dumpIds = new Set();
+  const entries = new Set();
+  for (const line of content.split(/\r?\n/u)) {
+    const match = line.match(/^([1-9][0-9]*); [0-9]+ [0-9]+ SEQUENCE SET .+$/u);
+    if (match === null) continue;
+    if (dumpIds.has(match[1]) || entries.has(line)) fail("DUPLICATE_ARCHIVE_SEQUENCE_ENTRY");
+    dumpIds.add(match[1]);
+    entries.add(line);
+    selected.push(line);
+  }
+  return {
+    tocEntryCount: selected.length,
+    contents: selected.length === 0 ? "" : `${selected.join("\n")}\n`,
+  };
+};
 
 const hashRowsWithCursor = async (client, cursorName, selectSql) => {
   if (!/^[a-z][a-z0-9_]{0,62}$/u.test(cursorName)) fail("INVALID_CURSOR_NAME");
@@ -524,7 +543,6 @@ const collectDatabaseEvidence = async (client, schemaDigest) => {
     extensions: extensionsResult.rows,
     schema: { digest: schemaDigest },
     tables: await collectTables(client),
-    sequences: await collectSequences(client),
     largeObjects: await collectLargeObjects(client),
     migrations: await collectMigrations(client),
     queues: {
@@ -545,6 +563,7 @@ export async function runPostgresRestoreRehearsal(options) {
     stateFile,
     dockerNetwork = null,
     afterSnapshot = null,
+    afterArchive = null,
   } = options;
   if (!REQUIRED_DOMAINS.has(domain)) fail("INVALID_DOMAIN");
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
@@ -560,11 +579,19 @@ export async function runPostgresRestoreRehearsal(options) {
     await sourceClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     transactionOpen = true;
     await sourceClient.query("SET LOCAL lock_timeout = '5s'");
-    await sourceClient.query("SET LOCAL statement_timeout = '15min'");
+    await sourceClient.query("SET LOCAL statement_timeout = '0'");
+    await sourceClient.query("SET LOCAL transaction_timeout = '0'");
     await sourceClient.query("SET LOCAL idle_in_transaction_session_timeout = '0'");
     await sourceClient.query("SET LOCAL timezone = 'UTC'");
-    const idleTimeout = await querySingle(sourceClient, "SHOW idle_in_transaction_session_timeout", [], "SOURCE_IDLE_TIMEOUT_UNPROVEN");
-    if (idleTimeout.idle_in_transaction_session_timeout !== "0") fail("SOURCE_IDLE_TIMEOUT_UNPROVEN");
+    const timeouts = await querySingle(sourceClient, `
+      SELECT
+        current_setting('statement_timeout') AS statement_timeout,
+        current_setting('transaction_timeout') AS transaction_timeout,
+        current_setting('idle_in_transaction_session_timeout') AS idle_timeout
+    `, [], "SOURCE_TIMEOUT_BOUNDARY_UNPROVEN");
+    if (timeouts.statement_timeout !== "0" || timeouts.transaction_timeout !== "0" || timeouts.idle_timeout !== "0") {
+      fail("SOURCE_TIMEOUT_BOUNDARY_UNPROVEN");
+    }
     const readOnly = await querySingle(sourceClient, "SHOW transaction_read_only", [], "SOURCE_READ_ONLY_UNPROVEN");
     if (readOnly.transaction_read_only !== "on") fail("SOURCE_READ_ONLY_UNPROVEN");
     const snapshotRow = await querySingle(sourceClient, "SELECT pg_export_snapshot() AS snapshot", [], "SNAPSHOT_EXPORT_FAILED");
@@ -587,9 +614,11 @@ export async function runPostgresRestoreRehearsal(options) {
       (...paths) => temporaryFiles.push(...paths),
     );
     const dumpFile = assertSafePath(`${tempDir}/snapshot.dump`, tempDir, "INVALID_DUMP_PATH");
+    const archiveTocFile = assertSafePath(`${tempDir}/snapshot.toc`, tempDir, "INVALID_TOC_PATH");
+    const sequenceUseListFile = assertSafePath(`${tempDir}/sequence-set.list`, tempDir, "INVALID_SEQUENCE_LIST_PATH");
     const sourceSchemaFile = assertSafePath(`${tempDir}/source-schema.sql`, tempDir, "INVALID_SCHEMA_PATH");
     const destinationSchemaFile = assertSafePath(`${tempDir}/destination-schema.sql`, tempDir, "INVALID_SCHEMA_PATH");
-    temporaryFiles.push(dumpFile, sourceSchemaFile, destinationSchemaFile);
+    temporaryFiles.push(dumpFile, archiveTocFile, sequenceUseListFile, sourceSchemaFile, destinationSchemaFile);
 
     await dockerClient({
       tempDir,
@@ -599,6 +628,19 @@ export async function runPostgresRestoreRehearsal(options) {
       code: "SOURCE_DUMP_FAILED",
       network: dockerNetwork,
     });
+    if (afterArchive !== null) await afterArchive();
+    await dockerClient({
+      tempDir,
+      ...clientFiles,
+      service: "source",
+      args: ["pg_restore", "--list", "--file", "/work/snapshot.toc", "/work/snapshot.dump"],
+      code: "ARCHIVE_TOC_FAILED",
+      network: dockerNetwork,
+    });
+    chmodSync(archiveTocFile, 0o600);
+    const sequenceSelection = buildSequenceUseList(readFileSync(archiveTocFile, "utf8"));
+    writeFileSync(sequenceUseListFile, sequenceSelection.contents, { mode: 0o600, flag: "wx" });
+    chmodSync(sequenceUseListFile, 0o600);
     await dockerClient({
       tempDir,
       ...clientFiles,
@@ -635,11 +677,49 @@ export async function runPostgresRestoreRehearsal(options) {
     try {
       await destinationClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await destinationClient.query("SET LOCAL lock_timeout = '5s'");
-      await destinationClient.query("SET LOCAL statement_timeout = '15min'");
+      await destinationClient.query("SET LOCAL statement_timeout = '0'");
+      await destinationClient.query("SET LOCAL transaction_timeout = '0'");
       await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
       await destinationClient.query("SET LOCAL timezone = 'UTC'");
       destinationEvidence = await collectDatabaseEvidence(destinationClient, destinationSchemaDigest);
+      const beforeReplay = await collectSequences(destinationClient);
       await destinationClient.query("COMMIT");
+      if (beforeReplay.length !== sequenceSelection.tocEntryCount) fail("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
+
+      if (sequenceSelection.tocEntryCount > 0) {
+        await dockerClient({
+          tempDir,
+          ...clientFiles,
+          service: "target",
+          args: [
+            "pg_restore",
+            "--exit-on-error",
+            "--no-owner",
+            "--no-acl",
+            "--use-list=/work/sequence-set.list",
+            "--dbname=service=target",
+            "/work/snapshot.dump",
+          ],
+          code: "ARCHIVE_SEQUENCE_REPLAY_FAILED",
+          network: dockerNetwork,
+        });
+      }
+
+      await destinationClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await destinationClient.query("SET LOCAL lock_timeout = '5s'");
+      await destinationClient.query("SET LOCAL statement_timeout = '0'");
+      await destinationClient.query("SET LOCAL transaction_timeout = '0'");
+      await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
+      await destinationClient.query("SET LOCAL timezone = 'UTC'");
+      const afterReplay = await collectSequences(destinationClient);
+      await destinationClient.query("COMMIT");
+      if (afterReplay.length !== sequenceSelection.tocEntryCount) fail("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
+      if (JSON.stringify(beforeReplay) !== JSON.stringify(afterReplay)) fail("ARCHIVE_SEQUENCE_REPLAY_MISMATCH");
+      destinationEvidence.archiveSequences = {
+        tocEntryCount: sequenceSelection.tocEntryCount,
+        beforeReplay,
+        afterReplay,
+      };
     } catch (error) {
       await destinationClient.query("ROLLBACK").catch(() => {});
       throw error;
@@ -653,7 +733,17 @@ export async function runPostgresRestoreRehearsal(options) {
       sourceRef,
       targetRef,
       source: sourceEvidence,
-      destination: destinationEvidence,
+      destination: {
+        server: destinationEvidence.server,
+        locale: destinationEvidence.locale,
+        extensions: destinationEvidence.extensions,
+        schema: destinationEvidence.schema,
+        tables: destinationEvidence.tables,
+        largeObjects: destinationEvidence.largeObjects,
+        migrations: destinationEvidence.migrations,
+        queues: destinationEvidence.queues,
+      },
+      archiveSequences: destinationEvidence.archiveSequences,
     };
     writePrivateJson(`${artifactDir}/postgres-restore-evidence.json`, evidence);
     return { sourceRef, targetRef, evidence };

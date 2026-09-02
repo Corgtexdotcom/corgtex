@@ -42,7 +42,6 @@ const databaseEvidence = () => ({
     { schema: "public", name: "Event", rowCount: 3, rowSha256: HASH_A },
     { schema: "public", name: "WorkflowJob", rowCount: 5, rowSha256: HASH_B },
   ],
-  sequences: [{ schema: "public", name: "legacy_id_seq", lastValue: "42", isCalled: true }],
   largeObjects: { count: 0, contentSha256: HASH_A },
   migrations: {
     rows: [{ name: "20260101000000_init", checksum: HASH_B, state: "FINISHED", appliedStepsCount: 1 }],
@@ -79,6 +78,11 @@ const evidence = () => {
     targetRef: "sha256:fedcba9876543210",
     source,
     destination: clone(source),
+    archiveSequences: {
+      tocEntryCount: 1,
+      beforeReplay: [{ schema: "public", name: "legacy_id_seq", lastValue: "42", isCalled: true }],
+      afterReplay: [{ schema: "public", name: "legacy_id_seq", lastValue: "42", isCalled: true }],
+    },
   };
 };
 
@@ -202,6 +206,7 @@ describe("validatePostgresRestoreRehearsal", () => {
       cleanup: "VERIFIED",
       tableCount: 2,
       totalRowCount: 8,
+      sequenceCount: 1,
     });
     const publicJson = JSON.stringify(receipt);
     expect(publicJson).not.toContain("private.invalid");
@@ -219,7 +224,7 @@ describe("validatePostgresRestoreRehearsal", () => {
     ["table identity", (value) => { value.destination.tables[0].name = "EventCopy"; }, "TABLE_PARITY_MISMATCH"],
     ["table count", (value) => { value.destination.tables[0].rowCount += 1; }, "TABLE_PARITY_MISMATCH"],
     ["row hash", (value) => { value.destination.tables[0].rowSha256 = HASH_B; }, "TABLE_PARITY_MISMATCH"],
-    ["sequence", (value) => { value.destination.sequences[0].lastValue = "43"; }, "SEQUENCE_PARITY_MISMATCH"],
+    ["archive sequence replay", (value) => { value.archiveSequences.afterReplay[0].lastValue = "43"; }, "ARCHIVE_SEQUENCE_REPLAY_MISMATCH"],
     ["large object", (value) => { value.destination.largeObjects.contentSha256 = HASH_B; }, "LARGE_OBJECT_PARITY_MISMATCH"],
     ["migration", (value) => { value.destination.migrations.rows[0].checksum = HASH_A; }, "MIGRATION_PARITY_MISMATCH"],
     ["queue", (value) => { value.destination.queues.event.statuses[0].count += 1; }, "QUEUE_PARITY_MISMATCH"],
@@ -234,6 +239,20 @@ describe("validatePostgresRestoreRehearsal", () => {
     input.source.tables.push(clone(input.source.tables[0]));
     input.destination.tables.push(clone(input.destination.tables[0]));
     expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow("SOURCE_TABLE_DUPLICATE");
+  });
+
+  it("rejects archive sequence coverage drift", () => {
+    const input = evidence();
+    input.archiveSequences.tocEntryCount = 2;
+    expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
+  });
+
+  it("rejects duplicate archive sequence identities", () => {
+    const input = evidence();
+    input.archiveSequences.tocEntryCount = 2;
+    input.archiveSequences.beforeReplay.push(clone(input.archiveSequences.beforeReplay[0]));
+    input.archiveSequences.afterReplay.push(clone(input.archiveSequences.afterReplay[0]));
+    expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow("ARCHIVE_BEFORE_REPLAY_SEQUENCE_DUPLICATE");
   });
 
   it.each(["scratchDatabase", "firewallRule", "credentials"])("requires verified %s cleanup", (kind) => {

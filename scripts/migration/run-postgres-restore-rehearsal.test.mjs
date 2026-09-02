@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCreateDatabaseSql,
   buildPgServiceContents,
+  buildSequenceUseList,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
   serializePgServiceValue,
@@ -59,6 +60,40 @@ describe("PostgreSQL restore rehearsal runner", () => {
     );
     expect(service.match(/sslmode=disable/gu)).toHaveLength(2);
     expect(service).not.toContain("sslrootcert");
+  });
+
+  it("selects only exact sequence-set entries from a PostgreSQL archive TOC", () => {
+    const selection = buildSequenceUseList([
+      "; Archive created at 2026-09-02 18:00:00 UTC",
+      "12; 1259 100 TABLE public Event postgres",
+      "13; 0 101 SEQUENCE SET public Event_id_seq postgres",
+      "14; 0 102 SEQUENCE SET internal audit_id_seq postgres",
+      "15; 0 100 TABLE DATA public Event postgres",
+      "",
+    ].join("\n"));
+    expect(selection).toEqual({
+      tocEntryCount: 2,
+      contents: [
+        "13; 0 101 SEQUENCE SET public Event_id_seq postgres",
+        "14; 0 102 SEQUENCE SET internal audit_id_seq postgres",
+        "",
+      ].join("\n"),
+    });
+    expect(selection.contents).not.toContain("TABLE DATA");
+  });
+
+  it("supports an archive with zero user sequences", () => {
+    expect(buildSequenceUseList("12; 1259 100 TABLE public Event postgres\n")).toEqual({
+      tocEntryCount: 0,
+      contents: "",
+    });
+  });
+
+  it("rejects duplicate selected archive entries", () => {
+    expect(() => buildSequenceUseList([
+      "13; 0 101 SEQUENCE SET public first_seq postgres",
+      "13; 0 102 SEQUENCE SET public second_seq postgres",
+    ].join("\n"))).toThrow("DUPLICATE_ARCHIVE_SEQUENCE_ENTRY");
   });
 
   it.each([

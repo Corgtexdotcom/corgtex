@@ -106,15 +106,21 @@ restore always targets a new run-derived database, never the Bicep-managed `corg
 database. The workflow preserves the source PostgreSQL 18 locale provider, provider
 locale, ICU rules, encoding, collation, and character classification, and requires
 the target-computed collation version to match before reporting parity. The exported
-snapshot holder disables its idle-in-transaction timeout; the workflow's bounded
-180-minute job timeout remains the outer limit.
+snapshot holder disables its statement, transaction, and idle-in-transaction
+timeouts, while dump, restore, and evidence clients disable statement and transaction
+timeouts; the workflow's bounded 180-minute job timeout remains the outer limit.
+Because sequence values are not MVCC-protected, sequence parity is derived from the
+immutable custom archive: only exact `SEQUENCE SET` entries are replayed against the
+isolated scratch database, and their replay must be a no-op with complete sequence
+coverage.
 
-Private evidence contains only schema/table identities, counts, and digests—never
-row values or dump bytes. The public receipt is limited to opaque source, target, and
-domain references; aggregate counts; the evidence digest; and fixed readiness
-states. Success is `POSTGRES_REHEARSAL_VERIFIED` with Redis, objects, destination
-runtime, and source quiescence still unproven, `ProviderCutover` still `PLANNED`, and
-`cutoverReady: false`.
+Private evidence contains schema/table identities, counts, digests, and the exact
+before/after archive-sequence replay proof—never table row values or dump bytes. The
+public receipt is limited to opaque source, target, and domain references; aggregate
+counts; the evidence digest; and fixed readiness states. Success is
+`POSTGRES_REHEARSAL_VERIFIED` with Redis, objects, destination runtime, and source
+quiescence still unproven, `ProviderCutover` still `PLANNED`, and `cutoverReady:
+false`.
 
 Scratch-database and firewall cleanup run independently under `always()`. A success
 receipt requires absence readback for both plus shredded runner-temporary connection
@@ -132,6 +138,6 @@ Any missing or failed cleanup is `RECOVERY_REQUIRED`.
 Local validation:
 
 ```text
-npx vitest run scripts/migration/run-postgres-restore-rehearsal.test.mjs scripts/migration/validate-postgres-restore-rehearsal.test.mjs scripts/migration/azure-postgres-restore-rehearsal-contract.test.mjs
+npx vitest run --project unit scripts/migration/run-postgres-restore-rehearsal.test.mjs scripts/migration/validate-postgres-restore-rehearsal.test.mjs scripts/migration/azure-postgres-restore-rehearsal-contract.test.mjs
 npm run test:migration:postgres-smoke
 ```

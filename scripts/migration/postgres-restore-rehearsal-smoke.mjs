@@ -201,6 +201,7 @@ const main = async () => {
       sslmode: "disable",
     };
     const scratchName = `corgtex_rehearsal_${suffix}_core`;
+    let liveSequenceAfterArchive = null;
 
     await runPostgresRestoreRehearsal({
       domain: "core",
@@ -223,6 +224,15 @@ const main = async () => {
           await concurrent.end();
         }
       },
+      afterArchive: async () => {
+        const concurrent = new Client(config(sourcePort, "source"));
+        await concurrent.connect();
+        try {
+          liveSequenceAfterArchive = String((await concurrent.query("SELECT nextval('\"legacy_id_seq\"') AS value")).rows[0].value);
+        } finally {
+          await concurrent.end();
+        }
+      },
     });
 
     const evidence = JSON.parse(readFileSync(join(artifactDir, "postgres-restore-evidence.json"), "utf8"));
@@ -232,14 +242,23 @@ const main = async () => {
     const sourceEvent = evidence.source.tables.find((table) => table.name === "Event");
     const destinationEvent = evidence.destination.tables.find((table) => table.name === "Event");
     if (sourceEvent?.rowCount !== 1 || destinationEvent?.rowCount !== 1) fail("SNAPSHOT_BINDING_FAILED");
+    const archiveSequenceBefore = evidence.archiveSequences.beforeReplay.find((sequence) => sequence.name === "legacy_id_seq");
+    const archiveSequenceAfter = evidence.archiveSequences.afterReplay.find((sequence) => sequence.name === "legacy_id_seq");
+    if (
+      evidence.archiveSequences.tocEntryCount !== 1
+      || archiveSequenceBefore?.lastValue === liveSequenceAfterArchive
+      || JSON.stringify(archiveSequenceBefore) !== JSON.stringify(archiveSequenceAfter)
+    ) fail("ARCHIVE_SEQUENCE_BINDING_FAILED");
     if (readdirSync(tempDir).length !== 0) fail("TEMPORARY_FILE_CLEANUP_FAILED");
 
     const sourceReadback = new Client(config(sourcePort, "source"));
     await sourceReadback.connect();
     const actualEventCount = Number((await sourceReadback.query('SELECT count(*) AS count FROM "Event"')).rows[0].count);
+    const actualSequenceValue = String((await sourceReadback.query('SELECT last_value AS value FROM "legacy_id_seq"')).rows[0].value);
     const identitiesAfter = await tableIdentities(sourceReadback);
     await sourceReadback.end();
     if (actualEventCount !== 2) fail("CONCURRENT_INSERT_MISSING");
+    if (actualSequenceValue !== liveSequenceAfterArchive) fail("CONCURRENT_SEQUENCE_ADVANCE_MISSING");
     if (JSON.stringify(identitiesBefore) !== JSON.stringify(identitiesAfter)) fail("SOURCE_SCHEMA_MUTATED");
 
     const databaseCleanup = await cleanupScratchDatabase({

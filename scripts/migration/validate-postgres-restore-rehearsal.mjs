@@ -171,7 +171,7 @@ const compareExact = (left, right, code) => {
 
 const validateDatabaseEvidence = (value, side) => {
   const prefix = side.toUpperCase();
-  expectExactKeys(value, ["server", "locale", "extensions", "schema", "tables", "sequences", "largeObjects", "migrations", "queues"], `${prefix}_EVIDENCE_SHAPE_MISMATCH`);
+  expectExactKeys(value, ["server", "locale", "extensions", "schema", "tables", "largeObjects", "migrations", "queues"], `${prefix}_EVIDENCE_SHAPE_MISMATCH`);
 
   expectExactKeys(value.server, ["majorVersion"], `${prefix}_SERVER_SHAPE_MISMATCH`);
   if (value.server.majorVersion !== 18) fail(`${prefix}_POSTGRES_VERSION_MISMATCH`);
@@ -219,9 +219,15 @@ const validateDatabaseEvidence = (value, side) => {
     tableKeys.add(key);
   }
 
-  if (!Array.isArray(value.sequences)) fail(`${prefix}_SEQUENCES_INVALID`);
+  validateDatabaseTail(value, side);
+  return value;
+};
+
+const validateSequences = (value, side) => {
+  const prefix = side.toUpperCase();
+  if (!Array.isArray(value)) fail(`${prefix}_SEQUENCES_INVALID`);
   const sequenceKeys = new Set();
-  for (const sequence of value.sequences) {
+  for (const sequence of value) {
     expectExactKeys(sequence, ["schema", "name", "lastValue", "isCalled"], `${prefix}_SEQUENCE_SHAPE_MISMATCH`);
     if (typeof sequence.schema !== "string" || !SAFE_IDENTIFIER_PATTERN.test(sequence.schema)) fail(`${prefix}_SEQUENCE_IDENTITY_INVALID`);
     if (typeof sequence.name !== "string" || sequence.name.length === 0 || sequence.name.length > 128) fail(`${prefix}_SEQUENCE_IDENTITY_INVALID`);
@@ -231,7 +237,11 @@ const validateDatabaseEvidence = (value, side) => {
     if (sequenceKeys.has(key)) fail(`${prefix}_SEQUENCE_DUPLICATE`);
     sequenceKeys.add(key);
   }
+  return value;
+};
 
+const validateDatabaseTail = (value, side) => {
+  const prefix = side.toUpperCase();
   expectExactKeys(value.largeObjects, ["count", "contentSha256"], `${prefix}_LARGE_OBJECT_SHAPE_MISMATCH`);
   validateCount(value.largeObjects.count, `${prefix}_LARGE_OBJECT_COUNT_INVALID`);
   validateHash(value.largeObjects.contentSha256, `${prefix}_LARGE_OBJECT_DIGEST_INVALID`);
@@ -270,28 +280,33 @@ const validateDatabaseEvidence = (value, side) => {
     }
     validateCount(queue.lockedCount, `${prefix}_${queueName.toUpperCase()}_LOCKED_COUNT_INVALID`);
   }
-
-  return value;
 };
 
 const sumRows = (tables) => tables.reduce((sum, table) => sum + table.rowCount, 0);
 const sumStatuses = (statuses) => statuses.reduce((sum, status) => sum + status.count, 0);
 
 export function validatePostgresRestoreRehearsal(document, cleanup) {
-  expectExactKeys(document, ["schemaVersion", "domain", "sourceRef", "targetRef", "source", "destination"], "INVALID_DOCUMENT");
+  expectExactKeys(document, ["schemaVersion", "domain", "sourceRef", "targetRef", "source", "destination", "archiveSequences"], "INVALID_DOCUMENT");
   if (document.schemaVersion !== "1.0.0") fail("SCHEMA_VERSION_MISMATCH");
   if (!new Set(["core", "ops"]).has(document.domain)) fail("INVALID_DOMAIN");
   validateOpaqueRef(document.sourceRef, "INVALID_SOURCE_REF");
   validateOpaqueRef(document.targetRef, "INVALID_TARGET_REF");
   const source = validateDatabaseEvidence(document.source, "source");
   const destination = validateDatabaseEvidence(document.destination, "destination");
+  expectExactKeys(document.archiveSequences, ["tocEntryCount", "beforeReplay", "afterReplay"], "ARCHIVE_SEQUENCES_SHAPE_MISMATCH");
+  const tocEntryCount = validateCount(document.archiveSequences.tocEntryCount, "ARCHIVE_SEQUENCE_COUNT_INVALID");
+  const beforeReplay = validateSequences(document.archiveSequences.beforeReplay, "archive_before_replay");
+  const afterReplay = validateSequences(document.archiveSequences.afterReplay, "archive_after_replay");
+  if (beforeReplay.length !== tocEntryCount || afterReplay.length !== tocEntryCount) {
+    fail("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
+  }
+  compareExact(beforeReplay, afterReplay, "ARCHIVE_SEQUENCE_REPLAY_MISMATCH");
 
   compareExact(source.server, destination.server, "SERVER_VERSION_MISMATCH");
   compareExact(source.locale, destination.locale, "LOCALE_PARITY_MISMATCH");
   compareExact(source.extensions, destination.extensions, "EXTENSION_MISMATCH");
   compareExact(source.schema, destination.schema, "SCHEMA_DIGEST_MISMATCH");
   compareExact(source.tables, destination.tables, "TABLE_PARITY_MISMATCH");
-  compareExact(source.sequences, destination.sequences, "SEQUENCE_PARITY_MISMATCH");
   compareExact(source.largeObjects, destination.largeObjects, "LARGE_OBJECT_PARITY_MISMATCH");
   compareExact(source.migrations, destination.migrations, "MIGRATION_PARITY_MISMATCH");
   compareExact(source.queues, destination.queues, "QUEUE_PARITY_MISMATCH");
@@ -318,6 +333,7 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
     targetRef: document.targetRef,
     tableCount: source.tables.length,
     totalRowCount: sumRows(source.tables),
+    sequenceCount: tocEntryCount,
     migrationCount: source.migrations.rows.length,
     eventCount: sumStatuses(source.queues.event.statuses),
     workflowJobCount: sumStatuses(source.queues.workflowJob.statuses),
