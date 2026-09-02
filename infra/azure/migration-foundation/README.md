@@ -32,18 +32,21 @@ runner-temporary parameter file, and reads back every exact previewed resource.
 
 Before `deploy`, freeze the exact subscription, absent resource-group name, location,
 name prefix, SKU/capacity, PostgreSQL 18 source compatibility, rollback, and owner.
-The workflow requires a protected `azure-migration-foundation` environment and the
-following secrets:
+The workflow requires the protected `managed-azure-release-production` environment.
+Before either `what-if` or `deploy`, configure these environment variables:
 
 - `AZURE_CLIENT_ID`
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
+
+Configure only the database credential as an environment secret:
+
 - `AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD`
 
 The example parameter password is a placeholder and must never be used or copied
 into a real parameter file. The workflow injects the protected secret only into a
 shredded runner-temporary parameter file; it is never passed in command arguments
-or uploaded as evidence.
+or uploaded as evidence. Raw provider output remains in private workflow artifacts.
 
 ## Local validation
 

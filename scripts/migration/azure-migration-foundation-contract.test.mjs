@@ -5,6 +5,7 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "
 
 describe("Azure migration foundation static contract", () => {
   const workflow = read(".github/workflows/azure-migration-foundation.yml");
+  const readme = read("infra/azure/migration-foundation/README.md");
   const entrypoint = read("infra/azure/migration-foundation/main.bicep");
   const postgres = read("infra/azure/modules/postgresql.bicep");
   const storage = read("infra/azure/modules/blob-storage.bicep");
@@ -52,6 +53,17 @@ describe("Azure migration foundation static contract", () => {
     expect(whatIfValidator).toContain('status: "SAFE_EXACT_CREATE"');
     expect(whatIfValidator).toContain('if (document.changes.length !== EXPECTED_CHANGE_COUNT)');
     expect(readbackValidator).toContain('status: "EXACT_CREATE_READ_BACK"');
+  });
+
+  it("documents the exact protected environment variable and secret contract", () => {
+    expect(readme).toContain("protected `managed-azure-release-production` environment");
+    expect(readme).toContain("Before either `what-if` or `deploy`, configure these environment variables:");
+    expect(readme).toContain("- `AZURE_CLIENT_ID`");
+    expect(readme).toContain("- `AZURE_TENANT_ID`");
+    expect(readme).toContain("- `AZURE_SUBSCRIPTION_ID`");
+    expect(readme).toContain("Configure only the database credential as an environment secret:");
+    expect(readme).toContain("- `AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD`");
+    expect(readme).not.toContain("protected `azure-migration-foundation` environment");
   });
 
   it("creates only a new subscription-scoped resource group and backing modules", () => {
