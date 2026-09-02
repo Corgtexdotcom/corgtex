@@ -181,9 +181,12 @@ export const validateSourceTlsRootCertificate = (rawCertificate, now = new Date(
   }
   if (!certificate.ca) fail("SOURCE_TLS_ROOT_CERT_NOT_CA");
   const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
+  const validFromMs = Date.parse(certificate.validFrom);
+  const validToMs = Date.parse(certificate.validTo);
   if (!Number.isFinite(nowMs)) fail("INVALID_CERTIFICATE_VALIDATION_TIME");
-  if (certificate.validFromDate.getTime() > nowMs) fail("SOURCE_TLS_ROOT_CERT_NOT_YET_VALID");
-  if (certificate.validToDate.getTime() <= nowMs) fail("SOURCE_TLS_ROOT_CERT_EXPIRED");
+  if (!Number.isFinite(validFromMs) || !Number.isFinite(validToMs)) fail("INVALID_SOURCE_TLS_ROOT_CERT");
+  if (validFromMs > nowMs) fail("SOURCE_TLS_ROOT_CERT_NOT_YET_VALID");
+  if (validToMs <= nowMs) fail("SOURCE_TLS_ROOT_CERT_EXPIRED");
   return `${pem}\n`;
 };
 
