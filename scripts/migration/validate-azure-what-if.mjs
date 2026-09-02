@@ -16,7 +16,6 @@ export const EXPECTED_RESOURCE_TYPE_COUNTS = Object.freeze({
   "microsoft.keyvault/vaults": 1,
   "microsoft.managedidentity/userassignedidentities": 1,
   "microsoft.operationalinsights/workspaces": 1,
-  "microsoft.resources/resourcegroups": 1,
   "microsoft.storage/storageaccounts": 1,
   "microsoft.storage/storageaccounts/blobservices": 1,
   "microsoft.storage/storageaccounts/blobservices/containers": 2,
@@ -58,7 +57,6 @@ export function expectedResourceGroupId(subscriptionId, resourceGroup) {
 export function resourceTypeFromId(resourceId, resourceGroupId) {
   const normalizedId = resourceId.toLowerCase();
   const normalizedGroup = resourceGroupId.toLowerCase();
-  if (normalizedId === normalizedGroup) return "microsoft.resources/resourcegroups";
   if (!normalizedId.startsWith(`${normalizedGroup}/providers/`)) fail("FOREIGN_RESOURCE");
 
   const segments = resourceId.split("/").filter(Boolean);

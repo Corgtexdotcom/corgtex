@@ -1,9 +1,4 @@
-targetScope = 'subscription'
-
-@description('Exact new resource group for the isolated migration foundation.')
-@minLength(10)
-@maxLength(90)
-param resourceGroupName string
+targetScope = 'resourceGroup'
 
 @allowed([
   'westus3'
@@ -52,15 +47,8 @@ param tags object = {
   managedBy: 'github-oidc'
 }
 
-resource foundationResourceGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: resourceGroupName
-  location: location
-  tags: tags
-}
-
 module observability '../modules/observability.bicep' = {
   name: 'observability'
-  scope: foundationResourceGroup
   params: {
     location: location
     namePrefix: namePrefix
@@ -70,7 +58,6 @@ module observability '../modules/observability.bicep' = {
 
 module identity '../modules/identity-key-vault.bicep' = {
   name: 'identity-key-vault'
-  scope: foundationResourceGroup
   params: {
     location: location
     namePrefix: namePrefix
@@ -80,7 +67,6 @@ module identity '../modules/identity-key-vault.bicep' = {
 
 module storage '../modules/blob-storage.bicep' = {
   name: 'blob-storage'
-  scope: foundationResourceGroup
   params: {
     location: location
     namePrefix: namePrefix
@@ -91,7 +77,6 @@ module storage '../modules/blob-storage.bicep' = {
 
 module postgres '../modules/postgresql.bicep' = {
   name: 'postgresql-restore-target'
-  scope: foundationResourceGroup
   params: {
     location: location
     namePrefix: namePrefix
@@ -107,7 +92,7 @@ module postgres '../modules/postgresql.bicep' = {
   }
 }
 
-output foundationResourceGroupId string = foundationResourceGroup.id
+output foundationResourceGroupId string = resourceGroup().id
 output logAnalyticsId string = observability.outputs.logAnalyticsId
 output applicationInsightsId string = observability.outputs.applicationInsightsId
 output managedIdentityId string = identity.outputs.managedIdentityId
