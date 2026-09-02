@@ -29,14 +29,20 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).toMatch(/options:\s*\n\s*- core\s*\n\s*- ops/u);
     expect(workflow).toContain("RAILWAY_CORE_POSTGRES_READ_ONLY_URL");
     expect(workflow).toContain("RAILWAY_OPS_POSTGRES_READ_ONLY_URL");
+    expect(workflow).toContain("RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT");
+    expect(workflow).toContain("RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT");
     expect(workflow).toContain("if: inputs.domain == 'core'");
     expect(workflow).toContain("if: inputs.domain == 'ops'");
     expect(workflow).toContain("SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}");
     expect(workflow).toContain("SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}");
+    expect(workflow).toContain("SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT }}");
+    expect(workflow).toContain("SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT }}");
     expect(workflow).not.toMatch(/&&\s*secrets\.|\|\|\s*secrets\./u);
     const jobEnv = workflow.slice(workflow.indexOf("    env:"), workflow.indexOf("    steps:"));
     expect(jobEnv).not.toContain("RAILWAY_CORE_POSTGRES_READ_ONLY_URL");
     expect(jobEnv).not.toContain("RAILWAY_OPS_POSTGRES_READ_ONLY_URL");
+    expect(jobEnv).not.toContain("RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT");
+    expect(jobEnv).not.toContain("RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT");
     expect(jobEnv).not.toContain("AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD");
     expect(workflow).not.toContain("--source-url");
     expect(workflow).not.toContain("--target-url");
@@ -50,6 +56,23 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).toContain('[[ "$client_version" == "pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)" ]]');
     expect(runner).toContain("POSTGRES_18_REQUIRED");
     expect(packageJson.devDependencies.pg).toBeTruthy();
+  });
+
+  it("authenticates each Railway source with its exact temporary CA trust anchor", () => {
+    expect(runner).toContain('sslmode !== "require"');
+    expect(runner).toContain('sourceTlsRootCert: validateSourceTlsRootCertificate(requiredEnvironment("SOURCE_TLS_ROOT_CERT"))');
+    expect(runner).toContain('ca: config.sourceTlsRootCert ?? fail("MISSING_SOURCE_TLS_ROOT_CERT")');
+    expect(runner).toContain("rejectUnauthorized: true");
+    expect(runner).toContain("checkServerIdentity: () => undefined");
+    expect(runner).toContain('"verify-ca"');
+    expect(runner).toContain('["sslrootcert=/work/source-root.crt"]');
+    expect(runner).toContain('`${tempDir}/source-root.crt`');
+    expect(runner).toContain("registerCleanup(serviceFile, passFile, ...(sourceRootCertFile === null ? [] : [sourceRootCertFile]))");
+    expect(runner).toContain("chmodSync(sourceRootCertFile, 0o600)");
+    expect(runner).toContain("target=/work/source-root.crt,readonly");
+    expect(runner).not.toContain("rejectUnauthorized: false");
+    expect(workflow).not.toContain("NODE_TLS_REJECT_UNAUTHORIZED");
+    expect(readme).toContain("CA-authenticated `verify-ca`");
   });
 
   it("pins the exact UAMI to one temporary RG-scoped Contributor role", () => {
@@ -185,6 +208,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain('`${tempDir}/snapshot.dump`');
     expect(runner).toContain("writeClientFiles(");
     expect(runner).toContain("secureDelete");
+    expect(runner).toContain("source-root.crt");
     expect(runner).not.toContain("console.log");
     expect(workflow).toContain("Upload private PostgreSQL rehearsal evidence");
     expect(workflow).toContain("retention-days: 7");
