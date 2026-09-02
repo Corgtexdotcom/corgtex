@@ -44,7 +44,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).toContain(image);
     expect(runner).toContain(image);
     expect(workflow).toContain('client_version="$(docker run --rm "$POSTGRES_CLIENT_IMAGE" pg_dump --version)"');
-    expect(workflow).toContain('[[ "$client_version" == "pg_dump (PostgreSQL) 18.6" ]]');
+    expect(workflow).toContain('[[ "$client_version" == "pg_dump (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)" ]]');
     expect(runner).toContain("POSTGRES_18_REQUIRED");
     expect(packageJson.devDependencies.pg).toBeTruthy();
   });
