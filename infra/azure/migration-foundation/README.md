@@ -140,6 +140,17 @@ immutable custom archive: only exact `SEQUENCE SET` entries are replayed against
 isolated scratch database, and their replay must be a no-op with complete sequence
 coverage.
 
+Large-object parity does not read the protected `pg_largeobject` page catalog. While
+the exported source snapshot is active and before the scratch database is created,
+the runner enumerates ordered OIDs through `pg_largeobject_metadata` and proves the
+read-only source role has `SELECT` on every object. It then hashes logical bytes with
+fixed-size, privilege-aware `lo_get` reads and an ordered length-framed manifest;
+the destination uses the same proof after restore. A missing source privilege stops
+before scratch creation as `SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING`, with only an
+aggregate unreadable count in the private artifact. Driver errors are mapped to
+bounded source or destination evidence codes. Do not grant system-catalog access or
+a broad database role to make this proof pass.
+
 Private evidence contains schema/table identities, counts, digests, and the exact
 before/after archive-sequence replay proof—never table row values or dump bytes. The
 public receipt is limited to opaque source, target, and domain references; aggregate

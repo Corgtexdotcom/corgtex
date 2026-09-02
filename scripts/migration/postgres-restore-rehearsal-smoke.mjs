@@ -16,6 +16,7 @@ import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-re
 const { Client } = pg;
 const SERVER_IMAGE = "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a";
 const TEST_PASSWORD = "local-rehearsal-only";
+const TEST_READER_PASSWORD = "local-rehearsal-reader-only";
 
 const fail = (code) => {
   const error = new Error(code);
@@ -53,11 +54,11 @@ const allocatePort = () => new Promise((resolvePromise, rejectPromise) => {
   });
 });
 
-const config = (port, database) => ({
+const config = (port, database, user = "postgres", password = TEST_PASSWORD) => ({
   host: "127.0.0.1",
   port,
-  user: "postgres",
-  password: TEST_PASSWORD,
+  user,
+  password,
   database,
   ssl: false,
 });
@@ -133,6 +134,7 @@ const main = async () => {
 
     const sourceAdmin = new Client(config(sourcePort, "source"));
     await sourceAdmin.connect();
+    await sourceAdmin.query(`CREATE ROLE rehearsal_reader LOGIN PASSWORD '${TEST_READER_PASSWORD}'`);
     await sourceAdmin.query(`
       CREATE EXTENSION vector;
       CREATE TYPE "EventStatus" AS ENUM ('PENDING', 'DISPATCHED', 'FAILED');
@@ -177,16 +179,39 @@ const main = async () => {
       INSERT INTO _prisma_migrations (id, checksum, finished_at, migration_name, applied_steps_count)
       VALUES ('11111111-1111-4111-8111-111111111111', repeat('a', 64), now(), '20260101000000_init', 1);
     `);
+    const largeObjectOid = String((await sourceAdmin.query(
+      "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
+    )).rows[0].oid);
+    if (!/^[1-9][0-9]{0,9}$/u.test(largeObjectOid)) fail("LARGE_OBJECT_CREATE_FAILED");
+    await sourceAdmin.query(`
+      GRANT CONNECT ON DATABASE source TO rehearsal_reader;
+      GRANT USAGE ON SCHEMA public TO rehearsal_reader;
+      GRANT SELECT ON ALL TABLES IN SCHEMA public TO rehearsal_reader;
+      GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO rehearsal_reader;
+      GRANT SELECT ON LARGE OBJECT ${largeObjectOid} TO rehearsal_reader;
+    `);
     const identitiesBefore = await tableIdentities(sourceAdmin);
     await sourceAdmin.end();
+
+    const restrictedReader = new Client(config(sourcePort, "source", "rehearsal_reader", TEST_READER_PASSWORD));
+    await restrictedReader.connect();
+    let protectedCatalogCode = null;
+    try {
+      await restrictedReader.query("SELECT count(*) FROM pg_largeobject");
+    } catch (error) {
+      protectedCatalogCode = error?.code;
+    } finally {
+      await restrictedReader.end();
+    }
+    if (protectedCatalogCode !== "42501") fail("RESTRICTED_READER_BOUNDARY_UNPROVEN");
 
     const sourceConfig = {
       host: "127.0.0.1",
       dockerHost: sourceContainer,
       dockerPort: 5432,
       port: sourcePort,
-      user: "postgres",
-      password: TEST_PASSWORD,
+      user: "rehearsal_reader",
+      password: TEST_READER_PASSWORD,
       database: "source",
       sslmode: "disable",
     };
@@ -242,6 +267,11 @@ const main = async () => {
     const sourceEvent = evidence.source.tables.find((table) => table.name === "Event");
     const destinationEvent = evidence.destination.tables.find((table) => table.name === "Event");
     if (sourceEvent?.rowCount !== 1 || destinationEvent?.rowCount !== 1) fail("SNAPSHOT_BINDING_FAILED");
+    if (
+      evidence.source.largeObjects.count !== 1
+      || evidence.destination.largeObjects.count !== 1
+      || evidence.source.largeObjects.contentSha256 !== evidence.destination.largeObjects.contentSha256
+    ) fail("LARGE_OBJECT_PARITY_FAILED");
     const archiveSequenceBefore = evidence.archiveSequences.beforeReplay.find((sequence) => sequence.name === "legacy_id_seq");
     const archiveSequenceAfter = evidence.archiveSequences.afterReplay.find((sequence) => sequence.name === "legacy_id_seq");
     if (
@@ -255,10 +285,15 @@ const main = async () => {
     await sourceReadback.connect();
     const actualEventCount = Number((await sourceReadback.query('SELECT count(*) AS count FROM "Event"')).rows[0].count);
     const actualSequenceValue = String((await sourceReadback.query('SELECT last_value AS value FROM "legacy_id_seq"')).rows[0].value);
+    const actualLargeObject = (await sourceReadback.query(
+      "SELECT encode(lo_get($1::oid), 'hex') AS content",
+      [largeObjectOid],
+    )).rows[0].content;
     const identitiesAfter = await tableIdentities(sourceReadback);
     await sourceReadback.end();
     if (actualEventCount !== 2) fail("CONCURRENT_INSERT_MISSING");
     if (actualSequenceValue !== liveSequenceAfterArchive) fail("CONCURRENT_SEQUENCE_ADVANCE_MISSING");
+    if (actualLargeObject !== "00112233445566778899aabbccddeeff") fail("SOURCE_LARGE_OBJECT_MUTATED");
     if (JSON.stringify(identitiesBefore) !== JSON.stringify(identitiesAfter)) fail("SOURCE_SCHEMA_MUTATED");
 
     const databaseCleanup = await cleanupScratchDatabase({

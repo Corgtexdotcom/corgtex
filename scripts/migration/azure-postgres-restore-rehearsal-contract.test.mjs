@@ -131,6 +131,23 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("to_jsonb(t)::text AS canonical_row");
   });
 
+  it("proves large objects through least-privilege APIs before scratch creation", () => {
+    const accessPreflight = runner.indexOf("const sourceLargeObjects = await inspectLargeObjectAccess");
+    const scratchCreation = runner.indexOf("await createScratchDatabase({");
+    expect(accessPreflight).toBeGreaterThan(0);
+    expect(scratchCreation).toBeGreaterThan(accessPreflight);
+    expect(runner).toContain("FROM pg_largeobject_metadata");
+    expect(runner).toContain("has_largeobject_privilege(oid, 'SELECT')");
+    expect(runner).toContain("SELECT lo_get($1::oid, $2::bigint, $3::integer) AS chunk");
+    expect(runner).toContain("SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING");
+    expect(runner).toContain("SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+    expect(runner).toContain("DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED");
+    expect(runner).toContain("large-object-diagnostic.json");
+    expect(runner).not.toMatch(/FROM pg_largeobject(?!_metadata)\b/u);
+    expect(workflow).not.toContain("pg_read_all_data");
+    expect(readme).toContain("privilege-aware `lo_get` reads");
+  });
+
   it("proves sequence state from the immutable archive instead of a later source read", () => {
     expect(runner).toContain('`${tempDir}/snapshot.toc`');
     expect(runner).toContain('`${tempDir}/sequence-set.list`');

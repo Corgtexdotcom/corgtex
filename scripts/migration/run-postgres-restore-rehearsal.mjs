@@ -27,6 +27,9 @@ export const POSTGRES_CLIENT_IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea5771
 const MAX_STATE_BYTES = 64 * 1024;
 const MAX_SOURCE_TLS_ROOT_CERT_BYTES = 16 * 1024;
 const FETCH_ROWS = 500;
+const LARGE_OBJECT_CHUNK_BYTES = 1024 * 1024;
+const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
+const MAX_POSTGRES_OID = 4_294_967_295n;
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,62}$/u;
 const REQUIRED_DOMAINS = new Set(["core", "ops"]);
 const TARGET_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -38,11 +41,15 @@ const LOCALE_PROVIDERS = new Map([
 ]);
 const LOCALE_DEFINITION_FIELDS = ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules"];
 
-const fail = (code) => {
-  const error = new Error(code);
-  error.code = code;
-  throw error;
-};
+class RehearsalError extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
+const fail = (code) => { throw new RehearsalError(code); };
+const isRehearsalError = (error) => error instanceof RehearsalError;
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const opaqueRef = (value) => `sha256:${sha256(value).slice(0, 16)}`;
@@ -120,10 +127,10 @@ const spawnFixed = (command, args, options = {}) => new Promise((resolvePromise,
     stderrBytes += chunk.length;
     if (stderrBytes > 1024 * 1024) child.kill("SIGKILL");
   });
-  child.on("error", () => rejectPromise(Object.assign(new Error(options.code ?? "COMMAND_FAILED"), { code: options.code ?? "COMMAND_FAILED" })));
+  child.on("error", () => rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED")));
   child.on("close", (status, signal) => {
     if (status === 0 && signal === null) resolvePromise();
-    else rejectPromise(Object.assign(new Error(options.code ?? "COMMAND_FAILED"), { code: options.code ?? "COMMAND_FAILED" }));
+    else rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"));
   });
 });
 
@@ -599,16 +606,78 @@ const collectSequences = async (client) => {
   return sequences;
 };
 
-const collectLargeObjects = async (client) => {
-  const countRow = await querySingle(client, "SELECT count(DISTINCT loid)::text AS count FROM pg_largeobject", [], "LARGE_OBJECT_COUNT_UNAVAILABLE");
-  const count = Number(countRow.count);
-  if (!Number.isSafeInteger(count) || count < 0) fail("INVALID_LARGE_OBJECT_COUNT");
-  const manifest = await hashRowsWithCursor(
-    client,
-    "large_object_manifest",
-    "SELECT jsonb_build_array(loid::text, pageno, encode(data, 'hex'))::text AS canonical_row FROM pg_largeobject ORDER BY loid, pageno",
-  );
-  return { count, contentSha256: manifest.rowSha256 };
+const lengthFrame = (value) => {
+  const bytes = Buffer.from(value, "utf8");
+  const length = Buffer.allocUnsafe(8);
+  length.writeBigUInt64BE(BigInt(bytes.length));
+  return [length, bytes];
+};
+
+const normalizeLargeObjectOid = (value) => {
+  const text = String(value);
+  if (!/^[1-9][0-9]{0,9}$/u.test(text)) fail("INVALID_LARGE_OBJECT_OID");
+  const oid = BigInt(text);
+  if (oid > MAX_POSTGRES_OID) fail("INVALID_LARGE_OBJECT_OID");
+  return text;
+};
+
+export const inspectLargeObjectAccess = async (client, failureCode) => {
+  try {
+    const result = await client.query(`
+      SELECT oid::text AS oid, has_largeobject_privilege(oid, 'SELECT') AS readable
+      FROM pg_largeobject_metadata
+      ORDER BY oid
+    `);
+    const identities = [];
+    let previousOid = null;
+    for (const row of result.rows) {
+      const oid = normalizeLargeObjectOid(row.oid);
+      if (row.readable !== true && row.readable !== false) fail("INVALID_LARGE_OBJECT_PRIVILEGE_STATUS");
+      if (previousOid !== null && BigInt(oid) <= BigInt(previousOid)) fail("INVALID_LARGE_OBJECT_ORDER");
+      identities.push({ oid, readable: row.readable });
+      previousOid = oid;
+    }
+    return identities;
+  } catch (error) {
+    if (isRehearsalError(error)) throw error;
+    fail(failureCode);
+  }
+};
+
+export const collectLargeObjects = async (client, identities, failureCode, privilegeFailureCode) => {
+  try {
+    const manifestHash = createHash("sha256");
+    let previousOid = null;
+    for (const identity of identities) {
+      if (identity.readable !== true) fail(privilegeFailureCode);
+      const oid = normalizeLargeObjectOid(identity.oid);
+      if (previousOid !== null && BigInt(oid) <= BigInt(previousOid)) fail("INVALID_LARGE_OBJECT_ORDER");
+      const contentHash = createHash("sha256");
+      let offset = 0n;
+      while (true) {
+        const row = await querySingle(
+          client,
+          "SELECT lo_get($1::oid, $2::bigint, $3::integer) AS chunk",
+          [oid, offset.toString(), LARGE_OBJECT_CHUNK_BYTES],
+          "LARGE_OBJECT_CHUNK_UNAVAILABLE",
+        );
+        if (!Buffer.isBuffer(row.chunk)) fail("INVALID_LARGE_OBJECT_CHUNK");
+        if (row.chunk.length === 0) break;
+        contentHash.update(row.chunk);
+        offset += BigInt(row.chunk.length);
+        if (offset > MAX_LARGE_OBJECT_BYTES) fail("LARGE_OBJECT_SIZE_EXCEEDED");
+      }
+      const digest = contentHash.digest("hex");
+      for (const value of [oid, offset.toString(), digest]) {
+        for (const frame of lengthFrame(value)) manifestHash.update(frame);
+      }
+      previousOid = oid;
+    }
+    return { count: identities.length, contentSha256: manifestHash.digest("hex") };
+  } catch (error) {
+    if (isRehearsalError(error)) throw error;
+    fail(failureCode);
+  }
 };
 
 const collectMigrations = async (client) => {
@@ -662,7 +731,7 @@ const collectQueue = async (client, table, statuses) => {
   };
 };
 
-const collectDatabaseEvidence = async (client, schemaDigest) => {
+const collectDatabaseEvidence = async (client, schemaDigest, largeObjectIdentities, largeObjectFailureCode) => {
   const settings = await databaseSettings(client);
   const extensionsResult = await client.query("SELECT extname AS name, extversion AS version FROM pg_extension ORDER BY extname COLLATE \"C\"");
   return {
@@ -671,7 +740,12 @@ const collectDatabaseEvidence = async (client, schemaDigest) => {
     extensions: extensionsResult.rows,
     schema: { digest: schemaDigest },
     tables: await collectTables(client),
-    largeObjects: await collectLargeObjects(client),
+    largeObjects: await collectLargeObjects(
+      client,
+      largeObjectIdentities,
+      largeObjectFailureCode,
+      largeObjectFailureCode.replace("_EVIDENCE_FAILED", "_READ_PRIVILEGE_MISSING"),
+    ),
     migrations: await collectMigrations(client),
     queues: {
       event: await collectQueue(client, "Event", ["PENDING", "DISPATCHED", "FAILED"]),
@@ -730,6 +804,15 @@ export async function runPostgresRestoreRehearsal(options) {
       writePrivateJson(`${artifactDir}/locale-diagnostic.json`, buildLocaleDiagnostic(sourceSettings));
       fail("SOURCE_COLLATION_VERSION_STALE");
     }
+    const sourceLargeObjects = await inspectLargeObjectAccess(sourceClient, "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+    const unreadableLargeObjectCount = sourceLargeObjects.filter(({ readable }) => !readable).length;
+    if (unreadableLargeObjectCount > 0) {
+      writePrivateJson(`${artifactDir}/large-object-diagnostic.json`, {
+        schemaVersion: "1.0.0",
+        unreadableCount: unreadableLargeObjectCount,
+      });
+      fail("SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING");
+    }
     if (afterSnapshot !== null) await afterSnapshot({ snapshot });
 
     await createScratchDatabase({
@@ -784,7 +867,12 @@ export async function runPostgresRestoreRehearsal(options) {
       network: dockerNetwork,
     });
     const sourceSchemaDigest = sha256(normalizeSchemaDump(readFileSync(sourceSchemaFile, "utf8")));
-    const sourceEvidence = await collectDatabaseEvidence(sourceClient, sourceSchemaDigest);
+    const sourceEvidence = await collectDatabaseEvidence(
+      sourceClient,
+      sourceSchemaDigest,
+      sourceLargeObjects,
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
+    );
     await sourceClient.query("COMMIT");
     transactionOpen = false;
 
@@ -815,7 +903,16 @@ export async function runPostgresRestoreRehearsal(options) {
       await destinationClient.query("SET LOCAL transaction_timeout = '0'");
       await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
       await destinationClient.query("SET LOCAL timezone = 'UTC'");
-      destinationEvidence = await collectDatabaseEvidence(destinationClient, destinationSchemaDigest);
+      const destinationLargeObjects = await inspectLargeObjectAccess(
+        destinationClient,
+        "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
+      );
+      destinationEvidence = await collectDatabaseEvidence(
+        destinationClient,
+        destinationSchemaDigest,
+        destinationLargeObjects,
+        "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
+      );
       const beforeReplay = await collectSequences(destinationClient);
       await destinationClient.query("COMMIT");
       if (beforeReplay.length !== sequenceSelection.tocEntryCount) fail("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
@@ -883,7 +980,7 @@ export async function runPostgresRestoreRehearsal(options) {
     return { sourceRef, targetRef, evidence };
   } catch (error) {
     if (transactionOpen) await sourceClient.query("ROLLBACK").catch(() => {});
-    if (error?.code) throw error;
+    if (isRehearsalError(error)) throw error;
     fail("REHEARSAL_FAILED");
   } finally {
     await sourceClient.end().catch(() => {});
@@ -986,7 +1083,7 @@ export async function main(tokens = process.argv.slice(2)) {
 const invokedScriptUrl = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
 if (import.meta.url === invokedScriptUrl) {
   main().catch((error) => {
-    process.stdout.write(`${JSON.stringify({ ok: false, error: error?.code ?? "REHEARSAL_FAILED" })}\n`);
+    process.stdout.write(`${JSON.stringify({ ok: false, error: isRehearsalError(error) ? error.code : "REHEARSAL_FAILED" })}\n`);
     process.exitCode = 1;
   });
 }
