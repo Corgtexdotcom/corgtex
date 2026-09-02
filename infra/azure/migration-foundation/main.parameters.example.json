@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "resourceGroupName": {
+      "value": "rg-corgtex-migration-rehearsal"
+    },
+    "location": {
+      "value": "westus3"
+    },
+    "namePrefix": {
+      "value": "corgtex-mig-reh"
+    },
+    "postgresAdministratorLogin": {
+      "value": "corgtexadmin"
+    },
+    "postgresAdministratorPassword": {
+      "value": "REPLACE_AT_DEPLOYMENT"
+    },
+    "postgresVersion": {
+      "value": "18"
+    },
+    "postgresSkuName": {
+      "value": "Standard_D2ds_v5"
+    },
+    "postgresSkuTier": {
+      "value": "GeneralPurpose"
+    },
+    "postgresStorageGb": {
+      "value": 128
+    },
+    "postgresAllowedExtensions": {
+      "value": "vector"
+    },
+    "postgresFirewallRules": {
+      "value": []
+    }
+  }
+}

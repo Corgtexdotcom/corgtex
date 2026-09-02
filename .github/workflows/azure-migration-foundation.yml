@@ -1,0 +1,361 @@
+name: Azure Migration Foundation
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "what-if previews the isolated foundation; deploy applies that exact create-only preview."
+        required: true
+        type: choice
+        default: what-if
+        options:
+          - what-if
+          - deploy
+      resource_group:
+        description: "Exact new migration resource group. It must not exist."
+        required: true
+        type: string
+        default: rg-corgtex-migration-rehearsal
+      location:
+        description: "Single migration region."
+        required: true
+        type: choice
+        default: westus3
+        options:
+          - westus3
+      name_prefix:
+        description: "Short lowercase resource prefix."
+        required: true
+        type: string
+        default: corgtex-mig-reh
+      postgres_sku_name:
+        description: "Frozen PostgreSQL 18 compute SKU name."
+        required: true
+        type: string
+        default: Standard_D2ds_v5
+      postgres_sku_tier:
+        description: "Frozen PostgreSQL compute tier."
+        required: true
+        type: string
+        default: GeneralPurpose
+      postgres_storage_gb:
+        description: "Frozen PostgreSQL restore-target storage in GiB."
+        required: true
+        type: number
+        default: 128
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-migration-foundation
+  cancel-in-progress: false
+
+jobs:
+  foundation:
+    name: Guard and apply isolated Azure foundation
+    runs-on: ubuntu-latest
+    environment: azure-migration-foundation
+    env:
+      OPERATION: ${{ inputs.operation }}
+      RESOURCE_GROUP: ${{ inputs.resource_group }}
+      LOCATION: ${{ inputs.location }}
+      NAME_PREFIX: ${{ inputs.name_prefix }}
+      POSTGRES_SKU_NAME: ${{ inputs.postgres_sku_name }}
+      POSTGRES_SKU_TIER: ${{ inputs.postgres_sku_tier }}
+      POSTGRES_STORAGE_GB: ${{ inputs.postgres_storage_gb }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate exact create-mode inputs
+        shell: bash
+        env:
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID POSTGRES_ADMIN_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing protected environment settings: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+          [[ "$OPERATION" == "what-if" || "$OPERATION" == "deploy" ]] || {
+            echo "::error::Unsupported operation."
+            exit 1
+          }
+          [[ "$LOCATION" == "westus3" ]] || {
+            echo "::error::Migration foundation is restricted to westus3."
+            exit 1
+          }
+          [[ "$RESOURCE_GROUP" =~ ^rg-corgtex-migration-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || {
+            echo "::error::Invalid migration resource-group boundary."
+            exit 1
+          }
+          [[ "$NAME_PREFIX" =~ ^[a-z][a-z0-9-]{4,18}[a-z0-9]$ ]] || {
+            echo "::error::Invalid name prefix."
+            exit 1
+          }
+          [[ "$POSTGRES_SKU_NAME" =~ ^Standard_[A-Za-z0-9_]+$ ]] || {
+            echo "::error::Invalid PostgreSQL SKU name."
+            exit 1
+          }
+          [[ "$POSTGRES_SKU_TIER" == "GeneralPurpose" ]] || {
+            echo "::error::PostgreSQL restore target requires the reviewed GeneralPurpose tier."
+            exit 1
+          }
+          [[ "$POSTGRES_STORAGE_GB" =~ ^[0-9]+$ ]] || {
+            echo "::error::PostgreSQL storage must be an integer."
+            exit 1
+          }
+          if (( POSTGRES_STORAGE_GB < 64 || POSTGRES_STORAGE_GB > 1024 )); then
+            echo "::error::PostgreSQL storage is outside the bounded rehearsal range."
+            exit 1
+          fi
+
+      - name: Log in to exact Azure subscription
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify Azure context and new target
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show --query id --output tsv --only-show-errors)"
+          [[ "$actual_subscription" == "$AZURE_SUBSCRIPTION_ID" ]] || {
+            echo "::error::Azure subscription mismatch."
+            exit 1
+          }
+          [[ "$(AZURE_CORE_COLLECT_TELEMETRY=no az group exists --name "$RESOURCE_GROUP" --output tsv --only-show-errors)" == "false" ]] || {
+            echo "::error::Create-mode target already exists; adoption and mutation are forbidden."
+            exit 1
+          }
+          subscription_ref="$(printf '%s' "$actual_subscription" | sha256sum | cut -c1-16)"
+          echo "Azure context and absent target verified: sha256:${subscription_ref}"
+
+      - name: Freeze compiled template and public deployment tuple
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=".artifacts/azure-migration-foundation/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$artifact_dir"
+          echo "ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az bicep build \
+            --file infra/azure/migration-foundation/main.bicep \
+            --stdout \
+            --only-show-errors > "$artifact_dir/main.json"
+
+          jq -S -c -n \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --arg location "$LOCATION" \
+            --arg name_prefix "$NAME_PREFIX" \
+            --arg sku_name "$POSTGRES_SKU_NAME" \
+            --arg sku_tier "$POSTGRES_SKU_TIER" \
+            --argjson storage_gb "$POSTGRES_STORAGE_GB" \
+            '{
+              "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+              contentVersion: "1.0.0.0",
+              parameters: {
+                resourceGroupName: {value: $resource_group},
+                location: {value: $location},
+                namePrefix: {value: $name_prefix},
+                postgresAdministratorLogin: {value: "corgtexadmin"},
+                postgresVersion: {value: "18"},
+                postgresSkuName: {value: $sku_name},
+                postgresSkuTier: {value: $sku_tier},
+                postgresStorageGb: {value: $storage_gb},
+                postgresAllowedExtensions: {value: "vector"}
+              }
+            }' > "$artifact_dir/public-parameters.json"
+
+          template_sha="$(sha256sum "$artifact_dir/main.json" | cut -d' ' -f1)"
+          parameters_sha="$(sha256sum "$artifact_dir/public-parameters.json" | cut -d' ' -f1)"
+          target_sha="$(printf '%s\0%s\0%s' "$AZURE_SUBSCRIPTION_ID" "$RESOURCE_GROUP" "$LOCATION" | sha256sum | cut -d' ' -f1)"
+          jq -n \
+            --arg template_sha "$template_sha" \
+            --arg parameters_sha "$parameters_sha" \
+            --arg target_sha "$target_sha" \
+            '{schemaVersion:"1.0.0",templateSha256:$template_sha,parametersSha256:$parameters_sha,targetSha256:$target_sha}' \
+            > "$artifact_dir/deployment-binding.json"
+
+      - name: Capture full create-only what-if privately
+        shell: bash
+        env:
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          secure_parameters="${RUNNER_TEMP}/azure-migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-what-if.parameters.json"
+          [[ "$secure_parameters" == "${RUNNER_TEMP}/"* ]] || exit 1
+          umask 077
+          jq '.parameters.postgresAdministratorPassword = {value: env.POSTGRES_ADMIN_PASSWORD}' \
+            "$ARTIFACT_DIR/public-parameters.json" > "$secure_parameters"
+          trap 'shred -u -- "$secure_parameters"' EXIT
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az deployment sub what-if \
+            --name "migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --location "$LOCATION" \
+            --template-file "$ARTIFACT_DIR/main.json" \
+            --parameters "@$secure_parameters" \
+            --result-format FullResourcePayloads \
+            --no-pretty-print \
+            --output json \
+            --only-show-errors > "$ARTIFACT_DIR/what-if.json"
+
+      - name: Reject unsafe, adopted, or incomplete provider preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/migration/validate-azure-what-if.mjs \
+            --input="$ARTIFACT_DIR/what-if.json" \
+            --subscription-id="$AZURE_SUBSCRIPTION_ID" \
+            --resource-group="$RESOURCE_GROUP" \
+            --template-digest="$(jq -er '.templateSha256' "$ARTIFACT_DIR/deployment-binding.json")" \
+            --parameters-digest="$(jq -er '.parametersSha256' "$ARTIFACT_DIR/deployment-binding.json")" \
+            --target-digest="$(jq -er '.targetSha256' "$ARTIFACT_DIR/deployment-binding.json")" \
+            > "$ARTIFACT_DIR/what-if-receipt.json"
+          jq . "$ARTIFACT_DIR/what-if-receipt.json"
+
+      - name: Deploy exact guarded foundation and read it back
+        if: ${{ inputs.operation == 'deploy' }}
+        shell: bash
+        env:
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          deploy_template="${RUNNER_TEMP}/azure-migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-deploy.json"
+          deploy_public_parameters="${RUNNER_TEMP}/azure-migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-deploy-public.parameters.json"
+          secure_parameters="${RUNNER_TEMP}/azure-migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-deploy.parameters.json"
+          for path in "$deploy_template" "$deploy_public_parameters" "$secure_parameters"; do
+            [[ "$path" == "${RUNNER_TEMP}/"* ]] || exit 1
+          done
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az bicep build \
+            --file infra/azure/migration-foundation/main.bicep \
+            --stdout \
+            --only-show-errors > "$deploy_template"
+          jq -S -c -n \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --arg location "$LOCATION" \
+            --arg name_prefix "$NAME_PREFIX" \
+            --arg sku_name "$POSTGRES_SKU_NAME" \
+            --arg sku_tier "$POSTGRES_SKU_TIER" \
+            --argjson storage_gb "$POSTGRES_STORAGE_GB" \
+            '{
+              "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+              contentVersion: "1.0.0.0",
+              parameters: {
+                resourceGroupName: {value: $resource_group},
+                location: {value: $location},
+                namePrefix: {value: $name_prefix},
+                postgresAdministratorLogin: {value: "corgtexadmin"},
+                postgresVersion: {value: "18"},
+                postgresSkuName: {value: $sku_name},
+                postgresSkuTier: {value: $sku_tier},
+                postgresStorageGb: {value: $storage_gb},
+                postgresAllowedExtensions: {value: "vector"}
+              }
+            }' > "$deploy_public_parameters"
+
+          expected_template_sha="$(jq -er '.templateSha256' "$ARTIFACT_DIR/deployment-binding.json")"
+          expected_parameters_sha="$(jq -er '.parametersSha256' "$ARTIFACT_DIR/deployment-binding.json")"
+          expected_target_sha="$(jq -er '.targetSha256' "$ARTIFACT_DIR/deployment-binding.json")"
+          [[ "$(sha256sum "$deploy_template" | cut -d' ' -f1)" == "$expected_template_sha" ]] || {
+            echo "::error::Compiled template changed after provider preview."
+            exit 1
+          }
+          [[ "$(sha256sum "$deploy_public_parameters" | cut -d' ' -f1)" == "$expected_parameters_sha" ]] || {
+            echo "::error::Deployment parameters changed after provider preview."
+            exit 1
+          }
+          [[ "$(printf '%s\0%s\0%s' "$AZURE_SUBSCRIPTION_ID" "$RESOURCE_GROUP" "$LOCATION" | sha256sum | cut -d' ' -f1)" == "$expected_target_sha" ]] || {
+            echo "::error::Deployment target changed after provider preview."
+            exit 1
+          }
+          jq -e \
+            --arg template "$expected_template_sha" \
+            --arg parameters "$expected_parameters_sha" \
+            --arg target "$expected_target_sha" \
+            '.ok == true and .receipt.status == "SAFE_EXACT_CREATE" and .receipt.templateSha256 == $template and .receipt.parametersSha256 == $parameters and .receipt.targetSha256 == $target' \
+            "$ARTIFACT_DIR/what-if-receipt.json" > /dev/null
+
+          umask 077
+          jq '.parameters.postgresAdministratorPassword = {value: env.POSTGRES_ADMIN_PASSWORD}' \
+            "$deploy_public_parameters" > "$secure_parameters"
+          trap 'shred -u -- "$secure_parameters"' EXIT
+
+          [[ "$(AZURE_CORE_COLLECT_TELEMETRY=no az group exists --name "$RESOURCE_GROUP" --output tsv --only-show-errors)" == "false" ]] || {
+            echo "::error::Create-mode target appeared after preview; refusing adoption or mutation."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az deployment sub create \
+            --name "migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --location "$LOCATION" \
+            --template-file "$deploy_template" \
+            --parameters "@$secure_parameters" \
+            --output json \
+            --only-show-errors > "$ARTIFACT_DIR/deployment.json"
+
+          jq -n \
+            --arg raw_sha "$(sha256sum "$ARTIFACT_DIR/deployment.json" | cut -d' ' -f1)" \
+            --arg state "$(jq -r '.properties.provisioningState // "UNKNOWN"' "$ARTIFACT_DIR/deployment.json")" \
+            '{ok: ($state == "Succeeded"), state: $state, deploymentSha256: $raw_sha}' \
+            > "$ARTIFACT_DIR/deployment-receipt.json"
+          jq -e '.ok == true' "$ARTIFACT_DIR/deployment-receipt.json" > /dev/null
+
+          : > "$ARTIFACT_DIR/readback.ndjson"
+          jq -c '.changes[] | {id:.resourceId,type:.after.type,apiVersion:.after.apiVersion}' \
+            "$ARTIFACT_DIR/what-if.json" \
+            | while IFS= read -r request; do
+                resource_id="$(jq -r '.id' <<< "$request")"
+                resource_type="$(jq -r '.type | ascii_downcase' <<< "$request")"
+                api_version="$(jq -r '.apiVersion' <<< "$request")"
+                if [[ "$resource_type" == "microsoft.resources/resourcegroups" ]]; then
+                  AZURE_CORE_COLLECT_TELEMETRY=no az group show \
+                    --name "$RESOURCE_GROUP" \
+                    --output json \
+                    --only-show-errors
+                else
+                  AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+                    --method get \
+                    --url "https://management.azure.com${resource_id}?api-version=${api_version}" \
+                    --output json \
+                    --only-show-errors
+                fi
+              done >> "$ARTIFACT_DIR/readback.ndjson"
+          jq -s '.' "$ARTIFACT_DIR/readback.ndjson" > "$ARTIFACT_DIR/readback.json"
+
+          node scripts/migration/validate-azure-foundation-readback.mjs \
+            --preview="$ARTIFACT_DIR/what-if.json" \
+            --input="$ARTIFACT_DIR/readback.json" \
+            --subscription-id="$AZURE_SUBSCRIPTION_ID" \
+            --resource-group="$RESOURCE_GROUP" \
+            --template-digest="$expected_template_sha" \
+            --parameters-digest="$expected_parameters_sha" \
+            --target-digest="$expected_target_sha" \
+            > "$ARTIFACT_DIR/readback-receipt.json"
+          jq . "$ARTIFACT_DIR/deployment-receipt.json"
+          jq . "$ARTIFACT_DIR/readback-receipt.json"
+
+      - name: Upload private provider evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-migration-foundation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/azure-migration-foundation/${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
