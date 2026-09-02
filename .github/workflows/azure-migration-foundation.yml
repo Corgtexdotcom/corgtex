@@ -12,7 +12,7 @@ on:
           - what-if
           - deploy
       resource_group:
-        description: "Exact new migration resource group. It must not exist."
+        description: "Exact precreated, empty migration resource group."
         required: true
         type: string
         default: rg-corgtex-migration-rehearsal
@@ -57,7 +57,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     name: Guard and apply isolated Azure foundation
     runs-on: ubuntu-latest
-    environment: managed-azure-release-production
+    environment: azure-migration-foundation
     env:
       OPERATION: ${{ inputs.operation }}
       RESOURCE_GROUP: ${{ inputs.resource_group }}
@@ -72,6 +72,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
 
       - name: Validate exact create-mode inputs
         shell: bash
@@ -124,6 +126,14 @@ jobs:
             exit 1
           fi
 
+      - name: Initialize private evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=".artifacts/azure-migration-foundation/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$artifact_dir"
+          echo "ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
+
       - name: Log in to exact Azure subscription
         uses: azure/login@v2
         with:
@@ -131,7 +141,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Verify Azure context and new target
+      - name: Verify Azure context and empty isolated target
         shell: bash
         run: |
           set -euo pipefail
@@ -140,28 +150,81 @@ jobs:
             echo "::error::Azure subscription mismatch."
             exit 1
           }
-          [[ "$(AZURE_CORE_COLLECT_TELEMETRY=no az group exists --name "$RESOURCE_GROUP" --output tsv --only-show-errors)" == "false" ]] || {
-            echo "::error::Create-mode target already exists; adoption and mutation are forbidden."
+
+          access_token="$(AZURE_CORE_COLLECT_TELEMETRY=no az account get-access-token \
+            --resource https://management.azure.com/ \
+            --query accessToken \
+            --output tsv \
+            --only-show-errors)"
+          principal_id="$(AZURE_ACCESS_TOKEN="$access_token" node -e '
+            const token = process.env.AZURE_ACCESS_TOKEN ?? "";
+            const segments = token.split(".");
+            if (segments.length !== 3) process.exit(1);
+            const payload = JSON.parse(Buffer.from(segments[1], "base64url").toString("utf8"));
+            if (typeof payload.oid !== "string") process.exit(1);
+            process.stdout.write(payload.oid);
+          ')"
+          unset access_token
+
+          principal_scope="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}"
+          AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
+            --assignee-object-id "$principal_id" \
+            --scope "$principal_scope" \
+            --include-groups \
+            --include-inherited \
+            --fill-principal-name false \
+            --output json \
+            --only-show-errors > "$ARTIFACT_DIR/principal-role-assignments.json"
+          jq -n \
+            --arg client_id "$AZURE_CLIENT_ID" \
+            --arg principal_id "$principal_id" \
+            --arg subscription_id "$actual_subscription" \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --slurpfile assignments "$ARTIFACT_DIR/principal-role-assignments.json" \
+            '{
+              clientId: $client_id,
+              principalId: $principal_id,
+              subscriptionId: $subscription_id,
+              resourceGroup: $resource_group,
+              assignments: $assignments[0]
+            }' > "$ARTIFACT_DIR/principal-input.json"
+          node scripts/migration/validate-azure-migration-principal.mjs \
+            --input="$ARTIFACT_DIR/principal-input.json" \
+            > "$ARTIFACT_DIR/principal-receipt.json"
+          jq . "$ARTIFACT_DIR/principal-receipt.json"
+
+          resource_group_json="$(AZURE_CORE_COLLECT_TELEMETRY=no az group show --name "$RESOURCE_GROUP" --output json --only-show-errors)" || {
+            echo "::error::The exact precreated migration resource group is absent or unreadable."
+            exit 1
+          }
+          jq -e --arg location "$LOCATION" '
+            (.location | ascii_downcase) == ($location | ascii_downcase)
+            and .tags.purpose == "railway-to-azure-migration-foundation"
+            and .tags.authority == "non-authoritative-restore-target"
+            and .tags.managedBy == "github-oidc"
+            and (.tags | keys | map(ascii_downcase) | sort) == ["authority", "managedby", "purpose"]
+          ' <<< "$resource_group_json" > /dev/null || {
+            echo "::error::The migration resource-group location or authority tags do not match the reviewed boundary."
+            exit 1
+          }
+          [[ "$(AZURE_CORE_COLLECT_TELEMETRY=no az resource list --resource-group "$RESOURCE_GROUP" --query 'length(@)' --output tsv --only-show-errors)" == "0" ]] || {
+            echo "::error::The migration resource group contains workload resources; adoption or mutation is forbidden."
             exit 1
           }
           subscription_ref="$(printf '%s' "$actual_subscription" | sha256sum | cut -c1-16)"
-          echo "Azure context and absent target verified: sha256:${subscription_ref}"
+          target_ref="$(printf '%s' "$RESOURCE_GROUP" | sha256sum | cut -c1-16)"
+          echo "Azure context and empty isolated target verified: subscription sha256:${subscription_ref}; target sha256:${target_ref}"
 
       - name: Freeze compiled template and public deployment tuple
         shell: bash
         run: |
           set -euo pipefail
-          artifact_dir=".artifacts/azure-migration-foundation/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$artifact_dir"
-          echo "ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
-
           AZURE_CORE_COLLECT_TELEMETRY=no az bicep build \
             --file infra/azure/migration-foundation/main.bicep \
             --stdout \
-            --only-show-errors > "$artifact_dir/main.json"
+            --only-show-errors > "$ARTIFACT_DIR/main.json"
 
           jq -S -c -n \
-            --arg resource_group "$RESOURCE_GROUP" \
             --arg location "$LOCATION" \
             --arg name_prefix "$NAME_PREFIX" \
             --arg sku_name "$POSTGRES_SKU_NAME" \
@@ -171,7 +234,6 @@ jobs:
               "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
               contentVersion: "1.0.0.0",
               parameters: {
-                resourceGroupName: {value: $resource_group},
                 location: {value: $location},
                 namePrefix: {value: $name_prefix},
                 postgresAdministratorLogin: {value: "corgtexadmin"},
@@ -181,17 +243,17 @@ jobs:
                 postgresStorageGb: {value: $storage_gb},
                 postgresAllowedExtensions: {value: "vector"}
               }
-            }' > "$artifact_dir/public-parameters.json"
+            }' > "$ARTIFACT_DIR/public-parameters.json"
 
-          template_sha="$(sha256sum "$artifact_dir/main.json" | cut -d' ' -f1)"
-          parameters_sha="$(sha256sum "$artifact_dir/public-parameters.json" | cut -d' ' -f1)"
+          template_sha="$(sha256sum "$ARTIFACT_DIR/main.json" | cut -d' ' -f1)"
+          parameters_sha="$(sha256sum "$ARTIFACT_DIR/public-parameters.json" | cut -d' ' -f1)"
           target_sha="$(printf '%s\0%s\0%s' "$AZURE_SUBSCRIPTION_ID" "$RESOURCE_GROUP" "$LOCATION" | sha256sum | cut -d' ' -f1)"
           jq -n \
             --arg template_sha "$template_sha" \
             --arg parameters_sha "$parameters_sha" \
             --arg target_sha "$target_sha" \
             '{schemaVersion:"1.0.0",templateSha256:$template_sha,parametersSha256:$parameters_sha,targetSha256:$target_sha}' \
-            > "$artifact_dir/deployment-binding.json"
+            > "$ARTIFACT_DIR/deployment-binding.json"
 
       - name: Capture full create-only what-if privately
         shell: bash
@@ -206,9 +268,9 @@ jobs:
             "$ARTIFACT_DIR/public-parameters.json" > "$secure_parameters"
           trap 'shred -u -- "$secure_parameters"' EXIT
 
-          AZURE_CORE_COLLECT_TELEMETRY=no az deployment sub what-if \
+          AZURE_CORE_COLLECT_TELEMETRY=no az deployment group what-if \
             --name "migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --location "$LOCATION" \
+            --resource-group "$RESOURCE_GROUP" \
             --template-file "$ARTIFACT_DIR/main.json" \
             --parameters "@$secure_parameters" \
             --result-format FullResourcePayloads \
@@ -249,7 +311,6 @@ jobs:
             --stdout \
             --only-show-errors > "$deploy_template"
           jq -S -c -n \
-            --arg resource_group "$RESOURCE_GROUP" \
             --arg location "$LOCATION" \
             --arg name_prefix "$NAME_PREFIX" \
             --arg sku_name "$POSTGRES_SKU_NAME" \
@@ -259,7 +320,6 @@ jobs:
               "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
               contentVersion: "1.0.0.0",
               parameters: {
-                resourceGroupName: {value: $resource_group},
                 location: {value: $location},
                 namePrefix: {value: $name_prefix},
                 postgresAdministratorLogin: {value: "corgtexadmin"},
@@ -298,13 +358,27 @@ jobs:
             "$deploy_public_parameters" > "$secure_parameters"
           trap 'shred -u -- "$secure_parameters"' EXIT
 
-          [[ "$(AZURE_CORE_COLLECT_TELEMETRY=no az group exists --name "$RESOURCE_GROUP" --output tsv --only-show-errors)" == "false" ]] || {
-            echo "::error::Create-mode target appeared after preview; refusing adoption or mutation."
+          resource_group_json="$(AZURE_CORE_COLLECT_TELEMETRY=no az group show --name "$RESOURCE_GROUP" --output json --only-show-errors)" || {
+            echo "::error::The exact migration resource group became absent or unreadable after preview."
             exit 1
           }
-          AZURE_CORE_COLLECT_TELEMETRY=no az deployment sub create \
+          jq -e --arg location "$LOCATION" '
+            (.location | ascii_downcase) == ($location | ascii_downcase)
+            and .tags.purpose == "railway-to-azure-migration-foundation"
+            and .tags.authority == "non-authoritative-restore-target"
+            and .tags.managedBy == "github-oidc"
+            and (.tags | keys | map(ascii_downcase) | sort) == ["authority", "managedby", "purpose"]
+          ' <<< "$resource_group_json" > /dev/null || {
+            echo "::error::The migration resource-group boundary changed after preview."
+            exit 1
+          }
+          [[ "$(AZURE_CORE_COLLECT_TELEMETRY=no az resource list --resource-group "$RESOURCE_GROUP" --query 'length(@)' --output tsv --only-show-errors)" == "0" ]] || {
+            echo "::error::The migration resource group gained workload resources after preview; refusing adoption or mutation."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az deployment group create \
             --name "migration-foundation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --location "$LOCATION" \
+            --resource-group "$RESOURCE_GROUP" \
             --template-file "$deploy_template" \
             --parameters "@$secure_parameters" \
             --output json \
@@ -317,27 +391,46 @@ jobs:
             > "$ARTIFACT_DIR/deployment-receipt.json"
           jq -e '.ok == true' "$ARTIFACT_DIR/deployment-receipt.json" > /dev/null
 
+          AZURE_CORE_COLLECT_TELEMETRY=no az group show \
+            --name "$RESOURCE_GROUP" \
+            --output json \
+            --only-show-errors > "$ARTIFACT_DIR/resource-group-readback.json"
+          jq -e --arg location "$LOCATION" '
+            (.location | ascii_downcase) == ($location | ascii_downcase)
+            and .tags.purpose == "railway-to-azure-migration-foundation"
+            and .tags.authority == "non-authoritative-restore-target"
+            and .tags.managedBy == "github-oidc"
+            and (.tags | keys | map(ascii_downcase) | sort) == ["authority", "managedby", "purpose"]
+          ' "$ARTIFACT_DIR/resource-group-readback.json" > /dev/null || {
+            echo "::error::Migration resource-group boundary failed post-deploy readback."
+            exit 1
+          }
+
           : > "$ARTIFACT_DIR/readback.ndjson"
           jq -c '.changes[] | {id:.resourceId,type:.after.type,apiVersion:.after.apiVersion}' \
             "$ARTIFACT_DIR/what-if.json" \
             | while IFS= read -r request; do
                 resource_id="$(jq -r '.id' <<< "$request")"
-                resource_type="$(jq -r '.type | ascii_downcase' <<< "$request")"
                 api_version="$(jq -r '.apiVersion' <<< "$request")"
-                if [[ "$resource_type" == "microsoft.resources/resourcegroups" ]]; then
-                  AZURE_CORE_COLLECT_TELEMETRY=no az group show \
-                    --name "$RESOURCE_GROUP" \
-                    --output json \
-                    --only-show-errors
-                else
-                  AZURE_CORE_COLLECT_TELEMETRY=no az rest \
-                    --method get \
-                    --url "https://management.azure.com${resource_id}?api-version=${api_version}" \
-                    --output json \
-                    --only-show-errors
-                fi
+                AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+                  --method get \
+                  --url "https://management.azure.com${resource_id}?api-version=${api_version}" \
+                  --output json \
+                  --only-show-errors
               done >> "$ARTIFACT_DIR/readback.ndjson"
           jq -s '.' "$ARTIFACT_DIR/readback.ndjson" > "$ARTIFACT_DIR/readback.json"
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az resource list \
+            --resource-group "$RESOURCE_GROUP" \
+            --output json \
+            --only-show-errors > "$ARTIFACT_DIR/resource-group-inventory.json"
+          jq -e --slurpfile inventory "$ARTIFACT_DIR/resource-group-inventory.json" '
+            [.changes[].resourceId | ascii_downcase] as $expected
+            | all($inventory[0][]; (.id | ascii_downcase) as $id | ($expected | index($id)) != null)
+          ' "$ARTIFACT_DIR/what-if.json" > /dev/null || {
+            echo "::error::Unexpected resource appeared in the migration resource group during deployment."
+            exit 1
+          }
 
           node scripts/migration/validate-azure-foundation-readback.mjs \
             --preview="$ARTIFACT_DIR/what-if.json" \

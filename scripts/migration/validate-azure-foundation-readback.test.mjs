@@ -34,11 +34,6 @@ const previewDocument = () => ({
   potentialChanges: null,
   error: null,
   changes: [
-    {
-      resourceId: groupId,
-      changeType: "Create",
-      after: { type: "Microsoft.Resources/resourceGroups", apiVersion: "2024-03-01", tags },
-    },
     resource("Microsoft.Authorization/roleAssignments", "role-1"),
     resource("Microsoft.Authorization/roleAssignments", "role-2"),
     resource("Microsoft.Storage/storageAccounts", "ctmigration123", true),
@@ -72,8 +67,8 @@ describe("Azure migration foundation provider readback", () => {
     const receipt = validateFoundationReadback(bytes(preview), bytes(readbackDocument(preview)), options);
     expect(receipt).toMatchObject({
       status: "EXACT_CREATE_READ_BACK",
-      resourceCount: 14,
-      taggedResourceCount: 7,
+      resourceCount: 13,
+      taggedResourceCount: 6,
       postgresVersion: "18",
       postgresBackupRetentionDays: 7,
       templateSha256: options.templateDigest,
@@ -110,17 +105,17 @@ describe("Azure migration foundation provider readback", () => {
   it("rejects missing authority tags and PostgreSQL drift", () => {
     const preview = previewDocument();
     const tagsMissing = readbackDocument(preview);
-    delete tagsMissing[0].tags.authority;
+    delete tagsMissing[2].tags.authority;
     expect(() => validateFoundationReadback(bytes(preview), bytes(tagsMissing), options))
       .toThrow("READBACK_TAG_MISMATCH");
 
     const versionDrift = readbackDocument(preview);
-    versionDrift[7].properties.version = "17";
+    versionDrift[6].properties.version = "17";
     expect(() => validateFoundationReadback(bytes(preview), bytes(versionDrift), options))
       .toThrow("POSTGRES_VERSION_MISMATCH");
 
     const backupDrift = readbackDocument(preview);
-    backupDrift[7].properties.backup.backupRetentionDays = 8;
+    backupDrift[6].properties.backup.backupRetentionDays = 8;
     expect(() => validateFoundationReadback(bytes(preview), bytes(backupDrift), options))
       .toThrow("POSTGRES_BACKUP_MISMATCH");
   });

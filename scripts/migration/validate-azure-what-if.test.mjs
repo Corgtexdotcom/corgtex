@@ -32,11 +32,6 @@ const safeDocument = () => ({
   potentialChanges: null,
   error: null,
   changes: [
-    {
-      resourceId: groupId,
-      changeType: "Create",
-      after: { type: "Microsoft.Resources/resourceGroups", apiVersion: "2024-03-01" },
-    },
     resource("Microsoft.Authorization/roleAssignments", "role-1"),
     resource("Microsoft.Authorization/roleAssignments", "role-2"),
     resource("Microsoft.Storage/storageAccounts", "ctmigration123"),
@@ -59,8 +54,8 @@ describe("Azure migration foundation what-if validation", () => {
     const result = validateWhatIfBytes(bytes, options);
     expect(result).toMatchObject({
       status: "SAFE_EXACT_CREATE",
-      changeCount: 14,
-      changeCounts: { Create: 14 },
+      changeCount: 13,
+      changeCounts: { Create: 13 },
       templateSha256: digests.templateDigest,
       parametersSha256: digests.parametersDigest,
       targetSha256: digests.targetDigest,
@@ -175,7 +170,6 @@ describe("Azure migration foundation what-if validation", () => {
       "microsoft.keyvault/vaults": 1,
       "microsoft.managedidentity/userassignedidentities": 1,
       "microsoft.operationalinsights/workspaces": 1,
-      "microsoft.resources/resourcegroups": 1,
       "microsoft.storage/storageaccounts": 1,
       "microsoft.storage/storageaccounts/blobservices": 1,
       "microsoft.storage/storageaccounts/blobservices/containers": 2,

@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { expectedResourceGroupId, validateWhatIfBytes } from "./validate-azure-what-if.mjs";
+import { validateWhatIfBytes } from "./validate-azure-what-if.mjs";
 
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 
@@ -64,7 +64,6 @@ export function validateFoundationReadback(previewBytes, readbackBytes, options)
   if (!Array.isArray(readback)) fail("INVALID_READBACK");
   if (readback.length !== preview.changes.length) fail("INCOMPLETE_READBACK");
 
-  const expectedResourceGroupIdValue = expectedResourceGroupId(options.subscriptionId, options.resourceGroup);
   const expectedById = new Map(preview.changes.map((change) => [change.resourceId.toLowerCase(), change]));
   const observedIds = new Set();
   let tagsChecked = 0;
@@ -96,7 +95,6 @@ export function validateFoundationReadback(previewBytes, readbackBytes, options)
   }
 
   if (observedIds.size !== expectedById.size) fail("INCOMPLETE_READBACK");
-  if (!observedIds.has(expectedResourceGroupIdValue.toLowerCase())) fail("MISSING_RESOURCE_GROUP_READBACK");
   if (tagsChecked === 0) fail("MISSING_TAGGED_READBACK");
   if (postgresVersion === null || postgresBackupRetentionDays === null) fail("MISSING_POSTGRES_READBACK");
 
