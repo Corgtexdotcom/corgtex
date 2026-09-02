@@ -5,6 +5,7 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "
 
 describe("Azure migration foundation static contract", () => {
   const workflow = read(".github/workflows/azure-migration-foundation.yml");
+  const readme = read("infra/azure/migration-foundation/README.md");
   const entrypoint = read("infra/azure/migration-foundation/main.bicep");
   const postgres = read("infra/azure/modules/postgresql.bicep");
   const storage = read("infra/azure/modules/blob-storage.bicep");
@@ -15,6 +16,14 @@ describe("Azure migration foundation static contract", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("default: what-if");
     expect(workflow).toContain("id-token: write");
+    expect(workflow.match(/if: github\.ref == 'refs\/heads\/main'/g)).toHaveLength(1);
+    expect(workflow).toContain("environment: managed-azure-release-production");
+    expect(workflow).toContain("AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}");
+    expect(workflow).toContain("AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}");
+    expect(workflow).toContain("AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}");
+    expect(workflow).toContain("client-id: ${{ vars.AZURE_CLIENT_ID }}");
+    expect(workflow).toContain("tenant-id: ${{ vars.AZURE_TENANT_ID }}");
+    expect(workflow).toContain("subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}");
     expect(workflow).toContain("az deployment sub what-if");
     expect(workflow).toContain("--result-format FullResourcePayloads");
     expect(workflow).toContain("validate-azure-what-if.mjs");
@@ -27,6 +36,10 @@ describe("Azure migration foundation static contract", () => {
     expect(workflow).not.toContain("az group delete");
     expect(workflow).not.toContain("railway ");
     expect(workflow).not.toContain("az containerapp");
+    expect(workflow).not.toContain("environment: azure-migration-foundation");
+    expect(workflow).not.toContain("secrets.AZURE_CLIENT_ID");
+    expect(workflow).not.toContain("secrets.AZURE_TENANT_ID");
+    expect(workflow).not.toContain("secrets.AZURE_SUBSCRIPTION_ID");
   });
 
   it("binds preview to deploy, keeps the database secret out of argv/artifacts, and reads back exact identities", () => {
@@ -41,6 +54,17 @@ describe("Azure migration foundation static contract", () => {
     expect(whatIfValidator).toContain('status: "SAFE_EXACT_CREATE"');
     expect(whatIfValidator).toContain('if (document.changes.length !== EXPECTED_CHANGE_COUNT)');
     expect(readbackValidator).toContain('status: "EXACT_CREATE_READ_BACK"');
+  });
+
+  it("documents the exact protected environment variable and secret contract", () => {
+    expect(readme).toContain("protected `managed-azure-release-production` environment");
+    expect(readme).toContain("Before either `what-if` or `deploy`, configure these environment variables:");
+    expect(readme).toContain("- `AZURE_CLIENT_ID`");
+    expect(readme).toContain("- `AZURE_TENANT_ID`");
+    expect(readme).toContain("- `AZURE_SUBSCRIPTION_ID`");
+    expect(readme).toContain("Configure only the database credential as an environment secret:");
+    expect(readme).toContain("- `AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD`");
+    expect(readme).not.toContain("protected `azure-migration-foundation` environment");
   });
 
   it("creates only a new subscription-scoped resource group and backing modules", () => {
