@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
@@ -25,10 +25,10 @@ const { Client } = pg;
 
 export const POSTGRES_CLIENT_IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const MAX_STATE_BYTES = 64 * 1024;
+const MAX_SOURCE_TLS_ROOT_CERT_BYTES = 16 * 1024;
 const FETCH_ROWS = 500;
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,62}$/u;
 const REQUIRED_DOMAINS = new Set(["core", "ops"]);
-const SOURCE_SSL_MODES = new Set(["require", "verify-ca", "verify-full"]);
 const TARGET_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
 const TARGET_CONNECTION_RETRY_DELAY_MS = 10 * 1000;
 const LOCALE_PROVIDERS = new Map([
@@ -144,7 +144,7 @@ export const parseSourceDatabaseUrl = (rawUrl, dockerHostOverride = null) => {
   }
   if (!new Set(["postgres:", "postgresql:"]).has(parsed.protocol)) fail("INVALID_SOURCE_DATABASE_URL");
   const sslmode = parsed.searchParams.get("sslmode");
-  if (!SOURCE_SSL_MODES.has(sslmode)) fail("SOURCE_TLS_REQUIRED");
+  if (sslmode !== "require") fail("SOURCE_TLS_REQUIRE_MODE_REQUIRED");
   const host = assertNoControlCharacters(parsed.hostname, "INVALID_SOURCE_HOST");
   const dockerHost = dockerHostOverride === null ? host : assertNoControlCharacters(dockerHostOverride, "INVALID_SOURCE_DOCKER_HOST");
   const port = parsed.port === "" ? 5432 : Number(parsed.port);
@@ -153,6 +153,38 @@ export const parseSourceDatabaseUrl = (rawUrl, dockerHostOverride = null) => {
   const password = decodeUrlPart(parsed.password, "INVALID_SOURCE_PASSWORD");
   const database = decodeUrlPart(parsed.pathname.replace(/^\//u, ""), "INVALID_SOURCE_DATABASE");
   return { host, dockerHost, port, user, password, database, sslmode };
+};
+
+export const validateSourceTlsRootCertificate = (rawCertificate, now = new Date()) => {
+  if (
+    typeof rawCertificate !== "string"
+    || rawCertificate.length === 0
+    || Buffer.byteLength(rawCertificate, "utf8") > MAX_SOURCE_TLS_ROOT_CERT_BYTES
+    || /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/u.test(rawCertificate)
+  ) fail("INVALID_SOURCE_TLS_ROOT_CERT");
+  const normalized = rawCertificate.replaceAll("\r\n", "\n");
+  const pem = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
+  const lines = pem.split("\n");
+  if (
+    lines[0] !== "-----BEGIN CERTIFICATE-----"
+    || lines.at(-1) !== "-----END CERTIFICATE-----"
+    || lines.slice(1, -1).length === 0
+    || lines.slice(1, -1).some((line) => !/^[A-Za-z0-9+/]+={0,2}$/u.test(line))
+    || (pem.match(/-----BEGIN CERTIFICATE-----/gu) ?? []).length !== 1
+    || (pem.match(/-----END CERTIFICATE-----/gu) ?? []).length !== 1
+  ) fail("INVALID_SOURCE_TLS_ROOT_CERT");
+  let certificate;
+  try {
+    certificate = new X509Certificate(`${pem}\n`);
+  } catch {
+    fail("INVALID_SOURCE_TLS_ROOT_CERT");
+  }
+  if (!certificate.ca) fail("SOURCE_TLS_ROOT_CERT_NOT_CA");
+  const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
+  if (!Number.isFinite(nowMs)) fail("INVALID_CERTIFICATE_VALIDATION_TIME");
+  if (certificate.validFromDate.getTime() > nowMs) fail("SOURCE_TLS_ROOT_CERT_NOT_YET_VALID");
+  if (certificate.validToDate.getTime() <= nowMs) fail("SOURCE_TLS_ROOT_CERT_EXPIRED");
+  return `${pem}\n`;
 };
 
 export const targetDatabaseConfigFromEnv = (environment, database, dockerHostOverride = null) => {
@@ -166,7 +198,7 @@ export const targetDatabaseConfigFromEnv = (environment, database, dockerHostOve
   return { host, dockerHost, port, user, password, database, sslmode: "verify-full" };
 };
 
-const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => ({
+export const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => ({
   host: config.host,
   port: config.port,
   user: config.user,
@@ -176,7 +208,15 @@ const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_
   connectionTimeoutMillis,
   ...(queryTimeoutMillis === null ? {} : { query_timeout: queryTimeoutMillis }),
   keepAlive: true,
-  ssl: config.sslmode === "disable" ? false : { rejectUnauthorized: config.tlsRejectUnauthorized !== false },
+  ssl: config.sslmode === "disable"
+    ? false
+    : config.sslmode === "require"
+      ? {
+          ca: config.sourceTlsRootCert ?? fail("MISSING_SOURCE_TLS_ROOT_CERT"),
+          rejectUnauthorized: true,
+          checkServerIdentity: () => undefined,
+        }
+      : { rejectUnauthorized: true },
 });
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -230,7 +270,9 @@ const pgPassEscape = (value) => assertNoControlCharacters(String(value), "INVALI
   .replaceAll(":", "\\:");
 
 export const buildPgServiceContents = (source, target) => {
-  const sourceServiceSslMode = source.sslmode === "disable" ? "disable" : "verify-full";
+  if (!new Set(["disable", "require"]).has(source.sslmode)) fail("INVALID_SOURCE_TLS_MODE");
+  if (!new Set(["disable", "verify-full"]).has(target.sslmode)) fail("INVALID_TARGET_TLS_MODE");
+  const sourceServiceSslMode = source.sslmode === "disable" ? "disable" : "verify-ca";
   const targetServiceSslMode = target.sslmode === "disable" ? "disable" : "verify-full";
   return [
     "[source]",
@@ -239,7 +281,7 @@ export const buildPgServiceContents = (source, target) => {
     `user=${serializePgServiceValue(source.user)}`,
     `dbname=${serializePgServiceValue(source.database)}`,
     `sslmode=${serializePgServiceValue(sourceServiceSslMode)}`,
-    ...(sourceServiceSslMode === "disable" ? [] : ["sslrootcert=system"]),
+    ...(sourceServiceSslMode === "disable" ? [] : ["sslrootcert=/work/source-root.crt"]),
     "connect_timeout=30",
     "",
     "[target]",
@@ -257,7 +299,10 @@ export const buildPgServiceContents = (source, target) => {
 const writeClientFiles = (tempDir, source, target, registerCleanup) => {
   const serviceFile = assertSafePath(`${tempDir}/pg_service.conf`, tempDir, "INVALID_SERVICE_PATH");
   const passFile = assertSafePath(`${tempDir}/pgpass`, tempDir, "INVALID_PASSFILE_PATH");
-  registerCleanup(serviceFile, passFile);
+  const sourceRootCertFile = source.sslmode === "disable"
+    ? null
+    : assertSafePath(`${tempDir}/source-root.crt`, tempDir, "INVALID_SOURCE_TLS_ROOT_CERT_PATH");
+  registerCleanup(serviceFile, passFile, ...(sourceRootCertFile === null ? [] : [sourceRootCertFile]));
   const service = buildPgServiceContents(source, target);
   const pass = [
     [source.dockerHost, source.dockerPort ?? source.port, source.database, source.user, source.password].map(pgPassEscape).join(":"),
@@ -266,12 +311,16 @@ const writeClientFiles = (tempDir, source, target, registerCleanup) => {
   ].join("\n");
   writeFileSync(serviceFile, service, { mode: 0o600, flag: "wx" });
   writeFileSync(passFile, pass, { mode: 0o600, flag: "wx" });
+  if (sourceRootCertFile !== null) {
+    writeFileSync(sourceRootCertFile, source.sourceTlsRootCert ?? fail("MISSING_SOURCE_TLS_ROOT_CERT"), { mode: 0o600, flag: "wx" });
+    chmodSync(sourceRootCertFile, 0o600);
+  }
   chmodSync(serviceFile, 0o600);
   chmodSync(passFile, 0o600);
-  return { serviceFile, passFile };
+  return { serviceFile, passFile, sourceRootCertFile };
 };
 
-const dockerClient = async ({ tempDir, serviceFile, passFile, service, args, code, network = null }) => {
+const dockerClient = async ({ tempDir, serviceFile, passFile, sourceRootCertFile, service, args, code, network = null }) => {
   const dockerArgs = ["run", "--rm"];
   if (network !== null) {
     assertNoControlCharacters(network, "INVALID_DOCKER_NETWORK");
@@ -280,6 +329,9 @@ const dockerClient = async ({ tempDir, serviceFile, passFile, service, args, cod
   dockerArgs.push(
     "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
     "--mount", `type=bind,source=${tempDir},target=/work`,
+    ...(sourceRootCertFile === null
+      ? []
+      : ["--mount", `type=bind,source=${sourceRootCertFile},target=/work/source-root.crt,readonly`]),
     "--env", "PGSERVICEFILE=/work/pg_service.conf",
     "--env", "PGPASSFILE=/work/pgpass",
     "--env", `PGSERVICE=${service}`,
@@ -290,6 +342,7 @@ const dockerClient = async ({ tempDir, serviceFile, passFile, service, args, cod
     ...args,
   );
   if (basename(serviceFile) !== "pg_service.conf" || basename(passFile) !== "pgpass") fail("INVALID_CLIENT_FILE_NAME");
+  if (sourceRootCertFile !== null && basename(sourceRootCertFile) !== "source-root.crt") fail("INVALID_CLIENT_FILE_NAME");
   await spawnFixed("docker", dockerArgs, { code });
 };
 
@@ -870,7 +923,10 @@ export async function main(tokens = process.argv.slice(2)) {
   const targetAdminConfig = targetDatabaseConfigFromEnv(process.env, "postgres", process.env.TARGET_POSTGRES_DOCKER_HOST ?? null);
   if (mode === "run" && args.size === 5 && args.has("domain") && args.has("artifact-dir") && args.has("temp-dir") && args.has("state-file")) {
     const domain = args.get("domain");
-    const sourceConfig = parseSourceDatabaseUrl(requiredEnvironment("SOURCE_DATABASE_URL"), process.env.SOURCE_POSTGRES_DOCKER_HOST ?? null);
+    const sourceConfig = {
+      ...parseSourceDatabaseUrl(requiredEnvironment("SOURCE_DATABASE_URL"), process.env.SOURCE_POSTGRES_DOCKER_HOST ?? null),
+      sourceTlsRootCert: validateSourceTlsRootCertificate(requiredEnvironment("SOURCE_TLS_ROOT_CERT")),
+    };
     await runPostgresRestoreRehearsal({
       domain,
       sourceConfig,

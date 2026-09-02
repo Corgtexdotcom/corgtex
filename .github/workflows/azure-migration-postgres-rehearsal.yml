@@ -85,10 +85,11 @@ jobs:
         shell: bash
         env:
           SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}
+          SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT }}
         run: |
           set -euo pipefail
-          [[ -n "$SOURCE_DATABASE_URL" ]] || {
-            echo "::error::Missing protected Core read-only PostgreSQL credential."
+          [[ -n "$SOURCE_DATABASE_URL" && -n "$SOURCE_TLS_ROOT_CERT" ]] || {
+            echo "::error::Missing protected Core read-only PostgreSQL credential or TLS trust anchor."
             exit 1
           }
 
@@ -97,10 +98,11 @@ jobs:
         shell: bash
         env:
           SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}
+          SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT }}
         run: |
           set -euo pipefail
-          [[ -n "$SOURCE_DATABASE_URL" ]] || {
-            echo "::error::Missing protected Ops read-only PostgreSQL credential."
+          [[ -n "$SOURCE_DATABASE_URL" && -n "$SOURCE_TLS_ROOT_CERT" ]] || {
+            echo "::error::Missing protected Ops read-only PostgreSQL credential or TLS trust anchor."
             exit 1
           }
 
@@ -438,6 +440,7 @@ jobs:
         shell: bash
         env:
           SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}
+          SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT }}
           TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
@@ -454,6 +457,7 @@ jobs:
         shell: bash
         env:
           SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}
+          SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT }}
           TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail

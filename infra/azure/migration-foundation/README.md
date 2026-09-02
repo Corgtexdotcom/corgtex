@@ -91,11 +91,23 @@ protected environment secrets:
 
 - `RAILWAY_CORE_POSTGRES_READ_ONLY_URL`
 - `RAILWAY_OPS_POSTGRES_READ_ONLY_URL`
+- `RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT`
+- `RAILWAY_OPS_POSTGRES_TLS_ROOT_CERT`
 
 The existing `AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD` secret is used only to create,
 restore, read, and remove the unique scratch database. URLs and passwords remain in
 step-scoped environment state and mode-0600 runner-temporary service/pass files; they
 are never command arguments, logs, or uploaded artifacts.
+
+Each Railway trust-anchor secret contains exactly the matching source service's
+current `root.crt`, retrieved through authenticated Railway access and validated
+against that service's live TLS chain before storage. The runner requires the source
+URL's `sslmode=require` contract but strengthens both Node and PostgreSQL client
+connections to CA-authenticated `verify-ca`; Azure remains system-root
+`verify-full`. Trust anchors are domain-scoped, written only to a mode-0600
+runner-temporary file, shredded with the other connection material, and never
+logged or uploaded. Railway CA rotation fails closed until the matching protected
+secret is refreshed.
 
 Each run reconfirms the exact 13-resource foundation, non-authoritative tags,
 PostgreSQL 18 posture, empty firewall set, absence of Container Apps, storage
