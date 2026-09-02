@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   buildCreateDatabaseSql,
@@ -5,6 +6,8 @@ import {
   buildPgServiceContents,
   buildSequenceUseList,
   classifyCollationVersionRelation,
+  collectLargeObjects,
+  inspectLargeObjectAccess,
   isCurrentCollationVersion,
   localeDefinitionMismatchFields,
   nodeClientConfig,
@@ -42,6 +45,39 @@ RwAwRAIgQ35C/sj6LKFpq+Ft0UkSrJDQsAkBqEEgMoiPW7+IRv4CIDy6Gh89WxvB
 xh2/uXu6vPtzLdW9VbcKqn7DPmGo9gWr
 -----END CERTIFICATE-----
 `;
+
+const lengthFramedLargeObjectManifest = (objects) => {
+  const manifest = createHash("sha256");
+  for (const { oid, content } of objects) {
+    const digest = createHash("sha256").update(content).digest("hex");
+    for (const value of [oid, String(content.length), digest]) {
+      const bytes = Buffer.from(value, "utf8");
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64BE(BigInt(bytes.length));
+      manifest.update(length);
+      manifest.update(bytes);
+    }
+  }
+  return manifest.digest("hex");
+};
+
+const largeObjectClient = (objects) => ({
+  query: async (sql, values = []) => {
+    if (sql.includes("FROM pg_largeobject_metadata")) {
+      return {
+        rows: objects.map(({ oid, readable = true }) => ({ oid, readable })),
+      };
+    }
+    if (sql.includes("SELECT lo_get")) {
+      const [oid, offset, length] = values;
+      const object = objects.find((candidate) => candidate.oid === oid);
+      if (!object) throw Object.assign(new Error("missing"), { code: "42704" });
+      const start = Number(offset);
+      return { rows: [{ chunk: object.content.subarray(start, start + length) }] };
+    }
+    throw new Error("UNEXPECTED_QUERY");
+  },
+});
 
 describe("PostgreSQL restore rehearsal runner", () => {
   it("pins the immutable PostgreSQL 18.6 client", () => {
@@ -261,6 +297,89 @@ describe("PostgreSQL restore rehearsal runner", () => {
       tocEntryCount: 0,
       contents: "",
     });
+  });
+
+  it("proves the empty large-object set without reading the protected page catalog", async () => {
+    const client = largeObjectClient([]);
+    const identities = await inspectLargeObjectAccess(client, "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+    const evidence = await collectLargeObjects(
+      client,
+      identities,
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
+      "SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
+    );
+
+    expect(evidence).toEqual({
+      count: 0,
+      contentSha256: createHash("sha256").digest("hex"),
+    });
+  });
+
+  it("hashes authorized large objects in bounded chunks with deterministic framing", async () => {
+    const objects = [
+      { oid: "101", content: Buffer.alloc((1024 * 1024) + 17, 0x61) },
+      { oid: "202", content: Buffer.from("second-object", "utf8") },
+    ];
+    const client = largeObjectClient(objects);
+    const identities = await inspectLargeObjectAccess(client, "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+
+    await expect(collectLargeObjects(
+      client,
+      identities,
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
+      "SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
+    )).resolves.toEqual({
+      count: 2,
+      contentSha256: lengthFramedLargeObjectManifest(objects),
+    });
+  });
+
+  it("binds large-object content and OID into the manifest digest", async () => {
+    const evidenceFor = async (oid, content) => collectLargeObjects(
+      largeObjectClient([{ oid, content }]),
+      [{ oid, readable: true }],
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
+      "SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
+    );
+    const baseline = await evidenceFor("101", Buffer.from("content", "utf8"));
+    const changedContent = await evidenceFor("101", Buffer.from("changed", "utf8"));
+    const changedOid = await evidenceFor("102", Buffer.from("content", "utf8"));
+
+    expect(changedContent.contentSha256).not.toBe(baseline.contentSha256);
+    expect(changedOid.contentSha256).not.toBe(baseline.contentSha256);
+  });
+
+  it("fails closed on unreadable or non-deterministically ordered large objects", async () => {
+    const client = largeObjectClient([
+      { oid: "202", content: Buffer.alloc(0) },
+      { oid: "101", content: Buffer.alloc(0) },
+    ]);
+    await expect(collectLargeObjects(
+      client,
+      [{ oid: "101", readable: false }],
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
+      "SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
+    )).rejects.toThrow("SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING");
+    await expect(collectLargeObjects(
+      client,
+      [{ oid: "202", readable: true }, { oid: "101", readable: true }],
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
+      "SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
+    )).rejects.toThrow("INVALID_LARGE_OBJECT_ORDER");
+  });
+
+  it("maps raw PostgreSQL privilege errors to bounded large-object stage codes", async () => {
+    const denied = {
+      query: async () => { throw Object.assign(new Error("private database error"), { code: "42501" }); },
+    };
+    await expect(inspectLargeObjectAccess(denied, "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED"))
+      .rejects.toThrow("SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+    await expect(collectLargeObjects(
+      denied,
+      [{ oid: "101", readable: true }],
+      "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
+      "DESTINATION_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
+    )).rejects.toThrow("DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED");
   });
 
   it("rejects duplicate selected archive entries", () => {
