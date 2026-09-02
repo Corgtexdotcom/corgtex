@@ -274,7 +274,7 @@ jobs:
             --method get \
             --url "https://management.azure.com${postgres_id}/databases?api-version=2023-12-01-preview" \
             --output json --only-show-errors > "$ARTIFACT_DIR/postgres-databases.json"
-          jq -e '.value | length == 1 and (map(.name | split("/") | last) == ["corgtex"])' \
+          jq -e '(.value | map(.name | split("/") | last) | sort) == ["azure_maintenance", "azure_sys", "corgtex", "postgres"]' \
             "$ARTIFACT_DIR/postgres-databases.json" > /dev/null || {
             echo "::error::Unexpected PostgreSQL databases exist before rehearsal."
             exit 1
