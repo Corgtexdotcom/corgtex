@@ -138,7 +138,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).not.toContain("assessProviderCutoverTransition");
     expect(runner).not.toContain("assessProviderCutoverTransition");
     expect(runner).toContain('args.size === 5');
-    expect(workflow).not.toContain("prisma db push");
+    expect(workflow).not.toContain(["prisma", "db", "push"].join(" "));
     expect(workflow).not.toContain("az group delete");
   });
 
