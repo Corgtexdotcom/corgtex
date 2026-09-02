@@ -116,9 +116,19 @@ firewall rule, exports one repeatable-read read-only source snapshot, and binds 
 the immutable PostgreSQL 18.6 `pg_dump` and source evidence to that snapshot. The
 restore always targets a new run-derived database, never the Bicep-managed `corgtex`
 database. The workflow preserves the source PostgreSQL 18 locale provider, provider
-locale, ICU rules, encoding, collation, and character classification, and requires
-the target-computed collation version to match before reporting parity. The exported
-snapshot holder disables its statement, transaction, and idle-in-transaction
+locale, ICU rules, encoding, collation, and character classification exactly. It
+requires each database's recorded collation version to match that database runtime's
+actual provider version, while allowing the source and Azure version strings to
+differ because this is a logical dump/restore and the new target objects and indexes
+are built under Azure's provider. The private evidence retains both version strings;
+the public receipt exposes only `SOURCE_AND_TARGET_CURRENT` plus `MATCH`, `DIFFERENT`,
+or `UNVERSIONED`. A `DIFFERENT` relation remains an explicit application-level
+ordering and uniqueness risk to resolve before cutover. `COLLATION_VERSION`
+is deliberately omitted from `CREATE DATABASE`; copying the source value is reserved
+for physical `pg_upgrade` semantics and would misrepresent the target runtime. A
+locale failure writes only fixed statuses and allowlisted mismatching field names to
+the private artifact, never locale values. The exported snapshot holder disables its
+statement, transaction, and idle-in-transaction
 timeouts, while dump, restore, and evidence clients disable statement and transaction
 timeouts. Before opening a source snapshot or creating the scratch database, the
 runner polls an authenticated, harmless target query for up to five minutes so the

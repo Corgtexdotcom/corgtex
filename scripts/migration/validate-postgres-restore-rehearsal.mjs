@@ -11,6 +11,7 @@ const CONTRIBUTOR_ROLE_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const OPAQUE_REF_PATTERN = /^sha256:[0-9a-f]{16}$/u;
 const SAFE_IDENTIFIER_PATTERN = /^[a-z][a-z0-9_]{0,62}$/u;
+const LOCALE_DEFINITION_FIELDS = ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules"];
 const BLOCKERS = [
   "REDIS_PARITY_UNPROVEN",
   "OBJECT_PARITY_UNPROVEN",
@@ -169,6 +170,18 @@ const compareExact = (left, right, code) => {
   if (stableJson(left) !== stableJson(right)) fail(code);
 };
 
+const localeDefinition = (locale) => Object.fromEntries(
+  LOCALE_DEFINITION_FIELDS.map((field) => [field, locale[field]]),
+);
+
+const isCurrentCollationVersion = (locale) =>
+  locale.collationVersion === locale.actualCollationVersion;
+
+const classifyCollationVersionRelation = (source, destination) => {
+  if (source.collationVersion === null || destination.collationVersion === null) return "UNVERSIONED";
+  return source.collationVersion === destination.collationVersion ? "MATCH" : "DIFFERENT";
+};
+
 const validateDatabaseEvidence = (value, side) => {
   const prefix = side.toUpperCase();
   expectExactKeys(value, ["server", "locale", "extensions", "schema", "tables", "largeObjects", "migrations", "queues"], `${prefix}_EVIDENCE_SHAPE_MISMATCH`);
@@ -176,12 +189,21 @@ const validateDatabaseEvidence = (value, side) => {
   expectExactKeys(value.server, ["majorVersion"], `${prefix}_SERVER_SHAPE_MISMATCH`);
   if (value.server.majorVersion !== 18) fail(`${prefix}_POSTGRES_VERSION_MISMATCH`);
 
-  expectExactKeys(value.locale, ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules", "collationVersion"], `${prefix}_LOCALE_SHAPE_MISMATCH`);
+  expectExactKeys(value.locale, [
+    "encoding",
+    "collation",
+    "ctype",
+    "provider",
+    "providerLocale",
+    "icuRules",
+    "collationVersion",
+    "actualCollationVersion",
+  ], `${prefix}_LOCALE_SHAPE_MISMATCH`);
   for (const key of ["encoding", "collation", "ctype"]) {
     if (typeof value.locale[key] !== "string" || value.locale[key].length === 0) fail(`${prefix}_LOCALE_INVALID`);
   }
   if (!["builtin", "icu", "libc"].includes(value.locale.provider)) fail(`${prefix}_LOCALE_PROVIDER_INVALID`);
-  for (const key of ["providerLocale", "icuRules", "collationVersion"]) {
+  for (const key of ["providerLocale", "icuRules", "collationVersion", "actualCollationVersion"]) {
     if (value.locale[key] !== null && (typeof value.locale[key] !== "string" || value.locale[key].length === 0)) {
       fail(`${prefix}_LOCALE_INVALID`);
     }
@@ -303,7 +325,10 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
   compareExact(beforeReplay, afterReplay, "ARCHIVE_SEQUENCE_REPLAY_MISMATCH");
 
   compareExact(source.server, destination.server, "SERVER_VERSION_MISMATCH");
-  compareExact(source.locale, destination.locale, "LOCALE_PARITY_MISMATCH");
+  if (!isCurrentCollationVersion(source.locale)) fail("SOURCE_COLLATION_VERSION_STALE");
+  if (!isCurrentCollationVersion(destination.locale)) fail("TARGET_COLLATION_VERSION_STALE");
+  compareExact(localeDefinition(source.locale), localeDefinition(destination.locale), "LOCALE_PARITY_MISMATCH");
+  const crossRuntimeVersionRelation = classifyCollationVersionRelation(source.locale, destination.locale);
   compareExact(source.extensions, destination.extensions, "EXTENSION_MISMATCH");
   compareExact(source.schema, destination.schema, "SCHEMA_DIGEST_MISMATCH");
   compareExact(source.tables, destination.tables, "TABLE_PARITY_MISMATCH");
@@ -340,6 +365,8 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
     evidenceSha256,
     cleanup: "VERIFIED",
     postgres: "VERIFIED",
+    collationVersionStatus: "SOURCE_AND_TARGET_CURRENT",
+    crossRuntimeVersionRelation,
     redis: "UNPROVEN",
     objects: "UNPROVEN",
     providerCutoverStatus: "PLANNED",
