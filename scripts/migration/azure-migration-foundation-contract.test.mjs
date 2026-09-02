@@ -16,6 +16,7 @@ describe("Azure migration foundation static contract", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("default: what-if");
     expect(workflow).toContain("id-token: write");
+    expect(workflow.match(/if: github\.ref == 'refs\/heads\/main'/g)).toHaveLength(1);
     expect(workflow).toContain("environment: managed-azure-release-production");
     expect(workflow).toContain("AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}");
     expect(workflow).toContain("AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}");

@@ -54,6 +54,7 @@ concurrency:
 
 jobs:
   foundation:
+    if: github.ref == 'refs/heads/main'
     name: Guard and apply isolated Azure foundation
     runs-on: ubuntu-latest
     environment: managed-azure-release-production
