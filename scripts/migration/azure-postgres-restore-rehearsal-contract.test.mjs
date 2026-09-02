@@ -199,9 +199,15 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("datlocale AS provider_locale");
     expect(runner).toContain("daticurules AS icu_rules");
     expect(runner).toContain("datcollversion AS collation_version");
+    expect(runner).toContain("pg_database_collation_actual_version(oid) AS actual_collation_version");
     expect(runner).toContain("LOCALE_PROVIDER");
     expect(runner).toContain("SCRATCH_DATABASE_LOCALE_MISMATCH");
-    expect(validator).toContain('compareExact(source.locale, destination.locale, "LOCALE_PARITY_MISMATCH")');
+    expect(runner).toContain("SOURCE_COLLATION_VERSION_STALE");
+    expect(runner).toContain("TARGET_COLLATION_VERSION_STALE");
+    expect(runner).not.toContain("COLLATION_VERSION ${quoteLiteral");
+    expect(validator).toContain('compareExact(localeDefinition(source.locale), localeDefinition(destination.locale), "LOCALE_PARITY_MISMATCH")');
+    expect(validator).toContain('collationVersionStatus: "SOURCE_AND_TARGET_CURRENT"');
+    expect(validator).toContain("crossRuntimeVersionRelation");
   });
 
   it("keeps dump bytes and credentials temporary while uploading only private evidence", () => {

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCreateDatabaseSql,
+  buildLocaleDiagnostic,
   buildPgServiceContents,
   buildSequenceUseList,
+  classifyCollationVersionRelation,
+  isCurrentCollationVersion,
+  localeDefinitionMismatchFields,
   nodeClientConfig,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
@@ -307,6 +311,66 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
     expect(sql).toContain("ICU_LOCALE 'en-US'");
     expect(sql).not.toContain("ICU_RULES");
+  });
+
+  it("treats provider-version drift separately from the exact locale definition", () => {
+    const source = {
+      encoding: "UTF8",
+      collation: "C",
+      ctype: "C",
+      provider: "icu",
+      providerLocale: "en-US",
+      icuRules: null,
+      collationVersion: "153.128",
+      actualCollationVersion: "153.128",
+    };
+    const target = { ...source, collationVersion: "154.1", actualCollationVersion: "154.1" };
+
+    expect(localeDefinitionMismatchFields(source, target)).toEqual([]);
+    expect(isCurrentCollationVersion(source)).toBe(true);
+    expect(isCurrentCollationVersion(target)).toBe(true);
+    expect(classifyCollationVersionRelation(source, target)).toBe("DIFFERENT");
+    expect(buildLocaleDiagnostic(source, target)).toEqual({
+      schemaVersion: "1.0.0",
+      definitionMismatchFields: [],
+      sourceVersionCurrent: true,
+      targetVersionCurrent: true,
+      crossRuntimeVersionRelation: "DIFFERENT",
+    });
+  });
+
+  it("reports only allowlisted field names and fixed statuses in locale diagnostics", () => {
+    const source = {
+      encoding: "UTF8",
+      collation: "private-source-locale",
+      ctype: "C",
+      provider: "libc",
+      providerLocale: null,
+      icuRules: null,
+      collationVersion: null,
+      actualCollationVersion: null,
+    };
+    const target = { ...source, collation: "private-target-locale" };
+    const diagnostic = buildLocaleDiagnostic(source, target);
+
+    expect(diagnostic).toEqual({
+      schemaVersion: "1.0.0",
+      definitionMismatchFields: ["collation"],
+      sourceVersionCurrent: true,
+      targetVersionCurrent: true,
+      crossRuntimeVersionRelation: "UNVERSIONED",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("private-source-locale");
+    expect(JSON.stringify(diagnostic)).not.toContain("private-target-locale");
+  });
+
+  it("detects stale recorded collation versions with null-safe equality", () => {
+    expect(isCurrentCollationVersion({ collationVersion: null, actualCollationVersion: null })).toBe(true);
+    expect(isCurrentCollationVersion({ collationVersion: "1", actualCollationVersion: "2" })).toBe(false);
+    expect(classifyCollationVersionRelation(
+      { collationVersion: null },
+      { collationVersion: "2" },
+    )).toBe("UNVERSIONED");
   });
 
   it.each([

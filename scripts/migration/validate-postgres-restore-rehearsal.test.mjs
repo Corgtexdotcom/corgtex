@@ -32,6 +32,7 @@ const databaseEvidence = () => ({
     providerLocale: "C.UTF-8",
     icuRules: null,
     collationVersion: "1",
+    actualCollationVersion: "1",
   },
   extensions: [
     { name: "plpgsql", version: "1.0" },
@@ -199,6 +200,8 @@ describe("validatePostgresRestoreRehearsal", () => {
     expect(receipt).toMatchObject({
       status: "POSTGRES_REHEARSAL_VERIFIED",
       postgres: "VERIFIED",
+      collationVersionStatus: "SOURCE_AND_TARGET_CURRENT",
+      crossRuntimeVersionRelation: "MATCH",
       redis: "UNPROVEN",
       objects: "UNPROVEN",
       providerCutoverStatus: "PLANNED",
@@ -216,9 +219,11 @@ describe("validatePostgresRestoreRehearsal", () => {
 
   it.each([
     ["server", (value) => { value.destination.server.majorVersion = 17; }, "DESTINATION_POSTGRES_VERSION_MISMATCH"],
+    ["encoding", (value) => { value.destination.locale.encoding = "LATIN1"; }, "LOCALE_PARITY_MISMATCH"],
+    ["collation", (value) => { value.destination.locale.collation = "POSIX"; }, "LOCALE_PARITY_MISMATCH"],
+    ["character classification", (value) => { value.destination.locale.ctype = "POSIX"; }, "LOCALE_PARITY_MISMATCH"],
     ["locale provider", (value) => { value.destination.locale.provider = "icu"; }, "LOCALE_PARITY_MISMATCH"],
     ["locale", (value) => { value.destination.locale.providerLocale = "PG_UNICODE_FAST"; }, "LOCALE_PARITY_MISMATCH"],
-    ["collation version", (value) => { value.destination.locale.collationVersion = "2"; }, "LOCALE_PARITY_MISMATCH"],
     ["extension", (value) => { value.destination.extensions[1].version = "0.9.0"; }, "EXTENSION_MISMATCH"],
     ["schema", (value) => { value.destination.schema.digest = HASH_B; }, "SCHEMA_DIGEST_MISMATCH"],
     ["table identity", (value) => { value.destination.tables[0].name = "EventCopy"; }, "TABLE_PARITY_MISMATCH"],
@@ -229,6 +234,58 @@ describe("validatePostgresRestoreRehearsal", () => {
     ["migration", (value) => { value.destination.migrations.rows[0].checksum = HASH_A; }, "MIGRATION_PARITY_MISMATCH"],
     ["queue", (value) => { value.destination.queues.event.statuses[0].count += 1; }, "QUEUE_PARITY_MISMATCH"],
   ])("rejects %s mismatch", (_label, mutate, code) => {
+    const input = evidence();
+    mutate(input);
+    expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow(code);
+  });
+
+  it("rejects an ICU rules mismatch independently of provider-version metadata", () => {
+    const input = evidence();
+    for (const side of [input.source, input.destination]) {
+      side.locale.provider = "icu";
+      side.locale.providerLocale = "en-US";
+      side.locale.icuRules = null;
+    }
+    input.destination.locale.icuRules = "&a < b";
+
+    expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow("LOCALE_PARITY_MISMATCH");
+  });
+
+  it("accepts different cross-runtime collation versions when both sides are current", () => {
+    const input = evidence();
+    input.destination.locale.collationVersion = "2";
+    input.destination.locale.actualCollationVersion = "2";
+
+    expect(validatePostgresRestoreRehearsal(input, cleanup())).toMatchObject({
+      collationVersionStatus: "SOURCE_AND_TARGET_CURRENT",
+      crossRuntimeVersionRelation: "DIFFERENT",
+      cutoverReady: false,
+    });
+  });
+
+  it("accepts null-safe unversioned locale metadata", () => {
+    const input = evidence();
+    for (const side of [input.source, input.destination]) {
+      side.locale.collationVersion = null;
+      side.locale.actualCollationVersion = null;
+    }
+
+    expect(validatePostgresRestoreRehearsal(input, cleanup())).toMatchObject({
+      collationVersionStatus: "SOURCE_AND_TARGET_CURRENT",
+      crossRuntimeVersionRelation: "UNVERSIONED",
+    });
+  });
+
+  it("fails closed when actual collation-version evidence is absent", () => {
+    const input = evidence();
+    delete input.destination.locale.actualCollationVersion;
+    expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow("DESTINATION_LOCALE_SHAPE_MISMATCH");
+  });
+
+  it.each([
+    ["source", (value) => { value.source.locale.actualCollationVersion = "2"; }, "SOURCE_COLLATION_VERSION_STALE"],
+    ["target", (value) => { value.destination.locale.actualCollationVersion = "2"; }, "TARGET_COLLATION_VERSION_STALE"],
+  ])("rejects a stale %s recorded collation version", (_label, mutate, code) => {
     const input = evidence();
     mutate(input);
     expect(() => validatePostgresRestoreRehearsal(input, cleanup())).toThrow(code);

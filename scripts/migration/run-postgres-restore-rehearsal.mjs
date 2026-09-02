@@ -36,6 +36,7 @@ const LOCALE_PROVIDERS = new Map([
   ["c", "libc"],
   ["i", "icu"],
 ]);
+const LOCALE_DEFINITION_FIELDS = ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules"];
 
 const fail = (code) => {
   const error = new Error(code);
@@ -365,7 +366,8 @@ const databaseSettings = async (client) => {
       datlocprovider::text AS locale_provider,
       datlocale AS provider_locale,
       daticurules AS icu_rules,
-      datcollversion AS collation_version
+      datcollversion AS collation_version,
+      pg_database_collation_actual_version(oid) AS actual_collation_version
     FROM pg_database
     WHERE datname = current_database()
   `, [], "DATABASE_SETTINGS_UNAVAILABLE");
@@ -387,6 +389,7 @@ const databaseSettings = async (client) => {
     providerLocale,
     icuRules,
     collationVersion: nullableText(row.collation_version, "INVALID_COLLATION_VERSION"),
+    actualCollationVersion: nullableText(row.actual_collation_version, "INVALID_ACTUAL_COLLATION_VERSION"),
   };
 };
 
@@ -427,9 +430,29 @@ const localeSettings = (settings) => ({
   providerLocale: settings.providerLocale,
   icuRules: settings.icuRules,
   collationVersion: settings.collationVersion,
+  actualCollationVersion: settings.actualCollationVersion,
 });
 
-const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef }) => {
+export const localeDefinitionMismatchFields = (source, target) => LOCALE_DEFINITION_FIELDS
+  .filter((field) => source[field] !== target[field]);
+
+export const isCurrentCollationVersion = (settings) =>
+  settings.collationVersion === settings.actualCollationVersion;
+
+export const classifyCollationVersionRelation = (source, target) => {
+  if (source.collationVersion === null || target.collationVersion === null) return "UNVERSIONED";
+  return source.collationVersion === target.collationVersion ? "MATCH" : "DIFFERENT";
+};
+
+export const buildLocaleDiagnostic = (source, target = null) => ({
+  schemaVersion: "1.0.0",
+  definitionMismatchFields: target === null ? [] : localeDefinitionMismatchFields(source, target),
+  sourceVersionCurrent: isCurrentCollationVersion(source),
+  targetVersionCurrent: target === null ? null : isCurrentCollationVersion(target),
+  crossRuntimeVersionRelation: target === null ? "UNAVAILABLE" : classifyCollationVersionRelation(source, target),
+});
+
+const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir }) => {
   const createSql = buildCreateDatabaseSql(scratchName, settings);
   const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
   await client.connect();
@@ -447,8 +470,14 @@ const createScratchDatabase = async ({ adminConfig, scratchName, settings, state
   await readbackClient.connect();
   try {
     const readback = await databaseSettings(readbackClient);
-    if (JSON.stringify(localeSettings(readback)) !== JSON.stringify(localeSettings(settings))) {
+    const diagnostic = buildLocaleDiagnostic(settings, readback);
+    if (diagnostic.definitionMismatchFields.length > 0) {
+      writePrivateJson(`${artifactDir}/locale-diagnostic.json`, diagnostic);
       fail("SCRATCH_DATABASE_LOCALE_MISMATCH");
+    }
+    if (!diagnostic.targetVersionCurrent) {
+      writePrivateJson(`${artifactDir}/locale-diagnostic.json`, diagnostic);
+      fail("TARGET_COLLATION_VERSION_STALE");
     }
   } finally {
     await readbackClient.end().catch(() => {});
@@ -697,6 +726,10 @@ export async function runPostgresRestoreRehearsal(options) {
     const snapshotRow = await querySingle(sourceClient, "SELECT pg_export_snapshot() AS snapshot", [], "SNAPSHOT_EXPORT_FAILED");
     const snapshot = assertNoControlCharacters(snapshotRow.snapshot, "INVALID_SNAPSHOT_ID");
     const sourceSettings = await databaseSettings(sourceClient);
+    if (!isCurrentCollationVersion(sourceSettings)) {
+      writePrivateJson(`${artifactDir}/locale-diagnostic.json`, buildLocaleDiagnostic(sourceSettings));
+      fail("SOURCE_COLLATION_VERSION_STALE");
+    }
     if (afterSnapshot !== null) await afterSnapshot({ snapshot });
 
     await createScratchDatabase({
@@ -705,6 +738,7 @@ export async function runPostgresRestoreRehearsal(options) {
       settings: sourceSettings,
       stateFile,
       targetRef,
+      artifactDir,
     });
     const targetConfig = { ...targetAdminConfig, database: scratchName };
     const clientFiles = writeClientFiles(
