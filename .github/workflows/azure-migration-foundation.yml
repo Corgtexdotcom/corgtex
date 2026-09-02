@@ -356,5 +356,6 @@ jobs:
         with:
           name: azure-migration-foundation-${{ github.run_id }}-${{ github.run_attempt }}
           path: .artifacts/azure-migration-foundation/${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

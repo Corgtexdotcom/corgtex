@@ -22,6 +22,7 @@ describe("Azure migration foundation static contract", () => {
     expect(workflow).toContain("az group exists");
     expect(workflow).toContain("SAFE_EXACT_CREATE");
     expect(workflow).toContain("deployment-binding.json");
+    expect(workflow).toContain("include-hidden-files: true");
     expect(workflow).toContain("if: ${{ inputs.operation == 'deploy' }}");
     expect(workflow).not.toContain("az group delete");
     expect(workflow).not.toContain("railway ");
