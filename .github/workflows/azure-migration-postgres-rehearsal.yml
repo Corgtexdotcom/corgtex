@@ -1,0 +1,859 @@
+name: Azure Migration PostgreSQL Restore Rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Run a rehearsal or recover exact resources from a persisted intent."
+        required: true
+        type: choice
+        options:
+          - rehearse
+          - recover
+      domain:
+        description: "Exactly one Railway PostgreSQL data domain to restore and verify."
+        required: true
+        type: choice
+        options:
+          - core
+          - ops
+      recovery_run_id:
+        description: "Required only for recovery: source workflow run ID."
+        required: false
+        type: string
+      recovery_run_attempt:
+        description: "Required only for recovery: source workflow run attempt."
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-migration-postgres-rehearsal
+  cancel-in-progress: false
+
+jobs:
+  rehearsal:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'rehearse'
+    name: Restore one read-only snapshot and prove parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      RESOURCE_GROUP: rg-corgtex-migration-rehearsal
+      LOCATION: westus3
+      NAME_PREFIX: corgtex-mig-reh
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      POSTGRES_CLIENT_IMAGE: postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate exact protected inputs
+        shell: bash
+        env:
+          TARGET_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
+            echo "::error::PostgreSQL rehearsal is restricted to main."
+            exit 1
+          }
+          [[ "$DOMAIN" == "core" || "$DOMAIN" == "ops" ]] || {
+            echo "::error::Unsupported data domain."
+            exit 1
+          }
+          missing=()
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID TARGET_ADMIN_PASSWORD; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing protected environment settings: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Validate the Core source credential is bound without fallback
+        if: inputs.domain == 'core'
+        shell: bash
+        env:
+          SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SOURCE_DATABASE_URL" ]] || {
+            echo "::error::Missing protected Core read-only PostgreSQL credential."
+            exit 1
+          }
+
+      - name: Validate the Ops source credential is bound without fallback
+        if: inputs.domain == 'ops'
+        shell: bash
+        env:
+          SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SOURCE_DATABASE_URL" ]] || {
+            echo "::error::Missing protected Ops read-only PostgreSQL credential."
+            exit 1
+          }
+
+      - name: Initialize private evidence and cleanup intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=".artifacts/azure-postgres-rehearsal/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          temp_dir="${RUNNER_TEMP}/azure-postgres-rehearsal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          state_file="${RUNNER_TEMP}/azure-postgres-rehearsal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.state.json"
+          scratch_database="corgtex_rehearsal_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}_${DOMAIN}"
+          firewall_rule="corgtex-rehearsal-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$artifact_dir" "$temp_dir"
+          chmod 700 "$artifact_dir" "$temp_dir"
+          {
+            echo "ARTIFACT_DIR=$artifact_dir"
+            echo "REHEARSAL_TEMP_DIR=$temp_dir"
+            echo "REHEARSAL_STATE_FILE=$state_file"
+            echo "SCRATCH_DATABASE_NAME=$scratch_database"
+            echo "FIREWALL_RULE_NAME=$firewall_rule"
+          } >> "$GITHUB_ENV"
+          jq -n '{credentials:{shredded:false}}' > "$artifact_dir/runner-cleanup.json"
+          jq -n --arg ref "sha256:$(printf '%s' "$scratch_database" | sha256sum | cut -c1-16)" \
+            '{scratchDatabase:{nameRef:$ref,dropped:false}}' > "$artifact_dir/database-cleanup.json"
+          jq -n --arg ref "sha256:$(printf '%s' "$firewall_rule" | sha256sum | cut -c1-16)" \
+            '{firewallRule:{nameRef:$ref,deleted:false}}' > "$artifact_dir/firewall-cleanup.json"
+
+      - name: Install the bounded PostgreSQL runner dependency
+        shell: bash
+        run: npm ci --ignore-scripts
+
+      - name: Pin the PostgreSQL 18.6 client image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$POSTGRES_CLIENT_IMAGE" > /dev/null
+          client_version="$(docker run --rm "$POSTGRES_CLIENT_IMAGE" pg_dump --version)"
+          [[ "$client_version" == "pg_dump (PostgreSQL) 18.6" ]] || {
+            echo "::error::The immutable PostgreSQL client is not version 18.6."
+            exit 1
+          }
+          printf '%s\n' '{"client":"PostgreSQL 18.6","image":"immutable-digest"}' \
+            > "$ARTIFACT_DIR/postgres-client-receipt.json"
+
+      - name: Log in to the exact Azure subscription
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify exact temporary rehearsal authority and foundation inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show --query id --output tsv --only-show-errors)"
+          [[ "$actual_subscription" == "$AZURE_SUBSCRIPTION_ID" ]] || {
+            echo "::error::Azure subscription mismatch."
+            exit 1
+          }
+
+          access_token="$(AZURE_CORE_COLLECT_TELEMETRY=no az account get-access-token \
+            --resource https://management.azure.com/ --query accessToken --output tsv --only-show-errors)"
+          principal_id="$(AZURE_ACCESS_TOKEN="$access_token" node -e '
+            const token = process.env.AZURE_ACCESS_TOKEN ?? "";
+            const segments = token.split(".");
+            if (segments.length !== 3) process.exit(1);
+            const payload = JSON.parse(Buffer.from(segments[1], "base64url").toString("utf8"));
+            if (typeof payload.oid !== "string") process.exit(1);
+            process.stdout.write(payload.oid);
+          ')"
+          unset access_token
+
+          principal_scope="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}"
+          AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
+            --assignee-object-id "$principal_id" \
+            --scope "$principal_scope" \
+            --include-groups \
+            --include-inherited \
+            --fill-principal-name false \
+            --output json \
+            --only-show-errors > "$ARTIFACT_DIR/principal-role-assignments.json"
+          jq -n \
+            --arg client_id "$AZURE_CLIENT_ID" \
+            --arg principal_id "$principal_id" \
+            --arg subscription_id "$actual_subscription" \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --slurpfile assignments "$ARTIFACT_DIR/principal-role-assignments.json" \
+            '{clientId:$client_id,principalId:$principal_id,subscriptionId:$subscription_id,resourceGroup:$resource_group,assignments:$assignments[0]}' \
+            > "$ARTIFACT_DIR/principal-input.json"
+          node scripts/migration/validate-postgres-restore-rehearsal.mjs \
+            --mode=principal \
+            --input="$ARTIFACT_DIR/principal-input.json" \
+            > "$ARTIFACT_DIR/principal-receipt.json"
+          jq . "$ARTIFACT_DIR/principal-receipt.json"
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az group show \
+            --name "$RESOURCE_GROUP" --output json --only-show-errors \
+            > "$ARTIFACT_DIR/resource-group.json"
+          jq -e --arg location "$LOCATION" '
+            (.location | ascii_downcase) == ($location | ascii_downcase)
+            and .tags.purpose == "railway-to-azure-migration-foundation"
+            and .tags.authority == "non-authoritative-restore-target"
+            and .tags.managedBy == "github-oidc"
+            and (.tags | keys | map(ascii_downcase) | sort) == ["authority", "managedby", "purpose"]
+          ' "$ARTIFACT_DIR/resource-group.json" > /dev/null || {
+            echo "::error::The non-authoritative foundation boundary drifted."
+            exit 1
+          }
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az resource list \
+            --resource-group "$RESOURCE_GROUP" --output json --only-show-errors \
+            > "$ARTIFACT_DIR/top-level-inventory.json"
+          jq -e '
+            length == 6
+            and (map(.type | ascii_downcase) | sort) == ([
+              "microsoft.dbforpostgresql/flexibleservers",
+              "microsoft.insights/components",
+              "microsoft.keyvault/vaults",
+              "microsoft.managedidentity/userassignedidentities",
+              "microsoft.operationalinsights/workspaces",
+              "microsoft.storage/storageaccounts"
+            ] | sort)
+            and all(.[].tags;
+              .purpose == "railway-to-azure-migration-foundation"
+              and .authority == "non-authoritative-restore-target"
+              and .managedBy == "github-oidc"
+              and (. | keys | map(ascii_downcase) | sort) == ["authority", "managedby", "purpose"])
+            and (map(.type | ascii_downcase) | all(. != "microsoft.app/containerapps" and . != "microsoft.app/jobs"))
+          ' "$ARTIFACT_DIR/top-level-inventory.json" > /dev/null || {
+            echo "::error::The exact six-resource foundation inventory drifted."
+            exit 1
+          }
+
+          postgres_name="$(jq -er '.[] | select((.type | ascii_downcase) == "microsoft.dbforpostgresql/flexibleservers") | .name' "$ARTIFACT_DIR/top-level-inventory.json")"
+          storage_name="$(jq -er '.[] | select((.type | ascii_downcase) == "microsoft.storage/storageaccounts") | .name' "$ARTIFACT_DIR/top-level-inventory.json")"
+          key_vault_id="$(jq -er '.[] | select((.type | ascii_downcase) == "microsoft.keyvault/vaults") | .id' "$ARTIFACT_DIR/top-level-inventory.json")"
+          storage_id="$(jq -er '.[] | select((.type | ascii_downcase) == "microsoft.storage/storageaccounts") | .id' "$ARTIFACT_DIR/top-level-inventory.json")"
+          foundation_identity_id="$(jq -er '.[] | select((.type | ascii_downcase) == "microsoft.managedidentity/userassignedidentities") | .id' "$ARTIFACT_DIR/top-level-inventory.json")"
+          [[ "$postgres_name" == "${NAME_PREFIX}-restore-pg" ]] || {
+            echo "::error::The exact PostgreSQL server identity drifted."
+            exit 1
+          }
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server show \
+            --resource-group "$RESOURCE_GROUP" --name "$postgres_name" \
+            --output json --only-show-errors > "$ARTIFACT_DIR/postgres-server.json"
+          jq -e '
+            .version == "18"
+            and .backup.backupRetentionDays == 7
+            and .network.publicNetworkAccess == "Enabled"
+          ' "$ARTIFACT_DIR/postgres-server.json" > /dev/null || {
+            echo "::error::PostgreSQL version, backup, or network posture drifted."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server parameter show \
+            --resource-group "$RESOURCE_GROUP" --server-name "$postgres_name" \
+            --name azure.extensions --output json --only-show-errors \
+            > "$ARTIFACT_DIR/postgres-extensions.json"
+          jq -e '.value == "vector" and .source == "user-override"' \
+            "$ARTIFACT_DIR/postgres-extensions.json" > /dev/null || {
+            echo "::error::The PostgreSQL extension allowlist drifted."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server db show \
+            --resource-group "$RESOURCE_GROUP" --server-name "$postgres_name" \
+            --name corgtex --output json --only-show-errors \
+            > "$ARTIFACT_DIR/postgres-foundation-database.json"
+          postgres_id="$(jq -er '.id' "$ARTIFACT_DIR/postgres-server.json")"
+          AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+            --method get \
+            --url "https://management.azure.com${postgres_id}/databases?api-version=2023-12-01-preview" \
+            --output json --only-show-errors > "$ARTIFACT_DIR/postgres-databases.json"
+          jq -e '.value | length == 1 and (map(.name | split("/") | last) == ["corgtex"])' \
+            "$ARTIFACT_DIR/postgres-databases.json" > /dev/null || {
+            echo "::error::Unexpected PostgreSQL databases exist before rehearsal."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
+            --resource-group "$RESOURCE_GROUP" --server-name "$postgres_name" \
+            --output json --only-show-errors > "$ARTIFACT_DIR/firewall-before.json"
+          jq -e 'length == 0' "$ARTIFACT_DIR/firewall-before.json" > /dev/null || {
+            echo "::error::Unexpected PostgreSQL firewall rules exist."
+            exit 1
+          }
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+            --method get \
+            --url "https://management.azure.com${storage_id}/blobServices/default?api-version=2023-05-01" \
+            --output json --only-show-errors > "$ARTIFACT_DIR/storage-blob-service.json"
+          AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+            --method get \
+            --url "https://management.azure.com${storage_id}/blobServices/default/containers?api-version=2023-05-01" \
+            --output json --only-show-errors > "$ARTIFACT_DIR/storage-containers.json"
+          jq -e '.value | length == 2 and (map(.name | split("/") | last) | sort) == ["migration-restore", "objects"]' \
+            "$ARTIFACT_DIR/storage-containers.json" > /dev/null || {
+            echo "::error::The exact storage-container inventory drifted."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az identity show \
+            --ids "$foundation_identity_id" --output json --only-show-errors \
+            > "$ARTIFACT_DIR/foundation-identity.json"
+          foundation_principal_id="$(jq -er '.principalId' "$ARTIFACT_DIR/foundation-identity.json")"
+          role_index=0
+          for tuple in "$key_vault_id:4633458b-17de-408a-b874-0445c86b69e6" "$storage_id:ba92f5b4-2d11-453d-a403-e96b0029c9fe"; do
+            scope="${tuple%:*}"
+            role_id="${tuple##*:}"
+            role_file="$ARTIFACT_DIR/foundation-role-${role_index}.json"
+            AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
+              --scope "$scope" --fill-principal-name false --output json --only-show-errors \
+              > "$role_file"
+            jq -e --arg scope "${scope,,}" --arg role "/roledefinitions/${role_id}" --arg principal "${foundation_principal_id,,}" '
+                  length == 1
+                  and (.[0].scope | ascii_downcase) == $scope
+                  and (.[0].roleDefinitionId | ascii_downcase | endswith($role))
+                  and (.[0].principalType | ascii_downcase) == "serviceprincipal"
+                  and (.[0].principalId | ascii_downcase) == $principal
+                  and (.[0].condition == null)
+                ' "$role_file" > /dev/null || {
+                  echo "::error::A foundation data-plane role assignment drifted."
+                  exit 1
+                }
+            role_index=$((role_index + 1))
+          done
+
+          jq -n \
+            --slurpfile top "$ARTIFACT_DIR/top-level-inventory.json" \
+            --slurpfile database "$ARTIFACT_DIR/postgres-foundation-database.json" \
+            --slurpfile configuration "$ARTIFACT_DIR/postgres-extensions.json" \
+            --slurpfile blob_service "$ARTIFACT_DIR/storage-blob-service.json" \
+            --slurpfile containers "$ARTIFACT_DIR/storage-containers.json" \
+            --slurpfile key_vault_role "$ARTIFACT_DIR/foundation-role-0.json" \
+            --slurpfile storage_role "$ARTIFACT_DIR/foundation-role-1.json" \
+            '(
+              ($top[0] | map(.id))
+              + [$database[0].id, $configuration[0].id, $blob_service[0].id]
+              + ($containers[0].value | map(.id))
+              + [$key_vault_role[0][0].id, $storage_role[0][0].id]
+            ) | map(ascii_downcase) | sort' \
+            > "$ARTIFACT_DIR/exact-foundation-resource-ids.json"
+          jq -e 'length == 13 and (unique | length) == 13' \
+            "$ARTIFACT_DIR/exact-foundation-resource-ids.json" > /dev/null || {
+            echo "::error::The full foundation resource identity set is incomplete or duplicated."
+            exit 1
+          }
+          resource_set_sha="$(jq -j 'join("\n")' "$ARTIFACT_DIR/exact-foundation-resource-ids.json" | sha256sum | cut -d' ' -f1)"
+          [[ "$resource_set_sha" == "9040099a546f60f31b3d2b797585fe022f384b26bf7e618d45d672b15208d682" ]] || {
+            echo "::error::The exact 13-resource foundation identity set drifted."
+            exit 1
+          }
+
+          postgres_host="$(jq -er '.fullyQualifiedDomainName' "$ARTIFACT_DIR/postgres-server.json")"
+          [[ "$postgres_host" == "${postgres_name}.postgres.database.azure.com" ]] || {
+            echo "::error::The PostgreSQL hostname does not match the exact server."
+            exit 1
+          }
+          echo "TARGET_POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
+          echo "TARGET_POSTGRES_ADMIN_USER=corgtexadmin" >> "$GITHUB_ENV"
+          jq -n --arg resource_set_sha "$resource_set_sha" \
+            '{status:"EXACT_FOUNDATION_READ_BACK",resourceCount:13,resourceSetSha256:$resource_set_sha,topLevelResourceCount:6,postgresVersion:18,containerCount:2,roleAssignmentCount:2,containerApps:0}' \
+            > "$ARTIFACT_DIR/foundation-receipt.json"
+          jq . "$ARTIFACT_DIR/foundation-receipt.json"
+
+          target_ref="sha256:$(printf '%s\0%s' "$postgres_host" "$SCRATCH_DATABASE_NAME" | sha256sum | cut -c1-16)"
+          jq -n \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg domain "$DOMAIN" \
+            --arg subscription_id "$actual_subscription" \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --arg server_name "$postgres_name" \
+            --arg postgres_resource_id "$postgres_id" \
+            --arg scratch_name "$SCRATCH_DATABASE_NAME" \
+            --arg target_ref "$target_ref" \
+            --arg firewall_name "$FIREWALL_RULE_NAME" \
+            '{
+              schemaVersion:"1.0.0",
+              runId:$run_id,
+              runAttempt:$run_attempt,
+              domain:$domain,
+              subscriptionId:$subscription_id,
+              target:{resourceGroup:$resource_group,serverName:$server_name,resourceId:$postgres_resource_id},
+              databaseState:{schemaVersion:"1.0.0",scratchName:$scratch_name,targetRef:$target_ref,phase:"ABSENCE_VERIFIED"},
+              firewallState:{schemaVersion:"1.0.0",name:$firewall_name,phase:"ABSENCE_VERIFIED"}
+            }' > "$ARTIFACT_DIR/recovery-intent.json"
+
+      - name: Persist recovery intent before any temporary mutation
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-postgres-recovery-intent-${{ inputs.domain }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/azure-postgres-rehearsal/${{ github.run_id }}-${{ github.run_attempt }}/recovery-intent.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Open one exact runner IPv4 firewall rule
+        id: firewall_create
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_ip="$(curl --fail --silent --show-error --proto '=https' --tlsv1.2 https://api.ipify.org)"
+          RUNNER_IP="$runner_ip" node -e '
+            const value = process.env.RUNNER_IP ?? "";
+            const parts = value.split(".");
+            if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) process.exit(1);
+          ' || {
+            echo "::error::Runner did not resolve to one exact IPv4 address."
+            exit 1
+          }
+          chmod 700 "$REHEARSAL_TEMP_DIR"
+          jq -n --arg name "$FIREWALL_RULE_NAME" --arg ip "$runner_ip" \
+            '{schemaVersion:"1.0.0",name:$name,ip:$ip,phase:"ABSENCE_VERIFIED"}' \
+            > "$REHEARSAL_TEMP_DIR/firewall-state.json"
+          chmod 600 "$REHEARSAL_TEMP_DIR/firewall-state.json"
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule create \
+            --resource-group "$RESOURCE_GROUP" \
+            --server-name "$NAME_PREFIX-restore-pg" \
+            --name "$FIREWALL_RULE_NAME" \
+            --start-ip-address "$runner_ip" \
+            --end-ip-address "$runner_ip" \
+            --output json --only-show-errors > "$ARTIFACT_DIR/firewall-create.json"
+          jq -e --arg name "$FIREWALL_RULE_NAME" --arg ip "$runner_ip" \
+            'select(.name == $name and .startIpAddress == $ip and .endIpAddress == $ip)' \
+            "$ARTIFACT_DIR/firewall-create.json" > /dev/null || {
+            echo "::error::Exact /32 firewall readback failed."
+            exit 1
+          }
+          jq -n --arg name "$FIREWALL_RULE_NAME" --arg ip "$runner_ip" \
+            '{schemaVersion:"1.0.0",name:$name,ip:$ip,phase:"CREATED"}' \
+            > "$REHEARSAL_TEMP_DIR/firewall-state.json"
+          chmod 600 "$REHEARSAL_TEMP_DIR/firewall-state.json"
+
+      - name: Restore the Core read-only snapshot and capture parity evidence
+        if: inputs.domain == 'core'
+        id: rehearsal_run_core
+        shell: bash
+        env:
+          SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node scripts/migration/run-postgres-restore-rehearsal.mjs \
+            --mode=run \
+            --domain="$DOMAIN" \
+            --artifact-dir="$ARTIFACT_DIR" \
+            --temp-dir="$REHEARSAL_TEMP_DIR" \
+            --state-file="$REHEARSAL_STATE_FILE"
+
+      - name: Restore the Ops read-only snapshot and capture parity evidence
+        if: inputs.domain == 'ops'
+        id: rehearsal_run_ops
+        shell: bash
+        env:
+          SOURCE_DATABASE_URL: ${{ secrets.RAILWAY_OPS_POSTGRES_READ_ONLY_URL }}
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node scripts/migration/run-postgres-restore-rehearsal.mjs \
+            --mode=run \
+            --domain="$DOMAIN" \
+            --artifact-dir="$ARTIFACT_DIR" \
+            --temp-dir="$REHEARSAL_TEMP_DIR" \
+            --state-file="$REHEARSAL_STATE_FILE"
+
+      - name: Remove the exact scratch database
+        id: database_cleanup
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          node scripts/migration/run-postgres-restore-rehearsal.mjs \
+            --mode=cleanup \
+            --artifact-dir="$ARTIFACT_DIR" \
+            --temp-dir="$REHEARSAL_TEMP_DIR" \
+            --state-file="$REHEARSAL_STATE_FILE"
+
+      - name: Remove the exact runner firewall rule
+        id: firewall_cleanup
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          name_ref="sha256:$(printf '%s' "$FIREWALL_RULE_NAME" | sha256sum | cut -c1-16)"
+          state="$REHEARSAL_TEMP_DIR/firewall-state.json"
+          if [[ ! -f "$state" ]]; then
+            jq -n --arg ref "$name_ref" '{firewallRule:{nameRef:$ref,deleted:true}}' \
+              > "$ARTIFACT_DIR/firewall-cleanup.json"
+            exit 0
+          fi
+          phase="$(jq -er '.phase' "$state")"
+          [[ "$phase" == "ABSENCE_VERIFIED" || "$phase" == "CREATED" ]] || {
+            echo "::error::Firewall cleanup ownership is unproven."
+            exit 1
+          }
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule delete \
+            --resource-group "$RESOURCE_GROUP" \
+            --server-name "$NAME_PREFIX-restore-pg" \
+            --name "$FIREWALL_RULE_NAME" \
+            --yes --only-show-errors || true
+          remaining="$(AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
+            --resource-group "$RESOURCE_GROUP" --server-name "$NAME_PREFIX-restore-pg" \
+            --query "[?name=='${FIREWALL_RULE_NAME}'] | length(@)" --output tsv --only-show-errors)"
+          [[ "$remaining" == "0" ]] || {
+            echo "::error::The exact firewall rule remains."
+            exit 1
+          }
+          jq -n --arg ref "$name_ref" '{firewallRule:{nameRef:$ref,deleted:true}}' \
+            > "$ARTIFACT_DIR/firewall-cleanup.json"
+
+      - name: Validate parity and publish only a bounded receipt
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -s '.[0] * .[1] * .[2]' \
+            "$ARTIFACT_DIR/database-cleanup.json" \
+            "$ARTIFACT_DIR/firewall-cleanup.json" \
+            "$ARTIFACT_DIR/runner-cleanup.json" \
+            > "$ARTIFACT_DIR/cleanup.json"
+          if [[ ! -f "$ARTIFACT_DIR/postgres-restore-evidence.json" ]]; then
+            jq -n '{ok:false,status:"RECOVERY_REQUIRED",postgres:"UNPROVEN",cutoverReady:false}' \
+              > "$ARTIFACT_DIR/public-receipt.json"
+            jq . "$ARTIFACT_DIR/public-receipt.json"
+            exit 1
+          fi
+          node scripts/migration/validate-postgres-restore-rehearsal.mjs \
+            --mode=parity \
+            --input="$ARTIFACT_DIR/postgres-restore-evidence.json" \
+            --cleanup="$ARTIFACT_DIR/cleanup.json" \
+            > "$ARTIFACT_DIR/public-receipt.json"
+          jq . "$ARTIFACT_DIR/public-receipt.json"
+
+      - name: Shred runner-temporary state
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in "$REHEARSAL_STATE_FILE" "$REHEARSAL_TEMP_DIR/firewall-state.json"; do
+            if [[ -f "$path" ]]; then
+              shred -u -- "$path"
+            fi
+          done
+          rmdir "$REHEARSAL_TEMP_DIR" 2>/dev/null || true
+
+      - name: Upload private PostgreSQL rehearsal evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-postgres-rehearsal-${{ inputs.domain }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/azure-postgres-rehearsal/${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  recovery:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover'
+    name: Recover exact resources from persisted intent
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      RESOURCE_GROUP: rg-corgtex-migration-rehearsal
+      NAME_PREFIX: corgtex-mig-reh
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate exact recovery inputs
+        shell: bash
+        env:
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
+            echo "::error::PostgreSQL recovery is restricted to main."
+            exit 1
+          }
+          [[ "$DOMAIN" == "core" || "$DOMAIN" == "ops" ]] || {
+            echo "::error::Unsupported data domain."
+            exit 1
+          }
+          [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ && "$RECOVERY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Recovery requires exact numeric source run identity."
+            exit 1
+          }
+          missing=()
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing protected environment settings: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          artifact_dir=".artifacts/azure-postgres-recovery/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          scratch_database="corgtex_rehearsal_${RECOVERY_RUN_ID}_${RECOVERY_RUN_ATTEMPT}_${DOMAIN}"
+          firewall_rule="corgtex-rehearsal-${RECOVERY_RUN_ID}-${RECOVERY_RUN_ATTEMPT}"
+          mkdir -p "$artifact_dir"
+          chmod 700 "$artifact_dir"
+          {
+            echo "RECOVERY_ARTIFACT_DIR=$artifact_dir"
+            echo "SCRATCH_DATABASE_NAME=$scratch_database"
+            echo "FIREWALL_RULE_NAME=$firewall_rule"
+          } >> "$GITHUB_ENV"
+
+      - name: Download the exact persisted recovery intent
+        uses: actions/download-artifact@v5
+        with:
+          name: azure-postgres-recovery-intent-${{ inputs.domain }}-${{ inputs.recovery_run_id }}-${{ inputs.recovery_run_attempt }}
+          path: .artifacts/azure-postgres-recovery/${{ github.run_id }}-${{ github.run_attempt }}/intent
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recovery_run_id }}
+
+      - name: Log in to the exact Azure subscription for recovery
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate recovery authority and exact cleanup target
+        shell: bash
+        env:
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+          RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+        run: |
+          set -euo pipefail
+          intent="$RECOVERY_ARTIFACT_DIR/intent/recovery-intent.json"
+          [[ -f "$intent" ]] || {
+            echo "::error::The exact persisted recovery intent is unavailable."
+            exit 1
+          }
+
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show --query id --output tsv --only-show-errors)"
+          [[ "$actual_subscription" == "$AZURE_SUBSCRIPTION_ID" ]] || {
+            echo "::error::Azure subscription mismatch."
+            exit 1
+          }
+          access_token="$(AZURE_CORE_COLLECT_TELEMETRY=no az account get-access-token \
+            --resource https://management.azure.com/ --query accessToken --output tsv --only-show-errors)"
+          principal_id="$(AZURE_ACCESS_TOKEN="$access_token" node -e '
+            const token = process.env.AZURE_ACCESS_TOKEN ?? "";
+            const segments = token.split(".");
+            if (segments.length !== 3) process.exit(1);
+            const payload = JSON.parse(Buffer.from(segments[1], "base64url").toString("utf8"));
+            if (typeof payload.oid !== "string") process.exit(1);
+            process.stdout.write(payload.oid);
+          ')"
+          unset access_token
+          principal_scope="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}"
+          AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
+            --assignee-object-id "$principal_id" \
+            --scope "$principal_scope" \
+            --include-groups \
+            --include-inherited \
+            --fill-principal-name false \
+            --output json \
+            --only-show-errors > "$RECOVERY_ARTIFACT_DIR/principal-role-assignments.json"
+          jq -n \
+            --arg client_id "$AZURE_CLIENT_ID" \
+            --arg principal_id "$principal_id" \
+            --arg subscription_id "$actual_subscription" \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --slurpfile assignments "$RECOVERY_ARTIFACT_DIR/principal-role-assignments.json" \
+            '{clientId:$client_id,principalId:$principal_id,subscriptionId:$subscription_id,resourceGroup:$resource_group,assignments:$assignments[0]}' \
+            > "$RECOVERY_ARTIFACT_DIR/principal-input.json"
+          node scripts/migration/validate-postgres-restore-rehearsal.mjs \
+            --mode=principal \
+            --input="$RECOVERY_ARTIFACT_DIR/principal-input.json" \
+            > "$RECOVERY_ARTIFACT_DIR/principal-receipt.json"
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az group show \
+            --name "$RESOURCE_GROUP" --output json --only-show-errors \
+            > "$RECOVERY_ARTIFACT_DIR/resource-group.json"
+          jq -e '
+            .tags.purpose == "railway-to-azure-migration-foundation"
+            and .tags.authority == "non-authoritative-restore-target"
+            and .tags.managedBy == "github-oidc"
+            and (.tags | keys | map(ascii_downcase) | sort) == ["authority", "managedby", "purpose"]
+          ' "$RECOVERY_ARTIFACT_DIR/resource-group.json" > /dev/null || {
+            echo "::error::The non-authoritative recovery boundary drifted."
+            exit 1
+          }
+          postgres_name="${NAME_PREFIX}-restore-pg"
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server show \
+            --resource-group "$RESOURCE_GROUP" --name "$postgres_name" \
+            --output json --only-show-errors > "$RECOVERY_ARTIFACT_DIR/postgres-server.json"
+          postgres_id="$(jq -er '.id' "$RECOVERY_ARTIFACT_DIR/postgres-server.json")"
+          expected_postgres_id="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${postgres_name}"
+          [[ "${postgres_id,,}" == "${expected_postgres_id,,}" ]] || {
+            echo "::error::The PostgreSQL recovery resource identity drifted."
+            exit 1
+          }
+          postgres_host="$(jq -er --arg name "$postgres_name" '
+            select(.name == $name and .version == "18") | .fullyQualifiedDomainName
+          ' "$RECOVERY_ARTIFACT_DIR/postgres-server.json")"
+          [[ "$postgres_host" == "${postgres_name}.postgres.database.azure.com" ]] || {
+            echo "::error::The exact PostgreSQL recovery target drifted."
+            exit 1
+          }
+          jq -n \
+            --arg run_id "$RECOVERY_RUN_ID" \
+            --arg run_attempt "$RECOVERY_RUN_ATTEMPT" \
+            --arg domain "$DOMAIN" \
+            --arg subscription_id "$actual_subscription" \
+            --arg resource_group "$RESOURCE_GROUP" \
+            --arg server_name "$postgres_name" \
+            --arg postgres_resource_id "$postgres_id" \
+            --arg postgres_host "$postgres_host" \
+            --arg scratch_name "$SCRATCH_DATABASE_NAME" \
+            --arg firewall_name "$FIREWALL_RULE_NAME" \
+            --slurpfile intent "$intent" '
+              {
+                intent:$intent[0],
+                current:{
+                  subscriptionId:$subscription_id,
+                  resourceGroup:$resource_group,
+                  serverName:$server_name,
+                  postgresResourceId:$postgres_resource_id,
+                  postgresHost:$postgres_host,
+                  runId:$run_id,
+                  runAttempt:$run_attempt,
+                  domain:$domain,
+                  scratchName:$scratch_name,
+                  firewallName:$firewall_name
+                }
+              }
+            ' > "$RECOVERY_ARTIFACT_DIR/recovery-intent-input.json"
+          node scripts/migration/validate-postgres-restore-rehearsal.mjs \
+            --mode=recovery-intent \
+            --input="$RECOVERY_ARTIFACT_DIR/recovery-intent-input.json" \
+            > "$RECOVERY_ARTIFACT_DIR/recovery-intent-receipt.json"
+          echo "POSTGRES_RESOURCE_ID=$postgres_id" >> "$GITHUB_ENV"
+
+      - name: Remove the exact recovery scratch database
+        id: recovery_database_cleanup
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SCRATCH_DATABASE_NAME" != "corgtex" && "$SCRATCH_DATABASE_NAME" == corgtex_rehearsal_* ]] || {
+            echo "::error::The recovery database name is outside the exact scratch namespace."
+            exit 1
+          }
+          api_url="https://management.azure.com${POSTGRES_RESOURCE_ID}/databases?api-version=2023-12-01-preview"
+          expected_id="${POSTGRES_RESOURCE_ID}/databases/${SCRATCH_DATABASE_NAME}"
+          AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+            --method get --url "$api_url" --output json --only-show-errors \
+            > "$RECOVERY_ARTIFACT_DIR/databases-before-cleanup.json"
+          matching="$(jq -c --arg name "$SCRATCH_DATABASE_NAME" \
+            '[.value[] | select((.name | split("/") | last) == $name)]' \
+            "$RECOVERY_ARTIFACT_DIR/databases-before-cleanup.json")"
+          count="$(jq 'length' <<< "$matching")"
+          [[ "$count" == "0" || "$count" == "1" ]] || {
+            echo "::error::The exact recovery database identity is ambiguous."
+            exit 1
+          }
+          if [[ "$count" == "1" ]]; then
+            jq -e --arg expected_id "${expected_id,,}" --arg name "$SCRATCH_DATABASE_NAME" '
+              length == 1
+              and (.[0].id | ascii_downcase) == $expected_id
+              and (.[0].name | split("/") | last) == $name
+              and (.[0].type | ascii_downcase) == "microsoft.dbforpostgresql/flexibleservers/databases"
+            ' <<< "$matching" > /dev/null || {
+              echo "::error::The exact recovery database resource binding drifted."
+              exit 1
+            }
+            AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server db delete \
+              --ids "$expected_id" \
+              --subscription "$AZURE_SUBSCRIPTION_ID" \
+              --yes --only-show-errors
+          fi
+          AZURE_CORE_COLLECT_TELEMETRY=no az rest \
+            --method get --url "$api_url" --output json --only-show-errors \
+            > "$RECOVERY_ARTIFACT_DIR/databases-after-cleanup.json"
+          jq -e --arg name "$SCRATCH_DATABASE_NAME" \
+            '[.value[] | select((.name | split("/") | last) == $name)] | length == 0' \
+            "$RECOVERY_ARTIFACT_DIR/databases-after-cleanup.json" > /dev/null || {
+              echo "::error::The exact recovery scratch database remains."
+              exit 1
+            }
+          name_ref="sha256:$(printf '%s' "$SCRATCH_DATABASE_NAME" | sha256sum | cut -c1-16)"
+          jq -n --arg ref "$name_ref" '{scratchDatabase:{nameRef:$ref,dropped:true}}' \
+            > "$RECOVERY_ARTIFACT_DIR/database-cleanup.json"
+
+      - name: Remove the exact recovery firewall rule
+        id: recovery_firewall_cleanup
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
+            --resource-group "$RESOURCE_GROUP" --server-name "$NAME_PREFIX-restore-pg" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors > "$RECOVERY_ARTIFACT_DIR/firewall-before-cleanup.json"
+          matching="$(jq -c --arg name "$FIREWALL_RULE_NAME" '[.[] | select(.name == $name)]' \
+            "$RECOVERY_ARTIFACT_DIR/firewall-before-cleanup.json")"
+          count="$(jq 'length' <<< "$matching")"
+          [[ "$count" == "0" || "$count" == "1" ]] || {
+            echo "::error::The exact recovery firewall identity is ambiguous."
+            exit 1
+          }
+          if [[ "$count" == "1" ]]; then
+            AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule delete \
+              --resource-group "$RESOURCE_GROUP" \
+              --server-name "$NAME_PREFIX-restore-pg" \
+              --name "$FIREWALL_RULE_NAME" \
+              --subscription "$AZURE_SUBSCRIPTION_ID" \
+              --yes --only-show-errors
+          fi
+          remaining="$(AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
+            --resource-group "$RESOURCE_GROUP" --server-name "$NAME_PREFIX-restore-pg" \
+            --query "[?name=='${FIREWALL_RULE_NAME}'] | length(@)" --output tsv --only-show-errors)"
+          [[ "$remaining" == "0" ]] || {
+            echo "::error::The exact recovery firewall rule remains."
+            exit 1
+          }
+          name_ref="sha256:$(printf '%s' "$FIREWALL_RULE_NAME" | sha256sum | cut -c1-16)"
+          jq -n --arg ref "$name_ref" '{firewallRule:{nameRef:$ref,deleted:true}}' \
+            > "$RECOVERY_ARTIFACT_DIR/firewall-cleanup.json"
+
+      - name: Prove exact recovery completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.scratchDatabase.dropped == true' \
+            "$RECOVERY_ARTIFACT_DIR/database-cleanup.json" > /dev/null
+          jq -e '.firewallRule.deleted == true' \
+            "$RECOVERY_ARTIFACT_DIR/firewall-cleanup.json" > /dev/null
+          jq -n \
+            --arg domain "$DOMAIN" \
+            --arg run_id "${{ inputs.recovery_run_id }}" \
+            --arg run_attempt "${{ inputs.recovery_run_attempt }}" \
+            '{ok:true,status:"POSTGRES_REHEARSAL_RECOVERED",domain:$domain,sourceRunId:$run_id,sourceRunAttempt:$run_attempt,scratchDatabase:"ABSENT",firewallRule:"ABSENT",cutoverReady:false}' \
+            > "$RECOVERY_ARTIFACT_DIR/recovery-receipt.json"
+          jq . "$RECOVERY_ARTIFACT_DIR/recovery-receipt.json"
+
+      - name: Upload private recovery evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-postgres-recovery-${{ inputs.domain }}-${{ inputs.recovery_run_id }}-${{ inputs.recovery_run_attempt }}-${{ github.run_id }}
+          path: .artifacts/azure-postgres-recovery/${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30

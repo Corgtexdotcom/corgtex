@@ -71,3 +71,77 @@ npx vitest run scripts/migration/validate-azure-migration-principal.test.mjs scr
 Provider rollback may remove only the exact newly created empty rehearsal resources
 after zero-data readback. Once restore data exists, preserve it until separately
 authorized cleanup.
+
+## PostgreSQL restore rehearsal
+
+The manual `Azure Migration PostgreSQL Restore Rehearsal` workflow restores exactly
+one `core` or `ops` snapshot per run. It is a PostgreSQL-only proof and does not
+authorize a cutover. The workflow runs only from exact `main`, uses the existing
+protected `azure-migration-foundation` environment, and serializes both data domains
+because they share one non-authoritative Azure server.
+
+Before a run, temporarily grant the dedicated migration UAMI only `Contributor` at
+the exact rehearsal resource-group scope. Its effective direct, inherited, and group
+assignment set must contain exactly that one role. Do not grant RBAC Administrator or
+data-plane storage roles for this phase. Revoke Contributor again after the run and
+its cleanup evidence have been verified.
+
+Configure one transactionally read-only Railway credential per data domain as
+protected environment secrets:
+
+- `RAILWAY_CORE_POSTGRES_READ_ONLY_URL`
+- `RAILWAY_OPS_POSTGRES_READ_ONLY_URL`
+
+The existing `AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD` secret is used only to create,
+restore, read, and remove the unique scratch database. URLs and passwords remain in
+step-scoped environment state and mode-0600 runner-temporary service/pass files; they
+are never command arguments, logs, or uploaded artifacts.
+
+Each run reconfirms the exact 13-resource foundation, non-authoritative tags,
+PostgreSQL 18 posture, empty firewall set, absence of Container Apps, storage
+containers, and data-plane role assignments. It then opens one run-named `/32`
+firewall rule, exports one repeatable-read read-only source snapshot, and binds both
+the immutable PostgreSQL 18.6 `pg_dump` and source evidence to that snapshot. The
+restore always targets a new run-derived database, never the Bicep-managed `corgtex`
+database. The workflow preserves the source PostgreSQL 18 locale provider, provider
+locale, ICU rules, encoding, collation, and character classification, and requires
+the target-computed collation version to match before reporting parity. The exported
+snapshot holder disables its statement, transaction, and idle-in-transaction
+timeouts, while dump, restore, and evidence clients disable statement and transaction
+timeouts. Before opening a source snapshot or creating the scratch database, the
+runner polls an authenticated, harmless target query for up to five minutes so the
+exact Azure firewall rule has reached the data plane; each connection attempt is
+bounded by the remaining deadline. The workflow's bounded 180-minute job timeout
+remains the outer limit.
+Because sequence values are not MVCC-protected, sequence parity is derived from the
+immutable custom archive: only exact `SEQUENCE SET` entries are replayed against the
+isolated scratch database, and their replay must be a no-op with complete sequence
+coverage.
+
+Private evidence contains schema/table identities, counts, digests, and the exact
+before/after archive-sequence replay proof—never table row values or dump bytes. The
+public receipt is limited to opaque source, target, and domain references; aggregate
+counts; the evidence digest; and fixed readiness states. Success is
+`POSTGRES_REHEARSAL_VERIFIED` with Redis, objects, destination runtime, and source
+quiescence still unproven, `ProviderCutover` still `PLANNED`, and `cutoverReady:
+false`.
+
+Scratch-database and firewall cleanup run independently under `always()`. A success
+receipt requires absence readback for both plus shredded runner-temporary connection
+material. Before either temporary resource can be created, the workflow uploads a
+30-day private recovery-intent artifact containing the exact run-derived database and
+firewall identities plus their absence-verified target. If the runner is terminated
+before `always()` cleanup, dispatch the same protected workflow with operation
+`recover`, the original domain, run ID, and run attempt. It downloads and validates
+that exact artifact, deletes the exact database child through the Azure management
+plane without a PostgreSQL password or recovery-runner firewall, independently
+removes the run-derived firewall rule, and proves both absent. The intent never
+authorizes removal of the Bicep-managed `corgtex` database or another firewall rule.
+Any missing or failed cleanup is `RECOVERY_REQUIRED`.
+
+Local validation:
+
+```text
+npx vitest run --project unit scripts/migration/run-postgres-restore-rehearsal.test.mjs scripts/migration/validate-postgres-restore-rehearsal.test.mjs scripts/migration/azure-postgres-restore-rehearsal-contract.test.mjs
+npm run test:migration:postgres-smoke
+```
