@@ -15,6 +15,13 @@ describe("Azure migration foundation static contract", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("default: what-if");
     expect(workflow).toContain("id-token: write");
+    expect(workflow).toContain("environment: managed-azure-release-production");
+    expect(workflow).toContain("AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}");
+    expect(workflow).toContain("AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}");
+    expect(workflow).toContain("AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}");
+    expect(workflow).toContain("client-id: ${{ vars.AZURE_CLIENT_ID }}");
+    expect(workflow).toContain("tenant-id: ${{ vars.AZURE_TENANT_ID }}");
+    expect(workflow).toContain("subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}");
     expect(workflow).toContain("az deployment sub what-if");
     expect(workflow).toContain("--result-format FullResourcePayloads");
     expect(workflow).toContain("validate-azure-what-if.mjs");
@@ -27,6 +34,10 @@ describe("Azure migration foundation static contract", () => {
     expect(workflow).not.toContain("az group delete");
     expect(workflow).not.toContain("railway ");
     expect(workflow).not.toContain("az containerapp");
+    expect(workflow).not.toContain("environment: azure-migration-foundation");
+    expect(workflow).not.toContain("secrets.AZURE_CLIENT_ID");
+    expect(workflow).not.toContain("secrets.AZURE_TENANT_ID");
+    expect(workflow).not.toContain("secrets.AZURE_SUBSCRIPTION_ID");
   });
 
   it("binds preview to deploy, keeps the database secret out of argv/artifacts, and reads back exact identities", () => {
