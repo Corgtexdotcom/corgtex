@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const read = (path) => readFileSync(path, "utf8");
+const expectedFoundationDatabases = ["azure_maintenance", "azure_sys", "corgtex", "postgres"];
+const hasExactFoundationDatabases = (names) =>
+  JSON.stringify([...names].sort()) === JSON.stringify(expectedFoundationDatabases);
 
 describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   const workflow = read(".github/workflows/azure-migration-postgres-rehearsal.yml");
@@ -66,12 +69,22 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).toContain('resourceCount:13');
     expect(workflow).toContain('containerApps:0');
     expect(workflow).toContain('microsoft.app/containerapps');
-    expect(workflow).toContain('length == 1 and (map(.name | split("/") | last) == ["corgtex"])');
+    expect(workflow).toContain('(.value | map(.name | split("/") | last) | sort) == ["azure_maintenance", "azure_sys", "corgtex", "postgres"]');
+    expect(workflow).not.toContain('length == 1 and (map(.name | split("/") | last) == ["corgtex"])');
     expect(workflow).toContain('length == 2 and (map(.name | split("/") | last) | sort) == ["migration-restore", "objects"]');
     expect(workflow).toContain("9040099a546f60f31b3d2b797585fe022f384b26bf7e618d45d672b15208d682");
     expect(workflow).toContain('(.[0].principalId | ascii_downcase) == $principal');
     expect(workflow).toContain('length == 13 and (unique | length) == 13');
     expect(workflow).toContain('.value == "vector"');
+  });
+
+  it("accepts only the exact Azure-managed and application database baseline", () => {
+    expect(hasExactFoundationDatabases(["corgtex", "postgres", "azure_maintenance", "azure_sys"])).toBe(true);
+    expect(hasExactFoundationDatabases([...expectedFoundationDatabases, "corgtex_rehearsal_123_1_core"])).toBe(false);
+    expect(hasExactFoundationDatabases([...expectedFoundationDatabases, "foreign"])).toBe(false);
+    expect(hasExactFoundationDatabases(expectedFoundationDatabases.filter((name) => name !== "azure_sys"))).toBe(false);
+    expect(hasExactFoundationDatabases([...expectedFoundationDatabases, "postgres"])).toBe(false);
+    expect(hasExactFoundationDatabases(["azure_maintenance", "azure_sys", "Corgtex", "postgres"])).toBe(false);
   });
 
   it("binds dump and source evidence to one exported read-only snapshot", () => {
