@@ -30,6 +30,7 @@ const MAX_TARGET_TLS_ROOT_CERT_BYTES = 32 * 1024;
 const MAX_RESTORE_DIAGNOSTIC_LINE_BYTES = 4 * 1024;
 const MAX_RESTORE_STATUS_LINE_BYTES = 128;
 const MAX_COMMAND_STDERR_BYTES = 1024 * 1024;
+const MAX_SCHEMA_DIAGNOSTIC_COUNT = 1_000_000;
 const FETCH_ROWS = 500;
 const LARGE_OBJECT_CHUNK_BYTES = 1024 * 1024;
 const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
@@ -47,6 +48,22 @@ const TARGET_TLS_ROOT_CERT_FINGERPRINTS = new Set([
 ]);
 const TARGET_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
 const TARGET_CONNECTION_RETRY_DELAY_MS = 10 * 1000;
+export const SCHEMA_TOKEN_ALGORITHM = "PG_DUMP_SQL_TOKENS_V1";
+export const SCHEMA_RESTRICT_KEY = "CorgtexSchemaParityV1";
+const SCHEMA_STATEMENT_CLASSES = [
+  "EXTENSION",
+  "TYPE",
+  "FUNCTION",
+  "TABLE",
+  "CONSTRAINT",
+  "INDEX",
+  "TRIGGER",
+  "POLICY",
+  "VIEW",
+  "COMMENT",
+  "OTHER",
+];
+const SCHEMA_TOKEN_DOMAINS = ["DDL_TOKEN", "STRING_LITERAL", "DOLLAR_BODY", "META_COMMAND"];
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -1027,13 +1044,317 @@ const createScratchDatabase = async ({ adminConfig, scratchName, settings, state
   }
 };
 
-const normalizeSchemaDump = (content) => content
+const legacyNormalizeSchemaDump = (content) => content
   .split(/\r?\n/u)
   .filter((line) => !line.startsWith("--"))
   .filter((line) => !line.startsWith("\\restrict ") && !line.startsWith("\\unrestrict "))
   .filter((line) => line.trim() !== "")
   .join("\n")
   .trim();
+
+const schemaFail = (code) => fail(code);
+const isSchemaWhitespace = (character) => character === " "
+  || character === "\t"
+  || character === "\r"
+  || character === "\n"
+  || character === "\f";
+const isSchemaOperator = (character) => /[~!@#%^&|`?+*/<>=:-]/u.test(character);
+const isSchemaPunctuation = (character) => /[()[\]{},.;]/u.test(character);
+
+const readQuotedSchemaToken = (content, start, quote, backslashEscapes, code) => {
+  let index = start + 1;
+  while (index < content.length) {
+    if (backslashEscapes && content[index] === "\\") {
+      if (index + 1 >= content.length) schemaFail(code);
+      index += 2;
+      continue;
+    }
+    if (content[index] === quote) {
+      if (content[index + 1] === quote) {
+        index += 2;
+        continue;
+      }
+      return index + 1;
+    }
+    index += 1;
+  }
+  schemaFail(code);
+};
+
+export const tokenizeSchemaDump = (content) => {
+  if (typeof content !== "string" || content.length === 0 || content.includes("\u0000")) {
+    schemaFail("INVALID_SCHEMA_DUMP");
+  }
+  const tokens = [];
+  const push = (domain, value) => tokens.push({ domain, value });
+  let index = 0;
+  let lineOnlyWhitespace = true;
+  while (index < content.length) {
+    const character = content[index];
+    if (isSchemaWhitespace(character)) {
+      if (character === "\n" || character === "\r") lineOnlyWhitespace = true;
+      index += 1;
+      continue;
+    }
+    if (content.startsWith("--", index)) {
+      const newline = content.indexOf("\n", index + 2);
+      index = newline === -1 ? content.length : newline + 1;
+      lineOnlyWhitespace = true;
+      continue;
+    }
+    if (content.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (index < content.length && depth > 0) {
+        if (content.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (content.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          if (content[index] === "\n" || content[index] === "\r") lineOnlyWhitespace = true;
+          index += 1;
+        }
+      }
+      if (depth !== 0) schemaFail("UNTERMINATED_SCHEMA_COMMENT");
+      continue;
+    }
+    if (character === "\\") {
+      if (!lineOnlyWhitespace) schemaFail("UNEXPECTED_SCHEMA_META_COMMAND");
+      const newline = content.indexOf("\n", index);
+      const end = newline === -1 ? content.length : newline;
+      const command = content.slice(index, end).replace(/\r$/u, "");
+      if (!new Set([
+        `\\restrict ${SCHEMA_RESTRICT_KEY}`,
+        `\\unrestrict ${SCHEMA_RESTRICT_KEY}`,
+      ]).has(command)) schemaFail("UNEXPECTED_SCHEMA_META_COMMAND");
+      push("META_COMMAND", command);
+      index = newline === -1 ? content.length : newline + 1;
+      lineOnlyWhitespace = true;
+      continue;
+    }
+    lineOnlyWhitespace = false;
+
+    const unicodePrefix = content.slice(index, index + 3).toUpperCase();
+    if (unicodePrefix === "U&'" || unicodePrefix === 'U&"') {
+      const quote = content[index + 2];
+      const end = readQuotedSchemaToken(content, index + 2, quote, quote === "'", "UNTERMINATED_SCHEMA_QUOTE");
+      push(quote === "'" ? "STRING_LITERAL" : "DDL_TOKEN", content.slice(index, end));
+      index = end;
+      continue;
+    }
+    if (/[EBXN]/iu.test(character) && content[index + 1] === "'") {
+      const end = readQuotedSchemaToken(
+        content,
+        index + 1,
+        "'",
+        character.toUpperCase() === "E",
+        "UNTERMINATED_SCHEMA_STRING",
+      );
+      push("STRING_LITERAL", content.slice(index, end));
+      index = end;
+      continue;
+    }
+    if (character === "'") {
+      const end = readQuotedSchemaToken(content, index, "'", false, "UNTERMINATED_SCHEMA_STRING");
+      push("STRING_LITERAL", content.slice(index, end));
+      index = end;
+      continue;
+    }
+    if (character === '"') {
+      const end = readQuotedSchemaToken(content, index, '"', false, "UNTERMINATED_SCHEMA_IDENTIFIER");
+      push("DDL_TOKEN", content.slice(index, end));
+      index = end;
+      continue;
+    }
+    if (character === "$") {
+      const delimiterMatch = content.slice(index).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u);
+      if (delimiterMatch !== null) {
+        const delimiter = delimiterMatch[0];
+        const endStart = content.indexOf(delimiter, index + delimiter.length);
+        if (endStart === -1) schemaFail("UNTERMINATED_SCHEMA_DOLLAR_BODY");
+        const end = endStart + delimiter.length;
+        push("DOLLAR_BODY", content.slice(index, end));
+        index = end;
+        continue;
+      }
+    }
+    if (isSchemaOperator(character)) {
+      let end = index + 1;
+      while (end < content.length && isSchemaOperator(content[end])) {
+        if (content.startsWith("--", end) || content.startsWith("/*", end)) break;
+        end += 1;
+      }
+      push("DDL_TOKEN", content.slice(index, end));
+      index = end;
+      continue;
+    }
+    if (isSchemaPunctuation(character)) {
+      push("DDL_TOKEN", character);
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < content.length) {
+      const next = content[end];
+      if (
+        isSchemaWhitespace(next)
+        || next === "'"
+        || next === '"'
+        || next === "\\"
+        || next === "$"
+        || isSchemaOperator(next)
+        || isSchemaPunctuation(next)
+        || content.startsWith("--", end)
+        || content.startsWith("/*", end)
+      ) break;
+      end += 1;
+    }
+    push("DDL_TOKEN", content.slice(index, end));
+    index = end;
+  }
+  if (tokens.length === 0) schemaFail("EMPTY_SCHEMA_TOKEN_STREAM");
+  return tokens;
+};
+
+const updateLengthFramed = (hash, value) => {
+  const bytes = Buffer.from(value, "utf8");
+  const length = Buffer.allocUnsafe(8);
+  length.writeBigUInt64BE(BigInt(bytes.length));
+  hash.update(length);
+  hash.update(bytes);
+};
+
+export const schemaTokenDigest = (tokens) => {
+  if (!Array.isArray(tokens) || tokens.length === 0) schemaFail("EMPTY_SCHEMA_TOKEN_STREAM");
+  const hash = createHash("sha256");
+  for (const token of tokens) {
+    if (!SCHEMA_TOKEN_DOMAINS.includes(token?.domain) || typeof token.value !== "string" || token.value.length === 0) {
+      schemaFail("INVALID_SCHEMA_TOKEN");
+    }
+    updateLengthFramed(hash, token.domain);
+    updateLengthFramed(hash, token.value);
+  }
+  return hash.digest("hex");
+};
+
+export const analyzeSchemaDump = (content) => {
+  const tokens = tokenizeSchemaDump(content);
+  return {
+    algorithm: SCHEMA_TOKEN_ALGORITHM,
+    digest: schemaTokenDigest(tokens),
+    legacyDigest: sha256(legacyNormalizeSchemaDump(content)),
+    tokens,
+  };
+};
+
+const schemaStatements = (tokens) => {
+  const statements = [];
+  let current = [];
+  const flush = () => {
+    if (current.length > 0) statements.push(current);
+    current = [];
+  };
+  for (const token of tokens) {
+    if (token.domain === "META_COMMAND") {
+      flush();
+      statements.push([token]);
+    } else {
+      current.push(token);
+      if (token.domain === "DDL_TOKEN" && token.value === ";") flush();
+    }
+  }
+  flush();
+  return statements;
+};
+
+const schemaStatementClass = (tokens) => {
+  if (tokens.length === 1 && tokens[0].domain === "META_COMMAND") return "OTHER";
+  const words = tokens
+    .filter((token) => token.domain === "DDL_TOKEN" && /^[A-Za-z_]+$/u.test(token.value))
+    .map((token) => token.value.toUpperCase());
+  const first = words[0];
+  const second = words[1];
+  const third = words[2];
+  const fourth = words[3];
+  if ((first === "CREATE" || first === "ALTER" || first === "DROP") && second === "EXTENSION") return "EXTENSION";
+  if ((first === "CREATE" || first === "ALTER" || first === "DROP") && second === "TYPE") return "TYPE";
+  if (
+    (first === "CREATE" && second === "FUNCTION")
+    || (first === "CREATE" && second === "OR" && third === "REPLACE" && fourth === "FUNCTION")
+    || ((first === "ALTER" || first === "DROP") && second === "FUNCTION")
+  ) return "FUNCTION";
+  if (
+    ((first === "CREATE" || first === "ALTER" || first === "DROP") && second === "INDEX")
+    || (first === "CREATE" && second === "UNIQUE" && third === "INDEX")
+  ) return "INDEX";
+  if ((first === "CREATE" || first === "ALTER" || first === "DROP") && second === "TRIGGER") return "TRIGGER";
+  if ((first === "CREATE" || first === "ALTER" || first === "DROP") && second === "POLICY") return "POLICY";
+  if (
+    ((first === "CREATE" || first === "ALTER" || first === "DROP") && ["VIEW", "MATERIALIZED"].includes(second))
+    || (first === "CREATE" && second === "OR" && third === "REPLACE" && ["VIEW", "MATERIALIZED"].includes(fourth))
+  ) return "VIEW";
+  if (first === "COMMENT" && second === "ON") return "COMMENT";
+  if ((first === "CREATE" || first === "ALTER" || first === "DROP") && ["TABLE", "SEQUENCE"].includes(second)) {
+    return words.includes("CONSTRAINT") ? "CONSTRAINT" : "TABLE";
+  }
+  return "OTHER";
+};
+
+const emptySchemaDiagnosticSide = () => ({
+  statementClasses: Object.fromEntries(SCHEMA_STATEMENT_CLASSES.map((name) => [name, 0])),
+  tokenDomains: Object.fromEntries(SCHEMA_TOKEN_DOMAINS.map((name) => [name, 0])),
+});
+
+const boundedDiagnosticAdd = (diagnostic, key, count, state) => {
+  const next = diagnostic[key] + count;
+  if (next > MAX_SCHEMA_DIAGNOSTIC_COUNT) {
+    diagnostic[key] = MAX_SCHEMA_DIAGNOSTIC_COUNT;
+    state.truncated = true;
+  } else {
+    diagnostic[key] = next;
+  }
+};
+
+export const buildSchemaDifferenceDiagnostic = (sourceTokens, destinationTokens) => {
+  const statementMap = (tokens) => {
+    const map = new Map();
+    for (const statement of schemaStatements(tokens)) {
+      const digest = schemaTokenDigest(statement);
+      const entry = map.get(digest) ?? { count: 0, statement };
+      entry.count += 1;
+      map.set(digest, entry);
+    }
+    return map;
+  };
+  const source = statementMap(sourceTokens);
+  const destination = statementMap(destinationTokens);
+  const sourceOnly = emptySchemaDiagnosticSide();
+  const destinationOnly = emptySchemaDiagnosticSide();
+  const state = { truncated: false };
+  const addUnmatched = (side, entry, count) => {
+    boundedDiagnosticAdd(side.statementClasses, schemaStatementClass(entry.statement), count, state);
+    for (const token of entry.statement) {
+      boundedDiagnosticAdd(side.tokenDomains, token.domain, count, state);
+    }
+  };
+  for (const [digest, entry] of source) {
+    const count = Math.max(0, entry.count - (destination.get(digest)?.count ?? 0));
+    if (count > 0) addUnmatched(sourceOnly, entry, count);
+  }
+  for (const [digest, entry] of destination) {
+    const count = Math.max(0, entry.count - (source.get(digest)?.count ?? 0));
+    if (count > 0) addUnmatched(destinationOnly, entry, count);
+  }
+  return {
+    schemaVersion: "1.0.0",
+    classification: "EXECUTABLE_SCHEMA_DIFFERENCE",
+    sourceOnly,
+    destinationOnly,
+    truncated: state.truncated,
+  };
+};
 
 export const buildSequenceUseList = (content) => {
   if (typeof content !== "string") fail("INVALID_ARCHIVE_TOC");
@@ -1267,14 +1588,14 @@ const collectQueue = async (client, table, statuses) => {
   };
 };
 
-const collectDatabaseEvidence = async (client, schemaDigest, largeObjectIdentities, largeObjectFailureCode) => {
+const collectDatabaseEvidence = async (client, schemaEvidence, largeObjectIdentities, largeObjectFailureCode) => {
   const settings = await databaseSettings(client);
   const extensionsResult = await client.query("SELECT extname AS name, extversion AS version FROM pg_extension ORDER BY extname COLLATE \"C\"");
   return {
     server: { majorVersion: settings.majorVersion },
     locale: localeSettings(settings),
     extensions: extensionsResult.rows,
-    schema: { digest: schemaDigest },
+    schema: schemaEvidence,
     tables: await collectTables(client),
     largeObjects: await collectLargeObjects(
       client,
@@ -1404,14 +1725,25 @@ export async function runPostgresRestoreRehearsal(options) {
       tempDir,
       ...clientFiles,
       service: "source",
-      args: ["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", "--snapshot", snapshot, "--file", "/work/source-schema.sql"],
+      args: [
+        "pg_dump",
+        "--schema-only",
+        "--format=plain",
+        "--no-owner",
+        "--no-acl",
+        `--restrict-key=${SCHEMA_RESTRICT_KEY}`,
+        "--snapshot",
+        snapshot,
+        "--file",
+        "/work/source-schema.sql",
+      ],
       code: "SOURCE_SCHEMA_DUMP_FAILED",
       network: dockerNetwork,
     });
-    const sourceSchemaDigest = sha256(normalizeSchemaDump(readFileSync(sourceSchemaFile, "utf8")));
+    const sourceSchema = analyzeSchemaDump(readFileSync(sourceSchemaFile, "utf8"));
     const sourceEvidence = await collectDatabaseEvidence(
       sourceClient,
-      sourceSchemaDigest,
+      { algorithm: sourceSchema.algorithm, digest: sourceSchema.digest },
       sourceLargeObjects,
       "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
     );
@@ -1428,11 +1760,30 @@ export async function runPostgresRestoreRehearsal(options) {
       tempDir,
       ...clientFiles,
       service: "target",
-      args: ["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", "--file", "/work/destination-schema.sql"],
+      args: [
+        "pg_dump",
+        "--schema-only",
+        "--format=plain",
+        "--no-owner",
+        "--no-acl",
+        `--restrict-key=${SCHEMA_RESTRICT_KEY}`,
+        "--file",
+        "/work/destination-schema.sql",
+      ],
       code: "DESTINATION_SCHEMA_DUMP_FAILED",
       network: dockerNetwork,
     });
-    const destinationSchemaDigest = sha256(normalizeSchemaDump(readFileSync(destinationSchemaFile, "utf8")));
+    const destinationSchema = analyzeSchemaDump(readFileSync(destinationSchemaFile, "utf8"));
+    if (sourceSchema.digest !== destinationSchema.digest) {
+      writePrivateJson(
+        `${artifactDir}/schema-diagnostic.json`,
+        buildSchemaDifferenceDiagnostic(sourceSchema.tokens, destinationSchema.tokens),
+      );
+    } else if (sourceSchema.legacyDigest !== destinationSchema.legacyDigest) {
+      writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
+        classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY",
+      });
+    }
     const destinationClient = new Client(nodeClientConfig(targetConfig, `corgtex_rehearsal_${domain}_readback`));
     await destinationClient.connect();
     let destinationEvidence;
@@ -1449,7 +1800,7 @@ export async function runPostgresRestoreRehearsal(options) {
       );
       destinationEvidence = await collectDatabaseEvidence(
         destinationClient,
-        destinationSchemaDigest,
+        { algorithm: destinationSchema.algorithm, digest: destinationSchema.digest },
         destinationLargeObjects,
         "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
       );

@@ -141,7 +141,14 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).not.toContain("statement_timeout=15min");
     expect(runner).not.toContain("statement_timeout=30min");
     expect(runner).toContain('["pg_dump", "--format=custom", "--no-owner", "--no-acl", "--snapshot", snapshot');
-    expect(runner).toContain('["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", "--snapshot", snapshot');
+    expect(runner.match(/`--restrict-key=\$\{SCHEMA_RESTRICT_KEY\}`/gu)).toHaveLength(2);
+    expect(runner).toContain('export const SCHEMA_RESTRICT_KEY = "CorgtexSchemaParityV1"');
+    expect(runner).toContain('export const SCHEMA_TOKEN_ALGORITHM = "PG_DUMP_SQL_TOKENS_V1"');
+    expect(runner).toContain('classification: "EXECUTABLE_SCHEMA_DIFFERENCE"');
+    expect(runner).toContain('classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY"');
+    expect(runner).toContain('`${artifactDir}/schema-diagnostic.json`');
+    expect(validator).toContain('value.schema.algorithm !== SCHEMA_TOKEN_ALGORITHM');
+    expect(readme).toContain("`PG_DUMP_SQL_TOKENS_V1`");
     expect(runner).toContain("DECLARE ${quoteIdentifier(cursorName)} NO SCROLL CURSOR");
     expect(runner).toContain("to_jsonb(t)::text AS canonical_row");
   });

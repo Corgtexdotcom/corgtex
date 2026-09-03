@@ -153,6 +153,18 @@ immutable custom archive: only exact `SEQUENCE SET` entries are replayed against
 isolated scratch database, and their replay must be a no-op with complete sequence
 coverage.
 
+Schema parity uses PostgreSQL 18.6 schema-only dumps with the same fixed, nonsecret
+`--restrict-key` on both sides. The `PG_DUMP_SQL_TOKENS_V1` evidence algorithm
+length-frames and hashes every SQL token, quoted identifier, string literal,
+dollar-quoted body, and expected restrict/unrestrict command. It ignores only
+comments and whitespace outside those executable tokens. Malformed quotes,
+unterminated comments or dollar bodies, and any unexpected psql meta-command fail
+closed. A canonical mismatch still fails `SCHEMA_DIGEST_MISMATCH` and writes only
+fixed statement-class and token-domain counts to `schema-diagnostic.json`; it never
+persists SQL, names, literals, token values, or per-statement hashes. If only the
+legacy line-oriented digest differs while canonical tokens match, the private
+diagnostic records `NON_EXECUTABLE_DUMP_TEXT_ONLY` and schema parity remains proven.
+
 Large-object parity does not read the protected `pg_largeobject` page catalog. While
 the exported source snapshot is active and before the scratch database is created,
 the runner enumerates ordered OIDs through `pg_largeobject_metadata` and proves the

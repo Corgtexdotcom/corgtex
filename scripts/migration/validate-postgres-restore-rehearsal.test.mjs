@@ -38,7 +38,7 @@ const databaseEvidence = () => ({
     { name: "plpgsql", version: "1.0" },
     { name: "vector", version: "0.8.2" },
   ],
-  schema: { digest: HASH_A },
+  schema: { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: HASH_A },
   tables: [
     { schema: "public", name: "Event", rowCount: 3, rowSha256: HASH_A },
     { schema: "public", name: "WorkflowJob", rowCount: 5, rowSha256: HASH_B },
@@ -226,6 +226,7 @@ describe("validatePostgresRestoreRehearsal", () => {
     ["locale", (value) => { value.destination.locale.providerLocale = "PG_UNICODE_FAST"; }, "LOCALE_PARITY_MISMATCH"],
     ["extension", (value) => { value.destination.extensions[1].version = "0.9.0"; }, "EXTENSION_MISMATCH"],
     ["schema", (value) => { value.destination.schema.digest = HASH_B; }, "SCHEMA_DIGEST_MISMATCH"],
+    ["schema algorithm", (value) => { value.destination.schema.algorithm = "LEGACY"; }, "DESTINATION_SCHEMA_ALGORITHM_MISMATCH"],
     ["table identity", (value) => { value.destination.tables[0].name = "EventCopy"; }, "TABLE_PARITY_MISMATCH"],
     ["table count", (value) => { value.destination.tables[0].rowCount += 1; }, "TABLE_PARITY_MISMATCH"],
     ["row hash", (value) => { value.destination.tables[0].rowSha256 = HASH_B; }, "TABLE_PARITY_MISMATCH"],
