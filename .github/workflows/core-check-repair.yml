@@ -1,0 +1,72 @@
+name: Core CHECK Representation Repair
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Inspect first; apply only the approved Core CHECK representation correction."
+        required: true
+        default: inspect
+        type: choice
+        options: [inspect, apply]
+
+permissions:
+  contents: read
+
+# Serialize with the existing restore/recovery workflow; never interrupt an owner.
+concurrency:
+  group: azure-migration-postgres-rehearsal
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: azure-migration-foundation
+    steps:
+      - name: Reject stale dispatch before initialization
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_main="$(gh api repos/Corgtexdotcom/corgtex/git/ref/heads/main --jq .object.sha)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            echo "::error::Stale repair dispatch; current main must be inspected and approved again."
+            exit 1
+          }
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install before binding production credentials
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Inspect or apply the exact Core correction
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIR_MODE: ${{ inputs.mode }}
+          SOURCE_OWNER_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          SOURCE_READ_ONLY_URL: ${{ secrets.RAILWAY_CORE_POSTGRES_READ_ONLY_URL }}
+          SOURCE_TLS_ROOT_CERT: ${{ secrets.RAILWAY_CORE_POSTGRES_TLS_ROOT_CERT }}
+        run: |
+          set -euo pipefail
+          current_main="$(gh api repos/Corgtexdotcom/corgtex/git/ref/heads/main --jq .object.sha)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            echo "::error::Stale repair dispatch; current main must be inspected and approved again."
+            exit 1
+          }
+          unset GH_TOKEN
+          node scripts/migration/repair-core-check.mjs | tee "$RUNNER_TEMP/core-check-repair.jsonl"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-check-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/core-check-repair.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
