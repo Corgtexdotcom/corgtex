@@ -1883,6 +1883,24 @@ const targetCheckReparseEligibilityQuery = `
     constraint_row.conislocal,
     constraint_row.coninhcount::text AS inheritance_count,
     constraint_row.conparentid::text AS parent_constraint_oid,
+    pg_catalog.octet_length(constraint_row.conbin::text)::text AS tree_bytes,
+    pg_catalog.octet_length(pg_catalog.convert_to(pg_catalog.pg_get_expr(
+      constraint_row.conbin,
+      constraint_row.conrelid,
+      false
+    ), 'UTF8'))::text AS expression_bytes,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.pg_depend AS dependency
+      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+        AND dependency.objid = constraint_row.oid
+        AND dependency.objsubid = 0) AS dependency_count,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.regexp_matches(
+        CASE WHEN pg_catalog.octet_length(constraint_row.conbin::text) <= ${MAX_CHECK_TREE_BYTES}
+          THEN constraint_row.conbin::text ELSE '' END,
+        '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
+        'g'
+      )) AS node_count,
     EXISTS (
       SELECT 1 FROM pg_catalog.pg_inherits
       WHERE inhrelid = relation.oid OR inhparent = relation.oid
@@ -2541,6 +2559,7 @@ export const runTargetCheckReparseDiagnostic = async ({
   destinationManifestEntry,
   sourceExpression,
   sourceDependencies,
+  destinationDetail,
   serverVersionRelation,
   createClient = (config) => new Client(config),
   randomBytesFn = randomBytes,
@@ -2557,6 +2576,9 @@ export const runTargetCheckReparseDiagnostic = async ({
       ["DEFINITION", "CHECK_EXPRESSION"],
     )
   ) return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "MISMATCH_SHAPE" });
+  if (destinationDetail?.ok !== true) {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "DESTINATION_DETAIL_UNAVAILABLE" });
+  }
   let identity;
   try {
     identity = JSON.parse(sourceManifestEntry.key);
@@ -2672,7 +2694,19 @@ export const runTargetCheckReparseDiagnostic = async ({
         const enabledEventTriggers = parseDiagnosticCount(row.enabled_event_trigger_count);
         const unsafeExecutables = parseDiagnosticCount(row.unsafe_executable_dependency_count);
         const unsafeTypes = parseDiagnosticCount(row.unsafe_type_dependency_count);
-        if (
+        const treeBytes = parseDiagnosticCount(row.tree_bytes);
+        const expressionBytes = parseDiagnosticCount(row.expression_bytes);
+        const dependencyCount = parseDiagnosticCount(row.dependency_count);
+        const nodeCount = parseDiagnosticCount(row.node_count);
+        if (treeBytes > MAX_CHECK_TREE_BYTES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "TREE_BYTES" });
+        } else if (expressionBytes > MAX_CONSTRAINT_TEXT_BYTES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "EXPRESSION_BYTES" });
+        } else if (dependencyCount > MAX_CHECK_DEPENDENCIES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "DEPENDENCY_COUNT" });
+        } else if (nodeCount > MAX_CHECK_NODE_TAGS) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "NODE_COUNT" });
+        } else if (
           row.relation_kind !== "r"
           || row.relation_persistence !== "p"
           || row.relispartition !== false
@@ -2772,22 +2806,22 @@ export const runTargetCheckReparseDiagnostic = async ({
         result = targetCheckReparseResult("UNAVAILABLE", { stage });
       } else {
         const row = comparison.rows[0];
-          const comparisons = [
-            ["TREE", row.tree_equal],
-            ["DEPARSE", row.deparse_equal],
-            ["DEPENDENCIES", row.dependencies_equal],
-            ["NODE_TAGS", row.node_tags_equal],
-            ["BOOLEAN_NODES", row.boolean_nodes_equal],
-          ];
-          if (comparisons.some(([, value]) => typeof value !== "boolean")) {
-            result = targetCheckReparseResult("UNAVAILABLE", { stage });
-          } else {
-            const mismatchFields = comparisons.filter(([, equal]) => !equal).map(([field]) => field);
-            result = targetCheckReparseResult(mismatchFields.length === 0 ? "MATCH" : "DIFFERENT", {
-              stage: "COMPLETE",
-              mismatchFields: TARGET_REPARSE_MISMATCH_FIELDS.filter((field) => mismatchFields.includes(field)),
-            });
-          }
+        const comparisons = [
+          ["TREE", row.tree_equal],
+          ["DEPARSE", row.deparse_equal],
+          ["DEPENDENCIES", row.dependencies_equal],
+          ["NODE_TAGS", row.node_tags_equal],
+          ["BOOLEAN_NODES", row.boolean_nodes_equal],
+        ];
+        if (comparisons.some(([, value]) => typeof value !== "boolean")) {
+          result = targetCheckReparseResult("UNAVAILABLE", { stage });
+        } else {
+          const mismatchFields = comparisons.filter(([, equal]) => !equal).map(([field]) => field);
+          result = targetCheckReparseResult(mismatchFields.length === 0 ? "MATCH" : "DIFFERENT", {
+            stage: "COMPLETE",
+            mismatchFields: TARGET_REPARSE_MISMATCH_FIELDS.filter((field) => mismatchFields.includes(field)),
+          });
+        }
       }
     }
   } catch {
@@ -4106,6 +4140,7 @@ export async function runPostgresRestoreRehearsal(options) {
         destinationManifestEntry: checkCandidate.destination,
         sourceExpression: checkDetails.source?.privateExpression,
         sourceDependencies: checkDetails.source?.dependencies,
+        destinationDetail: checkDetails.destination,
         serverVersionRelation: constraintServerVersionRelation,
       });
       writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {

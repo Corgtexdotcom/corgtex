@@ -1185,6 +1185,7 @@ const main = async () => {
           destinationManifestEntry: destination,
           sourceExpression,
           sourceDependencies: safeSourceDependencies,
+          destinationDetail,
           serverVersionRelation: "MATCH",
         });
         if (matching.status !== "MATCH" || matching.mismatchFields.length !== 0) {
@@ -1203,6 +1204,7 @@ const main = async () => {
             destinationManifestEntry: destination,
             sourceExpression: expression,
             sourceDependencies: safeSourceDependencies,
+            destinationDetail,
             serverVersionRelation: "MATCH",
           });
           if (different.status !== "DIFFERENT" || different.mismatchFields.length === 0) {
@@ -1222,6 +1224,7 @@ const main = async () => {
           destinationManifestEntry: destination,
           sourceExpression,
           sourceDependencies: safeSourceDependencies,
+          destinationDetail,
           serverVersionRelation: "MATCH",
         });
         await client.query("DROP EVENT TRIGGER corgtex_reparse_event_trigger");
@@ -1246,7 +1249,6 @@ const main = async () => {
         await client.query("SET LOCAL client_encoding = 'UTF8'");
         await client.query("SET LOCAL search_path = pg_catalog");
         const ineligibleManifest = await collectConstraintCatalogManifest(client, "TARGET_REPARSE_CATALOG_FAILED");
-        await client.query("COMMIT");
         const findConstraint = (name) => [...ineligibleManifest.values()].find((entry) => {
           try { return JSON.parse(entry.key)?.[3] === name; } catch { return false; }
         });
@@ -1255,6 +1257,12 @@ const main = async () => {
         if (partitionedConstraint === undefined || functionConstraint === undefined) {
           fail("TARGET_REPARSE_INELIGIBLE_FIXTURE_MISSING");
         }
+        const partitionedDetail = await collectCheckConstraintDetail(client, partitionedConstraint);
+        const functionDetail = await collectCheckConstraintDetail(client, functionConstraint);
+        if (partitionedDetail.ok !== true || functionDetail.ok !== true) {
+          fail("TARGET_REPARSE_INELIGIBLE_DETAIL_FAILED");
+        }
+        await client.query("COMMIT");
         const partitionedExpression = '(("flag" IS NOT NULL))';
         const partitionedResult = await runTargetCheckReparseDiagnostic({
           targetConfig: { ...targetAdminConfig, database: scratchName },
@@ -1262,6 +1270,7 @@ const main = async () => {
           destinationManifestEntry: partitionedConstraint,
           sourceExpression: partitionedExpression,
           sourceDependencies: safeSourceDependencies,
+          destinationDetail: partitionedDetail,
           serverVersionRelation: "MATCH",
         });
         if (partitionedResult.status !== "NOT_ELIGIBLE" || partitionedResult.reason !== "RELATION_KIND") {
@@ -1274,6 +1283,7 @@ const main = async () => {
           destinationManifestEntry: functionConstraint,
           sourceExpression: functionExpression,
           sourceDependencies: safeSourceDependencies,
+          destinationDetail: functionDetail,
           serverVersionRelation: "MATCH",
         });
         if (functionResult.status !== "NOT_ELIGIBLE" || functionResult.reason !== "EXECUTABLE_DEPENDENCY") {
@@ -1291,6 +1301,7 @@ const main = async () => {
           destinationManifestEntry: destination,
           sourceExpression,
           sourceDependencies: safeSourceDependencies,
+          destinationDetail,
           serverVersionRelation: "MATCH",
         });
         if (driftResult.status !== "NOT_ELIGIBLE" || driftResult.reason !== "DESTINATION_REBIND_DRIFT") {

@@ -2092,6 +2092,10 @@ describe("PostgreSQL restore rehearsal runner", () => {
               conislocal: true,
               inheritance_count: "0",
               parent_constraint_oid: "0",
+              tree_bytes: "256",
+              expression_bytes: "128",
+              dependency_count: "3",
+              node_count: "6",
               has_inheritance: false,
               enabled_event_trigger_count: "0",
               unsafe_executable_dependency_count: "0",
@@ -2141,6 +2145,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
             destinationManifestEntry,
             sourceExpression,
             sourceDependencies: checkDetail(sourceExpression).dependencies,
+            destinationDetail: { ok: true },
             serverVersionRelation: "MATCH",
             createClient,
             randomBytesFn: () => Buffer.alloc(12, 7),
@@ -2197,6 +2202,27 @@ describe("PostgreSQL restore rehearsal runner", () => {
         await expect(testCase.run()).resolves.toMatchObject({
           status: "NOT_ELIGIBLE",
           reason: "EVENT_TRIGGER_ENABLED",
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+      });
+
+      it("requires successful destination detail evidence before connecting", async () => {
+        const testCase = await fixture();
+        await expect(testCase.run({
+          destinationDetail: { ok: false, status: "LIMIT_EXCEEDED", stage: "PREFLIGHT", limitKind: "TREE_BYTES" },
+        })).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "DESTINATION_DETAIL_UNAVAILABLE",
+        });
+        expect(testCase.createClient).not.toHaveBeenCalled();
+      });
+
+      it("enforces fresh destination bounds before DDL", async () => {
+        const testCase = await fixture({ eligibility: { node_count: "4097" } });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "LIMIT_EXCEEDED",
+          stage: "ELIGIBILITY",
+          limitKind: "NODE_COUNT",
         });
         expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
       });
