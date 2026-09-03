@@ -17,6 +17,7 @@ const { Client } = pg;
 const SERVER_IMAGE = "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a";
 const TEST_PASSWORD = "local-rehearsal-only";
 const TEST_READER_PASSWORD = "local-rehearsal-reader-only";
+const TEST_TARGET_OPERATOR_PASSWORD = "local-rehearsal-target-operator-only";
 
 const fail = (code) => {
   const error = new Error(code);
@@ -100,8 +101,13 @@ const main = async () => {
   const artifactDir = join(root, "artifacts");
   const tempDir = join(root, "client");
   const stateFile = join(root, "state.json");
+  const diagnosticArtifactDir = join(root, "diagnostic-artifacts");
+  const diagnosticTempDir = join(root, "diagnostic-client");
+  const diagnosticStateFile = join(root, "diagnostic-state.json");
   mkdirSync(artifactDir, { mode: 0o700 });
   mkdirSync(tempDir, { mode: 0o700 });
+  mkdirSync(diagnosticArtifactDir, { mode: 0o700 });
+  mkdirSync(diagnosticTempDir, { mode: 0o700 });
   let networkCreated = false;
   let sourceStarted = false;
   let targetStarted = false;
@@ -205,6 +211,11 @@ const main = async () => {
     }
     if (protectedCatalogCode !== "42501") fail("RESTRICTED_READER_BOUNDARY_UNPROVEN");
 
+    const targetBootstrap = new Client(config(targetPort, "postgres"));
+    await targetBootstrap.connect();
+    await targetBootstrap.query(`CREATE ROLE rehearsal_target_operator LOGIN CREATEDB PASSWORD '${TEST_TARGET_OPERATOR_PASSWORD}'`);
+    await targetBootstrap.end();
+
     const sourceConfig = {
       host: "127.0.0.1",
       dockerHost: sourceContainer,
@@ -225,8 +236,51 @@ const main = async () => {
       database: "postgres",
       sslmode: "disable",
     };
+    const restrictedTargetConfig = {
+      ...targetAdminConfig,
+      user: "rehearsal_target_operator",
+      password: TEST_TARGET_OPERATOR_PASSWORD,
+    };
     const scratchName = `corgtex_rehearsal_${suffix}_core`;
+    const diagnosticScratchName = `corgtex_rehearsal_${suffix}_diagnostic`;
     let liveSequenceAfterArchive = null;
+
+    let diagnosticError = null;
+    try {
+      await runPostgresRestoreRehearsal({
+        domain: "core",
+        sourceConfig,
+        targetAdminConfig: restrictedTargetConfig,
+        scratchName: diagnosticScratchName,
+        artifactDir: diagnosticArtifactDir,
+        tempDir: diagnosticTempDir,
+        stateFile: diagnosticStateFile,
+        dockerNetwork: network,
+      });
+    } catch (error) {
+      diagnosticError = error?.code;
+    }
+    if (diagnosticError !== "DESTINATION_RESTORE_FAILED") fail("EXPECTED_RESTORE_FAILURE_MISSING");
+    const restoreDiagnostic = JSON.parse(readFileSync(join(diagnosticArtifactDir, "restore-diagnostic.json"), "utf8"));
+    if (JSON.stringify(restoreDiagnostic) !== JSON.stringify({
+      phase: "DESTINATION_RESTORE",
+      category: "INSUFFICIENT_PRIVILEGE",
+      objectClass: "EXTENSION",
+      extensionClass: "VECTOR",
+      sqlstate: null,
+      truncated: false,
+    })) fail("RESTORE_DIAGNOSTIC_BOUNDARY_FAILED");
+    const serializedRestoreDiagnostic = JSON.stringify(restoreDiagnostic);
+    for (const forbidden of ["rehearsal_target_operator", TEST_TARGET_OPERATOR_PASSWORD, "CREATE EXTENSION", "source"]) {
+      if (serializedRestoreDiagnostic.includes(forbidden)) fail("RESTORE_DIAGNOSTIC_LEAKED_INPUT");
+    }
+    if (readdirSync(diagnosticTempDir).length !== 0) fail("DIAGNOSTIC_TEMPORARY_FILE_CLEANUP_FAILED");
+    await cleanupScratchDatabase({
+      targetAdminConfig: restrictedTargetConfig,
+      stateFile: diagnosticStateFile,
+      artifactDir: diagnosticArtifactDir,
+      expectedScratchName: diagnosticScratchName,
+    });
 
     await runPostgresRestoreRehearsal({
       domain: "core",

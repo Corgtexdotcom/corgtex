@@ -153,7 +153,15 @@ a broad database role to make this proof pass.
 
 Private evidence contains schema/table identities, counts, digests, and the exact
 before/after archive-sequence replay proof—never table row values or dump bytes. The
-public receipt is limited to opaque source, target, and domain references; aggregate
+destination restore streams verbose stderr through a bounded-line classifier without
+accumulating raw output. On failure, it writes `restore-diagnostic.json` with fixed
+category, object, extension, SQLSTATE (null until supplied by a trusted structured
+source), and truncation fields; raw lines are discarded
+and are never logged or persisted. The enum-only file is uploaded with the private
+workflow artifacts. That bounded private diagnostic only selects the next investigation
+and never authorizes automatic remediation, privilege expansion, or an Azure setting
+change. The public receipt is limited to opaque source, target, and domain references;
+aggregate
 counts; the evidence digest; and fixed readiness states. Success is
 `POSTGRES_REHEARSAL_VERIFIED` with Redis, objects, destination runtime, and source
 quiescence still unproven, `ProviderCutover` still `PLANNED`, and `cutoverReady:
