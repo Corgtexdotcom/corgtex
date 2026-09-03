@@ -384,6 +384,7 @@ const main = async () => {
       CREATE TABLE "QualifiedContextFixture" (
         "value" text,
         "amount" integer,
+        "flag" boolean,
         "observedAt" timestamptz,
         CONSTRAINT "QualifiedContextFixture_type_check"
           CHECK (("value"::"context fixture"."bounded_text") IS NOT NULL),
@@ -413,6 +414,10 @@ const main = async () => {
           CHECK (CURRENT_CATALOG IS NOT NULL),
         CONSTRAINT "QualifiedContextFixture_current_schema_check"
           CHECK (CURRENT_SCHEMA IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_is_unknown_check"
+          CHECK ("flag" IS UNKNOWN),
+        CONSTRAINT "QualifiedContextFixture_is_not_unknown_check"
+          CHECK ("flag" IS NOT UNKNOWN),
         CONSTRAINT "QualifiedContextFixture_timezone_check"
           CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00')
       );
@@ -444,7 +449,8 @@ const main = async () => {
         position('{COALESCEEXPR ' IN conbin::text) > 0 AS has_coalesce_node,
         position('{NULLIFEXPR ' IN conbin::text) > 0 AS has_nullif_node,
         position('{MINMAXEXPR ' IN conbin::text) > 0 AS has_minmax_node,
-        position('{SQLVALUEFUNCTION ' IN conbin::text) > 0 AS has_sql_value_node
+        position('{SQLVALUEFUNCTION ' IN conbin::text) > 0 AS has_sql_value_node,
+        position('{BOOLEANTEST ' IN conbin::text) > 0 AS has_boolean_test_node
       FROM pg_constraint
       WHERE conname IN (
         'TypeContextFixture_character_check',
@@ -463,12 +469,14 @@ const main = async () => {
         'QualifiedContextFixture_current_time_check',
         'QualifiedContextFixture_current_user_check',
         'QualifiedContextFixture_current_catalog_check',
-        'QualifiedContextFixture_current_schema_check'
+        'QualifiedContextFixture_current_schema_check',
+        'QualifiedContextFixture_is_unknown_check',
+        'QualifiedContextFixture_is_not_unknown_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 17) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 19) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -624,6 +632,25 @@ const main = async () => {
         || edit.destinationOnly.FUNCTION !== 0
         || JSON.stringify(edit).match(/current|localtime|session|private/iu)
       ) fail("SQL_VALUE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, destinationName] of [
+      ["QualifiedContextFixture_is_unknown_check", "TRUE"],
+      ["QualifiedContextFixture_is_not_unknown_check", "FALSE"],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (typeof row?.expression !== "string" || row.has_boolean_test_node !== true) {
+        fail("BOOLEAN_TEST_PG18_NODE_MISMATCH");
+      }
+      const renamed = row.expression.replace(/\bUNKNOWN\b/iu, destinationName);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OPERATOR !== 1
+        || edit.destinationOnly.OPERATOR !== 1
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || JSON.stringify(edit).match(/unknown|private/iu)
+      ) fail("BOOLEAN_TEST_CLASSIFICATION_MISMATCH");
     }
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
@@ -877,6 +904,47 @@ const main = async () => {
     if (timezoneConstraint === undefined) fail("TIMEZONE_REBIND_FIXTURE_MISSING");
     const timezoneDetail = await collectReboundSourceCheckDetail(sourceConfig, timezoneConstraint);
     if (timezoneDetail.ok !== true) fail("TIMEZONE_REBIND_DRIFT");
+
+    const recoveryConstraint = [...targetConstraintManifest.values()].find((entry) => {
+      try {
+        return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_is_unknown_check";
+      } catch {
+        return false;
+      }
+    });
+    if (recoveryConstraint === undefined) fail("CHECK_RECOVERY_FIXTURE_MISSING");
+    const recoveryClient = new Client(config(targetPort, scratchName));
+    await recoveryClient.connect();
+    let recoveryTransactionOpen = false;
+    try {
+      await recoveryClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      recoveryTransactionOpen = true;
+      await recoveryClient.query("SET LOCAL timezone = 'UTC'");
+      await recoveryClient.query("SET LOCAL client_encoding = 'UTF8'");
+      await recoveryClient.query("SET LOCAL search_path = pg_catalog");
+      let injectedFailure = false;
+      const recoveryProxy = {
+        query: async (sql, values) => {
+          if (!injectedFailure && sql.includes("AS check_expression")) {
+            injectedFailure = true;
+            return recoveryClient.query("SELECT 1 / 0");
+          }
+          return recoveryClient.query(sql, values);
+        },
+      };
+      const recoveryDetail = await collectCheckConstraintDetail(recoveryProxy, recoveryConstraint);
+      if (
+        recoveryDetail.ok !== false
+        || recoveryDetail.status !== "COLLECTION_UNAVAILABLE"
+        || recoveryDetail.stage !== "EXPRESSION_FETCH"
+      ) fail("CHECK_RECOVERY_STATUS_MISMATCH");
+      await recoveryClient.query("SELECT 1");
+      await recoveryClient.query("COMMIT");
+      recoveryTransactionOpen = false;
+    } finally {
+      if (recoveryTransactionOpen) await recoveryClient.query("ROLLBACK").catch(() => {});
+      await recoveryClient.end().catch(() => {});
+    }
 
     const targetConstraintMutator = new Client(config(targetPort, scratchName));
     await targetConstraintMutator.connect();

@@ -2032,98 +2032,120 @@ const checkDetailFailure = (status, stage, limitKind = null) => ({
   limitKind,
 });
 
+class CheckDetailSavepointError extends Error {
+  constructor() {
+    super("CHECK_DETAIL_SAVEPOINT_FAILED");
+  }
+}
+
+const runCheckDetailSavepointCommand = async (client, command) => {
+  try {
+    await client.query(command);
+  } catch {
+    throw new CheckDetailSavepointError();
+  }
+};
+
 export const collectCheckConstraintDetail = async (client, manifestEntry) => {
   let stage = "REBIND";
+  if (
+    manifestEntry?.type !== "CHECK"
+    || !/^(?:0|[1-9][0-9]{0,9})$/u.test(manifestEntry?.diagnostic?.constraintOid)
+    || BigInt(manifestEntry.diagnostic.constraintOid) > MAX_POSTGRES_OID
+  ) return checkDetailFailure("IDENTITY_REBIND_FAILED", stage);
+  const oid = manifestEntry.diagnostic.constraintOid;
+  await runCheckDetailSavepointCommand(client, "SAVEPOINT corgtex_check_detail");
+  let detail;
   try {
-    if (
-      manifestEntry?.type !== "CHECK"
-      || !/^(?:0|[1-9][0-9]{0,9})$/u.test(manifestEntry?.diagnostic?.constraintOid)
-      || BigInt(manifestEntry.diagnostic.constraintOid) > MAX_POSTGRES_OID
-    ) return checkDetailFailure("IDENTITY_REBIND_FAILED", stage);
-    const oid = manifestEntry.diagnostic.constraintOid;
-    stage = "PREFLIGHT";
-    const preflight = await client.query(checkConstraintPreflightQuery, [oid]);
-    if (preflight.rowCount !== 1 || checkConstraintIdentityKey(preflight.rows[0]) !== manifestEntry.key) {
-      return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
-    }
-    if (preflight.rows[0].client_encoding !== "UTF8") {
-      return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
-    }
-    const expressionBytes = parseDiagnosticCount(preflight.rows[0].expression_bytes);
-    const treeBytes = parseDiagnosticCount(preflight.rows[0].tree_bytes);
-    const dependencyCount = parseDiagnosticCount(preflight.rows[0].dependency_count);
-    const nodeCount = parseDiagnosticCount(preflight.rows[0].node_count);
-    if (expressionBytes > MAX_CONSTRAINT_TEXT_BYTES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "EXPRESSION_BYTES");
-    if (treeBytes > MAX_CHECK_TREE_BYTES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "TREE_BYTES");
-    if (dependencyCount > MAX_CHECK_DEPENDENCIES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_COUNT");
-    if (nodeCount > MAX_CHECK_NODE_TAGS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "NODE_COUNT");
+    detail = await (async () => {
+      stage = "PREFLIGHT";
+      const preflight = await client.query(checkConstraintPreflightQuery, [oid]);
+      if (preflight.rowCount !== 1 || checkConstraintIdentityKey(preflight.rows[0]) !== manifestEntry.key) {
+        return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
+      }
+      if (preflight.rows[0].client_encoding !== "UTF8") {
+        return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+      }
+      const expressionBytes = parseDiagnosticCount(preflight.rows[0].expression_bytes);
+      const treeBytes = parseDiagnosticCount(preflight.rows[0].tree_bytes);
+      const dependencyCount = parseDiagnosticCount(preflight.rows[0].dependency_count);
+      const nodeCount = parseDiagnosticCount(preflight.rows[0].node_count);
+      if (expressionBytes > MAX_CONSTRAINT_TEXT_BYTES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "EXPRESSION_BYTES");
+      if (treeBytes > MAX_CHECK_TREE_BYTES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "TREE_BYTES");
+      if (dependencyCount > MAX_CHECK_DEPENDENCIES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_COUNT");
+      if (nodeCount > MAX_CHECK_NODE_TAGS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "NODE_COUNT");
 
-    stage = "DEPENDENCY_PREFLIGHT";
-    const dependencyPreflight = await client.query(checkConstraintDependencyPreflightQuery, [oid]);
-    if (dependencyPreflight.rowCount !== 1) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
-    const maxFieldBytes = parseDiagnosticCount(dependencyPreflight.rows[0].max_field_bytes);
-    const totalBytes = parseDiagnosticCount(dependencyPreflight.rows[0].total_bytes);
-    if (maxFieldBytes > MAX_CHECK_DEPENDENCY_FIELD_BYTES) {
-      return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
-    }
-    if (totalBytes > MAX_CHECK_DEPENDENCY_TOTAL_BYTES) {
-      return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
-    }
+      stage = "DEPENDENCY_PREFLIGHT";
+      const dependencyPreflight = await client.query(checkConstraintDependencyPreflightQuery, [oid]);
+      if (dependencyPreflight.rowCount !== 1) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+      const maxFieldBytes = parseDiagnosticCount(dependencyPreflight.rows[0].max_field_bytes);
+      const totalBytes = parseDiagnosticCount(dependencyPreflight.rows[0].total_bytes);
+      if (maxFieldBytes > MAX_CHECK_DEPENDENCY_FIELD_BYTES) {
+        return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
+      }
+      if (totalBytes > MAX_CHECK_DEPENDENCY_TOTAL_BYTES) {
+        return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
+      }
 
-    stage = "EXPRESSION_FETCH";
-    const expressionResult = await client.query(checkConstraintExpressionQuery, [oid]);
-    if (
-      expressionResult.rowCount !== 1
-      || typeof expressionResult.rows[0].check_expression !== "string"
-      || Buffer.byteLength(expressionResult.rows[0].check_expression, "utf8") !== expressionBytes
-    ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
-    stage = "TOKENIZE";
-    const tokens = tokenizeSchemaDump(expressionResult.rows[0].check_expression);
-    if (tokens.length > MAX_CHECK_EDIT_TOKENS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "TOKENS");
-
-    stage = "DEPENDENCY_FETCH";
-    const dependencyResult = await client.query(checkConstraintDependencyQuery, [oid]);
-    if (dependencyResult.rows.length !== dependencyCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
-    let fetchedDependencyMaxFieldBytes = 0;
-    let fetchedDependencyTotalBytes = 0;
-    const dependencies = dependencyResult.rows.map((row) => {
-      const identity = [row.dependency_type, row.type, row.schema, row.name, row.identity];
+      stage = "EXPRESSION_FETCH";
+      const expressionResult = await client.query(checkConstraintExpressionQuery, [oid]);
       if (
-        typeof identity[0] !== "string"
-        || identity[0].length !== 1
-        || typeof identity[1] !== "string"
-        || identity[1].length === 0
-        || !isNullableString(identity[2])
-        || !isNullableString(identity[3])
-        || typeof identity[4] !== "string"
-        || identity[4].length === 0
-      ) throw new Error("INVALID_DEPENDENCY_IDENTITY");
-      const fieldBytes = identity.map((value) => Buffer.byteLength(value ?? "", "utf8"));
-      fetchedDependencyMaxFieldBytes = Math.max(fetchedDependencyMaxFieldBytes, ...fieldBytes);
-      fetchedDependencyTotalBytes += fieldBytes.reduce((total, value) => total + value, 0);
-      return identity;
-    });
-    if (
-      fetchedDependencyMaxFieldBytes !== maxFieldBytes
-      || fetchedDependencyTotalBytes !== totalBytes
-    ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+        expressionResult.rowCount !== 1
+        || typeof expressionResult.rows[0].check_expression !== "string"
+        || Buffer.byteLength(expressionResult.rows[0].check_expression, "utf8") !== expressionBytes
+      ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+      stage = "TOKENIZE";
+      const tokens = tokenizeSchemaDump(expressionResult.rows[0].check_expression);
+      if (tokens.length > MAX_CHECK_EDIT_TOKENS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "TOKENS");
 
-    stage = "NODE_COUNT";
-    const nodeResult = await client.query(checkConstraintNodeQuery, [oid]);
-    const nodeTagCounts = Object.fromEntries(CHECK_NODE_TAGS.map((tag) => [tag, 0]));
-    let observedNodeCount = 0;
-    for (const row of nodeResult.rows) {
-      if (typeof row.node_tag !== "string") throw new Error("INVALID_NODE_TAG");
-      const count = parseDiagnosticCount(row.node_count);
-      const tag = CHECK_NODE_TAGS.includes(row.node_tag) ? row.node_tag : "OTHER";
-      nodeTagCounts[tag] += count;
-      observedNodeCount += count;
-    }
-    if (observedNodeCount !== nodeCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
-    return { ok: true, tokens, dependencies, nodeTagCounts };
+      stage = "DEPENDENCY_FETCH";
+      const dependencyResult = await client.query(checkConstraintDependencyQuery, [oid]);
+      if (dependencyResult.rows.length !== dependencyCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+      let fetchedDependencyMaxFieldBytes = 0;
+      let fetchedDependencyTotalBytes = 0;
+      const dependencies = dependencyResult.rows.map((row) => {
+        const identity = [row.dependency_type, row.type, row.schema, row.name, row.identity];
+        if (
+          typeof identity[0] !== "string"
+          || identity[0].length !== 1
+          || typeof identity[1] !== "string"
+          || identity[1].length === 0
+          || !isNullableString(identity[2])
+          || !isNullableString(identity[3])
+          || typeof identity[4] !== "string"
+          || identity[4].length === 0
+        ) throw new Error("INVALID_DEPENDENCY_IDENTITY");
+        const fieldBytes = identity.map((value) => Buffer.byteLength(value ?? "", "utf8"));
+        fetchedDependencyMaxFieldBytes = Math.max(fetchedDependencyMaxFieldBytes, ...fieldBytes);
+        fetchedDependencyTotalBytes += fieldBytes.reduce((total, value) => total + value, 0);
+        return identity;
+      });
+      if (
+        fetchedDependencyMaxFieldBytes !== maxFieldBytes
+        || fetchedDependencyTotalBytes !== totalBytes
+      ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+
+      stage = "NODE_COUNT";
+      const nodeResult = await client.query(checkConstraintNodeQuery, [oid]);
+      const nodeTagCounts = Object.fromEntries(CHECK_NODE_TAGS.map((tag) => [tag, 0]));
+      let observedNodeCount = 0;
+      for (const row of nodeResult.rows) {
+        if (typeof row.node_tag !== "string") throw new Error("INVALID_NODE_TAG");
+        const count = parseDiagnosticCount(row.node_count);
+        const tag = CHECK_NODE_TAGS.includes(row.node_tag) ? row.node_tag : "OTHER";
+        nodeTagCounts[tag] += count;
+        observedNodeCount += count;
+      }
+      if (observedNodeCount !== nodeCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
+      return { ok: true, tokens, dependencies, nodeTagCounts };
+    })();
   } catch {
+    await runCheckDetailSavepointCommand(client, "ROLLBACK TO SAVEPOINT corgtex_check_detail");
+    await runCheckDetailSavepointCommand(client, "RELEASE SAVEPOINT corgtex_check_detail");
     return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
   }
+  await runCheckDetailSavepointCommand(client, "RELEASE SAVEPOINT corgtex_check_detail");
+  return detail;
 };
 
 export const collectReboundSourceCheckDetail = async (
@@ -2177,7 +2199,8 @@ export const collectReboundSourceCheckDetail = async (
     await client.query("COMMIT");
     transactionOpen = false;
     return detail;
-  } catch {
+  } catch (error) {
+    if (error instanceof CheckDetailSavepointError) throw error;
     return checkDetailFailure("COLLECTION_UNAVAILABLE", "REBIND");
   } finally {
     if (transactionOpen) await client?.query("ROLLBACK").catch(() => {});
@@ -2335,6 +2358,18 @@ const checkContextualTokenCategories = (tokens) => {
       continue;
     }
     setCheckContextCategory(categories, span, "COLLATION");
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (
+      !isUnquotedCheckWord(token, "unknown")
+      || tokens[index - 1]?.value === "."
+      || tokens[index + 1]?.value === "."
+    ) continue;
+    const followsIs = isUnquotedCheckWord(tokens[index - 1], "is");
+    const followsIsNot = isUnquotedCheckWord(tokens[index - 2], "is")
+      && isUnquotedCheckWord(tokens[index - 1], "not");
+    if (followsIs || followsIsNot) setCheckContextCategory(categories, [index], "OPERATOR");
   }
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];

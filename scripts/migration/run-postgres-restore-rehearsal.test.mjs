@@ -622,6 +622,31 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      ["private_flag IS UNKNOWN", "private_flag IS TRUE"],
+      ["private_flag IS NOT UNKNOWN", "private_flag IS NOT FALSE"],
+      ["private_flag is unknown", "private_flag is true"],
+      ["private_flag is not unknown", "private_flag is not false"],
+    ])("classifies boolean-test UNKNOWN as operator syntax", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OPERATOR).toBe(1);
+      expect(edit.destinationOnly.OPERATOR).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it.each([
+      ["unknown", "renamed_unknown"],
+      ["app.unknown", "other.unknown"],
+      ['"UNKNOWN"', '"RENAMED_UNKNOWN"'],
+    ])("keeps non-boolean-test UNKNOWN identifiers out of operator syntax", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBeGreaterThan(0);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OPERATOR + edit.destinationOnly.OPERATOR).toBe(0);
+    });
+
+    it.each([
       ['"current_date"', '"other_date"', "COLUMN_REFERENCE"],
       ['"current_time"(3)', '"other_time"(3)', "FUNCTION"],
       ["app.current_date(private_column)", "other.current_date(private_column)", "FUNCTION"],
@@ -933,21 +958,24 @@ describe("PostgreSQL restore rehearsal runner", () => {
       const detail = await collectCheckConstraintDetail({
         query: async (sql, values) => {
           calls.push({ sql, values });
+          if (/^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)) return { rowCount: null, rows: [] };
           return responses.shift();
         },
       }, entry);
       expect(detail.ok).toBe(true);
       expect(detail.nodeTagCounts).toMatchObject({ OPEXPR: 1, OTHER: 1 });
-      expect(calls).toHaveLength(5);
-      expect(calls.every(({ values }) => values[0] === "123")).toBe(true);
-      expect(calls[0].sql).not.toContain("AS expression_tree");
-      expect(calls[0].sql).toContain("current_setting('client_encoding')");
-      expect(calls[0].sql).toContain("convert_to(pg_catalog.pg_get_expr");
-      expect(calls[1].sql).toContain("max(GREATEST(");
-      expect(calls[1].sql).not.toContain("pg_catalog.greatest");
-      expect(calls[1].sql).toContain("convert_to(dependency_type, 'UTF8')");
-      expect(calls[1].sql).toContain("convert_to(identity, 'UTF8')");
-      expect(calls[3].sql).toContain("LIMIT 257");
+      expect(calls).toHaveLength(7);
+      expect(calls[0]).toEqual({ sql: "SAVEPOINT corgtex_check_detail", values: undefined });
+      expect(calls.at(-1)).toEqual({ sql: "RELEASE SAVEPOINT corgtex_check_detail", values: undefined });
+      expect(calls.slice(1, -1).every(({ values }) => values[0] === "123")).toBe(true);
+      expect(calls[1].sql).not.toContain("AS expression_tree");
+      expect(calls[1].sql).toContain("current_setting('client_encoding')");
+      expect(calls[1].sql).toContain("convert_to(pg_catalog.pg_get_expr");
+      expect(calls[2].sql).toContain("max(GREATEST(");
+      expect(calls[2].sql).not.toContain("pg_catalog.greatest");
+      expect(calls[2].sql).toContain("convert_to(dependency_type, 'UTF8')");
+      expect(calls[2].sql).toContain("convert_to(identity, 'UTF8')");
+      expect(calls[4].sql).toContain("LIMIT 257");
       expect(JSON.stringify(buildConstraintSemanticDiagnostic(
         await constraintManifest([constraintCatalogRow({ check_expression: `(${expression})` })]),
         await constraintManifest([constraintCatalogRow()]),
@@ -963,7 +991,10 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ["NODE_COUNT", { node_count: "4097" }],
     ])("stops CHECK collection before value fetch on the %s limit", async (limitKind, override) => {
       const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
-      const query = vi.fn(async () => ({
+      const query = vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql) ? ({
+        rowCount: null,
+        rows: [],
+      }) : ({
         rowCount: 1,
         rows: [{
           namespace_name: "private_namespace",
@@ -988,12 +1019,20 @@ describe("PostgreSQL restore rehearsal runner", () => {
         stage: "PREFLIGHT",
         limitKind,
       });
-      expect(query).toHaveBeenCalledTimes(1);
+      expect(query).toHaveBeenCalledTimes(3);
+      expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+        "SAVEPOINT corgtex_check_detail",
+        expect.stringContaining("AS expression_bytes"),
+        "RELEASE SAVEPOINT corgtex_check_detail",
+      ]);
     });
 
     it("requires UTF8 preflight before fetching protected CHECK values", async () => {
       const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
-      const query = vi.fn(async () => ({
+      const query = vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql) ? ({
+        rowCount: null,
+        rows: [],
+      }) : ({
         rowCount: 1,
         rows: [{
           namespace_name: "private_namespace",
@@ -1017,7 +1056,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         stage: "PREFLIGHT",
         limitKind: null,
       });
-      expect(query).toHaveBeenCalledTimes(1);
+      expect(query).toHaveBeenCalledTimes(3);
     });
 
     it("uses identical UTF8 byte counts before and after multibyte CHECK fetches", async () => {
@@ -1048,7 +1087,11 @@ describe("PostgreSQL restore rehearsal runner", () => {
         { rowCount: 1, rows: [{ node_tag: "OPEXPR", node_count: "1" }] },
       ];
       await expect(collectCheckConstraintDetail({
-        query: vi.fn(async () => responses.shift()),
+        query: vi.fn(async (sql) => (
+          /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+            ? { rowCount: null, rows: [] }
+            : responses.shift()
+        )),
       }, entry)).resolves.toMatchObject({ ok: true });
     });
 
@@ -1083,13 +1126,105 @@ describe("PostgreSQL restore rehearsal runner", () => {
         { rowCount: 1, rows: [dependency] },
       ];
       await expect(collectCheckConstraintDetail({
-        query: vi.fn(async () => responses.shift()),
+        query: vi.fn(async (sql) => (
+          /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+            ? { rowCount: null, rows: [] }
+            : responses.shift()
+        )),
       }, entry)).resolves.toEqual({
         ok: false,
         status: "COLLECTION_UNAVAILABLE",
         stage: expectedStage,
         limitKind: null,
       });
+    });
+
+    it.each([
+      ["PREFLIGHT", "AS expression_bytes"],
+      ["DEPENDENCY_PREFLIGHT", "max(GREATEST"],
+      ["EXPRESSION_FETCH", "AS check_expression"],
+      ["DEPENDENCY_FETCH", "ORDER BY"],
+      ["NODE_COUNT", "AS node_tag"],
+    ])("recovers the shared transaction after a %s query error", async (expectedStage, failureMarker) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column IS NOT NULL)";
+      const commands = [];
+      let aborted = false;
+      let injected = false;
+      const query = vi.fn(async (sql) => {
+        commands.push(sql);
+        if (sql === "ROLLBACK TO SAVEPOINT corgtex_check_detail") {
+          aborted = false;
+          return { rowCount: null, rows: [] };
+        }
+        if (aborted) throw Object.assign(new Error("transaction aborted"), { code: "25P02" });
+        if (!injected && sql.includes(failureMarker)) {
+          injected = true;
+          aborted = true;
+          throw Object.assign(new Error("injected detail query failure"), { code: "22012" });
+        }
+        if (/^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql) || sql === "SELECT 1") {
+          return { rowCount: sql === "SELECT 1" ? 1 : null, rows: sql === "SELECT 1" ? [{ value: 1 }] : [] };
+        }
+        if (sql.includes("AS expression_bytes")) return { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+          dependency_count: "0", node_count: "1",
+        }] };
+        if (sql.includes("max(GREATEST")) return { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] };
+        if (sql.includes("AS check_expression")) return { rowCount: 1, rows: [{ check_expression: expression }] };
+        if (sql.includes("AS dependency_type")) return { rowCount: 0, rows: [] };
+        if (sql.includes("AS node_tag")) return { rowCount: 1, rows: [{ node_tag: "NULLTEST", node_count: "1" }] };
+        throw new Error("UNEXPECTED_TEST_QUERY");
+      });
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: expectedStage,
+        limitKind: null,
+      });
+      await expect(query("SELECT 1")).resolves.toMatchObject({ rowCount: 1 });
+      expect(commands.slice(-3)).toEqual([
+        "ROLLBACK TO SAVEPOINT corgtex_check_detail",
+        "RELEASE SAVEPOINT corgtex_check_detail",
+        "SELECT 1",
+      ]);
+    });
+
+    it.each([
+      ["SAVEPOINT", "SAVEPOINT corgtex_check_detail", false],
+      ["ROLLBACK", "ROLLBACK TO SAVEPOINT corgtex_check_detail", true],
+      ["RELEASE_AFTER_ERROR", "RELEASE SAVEPOINT corgtex_check_detail", true],
+      ["RELEASE_AFTER_SUCCESS", "RELEASE SAVEPOINT corgtex_check_detail", false],
+    ])("propagates a %s control-statement failure", async (_label, failedCommand, failDetailQuery) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column IS NOT NULL)";
+      let detailFailed = false;
+      const query = vi.fn(async (sql) => {
+        if (sql === failedCommand && (failedCommand !== "RELEASE SAVEPOINT corgtex_check_detail" || detailFailed === failDetailQuery)) {
+          throw new Error("SAVEPOINT_CONTROL_FAILED");
+        }
+        if (failDetailQuery && sql.includes("AS expression_bytes")) {
+          detailFailed = true;
+          throw new Error("DETAIL_QUERY_FAILED");
+        }
+        if (/^(?:SAVEPOINT|ROLLBACK TO SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)) return { rowCount: null, rows: [] };
+        if (sql.includes("AS expression_bytes")) return { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+          dependency_count: "0", node_count: "1",
+        }] };
+        if (sql.includes("max(GREATEST")) return { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] };
+        if (sql.includes("AS check_expression")) return { rowCount: 1, rows: [{ check_expression: expression }] };
+        if (sql.includes("AS dependency_type")) return { rowCount: 0, rows: [] };
+        if (sql.includes("AS node_tag")) return { rowCount: 1, rows: [{ node_tag: "NULLTEST", node_count: "1" }] };
+        throw new Error("UNEXPECTED_TEST_QUERY");
+      });
+      await expect(collectCheckConstraintDetail({ query }, entry)).rejects.toThrow("CHECK_DETAIL_SAVEPOINT_FAILED");
     });
 
     it("rebinds the source CHECK by logical identity and validates all phase-one semantics before detail", async () => {
@@ -1127,6 +1262,25 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(commands.indexOf("SET LOCAL timezone = 'UTC'")).toBeLessThan(commands.findIndex((sql) => /LIMIT 2\s*$/u.test(sql)));
       expect(commands).toContain("SET LOCAL client_encoding = 'UTF8'");
       expect(commands).not.toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    it("does not reduce a rebound source savepoint-control failure to collection unavailable", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql) => {
+          if (/LIMIT 2\s*$/u.test(sql)) return { rowCount: 1, rows: [constraintCatalogRow()] };
+          if (sql === "SAVEPOINT corgtex_check_detail") throw new Error("SAVEPOINT_FAILED");
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      await expect(collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client)).rejects.toThrow("CHECK_DETAIL_SAVEPOINT_FAILED");
+      expect(client.query).toHaveBeenCalledWith("ROLLBACK");
       expect(client.end).toHaveBeenCalledOnce();
     });
 
