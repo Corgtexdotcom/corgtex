@@ -66,6 +66,7 @@ apps/site/public/videos/*.mov
 # misc
 .DS_Store
 *.pem
+!infra/azure/migration-foundation/azure-postgres-root-ca.pem
 
 # debug
 npm-debug.log*

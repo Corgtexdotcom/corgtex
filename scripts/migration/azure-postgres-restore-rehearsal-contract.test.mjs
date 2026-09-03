@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -11,6 +12,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   const runner = read("scripts/migration/run-postgres-restore-rehearsal.mjs");
   const validator = read("scripts/migration/validate-postgres-restore-rehearsal.mjs");
   const readme = read("infra/azure/migration-foundation/README.md");
+  const targetRootBundle = read("infra/azure/migration-foundation/azure-postgres-root-ca.pem");
   const packageJson = JSON.parse(read("package.json"));
 
   it("is a protected main-only, single-writer manual workflow", () => {
@@ -58,6 +60,19 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(packageJson.devDependencies.pg).toBeTruthy();
   });
 
+  it("pins only the documented Azure PostgreSQL roots for explicit target verification", () => {
+    expect(createHash("sha256").update(targetRootBundle).digest("hex"))
+      .toBe("00aa10fc3c32eb0d024cd4262dac3d4466dd44aed87fa24d9f2d3fb49977601c");
+    expect(targetRootBundle.match(/-----BEGIN CERTIFICATE-----/gu)).toHaveLength(2);
+    expect(runner).toContain("CB:3C:CB:B7:60:31:E5:E0:13:8F:8D:D3:9A:23:F9:DE:47:FF:C3:5E:43:C1:14:4C:EA:27:D4:6A:5A:B1:CB:5F");
+    expect(runner).toContain("C7:41:F7:0F:4B:2A:8D:88:BF:2E:71:C1:41:22:EF:53:EF:10:EB:A0:CF:A5:E6:4C:FA:20:F4:18:85:30:73:E0");
+    expect(runner).toContain('targetServiceSslMode = target.sslmode === "disable" ? "disable" : "verify-full"');
+    expect(runner).toContain("sslrootcert=/work/target-root.crt");
+    expect(runner).not.toContain("sslrootcert=system");
+    expect(readme).toContain("DigiCert Global Root G2");
+    expect(readme).toContain("Microsoft RSA Root Certificate Authority 2017");
+  });
+
   it("authenticates each Railway source with its exact temporary CA trust anchor", () => {
     expect(runner).toContain('sslmode !== "require"');
     expect(runner).toContain('sourceTlsRootCert: validateSourceTlsRootCertificate(requiredEnvironment("SOURCE_TLS_ROOT_CERT"))');
@@ -67,7 +82,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain('"verify-ca"');
     expect(runner).toContain('["sslrootcert=/work/source-root.crt"]');
     expect(runner).toContain('`${tempDir}/source-root.crt`');
-    expect(runner).toContain("registerCleanup(serviceFile, passFile, ...(sourceRootCertFile === null ? [] : [sourceRootCertFile]))");
+    expect(runner).toContain("...(sourceRootCertFile === null ? [] : [sourceRootCertFile])");
     expect(runner).toContain("chmodSync(sourceRootCertFile, 0o600)");
     expect(runner).toContain("target=/work/source-root.crt,readonly");
     expect(runner).not.toContain("rejectUnauthorized: false");
@@ -232,6 +247,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("writeClientFiles(");
     expect(runner).toContain("secureDelete");
     expect(runner).toContain("source-root.crt");
+    expect(runner).toContain("target-root.crt");
     expect(runner).not.toContain("console.log");
     expect(workflow).toContain("Upload private PostgreSQL rehearsal evidence");
     expect(workflow).toContain("retention-days: 7");
@@ -244,10 +260,15 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("MAX_RESTORE_STATUS_LINE_BYTES = 128");
     expect(runner).toContain('LC_ALL: "C", LANG: "C"');
     expect(runner).toContain('`${artifactDir}/restore-diagnostic.json`');
+    expect(runner).toContain('`${artifactDir}/connection-probe-diagnostic.json`');
+    expect(runner).toContain('phase: "TARGET_CLIENT_CONNECTION_PROBE"');
     expect(runner).toContain('phase: "DESTINATION_RESTORE"');
     expect(runner).toContain('const RESTORE_SECTIONS = ["pre-data", "data", "post-data"]');
     expect(runner).toContain('pg_restore --section="$1" --no-owner --no-acl --file=- /work/snapshot.dump 2>/dev/null');
     expect(runner).toContain("psql -X --quiet --set=ON_ERROR_STOP=1 --set=VERBOSITY=sqlstate --set=SHOW_CONTEXT=never --set=ECHO=none");
+    expect(runner).toContain('"--command=SELECT 1"');
+    expect(runner.indexOf("await probeTargetClientConnection({"))
+      .toBeLessThan(runner.indexOf('["pg_dump", "--format=custom"'));
     expect(runner).toContain("CORGTEX_RESTORE_STATUS:%s:%s");
     expect(runner).toContain("PIPESTATUS");
     expect(runner).toContain("options.stderrClassifier?.consume(chunk)");

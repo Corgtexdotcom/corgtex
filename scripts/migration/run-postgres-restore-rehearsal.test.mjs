@@ -5,17 +5,20 @@ import {
   buildLocaleDiagnostic,
   buildPgServiceContents,
   buildRestoreDiagnostic,
+  buildTargetConnectionProbeDiagnostic,
   buildSequenceUseList,
   classifyCollationVersionRelation,
   collectLargeObjects,
   inspectLargeObjectAccess,
   isCurrentCollationVersion,
   localeDefinitionMismatchFields,
+  loadTargetTlsRootCertificate,
   nodeClientConfig,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
   serializePgServiceValue,
   validateSourceTlsRootCertificate,
+  validateTargetTlsRootCertificate,
   waitForTargetConnection,
 } from "./run-postgres-restore-rehearsal.mjs";
 
@@ -151,7 +154,8 @@ describe("PostgreSQL restore rehearsal runner", () => {
     expect(config.ssl.checkServerIdentity("proxy.example.test", {})).toBeUndefined();
   });
 
-  it("keeps system-root hostname verification for Node target connections", () => {
+  it("keeps explicit-root hostname verification for Node target connections", () => {
+    const targetTlsRootCert = loadTargetTlsRootCertificate();
     const config = nodeClientConfig({
       host: "target.example.test",
       port: 5432,
@@ -159,8 +163,33 @@ describe("PostgreSQL restore rehearsal runner", () => {
       password: "secret",
       database: "scratch",
       sslmode: "verify-full",
+      targetTlsRootCert,
     }, "target-test");
-    expect(config.ssl).toEqual({ rejectUnauthorized: true });
+    expect(config.ssl).toEqual({ ca: targetTlsRootCert, rejectUnauthorized: true });
+  });
+
+  it("accepts only the exact fingerprint-pinned Azure PostgreSQL root bundle", () => {
+    const targetTlsRootCert = loadTargetTlsRootCertificate();
+    expect(validateTargetTlsRootCertificate(targetTlsRootCert)).toBe(targetTlsRootCert);
+    expect(() => validateTargetTlsRootCertificate(TEST_SOURCE_CA)).toThrow("INVALID_TARGET_TLS_ROOT_CERT");
+    expect(() => validateTargetTlsRootCertificate(targetTlsRootCert.replace("MIIDjj", "NIIDjj")))
+      .toThrow("INVALID_TARGET_TLS_ROOT_CERT");
+    expect(() => validateTargetTlsRootCertificate(
+      targetTlsRootCert,
+      undefined,
+      new Date("2100-01-01T00:00:00Z"),
+    )).toThrow("INVALID_TARGET_TLS_ROOT_CERT");
+  });
+
+  it("fails closed when a target Node connection lacks its pinned trust anchor", () => {
+    expect(() => nodeClientConfig({
+      host: "target.example.test",
+      port: 5432,
+      user: "admin",
+      password: "secret",
+      database: "scratch",
+      sslmode: "verify-full",
+    }, "target-test")).toThrow("MISSING_TARGET_TLS_ROOT_CERT");
   });
 
   it("fails closed when a source Node connection lacks its exact trust anchor", () => {
@@ -182,13 +211,14 @@ describe("PostgreSQL restore rehearsal runner", () => {
     expect(`host=${serializePgServiceValue("source-db.internal")}`).not.toContain("'");
   });
 
-  it("uses the exact source CA with verify-ca and system roots with verify-full for Azure", () => {
+  it("uses exact mounted roots with verify-ca and verify-full", () => {
     const service = buildPgServiceContents(
       { dockerHost: "source.example.test", port: 5432, user: "reader", database: "core", sslmode: "require" },
       { dockerHost: "target.example.test", port: 5432, user: "admin", database: "scratch", sslmode: "verify-full" },
     );
     expect(service).toContain("sslmode=verify-ca\nsslrootcert=/work/source-root.crt");
-    expect(service.match(/sslmode=verify-full\nsslrootcert=system/gu)).toHaveLength(1);
+    expect(service.match(/sslmode=verify-full\nsslrootcert=\/work\/target-root\.crt/gu)).toHaveLength(1);
+    expect(service).not.toContain("sslrootcert=system");
   });
 
   it("never downgrades a stronger source URL claim to CA-only verification", () => {
@@ -219,6 +249,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         password: "secret",
         database: "postgres",
         sslmode: "verify-full",
+        targetTlsRootCert: loadTargetTlsRootCertificate(),
       },
       timeoutMs: 5_000,
       retryDelayMs: 1_000,
@@ -252,6 +283,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         password: "secret",
         database: "postgres",
         sslmode: "verify-full",
+        targetTlsRootCert: loadTargetTlsRootCertificate(),
       },
       timeoutMs: 2_500,
       retryDelayMs: 1_000,
@@ -411,6 +443,26 @@ describe("PostgreSQL restore rehearsal runner", () => {
       "stderrObserved",
       "stderrTruncated",
     ]);
+  });
+
+  it.each([
+    ["connection", 2, "private tls host password secret\n", "CONNECTION_ERROR", "UNKNOWN", null],
+    ["server script", 3, "ERROR:  42501\n", "SCRIPT_ERROR", "INSUFFICIENT_PRIVILEGE", "42501"],
+    ["unexpected process", 1, "private process output\n", "PROCESS_ERROR", "UNKNOWN", null],
+  ])("reduces a target %s probe failure to fixed fields", (_label, status, stderr, processClass, category, sqlstate) => {
+    const diagnostic = buildTargetConnectionProbeDiagnostic({
+      stderrChunks: [Buffer.from(stderr, "utf8")],
+      status,
+    });
+    expect(diagnostic).toEqual({
+      phase: "TARGET_CLIENT_CONNECTION_PROBE",
+      processClass,
+      category,
+      sqlstate,
+      stderrObserved: true,
+      stderrTruncated: false,
+    });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private|tls|host|password|secret|process output/u);
   });
 
   it("classifies arbitrary chunk boundaries and a missing final newline", () => {

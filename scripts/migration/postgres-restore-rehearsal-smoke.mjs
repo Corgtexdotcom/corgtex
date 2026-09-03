@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, X509Certificate } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
 import {
   cleanupScratchDatabase,
+  probeTargetClientConnection,
   runPostgresRestoreRehearsal,
+  writeClientFiles,
 } from "./run-postgres-restore-rehearsal.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
 
@@ -18,6 +20,8 @@ const SERVER_IMAGE = "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee
 const TEST_PASSWORD = "local-rehearsal-only";
 const TEST_READER_PASSWORD = "local-rehearsal-reader-only";
 const TEST_TARGET_OPERATOR_PASSWORD = "local-rehearsal-target-operator-only";
+const TARGET_TLS_HOST = "target.rehearsal.test";
+const WRONG_TARGET_TLS_HOST = "wrong-target.rehearsal.test";
 
 const fail = (code) => {
   const error = new Error(code);
@@ -104,15 +108,62 @@ const main = async () => {
   const diagnosticArtifactDir = join(root, "diagnostic-artifacts");
   const diagnosticTempDir = join(root, "diagnostic-client");
   const diagnosticStateFile = join(root, "diagnostic-state.json");
+  const tlsDir = join(root, "target-tls");
+  const probeCases = ["valid", "wrong-ca", "wrong-host"].map((name) => ({
+    name,
+    artifactDir: join(root, `probe-${name}-artifacts`),
+    tempDir: join(root, `probe-${name}-client`),
+  }));
   mkdirSync(artifactDir, { mode: 0o700 });
   mkdirSync(tempDir, { mode: 0o700 });
   mkdirSync(diagnosticArtifactDir, { mode: 0o700 });
   mkdirSync(diagnosticTempDir, { mode: 0o700 });
+  mkdirSync(tlsDir, { mode: 0o700 });
+  for (const probeCase of probeCases) {
+    mkdirSync(probeCase.artifactDir, { mode: 0o700 });
+    mkdirSync(probeCase.tempDir, { mode: 0o700 });
+  }
   let networkCreated = false;
   let sourceStarted = false;
   let targetStarted = false;
 
   try {
+    const targetCaKey = join(tlsDir, "target-ca.key");
+    const targetCaCert = join(tlsDir, "target-ca.crt");
+    const wrongCaKey = join(tlsDir, "wrong-ca.key");
+    const wrongCaCert = join(tlsDir, "wrong-ca.crt");
+    const serverKey = join(tlsDir, "server.key");
+    const serverRequest = join(tlsDir, "server.csr");
+    const serverCert = join(tlsDir, "server.crt");
+    const serverExtensions = join(tlsDir, "server.ext");
+    writeFileSync(serverExtensions, [
+      "basicConstraints=critical,CA:FALSE",
+      "keyUsage=critical,digitalSignature,keyEncipherment",
+      "extendedKeyUsage=serverAuth",
+      `subjectAltName=DNS:${TARGET_TLS_HOST},DNS:localhost,IP:127.0.0.1`,
+      "",
+    ].join("\n"), { mode: 0o600 });
+    await run("openssl", [
+      "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
+      "-keyout", targetCaKey, "-out", targetCaCert, "-days", "2",
+      "-subj", "/CN=Corgtex PostgreSQL TLS Smoke Root",
+    ], "TARGET_CA_CREATE_FAILED");
+    await run("openssl", [
+      "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
+      "-keyout", wrongCaKey, "-out", wrongCaCert, "-days", "2",
+      "-subj", "/CN=Corgtex Wrong PostgreSQL TLS Smoke Root",
+    ], "WRONG_CA_CREATE_FAILED");
+    await run("openssl", [
+      "req", "-new", "-newkey", "rsa:2048", "-sha256", "-nodes",
+      "-keyout", serverKey, "-out", serverRequest,
+      "-subj", `/CN=${TARGET_TLS_HOST}`,
+    ], "TARGET_CERTIFICATE_REQUEST_FAILED");
+    await run("openssl", [
+      "x509", "-req", "-in", serverRequest, "-CA", targetCaCert, "-CAkey", targetCaKey,
+      "-CAcreateserial", "-out", serverCert, "-days", "2", "-sha256", "-extfile", serverExtensions,
+    ], "TARGET_CERTIFICATE_CREATE_FAILED");
+    for (const file of [targetCaCert, wrongCaCert, serverCert, serverKey]) chmodSync(file, 0o644);
+
     await run("docker", ["network", "create", network], "NETWORK_CREATE_FAILED");
     networkCreated = true;
     await run("docker", [
@@ -124,9 +175,20 @@ const main = async () => {
     sourceStarted = true;
     await run("docker", [
       "run", "--detach", "--name", targetContainer, "--network", network,
+      "--network-alias", TARGET_TLS_HOST,
+      "--network-alias", WRONG_TARGET_TLS_HOST,
       "--publish", `127.0.0.1:${targetPort}:5432`,
       "--env", `POSTGRES_PASSWORD=${TEST_PASSWORD}`,
+      "--mount", `type=bind,source=${tlsDir},target=/tls,readonly`,
+      "--entrypoint", "sh",
       SERVER_IMAGE,
+      "-c", [
+        "cp /tls/server.crt /tmp/corgtex-server.crt",
+        "cp /tls/server.key /tmp/corgtex-server.key",
+        "chown postgres:postgres /tmp/corgtex-server.crt /tmp/corgtex-server.key",
+        "chmod 600 /tmp/corgtex-server.key",
+        "exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/corgtex-server.crt -c ssl_key_file=/tmp/corgtex-server.key",
+      ].join(" && "),
     ], "TARGET_CONTAINER_START_FAILED");
     targetStarted = true;
     await Promise.all([waitForDatabase(sourcePort, "postgres"), waitForDatabase(targetPort, "postgres")]);
@@ -226,21 +288,79 @@ const main = async () => {
       database: "source",
       sslmode: "disable",
     };
+    const targetTlsRootCert = readFileSync(targetCaCert, "utf8");
+    const targetTlsRootCertFingerprints = [new X509Certificate(targetTlsRootCert).fingerprint256];
     const targetAdminConfig = {
       host: "127.0.0.1",
-      dockerHost: targetContainer,
+      dockerHost: TARGET_TLS_HOST,
       dockerPort: 5432,
       port: targetPort,
       user: "postgres",
       password: TEST_PASSWORD,
       database: "postgres",
-      sslmode: "disable",
+      sslmode: "verify-full",
+      targetTlsRootCert,
+      targetTlsRootCertFingerprints,
     };
     const restrictedTargetConfig = {
       ...targetAdminConfig,
       user: "rehearsal_target_operator",
       password: TEST_TARGET_OPERATOR_PASSWORD,
     };
+
+    const runProbeCase = async (probeCase, probeTargetConfig, expectedError) => {
+      const temporaryFiles = [];
+      const clientFiles = writeClientFiles(
+        probeCase.tempDir,
+        sourceConfig,
+        probeTargetConfig,
+        (...paths) => temporaryFiles.push(...paths),
+      );
+      let probeError = null;
+      try {
+        await probeTargetClientConnection({
+          tempDir: probeCase.tempDir,
+          clientFiles,
+          network,
+          artifactDir: probeCase.artifactDir,
+        });
+      } catch (error) {
+        probeError = error?.code;
+      } finally {
+        for (const file of temporaryFiles) unlinkSync(file);
+      }
+      if (probeError !== expectedError) fail("TARGET_TLS_PROBE_RESULT_MISMATCH");
+      if (expectedError === null) {
+        if (readdirSync(probeCase.artifactDir).length !== 0) fail("SUCCESSFUL_TARGET_TLS_PROBE_EMITTED_DIAGNOSTIC");
+        return;
+      }
+      const diagnostic = JSON.parse(readFileSync(join(probeCase.artifactDir, "connection-probe-diagnostic.json"), "utf8"));
+      if (JSON.stringify(diagnostic) !== JSON.stringify({
+        phase: "TARGET_CLIENT_CONNECTION_PROBE",
+        processClass: "CONNECTION_ERROR",
+        category: "UNKNOWN",
+        sqlstate: null,
+        stderrObserved: true,
+        stderrTruncated: false,
+      })) fail("TARGET_TLS_PROBE_DIAGNOSTIC_MISMATCH");
+      const serializedDiagnostic = JSON.stringify(diagnostic);
+      for (const forbidden of [TARGET_TLS_HOST, WRONG_TARGET_TLS_HOST, TEST_PASSWORD, "certificate", "password"]) {
+        if (serializedDiagnostic.includes(forbidden)) fail("TARGET_TLS_PROBE_DIAGNOSTIC_LEAKED_INPUT");
+      }
+    };
+
+    await runProbeCase(probeCases[0], targetAdminConfig, null);
+    const wrongTargetTlsRootCert = readFileSync(wrongCaCert, "utf8");
+    await runProbeCase(probeCases[1], {
+      ...targetAdminConfig,
+      targetTlsRootCert: wrongTargetTlsRootCert,
+      targetTlsRootCertFingerprints: [new X509Certificate(wrongTargetTlsRootCert).fingerprint256],
+    }, "TARGET_CLIENT_CONNECTION_PROBE_FAILED");
+    await runProbeCase(probeCases[2], {
+      ...targetAdminConfig,
+      dockerHost: WRONG_TARGET_TLS_HOST,
+    }, "TARGET_CLIENT_CONNECTION_PROBE_FAILED");
+
     const scratchName = `corgtex_rehearsal_${suffix}_core`;
     const diagnosticScratchName = `corgtex_rehearsal_${suffix}_diagnostic`;
     let liveSequenceAfterArchive = null;
