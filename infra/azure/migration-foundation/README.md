@@ -86,6 +86,15 @@ assignment set must contain exactly that one role. Do not grant RBAC Administrat
 data-plane storage roles for this phase. Revoke Contributor again after the run and
 its cleanup evidence have been verified.
 
+The workflow signs in to the exact Azure tenant without assuming subscription
+discovery has already converged. Before any ARM read or mutation, it performs at most
+four server-refreshed discovery attempts over 75 seconds, requires one enabled match
+for the protected subscription and tenant, selects that subscription, and verifies
+the selected account tuple. Every subsequent resource command is also explicitly
+subscription-bound. Failure to select the exact subscription stops before recovery
+intent, firewall, or database operations; it does not justify subscription-wide
+Reader access.
+
 Configure one transactionally read-only Railway credential per data domain as
 protected environment secrets:
 
