@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 
 const { Client } = pg;
@@ -26,6 +26,7 @@ const { Client } = pg;
 export const POSTGRES_CLIENT_IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const MAX_STATE_BYTES = 64 * 1024;
 const MAX_SOURCE_TLS_ROOT_CERT_BYTES = 16 * 1024;
+const MAX_TARGET_TLS_ROOT_CERT_BYTES = 32 * 1024;
 const MAX_RESTORE_DIAGNOSTIC_LINE_BYTES = 4 * 1024;
 const MAX_RESTORE_STATUS_LINE_BYTES = 128;
 const MAX_COMMAND_STDERR_BYTES = 1024 * 1024;
@@ -35,6 +36,15 @@ const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
 const MAX_POSTGRES_OID = 4_294_967_295n;
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,62}$/u;
 const REQUIRED_DOMAINS = new Set(["core", "ops"]);
+const TARGET_TLS_ROOT_CERT_PATH = fileURLToPath(new URL(
+  "../../infra/azure/migration-foundation/azure-postgres-root-ca.pem",
+  import.meta.url,
+));
+const TARGET_TLS_ROOT_CERT_SHA256 = "00aa10fc3c32eb0d024cd4262dac3d4466dd44aed87fa24d9f2d3fb49977601c";
+const TARGET_TLS_ROOT_CERT_FINGERPRINTS = new Set([
+  "CB:3C:CB:B7:60:31:E5:E0:13:8F:8D:D3:9A:23:F9:DE:47:FF:C3:5E:43:C1:14:4C:EA:27:D4:6A:5A:B1:CB:5F",
+  "C7:41:F7:0F:4B:2A:8D:88:BF:2E:71:C1:41:22:EF:53:EF:10:EB:A0:CF:A5:E6:4C:FA:20:F4:18:85:30:73:E0",
+]);
 const TARGET_CONNECTION_TIMEOUT_MS = 5 * 60 * 1000;
 const TARGET_CONNECTION_RETRY_DELAY_MS = 10 * 1000;
 const LOCALE_PROVIDERS = new Map([
@@ -491,6 +501,68 @@ export const validateSourceTlsRootCertificate = (rawCertificate, now = new Date(
   return `${pem}\n`;
 };
 
+export const validateTargetTlsRootCertificate = (
+  rawCertificate,
+  expectedFingerprints = TARGET_TLS_ROOT_CERT_FINGERPRINTS,
+  now = new Date(),
+) => {
+  if (
+    typeof rawCertificate !== "string"
+    || rawCertificate.length === 0
+    || Buffer.byteLength(rawCertificate, "utf8") > MAX_TARGET_TLS_ROOT_CERT_BYTES
+  ) fail("INVALID_TARGET_TLS_ROOT_CERT");
+  const expected = new Set(expectedFingerprints);
+  if (expected.size === 0 || [...expected].some((fingerprint) => typeof fingerprint !== "string")) {
+    fail("INVALID_TARGET_TLS_ROOT_CERT_FINGERPRINTS");
+  }
+  const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
+  if (!Number.isFinite(nowMs)) fail("INVALID_CERTIFICATE_VALIDATION_TIME");
+  const normalized = rawCertificate.replaceAll("\r\n", "\n");
+  const blocks = normalized.match(/-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/]+={0,2}\n)+-----END CERTIFICATE-----\n/gu);
+  if (blocks === null || blocks.length !== expected.size || blocks.join("") !== normalized) {
+    fail("INVALID_TARGET_TLS_ROOT_CERT");
+  }
+  const fingerprints = new Set();
+  for (const block of blocks) {
+    let certificate;
+    try {
+      certificate = new X509Certificate(block);
+    } catch {
+      fail("INVALID_TARGET_TLS_ROOT_CERT");
+    }
+    const validFromMs = Date.parse(certificate.validFrom);
+    const validToMs = Date.parse(certificate.validTo);
+    if (
+      !certificate.ca
+      || !certificate.checkIssued(certificate)
+      || !certificate.verify(certificate.publicKey)
+      || !Number.isFinite(validFromMs)
+      || !Number.isFinite(validToMs)
+      || validFromMs > nowMs
+      || validToMs <= nowMs
+    ) {
+      fail("INVALID_TARGET_TLS_ROOT_CERT");
+    }
+    fingerprints.add(certificate.fingerprint256);
+  }
+  if (
+    fingerprints.size !== expected.size
+    || [...expected].some((fingerprint) => !fingerprints.has(fingerprint))
+  ) fail("TARGET_TLS_ROOT_CERT_FINGERPRINT_MISMATCH");
+  return normalized;
+};
+
+export const loadTargetTlsRootCertificate = (path = TARGET_TLS_ROOT_CERT_PATH) => {
+  let certificate;
+  try {
+    certificate = readFileSync(path, "utf8");
+  } catch {
+    fail("TARGET_TLS_ROOT_CERT_UNAVAILABLE");
+  }
+  if (sha256(certificate) !== TARGET_TLS_ROOT_CERT_SHA256) fail("TARGET_TLS_ROOT_CERT_DIGEST_MISMATCH");
+  return validateTargetTlsRootCertificate(certificate);
+};
+
 export const targetDatabaseConfigFromEnv = (environment, database, dockerHostOverride = null) => {
   const host = assertNoControlCharacters(environment.TARGET_POSTGRES_HOST, "INVALID_TARGET_HOST");
   const dockerHost = dockerHostOverride === null ? host : assertNoControlCharacters(dockerHostOverride, "INVALID_TARGET_DOCKER_HOST");
@@ -499,7 +571,16 @@ export const targetDatabaseConfigFromEnv = (environment, database, dockerHostOve
   const port = environment.TARGET_POSTGRES_PORT === undefined ? 5432 : Number(environment.TARGET_POSTGRES_PORT);
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail("INVALID_TARGET_PORT");
   assertNoControlCharacters(database, "INVALID_TARGET_DATABASE");
-  return { host, dockerHost, port, user, password, database, sslmode: "verify-full" };
+  return {
+    host,
+    dockerHost,
+    port,
+    user,
+    password,
+    database,
+    sslmode: "verify-full",
+    targetTlsRootCert: loadTargetTlsRootCertificate(),
+  };
 };
 
 export const nodeClientConfig = (config, applicationName, connectionTimeoutMillis = 30_000, queryTimeoutMillis = null) => ({
@@ -520,7 +601,10 @@ export const nodeClientConfig = (config, applicationName, connectionTimeoutMilli
           rejectUnauthorized: true,
           checkServerIdentity: () => undefined,
         }
-      : { rejectUnauthorized: true },
+      : {
+          ca: config.targetTlsRootCert ?? fail("MISSING_TARGET_TLS_ROOT_CERT"),
+          rejectUnauthorized: true,
+        },
 });
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -594,19 +678,27 @@ export const buildPgServiceContents = (source, target) => {
     `user=${serializePgServiceValue(target.user)}`,
     `dbname=${serializePgServiceValue(target.database)}`,
     `sslmode=${serializePgServiceValue(targetServiceSslMode)}`,
-    ...(targetServiceSslMode === "disable" ? [] : ["sslrootcert=system"]),
+    ...(targetServiceSslMode === "disable" ? [] : ["sslrootcert=/work/target-root.crt"]),
     "connect_timeout=30",
     "",
   ].join("\n");
 };
 
-const writeClientFiles = (tempDir, source, target, registerCleanup) => {
+export const writeClientFiles = (tempDir, source, target, registerCleanup) => {
   const serviceFile = assertSafePath(`${tempDir}/pg_service.conf`, tempDir, "INVALID_SERVICE_PATH");
   const passFile = assertSafePath(`${tempDir}/pgpass`, tempDir, "INVALID_PASSFILE_PATH");
   const sourceRootCertFile = source.sslmode === "disable"
     ? null
     : assertSafePath(`${tempDir}/source-root.crt`, tempDir, "INVALID_SOURCE_TLS_ROOT_CERT_PATH");
-  registerCleanup(serviceFile, passFile, ...(sourceRootCertFile === null ? [] : [sourceRootCertFile]));
+  const targetRootCertFile = target.sslmode === "disable"
+    ? null
+    : assertSafePath(`${tempDir}/target-root.crt`, tempDir, "INVALID_TARGET_TLS_ROOT_CERT_PATH");
+  registerCleanup(
+    serviceFile,
+    passFile,
+    ...(sourceRootCertFile === null ? [] : [sourceRootCertFile]),
+    ...(targetRootCertFile === null ? [] : [targetRootCertFile]),
+  );
   const service = buildPgServiceContents(source, target);
   const pass = [
     [source.dockerHost, source.dockerPort ?? source.port, source.database, source.user, source.password].map(pgPassEscape).join(":"),
@@ -619,9 +711,20 @@ const writeClientFiles = (tempDir, source, target, registerCleanup) => {
     writeFileSync(sourceRootCertFile, source.sourceTlsRootCert ?? fail("MISSING_SOURCE_TLS_ROOT_CERT"), { mode: 0o600, flag: "wx" });
     chmodSync(sourceRootCertFile, 0o600);
   }
+  if (targetRootCertFile !== null) {
+    writeFileSync(
+      targetRootCertFile,
+      validateTargetTlsRootCertificate(
+        target.targetTlsRootCert ?? fail("MISSING_TARGET_TLS_ROOT_CERT"),
+        target.targetTlsRootCertFingerprints ?? TARGET_TLS_ROOT_CERT_FINGERPRINTS,
+      ),
+      { mode: 0o600, flag: "wx" },
+    );
+    chmodSync(targetRootCertFile, 0o600);
+  }
   chmodSync(serviceFile, 0o600);
   chmodSync(passFile, 0o600);
-  return { serviceFile, passFile, sourceRootCertFile };
+  return { serviceFile, passFile, sourceRootCertFile, targetRootCertFile };
 };
 
 const dockerClient = async ({
@@ -666,6 +769,82 @@ const dockerClient = async ({
     onFailure,
   });
 };
+
+const targetConnectionProbeDiagnosticFromResults = ({
+  sqlstateResult,
+  status = 1,
+  spawnError = false,
+  signal = null,
+}) => {
+  const processClass = spawnError || signal !== null
+    ? "PROCESS_ERROR"
+    : status === 2
+      ? "CONNECTION_ERROR"
+      : status === 3
+        ? "SCRIPT_ERROR"
+        : "PROCESS_ERROR";
+  const sqlstate = processClass === "SCRIPT_ERROR" && !sqlstateResult.truncated
+    ? sqlstateResult.sqlstate
+    : null;
+  return {
+    phase: "TARGET_CLIENT_CONNECTION_PROBE",
+    processClass,
+    category: categoryFromSqlstate(sqlstate),
+    sqlstate,
+    stderrObserved: sqlstateResult.observed,
+    stderrTruncated: sqlstateResult.truncated,
+  };
+};
+
+export const buildTargetConnectionProbeDiagnostic = ({
+  stderrChunks,
+  status = 1,
+  spawnError = false,
+  signal = null,
+}) => {
+  const sqlstateClassifier = createSqlstateClassifier();
+  for (const chunk of stderrChunks) sqlstateClassifier.consume(chunk);
+  return targetConnectionProbeDiagnosticFromResults({
+    sqlstateResult: sqlstateClassifier.finish(),
+    status,
+    spawnError,
+    signal,
+  });
+};
+
+export const probeTargetClientConnection = async ({
+  tempDir,
+  clientFiles,
+  network,
+  artifactDir,
+}) => dockerClient({
+  tempDir,
+  ...clientFiles,
+  service: "target",
+  args: [
+    "psql",
+    "-X",
+    "--quiet",
+    "--set=ON_ERROR_STOP=1",
+    "--set=VERBOSITY=sqlstate",
+    "--set=SHOW_CONTEXT=never",
+    "--set=ECHO=none",
+    "--dbname=service=target",
+    "--command=SELECT 1",
+  ],
+  code: "TARGET_CLIENT_CONNECTION_PROBE_FAILED",
+  network,
+  stderrClassifier: createSqlstateClassifier(),
+  onFailure: ({ stderr, status, spawnError, signal }) => writePrivateJson(
+    `${artifactDir}/connection-probe-diagnostic.json`,
+    targetConnectionProbeDiagnosticFromResults({
+      sqlstateResult: stderr ?? { sqlstate: null, observed: false, truncated: false },
+      status,
+      spawnError,
+      signal,
+    }),
+  ),
+});
 
 const RESTORE_SECTIONS = ["pre-data", "data", "post-data"];
 const RESTORE_SECTION_SCRIPT = `
@@ -1187,6 +1366,12 @@ export async function runPostgresRestoreRehearsal(options) {
       targetConfig,
       (...paths) => temporaryFiles.push(...paths),
     );
+    await probeTargetClientConnection({
+      tempDir,
+      clientFiles,
+      network: dockerNetwork,
+      artifactDir,
+    });
     const dumpFile = assertSafePath(`${tempDir}/snapshot.dump`, tempDir, "INVALID_DUMP_PATH");
     const archiveTocFile = assertSafePath(`${tempDir}/snapshot.toc`, tempDir, "INVALID_TOC_PATH");
     const sequenceUseListFile = assertSafePath(`${tempDir}/sequence-set.list`, tempDir, "INVALID_SEQUENCE_LIST_PATH");

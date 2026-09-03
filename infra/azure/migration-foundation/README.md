@@ -103,18 +103,31 @@ Each Railway trust-anchor secret contains exactly the matching source service's
 current `root.crt`, retrieved through authenticated Railway access and validated
 against that service's live TLS chain before storage. The runner requires the source
 URL's `sslmode=require` contract but strengthens both Node and PostgreSQL client
-connections to CA-authenticated `verify-ca`; Azure remains system-root
-`verify-full`. Trust anchors are domain-scoped, written only to a mode-0600
+connections to CA-authenticated `verify-ca`; Azure uses explicit-root
+`verify-full`. The target bundle in `azure-postgres-root-ca.pem` contains only the
+two roots currently documented in Microsoft's
+[Azure Database for PostgreSQL TLS guidance](https://learn.microsoft.com/azure/postgresql/security/security-tls-how-to-connect)
+for regions outside China:
+DigiCert Global Root G2 and Microsoft RSA Root Certificate Authority 2017. The
+runner verifies the bundle SHA-256 and both root SHA-256 fingerprints before use,
+writes it to a mode-0600 `target-root.crt`, and never downloads or installs trust
+material at runtime. Trust anchors are domain-scoped, written only to a mode-0600
 runner-temporary file, shredded with the other connection material, and never
 logged or uploaded. Railway CA rotation fails closed until the matching protected
-secret is refreshed.
+secret is refreshed; Azure root rotation fails closed until this public bundle and
+its pinned fingerprints are reviewed and updated from Microsoft's certificate
+authority guidance.
 
 Each run reconfirms the exact 13-resource foundation, non-authoritative tags,
 PostgreSQL 18 posture, empty firewall set, absence of Container Apps, storage
 containers, and data-plane role assignments. It then opens one run-named `/32`
 firewall rule, exports one repeatable-read read-only source snapshot, and binds both
 the immutable PostgreSQL 18.6 `pg_dump` and source evidence to that snapshot. The
-restore always targets a new run-derived database, never the Bicep-managed `corgtex`
+first data-plane action in that exact client image is a no-data `SELECT 1` through the same
+target service file, `verify-full` root bundle, hostname check, and passfile used by
+the restore. A probe failure stops before dump or restore and emits only fixed
+process/category fields in `connection-probe-diagnostic.json` before normal cleanup.
+The restore always targets a new run-derived database, never the Bicep-managed `corgtex`
 database. The workflow preserves the source PostgreSQL 18 locale provider, provider
 locale, ICU rules, encoding, collation, and character classification exactly. It
 requires each database's recorded collation version to match that database runtime's
