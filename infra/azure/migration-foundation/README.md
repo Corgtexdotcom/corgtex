@@ -80,20 +80,25 @@ authorize a cutover. The workflow runs only from exact `main`, uses the existing
 protected `azure-migration-foundation` environment, and serializes both data domains
 because they share one non-authoritative Azure server.
 
-Before a run, temporarily grant the dedicated migration UAMI only `Contributor` at
-the exact rehearsal resource-group scope. Its effective direct, inherited, and group
-assignment set must contain exactly that one role. Do not grant RBAC Administrator or
-data-plane storage roles for this phase. Revoke Contributor again after the run and
-its cleanup evidence have been verified.
+Before a run, temporarily grant the dedicated migration UAMI exactly `Reader` at the
+subscription scope and `Contributor` at the exact rehearsal resource-group scope.
+Reader supplies subscription discovery and read-only control-plane metadata access;
+it has no data actions. The UAMI's effective direct, inherited, and transitive-group
+management assignment set at the rehearsal resource group must contain exactly that
+pair, both unconditional and directly assigned to the service principal. Do not grant
+RBAC Administrator or additional data-plane roles for this phase. Capture both role
+assignment IDs before dispatch, revoke both exact assignments after the run (including
+failed runs), and independently verify their absence after cleanup.
 
 The workflow signs in to the exact Azure tenant without assuming subscription
 discovery has already converged. Before any ARM read or mutation, it performs at most
 four server-refreshed discovery attempts over 75 seconds, requires one enabled match
 for the protected subscription and tenant, selects that subscription, and verifies
 the selected account tuple. Every subsequent resource command is also explicitly
-subscription-bound. Failure to select the exact subscription stops before recovery
-intent, firewall, or database operations; it does not justify subscription-wide
-Reader access.
+subscription-bound. The temporary Reader grant is an explicitly accepted bootstrap
+boundary and must not be used to enumerate or log unrelated subscription inventory.
+Failure to select the exact subscription stops before recovery intent, firewall, or
+database operations and requires revocation before any further correction.
 
 Configure one transactionally read-only Railway credential per data domain as
 protected environment secrets:

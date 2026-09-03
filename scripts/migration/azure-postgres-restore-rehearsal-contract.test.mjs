@@ -90,7 +90,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(readme).toContain("CA-authenticated `verify-ca`");
   });
 
-  it("pins the exact UAMI to one temporary RG-scoped Contributor role", () => {
+  it("pins the exact UAMI to temporary subscription Reader and RG Contributor roles", () => {
     expect(workflow).toContain("--assignee-object-id \"$principal_id\"");
     expect(workflow).toContain("--include-groups");
     expect(workflow).toContain("--include-inherited");
@@ -98,6 +98,11 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).toContain("--mode=principal");
     expect(validator).toContain('status: "EXACT_REHEARSAL_PRINCIPAL"');
     expect(validator).toContain("UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT");
+    expect(validator).toContain('const READER_ROLE_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"');
+    expect(validator).toContain("document.assignments.length !== 2");
+    expect(validator).toContain('kind: "reader", scope: subscriptionScope');
+    expect(validator).toContain('kind: "contributor", scope: expectedScope');
+    expect(validator).toContain('effectiveRoleAssignmentCount: 2');
     expect(validator).not.toContain("RBAC_ADMIN_ROLE_ID");
   });
 
@@ -128,12 +133,16 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
 
     const rehearsalSelection = workflow.indexOf("Select and verify the exact Azure subscription\n");
     const authorityValidation = workflow.indexOf("Verify exact temporary rehearsal authority and foundation inventory");
+    const persistRecoveryIntent = workflow.indexOf("Persist recovery intent before any temporary mutation");
     const recoverySelection = workflow.indexOf("Select and verify the exact Azure subscription for recovery\n");
     const recoveryValidation = workflow.indexOf("Validate recovery authority and exact cleanup target");
+    const recoveryScratchDelete = workflow.indexOf("Remove the exact recovery scratch database");
     expect(rehearsalSelection).toBeGreaterThan(0);
     expect(rehearsalSelection).toBeLessThan(authorityValidation);
+    expect(authorityValidation).toBeLessThan(persistRecoveryIntent);
     expect(recoverySelection).toBeGreaterThan(0);
     expect(recoverySelection).toBeLessThan(recoveryValidation);
+    expect(recoveryValidation).toBeLessThan(recoveryScratchDelete);
 
     const subscriptionScopedCommands = /\baz (?:account get-access-token|role assignment list|group show|resource list|postgres flexible-server|identity show|rest)\b/u;
     const lines = workflow.split("\n");

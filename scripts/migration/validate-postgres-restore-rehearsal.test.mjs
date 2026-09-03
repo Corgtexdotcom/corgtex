@@ -13,8 +13,11 @@ const PRINCIPAL_ID = "22222222-2222-4222-8222-222222222222";
 const SUBSCRIPTION_ID = "33333333-3333-4333-8333-333333333333";
 const RESOURCE_GROUP = "rg-corgtex-migration-rehearsal";
 const SCOPE = `/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}`;
+const SUBSCRIPTION_SCOPE = `/subscriptions/${SUBSCRIPTION_ID}`;
 const CONTRIBUTOR_ROLE_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c";
-const ROLE_ASSIGNMENT_ID = "44444444-4444-4444-8444-444444444444";
+const READER_ROLE_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7";
+const CONTRIBUTOR_ASSIGNMENT_ID = "44444444-4444-4444-8444-444444444444";
+const READER_ASSIGNMENT_ID = "55555555-5555-4555-8555-555555555555";
 const POSTGRES_SERVER = "corgtex-mig-reh-restore-pg";
 const POSTGRES_HOST = `${POSTGRES_SERVER}.postgres.database.azure.com`;
 const POSTGRES_RESOURCE_ID = `${SCOPE}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${POSTGRES_SERVER}`;
@@ -98,14 +101,24 @@ const principalInput = () => ({
   principalId: PRINCIPAL_ID,
   subscriptionId: SUBSCRIPTION_ID,
   resourceGroup: RESOURCE_GROUP,
-  assignments: [{
-    id: `${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGNMENT_ID}`,
-    scope: SCOPE,
-    principalId: PRINCIPAL_ID,
-    principalType: "ServicePrincipal",
-    roleDefinitionId: `/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Authorization/roleDefinitions/${CONTRIBUTOR_ROLE_ID}`,
-    condition: null,
-  }],
+  assignments: [
+    {
+      id: `${SUBSCRIPTION_SCOPE}/providers/Microsoft.Authorization/roleAssignments/${READER_ASSIGNMENT_ID}`,
+      scope: SUBSCRIPTION_SCOPE,
+      principalId: PRINCIPAL_ID,
+      principalType: "ServicePrincipal",
+      roleDefinitionId: `${SUBSCRIPTION_SCOPE}/providers/Microsoft.Authorization/roleDefinitions/${READER_ROLE_ID}`,
+      condition: null,
+    },
+    {
+      id: `${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${CONTRIBUTOR_ASSIGNMENT_ID}`,
+      scope: SCOPE,
+      principalId: PRINCIPAL_ID,
+      principalType: "ServicePrincipal",
+      roleDefinitionId: `${SUBSCRIPTION_SCOPE}/providers/Microsoft.Authorization/roleDefinitions/${CONTRIBUTOR_ROLE_ID}`,
+      condition: null,
+    },
+  ],
 });
 
 const recoveryDocument = () => {
@@ -150,19 +163,32 @@ const recoveryDocument = () => {
 };
 
 describe("validateRehearsalPrincipal", () => {
-  it("accepts only the pinned UAMI with one exact RG-scoped Contributor assignment", () => {
+  it("accepts only the pinned UAMI with exact subscription Reader and RG Contributor assignments", () => {
     const receipt = validateRehearsalPrincipal(principalInput(), { expectedClientSha256: sha256(CLIENT_ID) });
-    expect(receipt).toMatchObject({ status: "EXACT_REHEARSAL_PRINCIPAL", effectiveRoleAssignmentCount: 1 });
+    expect(receipt).toMatchObject({ status: "EXACT_REHEARSAL_PRINCIPAL", effectiveRoleAssignmentCount: 2 });
     expect(JSON.stringify(receipt)).not.toContain(CLIENT_ID);
     expect(JSON.stringify(receipt)).not.toContain(PRINCIPAL_ID);
     expect(JSON.stringify(receipt)).not.toContain(RESOURCE_GROUP);
   });
 
+  it("accepts the exact role pair irrespective of Azure response order", () => {
+    const input = principalInput();
+    input.assignments.reverse();
+    expect(() => validateRehearsalPrincipal(input, { expectedClientSha256: sha256(CLIENT_ID) })).not.toThrow();
+  });
+
   it.each([
-    ["duplicate effective assignment", (value) => value.assignments.push(clone(value.assignments[0])), "UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT"],
-    ["foreign scope", (value) => { value.assignments[0].scope = `${SCOPE}-foreign`; }, "INHERITED_OR_FOREIGN_ROLE_ASSIGNMENT"],
-    ["foreign target assignment id", (value) => { value.assignments[0].id = value.assignments[0].id.replace(RESOURCE_GROUP, `${RESOURCE_GROUP}-foreign`); }, "ASSIGNMENT_ID_SCOPE_MISMATCH"],
-    ["conditioned Contributor", (value) => { value.assignments[0].condition = "true"; }, "UNEXPECTED_CONTRIBUTOR_CONDITION"],
+    ["missing effective assignment", (value) => value.assignments.pop(), "UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT"],
+    ["additional effective assignment", (value) => value.assignments.push(clone(value.assignments[0])), "UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT"],
+    ["duplicate expected role", (value) => { value.assignments[1] = { ...clone(value.assignments[0]), id: value.assignments[0].id.replace(READER_ASSIGNMENT_ID, CONTRIBUTOR_ASSIGNMENT_ID) }; }, "UNEXPECTED_ROLE_DEFINITION"],
+    ["Reader at RG scope", (value) => { value.assignments[0].scope = SCOPE; }, "INHERITED_OR_FOREIGN_ROLE_ASSIGNMENT"],
+    ["Contributor at subscription scope", (value) => { value.assignments[1].scope = SUBSCRIPTION_SCOPE; }, "INHERITED_OR_FOREIGN_ROLE_ASSIGNMENT"],
+    ["foreign target assignment id", (value) => { value.assignments[1].id = value.assignments[1].id.replace(RESOURCE_GROUP, `${RESOURCE_GROUP}-foreign`); }, "ASSIGNMENT_ID_SCOPE_MISMATCH"],
+    ["conditioned Reader", (value) => { value.assignments[0].condition = "true"; }, "UNEXPECTED_READER_CONDITION"],
+    ["conditioned Contributor", (value) => { value.assignments[1].condition = "true"; }, "UNEXPECTED_CONTRIBUTOR_CONDITION"],
+    ["group assignment", (value) => { value.assignments[0].principalId = "66666666-6666-4666-8666-666666666666"; value.assignments[0].principalType = "Group"; }, "ROLE_PRINCIPAL_MISMATCH"],
+    ["non-service principal type", (value) => { value.assignments[0].principalType = "Group"; }, "ROLE_PRINCIPAL_TYPE_MISMATCH"],
+    ["foreign role", (value) => { value.assignments[0].roleDefinitionId = `${SUBSCRIPTION_SCOPE}/providers/Microsoft.Authorization/roleDefinitions/77777777-7777-4777-8777-777777777777`; }, "UNEXPECTED_ROLE_DEFINITION"],
   ])("rejects %s", (_label, mutate, code) => {
     const input = principalInput();
     mutate(input);
