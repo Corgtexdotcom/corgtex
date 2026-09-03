@@ -1039,11 +1039,20 @@ const main = async () => {
     if (!equalConstraintDiagnostic.semanticEqual || equalConstraintDiagnostic.mismatchFields.length !== 0) {
       fail("CONSTRAINT_CATALOG_PARITY_FAILED");
     }
-    const verifyKnownAssociativeStructure = async () => {
-      const clients = [new Client(config(sourcePort, "source")), new Client(config(targetPort, scratchName))];
+    const verifyKnownAssociativeStructure = async (libc = false) => {
+      const fixtureDatabase = "check_structure_libc";
+      const admins = libc ? [new Client(config(sourcePort, "postgres")), new Client(config(targetPort, "postgres"))] : [];
+      const clients = [new Client(config(sourcePort, libc ? fixtureDatabase : "source")),
+        new Client(config(targetPort, libc ? fixtureDatabase : scratchName))];
       const captures = [];
       const entries = [];
+      let simulatedVersionCapture;
       try {
+        for (const admin of admins) {
+          await admin.connect();
+          await admin.query(`CREATE DATABASE ${fixtureDatabase} TEMPLATE template0 ENCODING 'UTF8'
+            LOCALE_PROVIDER 'libc' LC_COLLATE 'en_US.utf8' LC_CTYPE 'en_US.utf8'`);
+        }
         for (let side = 0; side < clients.length; side += 1) {
           const client = clients[side];
           await client.connect();
@@ -1066,12 +1075,44 @@ const main = async () => {
           if (!entry) fail("ASSOCIATIVE_FIXTURE_MISSING");
           entries.push(entry);
           captures.push(await captureKnownCheckStructure(client, entry));
+          if (libc && side === 1) {
+            // Synthetic version skew only: real PG18 trees/catalogs and same-snapshot
+            // queries, but no second OS build and no persisted catalog mutation.
+            simulatedVersionCapture = await captureKnownCheckStructure({
+              async query(sql, params) {
+                const result = await client.query(sql, params);
+                if (sql.includes("WITH requested")) {
+                  for (const row of result.rows) {
+                    if (row.kind === "database_collation") {
+                      row.identity[6] = "synthetic-other-version";
+                      row.identity[7] = "synthetic-other-version";
+                    }
+                    if (row.kind === "collation") row.identity[10] = "synthetic-other-version";
+                  }
+                }
+                return result;
+              },
+            }, entry);
+          }
           await client.query("COMMIT");
         }
         const candidate = { source: entries[0], destination: entries[1] };
         const proof = compareKnownCheckStructure(captures[0], captures[1], candidate, "MATCH");
         if (proof.status !== "ASSOCIATIVE_GROUPING_ONLY" || proof.originalEqual || !proof.canonicalEqual || !proof.bindingsEqual) {
+          process.stderr.write(`${JSON.stringify({ fixture: libc ? "LIBC" : "BUILTIN", captures, proof })}\n`);
           fail("ASSOCIATIVE_FIXTURE_PROOF_FAILED");
+        }
+        if (!proof.operationsSupported) fail("ASSOCIATIVE_FIXTURE_OPERATIONS_UNSUPPORTED");
+        if (proof.defaultCollationCurrentLibc !== libc) fail("ASSOCIATIVE_FIXTURE_DEFAULT_COLLATION_FAILED");
+        if (proof.collationVersionOnly || proof.versionDriftAssessment !== "UNPROVEN") fail("ASSOCIATIVE_FIXTURE_EQUAL_BINDINGS_FAILED");
+        if (libc) {
+          const skew = compareKnownCheckStructure(captures[0], simulatedVersionCapture, candidate, "MATCH");
+          if (skew.status !== "STRUCTURALLY_DIFFERENT" || skew.bindingsEqual || !skew.collationVersionOnly
+            || skew.versionDriftAssessment !== "VERSION_DRIFT_IRRELEVANT_TO_SUPPORTED_CHECK"
+            || skew.bindingDifferences.COLLATION.fields.ACTUAL_VERSION !== 1
+            || skew.bindingDifferences.DATABASE_COLLATION.fields.VERSION !== 1
+            || skew.bindingDifferences.DATABASE_COLLATION.fields.ACTUAL_VERSION !== 1) fail("VERSION_SKEW_FIXTURE_FAILED");
+          if (/synthetic-other-version|en_US|pg_catalog|point-/u.test(JSON.stringify(skew))) fail("VERSION_SKEW_FIXTURE_LEAKED");
         }
         const serialized = JSON.stringify(proof);
         if (/point-|BOOLEXPR|OPEXPR|CONST|VAR|conbin/u.test(serialized)) fail("ASSOCIATIVE_FIXTURE_LEAKED");
@@ -1081,9 +1122,14 @@ const main = async () => {
           await client.query('DROP TABLE IF EXISTS "ConstitutionSourceReference"').catch(() => {});
           await client.end().catch(() => {});
         }
+        for (const admin of admins) {
+          await admin.query(`DROP DATABASE IF EXISTS ${fixtureDatabase}`).catch(() => {});
+          await admin.end().catch(() => {});
+        }
       }
     };
     await verifyKnownAssociativeStructure();
+    await verifyKnownAssociativeStructure(true);
     const timezoneConstraint = [...sourceConstraintManifest.values()].find((entry) => {
       try {
         return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_timezone_check";

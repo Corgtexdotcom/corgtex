@@ -199,6 +199,24 @@ that is an out-of-shape diagnostic result, not evidence of different semantics.
 It discards only validated numeric parser locations; it never reorders,
 deduplicates, folds, or normalizes leaves, casts, operators, functions, collations,
 or columns. Trees, bindings, constants, and canonical forms remain process-private.
+The binding diagnostic validates a fixed schema and compares each reference by
+class and OID in memory. It emits only fixed per-class missing/extra/changed counts
+and per-field difference counts, including type I/O, operator/function, attribute,
+collation, and same-snapshot database-collation metadata. `collationVersionOnly`
+requires identical reference sets and differences exclusively in recorded/actual
+collation-version fields; it is false for equality or any other difference.
+A separate assessment admits only the known builtin integer comparisons,
+deterministic text equality, text concatenation, and int4-to-text I/O, with matching
+non-version bindings and the existing grouping-shape gate. Default collation is
+resolved through the captured database metadata: both databases must have matching
+UTF8/libc locale definitions and internally current recorded/actual versions.
+Only then may it report `VERSION_DRIFT_IRRELEVANT_TO_SUPPORTED_CHECK`; other cases
+remain `UNPROVEN`. This says nothing about other collation-dependent expressions.
+Even a proven assessment preserves `bindingsEqual: false` and strict schema-parity
+failure. It does not authorize normalization, source correction, or cutover.
+The synthetic smoke uses real PG18 catalog reads for builtin and libc databases;
+its version-skew case substitutes only in-memory fixture versions, not stored
+catalogs or production evidence.
 Unsupported syntax, non-builtin executable references, limits, binding differences,
 or malformed trees fail closed. The source candidate may also be rebound by its full
 logical identity in a fresh, short read-only transaction after its complete

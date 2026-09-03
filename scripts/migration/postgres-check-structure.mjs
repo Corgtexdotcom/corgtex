@@ -155,7 +155,151 @@ const prepare = (tree) => {
     ]) };
   };
   const canonical = visit(root);
-  return { canonical: JSON.stringify(canonical), original: JSON.stringify(root), nodes, flattened, refs };
+  return { canonical: JSON.stringify(canonical), original: JSON.stringify(root), root, nodes, flattened, refs };
+};
+
+// This is also the complete public field vocabulary. Never derive output keys from catalog values.
+const bindingFields = Object.fromEntries(Object.entries({
+  type: "NAMESPACE:s NAME:s KIND:s LENGTH:n BY_VALUE:b CATEGORY:s COLLATION:n INPUT_NAMESPACE:s INPUT_NAME:s INPUT_SOURCE:s INPUT_BINARY:s? INPUT_LANGUAGE:s OUTPUT_NAMESPACE:s OUTPUT_NAME:s OUTPUT_SOURCE:s OUTPUT_BINARY:s? OUTPUT_LANGUAGE:s",
+  operator: "NAMESPACE:s NAME:s KIND:s LEFT_TYPE:n RIGHT_TYPE:n RESULT_TYPE:n FUNCTION:n",
+  function: "NAMESPACE:s NAME:s ARGUMENT_TYPES:s RESULT_TYPE:n SOURCE:s BINARY:s? LANGUAGE:s KIND:s VOLATILITY:s STRICT:b RETURNS_SET:b SECURITY_DEFINER:b CONFIG:a?",
+  collation: "NAMESPACE:s NAME:s PROVIDER:s DETERMINISTIC:b ENCODING:n COLLATE:s? CTYPE:s? LOCALE:s? ICU_RULES:s? VERSION:s? ACTUAL_VERSION:s?",
+  attribute: "NAMESPACE:s TABLE:s NAME:s TYPE:n TYPMOD:n COLLATION:n",
+  database_collation: "ENCODING:s PROVIDER:s COLLATE:s CTYPE:s LOCALE:s? ICU_RULES:s? VERSION:s? ACTUAL_VERSION:s?",
+}).map(([kind, schema]) => [kind, schema.split(" ").map((field) => field.split(":"))]));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const versionField = (kind, name) => ["collation", "database_collation"].includes(kind)
+  && ["VERSION", "ACTUAL_VERSION"].includes(name);
+const validateBindings = (rows, references) => {
+  if (!Array.isArray(rows) || rows.length !== references.length) reject();
+  if (Buffer.byteLength(JSON.stringify(rows), "utf8") > 65_536) reject("LIMIT_EXCEEDED");
+  const requested = new Set(references.map(({ kind, oid }) => `${kind}:${oid}`));
+  const bindings = new Map();
+  for (const row of rows) {
+    const key = `${row.kind}:${row.oid}`;
+    if (!same(Object.keys(row).sort(), ["identity", "kind", "oid"]) || !requested.has(key)
+      || bindings.has(key) || typeof row.oid !== "string" || !/^\d+$/u.test(row.oid)) reject();
+    const schema = bindingFields[row.kind];
+    if (!Array.isArray(row.identity) || row.identity.length !== schema.length) reject();
+    for (let i = 0; i < schema.length; i += 1) {
+      const type = schema[i][1];
+      const value = row.identity[i];
+      if (value === null && type.endsWith("?")) continue;
+      const string = (v) => typeof v === "string" && Buffer.byteLength(v, "utf8") <= 4096;
+      if (!(type.startsWith("s") ? string(value) : type === "n" ? Number.isSafeInteger(value)
+        : type === "b" ? typeof value === "boolean"
+          : Array.isArray(value) && value.length <= 64 && value.every(string))) reject();
+    }
+    // Copy so a client's row buffers cannot change a completed private capture.
+    bindings.set(key, structuredClone(row.identity));
+  }
+  return bindings;
+};
+
+const compareBindings = (left, right) => {
+  const classes = {};
+  let referenceSetsEqual = true;
+  let differences = 0;
+  let nonVersionDifferences = 0;
+  for (const [kind, schema] of Object.entries(bindingFields)) {
+    const counts = { missing: 0, extra: 0, changed: 0, fields: Object.fromEntries(schema.map(([name]) => [name, 0])) };
+    const keys = new Set([...left.keys(), ...right.keys()].filter((key) => key.startsWith(`${kind}:`)));
+    for (const key of keys) {
+      const a = left.get(key);
+      const b = right.get(key);
+      if (!a || !b) {
+        counts[a ? "missing" : "extra"] += 1;
+        referenceSetsEqual = false;
+        continue;
+      }
+      let changed = false;
+      schema.forEach(([name], i) => {
+        if (same(a[i], b[i])) return;
+        counts.fields[name] += 1;
+        differences += 1;
+        if (!versionField(kind, name)) nonVersionDifferences += 1;
+        changed = true;
+      });
+      if (changed) counts.changed += 1;
+    }
+    classes[kind.toUpperCase()] = counts;
+  }
+  return {
+    classes, referenceSetsEqual,
+    bindingsEqual: referenceSetsEqual && differences === 0,
+    nonVersionBindingsEqual: referenceSetsEqual && nonVersionDifferences === 0,
+    collationVersionOnly: referenceSetsEqual && differences > 0 && nonVersionDifferences === 0,
+  };
+};
+
+// Narrow PG18 builtin vocabulary, not a general SQL-equivalence engine. The type
+// I/O bindings cover the only admitted coercion (int4out -> textin).
+const supportedTypes = new Map([
+  [16, ["bool", 1, true, "B", 0, "boolin", "boolout"]],
+  [23, ["int4", 4, true, "N", 0, "int4in", "int4out"]],
+  [25, ["text", -1, false, "S", 100, "textin", "textout"]],
+]);
+const supportedOperators = new Map([
+  [525, [">=", 23, 16, 150, "int4ge"]],
+  [523, ["<=", 23, 16, 149, "int4le"]],
+  [98, ["=", 25, 16, 67, "texteq"]],
+  [654, ["||", 25, 25, 1258, "textcat"]],
+]);
+const supportedOperations = ({ root, bindings }) => {
+  const bound = (kind, oid, expected) => same(bindings.get(`${kind}:${oid}`), expected);
+  for (const [oid, [name, length, byValue, category, collation, input, output]] of supportedTypes) {
+    if (!bound("type", oid, ["pg_catalog", name, "b", length, byValue, category, collation,
+      "pg_catalog", input, input, null, "internal", "pg_catalog", output, output, null, "internal"])) return false;
+  }
+  for (const [oid, [name, input, output, fn, source]] of supportedOperators) {
+    if (!bound("operator", oid, ["pg_catalog", name, "b", input, input, output, fn])
+      || !bound("function", fn, ["pg_catalog", source, `${input} ${input}`, output, source, null,
+        "internal", "f", "i", true, false, false, null])) return false;
+  }
+  const visit = (node) => {
+    const entries = new Map(node.entries);
+    const one = (key) => entries.get(key)?.[0];
+    const n = (key) => Number(one(key));
+    if (node.tag === "BOOLEXPR") {
+      return one("boolop") === "and" && one("args").items.every((child) => visit(child) === 16) ? 16 : null;
+    }
+    if (node.tag === "VAR") {
+      const type = n("vartype");
+      const collation = type === 25 ? 100 : 0;
+      const attr = bindings.get(`attribute:${n("varattno")}`);
+      return [23, 25].includes(type) && n("varcollid") === collation && attr?.[0] === "public"
+        && attr[1] === "ConstitutionSourceReference" && same(attr.slice(3), [type, -1, collation]) ? type : null;
+    }
+    if (node.tag === "CONST") {
+      const type = n("consttype");
+      const expected = supportedTypes.get(type);
+      return [23, 25].includes(type) && n("constcollid") === expected[4]
+        && n("consttypmod") === -1 && n("constlen") === expected[1]
+        && one("constbyval") === String(expected[2]) ? type : null;
+    }
+    if (node.tag === "COERCEVIAIO") {
+      return n("resulttype") === 25 && n("resultcollid") === 100 && visit(one("arg")) === 23 ? 25 : null;
+    }
+    if (node.tag === "OPEXPR") {
+      const op = supportedOperators.get(n("opno"));
+      if (!op) return null;
+      const [, input, output, fn] = op;
+      return n("opfuncid") === fn && n("opresulttype") === output
+        && n("opcollid") === (output === 25 ? 100 : 0) && n("inputcollid") === (input === 25 ? 100 : 0)
+        && one("args").items.every((child) => visit(child) === input) ? output : null;
+    }
+    return null;
+  };
+  return visit(root) === 16;
+};
+
+const currentDefaultLibc = ({ bindings, refs }) => {
+  if (!same([...refs.collation], [100])) return false;
+  const db = bindings.get("database_collation:0");
+  const collation = bindings.get("collation:100");
+  return db[0] === "UTF8" && db[1] === "c" && db[2].length > 0 && db[3].length > 0
+    && db[4] === null && db[5] === null && typeof db[6] === "string" && db[6].length > 0 && db[6] === db[7]
+    && same(collation, ["pg_catalog", "default", "d", true, -1, null, null, null, null, null, db[7]]);
 };
 
 // Explicit per-reference catalog bindings, including each type's I/O implementation.
@@ -166,7 +310,7 @@ const bindingsSql = `
     SELECT r.kind, r.oid::text AS oid,
       CASE r.kind
         WHEN 'type' THEN (SELECT jsonb_build_array(n.nspname,t.typname,t.typtype,t.typlen,t.typbyval,
-          t.typcategory,t.typcollation,ni.nspname,pi.proname,pi.prosrc,pi.probin,li.lanname,
+          t.typcategory,t.typcollation::bigint,ni.nspname,pi.proname,pi.prosrc,pi.probin,li.lanname,
           no.nspname,po.proname,po.prosrc,po.probin,lo.lanname)
           FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
           JOIN pg_proc pi ON pi.oid=t.typinput JOIN pg_namespace ni ON ni.oid=pi.pronamespace
@@ -175,10 +319,11 @@ const bindingsSql = `
           JOIN pg_language lo ON lo.oid=po.prolang
           WHERE t.oid=r.oid AND n.nspname='pg_catalog' AND ni.nspname='pg_catalog' AND no.nspname='pg_catalog'
             AND pi.oid<16384 AND po.oid<16384 AND li.lanname='internal' AND lo.lanname='internal')
-        WHEN 'operator' THEN (SELECT jsonb_build_array(n.nspname,o.oprname,o.oprkind,o.oprleft,o.oprright,o.oprresult,o.oprcode::oid)
+        WHEN 'operator' THEN (SELECT jsonb_build_array(n.nspname,o.oprname,o.oprkind,
+          o.oprleft::bigint,o.oprright::bigint,o.oprresult::bigint,o.oprcode::oid::bigint)
           FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace
           WHERE o.oid=r.oid AND n.nspname='pg_catalog')
-        WHEN 'function' THEN (SELECT jsonb_build_array(n.nspname,p.proname,p.proargtypes::text,p.prorettype,
+        WHEN 'function' THEN (SELECT jsonb_build_array(n.nspname,p.proname,p.proargtypes::text,p.prorettype::bigint,
           p.prosrc,p.probin,l.lanname,p.prokind,p.provolatile,p.proisstrict,p.proretset,p.prosecdef,p.proconfig)
           FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
           WHERE p.oid=r.oid AND n.nspname='pg_catalog' AND l.lanname='internal')
@@ -186,9 +331,12 @@ const bindingsSql = `
           c.collencoding,c.collcollate,c.collctype,c.colllocale,c.collicurules,c.collversion,pg_collation_actual_version(c.oid))
           FROM pg_collation c JOIN pg_namespace n ON n.oid=c.collnamespace
           WHERE c.oid=r.oid AND n.nspname='pg_catalog')
-        WHEN 'attribute' THEN (SELECT jsonb_build_array(n.nspname,t.relname,a.attname,a.atttypid,a.atttypmod,a.attcollation)
+        WHEN 'attribute' THEN (SELECT jsonb_build_array(n.nspname,t.relname,a.attname,a.atttypid::bigint,a.atttypmod,a.attcollation::bigint)
           FROM pg_attribute a JOIN pg_class t ON t.oid=a.attrelid JOIN pg_namespace n ON n.oid=t.relnamespace
           WHERE a.attrelid=$3::oid AND a.attnum=r.oid::int AND NOT a.attisdropped AND a.attnum>0)
+        WHEN 'database_collation' THEN (SELECT jsonb_build_array(pg_encoding_to_char(d.encoding),d.datlocprovider,
+          d.datcollate,d.datctype,d.datlocale,d.daticurules,d.datcollversion,pg_database_collation_actual_version(d.oid))
+          FROM pg_database d WHERE d.datname=current_database())
       END AS identity FROM requested r
   ) SELECT kind,oid,CASE WHEN octet_length(identity::text)<=4096 THEN identity END AS identity
     FROM bindings ORDER BY kind COLLATE "C", oid::bigint
@@ -218,12 +366,13 @@ export async function captureKnownCheckStructure(client, entry) {
     if (query.rows[0].bytes > 262_144) reject("LIMIT_EXCEEDED");
     const prepared = prepare(query.rows[0].tree);
     const references = Object.entries(prepared.refs).flatMap(([kind, ids]) => [...ids].map((oid) => ({ kind, oid })));
+    // Captured inside the caller's same read-only snapshot, never a later reconnect.
+    references.push({ kind: "database_collation", oid: 0 });
     if (references.length > 256) reject("LIMIT_EXCEEDED");
     const bindings = await client.query(bindingsSql, [references.map((r) => r.kind), references.map((r) => r.oid), query.rows[0].relation_oid]);
-    if (bindings.rows.length !== references.length || bindings.rows.some((row) => !Array.isArray(row.identity))) reject();
-    if (Buffer.byteLength(JSON.stringify(bindings.rows), "utf8") > 65_536) reject("LIMIT_EXCEEDED");
+    const validatedBindings = validateBindings(bindings.rows, references);
     result = Object.freeze({ status: "CAPTURED" });
-    privateCaptures.set(result, { ...prepared, bindings: JSON.stringify(bindings.rows) });
+    privateCaptures.set(result, { ...prepared, bindings: validatedBindings });
   } catch (error) {
     result = { status: error instanceof StructureError ? error.status : "UNAVAILABLE" };
   } finally {
@@ -250,13 +399,21 @@ export function compareKnownCheckStructure(source, destination, candidate, serve
     return status([source?.status, destination?.status].includes("LIMIT_EXCEEDED") ? "LIMIT_EXCEEDED"
       : [source?.status, destination?.status].includes("NOT_ELIGIBLE") ? "NOT_ELIGIBLE" : "UNAVAILABLE");
   }
-  const bindingsEqual = left.bindings === right.bindings;
+  const comparison = compareBindings(left.bindings, right.bindings);
+  const { bindingsEqual, nonVersionBindingsEqual, collationVersionOnly, referenceSetsEqual } = comparison;
   const canonicalEqual = left.canonical === right.canonical;
   const originalEqual = left.original === right.original;
+  const groupingShape = canonicalEqual && !originalEqual && left.flattened !== right.flattened;
+  const operationsSupported = supportedOperations(left) && supportedOperations(right);
+  const defaultCollationCurrentLibc = currentDefaultLibc(left) && currentDefaultLibc(right);
   return {
-    status: bindingsEqual && canonicalEqual && !originalEqual && left.flattened !== right.flattened
+    status: bindingsEqual && groupingShape
       ? "ASSOCIATIVE_GROUPING_ONLY" : "STRUCTURALLY_DIFFERENT",
     bindingsEqual, canonicalEqual, originalEqual,
+    bindingDifferences: comparison.classes, referenceSetsEqual, nonVersionBindingsEqual, collationVersionOnly,
+    operationsSupported, defaultCollationCurrentLibc,
+    versionDriftAssessment: collationVersionOnly && groupingShape && operationsSupported && defaultCollationCurrentLibc
+      ? "VERSION_DRIFT_IRRELEVANT_TO_SUPPORTED_CHECK" : "UNPROVEN",
     sourceNodes: left.nodes, destinationNodes: right.nodes,
     sourceFlattened: left.flattened, destinationFlattened: right.flattened,
   };
