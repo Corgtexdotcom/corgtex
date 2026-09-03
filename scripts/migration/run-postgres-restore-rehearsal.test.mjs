@@ -581,12 +581,62 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ["private_column = ANY (private_array)", "other_column = ANY (private_array)", "COLUMN_REFERENCE"],
       ["private_column = ALL (private_array)", "other_column = ALL (private_array)", "COLUMN_REFERENCE"],
       ["private_column OPERATOR(pg_catalog.>) 0", "private_column OPERATOR(pg_catalog.<) 0", "OPERATOR"],
-      ["private_column::numeric(10, 2)", "private_column::varchar(10)", "BUILTIN_TYPE"],
+      ["private_column::numeric(10, 2)", "other_column::numeric(10, 2)", "COLUMN_REFERENCE"],
     ])("does not infer function spans from ordinary or operator contexts", (source, destination, category) => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
       expect(edit.status).toBe("UNIQUE");
       expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
       expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::character varying(10)", "private_column::character(10)"],
+      ["private_column::bit varying(8)", "private_column::bit(8)"],
+      ["private_column::CHARACTER VARYING(10)", "private_column::CHARACTER(10)"],
+      ["private_column::character varying", "private_column::character"],
+      ["private_column::character varying(10)[]", "private_column::character(10)[]"],
+    ])("classifies PG18 multiword built-in type edits without values", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it("keeps a multiword built-in typmod edit semantic", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("private_column::character varying(10)"),
+        tokenizeSchemaDump("private_column::character varying(11)"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.BUILTIN_TYPE + edit.destinationOnly.BUILTIN_TYPE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it.each([
+      ['private_column::"character" varying(10)', 'other_column::"character" varying(10)'],
+      ["private_column::character varying(10", "other_column::character varying(10"],
+      ["private_column::app.varying(10)", "other_column::app.varying(10)"],
+      ["private_column::custom varying(10)", "other_column::custom varying(10)"],
+    ])("fails closed for unsupported cast type contexts", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["varying(private_column)", "other(private_column)"],
+      ["private_schema.varying(private_column)", "other_schema.varying(private_column)"],
+      ['"varying"(private_column)', '"other"(private_column)'],
+    ])("keeps ordinary functions named varying in FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBeGreaterThan(0);
+      expect(edit.destinationOnly.FUNCTION).toBeGreaterThan(0);
       expect(JSON.stringify(edit)).not.toContain("private");
     });
 

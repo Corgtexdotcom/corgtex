@@ -2187,6 +2187,9 @@ const setCheckContextCategory = (categories, indexes, category) => {
   for (const index of indexes) categories.set(index, resolvedCategory);
 };
 
+const isUnquotedCheckWord = (token, word) => token?.domain === "DDL_TOKEN"
+  && new RegExp(`^${word}$`, "iu").test(token.value);
+
 const checkContextualTokenCategories = (tokens) => {
   const categories = new Map();
   for (let index = 0; index < tokens.length; index += 1) {
@@ -2213,6 +2216,22 @@ const checkContextualTokenCategories = (tokens) => {
     }
     setCheckContextCategory(categories, span, "COLLATION");
   }
+  for (let castIndex = 0; castIndex < tokens.length; castIndex += 1) {
+    if (tokens[castIndex]?.domain !== "DDL_TOKEN" || tokens[castIndex].value !== "::") continue;
+    const first = tokens[castIndex + 1];
+    const second = tokens[castIndex + 2];
+    if (
+      !(isUnquotedCheckWord(first, "character") || isUnquotedCheckWord(first, "bit"))
+      || !isUnquotedCheckWord(second, "varying")
+    ) continue;
+    if (tokens[castIndex + 3]?.value === "(" && !(
+      tokens[castIndex + 4]?.domain === "DDL_TOKEN"
+      && /^[0-9]+$/u.test(tokens[castIndex + 4].value)
+      && tokens[castIndex + 5]?.domain === "DDL_TOKEN"
+      && tokens[castIndex + 5].value === ")"
+    )) continue;
+    setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "BUILTIN_TYPE");
+  }
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;
     const terminalIndex = parenthesisIndex - 1;
@@ -2228,11 +2247,18 @@ const checkContextualTokenCategories = (tokens) => {
       continue;
     }
     const terminal = tokens[terminalIndex];
+    if (categories.get(terminalIndex) === "BUILTIN_TYPE") continue;
     const terminalNormalized = terminal.value.toLowerCase();
     const terminalIsKeyword = !terminal.value.startsWith('"')
       && (CHECK_OPERATOR_WORDS.has(terminalNormalized) || BUILTIN_TYPE_NAMES.has(terminalNormalized));
     if (tokens[terminalIndex - 1]?.value !== ".") {
-      if (!terminalIsKeyword) setCheckContextCategory(categories, [terminalIndex], "FUNCTION");
+      if (tokens[terminalIndex - 1]?.value === "::") {
+        setCheckContextCategory(categories, [terminalIndex], "OTHER");
+      } else if (tokens[terminalIndex - 2]?.value === "::" && isCheckIdentifierToken(tokens[terminalIndex - 1])) {
+        setCheckContextCategory(categories, [terminalIndex - 1, terminalIndex], "OTHER");
+      } else if (!terminalIsKeyword) {
+        setCheckContextCategory(categories, [terminalIndex], "FUNCTION");
+      }
       continue;
     }
     const span = [terminalIndex - 1, terminalIndex];
@@ -2241,6 +2267,7 @@ const checkContextualTokenCategories = (tokens) => {
       terminalIsKeyword
       || !isCheckIdentifierToken(tokens[terminalIndex - 2])
       || tokens[terminalIndex - 3]?.value === "."
+      || tokens[terminalIndex - 3]?.value === "::"
     ) {
       let cursor = terminalIndex - 3;
       while (cursor >= 0 && (tokens[cursor]?.value === "." || isCheckIdentifierToken(tokens[cursor]))) {

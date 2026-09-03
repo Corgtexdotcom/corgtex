@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
 import {
+  buildUniqueCheckTokenEdit,
   buildConstraintSemanticDiagnostic,
   cleanupScratchDatabase,
   collectCheckConstraintDetail,
@@ -16,6 +17,7 @@ import {
   findSingleCheckExpressionMismatch,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
+  tokenizeSchemaDump,
   writeClientFiles,
 } from "./run-postgres-restore-rehearsal.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
@@ -307,6 +309,17 @@ const main = async () => {
       ) PARTITION BY RANGE ("id");
       CREATE TABLE "PartitionedConstraintFixture_first"
         PARTITION OF "PartitionedConstraintFixture" FOR VALUES FROM (0) TO (10);
+      CREATE FUNCTION "type_context_varying"(text) RETURNS boolean
+      LANGUAGE sql IMMUTABLE AS 'SELECT true';
+      CREATE TABLE "TypeContextFixture" (
+        "value" text,
+        CONSTRAINT "TypeContextFixture_character_check"
+          CHECK (("value"::character varying(10)) IS NOT NULL),
+        CONSTRAINT "TypeContextFixture_bit_check"
+          CHECK (("value"::bit varying(8)) IS NOT NULL),
+        CONSTRAINT "TypeContextFixture_function_check"
+          CHECK ("type_context_varying"("value"))
+      );
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
       CREATE TABLE _prisma_migrations (
@@ -325,6 +338,54 @@ const main = async () => {
       INSERT INTO _prisma_migrations (id, checksum, finished_at, migration_name, applied_steps_count)
       VALUES ('11111111-1111-4111-8111-111111111111', repeat('a', 64), now(), '20260101000000_init', 1);
     `);
+    await sourceAdmin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await sourceAdmin.query("SET LOCAL search_path = pg_catalog");
+    const typeContextExpressions = (await sourceAdmin.query(`
+      SELECT conname, pg_get_expr(conbin, conrelid) AS expression
+      FROM pg_constraint
+      WHERE conname IN (
+        'TypeContextFixture_character_check',
+        'TypeContextFixture_bit_check',
+        'TypeContextFixture_function_check'
+      )
+      ORDER BY conname COLLATE "C"
+    `)).rows;
+    await sourceAdmin.query("COMMIT");
+    if (typeContextExpressions.length !== 3) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    for (const [constraintName, typeName, typmod] of [
+      ["TypeContextFixture_character_check", "character", "10"],
+      ["TypeContextFixture_bit_check", "bit", "8"],
+    ]) {
+      const expression = typeContextExpressions.find((row) => row.conname === constraintName)?.expression;
+      if (typeof expression !== "string" || !new RegExp(`${typeName} varying\\(${typmod}\\)`, "iu").test(expression)) {
+        fail("TYPE_CONTEXT_PG18_DEPARSE_MISMATCH");
+      }
+      const withoutVarying = expression.replace(/\s+varying(?=\()/iu, "");
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(expression), tokenizeSchemaDump(withoutVarying));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.BUILTIN_TYPE !== 1
+        || edit.sourceOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/character|varying|private|type_context/iu)
+      ) fail("TYPE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    const functionExpression = typeContextExpressions.find(
+      (row) => row.conname === "TypeContextFixture_function_check",
+    )?.expression;
+    if (typeof functionExpression !== "string" || !/public\.type_context_varying\(/iu.test(functionExpression)) {
+      fail("FUNCTION_CONTEXT_PG18_DEPARSE_MISMATCH");
+    }
+    const renamedFunctionExpression = functionExpression.replace(/public\.type_context_varying/iu, "other_schema.type_context_varying");
+    const functionEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(functionExpression),
+      tokenizeSchemaDump(renamedFunctionExpression),
+    );
+    if (
+      functionEdit.status !== "UNIQUE"
+      || functionEdit.sourceOnly.FUNCTION !== 1
+      || functionEdit.destinationOnly.FUNCTION !== 1
+      || JSON.stringify(functionEdit).match(/varying|private|type_context/iu)
+    ) fail("FUNCTION_CONTEXT_CLASSIFICATION_MISMATCH");
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
     )).rows[0].oid);
