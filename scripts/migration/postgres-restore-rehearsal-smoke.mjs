@@ -35,7 +35,7 @@ const CHECK_COLLECTION_FAILURES = new Map(
     [JSON.stringify([side, "SOURCE_REBIND_DRIFT", "REBIND", null]), `${side}_SOURCE_REBIND_DRIFT_REBIND`],
     ...[
       "REBIND", "PREFLIGHT", "EXPRESSION_FETCH", "DEPENDENCY_PREFLIGHT",
-      "DEPENDENCY_FETCH", "NODE_COUNT", "TOKENIZE",
+      "KEYWORD_PREFLIGHT", "KEYWORD_FETCH", "DEPENDENCY_FETCH", "NODE_COUNT", "TOKENIZE",
     ].map((stage) => [
       JSON.stringify([side, "COLLECTION_UNAVAILABLE", stage, null]),
       `${side}_COLLECTION_UNAVAILABLE_${stage}`,
@@ -46,6 +46,8 @@ const CHECK_COLLECTION_FAILURES = new Map(
       ["PREFLIGHT", "DEPENDENCY_COUNT"],
       ["PREFLIGHT", "NODE_COUNT"],
       ["DEPENDENCY_PREFLIGHT", "DEPENDENCY_BYTES"],
+      ["KEYWORD_PREFLIGHT", "KEYWORD_COUNT"],
+      ["KEYWORD_PREFLIGHT", "KEYWORD_BYTES"],
       ["TOKENIZE", "TOKENS"],
     ].map(([stage, limitKind]) => [
       JSON.stringify([side, "LIMIT_EXCEEDED", stage, limitKind]),
@@ -435,7 +437,9 @@ const main = async () => {
         CONSTRAINT "QualifiedContextFixture_array_empty_check"
           CHECK (cardinality(ARRAY[]::integer[]) = 0),
         CONSTRAINT "QualifiedContextFixture_timezone_check"
-          CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00')
+          CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00'),
+        CONSTRAINT "QualifiedContextFixture_extract_check"
+          CHECK (EXTRACT(YEAR FROM "observedAt") >= 2026)
       );
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
@@ -470,7 +474,8 @@ const main = async () => {
         position('{CASEEXPR ' IN conbin::text) > 0 AS has_case_node,
         position('{CASEWHEN ' IN conbin::text) > 0 AS has_case_when_node,
         position('{CASETESTEXPR ' IN conbin::text) > 0 AS has_case_test_node,
-        position('{ARRAYEXPR ' IN conbin::text) > 0 AS has_array_node
+        position('{ARRAYEXPR ' IN conbin::text) > 0 AS has_array_node,
+        position('{FUNCEXPR ' IN conbin::text) > 0 AS has_function_node
       FROM pg_constraint
       WHERE conname IN (
         'TypeContextFixture_character_check',
@@ -499,12 +504,13 @@ const main = async () => {
         'QualifiedContextFixture_array_any_check',
         'QualifiedContextFixture_array_nested_check',
         'QualifiedContextFixture_array_multidimensional_check',
-        'QualifiedContextFixture_array_empty_check'
+        'QualifiedContextFixture_array_empty_check',
+        'QualifiedContextFixture_extract_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 27) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 28) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -673,8 +679,10 @@ const main = async () => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
       if (
         edit.status !== "UNIQUE"
-        || edit.sourceOnly.OPERATOR !== 1
-        || edit.destinationOnly.OPERATOR !== 1
+        || edit.sourceOnly.OTHER !== 1
+        || edit.destinationOnly.OTHER !== 1
+        || edit.sourceOnly.OPERATOR !== 0
+        || edit.destinationOnly.OPERATOR !== 0
         || edit.sourceOnly.COLUMN_REFERENCE !== 0
         || edit.destinationOnly.COLUMN_REFERENCE !== 0
         || JSON.stringify(edit).match(/unknown|private/iu)
@@ -731,6 +739,57 @@ const main = async () => {
         || JSON.stringify(edit).match(/array|private/iu)
       ) fail("ARRAY_CONTEXT_CLASSIFICATION_MISMATCH");
     }
+    const extractRow = typeContextExpressions.find(
+      (entry) => entry.conname === "QualifiedContextFixture_extract_check",
+    );
+    if (
+      typeof extractRow?.expression !== "string"
+      || extractRow.has_function_node !== true
+      || !/EXTRACT\(year FROM "observedAt"\)/iu.test(extractRow.expression)
+    ) fail("EXTRACT_CONTEXT_PG18_NODE_MISMATCH");
+    await sourceAdmin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await sourceAdmin.query("SET LOCAL timezone = 'UTC'");
+    await sourceAdmin.query("SET LOCAL client_encoding = 'UTF8'");
+    await sourceAdmin.query("SET LOCAL search_path = pg_catalog");
+    const contextConstraintManifest = await collectConstraintCatalogManifest(
+      sourceAdmin,
+      "CONTEXT_CONSTRAINT_CATALOG_FAILED",
+    );
+    const extractConstraint = [...contextConstraintManifest.values()].find((entry) => {
+      try {
+        return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_extract_check";
+      } catch {
+        return false;
+      }
+    });
+    if (extractConstraint === undefined) fail("EXTRACT_CONTEXT_FIXTURE_MISSING");
+    const extractDetail = await collectCheckConstraintDetail(sourceAdmin, extractConstraint);
+    if (
+      extractDetail.ok !== true
+      || !extractDetail.keywords.has("extract")
+      || !extractDetail.keywords.has("year")
+      || !extractDetail.keywords.has("month")
+      || !extractDetail.keywords.has("from")
+      || !extractDetail.columnReferences.has("observedAt")
+    ) fail("EXTRACT_CONTEXT_CATALOG_EVIDENCE_MISMATCH");
+    const monthExpression = extractRow.expression.replace(/\byear\b/iu, "month");
+    const extractEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(extractRow.expression),
+      tokenizeSchemaDump(monthExpression),
+      extractDetail,
+      extractDetail,
+    );
+    if (
+      extractEdit.status !== "UNIQUE"
+      || extractEdit.sourceOnly.OTHER !== 1
+      || extractEdit.destinationOnly.OTHER !== 1
+      || extractEdit.sourceOnly.COLUMN_REFERENCE !== 0
+      || extractEdit.destinationOnly.COLUMN_REFERENCE !== 0
+      || extractEdit.sourceOnly.FUNCTION !== 0
+      || extractEdit.destinationOnly.FUNCTION !== 0
+      || JSON.stringify(extractEdit).match(/extract|year|month|observed|private/iu)
+    ) fail("EXTRACT_CONTEXT_CLASSIFICATION_MISMATCH");
+    await sourceAdmin.query("COMMIT");
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
     )).rows[0].oid);

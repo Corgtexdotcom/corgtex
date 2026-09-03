@@ -36,6 +36,7 @@ const MAX_CHECK_EDIT_TOKENS = 1024;
 const MAX_CONSTRAINT_TEXT_BYTES = 65_536;
 const MAX_CHECK_TREE_BYTES = 262_144;
 const MAX_CHECK_DEPENDENCIES = 256;
+const MAX_CHECK_KEYWORDS = 1024;
 const MAX_CHECK_DEPENDENCY_FIELD_BYTES = 4096;
 const MAX_CHECK_DEPENDENCY_TOTAL_BYTES = 65_536;
 const MAX_CHECK_NODE_TAGS = 4096;
@@ -150,16 +151,6 @@ const CHECK_DEPENDENCY_CLASSES = [
   "TYPE",
   "OTHER",
 ];
-const CHECK_OPERATOR_WORDS = new Set([
-  "all", "and", "any", "between", "false", "ilike", "in", "is", "like", "not",
-  "null", "operator", "or", "similar", "true",
-]);
-const CHECK_SQL_CONSTRUCTS = new Set(["coalesce", "greatest", "least", "nullif"]);
-const CHECK_SQL_VALUE_CONSTRUCTS = new Set([
-  "current_catalog", "current_date", "current_role", "current_schema", "current_time",
-  "current_timestamp", "current_user", "localtime", "localtimestamp", "session_user",
-  "system_user", "user",
-]);
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -1728,13 +1719,29 @@ const checkConstraintDependencyPreflightQuery = `
       identified.type,
       identified.schema,
       identified.name,
-      identified.identity
+      identified.identity,
+      CASE
+        WHEN referenced_column.attname IS NOT NULL THEN 'COLUMN'
+        WHEN referenced_function.proname IS NOT NULL THEN 'FUNCTION'
+        ELSE NULL
+      END AS reference_kind,
+      COALESCE(referenced_column.attname, referenced_function.proname) AS reference_name
     FROM pg_catalog.pg_depend AS dependency
     CROSS JOIN LATERAL pg_catalog.pg_identify_object(
       dependency.refclassid,
       dependency.refobjid,
       dependency.refobjsubid
     ) AS identified
+    LEFT JOIN pg_catalog.pg_attribute AS referenced_column
+      ON dependency.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+      AND dependency.refobjsubid > 0
+      AND referenced_column.attrelid = dependency.refobjid
+      AND referenced_column.attnum = dependency.refobjsubid
+      AND NOT referenced_column.attisdropped
+    LEFT JOIN pg_catalog.pg_proc AS referenced_function
+      ON dependency.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+      AND dependency.refobjsubid = 0
+      AND referenced_function.oid = dependency.refobjid
     WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
       AND dependency.objid = $1::pg_catalog.oid
       AND dependency.objsubid = 0
@@ -1746,7 +1753,9 @@ const checkConstraintDependencyPreflightQuery = `
       pg_catalog.octet_length(pg_catalog.convert_to(type, 'UTF8')),
       pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(schema, ''), 'UTF8')),
       pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(name, ''), 'UTF8')),
-      pg_catalog.octet_length(pg_catalog.convert_to(identity, 'UTF8'))
+      pg_catalog.octet_length(pg_catalog.convert_to(identity, 'UTF8')),
+      pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(reference_kind, ''), 'UTF8')),
+      pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(reference_name, ''), 'UTF8'))
     )), 0)::text AS max_field_bytes,
     COALESCE(pg_catalog.sum(
       pg_catalog.octet_length(pg_catalog.convert_to(dependency_type, 'UTF8'))
@@ -1754,8 +1763,31 @@ const checkConstraintDependencyPreflightQuery = `
       + pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(schema, ''), 'UTF8'))
       + pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(name, ''), 'UTF8'))
       + pg_catalog.octet_length(pg_catalog.convert_to(identity, 'UTF8'))
+      + pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(reference_kind, ''), 'UTF8'))
+      + pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(reference_name, ''), 'UTF8'))
     ), 0)::text AS total_bytes
   FROM dependency_identity
+`;
+
+const checkKeywordPreflightQuery = `
+  WITH keywords AS MATERIALIZED (
+    SELECT word
+    FROM pg_catalog.pg_get_keywords()
+    ORDER BY word COLLATE "C"
+    LIMIT ${MAX_CHECK_KEYWORDS + 1}
+  )
+  SELECT
+    pg_catalog.count(*)::text AS keyword_count,
+    COALESCE(pg_catalog.max(pg_catalog.octet_length(pg_catalog.convert_to(word, 'UTF8'))), 0)::text AS max_field_bytes,
+    COALESCE(pg_catalog.sum(pg_catalog.octet_length(pg_catalog.convert_to(word, 'UTF8'))), 0)::text AS total_bytes
+  FROM keywords
+`;
+
+const checkKeywordQuery = `
+  SELECT word
+  FROM pg_catalog.pg_get_keywords()
+  ORDER BY word COLLATE "C"
+  LIMIT ${MAX_CHECK_KEYWORDS + 1}
 `;
 
 const checkConstraintExpressionQuery = `
@@ -1770,13 +1802,29 @@ const checkConstraintDependencyQuery = `
     identified.type,
     identified.schema,
     identified.name,
-    identified.identity
+    identified.identity,
+    CASE
+      WHEN referenced_column.attname IS NOT NULL THEN 'COLUMN'
+      WHEN referenced_function.proname IS NOT NULL THEN 'FUNCTION'
+      ELSE NULL
+    END AS reference_kind,
+    COALESCE(referenced_column.attname, referenced_function.proname) AS reference_name
   FROM pg_catalog.pg_depend AS dependency
   CROSS JOIN LATERAL pg_catalog.pg_identify_object(
     dependency.refclassid,
     dependency.refobjid,
     dependency.refobjsubid
   ) AS identified
+  LEFT JOIN pg_catalog.pg_attribute AS referenced_column
+    ON dependency.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
+    AND dependency.refobjsubid > 0
+    AND referenced_column.attrelid = dependency.refobjid
+    AND referenced_column.attnum = dependency.refobjsubid
+    AND NOT referenced_column.attisdropped
+  LEFT JOIN pg_catalog.pg_proc AS referenced_function
+    ON dependency.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+    AND dependency.refobjsubid = 0
+    AND referenced_function.oid = dependency.refobjid
   WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
     AND dependency.objid = $1::pg_catalog.oid
     AND dependency.objsubid = 0
@@ -1785,7 +1833,8 @@ const checkConstraintDependencyQuery = `
     identified.type COLLATE "C",
     COALESCE(identified.schema, '') COLLATE "C",
     COALESCE(identified.name, '') COLLATE "C",
-    identified.identity COLLATE "C"
+    identified.identity COLLATE "C",
+    COALESCE(referenced_column.attname, referenced_function.proname, '') COLLATE "C"
   LIMIT ${MAX_CHECK_DEPENDENCIES + 1}
 `;
 
@@ -2087,6 +2136,38 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
         return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
       }
 
+      stage = "KEYWORD_PREFLIGHT";
+      const keywordPreflight = await client.query(checkKeywordPreflightQuery);
+      if (keywordPreflight.rowCount !== 1) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+      const keywordCount = parseDiagnosticCount(keywordPreflight.rows[0].keyword_count);
+      const keywordMaxFieldBytes = parseDiagnosticCount(keywordPreflight.rows[0].max_field_bytes);
+      const keywordTotalBytes = parseDiagnosticCount(keywordPreflight.rows[0].total_bytes);
+      if (keywordCount > MAX_CHECK_KEYWORDS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "KEYWORD_COUNT");
+      if (
+        keywordMaxFieldBytes > MAX_CHECK_DEPENDENCY_FIELD_BYTES
+        || keywordTotalBytes > MAX_CHECK_DEPENDENCY_TOTAL_BYTES
+      ) return checkDetailFailure("LIMIT_EXCEEDED", stage, "KEYWORD_BYTES");
+
+      stage = "KEYWORD_FETCH";
+      const keywordResult = await client.query(checkKeywordQuery);
+      if (keywordResult.rows.length !== keywordCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+      const keywords = new Set();
+      let fetchedKeywordMaxFieldBytes = 0;
+      let fetchedKeywordTotalBytes = 0;
+      for (const row of keywordResult.rows) {
+        if (typeof row.word !== "string" || !/^[a-z][a-z_]*$/u.test(row.word) || keywords.has(row.word)) {
+          throw new Error("INVALID_KEYWORD_IDENTITY");
+        }
+        const bytes = Buffer.byteLength(row.word, "utf8");
+        fetchedKeywordMaxFieldBytes = Math.max(fetchedKeywordMaxFieldBytes, bytes);
+        fetchedKeywordTotalBytes += bytes;
+        keywords.add(row.word);
+      }
+      if (
+        fetchedKeywordMaxFieldBytes !== keywordMaxFieldBytes
+        || fetchedKeywordTotalBytes !== keywordTotalBytes
+      ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+
       stage = "EXPRESSION_FETCH";
       const expressionResult = await client.query(checkConstraintExpressionQuery, [oid]);
       if (
@@ -2103,8 +2184,11 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
       if (dependencyResult.rows.length !== dependencyCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
       let fetchedDependencyMaxFieldBytes = 0;
       let fetchedDependencyTotalBytes = 0;
+      const columnReferences = new Set();
+      const functionReferences = new Set();
       const dependencies = dependencyResult.rows.map((row) => {
         const identity = [row.dependency_type, row.type, row.schema, row.name, row.identity];
+        const reference = [row.reference_kind, row.reference_name];
         if (
           typeof identity[0] !== "string"
           || identity[0].length !== 1
@@ -2114,10 +2198,16 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
           || !isNullableString(identity[3])
           || typeof identity[4] !== "string"
           || identity[4].length === 0
+          || ![null, "COLUMN", "FUNCTION"].includes(reference[0])
+          || !isNullableString(reference[1])
+          || (reference[0] === null) !== (reference[1] === null)
+          || (reference[1] !== null && reference[1].length === 0)
         ) throw new Error("INVALID_DEPENDENCY_IDENTITY");
-        const fieldBytes = identity.map((value) => Buffer.byteLength(value ?? "", "utf8"));
+        const fieldBytes = [...identity, ...reference].map((value) => Buffer.byteLength(value ?? "", "utf8"));
         fetchedDependencyMaxFieldBytes = Math.max(fetchedDependencyMaxFieldBytes, ...fieldBytes);
         fetchedDependencyTotalBytes += fieldBytes.reduce((total, value) => total + value, 0);
+        if (reference[0] === "COLUMN") columnReferences.add(reference[1]);
+        if (reference[0] === "FUNCTION") functionReferences.add(reference[1]);
         return identity;
       });
       if (
@@ -2137,7 +2227,7 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
         observedNodeCount += count;
       }
       if (observedNodeCount !== nodeCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
-      return { ok: true, tokens, dependencies, nodeTagCounts };
+      return { ok: true, tokens, dependencies, nodeTagCounts, keywords, columnReferences, functionReferences };
     })();
   } catch {
     await runCheckDetailSavepointCommand(client, "ROLLBACK TO SAVEPOINT corgtex_check_detail");
@@ -2294,58 +2384,6 @@ const checkMultiwordTypeSpan = (tokens, start) => {
   return null;
 };
 
-const setCheckCaseContextCategories = (categories, tokens) => {
-  const frames = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (
-      token?.domain !== "DDL_TOKEN"
-      || token.value.startsWith('"')
-      || tokens[index - 1]?.value === "."
-      || tokens[index + 1]?.value === "."
-      || categories.has(index)
-    ) continue;
-    const word = token.value.toLowerCase();
-    if (word === "case") {
-      frames.push({ state: "START", valid: true, indexes: [index] });
-      continue;
-    }
-    const frame = frames.at(-1);
-    if (frame === undefined || !["when", "then", "else", "end"].includes(word)) continue;
-    if (word === "when") {
-      if (!frame.valid || !["START", "THEN"].includes(frame.state)) {
-        frame.valid = false;
-        continue;
-      }
-      frame.state = "WHEN";
-      frame.indexes.push(index);
-      continue;
-    }
-    if (word === "then") {
-      if (!frame.valid || frame.state !== "WHEN") {
-        frame.valid = false;
-        continue;
-      }
-      frame.state = "THEN";
-      frame.indexes.push(index);
-      continue;
-    }
-    if (word === "else") {
-      if (!frame.valid || frame.state !== "THEN") {
-        frame.valid = false;
-        continue;
-      }
-      frame.state = "ELSE";
-      frame.indexes.push(index);
-      continue;
-    }
-    frames.pop();
-    if (!frame.valid || !["THEN", "ELSE"].includes(frame.state)) continue;
-    frame.indexes.push(index);
-    setCheckContextCategory(categories, frame.indexes, "OTHER");
-  }
-};
-
 const checkContextualTokenCategories = (tokens) => {
   const categories = new Map();
   for (let castIndex = 0; castIndex < tokens.length; castIndex += 1) {
@@ -2411,39 +2449,6 @@ const checkContextualTokenCategories = (tokens) => {
     }
     setCheckContextCategory(categories, span, "COLLATION");
   }
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (
-      !isUnquotedCheckWord(token, "unknown")
-      || tokens[index - 1]?.value === "."
-      || tokens[index + 1]?.value === "."
-    ) continue;
-    const followsIs = isUnquotedCheckWord(tokens[index - 1], "is");
-    const followsIsNot = isUnquotedCheckWord(tokens[index - 2], "is")
-      && isUnquotedCheckWord(tokens[index - 1], "not");
-    if (followsIs || followsIsNot) setCheckContextCategory(categories, [index], "OPERATOR");
-  }
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (
-      token?.domain !== "DDL_TOKEN"
-      || token.value.startsWith('"')
-      || !CHECK_SQL_VALUE_CONSTRUCTS.has(token.value.toLowerCase())
-      || tokens[index - 1]?.value === "."
-      || tokens[index + 1]?.value === "."
-    ) continue;
-    setCheckContextCategory(categories, [index], "OTHER");
-  }
-  for (let index = 0; index < tokens.length; index += 1) {
-    if (
-      !isUnquotedCheckWord(tokens[index], "array")
-      || tokens[index + 1]?.value !== "["
-      || tokens[index - 1]?.value === "."
-      || categories.has(index)
-    ) continue;
-    setCheckContextCategory(categories, [index], "OTHER");
-  }
-  setCheckCaseContextCategories(categories, tokens);
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;
     const terminalIndex = parenthesisIndex - 1;
@@ -2460,22 +2465,13 @@ const checkContextualTokenCategories = (tokens) => {
     }
     const terminal = tokens[terminalIndex];
     if (categories.get(terminalIndex) === "BUILTIN_TYPE") continue;
-    const terminalNormalized = terminal.value.toLowerCase();
-    const terminalIsSqlConstruct = !terminal.value.startsWith('"')
-      && CHECK_SQL_CONSTRUCTS.has(terminalNormalized);
-    const terminalIsKeyword = !terminal.value.startsWith('"')
-      && CHECK_OPERATOR_WORDS.has(terminalNormalized);
     if (tokens[terminalIndex - 1]?.value !== ".") {
-      if (terminalIsSqlConstruct) {
-        setCheckContextCategory(categories, [terminalIndex], "OTHER");
-      } else if (categories.get(terminalIndex - 1) === "BUILTIN_TYPE") {
+      if (categories.get(terminalIndex - 1) === "BUILTIN_TYPE") {
         setCheckContextCategory(categories, [terminalIndex], "OTHER");
       } else if (tokens[terminalIndex - 1]?.value === "::") {
         setCheckContextCategory(categories, [terminalIndex], "OTHER");
       } else if (tokens[terminalIndex - 2]?.value === "::" && isCheckIdentifierToken(tokens[terminalIndex - 1])) {
         setCheckContextCategory(categories, [terminalIndex - 1, terminalIndex], "OTHER");
-      } else if (!terminalIsKeyword) {
-        setCheckContextCategory(categories, [terminalIndex], "FUNCTION");
       }
       continue;
     }
@@ -2499,21 +2495,68 @@ const checkContextualTokenCategories = (tokens) => {
   return categories;
 };
 
-const checkEditCategory = (tokens, contextualTokenCategories, index) => {
+const checkIdentifierLogicalName = (token) => {
+  if (token?.domain !== "DDL_TOKEN") return null;
+  if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) return token.value.toLowerCase();
+  if (!/^"(?:[^"]|"")+"$/u.test(token.value)) return null;
+  return token.value.slice(1, -1).replace(/""/gu, '"');
+};
+
+const normalizeCheckIdentifierContext = (context) => {
+  if (context === undefined) return { keywords: new Set(), columnReferences: new Set(), functionReferences: new Set() };
+  if (
+    context === null
+    || typeof context !== "object"
+    || !(context.keywords instanceof Set)
+    || !(context.columnReferences instanceof Set)
+    || !(context.functionReferences instanceof Set)
+    || [...context.keywords].some((value) => typeof value !== "string" || !/^[a-z][a-z_]*$/u.test(value))
+    || [...context.columnReferences, ...context.functionReferences].some(
+      (value) => typeof value !== "string" || value.length === 0,
+    )
+  ) fail("INVALID_CHECK_IDENTIFIER_CONTEXT");
+  return context;
+};
+
+const checkCatalogIdentifierCategories = (tokens, contextualTokenCategories, context) => {
+  const categories = new Map();
+  const occurrences = new Map();
+  const logicalNames = new Map();
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (contextualTokenCategories.has(index)) continue;
+    const token = tokens[index];
+    const logicalName = checkIdentifierLogicalName(token);
+    if (
+      logicalName === null
+      || tokens[index - 1]?.value === "."
+      || tokens[index + 1]?.value === "."
+      || (!token.value.startsWith('"') && context.keywords.has(logicalName))
+    ) continue;
+    logicalNames.set(index, logicalName);
+    occurrences.set(logicalName, (occurrences.get(logicalName) ?? 0) + 1);
+  }
+  for (const [index, logicalName] of logicalNames) {
+    if (occurrences.get(logicalName) !== 1) continue;
+    if (tokens[index + 1]?.value === "(" && context.functionReferences.has(logicalName)) {
+      categories.set(index, "FUNCTION");
+    } else if (tokens[index + 1]?.value !== "(" && context.columnReferences.has(logicalName)) {
+      categories.set(index, "COLUMN_REFERENCE");
+    }
+  }
+  return categories;
+};
+
+const checkEditCategory = (tokens, contextualTokenCategories, catalogIdentifierCategories, keywordSet, index) => {
   const token = tokens[index];
   if (token.domain === "STRING_LITERAL") return "STRING_LITERAL";
   if (token.domain !== "DDL_TOKEN") return "OTHER";
   if (token.value === "(" || token.value === ")") return "PARENTHESIS";
   if (token.value === "::") return "CAST_OPERATOR";
   if (contextualTokenCategories.has(index)) return contextualTokenCategories.get(index);
-  if (/^"(?:[^"]|"")+"$/u.test(token.value)) {
-    return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
-  }
   const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
-  if (isSchemaOperator(token.value) || CHECK_OPERATOR_WORDS.has(normalized)) return "OPERATOR";
-  if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {
-    return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
-  }
+  if (!token.value.startsWith('"') && isSchemaOperator(token.value)) return "OPERATOR";
+  if (!token.value.startsWith('"') && keywordSet.has(normalized)) return "OTHER";
+  if (catalogIdentifierCategories.has(index)) return catalogIdentifierCategories.get(index);
   return "OTHER";
 };
 
@@ -2538,7 +2581,12 @@ const unwrapCheckExpression = (tokens) => {
   return { tokens: current, layers };
 };
 
-export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
+export const buildUniqueCheckTokenEdit = (
+  sourceTokens,
+  destinationTokens,
+  sourceIdentifierContext,
+  destinationIdentifierContext,
+) => {
   if (!Array.isArray(sourceTokens) || !Array.isArray(destinationTokens)) fail("INVALID_CHECK_TOKEN_STREAM");
   if (sourceTokens.length > MAX_CHECK_EDIT_TOKENS || destinationTokens.length > MAX_CHECK_EDIT_TOKENS) {
     return { status: "LIMIT_EXCEEDED", sourceOnly: null, destinationOnly: null };
@@ -2547,6 +2595,18 @@ export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
   schemaTokenDigest(destinationTokens);
   const sourceContextualTokenCategories = checkContextualTokenCategories(sourceTokens);
   const destinationContextualTokenCategories = checkContextualTokenCategories(destinationTokens);
+  const sourceContext = normalizeCheckIdentifierContext(sourceIdentifierContext);
+  const destinationContext = normalizeCheckIdentifierContext(destinationIdentifierContext);
+  const sourceCatalogIdentifierCategories = checkCatalogIdentifierCategories(
+    sourceTokens,
+    sourceContextualTokenCategories,
+    sourceContext,
+  );
+  const destinationCatalogIdentifierCategories = checkCatalogIdentifierCategories(
+    destinationTokens,
+    destinationContextualTokenCategories,
+    destinationContext,
+  );
   const sourceUnwrapped = unwrapCheckExpression(sourceTokens);
   const destinationUnwrapped = unwrapCheckExpression(destinationTokens);
   if (
@@ -2622,21 +2682,45 @@ export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
       && destinationIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex - 1] + 1
     ) {
-      sourceOnly[checkEditCategory(sourceTokens, sourceContextualTokenCategories, sourceIndex - 1)] += 1;
-      destinationOnly[checkEditCategory(destinationTokens, destinationContextualTokenCategories, destinationIndex - 1)] += 1;
+      sourceOnly[checkEditCategory(
+        sourceTokens,
+        sourceContextualTokenCategories,
+        sourceCatalogIdentifierCategories,
+        sourceContext.keywords,
+        sourceIndex - 1,
+      )] += 1;
+      destinationOnly[checkEditCategory(
+        destinationTokens,
+        destinationContextualTokenCategories,
+        destinationCatalogIdentifierCategories,
+        destinationContext.keywords,
+        destinationIndex - 1,
+      )] += 1;
       sourceIndex -= 1;
       destinationIndex -= 1;
     } else if (
       sourceIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex] + 1
     ) {
-      sourceOnly[checkEditCategory(sourceTokens, sourceContextualTokenCategories, sourceIndex - 1)] += 1;
+      sourceOnly[checkEditCategory(
+        sourceTokens,
+        sourceContextualTokenCategories,
+        sourceCatalogIdentifierCategories,
+        sourceContext.keywords,
+        sourceIndex - 1,
+      )] += 1;
       sourceIndex -= 1;
     } else if (
       destinationIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex][destinationIndex - 1] + 1
     ) {
-      destinationOnly[checkEditCategory(destinationTokens, destinationContextualTokenCategories, destinationIndex - 1)] += 1;
+      destinationOnly[checkEditCategory(
+        destinationTokens,
+        destinationContextualTokenCategories,
+        destinationCatalogIdentifierCategories,
+        destinationContext.keywords,
+        destinationIndex - 1,
+      )] += 1;
       destinationIndex -= 1;
     } else {
       fail("CHECK_TOKEN_EDIT_BACKTRACK_FAILED");
@@ -2699,7 +2783,20 @@ const buildCheckExpressionDifference = (source, destination) => {
       destination?.stage ?? null,
     );
   }
-  const tokenEdit = buildUniqueCheckTokenEdit(source.tokens, destination.tokens);
+  const tokenEdit = buildUniqueCheckTokenEdit(
+    source.tokens,
+    destination.tokens,
+    {
+      keywords: source.keywords,
+      columnReferences: source.columnReferences,
+      functionReferences: source.functionReferences,
+    },
+    {
+      keywords: destination.keywords,
+      columnReferences: destination.columnReferences,
+      functionReferences: destination.functionReferences,
+    },
+  );
   if (tokenEdit.status === "LIMIT_EXCEEDED") return emptyCheckExpressionDifference("LIMIT_EXCEEDED", "TOKENS");
   if (tokenEdit.status !== "UNIQUE") return emptyCheckExpressionDifference("AMBIGUOUS");
   return {
