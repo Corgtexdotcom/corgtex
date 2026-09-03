@@ -426,6 +426,14 @@ const main = async () => {
           CHECK ((CASE WHEN "amount" < 0 THEN 0 WHEN "amount" = 0 THEN 1 ELSE 2 END) >= 0),
         CONSTRAINT "QualifiedContextFixture_case_nested_check"
           CHECK ((CASE WHEN "flag" THEN CASE "amount" WHEN 0 THEN 0 ELSE 1 END ELSE 2 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_array_any_check"
+          CHECK ("amount" = ANY (ARRAY[1, 2])),
+        CONSTRAINT "QualifiedContextFixture_array_nested_check"
+          CHECK ("amount" = ANY (ARRAY[ARRAY[1, 2], ARRAY[3, 4]])),
+        CONSTRAINT "QualifiedContextFixture_array_multidimensional_check"
+          CHECK ("amount" = ANY (ARRAY[[1, 2], [3, 4]])),
+        CONSTRAINT "QualifiedContextFixture_array_empty_check"
+          CHECK (cardinality(ARRAY[]::integer[]) = 0),
         CONSTRAINT "QualifiedContextFixture_timezone_check"
           CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00')
       );
@@ -461,7 +469,8 @@ const main = async () => {
         position('{BOOLEANTEST ' IN conbin::text) > 0 AS has_boolean_test_node,
         position('{CASEEXPR ' IN conbin::text) > 0 AS has_case_node,
         position('{CASEWHEN ' IN conbin::text) > 0 AS has_case_when_node,
-        position('{CASETESTEXPR ' IN conbin::text) > 0 AS has_case_test_node
+        position('{CASETESTEXPR ' IN conbin::text) > 0 AS has_case_test_node,
+        position('{ARRAYEXPR ' IN conbin::text) > 0 AS has_array_node
       FROM pg_constraint
       WHERE conname IN (
         'TypeContextFixture_character_check',
@@ -486,12 +495,16 @@ const main = async () => {
         'QualifiedContextFixture_case_searched_check',
         'QualifiedContextFixture_case_simple_check',
         'QualifiedContextFixture_case_multi_check',
-        'QualifiedContextFixture_case_nested_check'
+        'QualifiedContextFixture_case_nested_check',
+        'QualifiedContextFixture_array_any_check',
+        'QualifiedContextFixture_array_nested_check',
+        'QualifiedContextFixture_array_multidimensional_check',
+        'QualifiedContextFixture_array_empty_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 23) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 27) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -692,6 +705,31 @@ const main = async () => {
         || edit.destinationOnly.FUNCTION !== 0
         || JSON.stringify(edit).match(/case|when|then|else|end|private/iu)
       ) fail("CASE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, structuralCount] of [
+      ["QualifiedContextFixture_array_any_check", 1],
+      ["QualifiedContextFixture_array_nested_check", 3],
+      ["QualifiedContextFixture_array_multidimensional_check", 3],
+      ["QualifiedContextFixture_array_empty_check", 1],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (
+        typeof row?.expression !== "string"
+        || !/\bARRAY\s*\[/u.test(row.expression)
+        || row.has_array_node !== true
+      ) fail("ARRAY_CONTEXT_PG18_NODE_MISMATCH");
+      const lowerArraySyntax = row.expression.replace(/\bARRAY(?=\s*\[)/gu, (word) => word.toLowerCase());
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(lowerArraySyntax));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== structuralCount
+        || edit.destinationOnly.OTHER !== structuralCount
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/array|private/iu)
+      ) fail("ARRAY_CONTEXT_CLASSIFICATION_MISMATCH");
     }
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",

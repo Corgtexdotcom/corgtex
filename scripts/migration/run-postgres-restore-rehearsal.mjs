@@ -2434,6 +2434,15 @@ const checkContextualTokenCategories = (tokens) => {
     ) continue;
     setCheckContextCategory(categories, [index], "OTHER");
   }
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      !isUnquotedCheckWord(tokens[index], "array")
+      || tokens[index + 1]?.value !== "["
+      || tokens[index - 1]?.value === "."
+      || categories.has(index)
+    ) continue;
+    setCheckContextCategory(categories, [index], "OTHER");
+  }
   setCheckCaseContextCategories(categories, tokens);
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;

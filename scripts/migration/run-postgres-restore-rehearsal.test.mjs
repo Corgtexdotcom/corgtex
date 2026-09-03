@@ -621,6 +621,70 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      ["ARRAY[]::integer[]", "array[]::integer[]", 1],
+      ["ARRAY[a, b]", "array[a, b]", 1],
+      ["ARRAY[ARRAY[a], ARRAY[b]]", "array[array[a], array[b]]", 3],
+      ["ARRAY[[a, b], [c, d]]", "array[[a, b], [c, d]]", 1],
+    ])("classifies bracket-form ARRAY introducers as syntax", (source, destination, count) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(count);
+      expect(edit.destinationOnly.OTHER).toBe(count);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("classifies an edited ARRAY introducer without stealing its element column", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("ARRAY[existing_column]"),
+        tokenizeSchemaDump("array[existing_column]"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("keeps ARRAY element edits in column references", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("ARRAY[existing_column]"),
+        tokenizeSchemaDump("ARRAY[added_column]"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
+      ['"ARRAY"[a]', '"RENAMED_ARRAY"[a]', "COLUMN_REFERENCE"],
+      ["row.array[a]", "other.array[a]", "COLUMN_REFERENCE"],
+      ["array_value[a]", "other_value[a]", "COLUMN_REFERENCE"],
+      ["arrays[a]", "other_arrays[a]", "COLUMN_REFERENCE"],
+      ["ordinary_column[a]", "renamed_column[a]", "COLUMN_REFERENCE"],
+      ["value::array[a]", "value::renamed_type[a]", "BUILTIN_TYPE"],
+    ])("does not widen ARRAY syntax classification for %s", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBeGreaterThan(0);
+      expect(edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it("contains an incomplete ARRAY candidate without scanning later tokens", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("ARRAY[incomplete_element outside_column"),
+        tokenizeSchemaDump("array[incomplete_element renamed_column"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+    });
+
+    it.each([
       "CASE WHEN a THEN b outside_column",
       "CASE THEN a WHEN b THEN c END outside_column",
       "CASE WHEN a THEN b ELSE c ELSE d END outside_column",
