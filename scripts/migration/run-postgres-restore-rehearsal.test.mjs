@@ -384,123 +384,132 @@ describe("PostgreSQL restore rehearsal runner", () => {
   });
 
   it.each([
-    {
-      label: "privileged vector extension",
-      stderr: `pg_restore: creating EXTENSION "private.vector"\npg_restore: error: could not execute query: ERROR: permission denied to create extension "private_customer_extension"\nCommand was: CREATE EXTENSION vector; password=do-not-persist`,
-      expected: { category: "INSUFFICIENT_PRIVILEGE", objectClass: "EXTENSION", extensionClass: "VECTOR", sqlstate: null },
-    },
-    {
-      label: "unavailable extension fallback",
-      stderr: "pg_restore: error: extension is not allow-listed\nCommand was: CREATE EXTENSION private_extension;",
-      expected: { category: "EXTENSION_UNAVAILABLE", objectClass: "EXTENSION", extensionClass: "OTHER", sqlstate: null },
-    },
-    {
-      label: "duplicate table",
-      stderr: "pg_restore: creating TABLE private.hostile_table\npg_restore: error: relation already exists",
-      expected: { category: "DUPLICATE_OBJECT", objectClass: "TABLE", extensionClass: "UNKNOWN", sqlstate: null },
-    },
-    {
-      label: "constraint data",
-      stderr: "pg_restore: processing data for table private.hostile_table\npg_restore: error: duplicate key value violates unique constraint 'private_value'\nrow=(secret)",
-      expected: { category: "DATA_CONSTRAINT", objectClass: "TABLE_DATA", extensionClass: "UNKNOWN", sqlstate: null },
-    },
-  ])("reduces $label failures to exact allowlisted diagnostic values", ({ stderr, expected }) => {
-    const diagnostic = buildRestoreDiagnostic([Buffer.from(stderr, "utf8")]);
-
+    ["pre-data privilege", "pre-data", "ERROR:  42501\n", "0:3", "INSUFFICIENT_PRIVILEGE", "42501"],
+    ["data constraint", "data", "ERROR:  23505\n", "0:3", "DATA_CONSTRAINT", "23505"],
+    ["post-data duplicate", "post-data", "ERROR:  42P07\n", "0:3", "DUPLICATE_OBJECT", "42P07"],
+  ])("reduces %s to server-authored SQLSTATE evidence", (_label, section, stderr, statuses, category, sqlstate) => {
+    const diagnostic = buildRestoreDiagnostic({
+      section,
+      stderrChunks: [Buffer.from(stderr, "utf8")],
+      statusChunks: [Buffer.from(`CORGTEX_RESTORE_STATUS:${statuses}\n`, "utf8")],
+    });
     expect(diagnostic).toEqual({
       phase: "DESTINATION_RESTORE",
-      ...expected,
-      truncated: false,
+      section: section.replace("-", "_").toUpperCase(),
+      processClass: "SCRIPT_ERROR",
+      category,
+      sqlstate,
+      stderrObserved: true,
+      stderrTruncated: false,
     });
     expect(Object.keys(diagnostic)).toEqual([
       "phase",
+      "section",
+      "processClass",
       "category",
-      "objectClass",
-      "extensionClass",
       "sqlstate",
-      "truncated",
+      "stderrObserved",
+      "stderrTruncated",
     ]);
-    const serialized = JSON.stringify(diagnostic);
-    for (const forbidden of ["private", "hostile", "secret", "password", "CREATE EXTENSION", "row="]) {
-      expect(serialized).not.toContain(forbidden);
-    }
   });
 
   it("classifies arbitrary chunk boundaries and a missing final newline", () => {
-    const input = Buffer.from([
-      "pg_restore: creating EXTENSION \"public.plpgsql\"\n",
-      "pg_restore: error: could not execute query: ERROR: permission denied\n",
-      "SQLSTATE: 42501",
-    ].join(""), "utf8");
-    const chunks = Array.from(input, (byte) => Buffer.from([byte]));
-
-    expect(buildRestoreDiagnostic(chunks)).toEqual({
-      phase: "DESTINATION_RESTORE",
+    const stderrChunks = Array.from(Buffer.from("ERROR:  42501", "utf8"), (byte) => Buffer.from([byte]));
+    const statusChunks = Array.from(Buffer.from("CORGTEX_RESTORE_STATUS:141:3", "utf8"), (byte) => Buffer.from([byte]));
+    expect(buildRestoreDiagnostic({ section: "pre-data", stderrChunks, statusChunks })).toMatchObject({
+      section: "PRE_DATA",
+      processClass: "SCRIPT_ERROR",
       category: "INSUFFICIENT_PRIVILEGE",
-      objectClass: "EXTENSION",
-      extensionClass: "PLPGSQL",
-      sqlstate: null,
-      truncated: false,
+      sqlstate: "42501",
     });
   });
 
-  it("freezes the operation and category at the first restore error", () => {
-    expect(buildRestoreDiagnostic([Buffer.from([
-      "pg_restore: creating INDEX private.first\n",
-      "pg_restore: error: relation already exists\n",
-      "pg_restore: creating TABLE private.second\n",
-      "pg_restore: error: permission denied\n",
-    ].join(""), "utf8")])).toMatchObject({
-      category: "DUPLICATE_OBJECT",
-      objectClass: "INDEX",
+  it.each([
+    ["archive renderer", "1:0", "ARCHIVE_RENDER_FAILED"],
+    ["archive renderer with secondary script error", "1:3", "ARCHIVE_RENDER_FAILED"],
+    ["connection", "0:2", "CONNECTION_ERROR"],
+    ["psql client", "0:1", "PROCESS_ERROR"],
+    ["unexpected consumer", "0:9", "PROCESS_ERROR"],
+  ])("classifies a %s exit without retaining process output", (_label, statuses, processClass) => {
+    const diagnostic = buildRestoreDiagnostic({
+      section: "data",
+      stderrChunks: [Buffer.from("private host password secret\n", "utf8")],
+      statusChunks: [Buffer.from(`CORGTEX_RESTORE_STATUS:${statuses}\n`, "utf8")],
     });
+    expect(diagnostic).toMatchObject({ processClass, category: "UNKNOWN", sqlstate: null, stderrObserved: true });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private|host|password|secret/u);
   });
 
-  it("resets stale operation evidence for an unrecognized verbose object type", () => {
-    expect(buildRestoreDiagnostic([Buffer.from([
-      "pg_restore: creating EXTENSION \"public.vector\"\n",
-      "pg_restore: creating TRIGGER private.hostile\n",
-      "pg_restore: error: permission denied\n",
-    ].join(""), "utf8")])).toEqual({
-      phase: "DESTINATION_RESTORE",
-      category: "INSUFFICIENT_PRIVILEGE",
-      objectClass: "OTHER",
-      extensionClass: "UNKNOWN",
-      sqlstate: null,
-      truncated: false,
-    });
+  it("fails closed when the controlled status marker or process result is unavailable", () => {
+    expect(buildRestoreDiagnostic({
+      section: "post-data",
+      stderrChunks: [],
+      statusChunks: [],
+    })).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    expect(buildRestoreDiagnostic({
+      section: "post-data",
+      stderrChunks: [],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+      spawnError: true,
+    })).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    expect(buildRestoreDiagnostic({
+      section: "post-data",
+      stderrChunks: [],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+      signal: "SIGKILL",
+    })).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    expect(buildRestoreDiagnostic({
+      section: "post-data",
+      stderrChunks: [],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:0\n", "utf8")],
+      status: 125,
+    })).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
   });
 
-  it("drains and discards an oversized line while preserving later bounded evidence", () => {
-    const diagnostic = buildRestoreDiagnostic([
-      Buffer.alloc(5 * 1024, 0x61),
-      Buffer.from("\npg_restore: creating TYPE private.hostile\npg_restore: error: permission denied\n", "utf8"),
-    ]);
+  it("rejects message-shaped and malformed SQLSTATE claims", () => {
+    const diagnostic = buildRestoreDiagnostic({
+      section: "pre-data",
+      stderrChunks: [Buffer.from("SQLSTATE: 42501\nERROR: private 42501\n", "utf8")],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
+    expect(diagnostic).toMatchObject({ processClass: "SCRIPT_ERROR", category: "UNKNOWN", sqlstate: null });
+  });
+
+  it("fails closed on truncated or malformed diagnostic streams", () => {
+    const diagnostic = buildRestoreDiagnostic({
+      section: "pre-data",
+      stderrChunks: [Buffer.alloc(5 * 1024, 0x61), Buffer.from("\nERROR:  42501\n", "utf8")],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
     expect(diagnostic).toMatchObject({
-      category: "INSUFFICIENT_PRIVILEGE",
-      objectClass: "TYPE",
-      extensionClass: "UNKNOWN",
-      truncated: true,
-    });
-    expect(JSON.stringify(diagnostic)).not.toContain("hostile");
-  });
-
-  it("fails closed on malformed or non-buffer chunks", () => {
-    const malformed = buildRestoreDiagnostic([Buffer.from([0xff, 0xfe, 0xfd])]);
-    const nonBuffer = buildRestoreDiagnostic(["pg_restore: error: permission denied"]);
-    expect(malformed).toMatchObject({ category: "UNKNOWN", objectClass: "UNKNOWN" });
-    expect(nonBuffer).toMatchObject({ category: "UNKNOWN", objectClass: "UNKNOWN", truncated: true });
-  });
-
-  it("does not trust SQLSTATE-like lines from restore stderr", () => {
-    expect(buildRestoreDiagnostic([Buffer.from([
-      "pg_restore: creating TABLE private.value\n",
-      "pg_restore: error: unknown failure\n",
-      "SQLSTATE: 42501\n",
-    ].join(""), "utf8")])).toMatchObject({
+      processClass: "SCRIPT_ERROR",
       category: "UNKNOWN",
       sqlstate: null,
+      stderrTruncated: true,
     });
+    const malformedStderr = buildRestoreDiagnostic({
+      section: "data",
+      stderrChunks: [Buffer.from([0xff, 0xfe, 0xfd]), Buffer.from("\nERROR:  42501\n", "utf8")],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
+    expect(malformedStderr).toMatchObject({
+      processClass: "SCRIPT_ERROR",
+      category: "UNKNOWN",
+      sqlstate: null,
+      stderrTruncated: true,
+    });
+    const malformedStatus = buildRestoreDiagnostic({
+      section: "data",
+      stderrChunks: [Buffer.from("ERROR:  42501\n", "utf8")],
+      statusChunks: [Buffer.from([0xff]), Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
+    expect(malformedStatus).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    const oversizedStatus = buildRestoreDiagnostic({
+      section: "data",
+      stderrChunks: [Buffer.from("ERROR:  42501\n", "utf8")],
+      statusChunks: [Buffer.alloc(256, 0x61), Buffer.from("\nCORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
+    expect(oversizedStatus).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
   });
 
   it("rejects duplicate selected archive entries", () => {

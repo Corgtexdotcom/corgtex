@@ -264,11 +264,12 @@ const main = async () => {
     const restoreDiagnostic = JSON.parse(readFileSync(join(diagnosticArtifactDir, "restore-diagnostic.json"), "utf8"));
     if (JSON.stringify(restoreDiagnostic) !== JSON.stringify({
       phase: "DESTINATION_RESTORE",
+      section: "PRE_DATA",
+      processClass: "SCRIPT_ERROR",
       category: "INSUFFICIENT_PRIVILEGE",
-      objectClass: "EXTENSION",
-      extensionClass: "VECTOR",
-      sqlstate: null,
-      truncated: false,
+      sqlstate: "42501",
+      stderrObserved: true,
+      stderrTruncated: false,
     })) fail("RESTORE_DIAGNOSTIC_BOUNDARY_FAILED");
     const serializedRestoreDiagnostic = JSON.stringify(restoreDiagnostic);
     for (const forbidden of ["rehearsal_target_operator", TEST_TARGET_OPERATOR_PASSWORD, "CREATE EXTENSION", "source"]) {
