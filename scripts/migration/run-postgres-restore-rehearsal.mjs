@@ -18,6 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 
@@ -26,6 +27,8 @@ const { Client } = pg;
 export const POSTGRES_CLIENT_IMAGE = "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280";
 const MAX_STATE_BYTES = 64 * 1024;
 const MAX_SOURCE_TLS_ROOT_CERT_BYTES = 16 * 1024;
+const MAX_RESTORE_DIAGNOSTIC_LINE_BYTES = 4 * 1024;
+const MAX_COMMAND_STDERR_BYTES = 1024 * 1024;
 const FETCH_ROWS = 500;
 const LARGE_OBJECT_CHUNK_BYTES = 1024 * 1024;
 const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
@@ -40,7 +43,6 @@ const LOCALE_PROVIDERS = new Map([
   ["i", "icu"],
 ]);
 const LOCALE_DEFINITION_FIELDS = ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules"];
-
 class RehearsalError extends Error {
   constructor(code) {
     super(code);
@@ -116,21 +118,214 @@ const secureDelete = async (filePath) => {
   }
 };
 
+const restoreCategory = (errorLine, sqlstate) => {
+  if (
+    sqlstate === "42501"
+    || /\b(?:permission denied|must be (?:a )?(?:superuser|owner)|not a superuser|only superuser)\b/iu.test(errorLine)
+  ) return "INSUFFICIENT_PRIVILEGE";
+  if (
+    /\bextension\b[^\n]*(?:not available|not allow-listed|not supported|control file|installation script)/iu.test(errorLine)
+  ) return "EXTENSION_UNAVAILABLE";
+  if (["42710", "42P07"].includes(sqlstate) || /\balready exists\b/iu.test(errorLine)) return "DUPLICATE_OBJECT";
+  if (
+    ["42704", "3F000"].includes(sqlstate)
+    || /\b(?:does not exist|required extension|missing dependency)\b/iu.test(errorLine)
+  ) return "MISSING_DEPENDENCY";
+  if (sqlstate?.startsWith("23") || /\bviolates\b[^\n]*\bconstraint\b|\bduplicate key value\b/iu.test(errorLine)) {
+    return "DATA_CONSTRAINT";
+  }
+  if (
+    sqlstate?.startsWith("53")
+    || /\b(?:out of memory|disk full|too many connections|insufficient resources)\b/iu.test(errorLine)
+  ) return "RESOURCE_EXHAUSTED";
+  if (
+    sqlstate?.startsWith("08")
+    || /\b(?:could not connect|connection to server was lost|server closed the connection unexpectedly|terminating connection)\b/iu.test(errorLine)
+  ) return "CONNECTION";
+  return "UNKNOWN";
+};
+
+const extensionClassFromLine = (line) => {
+  if (/(?:^|[.\s"])(?:plpgsql)(?:["\s]|$)/iu.test(line)) return "PLPGSQL";
+  if (/(?:^|[.\s"])(?:vector)(?:["\s]|$)/iu.test(line)) return "VECTOR";
+  return "OTHER";
+};
+
+const verboseOperation = (line) => {
+  if (/^pg_restore: processing data for table\b/u.test(line)) {
+    return { objectClass: "TABLE_DATA", extensionClass: "UNKNOWN" };
+  }
+  const match = line.match(/^pg_restore: creating (EXTENSION|COMMENT|SCHEMA|TYPE|TABLE|SEQUENCE|FUNCTION|INDEX|(?:FK |CHECK )?CONSTRAINT|BLOB(?: COMMENTS)?|LARGE OBJECT)\b/u);
+  if (!match) return null;
+  const token = match[1];
+  let objectClass = token.replaceAll(" ", "_");
+  if (["FK_CONSTRAINT", "CHECK_CONSTRAINT"].includes(objectClass)) objectClass = "CONSTRAINT";
+  if (["BLOB", "BLOB_COMMENTS", "LARGE_OBJECT"].includes(objectClass)) objectClass = "LARGE_OBJECT";
+  return {
+    objectClass,
+    extensionClass: token === "EXTENSION" || (token === "COMMENT" && /\bEXTENSION\b/u.test(line))
+      ? extensionClassFromLine(line)
+      : "UNKNOWN",
+  };
+};
+
+const commandOperation = (line) => {
+  const command = line.slice("Command was: ".length);
+  if (/^CREATE EXTENSION\b/u.test(command)) {
+    return { objectClass: "EXTENSION", extensionClass: extensionClassFromLine(command) };
+  }
+  if (/^COMMENT ON EXTENSION\b/u.test(command)) {
+    return { objectClass: "COMMENT", extensionClass: extensionClassFromLine(command) };
+  }
+  if (/^CREATE TABLE\b/u.test(command)) return { objectClass: "TABLE", extensionClass: "UNKNOWN" };
+  if (/^ALTER TABLE\b/u.test(command)) return { objectClass: "CONSTRAINT", extensionClass: "UNKNOWN" };
+  if (/^COPY\b/u.test(command)) return { objectClass: "TABLE_DATA", extensionClass: "UNKNOWN" };
+  if (/^CREATE (?:UNIQUE )?INDEX\b/u.test(command)) return { objectClass: "INDEX", extensionClass: "UNKNOWN" };
+  if (/^CREATE SEQUENCE\b|^SELECT pg_catalog\.setval\b/u.test(command)) {
+    return { objectClass: "SEQUENCE", extensionClass: "UNKNOWN" };
+  }
+  if (/^CREATE FUNCTION\b/u.test(command)) return { objectClass: "FUNCTION", extensionClass: "UNKNOWN" };
+  if (/^CREATE TYPE\b/u.test(command)) return { objectClass: "TYPE", extensionClass: "UNKNOWN" };
+  if (/^CREATE SCHEMA\b/u.test(command)) return { objectClass: "SCHEMA", extensionClass: "UNKNOWN" };
+  if (/^SELECT pg_catalog\.(?:lo_create|lo_open|lowrite)\b/u.test(command)) {
+    return { objectClass: "LARGE_OBJECT", extensionClass: "UNKNOWN" };
+  }
+  return null;
+};
+
+export const createRestoreDiagnosticClassifier = () => {
+  const decoder = new StringDecoder("utf8");
+  let partial = "";
+  let discardingLine = false;
+  let truncated = false;
+  let errorSeen = false;
+  let operation = { objectClass: "UNKNOWN", extensionClass: "UNKNOWN" };
+  let category = "UNKNOWN";
+  let sqlstate = null;
+
+  const processLine = (rawLine) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!errorSeen) {
+      const nextOperation = verboseOperation(line);
+      if (nextOperation !== null) operation = nextOperation;
+      if (line.startsWith("pg_restore: error:")) {
+        errorSeen = true;
+        category = restoreCategory(line, null);
+      }
+      return;
+    }
+    const sqlstateMatch = line.match(/^SQLSTATE(?:\s*\([^\r\n)]{1,40}\))?\s*[:=]\s*([0-9A-Z]{5})\s*$/u);
+    if (sqlstate === null && sqlstateMatch) {
+      sqlstate = sqlstateMatch[1];
+      if (category === "UNKNOWN") category = restoreCategory("", sqlstate);
+      return;
+    }
+    if (operation.objectClass === "UNKNOWN" && line.startsWith("Command was: ")) {
+      operation = commandOperation(line) ?? operation;
+    }
+  };
+
+  const consumeText = (text, final = false) => {
+    let remaining = text;
+    while (remaining.length > 0) {
+      if (discardingLine) {
+        const newline = remaining.indexOf("\n");
+        if (newline === -1) return;
+        remaining = remaining.slice(newline + 1);
+        discardingLine = false;
+        continue;
+      }
+      const newline = remaining.indexOf("\n");
+      const segment = newline === -1 ? remaining : remaining.slice(0, newline);
+      if (Buffer.byteLength(partial) + Buffer.byteLength(segment) > MAX_RESTORE_DIAGNOSTIC_LINE_BYTES) {
+        partial = "";
+        truncated = true;
+        if (newline === -1) {
+          discardingLine = true;
+          return;
+        }
+      } else {
+        partial += segment;
+        if (newline === -1) return;
+        processLine(partial);
+        partial = "";
+      }
+      remaining = remaining.slice(newline + 1);
+    }
+    if (final && partial) {
+      processLine(partial);
+      partial = "";
+    }
+  };
+
+  return {
+    consume(chunk) {
+      if (!Buffer.isBuffer(chunk)) {
+        truncated = true;
+        return;
+      }
+      consumeText(decoder.write(chunk));
+    },
+    finish() {
+      consumeText(decoder.end(), true);
+      const diagnostic = {
+        phase: "DESTINATION_RESTORE",
+        category,
+        objectClass: operation.objectClass,
+        extensionClass: operation.extensionClass,
+        sqlstate,
+        truncated,
+      };
+      partial = "";
+      return diagnostic;
+    },
+    discard() {
+      decoder.end();
+      partial = "";
+      discardingLine = false;
+    },
+  };
+};
+
+export const buildRestoreDiagnostic = (chunks) => {
+  const classifier = createRestoreDiagnosticClassifier();
+  for (const chunk of chunks) classifier.consume(chunk);
+  return classifier.finish();
+};
+
 const spawnFixed = (command, args, options = {}) => new Promise((resolvePromise, rejectPromise) => {
   const child = spawn(command, args, {
     cwd: options.cwd,
-    env: options.env ?? process.env,
+    env: { ...(options.env ?? process.env), LC_ALL: "C", LANG: "C" },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderrBytes = 0;
+  let settled = false;
   child.stderr.on("data", (chunk) => {
     stderrBytes += chunk.length;
-    if (stderrBytes > 1024 * 1024) child.kill("SIGKILL");
+    options.stderrClassifier?.consume(chunk);
+    if (options.stderrClassifier === undefined && stderrBytes > MAX_COMMAND_STDERR_BYTES) child.kill("SIGKILL");
   });
-  child.on("error", () => rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED")));
+  child.on("error", () => {
+    if (settled) return;
+    settled = true;
+    options.stderrClassifier?.discard();
+    rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"));
+  });
   child.on("close", (status, signal) => {
-    if (status === 0 && signal === null) resolvePromise();
-    else rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"));
+    if (settled) return;
+    settled = true;
+    if (status === 0 && signal === null) {
+      options.stderrClassifier?.discard();
+      resolvePromise();
+      return;
+    }
+    try {
+      options.onFailure?.(options.stderrClassifier?.finish());
+    } catch {
+      // Preserve the fixed public command failure; diagnostics are best-effort and never broaden output.
+    }
+    rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"));
   });
 });
 
@@ -331,7 +526,18 @@ const writeClientFiles = (tempDir, source, target, registerCleanup) => {
   return { serviceFile, passFile, sourceRootCertFile };
 };
 
-const dockerClient = async ({ tempDir, serviceFile, passFile, sourceRootCertFile, service, args, code, network = null }) => {
+const dockerClient = async ({
+  tempDir,
+  serviceFile,
+  passFile,
+  sourceRootCertFile,
+  service,
+  args,
+  code,
+  network = null,
+  stderrClassifier = null,
+  onFailure = null,
+}) => {
   const dockerArgs = ["run", "--rm"];
   if (network !== null) {
     assertNoControlCharacters(network, "INVALID_DOCKER_NETWORK");
@@ -354,7 +560,11 @@ const dockerClient = async ({ tempDir, serviceFile, passFile, sourceRootCertFile
   );
   if (basename(serviceFile) !== "pg_service.conf" || basename(passFile) !== "pgpass") fail("INVALID_CLIENT_FILE_NAME");
   if (sourceRootCertFile !== null && basename(sourceRootCertFile) !== "source-root.crt") fail("INVALID_CLIENT_FILE_NAME");
-  await spawnFixed("docker", dockerArgs, { code });
+  await spawnFixed("docker", dockerArgs, {
+    code,
+    stderrClassifier: stderrClassifier ?? undefined,
+    onFailure,
+  });
 };
 
 const querySingle = async (client, text, values, code) => {
@@ -880,9 +1090,11 @@ export async function runPostgresRestoreRehearsal(options) {
       tempDir,
       ...clientFiles,
       service: "target",
-      args: ["pg_restore", "--exit-on-error", "--no-owner", "--no-acl", "--dbname=service=target", "/work/snapshot.dump"],
+      args: ["pg_restore", "--verbose", "--exit-on-error", "--no-owner", "--no-acl", "--dbname=service=target", "/work/snapshot.dump"],
       code: "DESTINATION_RESTORE_FAILED",
       network: dockerNetwork,
+      stderrClassifier: createRestoreDiagnosticClassifier(),
+      onFailure: (diagnostic) => writePrivateJson(`${artifactDir}/restore-diagnostic.json`, diagnostic),
     });
     await dockerClient({
       tempDir,

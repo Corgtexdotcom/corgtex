@@ -4,6 +4,7 @@ import {
   buildCreateDatabaseSql,
   buildLocaleDiagnostic,
   buildPgServiceContents,
+  buildRestoreDiagnostic,
   buildSequenceUseList,
   classifyCollationVersionRelation,
   collectLargeObjects,
@@ -380,6 +381,107 @@ describe("PostgreSQL restore rehearsal runner", () => {
       "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
       "DESTINATION_LARGE_OBJECT_READ_PRIVILEGE_MISSING",
     )).rejects.toThrow("DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED");
+  });
+
+  it.each([
+    {
+      label: "privileged vector extension",
+      stderr: `pg_restore: creating EXTENSION "private.vector"\npg_restore: error: could not execute query: ERROR: permission denied to create extension "private_customer_extension"\nCommand was: CREATE EXTENSION vector; password=do-not-persist`,
+      expected: { category: "INSUFFICIENT_PRIVILEGE", objectClass: "EXTENSION", extensionClass: "VECTOR", sqlstate: null },
+    },
+    {
+      label: "unavailable extension fallback",
+      stderr: "pg_restore: error: extension is not allow-listed\nCommand was: CREATE EXTENSION private_extension;",
+      expected: { category: "EXTENSION_UNAVAILABLE", objectClass: "EXTENSION", extensionClass: "OTHER", sqlstate: null },
+    },
+    {
+      label: "duplicate table",
+      stderr: "pg_restore: creating TABLE private.hostile_table\npg_restore: error: relation already exists",
+      expected: { category: "DUPLICATE_OBJECT", objectClass: "TABLE", extensionClass: "UNKNOWN", sqlstate: null },
+    },
+    {
+      label: "constraint data",
+      stderr: "pg_restore: processing data for table private.hostile_table\npg_restore: error: duplicate key value violates unique constraint 'private_value'\nrow=(secret)",
+      expected: { category: "DATA_CONSTRAINT", objectClass: "TABLE_DATA", extensionClass: "UNKNOWN", sqlstate: null },
+    },
+  ])("reduces $label failures to exact allowlisted diagnostic values", ({ stderr, expected }) => {
+    const diagnostic = buildRestoreDiagnostic([Buffer.from(stderr, "utf8")]);
+
+    expect(diagnostic).toEqual({
+      phase: "DESTINATION_RESTORE",
+      ...expected,
+      truncated: false,
+    });
+    expect(Object.keys(diagnostic)).toEqual([
+      "phase",
+      "category",
+      "objectClass",
+      "extensionClass",
+      "sqlstate",
+      "truncated",
+    ]);
+    const serialized = JSON.stringify(diagnostic);
+    for (const forbidden of ["private", "hostile", "secret", "password", "CREATE EXTENSION", "row="]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("classifies arbitrary chunk boundaries and a missing final newline", () => {
+    const input = Buffer.from([
+      "pg_restore: creating EXTENSION \"public.plpgsql\"\n",
+      "pg_restore: error: could not execute query: ERROR: permission denied\n",
+      "SQLSTATE: 42501",
+    ].join(""), "utf8");
+    const chunks = Array.from(input, (byte) => Buffer.from([byte]));
+
+    expect(buildRestoreDiagnostic(chunks)).toEqual({
+      phase: "DESTINATION_RESTORE",
+      category: "INSUFFICIENT_PRIVILEGE",
+      objectClass: "EXTENSION",
+      extensionClass: "PLPGSQL",
+      sqlstate: "42501",
+      truncated: false,
+    });
+  });
+
+  it("freezes the operation and category at the first restore error", () => {
+    expect(buildRestoreDiagnostic([Buffer.from([
+      "pg_restore: creating INDEX private.first\n",
+      "pg_restore: error: relation already exists\n",
+      "pg_restore: creating TABLE private.second\n",
+      "pg_restore: error: permission denied\n",
+    ].join(""), "utf8")])).toMatchObject({
+      category: "DUPLICATE_OBJECT",
+      objectClass: "INDEX",
+    });
+  });
+
+  it("drains and discards an oversized line while preserving later bounded evidence", () => {
+    const diagnostic = buildRestoreDiagnostic([
+      Buffer.alloc(5 * 1024, 0x61),
+      Buffer.from("\npg_restore: creating TYPE private.hostile\npg_restore: error: permission denied\n", "utf8"),
+    ]);
+    expect(diagnostic).toMatchObject({
+      category: "INSUFFICIENT_PRIVILEGE",
+      objectClass: "TYPE",
+      extensionClass: "UNKNOWN",
+      truncated: true,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("hostile");
+  });
+
+  it("fails closed on malformed or non-buffer chunks", () => {
+    const malformed = buildRestoreDiagnostic([Buffer.from([0xff, 0xfe, 0xfd])]);
+    const nonBuffer = buildRestoreDiagnostic(["pg_restore: error: permission denied"]);
+    expect(malformed).toMatchObject({ category: "UNKNOWN", objectClass: "UNKNOWN" });
+    expect(nonBuffer).toMatchObject({ category: "UNKNOWN", objectClass: "UNKNOWN", truncated: true });
+  });
+
+  it("does not infer a SQLSTATE from unlabelled five-character text", () => {
+    expect(buildRestoreDiagnostic([Buffer.from(
+      "pg_restore: creating TABLE private.value\npg_restore: error: code 42501",
+      "utf8",
+    )]).sqlstate).toBeNull();
   });
 
   it("rejects duplicate selected archive entries", () => {

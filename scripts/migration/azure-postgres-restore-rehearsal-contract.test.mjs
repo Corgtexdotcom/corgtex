@@ -239,6 +239,48 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(readme).toContain("Raw provider output and deployment output remain private workflow artifacts");
   });
 
+  it("reduces destination restore failures to a private enum-only diagnostic", () => {
+    expect(runner).toContain("MAX_RESTORE_DIAGNOSTIC_LINE_BYTES = 4 * 1024");
+    expect(runner).toContain('LC_ALL: "C", LANG: "C"');
+    expect(runner).toContain('`${artifactDir}/restore-diagnostic.json`');
+    expect(runner).toContain('phase: "DESTINATION_RESTORE"');
+    expect(runner).toContain('["pg_restore", "--verbose", "--exit-on-error"');
+    expect(runner).toContain("options.stderrClassifier?.consume(chunk)");
+    expect(runner).toContain("if (options.stderrClassifier === undefined && stderrBytes > MAX_COMMAND_STDERR_BYTES)");
+    for (const category of [
+      "INSUFFICIENT_PRIVILEGE",
+      "EXTENSION_UNAVAILABLE",
+      "DUPLICATE_OBJECT",
+      "MISSING_DEPENDENCY",
+      "DATA_CONSTRAINT",
+      "RESOURCE_EXHAUSTED",
+      "CONNECTION",
+      "UNKNOWN",
+    ]) expect(runner).toContain(`"${category}"`);
+    for (const objectClass of [
+      "EXTENSION",
+      "COMMENT",
+      "SCHEMA",
+      "TYPE",
+      "TABLE",
+      "TABLE_DATA",
+      "SEQUENCE",
+      "FUNCTION",
+      "INDEX",
+      "CONSTRAINT",
+      "LARGE_OBJECT",
+      "OTHER",
+      "UNKNOWN",
+    ]) expect(runner).toContain(`"${objectClass}"`);
+    expect(runner).toContain('rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"))');
+    expect(runner).not.toContain("writeFileSync(stderr");
+    expect(runner).not.toContain("process.stderr.write");
+    expect(runner).not.toContain("stderrTail");
+    expect(runner).not.toContain("archiveToc:");
+    expect(readme).toContain("restore-diagnostic.json");
+    expect(readme).toContain("never authorizes automatic remediation");
+  });
+
   it("cannot mutate Railway, traffic, DNS, runtimes, or provider-cutover state", () => {
     expect(workflow).not.toMatch(/\brailway\s+(up|down|delete|deploy|service|variables|restart)/iu);
     expect(workflow).not.toMatch(/az\s+containerapp/iu);
