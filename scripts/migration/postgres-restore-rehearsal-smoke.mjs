@@ -1044,6 +1044,98 @@ const main = async () => {
     const timezoneDetail = await collectReboundSourceCheckDetail(sourceConfig, timezoneConstraint);
     if (timezoneDetail.ok !== true) fail("TIMEZONE_REBIND_DRIFT");
 
+    const verifyBooleanOperatorExtraction = async () => {
+      const tableName = "BooleanOperatorExtractionFixture";
+      const expectedCounts = {
+        BooleanOperatorExtractionFixture_grouped_and: { AND: 1, OR: 0, NOT: 0 },
+        BooleanOperatorExtractionFixture_flat_and: { AND: 1, OR: 0, NOT: 0 },
+        BooleanOperatorExtractionFixture_grouped_or: { AND: 0, OR: 1, NOT: 0 },
+        BooleanOperatorExtractionFixture_flat_or: { AND: 0, OR: 1, NOT: 0 },
+        BooleanOperatorExtractionFixture_mixed: { AND: 1, OR: 1, NOT: 1 },
+      };
+      const fixture = new Client(config(sourcePort, "source"));
+      await fixture.connect();
+      let transactionOpen = false;
+      try {
+        await fixture.query(`
+          CREATE TABLE "${tableName}" (
+            "fixture_a" boolean,
+            "fixture_b" boolean,
+            "fixture_c" boolean,
+            CONSTRAINT "BooleanOperatorExtractionFixture_grouped_and"
+              CHECK (("fixture_a" AND "fixture_b") AND "fixture_c"),
+            CONSTRAINT "BooleanOperatorExtractionFixture_flat_and"
+              CHECK ("fixture_a" AND "fixture_b" AND "fixture_c"),
+            CONSTRAINT "BooleanOperatorExtractionFixture_grouped_or"
+              CHECK (("fixture_a" OR "fixture_b") OR "fixture_c"),
+            CONSTRAINT "BooleanOperatorExtractionFixture_flat_or"
+              CHECK ("fixture_a" OR "fixture_b" OR "fixture_c"),
+            CONSTRAINT "BooleanOperatorExtractionFixture_mixed"
+              CHECK (NOT "fixture_a" AND ("fixture_b" OR "fixture_c"))
+          )
+        `);
+        await fixture.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        transactionOpen = true;
+        await fixture.query("SET LOCAL timezone = 'UTC'");
+        await fixture.query("SET LOCAL client_encoding = 'UTF8'");
+        await fixture.query("SET LOCAL search_path = pg_catalog");
+        const manifest = await collectConstraintCatalogManifest(
+          fixture,
+          "BOOLEAN_OPERATOR_CATALOG_FAILED",
+        );
+        const entries = new Map([...manifest.values()].flatMap((entry) => {
+          try {
+            const identity = JSON.parse(entry.key);
+            return identity?.[2] === tableName && Object.hasOwn(expectedCounts, identity?.[3])
+              ? [[identity[3], entry]]
+              : [];
+          } catch {
+            return [];
+          }
+        }));
+        if (entries.size !== Object.keys(expectedCounts).length) fail("BOOLEAN_OPERATOR_FIXTURE_MISSING");
+        const details = new Map();
+        for (const [constraintName, entry] of entries) {
+          const detail = await collectCheckConstraintDetail(fixture, entry);
+          if (detail.ok !== true) fail("BOOLEAN_OPERATOR_DETAIL_FAILED");
+          if (JSON.stringify(detail.booleanNodeCounts) !== JSON.stringify(expectedCounts[constraintName])) {
+            fail("BOOLEAN_OPERATOR_COUNT_MISMATCH");
+          }
+          const booleanTotal = Object.values(detail.booleanNodeCounts).reduce((total, count) => total + count, 0);
+          if (booleanTotal !== detail.nodeTagCounts.BOOLEXPR) fail("BOOLEAN_OPERATOR_RECONCILIATION_FAILED");
+          if (Object.hasOwn(detail, "conbin") || Object.hasOwn(detail, "expressionTree")) {
+            fail("BOOLEAN_OPERATOR_RAW_TREE_EXPOSED");
+          }
+          details.set(constraintName, detail);
+        }
+        for (const operator of ["and", "or"]) {
+          const grouped = details.get(`BooleanOperatorExtractionFixture_grouped_${operator}`);
+          const flat = details.get(`BooleanOperatorExtractionFixture_flat_${operator}`);
+          if (
+            JSON.stringify(grouped.tokens) !== JSON.stringify(flat.tokens)
+            || JSON.stringify(grouped.nodeTagCounts) !== JSON.stringify(flat.nodeTagCounts)
+            || JSON.stringify(grouped.booleanNodeCounts) !== JSON.stringify(flat.booleanNodeCounts)
+          ) fail("BOOLEAN_OPERATOR_CURRENT_VERSION_CANONICALIZATION_FAILED");
+        }
+        await fixture.query("COMMIT");
+        transactionOpen = false;
+        const publicEvidence = [...details.values()].map((detail) => ({
+          booleanNodeCounts: detail.booleanNodeCounts,
+          booleanNodeCount: detail.nodeTagCounts.BOOLEXPR,
+        }));
+        const serialized = JSON.stringify(publicEvidence);
+        for (const forbidden of [tableName, "fixture_a", "fixture_b", "fixture_c", "BOOLEXPR :boolop"]) {
+          if (serialized.includes(forbidden)) fail("BOOLEAN_OPERATOR_EVIDENCE_PRIVACY_FAILED");
+        }
+        if (/[a-f0-9]{64}/u.test(serialized)) fail("BOOLEAN_OPERATOR_EVIDENCE_DIGEST_LEAKED");
+      } finally {
+        if (transactionOpen) await fixture.query("ROLLBACK").catch(() => {});
+        await fixture.query(`DROP TABLE IF EXISTS "${tableName}"`).catch(() => {});
+        await fixture.end().catch(() => {});
+      }
+    };
+    await verifyBooleanOperatorExtraction();
+
     const ambiguousSourceExpression = "fixture_flag AND ((other_fixture_flag IS NOT NULL))";
     const ambiguousDestinationExpression = "fixture_flag AND (other_fixture_flag IS NOT NULL)";
     const ambiguousSourceManifest = new Map([[timezoneConstraint.key, {
@@ -1097,6 +1189,10 @@ const main = async () => {
     if (Object.values(ambiguity.ambiguityFingerprint.destinationOnly).some((count) => count !== 0)) {
       fail("CONSTRAINT_CHECK_AMBIGUITY_DESTINATION_EXTRA_CATEGORY");
     }
+    if (
+      ambiguity.booleanGroupingFingerprint?.relation !== "NOT_PROVEN"
+      || ambiguity.booleanGroupingFingerprint.operator !== null
+    ) fail("CONSTRAINT_CHECK_AMBIGUITY_BOOLEAN_GROUPING_STATUS");
     if (!ambiguity.dependencies.identitySetEqual || ambiguity.dependencies.changedClasses.length !== 0) {
       fail("CONSTRAINT_CHECK_AMBIGUITY_DEPENDENCY_MISMATCH");
     }
