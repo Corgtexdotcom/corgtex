@@ -10,6 +10,7 @@ const hasExactFoundationDatabases = (names) =>
 describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   const workflow = read(".github/workflows/azure-migration-postgres-rehearsal.yml");
   const runner = read("scripts/migration/run-postgres-restore-rehearsal.mjs");
+  const smoke = read("scripts/migration/postgres-restore-rehearsal-smoke.mjs");
   const validator = read("scripts/migration/validate-postgres-restore-rehearsal.mjs");
   const readme = read("infra/azure/migration-foundation/README.md");
   const targetRootBundle = read("infra/azure/migration-foundation/azure-postgres-root-ca.pem");
@@ -204,17 +205,46 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain('classification: "EXECUTABLE_SCHEMA_DIFFERENCE"');
     expect(runner).toContain('classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY"');
     expect(runner).toContain('`${artifactDir}/schema-diagnostic.json`');
-    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(2);
+    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(3);
+    expect(runner.indexOf('await sourceClient.query("COMMIT");'))
+      .toBeLessThan(runner.indexOf("await restoreArchiveSections({"));
+    expect(runner).toContain("constraintCatalogIdentityQuery");
+    expect(runner).toContain("LIMIT 2");
+    expect(runner).toContain('"SOURCE_REBIND_DRIFT"');
     expect(runner).toContain("FROM pg_catalog.pg_constraint AS constraint_row");
     expect(runner).toContain("pg_catalog.pg_get_constraintdef(constraint_row.oid, false)");
     expect(runner).toContain("pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)");
     expect(runner).toContain("pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)");
     expect(runner).toContain("constraintSemantics: buildConstraintSemanticDiagnostic");
+    expect(runner).toContain("checkExpressionDifference");
+    expect(runner).toContain("buildUniqueCheckTokenEdit");
+    expect(runner).toContain("pg_catalog.pg_identify_object");
+    expect(runner).toContain('status: "AMBIGUOUS"');
+    expect(smoke).not.toContain("CONSTRAINT_CHECK_DIAGNOSTIC_CLASSIFICATION_FAILED");
+    expect(smoke).toContain("CONSTRAINT_CHECK_DIAGNOSTIC_COLLECTION_STATUS");
+    expect(smoke).toContain("CONSTRAINT_CHECK_DIAGNOSTIC_DEPENDENCY_IDENTITY");
+    expect(smoke).toContain("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_NODE_COUNTS");
+    expect(readme).toContain("fixed token-category counts");
+    expect(readme).toContain("never\nrelax schema parity");
     expect(readme).toContain("no catalog value is serialized");
     expect(validator).toContain('value.schema.algorithm !== SCHEMA_TOKEN_ALGORITHM');
     expect(readme).toContain("`PG_DUMP_SQL_TOKENS_V1`");
     expect(runner).toContain("DECLARE ${quoteIdentifier(cursorName)} NO SCROLL CURSOR");
     expect(runner).toContain("to_jsonb(t)::text AS canonical_row");
+  });
+
+  it("pins UTC and the existing timeouts for every containerized libpq session", () => {
+    const pgOptions = [...runner.matchAll(/"PGOPTIONS=([^"]+)"/gu)].map((match) => match[1]);
+    expect(pgOptions).toHaveLength(2);
+    for (const options of pgOptions) {
+      expect(options.match(/-c timezone=UTC/gu)).toHaveLength(1);
+      expect(options).toContain("-c lock_timeout=5s");
+      expect(options).toContain("-c statement_timeout=0");
+      expect(options).toContain("-c transaction_timeout=0");
+      expect(options).toContain("-c idle_in_transaction_session_timeout=20min");
+    }
+    expect(pgOptions.filter((options) => options.includes("-c default_transaction_read_only=on")))
+      .toHaveLength(1);
   });
 
   it("proves large objects through least-privilege APIs before scratch creation", () => {

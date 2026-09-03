@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   analyzeSchemaDump,
   buildCreateDatabaseSql,
@@ -9,9 +9,12 @@ import {
   buildRestoreDiagnostic,
   buildSchemaDifferenceDiagnostic,
   buildTargetConnectionProbeDiagnostic,
+  buildUniqueCheckTokenEdit as buildUniqueCheckTokenEditWithContext,
   buildSequenceUseList,
   classifyCollationVersionRelation,
+  collectCheckConstraintDetail,
   collectConstraintCatalogManifest,
+  collectReboundSourceCheckDetail,
   collectLargeObjects,
   inspectLargeObjectAccess,
   isCurrentCollationVersion,
@@ -92,6 +95,7 @@ const largeObjectClient = (objects) => ({
 });
 
 const constraintCatalogRow = (overrides = {}) => ({
+  constraint_oid: "123",
   namespace_name: "private_namespace",
   constraint_name: "private_constraint",
   object_kind: "TABLE",
@@ -139,9 +143,83 @@ const constraintCatalogRow = (overrides = {}) => ({
   foreign_foreign_operators: [],
   exclusion_operators: [],
   definition: "CHECK ((private_column <> 'private-literal'::text))",
+  definition_within_limit: true,
   check_expression: "(private_column <> 'private-literal'::text)",
+  check_expression_within_limit: true,
   ...overrides,
 });
+
+const checkDetail = (expression, overrides = {}) => ({
+  ok: true,
+  tokens: tokenizeSchemaDump(expression),
+  keywords: new Set([
+    "all", "and", "any", "array", "between", "case", "coalesce", "else", "end", "extract", "false",
+    "from", "greatest", "in", "is", "least", "like", "month", "not", "null", "nullif", "or", "then",
+    "true", "unknown", "when", "year",
+  ]),
+  columnReferences: new Set(["private_column"]),
+  functionReferences: new Set(),
+  nodeTagCounts: Object.fromEntries([
+    "ARRAYCOERCEEXPR", "ARRAYEXPR", "BOOLEXPR", "BOOLEANTEST", "CASEEXPR", "CASETESTEXPR",
+    "CASEWHEN", "COALESCEEXPR", "COERCETODOMAIN", "COERCETODOMAINVALUE", "COERCEVIAIO",
+    "COLLATEEXPR", "CONST", "CONVERTROWTYPEEXPR", "DISTINCTEXPR", "FIELDSELECT", "FUNCEXPR",
+    "MINMAXEXPR", "NAMEDARGEXPR", "NEXTVALUEEXPR", "NULLIFEXPR", "NULLTEST", "OPEXPR",
+    "PARAM", "RELABELTYPE", "ROWCOMPAREEXPR", "ROWEXPR", "SCALARARRAYOPEXPR", "SETTODEFAULT",
+    "SQLVALUEFUNCTION", "VAR", "XMLEXPR", "OTHER",
+  ].map((tag) => [tag, 0])),
+  dependencies: [
+    ["a", "table column", "private_namespace", "private_relation", "private_namespace.private_relation.private_column"],
+    ["n", "operator", "pg_catalog", "<>", "pg_catalog.<>(text,text)"],
+    ["n", "type", "pg_catalog", "text", "pg_catalog.text"],
+  ],
+  ...overrides,
+});
+
+const TEST_CHECK_KEYWORDS = new Set([
+  "all", "and", "any", "array", "between", "case", "coalesce", "collate", "current_catalog",
+  "current_date", "current_role", "current_schema", "current_time", "current_timestamp", "current_user",
+  "else", "end", "extract", "false", "from", "greatest", "ilike", "in", "is", "least", "like",
+  "localtime", "localtimestamp", "month", "not", "null", "nullif", "operator", "or", "session_user",
+  "similar", "system_user", "then", "true", "unknown", "user", "when", "year",
+]);
+
+const testIdentifierLogicalName = (token) => {
+  if (token?.domain !== "DDL_TOKEN") return null;
+  if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) return token.value.toLowerCase();
+  if (!/^"(?:[^"]|"")+"$/u.test(token.value)) return null;
+  return token.value.slice(1, -1).replace(/""/gu, '"');
+};
+
+const inferredTestIdentifierContext = (tokens) => {
+  const columnReferences = new Set();
+  const functionReferences = new Set();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const name = testIdentifierLogicalName(tokens[index]);
+    if (name === null || (!tokens[index].value.startsWith('"') && TEST_CHECK_KEYWORDS.has(name))) continue;
+    if (tokens[index + 1]?.value === "(") functionReferences.add(name);
+    else columnReferences.add(name);
+  }
+  return { keywords: TEST_CHECK_KEYWORDS, columnReferences, functionReferences };
+};
+
+const buildUniqueCheckTokenEdit = (
+  sourceTokens,
+  destinationTokens,
+  sourceContext = inferredTestIdentifierContext(sourceTokens),
+  destinationContext = inferredTestIdentifierContext(destinationTokens),
+) => buildUniqueCheckTokenEditWithContext(sourceTokens, destinationTokens, sourceContext, destinationContext);
+
+const TEST_KEYWORD_ROWS = [{ word: "array" }, { word: "extract" }, { word: "from" }];
+const TEST_KEYWORD_BYTES = TEST_KEYWORD_ROWS.map(({ word }) => Buffer.byteLength(word, "utf8"));
+const testKeywordPreflight = () => ({
+  rowCount: 1,
+  rows: [{
+    keyword_count: String(TEST_KEYWORD_ROWS.length),
+    max_field_bytes: String(Math.max(...TEST_KEYWORD_BYTES)),
+    total_bytes: String(TEST_KEYWORD_BYTES.reduce((total, value) => total + value, 0)),
+  }],
+});
+const testKeywordFetch = () => ({ rowCount: TEST_KEYWORD_ROWS.length, rows: TEST_KEYWORD_ROWS });
 
 const constraintManifest = async (rows) => collectConstraintCatalogManifest({
   query: async () => ({ rows }),
@@ -306,6 +384,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         semanticEqual: true,
         mismatchCount: 0,
         mismatchFields: [],
+        checkExpressionDifference: null,
         truncated: false,
       });
       const serialized = JSON.stringify(diagnostic);
@@ -341,6 +420,1331 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(diagnostic.mismatchFields).toContain(field);
     });
 
+    it("emits only fixed token, node, and dependency categories for one CHECK expression mismatch", async () => {
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: "((private_column <> 'private-literal'::text))",
+        definition: "CHECK (((private_column <> 'private-literal'::text)))",
+        expression_tree: "{RELABELTYPE :arg {OPEXPR :args ({VAR} {CONST})}}",
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: "(private_column <> 'private-literal'::text)",
+        definition: "CHECK ((private_column <> 'private-literal'::text))",
+        expression_tree: "{OPEXPR :args ({VAR} {CONST})}",
+      })]);
+      const sourceDetail = checkDetail("((private_column <> 'private-literal'::text))");
+      sourceDetail.nodeTagCounts.RELABELTYPE = 1;
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH", {
+        source: sourceDetail,
+        destination: checkDetail("(private_column <> 'private-literal'::text)"),
+      });
+      expect(diagnostic.checkExpressionDifference).toEqual({
+        status: "UNIQUE",
+        limitKind: null,
+        side: null,
+        stage: null,
+        tokenEdit: {
+          status: "UNIQUE",
+          sourceOnly: {
+            CAST_OPERATOR: 0,
+            BUILTIN_TYPE: 0,
+            PARENTHESIS: 2,
+            COLLATION: 0,
+            OPERATOR: 0,
+            FUNCTION: 0,
+            COLUMN_REFERENCE: 0,
+            STRING_LITERAL: 0,
+            OTHER: 0,
+          },
+          destinationOnly: {
+            CAST_OPERATOR: 0,
+            BUILTIN_TYPE: 0,
+            PARENTHESIS: 0,
+            COLLATION: 0,
+            OPERATOR: 0,
+            FUNCTION: 0,
+            COLUMN_REFERENCE: 0,
+            STRING_LITERAL: 0,
+            OTHER: 0,
+          },
+        },
+        nodeTagDeltas: {
+          sourceOnly: expect.objectContaining({ RELABELTYPE: 1, OTHER: 0 }),
+          destinationOnly: expect.objectContaining({ RELABELTYPE: 0, OTHER: 0 }),
+        },
+        dependencies: { identitySetEqual: true, changedClasses: [] },
+      });
+      const serialized = JSON.stringify(diagnostic);
+      for (const forbidden of [
+        "private_namespace",
+        "private_constraint",
+        "private_relation",
+        "private_column",
+        "private-literal",
+        "pg_catalog.<>",
+      ]) expect(serialized).not.toContain(forbidden);
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it("fails closed to ambiguous token edits and reports fixed dependency classes only", async () => {
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: "private_column OR private_column",
+        definition: "CHECK (private_column OR private_column)",
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: "private_column",
+        definition: "CHECK (private_column)",
+        dependencies: [
+          ["a", "table column", "private_namespace", "other_private_relation", "private_namespace.other_private_relation.private_column"],
+        ],
+      })]);
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "UNAVAILABLE", {
+        source: checkDetail("private_column OR private_column"),
+        destination: checkDetail("private_column", {
+          dependencies: [
+            ["a", "table column", "private_namespace", "other_private_relation", "private_namespace.other_private_relation.private_column"],
+          ],
+        }),
+      });
+      expect(diagnostic.checkExpressionDifference).toEqual({
+        status: "AMBIGUOUS",
+        limitKind: null,
+        side: null,
+        stage: null,
+        tokenEdit: null,
+        nodeTagDeltas: null,
+        dependencies: null,
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain("other_private_relation");
+    });
+
+    it.each([
+      ["CAST_OPERATOR", "private_column::text", "private_column text"],
+      ["BUILTIN_TYPE", "private_column::text", "private_column::integer"],
+      ["COLLATION", "private_column COLLATE private_collation", "private_column"],
+      ["OPERATOR", "private_column > 1", "private_column < 1"],
+      ["FUNCTION", "private_function(private_column)", "other_function(private_column)"],
+      ["COLUMN_REFERENCE", "private_column > 1", "other_column > 1"],
+      ["STRING_LITERAL", "private_column = 'private-literal'", "private_column = 'other-literal'"],
+      ["OTHER", "private_column > 1", "private_column > 2"],
+    ])("classifies a unique %s CHECK token edit without values", (category, source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ['"order-total"', '"order_total"', "COLUMN_REFERENCE"],
+      ['"a+b"', '"a_b"', "COLUMN_REFERENCE"],
+      ['"<>"', '"comparison"', "COLUMN_REFERENCE"],
+      ['"a""b"', '"a_b"', "COLUMN_REFERENCE"],
+      ['"collate" > 0', '"renamed" > 0', "COLUMN_REFERENCE"],
+      ['"private-function"(private_column)', '"other_function"(private_column)', "FUNCTION"],
+    ])("classifies quoted identifier edits without treating embedded operators as syntax", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBe(1);
+      expect(edit.destinationOnly[category]).toBe(1);
+      expect(edit.sourceOnly.OPERATOR).toBe(0);
+      expect(edit.destinationOnly.OPERATOR).toBe(0);
+    });
+
+    it.each([
+      ["private_column COLLATE private_schema.private_a", "private_column COLLATE private_schema.private_b", 1, 1],
+      ["private_column COLLATE private_schema.private_a", "private_column COLLATE other_schema.private_a", 1, 1],
+      ['private_column COLLATE "private schema"."private-a"', 'private_column COLLATE "private schema"."private-b"', 1, 1],
+      ['private_column COLLATE private_schema."private-a"', 'private_column COLLATE private_schema."private-b"', 1, 1],
+      ['private_column COLLATE "private""schema"."private-a"', 'private_column COLLATE "private""schema"."private-b"', 1, 1],
+      ['private_column COLLATE "C"', 'private_column COLLATE "POSIX"', 1, 1],
+      ["private_column COLLATE private_a IS NULL", "private_column COLLATE private_b IS NULL", 1, 1],
+      ["private_column COLLATE private_schema.private_a", "private_column COLLATE private_a", 2, 0],
+      ["private_column COLLATE private_a", "private_column COLLATE private_schema.private_a", 0, 2],
+      [
+        "private_a COLLATE private_schema.collation_a = private_b COLLATE other_schema.collation_b",
+        "private_a COLLATE private_schema.collation_c = private_b COLLATE other_schema.collation_b",
+        1,
+        1,
+      ],
+    ])("classifies bounded qualified COLLATE token edits without values", (source, destination, sourceCount, destinationCount) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLLATION).toBe(sourceCount);
+      expect(edit.destinationOnly.COLLATION).toBe(destinationCount);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ['private_column = "COLLATE"', 'private_column = "renamed"', "COLUMN_REFERENCE"],
+      ["private_column = 'COLLATE private_schema.private_a'", "private_column = 'other'", "STRING_LITERAL"],
+      ["private_column COLLATE catalog.private_schema.private_a", "private_column COLLATE catalog.private_schema.private_b", "OTHER"],
+      ["private_column COLLATE", "private_column renamed", "OTHER"],
+      ["private_column COLLATE private_schema.", "private_column renamed private_schema.", "OTHER"],
+      ["private_function(private_column)", "other_function(private_column)", "FUNCTION"],
+      ["private_column > 1", "private_column < 1", "OPERATOR"],
+    ])("does not infer COLLATE spans from malformed or unrelated tokens", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLLATION + edit.destinationOnly.COLLATION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_schema.validate(private_column)", "other_schema.validate(private_column)", 1, 1],
+      ["private_schema.validate(private_column)", "private_schema.other(private_column)", 1, 1],
+      ["private_schema.validate(private_column)", "validate(private_column)", 2, 0],
+      ["validate(private_column)", "private_schema.validate(private_column)", 0, 2],
+      ['"private schema"."private-function"(private_column)', '"other schema"."private-function"(private_column)', 1, 1],
+      ['private_schema."private-function"(private_column)', 'other_schema."private-function"(private_column)', 1, 1],
+      ['"private""schema"."private-function"(private_column)', '"other""schema"."private-function"(private_column)', 1, 1],
+      ["outer_function(private_schema.validate(private_column))", "outer_function(other_schema.validate(private_column))", 1, 1],
+      ["NOT private_schema.validate(private_column)", "NOT other_schema.validate(private_column)", 1, 1],
+      [
+        "private_schema.validate(private_column) AND other_schema.check_value(private_column)",
+        "changed_schema.validate(private_column) AND other_schema.check_value(private_column)",
+        1,
+        1,
+      ],
+      ['"COLLATE"(private_column)', '"renamed"(private_column)', 1, 1],
+    ])("classifies bounded qualified function token edits without values", (source, destination, sourceCount, destinationCount) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBe(sourceCount);
+      expect(edit.destinationOnly.FUNCTION).toBe(destinationCount);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["COALESCE(private_column, 0)", "NULLIF(private_column, 0)"],
+      ["GREATEST(private_column, 0)", "LEAST(private_column, 0)"],
+      ["coalesce(private_column, 0)", "nullif(private_column, 0)"],
+    ])("classifies closed SQL constructs as syntax rather than functions", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["CASE WHEN a THEN b ELSE c END", "case when a then b else c end", 5],
+      ["CASE a WHEN b THEN c ELSE d END", "case a when b then c else d end", 5],
+      ["CASE WHEN a THEN b WHEN c THEN d ELSE e END", "case when a then b when c then d else e end", 7],
+      [
+        "CASE WHEN a THEN CASE b WHEN c THEN d ELSE e END ELSE f END",
+        "case when a then case b when c then d else e end else f end",
+        10,
+      ],
+    ])("classifies structural CASE tokens as syntax", (source, destination, count) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(count);
+      expect(edit.destinationOnly.OTHER).toBe(count);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("separates added CASE-arm syntax from its payload columns", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("CASE WHEN a THEN b ELSE c END"),
+        tokenizeSchemaDump("CASE WHEN a THEN b WHEN d THEN e ELSE c END"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.destinationOnly.OTHER).toBe(2);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(2);
+      expect(edit.sourceOnly.OTHER + edit.sourceOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it.each([
+      ['"CASE"', '"RENAMED_CASE"', "COLUMN_REFERENCE"],
+      ['"WHEN"', '"RENAMED_WHEN"', "COLUMN_REFERENCE"],
+      ["app.case(private_column)", "other.case(private_column)", "FUNCTION"],
+      ["case_value", "other_value", "COLUMN_REFERENCE"],
+      ["weekend", "weekday", "COLUMN_REFERENCE"],
+    ])("does not widen CASE syntax classification for %s", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBeGreaterThan(0);
+      expect(edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
+      ["row.when", "other.when"],
+      ["row.end", "other.end"],
+    ])("keeps qualified non-callable CASE lookalikes conservative for %s", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it.each([
+      ["ARRAY[]::integer[]", "array[]::integer[]", 1],
+      ["ARRAY[a, b]", "array[a, b]", 1],
+      ["ARRAY[ARRAY[a], ARRAY[b]]", "array[array[a], array[b]]", 3],
+      ["ARRAY[[a, b], [c, d]]", "array[[a, b], [c, d]]", 1],
+    ])("classifies bracket-form ARRAY introducers as syntax", (source, destination, count) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(count);
+      expect(edit.destinationOnly.OTHER).toBe(count);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("classifies an edited ARRAY introducer without stealing its element column", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("ARRAY[existing_column]"),
+        tokenizeSchemaDump("array[existing_column]"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("keeps ARRAY element edits in column references", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("ARRAY[existing_column]"),
+        tokenizeSchemaDump("ARRAY[added_column]"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
+      ['"ARRAY"[a]', '"RENAMED_ARRAY"[a]', "COLUMN_REFERENCE"],
+      ["array_value[a]", "other_value[a]", "COLUMN_REFERENCE"],
+      ["arrays[a]", "other_arrays[a]", "COLUMN_REFERENCE"],
+      ["ordinary_column[a]", "renamed_column[a]", "COLUMN_REFERENCE"],
+      ["value::array[a]", "value::renamed_type[a]", "BUILTIN_TYPE"],
+    ])("does not widen ARRAY syntax classification for %s", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBeGreaterThan(0);
+      expect(edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it("keeps a qualified non-callable ARRAY lookalike conservative", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("row.array[a]"),
+        tokenizeSchemaDump("other.array[a]"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it("contains an incomplete ARRAY candidate without scanning later tokens", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("ARRAY[incomplete_element outside_column"),
+        tokenizeSchemaDump("array[incomplete_element renamed_column"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+    });
+
+    it.each([
+      "CASE WHEN a THEN b outside_column",
+      "CASE THEN a WHEN b THEN c END outside_column",
+      "CASE WHEN a THEN b ELSE c ELSE d END outside_column",
+      "CASE WHEN a END outside_column",
+    ])("contains malformed CASE candidates without reclassifying later tokens", (source) => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump(source),
+        tokenizeSchemaDump(source.replace("outside_column", "renamed_column")),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
+      "CURRENT_CATALOG",
+      "CURRENT_DATE",
+      "CURRENT_ROLE",
+      "CURRENT_SCHEMA",
+      "CURRENT_TIME",
+      "CURRENT_TIMESTAMP",
+      "CURRENT_USER",
+      "LOCALTIME",
+      "LOCALTIMESTAMP",
+      "SESSION_USER",
+      "SYSTEM_USER",
+      "USER",
+    ])("classifies the closed SQL value construct %s as syntax", (source) => {
+      const destination = source === "CURRENT_DATE" ? "CURRENT_TIME" : "CURRENT_DATE";
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it.each([
+      ["CURRENT_TIME(3)", "CURRENT_TIMESTAMP(3)"],
+      ["LOCALTIME(3)", "LOCALTIMESTAMP(3)"],
+    ])("keeps parenthesized SQL value constructs out of FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("keeps the optional CURRENT_SCHEMA parentheses as syntax", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("CURRENT_SCHEMA()"),
+        tokenizeSchemaDump("CURRENT_SCHEMA"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.PARENTHESIS).toBe(2);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it.each([
+      ["private_flag IS UNKNOWN", "private_flag IS TRUE"],
+      ["private_flag IS NOT UNKNOWN", "private_flag IS NOT FALSE"],
+      ["private_flag is unknown", "private_flag is true"],
+      ["private_flag is not unknown", "private_flag is not false"],
+    ])("classifies boolean-test words conservatively from the keyword catalog", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.OPERATOR + edit.destinationOnly.OPERATOR).toBe(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it.each([
+      ["unknown", "renamed_unknown"],
+      ["app.unknown", "other.unknown"],
+    ])("keeps unquoted or qualified UNKNOWN tokens conservative for %s", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OPERATOR + edit.destinationOnly.OPERATOR).toBe(0);
+    });
+
+    it("uses catalog evidence for a quoted UNKNOWN column", () => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump('"UNKNOWN"'), tokenizeSchemaDump('"RENAMED_UNKNOWN"'));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OPERATOR + edit.destinationOnly.OPERATOR).toBe(0);
+    });
+
+    it("keeps EXTRACT fields as syntax while retaining catalog-backed columns", () => {
+      const sourceContext = {
+        keywords: new Set(["extract", "from", "year"]),
+        columnReferences: new Set(["observed_at"]),
+        functionReferences: new Set(),
+      };
+      const destinationContext = {
+        keywords: new Set(["extract", "from", "month"]),
+        columnReferences: new Set(["observed_at"]),
+        functionReferences: new Set(),
+      };
+      const edit = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("EXTRACT(YEAR FROM observed_at)"),
+        tokenizeSchemaDump("EXTRACT(MONTH FROM observed_at)"),
+        sourceContext,
+        destinationContext,
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("uses bounded catalog evidence for a unique column edit", () => {
+      const edit = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("EXTRACT(YEAR FROM observed_at)"),
+        tokenizeSchemaDump("EXTRACT(YEAR FROM measured_at)"),
+        {
+          keywords: new Set(["extract", "from", "year"]),
+          columnReferences: new Set(["observed_at"]),
+          functionReferences: new Set(),
+        },
+        {
+          keywords: new Set(["extract", "from", "year"]),
+          columnReferences: new Set(["measured_at"]),
+          functionReferences: new Set(),
+        },
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it("defaults unresolved identifiers to OTHER when catalog context is absent", () => {
+      const edit = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("private_column"),
+        tokenizeSchemaDump("renamed_column"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it("gives unquoted PostgreSQL keywords precedence over column-name collisions", () => {
+      const edit = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("year"),
+        tokenizeSchemaDump("month"),
+        { keywords: new Set(["year"]), columnReferences: new Set(["year"]), functionReferences: new Set() },
+        { keywords: new Set(["month"]), columnReferences: new Set(["month"]), functionReferences: new Set() },
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it("allows quoted identifiers to bypass PostgreSQL keyword precedence", () => {
+      const edit = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump('"year"'),
+        tokenizeSchemaDump('"month"'),
+        { keywords: new Set(["year"]), columnReferences: new Set(["year"]), functionReferences: new Set() },
+        { keywords: new Set(["month"]), columnReferences: new Set(["month"]), functionReferences: new Set() },
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it("keeps duplicate catalog-backed identifier occurrences conservative", () => {
+      const edit = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("alpha + alpha"),
+        tokenizeSchemaDump("beta + beta"),
+        { keywords: new Set(), columnReferences: new Set(["alpha"]), functionReferences: new Set() },
+        { keywords: new Set(), columnReferences: new Set(["beta"]), functionReferences: new Set() },
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(2);
+      expect(edit.destinationOnly.OTHER).toBe(2);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it("requires unique catalog evidence for unqualified functions", () => {
+      const backed = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("validate(private_column)"),
+        tokenizeSchemaDump("verify(private_column)"),
+        { keywords: new Set(), columnReferences: new Set(["private_column"]), functionReferences: new Set(["validate"]) },
+        { keywords: new Set(), columnReferences: new Set(["private_column"]), functionReferences: new Set(["verify"]) },
+      );
+      expect(backed.status).toBe("UNIQUE");
+      expect(backed.sourceOnly.FUNCTION).toBe(1);
+      expect(backed.destinationOnly.FUNCTION).toBe(1);
+
+      const unresolved = buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("validate(private_column)"),
+        tokenizeSchemaDump("verify(private_column)"),
+      );
+      expect(unresolved.status).toBe("UNIQUE");
+      expect(unresolved.sourceOnly.OTHER).toBe(1);
+      expect(unresolved.destinationOnly.OTHER).toBe(1);
+      expect(unresolved.sourceOnly.FUNCTION + unresolved.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("rejects malformed CHECK identifier context", () => {
+      expect(() => buildUniqueCheckTokenEditWithContext(
+        tokenizeSchemaDump("private_column"),
+        tokenizeSchemaDump("renamed_column"),
+        { keywords: new Set(["INVALID"]), columnReferences: new Set(), functionReferences: new Set() },
+      )).toThrow("INVALID_CHECK_IDENTIFIER_CONTEXT");
+    });
+
+    it.each([
+      ['"current_date"', '"other_date"', "COLUMN_REFERENCE"],
+      ['"current_time"(3)', '"other_time"(3)', "FUNCTION"],
+      ["app.current_date(private_column)", "other.current_date(private_column)", "FUNCTION"],
+      ["current_setting", "other_setting", "COLUMN_REFERENCE"],
+      ["current_query()", "other_query()", "FUNCTION"],
+      ["current_path", "other_path", "COLUMN_REFERENCE"],
+      ["local_value", "other_value", "COLUMN_REFERENCE"],
+    ])("does not widen SQL value classification for %s", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBeGreaterThan(0);
+      expect(edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
+      ["private_schema.coalesce(private_column, 0)", "other_schema.coalesce(private_column, 0)"],
+      ["private_schema.operator(private_column)", "other_schema.operator(private_column)"],
+      ['"COALESCE"(private_column, 0)', '"NULLIF"(private_column, 0)'],
+      ['"OPERATOR"(private_column)', '"renamed"(private_column)'],
+    ])("keeps quoted or qualified construct names in FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBeGreaterThan(0);
+      expect(edit.destinationOnly.FUNCTION).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_catalog.private_schema.validate(private_column)", "other_catalog.private_schema.validate(private_column)"],
+      [".validate(private_column)", ".other(private_column)"],
+      ["private_schema..validate(private_column)", "other_schema..validate(private_column)"],
+      ["private_schema.(private_column)", "other_schema.(private_column)"],
+    ])("fails closed for malformed or unsupported callable chains", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column OPERATOR(private_schema.>) 0", "private_column OPERATOR(other_schema.>) 0", 1, 1],
+      ["private_column OPERATOR(private_schema.>) 0", "private_column OPERATOR(private_schema.<) 0", 1, 1],
+      ["private_column OPERATOR(operator.>) 0", "private_column OPERATOR(other.>) 0", 1, 1],
+      ['private_column OPERATOR("private schema".>) 0', 'private_column OPERATOR("other schema".>) 0', 1, 1],
+      ['private_column OPERATOR("operator".>) 0', 'private_column OPERATOR("other".>) 0', 1, 1],
+      ['private_column OPERATOR("private""schema".>) 0', 'private_column OPERATOR("other""schema".>) 0', 1, 1],
+      ["private_column OPERATOR(private_schema.+) 0", "private_column OPERATOR(other_schema.+) 0", 1, 1],
+    ])("classifies bounded qualified operator token edits without values", (
+      source,
+      destination,
+      sourceCount,
+      destinationCount,
+    ) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OPERATOR).toBe(sourceCount);
+      expect(edit.destinationOnly.OPERATOR).toBe(destinationCount);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column OPERATOR(private_catalog.private_schema.>) 0", "private_column OPERATOR(other_catalog.private_schema.>) 0"],
+      ["private_column OPERATOR(private_schema..>) 0", "private_column OPERATOR(other_schema..>) 0"],
+      ["private_column OPERATOR(private_schema.) 0", "private_column OPERATOR(other_schema.) 0"],
+      ["private_column OPERATOR(private_schema.++) 0", "private_column OPERATOR(other_schema.++) 0"],
+      ['private_column OPERATOR(private_schema."+") 0', 'private_column OPERATOR(other_schema."+") 0'],
+    ])("fails closed for malformed or unsupported qualified operator contexts", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::private_schema.private_type", "private_column::other_schema.private_type", 1, 1],
+      ["private_column::private_schema.private_type", "private_column::private_schema.other_type", 1, 1],
+      ["private_column::private_type", "private_column::other_type", 1, 1],
+      ["private_column::operator", "private_column::other_type", 1, 1],
+      ["private_column::operator.bounded_text", "private_column::other_schema.bounded_text", 1, 1],
+      ["private_column::operator(10)", "private_column::other_type(10)", 1, 1],
+      ['private_column::"private schema"."private-type"', 'private_column::"other schema"."private-type"', 1, 1],
+      ['private_column::"operator"."private-type"', 'private_column::"other"."private-type"', 1, 1],
+      ['private_column::private_schema."private-type"', 'private_column::other_schema."private-type"', 1, 1],
+      ["private_column::private_schema.private_type(10)", "private_column::other_schema.private_type(10)", 1, 1],
+      ["private_column::private_schema.private_type[]", "private_column::other_schema.private_type[]", 1, 1],
+    ])("classifies bounded qualified cast type edits without values", (
+      source,
+      destination,
+      sourceCount,
+      destinationCount,
+    ) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(sourceCount);
+      expect(edit.destinationOnly.BUILTIN_TYPE).toBe(destinationCount);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::private_schema.local_timestamp AT TIME ZONE 'UTC'", "private_column::other_schema.local_timestamp AT TIME ZONE 'UTC'"],
+      ["private_column::private_schema.private_type COLLATE private_collation", "private_column::other_schema.private_type COLLATE private_collation"],
+      ["private_column::private_schema.private_type IS NULL", "private_column::other_schema.private_type IS NULL"],
+      ["private_column::private_schema.private_type IS DISTINCT FROM NULL", "private_column::other_schema.private_type IS DISTINCT FROM NULL"],
+      ["private_column::private_schema.private_type = private_column", "private_column::other_schema.private_type = private_column"],
+      ["private_column::private_schema.private_type(10)", "private_column::other_schema.private_type(10)"],
+      ["private_column::private_schema.private_type[]", "private_column::other_schema.private_type[]"],
+      ["private_column::private_schema.private_type[1]", "private_column::other_schema.private_type[1]"],
+    ])("keeps qualified cast identities bounded before valid expression suffixes", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.destinationOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::private_catalog.private_schema.private_type", "private_column::other_catalog.private_schema.private_type"],
+      ["private_column::private_schema..private_type", "private_column::other_schema..private_type"],
+      ["private_column::private_schema.", "private_column::other_schema."],
+      ['private_column::U&"private_type"', 'private_column::U&"other_type"'],
+    ])("fails closed for malformed or unsupported cast identity spans", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_schema.private_column > 0", "other_schema.private_column > 0", "OTHER"],
+      ["private_column IN (1, 2)", "other_column IN (1, 2)", "COLUMN_REFERENCE"],
+      ["private_column = ANY (private_array)", "other_column = ANY (private_array)", "COLUMN_REFERENCE"],
+      ["private_column = ALL (private_array)", "other_column = ALL (private_array)", "COLUMN_REFERENCE"],
+      ["private_column OPERATOR(pg_catalog.>) 0", "private_column OPERATOR(pg_catalog.<) 0", "OPERATOR"],
+      ["private_column::numeric(10, 2)", "other_column::numeric(10, 2)", "COLUMN_REFERENCE"],
+    ])("does not infer function spans from ordinary or operator contexts", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::character varying(10)", "private_column::character(10)"],
+      ["private_column::bit varying(8)", "private_column::bit(8)"],
+      ["private_column::double precision", "private_column::double"],
+      ["private_column::CHARACTER VARYING(10)", "private_column::CHARACTER(10)"],
+      ["private_column::character varying", "private_column::character"],
+      ["private_column::character varying IS NOT NULL", "private_column::character IS NOT NULL"],
+      ["private_column::character varying(10)[]", "private_column::character(10)[]"],
+    ])("classifies PG18 multiword built-in type edits without values", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::time with time zone", "private_column::time without time zone"],
+      ["private_column::timestamp with time zone", "private_column::timestamp without time zone"],
+      ["private_column::timestamp(3) with time zone", "private_column::timestamp(3) without time zone"],
+    ])("classifies PG18 time-zone type identity edits without values", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.destinationOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["text <> ''::text", "description <> ''::text"],
+      ["date IS NOT NULL", "created_at IS NOT NULL"],
+      ["name = 'value'", "label = 'value'"],
+      ['"text" <> \'\'', '"description" <> \'\''],
+    ])("keeps built-in-shaped bare identifiers in COLUMN_REFERENCE", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.BUILTIN_TYPE + edit.destinationOnly.BUILTIN_TYPE).toBe(0);
+    });
+
+    it.each([
+      ["text(private_column)", "description(private_column)"],
+      ["date(private_column)", "created_at(private_column)"],
+      ["name(private_column)", "label(private_column)"],
+    ])("keeps function-shaped built-in names in FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBe(1);
+      expect(edit.destinationOnly.FUNCTION).toBe(1);
+      expect(edit.sourceOnly.BUILTIN_TYPE + edit.destinationOnly.BUILTIN_TYPE).toBe(0);
+    });
+
+    it("keeps a multiword built-in typmod edit semantic", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("private_column::character varying(10)"),
+        tokenizeSchemaDump("private_column::character varying(11)"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.BUILTIN_TYPE + edit.destinationOnly.BUILTIN_TYPE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it.each([
+      ['private_column::"character" varying(10)', 'other_column::"character" varying(10)'],
+      ["private_column::character varying(10", "other_column::character varying(10"],
+      ["private_column::custom varying(10)", "other_column::custom varying(10)"],
+    ])("fails closed for unsupported cast type contexts", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["varying(private_column)", "other(private_column)"],
+      ["private_schema.varying(private_column)", "other_schema.varying(private_column)"],
+      ['"varying"(private_column)', '"other"(private_column)'],
+    ])("keeps ordinary functions named varying in FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBeGreaterThan(0);
+      expect(edit.destinationOnly.FUNCTION).toBeGreaterThan(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it("bounds CHECK edit analysis before allocating its comparison matrix", () => {
+      const oversized = Array.from({ length: 1025 }, () => ({ domain: "DDL_TOKEN", value: "private" }));
+      expect(buildUniqueCheckTokenEdit(oversized, [{ domain: "DDL_TOKEN", value: "other" }])).toEqual({
+        status: "LIMIT_EXCEEDED",
+        sourceOnly: null,
+        destinationOnly: null,
+      });
+      expect(() => buildUniqueCheckTokenEdit([], [])).toThrow("EMPTY_SCHEMA_TOKEN_STREAM");
+    });
+
+    it("keeps the broad constraint collection free of CHECK trees and dependency identities", async () => {
+      let queryText = "";
+      await collectConstraintCatalogManifest({
+        query: async (sql) => {
+          queryText = sql;
+          return { rows: [constraintCatalogRow()] };
+        },
+      }, "CONSTRAINT_CATALOG_FAILED");
+      expect(queryText).not.toContain("AS expression_tree");
+      expect(queryText).not.toContain("pg_catalog.pg_identify_object");
+      expect(queryText).toContain("definition_within_limit");
+      expect(queryText).toContain("check_expression_within_limit");
+      expect(queryText).toContain("pg_catalog.convert_to");
+      expect(queryText).not.toMatch(/convert_to\(constraint_row\.conbin::text/iu);
+    });
+
+    it("collects one rebound CHECK detail only after every bounded preflight", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column <> 'private-literal'::text)";
+      const dependency = {
+        dependency_type: "a",
+        type: "table column",
+        schema: "private_namespace",
+        name: "private_relation",
+        identity: "private_namespace.private_relation.private_column",
+        reference_kind: "COLUMN",
+        reference_name: "private_column",
+      };
+      const dependencyFieldBytes = Object.values(dependency).map((value) => Buffer.byteLength(value ?? "", "utf8"));
+      const calls = [];
+      const responses = [
+        { rows: [{
+          namespace_name: "private_namespace",
+          constraint_name: "private_constraint",
+          object_kind: "TABLE",
+          relation_namespace_name: "private_namespace",
+          relation_name: "private_relation",
+          domain_namespace_name: null,
+          domain_name: null,
+          type: "c",
+          client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression, "utf8")),
+          tree_bytes: "128",
+          dependency_count: "1",
+          node_count: "2",
+        }], rowCount: 1 },
+        { rows: [{
+          max_field_bytes: String(Math.max(...dependencyFieldBytes)),
+          total_bytes: String(dependencyFieldBytes.reduce((total, value) => total + value, 0)),
+        }], rowCount: 1 },
+        testKeywordPreflight(),
+        testKeywordFetch(),
+        { rows: [{ check_expression: expression }], rowCount: 1 },
+        { rows: [dependency], rowCount: 1 },
+        { rows: [{ node_tag: "OPEXPR", node_count: "1" }, { node_tag: "PRIVATE_NODE", node_count: "1" }], rowCount: 2 },
+      ];
+      const detail = await collectCheckConstraintDetail({
+        query: async (sql, values) => {
+          calls.push({ sql, values });
+          if (/^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)) return { rowCount: null, rows: [] };
+          return responses.shift();
+        },
+      }, entry);
+      expect(detail.ok).toBe(true);
+      expect(detail.nodeTagCounts).toMatchObject({ OPEXPR: 1, OTHER: 1 });
+      expect(calls).toHaveLength(9);
+      expect(calls[0]).toEqual({ sql: "SAVEPOINT corgtex_check_detail", values: undefined });
+      expect(calls.at(-1)).toEqual({ sql: "RELEASE SAVEPOINT corgtex_check_detail", values: undefined });
+      expect(calls.slice(1, -1).filter(({ values }) => values !== undefined).every(({ values }) => values[0] === "123")).toBe(true);
+      expect(calls[1].sql).not.toContain("AS expression_tree");
+      expect(calls[1].sql).toContain("current_setting('client_encoding')");
+      expect(calls[1].sql).toContain("convert_to(pg_catalog.pg_get_expr");
+      expect(calls[2].sql).toContain("max(GREATEST(");
+      expect(calls[2].sql).not.toContain("pg_catalog.greatest");
+      expect(calls[2].sql).toContain("convert_to(dependency_type, 'UTF8')");
+      expect(calls[2].sql).toContain("convert_to(identity, 'UTF8')");
+      expect(calls[3].sql).toContain("pg_get_keywords");
+      expect(calls[4].sql).toContain("pg_get_keywords");
+      expect(calls[6].sql).toContain("LIMIT 257");
+      const serializedDiagnostic = JSON.stringify(buildConstraintSemanticDiagnostic(
+        await constraintManifest([constraintCatalogRow({ check_expression: `(${expression})` })]),
+        await constraintManifest([constraintCatalogRow()]),
+        "MATCH",
+        { source: detail, destination: detail },
+      ));
+      for (const privateValue of ["private_namespace", "private_relation", "private_column", "private-literal"]) {
+        expect(serializedDiagnostic).not.toContain(privateValue);
+      }
+    });
+
+    it.each([
+      ["EXPRESSION_BYTES", { expression_bytes: "65537" }],
+      ["TREE_BYTES", { tree_bytes: "262145" }],
+      ["DEPENDENCY_COUNT", { dependency_count: "257" }],
+      ["NODE_COUNT", { node_count: "4097" }],
+    ])("stops CHECK collection before value fetch on the %s limit", async (limitKind, override) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const query = vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql) ? ({
+        rowCount: null,
+        rows: [],
+      }) : ({
+        rowCount: 1,
+        rows: [{
+          namespace_name: "private_namespace",
+          constraint_name: "private_constraint",
+          object_kind: "TABLE",
+          relation_namespace_name: "private_namespace",
+          relation_name: "private_relation",
+          domain_namespace_name: null,
+          domain_name: null,
+          type: "c",
+          client_encoding: "UTF8",
+          expression_bytes: "64",
+          tree_bytes: "128",
+          dependency_count: "1",
+          node_count: "2",
+          ...override,
+        }],
+      }));
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "LIMIT_EXCEEDED",
+        stage: "PREFLIGHT",
+        limitKind,
+      });
+      expect(query).toHaveBeenCalledTimes(3);
+      expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+        "SAVEPOINT corgtex_check_detail",
+        expect.stringContaining("AS expression_bytes"),
+        "RELEASE SAVEPOINT corgtex_check_detail",
+      ]);
+    });
+
+    it.each([
+      ["KEYWORD_COUNT", { keyword_count: "1025", max_field_bytes: "17", total_bytes: "3306" }],
+      ["KEYWORD_BYTES", { keyword_count: "494", max_field_bytes: "4097", total_bytes: "3306" }],
+      ["KEYWORD_BYTES", { keyword_count: "494", max_field_bytes: "17", total_bytes: "65537" }],
+    ])("stops CHECK collection before keyword fetch on the %s limit", async (limitKind, keywordRow) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: "32", tree_bytes: "128", dependency_count: "0", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] },
+        { rowCount: 1, rows: [keywordRow] },
+      ];
+      const query = vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+        ? { rowCount: null, rows: [] }
+        : responses.shift());
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "LIMIT_EXCEEDED",
+        stage: "KEYWORD_PREFLIGHT",
+        limitKind,
+      });
+      expect(query.mock.calls.map(([sql]) => sql)).not.toContain(expect.stringMatching(/^\s*SELECT word/u));
+    });
+
+    it("fails closed when keyword preflight and fetch byte evidence differ", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: "32", tree_bytes: "128", dependency_count: "0", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] },
+        { rowCount: 1, rows: [{ keyword_count: "1", max_field_bytes: "6", total_bytes: "6" }] },
+        { rowCount: 1, rows: [{ word: "array" }] },
+      ];
+      const query = vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+        ? { rowCount: null, rows: [] }
+        : responses.shift());
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: "KEYWORD_FETCH",
+        limitKind: null,
+      });
+    });
+
+    it("requires UTF8 preflight before fetching protected CHECK values", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const query = vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql) ? ({
+        rowCount: null,
+        rows: [],
+      }) : ({
+        rowCount: 1,
+        rows: [{
+          namespace_name: "private_namespace",
+          constraint_name: "private_constraint",
+          object_kind: "TABLE",
+          relation_namespace_name: "private_namespace",
+          relation_name: "private_relation",
+          domain_namespace_name: null,
+          domain_name: null,
+          type: "c",
+          client_encoding: "LATIN1",
+          expression_bytes: "64",
+          tree_bytes: "128",
+          dependency_count: "0",
+          node_count: "1",
+        }],
+      }));
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: "PREFLIGHT",
+        limitKind: null,
+      });
+      expect(query).toHaveBeenCalledTimes(3);
+    });
+
+    it("uses identical UTF8 byte counts before and after multibyte CHECK fetches", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(caf\u00e9 = '\u00e9')";
+      const dependency = {
+        dependency_type: "a",
+        type: "table column",
+        schema: "sch\u00e9ma",
+        name: "caf\u00e9",
+        identity: "sch\u00e9ma.caf\u00e9",
+        reference_kind: "COLUMN",
+        reference_name: "caf\u00e9",
+      };
+      const fieldBytes = Object.values(dependency).map((value) => Buffer.byteLength(value ?? "", "utf8"));
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression, "utf8")), tree_bytes: "128",
+          dependency_count: "1", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{
+          max_field_bytes: String(Math.max(...fieldBytes)),
+          total_bytes: String(fieldBytes.reduce((total, value) => total + value, 0)),
+        }] },
+        testKeywordPreflight(),
+        testKeywordFetch(),
+        { rowCount: 1, rows: [{ check_expression: expression }] },
+        { rowCount: 1, rows: [dependency] },
+        { rowCount: 1, rows: [{ node_tag: "OPEXPR", node_count: "1" }] },
+      ];
+      await expect(collectCheckConstraintDetail({
+        query: vi.fn(async (sql) => (
+          /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+            ? { rowCount: null, rows: [] }
+            : responses.shift()
+        )),
+      }, entry)).resolves.toMatchObject({ ok: true });
+    });
+
+    it.each([
+      ["EXPRESSION_FETCH", true],
+      ["DEPENDENCY_FETCH", false],
+    ])("fails closed on a %s UTF8 byte-count mismatch", async (expectedStage, expressionMismatch) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(caf\u00e9 IS NOT NULL)";
+      const dependency = {
+        dependency_type: "a",
+        type: "table column",
+        schema: "sch\u00e9ma",
+        name: "caf\u00e9",
+        identity: "sch\u00e9ma.caf\u00e9",
+        reference_kind: "COLUMN",
+        reference_name: "caf\u00e9",
+      };
+      const fieldBytes = Object.values(dependency).map((value) => Buffer.byteLength(value ?? "", "utf8"));
+      const totalBytes = fieldBytes.reduce((total, value) => total + value, 0);
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression, "utf8") - Number(expressionMismatch)),
+          tree_bytes: "128", dependency_count: "1", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{
+          max_field_bytes: String(Math.max(...fieldBytes)),
+          total_bytes: String(totalBytes - Number(!expressionMismatch)),
+        }] },
+        testKeywordPreflight(),
+        testKeywordFetch(),
+        { rowCount: 1, rows: [{ check_expression: expression }] },
+        { rowCount: 1, rows: [dependency] },
+      ];
+      await expect(collectCheckConstraintDetail({
+        query: vi.fn(async (sql) => (
+          /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+            ? { rowCount: null, rows: [] }
+            : responses.shift()
+        )),
+      }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: expectedStage,
+        limitKind: null,
+      });
+    });
+
+    it.each([
+      ["PREFLIGHT", "AS expression_bytes"],
+      ["DEPENDENCY_PREFLIGHT", "max(GREATEST"],
+      ["KEYWORD_PREFLIGHT", "AS keyword_count"],
+      ["KEYWORD_FETCH", "FETCH_KEYWORDS"],
+      ["EXPRESSION_FETCH", "AS check_expression"],
+      ["DEPENDENCY_FETCH", "FETCH_DEPENDENCIES"],
+      ["NODE_COUNT", "AS node_tag"],
+    ])("recovers the shared transaction after a %s query error", async (expectedStage, failureMarker) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column IS NOT NULL)";
+      const commands = [];
+      let aborted = false;
+      let injected = false;
+      const query = vi.fn(async (sql) => {
+        commands.push(sql);
+        if (sql === "ROLLBACK TO SAVEPOINT corgtex_check_detail") {
+          aborted = false;
+          return { rowCount: null, rows: [] };
+        }
+        if (aborted) throw Object.assign(new Error("transaction aborted"), { code: "25P02" });
+        const matchesFailure = failureMarker === "FETCH_KEYWORDS"
+          ? sql.trimStart().startsWith("SELECT word")
+          : failureMarker === "FETCH_DEPENDENCIES"
+            ? sql.trimStart().startsWith("SELECT\n    dependency.deptype::text AS dependency_type")
+            : sql.includes(failureMarker);
+        if (!injected && matchesFailure) {
+          injected = true;
+          aborted = true;
+          throw Object.assign(new Error("injected detail query failure"), { code: "22012" });
+        }
+        if (/^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql) || sql === "SELECT 1") {
+          return { rowCount: sql === "SELECT 1" ? 1 : null, rows: sql === "SELECT 1" ? [{ value: 1 }] : [] };
+        }
+        if (sql.includes("AS expression_bytes")) return { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+          dependency_count: "0", node_count: "1",
+        }] };
+        if (sql.includes("max(GREATEST")) return { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] };
+        if (sql.includes("AS keyword_count")) return testKeywordPreflight();
+        if (sql.includes("SELECT word")) return testKeywordFetch();
+        if (sql.includes("AS check_expression")) return { rowCount: 1, rows: [{ check_expression: expression }] };
+        if (sql.includes("AS dependency_type")) return { rowCount: 0, rows: [] };
+        if (sql.includes("AS node_tag")) return { rowCount: 1, rows: [{ node_tag: "NULLTEST", node_count: "1" }] };
+        throw new Error("UNEXPECTED_TEST_QUERY");
+      });
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: expectedStage,
+        limitKind: null,
+      });
+      await expect(query("SELECT 1")).resolves.toMatchObject({ rowCount: 1 });
+      expect(commands.slice(-3)).toEqual([
+        "ROLLBACK TO SAVEPOINT corgtex_check_detail",
+        "RELEASE SAVEPOINT corgtex_check_detail",
+        "SELECT 1",
+      ]);
+    });
+
+    it.each([
+      ["SAVEPOINT", "SAVEPOINT corgtex_check_detail", false],
+      ["ROLLBACK", "ROLLBACK TO SAVEPOINT corgtex_check_detail", true],
+      ["RELEASE_AFTER_ERROR", "RELEASE SAVEPOINT corgtex_check_detail", true],
+      ["RELEASE_AFTER_SUCCESS", "RELEASE SAVEPOINT corgtex_check_detail", false],
+    ])("propagates a %s control-statement failure", async (_label, failedCommand, failDetailQuery) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column IS NOT NULL)";
+      let detailFailed = false;
+      const query = vi.fn(async (sql) => {
+        if (sql === failedCommand && (failedCommand !== "RELEASE SAVEPOINT corgtex_check_detail" || detailFailed === failDetailQuery)) {
+          throw new Error("SAVEPOINT_CONTROL_FAILED");
+        }
+        if (failDetailQuery && sql.includes("AS expression_bytes")) {
+          detailFailed = true;
+          throw new Error("DETAIL_QUERY_FAILED");
+        }
+        if (/^(?:SAVEPOINT|ROLLBACK TO SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)) return { rowCount: null, rows: [] };
+        if (sql.includes("AS expression_bytes")) return { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+          dependency_count: "0", node_count: "1",
+        }] };
+        if (sql.includes("max(GREATEST")) return { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] };
+        if (sql.includes("AS keyword_count")) return testKeywordPreflight();
+        if (sql.includes("SELECT word")) return testKeywordFetch();
+        if (sql.includes("AS check_expression")) return { rowCount: 1, rows: [{ check_expression: expression }] };
+        if (sql.includes("AS dependency_type")) return { rowCount: 0, rows: [] };
+        if (sql.includes("AS node_tag")) return { rowCount: 1, rows: [{ node_tag: "NULLTEST", node_count: "1" }] };
+        throw new Error("UNEXPECTED_TEST_QUERY");
+      });
+      await expect(collectCheckConstraintDetail({ query }, entry)).rejects.toThrow("CHECK_DETAIL_SAVEPOINT_FAILED");
+    });
+
+    it("rebinds the source CHECK by logical identity and validates all phase-one semantics before detail", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column <> 'private-literal'::text)";
+      const commands = [];
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql, values) => {
+          commands.push(sql);
+          if (/LIMIT 2\s*$/u.test(sql)) return { rowCount: 1, rows: [constraintCatalogRow()] };
+          if (sql.includes("AS expression_bytes")) return { rowCount: 1, rows: [{
+            namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+            relation_namespace_name: "private_namespace", relation_name: "private_relation",
+            domain_namespace_name: null, domain_name: null, type: "c",
+            client_encoding: "UTF8",
+            expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+            dependency_count: "0", node_count: "1",
+          }] };
+          if (sql.includes("max(GREATEST")) return { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] };
+          if (sql.includes("AS keyword_count")) return testKeywordPreflight();
+          if (sql.includes("SELECT word")) return testKeywordFetch();
+          if (sql.includes("AS check_expression")) return { rowCount: 1, rows: [{ check_expression: expression }] };
+          if (sql.includes("AS dependency_type")) return { rowCount: 0, rows: [] };
+          if (sql.includes("AS node_tag")) return { rowCount: 1, rows: [{ node_tag: "OPEXPR", node_count: "1" }] };
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      const detail = await collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client);
+      expect(detail.ok).toBe(true);
+      expect(commands.indexOf("COMMIT")).toBeGreaterThan(commands.findIndex((sql) => sql.includes("AS node_tag")));
+      expect(commands.indexOf("SET LOCAL timezone = 'UTC'")).toBeGreaterThan(commands.indexOf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"));
+      expect(commands.indexOf("SET LOCAL timezone = 'UTC'")).toBeLessThan(commands.findIndex((sql) => /LIMIT 2\s*$/u.test(sql)));
+      expect(commands).toContain("SET LOCAL client_encoding = 'UTF8'");
+      expect(commands).not.toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    it("does not reduce a rebound source savepoint-control failure to collection unavailable", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql) => {
+          if (/LIMIT 2\s*$/u.test(sql)) return { rowCount: 1, rows: [constraintCatalogRow()] };
+          if (sql === "SAVEPOINT corgtex_check_detail") throw new Error("SAVEPOINT_FAILED");
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      await expect(collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client)).rejects.toThrow("CHECK_DETAIL_SAVEPOINT_FAILED");
+      expect(client.query).toHaveBeenCalledWith("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    it("rolls back when UTC cannot be restored for source CHECK rebind", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const commands = [];
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql) => {
+          commands.push(sql);
+          if (sql === "SET LOCAL timezone = 'UTC'") throw new Error("setting failed");
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      await expect(collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: "REBIND",
+        limitKind: null,
+      });
+      expect(commands).toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    it("fails closed on source CHECK recreation before issuing any detail query", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const commands = [];
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql) => {
+          commands.push(sql);
+          if (/LIMIT 2\s*$/u.test(sql)) {
+            return { rowCount: 1, rows: [constraintCatalogRow({ constraint_oid: "124" })] };
+          }
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      await expect(collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client)).resolves.toEqual({
+        ok: false,
+        status: "SOURCE_REBIND_DRIFT",
+        stage: "REBIND",
+        limitKind: null,
+      });
+      expect(commands.some((sql) => sql.includes("AS expression_bytes"))).toBe(false);
+      expect(commands).toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
     it("classifies identity, type, parentage, and foreign-key action mismatches", async () => {
       const sourceCheck = await constraintManifest([constraintCatalogRow()]);
       const changedIdentity = await constraintManifest([constraintCatalogRow({ relation_name: "other_private_relation" })]);
@@ -351,7 +1755,11 @@ describe("PostgreSQL restore rehearsal runner", () => {
         mismatchFields: ["IDENTITY_SET"],
       });
 
-      const changedType = await constraintManifest([constraintCatalogRow({ type: "n", check_expression: null })]);
+      const changedType = await constraintManifest([constraintCatalogRow({
+        type: "n",
+        check_expression: null,
+        expression_tree: null,
+      })]);
       expect(buildConstraintSemanticDiagnostic(sourceCheck, changedType).mismatchFields).toContain("TYPE");
 
       const changedParentage = await constraintManifest([constraintCatalogRow({
@@ -365,6 +1773,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       const foreignKey = constraintCatalogRow({
         type: "f",
         check_expression: null,
+        expression_tree: null,
         definition: "FOREIGN KEY (private_column) REFERENCES private_parent(private_column)",
         has_referenced_relation: true,
         referenced_namespace_name: "private_namespace",
@@ -390,6 +1799,10 @@ describe("PostgreSQL restore rehearsal runner", () => {
         referenced_namespace_name: null,
         referenced_relation_name: null,
       })])).rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
+      await expect(constraintManifest([constraintCatalogRow({ constraint_oid: "4294967296" })]))
+        .rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
+      await expect(constraintManifest([constraintCatalogRow({ definition_within_limit: false, definition: null })]))
+        .rejects.toThrow("CONSTRAINT_TEXT_LIMIT_EXCEEDED");
     });
   });
 

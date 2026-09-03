@@ -8,11 +8,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
 import {
+  buildUniqueCheckTokenEdit,
   buildConstraintSemanticDiagnostic,
   cleanupScratchDatabase,
+  collectCheckConstraintDetail,
   collectConstraintCatalogManifest,
+  collectReboundSourceCheckDetail,
+  findSingleCheckExpressionMismatch,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
+  tokenizeSchemaDump,
   writeClientFiles,
 } from "./run-postgres-restore-rehearsal.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
@@ -24,11 +29,48 @@ const TEST_READER_PASSWORD = "local-rehearsal-reader-only";
 const TEST_TARGET_OPERATOR_PASSWORD = "local-rehearsal-target-operator-only";
 const TARGET_TLS_HOST = "target.rehearsal.test";
 const WRONG_TARGET_TLS_HOST = "wrong-target.rehearsal.test";
+const CHECK_COLLECTION_FAILURES = new Map(
+  ["SOURCE", "DESTINATION"].flatMap((side) => [
+    [JSON.stringify([side, "IDENTITY_REBIND_FAILED", "REBIND", null]), `${side}_IDENTITY_REBIND_FAILED_REBIND`],
+    [JSON.stringify([side, "SOURCE_REBIND_DRIFT", "REBIND", null]), `${side}_SOURCE_REBIND_DRIFT_REBIND`],
+    ...[
+      "REBIND", "PREFLIGHT", "EXPRESSION_FETCH", "DEPENDENCY_PREFLIGHT",
+      "KEYWORD_PREFLIGHT", "KEYWORD_FETCH", "DEPENDENCY_FETCH", "NODE_COUNT", "TOKENIZE",
+    ].map((stage) => [
+      JSON.stringify([side, "COLLECTION_UNAVAILABLE", stage, null]),
+      `${side}_COLLECTION_UNAVAILABLE_${stage}`,
+    ]),
+    ...[
+      ["PREFLIGHT", "EXPRESSION_BYTES"],
+      ["PREFLIGHT", "TREE_BYTES"],
+      ["PREFLIGHT", "DEPENDENCY_COUNT"],
+      ["PREFLIGHT", "NODE_COUNT"],
+      ["DEPENDENCY_PREFLIGHT", "DEPENDENCY_BYTES"],
+      ["KEYWORD_PREFLIGHT", "KEYWORD_COUNT"],
+      ["KEYWORD_PREFLIGHT", "KEYWORD_BYTES"],
+      ["TOKENIZE", "TOKENS"],
+    ].map(([stage, limitKind]) => [
+      JSON.stringify([side, "LIMIT_EXCEEDED", stage, limitKind]),
+      `${side}_LIMIT_EXCEEDED_${limitKind}`,
+    ]),
+  ]),
+);
 
 const fail = (code) => {
   const error = new Error(code);
   error.code = code;
   throw error;
+};
+
+const assertCheckCollection = (side, detail) => {
+  if (detail?.ok === true) return;
+  const code = CHECK_COLLECTION_FAILURES.get(JSON.stringify([
+    side,
+    detail?.status,
+    detail?.stage,
+    detail?.limitKind ?? null,
+  ]));
+  fail(`CONSTRAINT_CHECK_DIAGNOSTIC_${code ?? "COLLECTION_STATUS_INVALID"}`);
 };
 
 const run = (command, args, code) => new Promise((resolvePromise, rejectPromise) => {
@@ -200,7 +242,49 @@ const main = async () => {
     await sourceBootstrap.query(
       "CREATE DATABASE source TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER 'builtin' LC_COLLATE 'C' LC_CTYPE 'C' BUILTIN_LOCALE 'C.UTF-8'",
     );
+    await sourceBootstrap.query(
+      "CREATE DATABASE latin1_bytes TEMPLATE template0 ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C'",
+    );
     await sourceBootstrap.end();
+
+    const latin1Admin = new Client(config(sourcePort, "latin1_bytes"));
+    await latin1Admin.connect();
+    try {
+      await latin1Admin.query(`
+        CREATE TABLE "Utf8BoundaryFixture" (
+          "caf\u00e9" text,
+          CONSTRAINT "Utf8BoundaryFixture_check" CHECK ("caf\u00e9" <> '\u00e9')
+        )
+      `);
+      await latin1Admin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await latin1Admin.query("SET LOCAL client_encoding = 'UTF8'");
+      await latin1Admin.query("SET LOCAL search_path = pg_catalog");
+      const latin1Manifest = await collectConstraintCatalogManifest(
+        latin1Admin,
+        "LATIN1_CONSTRAINT_CATALOG_FAILED",
+      );
+      const latin1Entry = [...latin1Manifest.values()].find((entry) => entry.type === "CHECK");
+      if (latin1Entry === undefined) fail("LATIN1_CHECK_MISSING");
+      const byteProof = (await latin1Admin.query(`
+        SELECT
+          pg_catalog.octet_length(pg_catalog.pg_get_expr(conbin, conrelid, false))::integer AS database_bytes,
+          pg_catalog.octet_length(pg_catalog.convert_to(
+            pg_catalog.pg_get_expr(conbin, conrelid, false),
+            'UTF8'
+          ))::integer AS utf8_bytes
+        FROM pg_catalog.pg_constraint
+        WHERE oid = $1::pg_catalog.oid AND contype = 'c'
+      `, [latin1Entry.diagnostic.constraintOid])).rows[0];
+      if (!(byteProof?.utf8_bytes > byteProof?.database_bytes)) fail("LATIN1_UTF8_BYTE_DIFFERENCE_MISSING");
+      const latin1Detail = await collectCheckConstraintDetail(latin1Admin, latin1Entry);
+      if (latin1Detail.ok !== true) fail("LATIN1_UTF8_BOUNDARY_FAILED");
+      await latin1Admin.query("COMMIT");
+    } catch (error) {
+      await latin1Admin.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      await latin1Admin.end().catch(() => {});
+    }
 
     const sourceAdmin = new Client(config(sourcePort, "source"));
     await sourceAdmin.connect();
@@ -269,6 +353,94 @@ const main = async () => {
       ) PARTITION BY RANGE ("id");
       CREATE TABLE "PartitionedConstraintFixture_first"
         PARTITION OF "PartitionedConstraintFixture" FOR VALUES FROM (0) TO (10);
+      CREATE SCHEMA "context fixture";
+      CREATE DOMAIN "context fixture"."bounded_text" AS text;
+      CREATE DOMAIN "context fixture"."operator" AS text;
+      CREATE FUNCTION "context fixture"."greater_than"(integer, integer) RETURNS boolean
+      LANGUAGE sql IMMUTABLE AS 'SELECT $1 > $2';
+      CREATE OPERATOR "context fixture".> (
+        LEFTARG = integer,
+        RIGHTARG = integer,
+        FUNCTION = "context fixture"."greater_than"
+      );
+      CREATE SCHEMA "operator";
+      CREATE DOMAIN "operator"."bounded_text" AS text;
+      CREATE FUNCTION "operator"."greater_than"(integer, integer) RETURNS boolean
+      LANGUAGE sql IMMUTABLE AS 'SELECT $1 > $2';
+      CREATE OPERATOR "operator".> (
+        LEFTARG = integer,
+        RIGHTARG = integer,
+        FUNCTION = "operator"."greater_than"
+      );
+      CREATE FUNCTION "type_context_varying"(text) RETURNS boolean
+      LANGUAGE sql IMMUTABLE AS 'SELECT true';
+      CREATE TABLE "TypeContextFixture" (
+        "value" text,
+        CONSTRAINT "TypeContextFixture_character_check"
+          CHECK (("value"::character varying(10)) IS NOT NULL),
+        CONSTRAINT "TypeContextFixture_bit_check"
+          CHECK (("value"::bit varying(8)) IS NOT NULL),
+        CONSTRAINT "TypeContextFixture_function_check"
+          CHECK ("type_context_varying"("value"))
+      );
+      CREATE TABLE "QualifiedContextFixture" (
+        "value" text,
+        "amount" integer,
+        "flag" boolean,
+        "observedAt" timestamptz,
+        CONSTRAINT "QualifiedContextFixture_type_check"
+          CHECK (("value"::"context fixture"."bounded_text") IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_operator_check"
+          CHECK ("amount" OPERATOR("context fixture".>) 0),
+        CONSTRAINT "QualifiedContextFixture_operator_type_check"
+          CHECK (("value"::"context fixture"."operator") IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_operator_schema_type_check"
+          CHECK (("value"::"operator"."bounded_text") IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_operator_schema_operator_check"
+          CHECK ("amount" OPERATOR("operator".>) 0),
+        CONSTRAINT "QualifiedContextFixture_coalesce_check"
+          CHECK (COALESCE("amount", 0) >= 0),
+        CONSTRAINT "QualifiedContextFixture_nullif_check"
+          CHECK (NULLIF("amount", 0) IS NULL OR "amount" <> 0),
+        CONSTRAINT "QualifiedContextFixture_greatest_check"
+          CHECK (GREATEST("amount", 0) >= 0),
+        CONSTRAINT "QualifiedContextFixture_least_check"
+          CHECK (LEAST("amount", 0) <= 0),
+        CONSTRAINT "QualifiedContextFixture_current_date_check"
+          CHECK (CURRENT_DATE IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_time_check"
+          CHECK (CURRENT_TIME(3) IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_user_check"
+          CHECK (CURRENT_USER IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_catalog_check"
+          CHECK (CURRENT_CATALOG IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_schema_check"
+          CHECK (CURRENT_SCHEMA IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_is_unknown_check"
+          CHECK ("flag" IS UNKNOWN),
+        CONSTRAINT "QualifiedContextFixture_is_not_unknown_check"
+          CHECK ("flag" IS NOT UNKNOWN),
+        CONSTRAINT "QualifiedContextFixture_case_searched_check"
+          CHECK ((CASE WHEN "amount" < 0 THEN 0 ELSE 2 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_case_simple_check"
+          CHECK ((CASE "amount" WHEN 0 THEN 0 ELSE 1 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_case_multi_check"
+          CHECK ((CASE WHEN "amount" < 0 THEN 0 WHEN "amount" = 0 THEN 1 ELSE 2 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_case_nested_check"
+          CHECK ((CASE WHEN "flag" THEN CASE "amount" WHEN 0 THEN 0 ELSE 1 END ELSE 2 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_array_any_check"
+          CHECK ("amount" = ANY (ARRAY[1, 2])),
+        CONSTRAINT "QualifiedContextFixture_array_nested_check"
+          CHECK ("amount" = ANY (ARRAY[ARRAY[1, 2], ARRAY[3, 4]])),
+        CONSTRAINT "QualifiedContextFixture_array_multidimensional_check"
+          CHECK ("amount" = ANY (ARRAY[[1, 2], [3, 4]])),
+        CONSTRAINT "QualifiedContextFixture_array_empty_check"
+          CHECK (cardinality(ARRAY[]::integer[]) = 0),
+        CONSTRAINT "QualifiedContextFixture_timezone_check"
+          CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00'),
+        CONSTRAINT "QualifiedContextFixture_extract_check"
+          CHECK (EXTRACT(YEAR FROM "observedAt") >= 2026)
+      );
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
       CREATE TABLE _prisma_migrations (
@@ -287,6 +459,337 @@ const main = async () => {
       INSERT INTO _prisma_migrations (id, checksum, finished_at, migration_name, applied_steps_count)
       VALUES ('11111111-1111-4111-8111-111111111111', repeat('a', 64), now(), '20260101000000_init', 1);
     `);
+    await sourceAdmin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await sourceAdmin.query("SET LOCAL client_encoding = 'UTF8'");
+    await sourceAdmin.query("SET LOCAL search_path = pg_catalog");
+    const typeContextExpressions = (await sourceAdmin.query(`
+      SELECT
+        conname,
+        pg_get_expr(conbin, conrelid) AS expression,
+        position('{COALESCEEXPR ' IN conbin::text) > 0 AS has_coalesce_node,
+        position('{NULLIFEXPR ' IN conbin::text) > 0 AS has_nullif_node,
+        position('{MINMAXEXPR ' IN conbin::text) > 0 AS has_minmax_node,
+        position('{SQLVALUEFUNCTION ' IN conbin::text) > 0 AS has_sql_value_node,
+        position('{BOOLEANTEST ' IN conbin::text) > 0 AS has_boolean_test_node,
+        position('{CASEEXPR ' IN conbin::text) > 0 AS has_case_node,
+        position('{CASEWHEN ' IN conbin::text) > 0 AS has_case_when_node,
+        position('{CASETESTEXPR ' IN conbin::text) > 0 AS has_case_test_node,
+        position('{ARRAYEXPR ' IN conbin::text) > 0 AS has_array_node,
+        position('{FUNCEXPR ' IN conbin::text) > 0 AS has_function_node
+      FROM pg_constraint
+      WHERE conname IN (
+        'TypeContextFixture_character_check',
+        'TypeContextFixture_bit_check',
+        'TypeContextFixture_function_check',
+        'QualifiedContextFixture_type_check',
+        'QualifiedContextFixture_operator_check',
+        'QualifiedContextFixture_operator_type_check',
+        'QualifiedContextFixture_operator_schema_type_check',
+        'QualifiedContextFixture_operator_schema_operator_check',
+        'QualifiedContextFixture_coalesce_check',
+        'QualifiedContextFixture_nullif_check',
+        'QualifiedContextFixture_greatest_check',
+        'QualifiedContextFixture_least_check',
+        'QualifiedContextFixture_current_date_check',
+        'QualifiedContextFixture_current_time_check',
+        'QualifiedContextFixture_current_user_check',
+        'QualifiedContextFixture_current_catalog_check',
+        'QualifiedContextFixture_current_schema_check',
+        'QualifiedContextFixture_is_unknown_check',
+        'QualifiedContextFixture_is_not_unknown_check',
+        'QualifiedContextFixture_case_searched_check',
+        'QualifiedContextFixture_case_simple_check',
+        'QualifiedContextFixture_case_multi_check',
+        'QualifiedContextFixture_case_nested_check',
+        'QualifiedContextFixture_array_any_check',
+        'QualifiedContextFixture_array_nested_check',
+        'QualifiedContextFixture_array_multidimensional_check',
+        'QualifiedContextFixture_array_empty_check',
+        'QualifiedContextFixture_extract_check'
+      )
+      ORDER BY conname COLLATE "C"
+    `)).rows;
+    await sourceAdmin.query("COMMIT");
+    if (typeContextExpressions.length !== 28) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    for (const [constraintName, typeName, typmod] of [
+      ["TypeContextFixture_character_check", "character", "10"],
+      ["TypeContextFixture_bit_check", "bit", "8"],
+    ]) {
+      const expression = typeContextExpressions.find((row) => row.conname === constraintName)?.expression;
+      if (typeof expression !== "string" || !new RegExp(`${typeName} varying\\(${typmod}\\)`, "iu").test(expression)) {
+        fail("TYPE_CONTEXT_PG18_DEPARSE_MISMATCH");
+      }
+      const withoutVarying = expression.replace(/\s+varying(?=\()/iu, "");
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(expression), tokenizeSchemaDump(withoutVarying));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.BUILTIN_TYPE !== 1
+        || edit.sourceOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/character|varying|private|type_context/iu)
+      ) fail("TYPE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    const functionExpression = typeContextExpressions.find(
+      (row) => row.conname === "TypeContextFixture_function_check",
+    )?.expression;
+    if (typeof functionExpression !== "string" || !/public\.type_context_varying\(/iu.test(functionExpression)) {
+      fail("FUNCTION_CONTEXT_PG18_DEPARSE_MISMATCH");
+    }
+    const renamedFunctionExpression = functionExpression.replace(/public\.type_context_varying/iu, "other_schema.type_context_varying");
+    const functionEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(functionExpression),
+      tokenizeSchemaDump(renamedFunctionExpression),
+    );
+    if (
+      functionEdit.status !== "UNIQUE"
+      || functionEdit.sourceOnly.FUNCTION !== 1
+      || functionEdit.destinationOnly.FUNCTION !== 1
+      || JSON.stringify(functionEdit).match(/varying|private|type_context/iu)
+    ) fail("FUNCTION_CONTEXT_CLASSIFICATION_MISMATCH");
+    const qualifiedTypeExpression = typeContextExpressions.find(
+      (row) => row.conname === "QualifiedContextFixture_type_check",
+    )?.expression;
+    if (
+      typeof qualifiedTypeExpression !== "string"
+      || !/::"context fixture"\.bounded_text/iu.test(qualifiedTypeExpression)
+    ) fail("QUALIFIED_TYPE_CONTEXT_PG18_DEPARSE_MISMATCH");
+    const renamedQualifiedTypeExpression = qualifiedTypeExpression.replace(
+      /"context fixture"\.bounded_text/iu,
+      '"other context".bounded_text',
+    );
+    const qualifiedTypeEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(qualifiedTypeExpression),
+      tokenizeSchemaDump(renamedQualifiedTypeExpression),
+    );
+    if (
+      qualifiedTypeEdit.status !== "UNIQUE"
+      || qualifiedTypeEdit.sourceOnly.BUILTIN_TYPE !== 1
+      || qualifiedTypeEdit.destinationOnly.BUILTIN_TYPE !== 1
+      || qualifiedTypeEdit.sourceOnly.COLUMN_REFERENCE !== 0
+      || qualifiedTypeEdit.destinationOnly.COLUMN_REFERENCE !== 0
+      || JSON.stringify(qualifiedTypeEdit).match(/context|bounded|private/iu)
+    ) fail("QUALIFIED_TYPE_CONTEXT_CLASSIFICATION_MISMATCH");
+    const qualifiedOperatorExpression = typeContextExpressions.find(
+      (row) => row.conname === "QualifiedContextFixture_operator_check",
+    )?.expression;
+    if (
+      typeof qualifiedOperatorExpression !== "string"
+      || !/OPERATOR\("context fixture"\.>\)/iu.test(qualifiedOperatorExpression)
+    ) fail("QUALIFIED_OPERATOR_CONTEXT_PG18_DEPARSE_MISMATCH");
+    const renamedQualifiedOperatorExpression = qualifiedOperatorExpression.replace(
+      /"context fixture"(?=\.>)/iu,
+      '"other context"',
+    );
+    const qualifiedOperatorEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(qualifiedOperatorExpression),
+      tokenizeSchemaDump(renamedQualifiedOperatorExpression),
+    );
+    if (
+      qualifiedOperatorEdit.status !== "UNIQUE"
+      || qualifiedOperatorEdit.sourceOnly.OPERATOR !== 1
+      || qualifiedOperatorEdit.destinationOnly.OPERATOR !== 1
+      || qualifiedOperatorEdit.sourceOnly.COLUMN_REFERENCE !== 0
+      || qualifiedOperatorEdit.destinationOnly.COLUMN_REFERENCE !== 0
+      || JSON.stringify(qualifiedOperatorEdit).match(/context|greater|private/iu)
+    ) fail("QUALIFIED_OPERATOR_CONTEXT_CLASSIFICATION_MISMATCH");
+    for (const [constraintName, pattern, replacement, category] of [
+      [
+        "QualifiedContextFixture_operator_type_check",
+        /\.(?:"operator"|operator)(?=\)|\s)/iu,
+        ".renamed_type",
+        "BUILTIN_TYPE",
+      ],
+      [
+        "QualifiedContextFixture_operator_schema_type_check",
+        /::(?:"operator"|operator)\./iu,
+        "::renamed_schema.",
+        "BUILTIN_TYPE",
+      ],
+      [
+        "QualifiedContextFixture_operator_schema_operator_check",
+        /OPERATOR\((?:"operator"|operator)(?=\.>)/iu,
+        "OPERATOR(renamed_schema",
+        "OPERATOR",
+      ],
+    ]) {
+      const expression = typeContextExpressions.find((row) => row.conname === constraintName)?.expression;
+      if (typeof expression !== "string" || !pattern.test(expression)) fail("OPERATOR_IDENTIFIER_PG18_DEPARSE_MISMATCH");
+      const renamed = expression.replace(pattern, replacement);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly[category] !== 1
+        || edit.destinationOnly[category] !== 1
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || JSON.stringify(edit).match(/renamed|context|private/iu)
+      ) fail("OPERATOR_IDENTIFIER_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, sourceName, destinationName, nodeField] of [
+      ["QualifiedContextFixture_coalesce_check", "COALESCE", "NULLIF", "has_coalesce_node"],
+      ["QualifiedContextFixture_nullif_check", "NULLIF", "COALESCE", "has_nullif_node"],
+      ["QualifiedContextFixture_greatest_check", "GREATEST", "LEAST", "has_minmax_node"],
+      ["QualifiedContextFixture_least_check", "LEAST", "GREATEST", "has_minmax_node"],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (typeof row?.expression !== "string" || row[nodeField] !== true) fail("SQL_CONSTRUCT_PG18_NODE_MISMATCH");
+      const renamed = row.expression.replace(new RegExp(`\\b${sourceName}\\b`, "iu"), destinationName);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== 1
+        || edit.destinationOnly.OTHER !== 1
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/coalesce|nullif|greatest|least|private/iu)
+      ) fail("SQL_CONSTRUCT_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, sourceName, destinationName] of [
+      ["QualifiedContextFixture_current_date_check", "CURRENT_DATE", "CURRENT_TIMESTAMP"],
+      ["QualifiedContextFixture_current_time_check", "CURRENT_TIME", "LOCALTIME"],
+      ["QualifiedContextFixture_current_user_check", "CURRENT_USER", "SESSION_USER"],
+      ["QualifiedContextFixture_current_catalog_check", "CURRENT_CATALOG", "CURRENT_SCHEMA"],
+      ["QualifiedContextFixture_current_schema_check", "CURRENT_SCHEMA", "CURRENT_CATALOG"],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (typeof row?.expression !== "string" || row.has_sql_value_node !== true) {
+        fail("SQL_VALUE_CONTEXT_PG18_NODE_MISMATCH");
+      }
+      const renamed = row.expression.replace(new RegExp(`\\b${sourceName}\\b`, "iu"), destinationName);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== 1
+        || edit.destinationOnly.OTHER !== 1
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/current|localtime|session|private/iu)
+      ) fail("SQL_VALUE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, destinationName] of [
+      ["QualifiedContextFixture_is_unknown_check", "TRUE"],
+      ["QualifiedContextFixture_is_not_unknown_check", "FALSE"],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (typeof row?.expression !== "string" || row.has_boolean_test_node !== true) {
+        fail("BOOLEAN_TEST_PG18_NODE_MISMATCH");
+      }
+      const renamed = row.expression.replace(/\bUNKNOWN\b/iu, destinationName);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== 1
+        || edit.destinationOnly.OTHER !== 1
+        || edit.sourceOnly.OPERATOR !== 0
+        || edit.destinationOnly.OPERATOR !== 0
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || JSON.stringify(edit).match(/unknown|private/iu)
+      ) fail("BOOLEAN_TEST_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, structuralCount, hasCaseTest] of [
+      ["QualifiedContextFixture_case_searched_check", 5, false],
+      ["QualifiedContextFixture_case_simple_check", 5, true],
+      ["QualifiedContextFixture_case_multi_check", 7, false],
+      ["QualifiedContextFixture_case_nested_check", 10, true],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (
+        typeof row?.expression !== "string"
+        || row.has_case_node !== true
+        || row.has_case_when_node !== true
+        || row.has_case_test_node !== hasCaseTest
+      ) fail("CASE_CONTEXT_PG18_NODE_MISMATCH");
+      const lowerCaseSyntax = row.expression.replace(/\b(?:CASE|WHEN|THEN|ELSE|END)\b/gu, (word) => word.toLowerCase());
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(lowerCaseSyntax));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== structuralCount
+        || edit.destinationOnly.OTHER !== structuralCount
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/case|when|then|else|end|private/iu)
+      ) fail("CASE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, structuralCount] of [
+      ["QualifiedContextFixture_array_any_check", 1],
+      ["QualifiedContextFixture_array_nested_check", 3],
+      ["QualifiedContextFixture_array_multidimensional_check", 3],
+      ["QualifiedContextFixture_array_empty_check", 1],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (
+        typeof row?.expression !== "string"
+        || !/\bARRAY\s*\[/u.test(row.expression)
+        || row.has_array_node !== true
+      ) fail("ARRAY_CONTEXT_PG18_NODE_MISMATCH");
+      const lowerArraySyntax = row.expression.replace(/\bARRAY(?=\s*\[)/gu, (word) => word.toLowerCase());
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(lowerArraySyntax));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== structuralCount
+        || edit.destinationOnly.OTHER !== structuralCount
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/array|private/iu)
+      ) fail("ARRAY_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
+    const extractRow = typeContextExpressions.find(
+      (entry) => entry.conname === "QualifiedContextFixture_extract_check",
+    );
+    if (
+      typeof extractRow?.expression !== "string"
+      || extractRow.has_function_node !== true
+      || !/EXTRACT\(year FROM "observedAt"\)/iu.test(extractRow.expression)
+    ) fail("EXTRACT_CONTEXT_PG18_NODE_MISMATCH");
+    await sourceAdmin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await sourceAdmin.query("SET LOCAL timezone = 'UTC'");
+    await sourceAdmin.query("SET LOCAL client_encoding = 'UTF8'");
+    await sourceAdmin.query("SET LOCAL search_path = pg_catalog");
+    const contextConstraintManifest = await collectConstraintCatalogManifest(
+      sourceAdmin,
+      "CONTEXT_CONSTRAINT_CATALOG_FAILED",
+    );
+    const extractConstraint = [...contextConstraintManifest.values()].find((entry) => {
+      try {
+        return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_extract_check";
+      } catch {
+        return false;
+      }
+    });
+    if (extractConstraint === undefined) fail("EXTRACT_CONTEXT_FIXTURE_MISSING");
+    const extractDetail = await collectCheckConstraintDetail(sourceAdmin, extractConstraint);
+    if (
+      extractDetail.ok !== true
+      || !extractDetail.keywords.has("extract")
+      || !extractDetail.keywords.has("year")
+      || !extractDetail.keywords.has("month")
+      || !extractDetail.keywords.has("from")
+      || !extractDetail.columnReferences.has("observedAt")
+    ) fail("EXTRACT_CONTEXT_CATALOG_EVIDENCE_MISMATCH");
+    const monthExpression = extractRow.expression.replace(/\byear\b/iu, "month");
+    const extractEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(extractRow.expression),
+      tokenizeSchemaDump(monthExpression),
+      extractDetail,
+      extractDetail,
+    );
+    if (
+      extractEdit.status !== "UNIQUE"
+      || extractEdit.sourceOnly.OTHER !== 1
+      || extractEdit.destinationOnly.OTHER !== 1
+      || extractEdit.sourceOnly.COLUMN_REFERENCE !== 0
+      || extractEdit.destinationOnly.COLUMN_REFERENCE !== 0
+      || extractEdit.sourceOnly.FUNCTION !== 0
+      || extractEdit.destinationOnly.FUNCTION !== 0
+      || JSON.stringify(extractEdit).match(/extract|year|month|observed|private/iu)
+    ) fail("EXTRACT_CONTEXT_CLASSIFICATION_MISMATCH");
+    await sourceAdmin.query("COMMIT");
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
     )).rows[0].oid);
@@ -297,6 +800,7 @@ const main = async () => {
       GRANT SELECT ON ALL TABLES IN SCHEMA public TO rehearsal_reader;
       GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO rehearsal_reader;
       GRANT SELECT ON LARGE OBJECT ${largeObjectOid} TO rehearsal_reader;
+      ALTER ROLE rehearsal_reader SET timezone = 'America/Los_Angeles';
     `);
     const identitiesBefore = await tableIdentities(sourceAdmin);
     await sourceAdmin.end();
@@ -501,6 +1005,10 @@ const main = async () => {
     try {
       await sourceConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await targetConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await sourceConstraintReadback.query("SET LOCAL timezone = 'UTC'");
+      await targetConstraintReadback.query("SET LOCAL timezone = 'UTC'");
+      await sourceConstraintReadback.query("SET LOCAL client_encoding = 'UTF8'");
+      await targetConstraintReadback.query("SET LOCAL client_encoding = 'UTF8'");
       await sourceConstraintReadback.query("SET LOCAL search_path = pg_catalog");
       await targetConstraintReadback.query("SET LOCAL search_path = pg_catalog");
       sourceConstraintManifest = await collectConstraintCatalogManifest(
@@ -524,10 +1032,62 @@ const main = async () => {
     if (!equalConstraintDiagnostic.semanticEqual || equalConstraintDiagnostic.mismatchFields.length !== 0) {
       fail("CONSTRAINT_CATALOG_PARITY_FAILED");
     }
+    const timezoneConstraint = [...sourceConstraintManifest.values()].find((entry) => {
+      try {
+        return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_timezone_check";
+      } catch {
+        return false;
+      }
+    });
+    if (timezoneConstraint === undefined) fail("TIMEZONE_REBIND_FIXTURE_MISSING");
+    const timezoneDetail = await collectReboundSourceCheckDetail(sourceConfig, timezoneConstraint);
+    if (timezoneDetail.ok !== true) fail("TIMEZONE_REBIND_DRIFT");
+
+    const recoveryConstraint = [...targetConstraintManifest.values()].find((entry) => {
+      try {
+        return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_is_unknown_check";
+      } catch {
+        return false;
+      }
+    });
+    if (recoveryConstraint === undefined) fail("CHECK_RECOVERY_FIXTURE_MISSING");
+    const recoveryClient = new Client(config(targetPort, scratchName));
+    await recoveryClient.connect();
+    let recoveryTransactionOpen = false;
+    try {
+      await recoveryClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      recoveryTransactionOpen = true;
+      await recoveryClient.query("SET LOCAL timezone = 'UTC'");
+      await recoveryClient.query("SET LOCAL client_encoding = 'UTF8'");
+      await recoveryClient.query("SET LOCAL search_path = pg_catalog");
+      let injectedFailure = false;
+      const recoveryProxy = {
+        query: async (sql, values) => {
+          if (!injectedFailure && sql.includes("AS check_expression")) {
+            injectedFailure = true;
+            return recoveryClient.query("SELECT 1 / 0");
+          }
+          return recoveryClient.query(sql, values);
+        },
+      };
+      const recoveryDetail = await collectCheckConstraintDetail(recoveryProxy, recoveryConstraint);
+      if (
+        recoveryDetail.ok !== false
+        || recoveryDetail.status !== "COLLECTION_UNAVAILABLE"
+        || recoveryDetail.stage !== "EXPRESSION_FETCH"
+      ) fail("CHECK_RECOVERY_STATUS_MISMATCH");
+      await recoveryClient.query("SELECT 1");
+      await recoveryClient.query("COMMIT");
+      recoveryTransactionOpen = false;
+    } finally {
+      if (recoveryTransactionOpen) await recoveryClient.query("ROLLBACK").catch(() => {});
+      await recoveryClient.end().catch(() => {});
+    }
 
     const targetConstraintMutator = new Client(config(targetPort, scratchName));
     await targetConstraintMutator.connect();
     let changedTargetConstraintManifest;
+    let changedCheckDetails;
     try {
       await targetConstraintMutator.query(
         'ALTER TABLE "ConstraintFixture" DROP CONSTRAINT "ConstraintFixture_kind_check"',
@@ -537,11 +1097,24 @@ const main = async () => {
           CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-delta'))`,
       );
       await targetConstraintMutator.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await targetConstraintMutator.query("SET LOCAL timezone = 'UTC'");
+      await targetConstraintMutator.query("SET LOCAL client_encoding = 'UTF8'");
       await targetConstraintMutator.query("SET LOCAL search_path = pg_catalog");
       changedTargetConstraintManifest = await collectConstraintCatalogManifest(
         targetConstraintMutator,
         "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
       );
+      const candidate = findSingleCheckExpressionMismatch(
+        sourceConstraintManifest,
+        changedTargetConstraintManifest,
+      );
+      if (candidate === null) fail("CONSTRAINT_CHECK_DIAGNOSTIC_CANDIDATE_MISSING");
+      changedCheckDetails = {
+        source: await collectReboundSourceCheckDetail(sourceConfig, candidate.source),
+        destination: await collectCheckConstraintDetail(targetConstraintMutator, candidate.destination),
+      };
+      assertCheckCollection("SOURCE", changedCheckDetails.source);
+      assertCheckCollection("DESTINATION", changedCheckDetails.destination);
       await targetConstraintMutator.query("COMMIT");
     } finally {
       await targetConstraintMutator.end().catch(() => {});
@@ -549,11 +1122,39 @@ const main = async () => {
     const changedConstraintDiagnostic = buildConstraintSemanticDiagnostic(
       sourceConstraintManifest,
       changedTargetConstraintManifest,
+      "MATCH",
+      changedCheckDetails,
     );
     if (
       changedConstraintDiagnostic.semanticEqual
       || !changedConstraintDiagnostic.mismatchFields.includes("CHECK_EXPRESSION")
     ) fail("CONSTRAINT_CATALOG_MUTATION_UNDETECTED");
+    const checkDifference = changedConstraintDiagnostic.checkExpressionDifference;
+    if (checkDifference === null) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DETAIL_MISSING");
+    if (checkDifference.status !== "UNIQUE" || checkDifference.limitKind !== null) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_COLLECTION_STATUS");
+    }
+    if (checkDifference.tokenEdit?.status !== "UNIQUE") fail("CONSTRAINT_CHECK_DIAGNOSTIC_TOKEN_STATUS");
+    if (checkDifference.tokenEdit.sourceOnly.STRING_LITERAL !== 1) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_LITERAL_COUNT");
+    }
+    if (checkDifference.tokenEdit.destinationOnly.STRING_LITERAL !== 1) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_DESTINATION_LITERAL_COUNT");
+    }
+    if (Object.entries(checkDifference.tokenEdit.sourceOnly).some(
+      ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
+    )) fail("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_EXTRA_CATEGORY");
+    if (Object.entries(checkDifference.tokenEdit.destinationOnly).some(
+      ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
+    )) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DESTINATION_EXTRA_CATEGORY");
+    if (!checkDifference.dependencies.identitySetEqual) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DEPENDENCY_IDENTITY");
+    if (checkDifference.dependencies.changedClasses.length !== 0) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DEPENDENCY_CLASS");
+    if (Object.values(checkDifference.nodeTagDeltas.sourceOnly).some((count) => count !== 0)) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_NODE_COUNTS");
+    }
+    if (Object.values(checkDifference.nodeTagDeltas.destinationOnly).some((count) => count !== 0)) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_DESTINATION_NODE_COUNTS");
+    }
     if (evidence.source.locale.provider !== "builtin" || JSON.stringify(evidence.source.locale) !== JSON.stringify(evidence.destination.locale)) {
       fail("LOCALE_PROVIDER_PARITY_FAILED");
     }

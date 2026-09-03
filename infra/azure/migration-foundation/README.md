@@ -183,8 +183,21 @@ constraint type, identity-set and semantic equality booleans, a bounded mismatch
 count, fixed mismatch-field enums, and a truncation flag. Constraint definitions,
 expressions, object identities, bindings,
 and extension ownership are compared only in memory with `search_path` fixed to
-`pg_catalog`; no catalog value is serialized. This diagnostic classifies the next
-investigation but never relaxes schema parity. If only the
+`pg_catalog`; no catalog value is serialized. When exactly one matched CHECK
+expression differs, the private diagnostic also reports a unique-or-ambiguous
+minimal edit using only fixed token-category counts, fixed expression-node-tag
+deltas, and fixed dependency classes. Collection is two-phase: the broad manifest
+retains only bounded deparsed text, digests, and private snapshot-local locators.
+The source snapshot is released before target restore; only the single matched CHECK
+candidate may be rebound by its full logical identity in a fresh, short read-only
+transaction after its complete phase-one semantics and locator are revalidated.
+That candidate may then proceed through SQL-side expression,
+tree, dependency, identity-byte, node-count, and token-count limits. Raw expression
+trees never cross the database boundary, and dependency identities, token text,
+positions, identifiers, literals, hashes, and lengths are never serialized.
+Ambiguous, unavailable, rebound, or oversized evidence and unrecognized node or
+dependency classes stay explicitly fail-closed. These fields classify the next investigation but never
+relax schema parity. If only the
 legacy line-oriented digest differs while canonical tokens match, the private
 diagnostic records `NON_EXECUTABLE_DUMP_TEXT_ONLY` and schema parity remains proven.
 
