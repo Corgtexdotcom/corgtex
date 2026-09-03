@@ -153,11 +153,13 @@ a broad database role to make this proof pass.
 
 Private evidence contains schema/table identities, counts, digests, and the exact
 before/after archive-sequence replay proof—never table row values or dump bytes. The
-destination restore streams verbose stderr through a bounded-line classifier without
-accumulating raw output. On failure, it writes `restore-diagnostic.json` with fixed
-category, object, extension, SQLSTATE (null until supplied by a trusted structured
-source), and truncation fields; raw lines are discarded
-and are never logged or persisted. The enum-only file is uploaded with the private
+destination restore streams the standard `pre-data`, `data`, and `post-data` archive
+sections directly from `pg_restore` into `psql`; generated SQL is never materialized.
+`psql` uses `ON_ERROR_STOP` and SQLSTATE-only verbosity. On failure, the runner drains
+and discards all text and writes `restore-diagnostic.json` with only the fixed section,
+process class, SQLSTATE-derived category, exact five-character SQLSTATE when trusted,
+and bounded stderr observation fields. Raw lines are never logged or persisted. The
+enum-only file is uploaded with the private
 workflow artifacts. That bounded private diagnostic only selects the next investigation
 and never authorizes automatic remediation, privilege expansion, or an Azure setting
 change. The public receipt is limited to opaque source, target, and domain references;

@@ -241,43 +241,43 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
 
   it("reduces destination restore failures to a private enum-only diagnostic", () => {
     expect(runner).toContain("MAX_RESTORE_DIAGNOSTIC_LINE_BYTES = 4 * 1024");
+    expect(runner).toContain("MAX_RESTORE_STATUS_LINE_BYTES = 128");
     expect(runner).toContain('LC_ALL: "C", LANG: "C"');
     expect(runner).toContain('`${artifactDir}/restore-diagnostic.json`');
     expect(runner).toContain('phase: "DESTINATION_RESTORE"');
-    expect(runner).toContain('["pg_restore", "--verbose", "--exit-on-error"');
+    expect(runner).toContain('const RESTORE_SECTIONS = ["pre-data", "data", "post-data"]');
+    expect(runner).toContain('pg_restore --section="$1" --no-owner --no-acl --file=- /work/snapshot.dump 2>/dev/null');
+    expect(runner).toContain("psql -X --quiet --set=ON_ERROR_STOP=1 --set=VERBOSITY=sqlstate --set=SHOW_CONTEXT=never --set=ECHO=none");
+    expect(runner).toContain("CORGTEX_RESTORE_STATUS:%s:%s");
+    expect(runner).toContain("PIPESTATUS");
     expect(runner).toContain("options.stderrClassifier?.consume(chunk)");
+    expect(runner).toContain("options.stdoutClassifier.consume(chunk)");
     expect(runner).toContain("if (options.stderrClassifier === undefined && stderrBytes > MAX_COMMAND_STDERR_BYTES)");
     for (const category of [
       "INSUFFICIENT_PRIVILEGE",
-      "EXTENSION_UNAVAILABLE",
       "DUPLICATE_OBJECT",
       "MISSING_DEPENDENCY",
       "DATA_CONSTRAINT",
       "RESOURCE_EXHAUSTED",
       "CONNECTION",
+      "AUTHENTICATION",
+      "UNSUPPORTED_FEATURE",
+      "SYNTAX_OR_ACCESS_RULE",
+      "INTERNAL_ERROR",
       "UNKNOWN",
     ]) expect(runner).toContain(`"${category}"`);
-    for (const objectClass of [
-      "EXTENSION",
-      "COMMENT",
-      "SCHEMA",
-      "TYPE",
-      "TABLE",
-      "TABLE_DATA",
-      "SEQUENCE",
-      "FUNCTION",
-      "INDEX",
-      "CONSTRAINT",
-      "LARGE_OBJECT",
-      "OTHER",
-      "UNKNOWN",
-    ]) expect(runner).toContain(`"${objectClass}"`);
+    for (const processClass of ["OK", "ARCHIVE_RENDER_FAILED", "SCRIPT_ERROR", "CONNECTION_ERROR", "PROCESS_ERROR"]) {
+      expect(runner).toContain(`"${processClass}"`);
+    }
     expect(runner).toContain('rejectPromise(new RehearsalError(options.code ?? "COMMAND_FAILED"))');
     expect(runner).not.toContain("writeFileSync(stderr");
     expect(runner).not.toContain("process.stderr.write");
     expect(runner).not.toContain("stderrTail");
+    expect(runner).not.toContain('"--verbose"');
     expect(runner).not.toContain("archiveToc:");
     expect(readme).toContain("restore-diagnostic.json");
+    expect(readme).toContain("generated SQL is never materialized");
+    expect(readme).toContain("SQLSTATE-only verbosity");
     expect(readme).toContain("never authorizes automatic remediation");
   });
 
