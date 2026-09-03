@@ -2294,6 +2294,58 @@ const checkMultiwordTypeSpan = (tokens, start) => {
   return null;
 };
 
+const setCheckCaseContextCategories = (categories, tokens) => {
+  const frames = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (
+      token?.domain !== "DDL_TOKEN"
+      || token.value.startsWith('"')
+      || tokens[index - 1]?.value === "."
+      || tokens[index + 1]?.value === "."
+      || categories.has(index)
+    ) continue;
+    const word = token.value.toLowerCase();
+    if (word === "case") {
+      frames.push({ state: "START", valid: true, indexes: [index] });
+      continue;
+    }
+    const frame = frames.at(-1);
+    if (frame === undefined || !["when", "then", "else", "end"].includes(word)) continue;
+    if (word === "when") {
+      if (!frame.valid || !["START", "THEN"].includes(frame.state)) {
+        frame.valid = false;
+        continue;
+      }
+      frame.state = "WHEN";
+      frame.indexes.push(index);
+      continue;
+    }
+    if (word === "then") {
+      if (!frame.valid || frame.state !== "WHEN") {
+        frame.valid = false;
+        continue;
+      }
+      frame.state = "THEN";
+      frame.indexes.push(index);
+      continue;
+    }
+    if (word === "else") {
+      if (!frame.valid || frame.state !== "THEN") {
+        frame.valid = false;
+        continue;
+      }
+      frame.state = "ELSE";
+      frame.indexes.push(index);
+      continue;
+    }
+    frames.pop();
+    if (!frame.valid || !["THEN", "ELSE"].includes(frame.state)) continue;
+    frame.indexes.push(index);
+    setCheckContextCategory(categories, frame.indexes, "OTHER");
+  }
+};
+
 const checkContextualTokenCategories = (tokens) => {
   const categories = new Map();
   for (let castIndex = 0; castIndex < tokens.length; castIndex += 1) {
@@ -2382,6 +2434,7 @@ const checkContextualTokenCategories = (tokens) => {
     ) continue;
     setCheckContextCategory(categories, [index], "OTHER");
   }
+  setCheckCaseContextCategories(categories, tokens);
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;
     const terminalIndex = parenthesisIndex - 1;

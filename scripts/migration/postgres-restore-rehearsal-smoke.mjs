@@ -418,6 +418,14 @@ const main = async () => {
           CHECK ("flag" IS UNKNOWN),
         CONSTRAINT "QualifiedContextFixture_is_not_unknown_check"
           CHECK ("flag" IS NOT UNKNOWN),
+        CONSTRAINT "QualifiedContextFixture_case_searched_check"
+          CHECK ((CASE WHEN "amount" < 0 THEN 0 ELSE 2 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_case_simple_check"
+          CHECK ((CASE "amount" WHEN 0 THEN 0 ELSE 1 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_case_multi_check"
+          CHECK ((CASE WHEN "amount" < 0 THEN 0 WHEN "amount" = 0 THEN 1 ELSE 2 END) >= 0),
+        CONSTRAINT "QualifiedContextFixture_case_nested_check"
+          CHECK ((CASE WHEN "flag" THEN CASE "amount" WHEN 0 THEN 0 ELSE 1 END ELSE 2 END) >= 0),
         CONSTRAINT "QualifiedContextFixture_timezone_check"
           CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00')
       );
@@ -450,7 +458,10 @@ const main = async () => {
         position('{NULLIFEXPR ' IN conbin::text) > 0 AS has_nullif_node,
         position('{MINMAXEXPR ' IN conbin::text) > 0 AS has_minmax_node,
         position('{SQLVALUEFUNCTION ' IN conbin::text) > 0 AS has_sql_value_node,
-        position('{BOOLEANTEST ' IN conbin::text) > 0 AS has_boolean_test_node
+        position('{BOOLEANTEST ' IN conbin::text) > 0 AS has_boolean_test_node,
+        position('{CASEEXPR ' IN conbin::text) > 0 AS has_case_node,
+        position('{CASEWHEN ' IN conbin::text) > 0 AS has_case_when_node,
+        position('{CASETESTEXPR ' IN conbin::text) > 0 AS has_case_test_node
       FROM pg_constraint
       WHERE conname IN (
         'TypeContextFixture_character_check',
@@ -471,12 +482,16 @@ const main = async () => {
         'QualifiedContextFixture_current_catalog_check',
         'QualifiedContextFixture_current_schema_check',
         'QualifiedContextFixture_is_unknown_check',
-        'QualifiedContextFixture_is_not_unknown_check'
+        'QualifiedContextFixture_is_not_unknown_check',
+        'QualifiedContextFixture_case_searched_check',
+        'QualifiedContextFixture_case_simple_check',
+        'QualifiedContextFixture_case_multi_check',
+        'QualifiedContextFixture_case_nested_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 19) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 23) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -651,6 +666,32 @@ const main = async () => {
         || edit.destinationOnly.COLUMN_REFERENCE !== 0
         || JSON.stringify(edit).match(/unknown|private/iu)
       ) fail("BOOLEAN_TEST_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, structuralCount, hasCaseTest] of [
+      ["QualifiedContextFixture_case_searched_check", 5, false],
+      ["QualifiedContextFixture_case_simple_check", 5, true],
+      ["QualifiedContextFixture_case_multi_check", 7, false],
+      ["QualifiedContextFixture_case_nested_check", 10, true],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (
+        typeof row?.expression !== "string"
+        || row.has_case_node !== true
+        || row.has_case_when_node !== true
+        || row.has_case_test_node !== hasCaseTest
+      ) fail("CASE_CONTEXT_PG18_NODE_MISMATCH");
+      const lowerCaseSyntax = row.expression.replace(/\b(?:CASE|WHEN|THEN|ELSE|END)\b/gu, (word) => word.toLowerCase());
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(lowerCaseSyntax));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== structuralCount
+        || edit.destinationOnly.OTHER !== structuralCount
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/case|when|then|else|end|private/iu)
+      ) fail("CASE_CONTEXT_CLASSIFICATION_MISMATCH");
     }
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",

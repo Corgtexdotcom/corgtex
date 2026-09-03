@@ -576,6 +576,67 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      ["CASE WHEN a THEN b ELSE c END", "case when a then b else c end", 5],
+      ["CASE a WHEN b THEN c ELSE d END", "case a when b then c else d end", 5],
+      ["CASE WHEN a THEN b WHEN c THEN d ELSE e END", "case when a then b when c then d else e end", 7],
+      [
+        "CASE WHEN a THEN CASE b WHEN c THEN d ELSE e END ELSE f END",
+        "case when a then case b when c then d else e end else f end",
+        10,
+      ],
+    ])("classifies structural CASE tokens as syntax", (source, destination, count) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(count);
+      expect(edit.destinationOnly.OTHER).toBe(count);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("separates added CASE-arm syntax from its payload columns", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("CASE WHEN a THEN b ELSE c END"),
+        tokenizeSchemaDump("CASE WHEN a THEN b WHEN d THEN e ELSE c END"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.destinationOnly.OTHER).toBe(2);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(2);
+      expect(edit.sourceOnly.OTHER + edit.sourceOnly.COLUMN_REFERENCE).toBe(0);
+    });
+
+    it.each([
+      ['"CASE"', '"RENAMED_CASE"', "COLUMN_REFERENCE"],
+      ['"WHEN"', '"RENAMED_WHEN"', "COLUMN_REFERENCE"],
+      ["app.case(private_column)", "other.case(private_column)", "FUNCTION"],
+      ["row.when", "other.when", "COLUMN_REFERENCE"],
+      ["row.end", "other.end", "COLUMN_REFERENCE"],
+      ["case_value", "other_value", "COLUMN_REFERENCE"],
+      ["weekend", "weekday", "COLUMN_REFERENCE"],
+    ])("does not widen CASE syntax classification for %s", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBeGreaterThan(0);
+      expect(edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
+      "CASE WHEN a THEN b outside_column",
+      "CASE THEN a WHEN b THEN c END outside_column",
+      "CASE WHEN a THEN b ELSE c ELSE d END outside_column",
+      "CASE WHEN a END outside_column",
+    ])("contains malformed CASE candidates without reclassifying later tokens", (source) => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump(source),
+        tokenizeSchemaDump(source.replace("outside_column", "renamed_column")),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
       "CURRENT_CATALOG",
       "CURRENT_DATE",
       "CURRENT_ROLE",
