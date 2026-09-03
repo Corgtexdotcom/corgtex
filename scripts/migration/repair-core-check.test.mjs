@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { boundOwnerConfig, runCoreCheckRepair, treeDigest, validateCatalog } from "./repair-core-check.mjs";
 
@@ -50,5 +51,13 @@ describe("exact Core CHECK repair", () => {
     expect(workflow.indexOf("npm ci")).toBeLessThan(workflow.indexOf("secrets.PRODUCTION_DATABASE_URL"));
     expect(workflow).not.toMatch(/id-token:|azure\/login|release:db|migrate-and-seed/u);
     expect(workflow).toContain("options: [inspect, apply]");
+  });
+  it.each([["same", "same", 0], ["new-main", "queued-old-sha", 1]])("enforces live main %s against dispatched %s", (current, queued, status) => {
+    const workflow = readFileSync(new URL("../../.github/workflows/core-check-repair.yml", import.meta.url), "utf8");
+    const gate = workflow.slice(workflow.indexOf('          current_main="'), workflow.indexOf("          unset GH_TOKEN"));
+    const result = spawnSync("bash", ["-c", `set -euo pipefail\ngh() { printf '%s' "$TEST_CURRENT_MAIN"; }\n${gate}`], {
+      encoding: "utf8", env: { PATH: process.env.PATH, GITHUB_SHA: queued, TEST_CURRENT_MAIN: current },
+    });
+    expect(result.status).toBe(status);
   });
 });
