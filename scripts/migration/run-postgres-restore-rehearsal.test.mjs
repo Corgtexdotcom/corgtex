@@ -439,7 +439,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       category: "INSUFFICIENT_PRIVILEGE",
       objectClass: "EXTENSION",
       extensionClass: "PLPGSQL",
-      sqlstate: "42501",
+      sqlstate: null,
       truncated: false,
     });
   });
@@ -492,11 +492,15 @@ describe("PostgreSQL restore rehearsal runner", () => {
     expect(nonBuffer).toMatchObject({ category: "UNKNOWN", objectClass: "UNKNOWN", truncated: true });
   });
 
-  it("does not infer a SQLSTATE from unlabelled five-character text", () => {
-    expect(buildRestoreDiagnostic([Buffer.from(
-      "pg_restore: creating TABLE private.value\npg_restore: error: code 42501",
-      "utf8",
-    )]).sqlstate).toBeNull();
+  it("does not trust SQLSTATE-like lines from restore stderr", () => {
+    expect(buildRestoreDiagnostic([Buffer.from([
+      "pg_restore: creating TABLE private.value\n",
+      "pg_restore: error: unknown failure\n",
+      "SQLSTATE: 42501\n",
+    ].join(""), "utf8")])).toMatchObject({
+      category: "UNKNOWN",
+      sqlstate: null,
+    });
   });
 
   it("rejects duplicate selected archive entries", () => {

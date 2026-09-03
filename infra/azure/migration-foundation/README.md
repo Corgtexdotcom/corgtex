@@ -155,7 +155,8 @@ Private evidence contains schema/table identities, counts, digests, and the exac
 before/after archive-sequence replay proof—never table row values or dump bytes. The
 destination restore streams verbose stderr through a bounded-line classifier without
 accumulating raw output. On failure, it writes `restore-diagnostic.json` with fixed
-category, object, extension, SQLSTATE, and truncation fields; raw lines are discarded
+category, object, extension, SQLSTATE (null until supplied by a trusted structured
+source), and truncation fields; raw lines are discarded
 and are never logged or persisted. The enum-only file is uploaded with the private
 workflow artifacts. That bounded private diagnostic only selects the next investigation
 and never authorizes automatic remediation, privilege expansion, or an Azure setting

@@ -118,29 +118,25 @@ const secureDelete = async (filePath) => {
   }
 };
 
-const restoreCategory = (errorLine, sqlstate) => {
+const restoreCategory = (errorLine) => {
   if (
-    sqlstate === "42501"
-    || /\b(?:permission denied|must be (?:a )?(?:superuser|owner)|not a superuser|only superuser)\b/iu.test(errorLine)
+    /\b(?:permission denied|must be (?:a )?(?:superuser|owner)|not a superuser|only superuser)\b/iu.test(errorLine)
   ) return "INSUFFICIENT_PRIVILEGE";
   if (
     /\bextension\b[^\n]*(?:not available|not allow-listed|not supported|control file|installation script)/iu.test(errorLine)
   ) return "EXTENSION_UNAVAILABLE";
-  if (["42710", "42P07"].includes(sqlstate) || /\balready exists\b/iu.test(errorLine)) return "DUPLICATE_OBJECT";
+  if (/\balready exists\b/iu.test(errorLine)) return "DUPLICATE_OBJECT";
   if (
-    ["42704", "3F000"].includes(sqlstate)
-    || /\b(?:does not exist|required extension|missing dependency)\b/iu.test(errorLine)
+    /\b(?:does not exist|required extension|missing dependency)\b/iu.test(errorLine)
   ) return "MISSING_DEPENDENCY";
-  if (sqlstate?.startsWith("23") || /\bviolates\b[^\n]*\bconstraint\b|\bduplicate key value\b/iu.test(errorLine)) {
+  if (/\bviolates\b[^\n]*\bconstraint\b|\bduplicate key value\b/iu.test(errorLine)) {
     return "DATA_CONSTRAINT";
   }
   if (
-    sqlstate?.startsWith("53")
-    || /\b(?:out of memory|disk full|too many connections|insufficient resources)\b/iu.test(errorLine)
+    /\b(?:out of memory|disk full|too many connections|insufficient resources)\b/iu.test(errorLine)
   ) return "RESOURCE_EXHAUSTED";
   if (
-    sqlstate?.startsWith("08")
-    || /\b(?:could not connect|connection to server was lost|server closed the connection unexpectedly|terminating connection)\b/iu.test(errorLine)
+    /\b(?:could not connect|connection to server was lost|server closed the connection unexpectedly|terminating connection)\b/iu.test(errorLine)
   ) return "CONNECTION";
   return "UNKNOWN";
 };
@@ -205,7 +201,6 @@ export const createRestoreDiagnosticClassifier = () => {
   let errorSeen = false;
   let operation = { objectClass: "UNKNOWN", extensionClass: "UNKNOWN" };
   let category = "UNKNOWN";
-  let sqlstate = null;
 
   const processLine = (rawLine) => {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
@@ -214,14 +209,8 @@ export const createRestoreDiagnosticClassifier = () => {
       if (nextOperation !== null) operation = nextOperation;
       if (line.startsWith("pg_restore: error:")) {
         errorSeen = true;
-        category = restoreCategory(line, null);
+        category = restoreCategory(line);
       }
-      return;
-    }
-    const sqlstateMatch = line.match(/^SQLSTATE(?:\s*\([^\r\n)]{1,40}\))?\s*[:=]\s*([0-9A-Z]{5})\s*$/u);
-    if (sqlstate === null && sqlstateMatch) {
-      sqlstate = sqlstateMatch[1];
-      if (category === "UNKNOWN") category = restoreCategory("", sqlstate);
       return;
     }
     if (operation.objectClass === "UNKNOWN" && line.startsWith("Command was: ")) {
@@ -277,7 +266,7 @@ export const createRestoreDiagnosticClassifier = () => {
         category,
         objectClass: operation.objectClass,
         extensionClass: operation.extensionClass,
-        sqlstate,
+        sqlstate: null,
         truncated,
       };
       partial = "";
