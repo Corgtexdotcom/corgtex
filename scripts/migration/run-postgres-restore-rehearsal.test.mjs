@@ -576,6 +576,68 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      "CURRENT_CATALOG",
+      "CURRENT_DATE",
+      "CURRENT_ROLE",
+      "CURRENT_SCHEMA",
+      "CURRENT_TIME",
+      "CURRENT_TIMESTAMP",
+      "CURRENT_USER",
+      "LOCALTIME",
+      "LOCALTIMESTAMP",
+      "SESSION_USER",
+      "SYSTEM_USER",
+      "USER",
+    ])("classifies the closed SQL value construct %s as syntax", (source) => {
+      const destination = source === "CURRENT_DATE" ? "CURRENT_TIME" : "CURRENT_DATE";
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it.each([
+      ["CURRENT_TIME(3)", "CURRENT_TIMESTAMP(3)"],
+      ["LOCALTIME(3)", "LOCALTIMESTAMP(3)"],
+    ])("keeps parenthesized SQL value constructs out of FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it("keeps the optional CURRENT_SCHEMA parentheses as syntax", () => {
+      const edit = buildUniqueCheckTokenEdit(
+        tokenizeSchemaDump("CURRENT_SCHEMA()"),
+        tokenizeSchemaDump("CURRENT_SCHEMA"),
+      );
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.PARENTHESIS).toBe(2);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+    });
+
+    it.each([
+      ['"current_date"', '"other_date"', "COLUMN_REFERENCE"],
+      ['"current_time"(3)', '"other_time"(3)', "FUNCTION"],
+      ["app.current_date(private_column)", "other.current_date(private_column)", "FUNCTION"],
+      ["current_setting", "other_setting", "COLUMN_REFERENCE"],
+      ["current_query()", "other_query()", "FUNCTION"],
+      ["current_path", "other_path", "COLUMN_REFERENCE"],
+      ["local_value", "other_value", "COLUMN_REFERENCE"],
+    ])("does not widen SQL value classification for %s", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBeGreaterThan(0);
+      expect(edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+    });
+
+    it.each([
       ["private_schema.coalesce(private_column, 0)", "other_schema.coalesce(private_column, 0)"],
       ["private_schema.operator(private_column)", "other_schema.operator(private_column)"],
       ['"COALESCE"(private_column, 0)', '"NULLIF"(private_column, 0)'],
@@ -1061,8 +1123,35 @@ describe("PostgreSQL restore rehearsal runner", () => {
       }, entry, () => client);
       expect(detail.ok).toBe(true);
       expect(commands.indexOf("COMMIT")).toBeGreaterThan(commands.findIndex((sql) => sql.includes("AS node_tag")));
+      expect(commands.indexOf("SET LOCAL timezone = 'UTC'")).toBeGreaterThan(commands.indexOf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"));
+      expect(commands.indexOf("SET LOCAL timezone = 'UTC'")).toBeLessThan(commands.findIndex((sql) => /LIMIT 2\s*$/u.test(sql)));
       expect(commands).toContain("SET LOCAL client_encoding = 'UTF8'");
       expect(commands).not.toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    it("rolls back when UTC cannot be restored for source CHECK rebind", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const commands = [];
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql) => {
+          commands.push(sql);
+          if (sql === "SET LOCAL timezone = 'UTC'") throw new Error("setting failed");
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      await expect(collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: "REBIND",
+        limitKind: null,
+      });
+      expect(commands).toContain("ROLLBACK");
       expect(client.end).toHaveBeenCalledOnce();
     });
 

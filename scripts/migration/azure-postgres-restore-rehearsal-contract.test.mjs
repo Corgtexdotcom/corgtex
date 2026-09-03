@@ -233,6 +233,20 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("to_jsonb(t)::text AS canonical_row");
   });
 
+  it("pins UTC and the existing timeouts for every containerized libpq session", () => {
+    const pgOptions = [...runner.matchAll(/"PGOPTIONS=([^"]+)"/gu)].map((match) => match[1]);
+    expect(pgOptions).toHaveLength(2);
+    for (const options of pgOptions) {
+      expect(options.match(/-c timezone=UTC/gu)).toHaveLength(1);
+      expect(options).toContain("-c lock_timeout=5s");
+      expect(options).toContain("-c statement_timeout=0");
+      expect(options).toContain("-c transaction_timeout=0");
+      expect(options).toContain("-c idle_in_transaction_session_timeout=20min");
+    }
+    expect(pgOptions.filter((options) => options.includes("-c default_transaction_read_only=on")))
+      .toHaveLength(1);
+  });
+
   it("proves large objects through least-privilege APIs before scratch creation", () => {
     const accessPreflight = runner.indexOf("const sourceLargeObjects = await inspectLargeObjectAccess");
     const scratchCreation = runner.indexOf("await createScratchDatabase({");

@@ -155,6 +155,11 @@ const CHECK_OPERATOR_WORDS = new Set([
   "null", "operator", "or", "similar", "true",
 ]);
 const CHECK_SQL_CONSTRUCTS = new Set(["coalesce", "greatest", "least", "nullif"]);
+const CHECK_SQL_VALUE_CONSTRUCTS = new Set([
+  "current_catalog", "current_date", "current_role", "current_schema", "current_time",
+  "current_timestamp", "current_user", "localtime", "localtimestamp", "session_user",
+  "system_user", "user",
+]);
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -863,8 +868,8 @@ const dockerClient = async ({
     "--env", "PGPASSFILE=/work/pgpass",
     "--env", `PGSERVICE=${service}`,
     "--env", service === "source"
-      ? "PGOPTIONS=-c default_transaction_read_only=on -c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min"
-      : "PGOPTIONS=-c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min",
+      ? "PGOPTIONS=-c default_transaction_read_only=on -c timezone=UTC -c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min"
+      : "PGOPTIONS=-c timezone=UTC -c lock_timeout=5s -c statement_timeout=0 -c transaction_timeout=0 -c idle_in_transaction_session_timeout=20min",
     POSTGRES_CLIENT_IMAGE,
     ...args,
   );
@@ -2144,6 +2149,7 @@ export const collectReboundSourceCheckDetail = async (
     await client.query("SET LOCAL statement_timeout = '30s'");
     await client.query("SET LOCAL transaction_timeout = '60s'");
     await client.query("SET LOCAL idle_in_transaction_session_timeout = '60s'");
+    await client.query("SET LOCAL timezone = 'UTC'");
     await client.query("SET LOCAL client_encoding = 'UTF8'");
     await client.query("SET LOCAL search_path = pg_catalog");
     const reboundResult = await client.query(constraintCatalogIdentityQuery, [
@@ -2329,6 +2335,17 @@ const checkContextualTokenCategories = (tokens) => {
       continue;
     }
     setCheckContextCategory(categories, span, "COLLATION");
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (
+      token?.domain !== "DDL_TOKEN"
+      || token.value.startsWith('"')
+      || !CHECK_SQL_VALUE_CONSTRUCTS.has(token.value.toLowerCase())
+      || tokens[index - 1]?.value === "."
+      || tokens[index + 1]?.value === "."
+    ) continue;
+    setCheckContextCategory(categories, [index], "OTHER");
   }
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;

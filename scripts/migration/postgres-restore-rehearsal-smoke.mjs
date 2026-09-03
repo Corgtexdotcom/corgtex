@@ -384,6 +384,7 @@ const main = async () => {
       CREATE TABLE "QualifiedContextFixture" (
         "value" text,
         "amount" integer,
+        "observedAt" timestamptz,
         CONSTRAINT "QualifiedContextFixture_type_check"
           CHECK (("value"::"context fixture"."bounded_text") IS NOT NULL),
         CONSTRAINT "QualifiedContextFixture_operator_check"
@@ -401,7 +402,19 @@ const main = async () => {
         CONSTRAINT "QualifiedContextFixture_greatest_check"
           CHECK (GREATEST("amount", 0) >= 0),
         CONSTRAINT "QualifiedContextFixture_least_check"
-          CHECK (LEAST("amount", 0) <= 0)
+          CHECK (LEAST("amount", 0) <= 0),
+        CONSTRAINT "QualifiedContextFixture_current_date_check"
+          CHECK (CURRENT_DATE IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_time_check"
+          CHECK (CURRENT_TIME(3) IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_user_check"
+          CHECK (CURRENT_USER IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_catalog_check"
+          CHECK (CURRENT_CATALOG IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_current_schema_check"
+          CHECK (CURRENT_SCHEMA IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_timezone_check"
+          CHECK ("observedAt" >= TIMESTAMPTZ '2026-01-01 00:00:00+00')
       );
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
@@ -430,7 +443,8 @@ const main = async () => {
         pg_get_expr(conbin, conrelid) AS expression,
         position('{COALESCEEXPR ' IN conbin::text) > 0 AS has_coalesce_node,
         position('{NULLIFEXPR ' IN conbin::text) > 0 AS has_nullif_node,
-        position('{MINMAXEXPR ' IN conbin::text) > 0 AS has_minmax_node
+        position('{MINMAXEXPR ' IN conbin::text) > 0 AS has_minmax_node,
+        position('{SQLVALUEFUNCTION ' IN conbin::text) > 0 AS has_sql_value_node
       FROM pg_constraint
       WHERE conname IN (
         'TypeContextFixture_character_check',
@@ -444,12 +458,17 @@ const main = async () => {
         'QualifiedContextFixture_coalesce_check',
         'QualifiedContextFixture_nullif_check',
         'QualifiedContextFixture_greatest_check',
-        'QualifiedContextFixture_least_check'
+        'QualifiedContextFixture_least_check',
+        'QualifiedContextFixture_current_date_check',
+        'QualifiedContextFixture_current_time_check',
+        'QualifiedContextFixture_current_user_check',
+        'QualifiedContextFixture_current_catalog_check',
+        'QualifiedContextFixture_current_schema_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 12) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 17) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -582,6 +601,30 @@ const main = async () => {
         || JSON.stringify(edit).match(/coalesce|nullif|greatest|least|private/iu)
       ) fail("SQL_CONSTRUCT_CLASSIFICATION_MISMATCH");
     }
+    for (const [constraintName, sourceName, destinationName] of [
+      ["QualifiedContextFixture_current_date_check", "CURRENT_DATE", "CURRENT_TIMESTAMP"],
+      ["QualifiedContextFixture_current_time_check", "CURRENT_TIME", "LOCALTIME"],
+      ["QualifiedContextFixture_current_user_check", "CURRENT_USER", "SESSION_USER"],
+      ["QualifiedContextFixture_current_catalog_check", "CURRENT_CATALOG", "CURRENT_SCHEMA"],
+      ["QualifiedContextFixture_current_schema_check", "CURRENT_SCHEMA", "CURRENT_CATALOG"],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (typeof row?.expression !== "string" || row.has_sql_value_node !== true) {
+        fail("SQL_VALUE_CONTEXT_PG18_NODE_MISMATCH");
+      }
+      const renamed = row.expression.replace(new RegExp(`\\b${sourceName}\\b`, "iu"), destinationName);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== 1
+        || edit.destinationOnly.OTHER !== 1
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/current|localtime|session|private/iu)
+      ) fail("SQL_VALUE_CONTEXT_CLASSIFICATION_MISMATCH");
+    }
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
     )).rows[0].oid);
@@ -592,6 +635,7 @@ const main = async () => {
       GRANT SELECT ON ALL TABLES IN SCHEMA public TO rehearsal_reader;
       GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO rehearsal_reader;
       GRANT SELECT ON LARGE OBJECT ${largeObjectOid} TO rehearsal_reader;
+      ALTER ROLE rehearsal_reader SET timezone = 'America/Los_Angeles';
     `);
     const identitiesBefore = await tableIdentities(sourceAdmin);
     await sourceAdmin.end();
@@ -796,6 +840,8 @@ const main = async () => {
     try {
       await sourceConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await targetConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await sourceConstraintReadback.query("SET LOCAL timezone = 'UTC'");
+      await targetConstraintReadback.query("SET LOCAL timezone = 'UTC'");
       await sourceConstraintReadback.query("SET LOCAL client_encoding = 'UTF8'");
       await targetConstraintReadback.query("SET LOCAL client_encoding = 'UTF8'");
       await sourceConstraintReadback.query("SET LOCAL search_path = pg_catalog");
@@ -821,6 +867,16 @@ const main = async () => {
     if (!equalConstraintDiagnostic.semanticEqual || equalConstraintDiagnostic.mismatchFields.length !== 0) {
       fail("CONSTRAINT_CATALOG_PARITY_FAILED");
     }
+    const timezoneConstraint = [...sourceConstraintManifest.values()].find((entry) => {
+      try {
+        return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_timezone_check";
+      } catch {
+        return false;
+      }
+    });
+    if (timezoneConstraint === undefined) fail("TIMEZONE_REBIND_FIXTURE_MISSING");
+    const timezoneDetail = await collectReboundSourceCheckDetail(sourceConfig, timezoneConstraint);
+    if (timezoneDetail.ok !== true) fail("TIMEZONE_REBIND_DRIFT");
 
     const targetConstraintMutator = new Client(config(targetPort, scratchName));
     await targetConstraintMutator.connect();
@@ -835,6 +891,7 @@ const main = async () => {
           CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-delta'))`,
       );
       await targetConstraintMutator.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await targetConstraintMutator.query("SET LOCAL timezone = 'UTC'");
       await targetConstraintMutator.query("SET LOCAL client_encoding = 'UTF8'");
       await targetConstraintMutator.query("SET LOCAL search_path = pg_catalog");
       changedTargetConstraintManifest = await collectConstraintCatalogManifest(
