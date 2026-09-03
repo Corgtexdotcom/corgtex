@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import yaml from "js-yaml";
 import { describe, expect, it, vi } from "vitest";
 import { boundOwnerConfig, runCoreCheckRepair, treeDigest, validateCatalog } from "./repair-core-check.mjs";
 
@@ -51,13 +52,37 @@ describe("exact Core CHECK repair", () => {
     expect(workflow.indexOf("npm ci")).toBeLessThan(workflow.indexOf("secrets.PRODUCTION_DATABASE_URL"));
     expect(workflow).not.toMatch(/id-token:|azure\/login|release:db|migrate-and-seed/u);
     expect(workflow).toContain("options: [inspect, apply]");
+    const steps = yaml.load(workflow).jobs.repair.steps;
+    expect(steps[0].run).toContain('[[ "$current_main" == "$GITHUB_SHA" ]]');
+    expect(Object.keys(steps[0].env)).toEqual(["GH_TOKEN"]);
+    expect(steps[1].uses).toBe("actions/checkout@v5");
+    const installIndex = steps.findIndex(step => step.run?.startsWith("npm ci"));
+    expect(steps[installIndex].run).toBe("npm ci --ignore-scripts --no-audit --no-fund");
+    expect(steps[installIndex + 1].run).toContain('[[ "$current_main" == "$GITHUB_SHA" ]]');
   });
-  it.each([["same", "same", 0], ["new-main", "queued-old-sha", 1]])("enforces live main %s against dispatched %s", (current, queued, status) => {
+  it.each([
+    ["same", "same", false, 0, true],
+    ["new-main", "same", false, 1, false],
+    ["same", "new-main", false, 1, true],
+    ["same", "same", true, 17, false],
+    ["", "same", false, 1, false],
+    ["same", "", false, 1, true],
+  ])("enforces both live-main gates (%s, %s, failure %s)", (first, second, apiFailure, status, installed) => {
     const workflow = readFileSync(new URL("../../.github/workflows/core-check-repair.yml", import.meta.url), "utf8");
-    const gate = workflow.slice(workflow.indexOf('          current_main="'), workflow.indexOf("          unset GH_TOKEN"));
-    const result = spawnSync("bash", ["-c", `set -euo pipefail\ngh() { printf '%s' "$TEST_CURRENT_MAIN"; }\n${gate}`], {
-      encoding: "utf8", env: { PATH: process.env.PATH, GITHUB_SHA: queued, TEST_CURRENT_MAIN: current },
+    const gates = yaml.load(workflow).jobs.repair.steps.filter(step => step.run?.includes('current_main="')).map(step => step.run.split("unset GH_TOKEN")[0]);
+    expect(gates).toHaveLength(2);
+    const script = `set -euo pipefail
+gh() { if [[ "$TEST_API_FAILURE" == true ]]; then return 17; fi; printf '%s' "$TEST_CURRENT_MAIN"; }
+${gates[0]}
+printf 'INSTALL_REACHED\\n'
+TEST_CURRENT_MAIN="$TEST_SECOND_MAIN"
+${gates[1]}
+printf 'EXECUTION_REACHED\\n'`;
+    const result = spawnSync("bash", ["-c", script], {
+      encoding: "utf8", env: { PATH: process.env.PATH, GITHUB_SHA: "same", TEST_CURRENT_MAIN: first, TEST_SECOND_MAIN: second, TEST_API_FAILURE: String(apiFailure) },
     });
     expect(result.status).toBe(status);
+    expect(result.stdout.includes("INSTALL_REACHED")).toBe(installed);
+    expect(result.stdout.includes("EXECUTION_REACHED")).toBe(status === 0);
   });
 });

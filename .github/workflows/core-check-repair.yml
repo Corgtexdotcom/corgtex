@@ -25,6 +25,17 @@ jobs:
     timeout-minutes: 10
     environment: azure-migration-foundation
     steps:
+      - name: Reject stale dispatch before initialization
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_main="$(gh api repos/Corgtexdotcom/corgtex/git/ref/heads/main --jq .object.sha)"
+          [[ "$current_main" == "$GITHUB_SHA" ]] || {
+            echo "::error::Stale repair dispatch; current main must be inspected and approved again."
+            exit 1
+          }
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
@@ -34,7 +45,7 @@ jobs:
           node-version: 22
           cache: npm
       - name: Install before binding production credentials
-        run: npm ci --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Inspect or apply the exact Core correction
         shell: bash
         env:
