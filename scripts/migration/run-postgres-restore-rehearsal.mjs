@@ -1523,7 +1523,11 @@ const constraintCatalogQuery = `
       JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
       JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
     ), '[]'::jsonb) AS exclusion_operators,
-    pg_catalog.pg_get_constraintdef(constraint_row.oid, false) AS definition,
+    CASE
+      WHEN constraint_row.contype = 't'
+      THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
+      ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
+    END AS definition,
     CASE
       WHEN constraint_row.contype = 'c'
       THEN pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)
@@ -1540,6 +1544,10 @@ const constraintCatalogQuery = `
   LEFT JOIN pg_catalog.pg_class AS supporting_index ON supporting_index.oid = constraint_row.conindid
   LEFT JOIN pg_catalog.pg_namespace AS supporting_index_namespace ON supporting_index_namespace.oid = supporting_index.relnamespace
   LEFT JOIN pg_catalog.pg_constraint AS parent_constraint ON parent_constraint.oid = constraint_row.conparentid
+  LEFT JOIN pg_catalog.pg_trigger AS constraint_trigger
+    ON constraint_row.contype = 't'
+   AND constraint_trigger.tgconstraint = constraint_row.oid
+   AND NOT constraint_trigger.tgisinternal
   LEFT JOIN pg_catalog.pg_class AS parent_relation ON parent_relation.oid = parent_constraint.conrelid
   LEFT JOIN pg_catalog.pg_namespace AS parent_relation_namespace ON parent_relation_namespace.oid = parent_relation.relnamespace
   LEFT JOIN pg_catalog.pg_type AS parent_domain ON parent_domain.oid = parent_constraint.contypid

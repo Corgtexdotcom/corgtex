@@ -248,6 +248,16 @@ const main = async () => {
         CONSTRAINT "ConstraintFixture_parentId_fkey"
           FOREIGN KEY ("parentId") REFERENCES "ConstraintParent" ("id") ON DELETE CASCADE NOT VALID
       );
+      CREATE FUNCTION "constraint_trigger_guard"() RETURNS trigger
+      LANGUAGE plpgsql AS $function$
+      BEGIN
+        RETURN NEW;
+      END;
+      $function$;
+      CREATE CONSTRAINT TRIGGER "ConstraintFixture_guard"
+        AFTER INSERT ON "ConstraintFixture"
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION "constraint_trigger_guard"();
       CREATE TABLE "InheritedConstraintBase" (
         "id" integer,
         CONSTRAINT "InheritedConstraintBase_id_check" CHECK ("id" >= 0)
