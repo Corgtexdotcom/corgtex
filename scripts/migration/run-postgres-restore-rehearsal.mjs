@@ -20,6 +20,11 @@ import {
 import { basename, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
+import {
+  KNOWN_CHECK_KEY,
+  captureKnownCheckStructure,
+  compareKnownCheckStructure,
+} from "./postgres-check-structure.mjs";
 
 const { Client } = pg;
 
@@ -3509,9 +3514,10 @@ const buildCheckExpressionDifference = (source, destination) => {
 
 const buildCheckExpressionDiagnostic = (checkDetails) => {
   const diagnostic = buildCheckExpressionDifference(checkDetails.source, checkDetails.destination);
-  return Object.hasOwn(checkDetails, "targetReparse")
-    ? { ...diagnostic, targetReparse: checkDetails.targetReparse }
-    : diagnostic;
+  if (Object.hasOwn(checkDetails, "associativeStructure")) {
+    return { ...diagnostic, associativeStructure: checkDetails.associativeStructure };
+  }
+  return Object.hasOwn(checkDetails, "targetReparse") ? { ...diagnostic, targetReparse: checkDetails.targetReparse } : diagnostic;
 };
 
 const analyzeConstraintSemanticManifests = (
@@ -3935,6 +3941,8 @@ export async function runPostgresRestoreRehearsal(options) {
       sourceClient,
       "SOURCE_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
     );
+    const knownSourceCheck = sourceConstraintManifest.get(KNOWN_CHECK_KEY);
+    const sourceCheckStructure = await captureKnownCheckStructure(sourceClient, knownSourceCheck);
     if (afterSnapshot !== null) await afterSnapshot({ snapshot });
 
     await createScratchDatabase({
@@ -4077,10 +4085,22 @@ export async function runPostgresRestoreRehearsal(options) {
           sourceConstraintManifest,
           destinationConstraintManifest,
         );
-        checkDetails = checkCandidate === null ? null : {
-          source: await collectReboundSourceCheckDetail(sourceConfig, checkCandidate.source),
-          destination: await collectCheckConstraintDetail(destinationClient, checkCandidate.destination),
-        };
+        if (checkCandidate !== null) {
+          const destinationCheckStructure = await captureKnownCheckStructure(
+            destinationClient,
+            checkCandidate.destination,
+          );
+          checkDetails = {
+            source: await collectReboundSourceCheckDetail(sourceConfig, checkCandidate.source),
+            destination: await collectCheckConstraintDetail(destinationClient, checkCandidate.destination),
+            associativeStructure: compareKnownCheckStructure(
+              sourceCheckStructure,
+              destinationCheckStructure,
+              checkCandidate,
+              constraintServerVersionRelation,
+            ),
+          };
+        }
         writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
           ...schemaDifferenceDiagnostic,
           constraintSemantics: buildConstraintSemanticDiagnostic(
@@ -4142,31 +4162,6 @@ export async function runPostgresRestoreRehearsal(options) {
       throw error;
     } finally {
       await destinationClient.end().catch(() => {});
-    }
-
-    if (
-      schemaDifferenceDiagnostic?.classification === "EXECUTABLE_SCHEMA_DIFFERENCE"
-      && checkCandidate !== null
-      && checkDetails !== null
-    ) {
-      checkDetails.targetReparse = await runTargetCheckReparseDiagnostic({
-        targetConfig,
-        sourceManifestEntry: checkCandidate.source,
-        destinationManifestEntry: checkCandidate.destination,
-        sourceExpression: checkDetails.source?.privateExpression,
-        sourceDependencies: checkDetails.source?.dependencies,
-        destinationDetail: checkDetails.destination,
-        serverVersionRelation: constraintServerVersionRelation,
-      });
-      writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
-        ...schemaDifferenceDiagnostic,
-        constraintSemantics: buildConstraintSemanticDiagnostic(
-          sourceConstraintManifest,
-          destinationConstraintManifest,
-          constraintServerVersionRelation,
-          checkDetails,
-        ),
-      });
     }
 
     const evidence = {

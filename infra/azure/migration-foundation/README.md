@@ -188,12 +188,24 @@ expression differs, the private diagnostic also reports a unique-or-ambiguous
 minimal edit using only fixed token-category counts, fixed expression-node-tag
 deltas, and fixed dependency classes. Collection is two-phase: the broad manifest
 retains only bounded deparsed text, digests, and private snapshot-local locators.
-The source snapshot is released before target restore; only the single matched CHECK
-candidate may be rebound by its full logical identity in a fresh, short read-only
-transaction after its complete phase-one semantics and locator are revalidated.
+Before the source snapshot is released, the runner privately captures a bounded
+serialized expression tree and builtin/column bindings for the single known
+`ConstitutionSource_point_contract_check`. If it is later the sole mismatch, the
+destination tree is captured in the existing read-only transaction and the runner
+reports whether the only structural difference is ordered associative AND/OR
+grouping with unequal flatten counts, the observed discrepancy's admitted shape.
+Equal-count regroupings remain `STRUCTURALLY_DIFFERENT` with `canonicalEqual: true`;
+that is an out-of-shape diagnostic result, not evidence of different semantics.
+It discards only validated numeric parser locations; it never reorders,
+deduplicates, folds, or normalizes leaves, casts, operators, functions, collations,
+or columns. Trees, bindings, constants, and canonical forms remain process-private.
+Unsupported syntax, non-builtin executable references, limits, binding differences,
+or malformed trees fail closed. The source candidate may also be rebound by its full
+logical identity in a fresh, short read-only transaction after its complete
+phase-one semantics and locator are revalidated.
 That candidate may then proceed through SQL-side expression,
 tree, dependency, identity-byte, node-count, and token-count limits. Raw expression
-trees never cross the database boundary, and dependency identities, token text,
+trees never cross the private diagnostic process boundary, and dependency identities, token text,
 positions, identifiers, literals, hashes, and lengths are never serialized.
 Ambiguous, unavailable, rebound, or oversized evidence and unrecognized node or
 dependency classes stay explicitly fail-closed. These fields classify the next investigation but never
