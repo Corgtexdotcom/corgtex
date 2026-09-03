@@ -638,7 +638,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
     it.each([
       ["AND", "private_a AND ((private_b AND private_c))", "private_a AND (private_b AND private_c)"],
       ["OR", "private_a OR ((private_b OR private_c))", "private_a OR (private_b OR private_c)"],
-    ])("proves one source-side associative %s grouping without emitting tokens", async (
+    ])("reports source-side %s node counts without inferring grouping", async (
       operator,
       sourceExpression,
       destinationExpression,
@@ -652,8 +652,8 @@ describe("PostgreSQL restore rehearsal runner", () => {
         destinationBooleanNodeCounts,
       });
       expect(diagnostic.checkExpressionDifference?.booleanGroupingFingerprint).toEqual({
-        relation: "SOURCE_EXTRA_ASSOCIATIVE_GROUP",
-        operator,
+        relation: "NOT_PROVEN",
+        operator: null,
         booleanNodeDeltas: {
           sourceOnly: { AND: operator === "AND" ? 1 : 0, OR: operator === "OR" ? 1 : 0, NOT: 0 },
           destinationOnly: { AND: 0, OR: 0, NOT: 0 },
@@ -665,7 +665,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
     });
 
-    it("reports destination-side associative grouping direction", async () => {
+    it("reports destination-side Boolean node counts without inferring grouping", async () => {
       const diagnostic = await booleanGroupingDiagnostic({
         sourceExpression: "private_a OR (private_b OR private_c)",
         destinationExpression: "private_a OR ((private_b OR private_c))",
@@ -673,8 +673,8 @@ describe("PostgreSQL restore rehearsal runner", () => {
         destinationBooleanNodeCounts: { AND: 0, OR: 2, NOT: 0 },
       });
       expect(diagnostic.checkExpressionDifference?.booleanGroupingFingerprint).toEqual({
-        relation: "DESTINATION_EXTRA_ASSOCIATIVE_GROUP",
-        operator: "OR",
+        relation: "NOT_PROVEN",
+        operator: null,
         booleanNodeDeltas: {
           sourceOnly: { AND: 0, OR: 0, NOT: 0 },
           destinationOnly: { AND: 0, OR: 1, NOT: 0 },
@@ -686,6 +686,10 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ["mixed precedence", "private_a AND ((private_b OR private_c))", "private_a AND (private_b OR private_c)", { AND: 1, OR: 1, NOT: 0 }, { AND: 1, OR: 1, NOT: 0 }],
       ["Boolean NOT", "private_a AND ((NOT private_b))", "private_a AND (NOT private_b)", { AND: 1, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
       ["NOT wrapper", "NOT ((private_a AND private_b)) AND private_c", "NOT (private_a AND private_b) AND private_c", { AND: 2, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
+      ["IS TRUE postfix", "private_a AND ((private_b AND private_c)) IS TRUE", "private_a AND (private_b AND private_c) IS TRUE", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["IS FALSE postfix", "private_a AND ((private_b AND private_c)) IS FALSE", "private_a AND (private_b AND private_c) IS FALSE", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["IS UNKNOWN postfix", "private_a AND ((private_b AND private_c)) IS UNKNOWN", "private_a AND (private_b AND private_c) IS UNKNOWN", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["IS NOT TRUE postfix", "private_a AND ((private_b AND private_c)) IS NOT TRUE", "private_a AND (private_b AND private_c) IS NOT TRUE", { AND: 2, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
       ["BETWEEN separator", "private_a AND ((private_b BETWEEN private_c AND private_d))", "private_a AND (private_b BETWEEN private_c AND private_d)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["BETWEEN SYMMETRIC separator", "private_a AND ((private_b BETWEEN SYMMETRIC private_c AND private_d))", "private_a AND (private_b BETWEEN SYMMETRIC private_c AND private_d)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["searched CASE", "private_a AND ((CASE WHEN private_b AND private_c THEN true ELSE false END))", "private_a AND (CASE WHEN private_b AND private_c THEN true ELSE false END)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],

@@ -2668,90 +2668,9 @@ const buildCheckAmbiguityFingerprint = (
   return { nonParenthesisTokenSequenceRelation, sourceOnly, destinationOnly };
 };
 
-const checkBooleanOperatorToken = (tokens, index, contextualTokenCategories) => {
-  const token = tokens[index];
-  if (
-    token?.domain !== "DDL_TOKEN"
-    || token.value.startsWith('"')
-    || contextualTokenCategories.has(index)
-    || !CHECK_BOOLEAN_OPERATORS.includes(token.value.toUpperCase())
-  ) return null;
-  return token.value.toUpperCase();
-};
-
-const sameCheckTokenStream = (left, right) => left.length === right.length
-  && left.every((token, index) => sameSchemaToken(token, right[index]));
-
-const checkParenthesisPairs = (tokens) => {
-  const stack = [];
-  const pairs = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    if (!isCheckParenthesis(tokens[index])) continue;
-    if (tokens[index].value === "(") {
-      stack.push(index);
-      continue;
-    }
-    const open = stack.pop();
-    if (open === undefined) return null;
-    pairs.push([open, index]);
-  }
-  return stack.length === 0 ? pairs : null;
-};
-
-const associativeBooleanOperatorForPair = (tokens, open, close, contextualTokenCategories) => {
-  let parenthesisDepth = 0;
-  let bracketDepth = 0;
-  const operators = new Set();
-  for (let index = open + 1; index < close; index += 1) {
-    if (isCheckParenthesis(tokens[index])) {
-      parenthesisDepth += tokens[index].value === "(" ? 1 : -1;
-      if (parenthesisDepth < 0) return null;
-      continue;
-    }
-    if (tokens[index]?.domain === "DDL_TOKEN" && ["[", "]"].includes(tokens[index].value)) {
-      bracketDepth += tokens[index].value === "[" ? 1 : -1;
-      if (bracketDepth < 0) return null;
-      continue;
-    }
-    if (parenthesisDepth !== 0 || bracketDepth !== 0) continue;
-    if (["between", "case", "when", "then", "else", "end"].some(
-      (keyword) => isUnquotedCheckWord(tokens[index], keyword),
-    )) return null;
-    const operator = checkBooleanOperatorToken(tokens, index, contextualTokenCategories);
-    if (operator === "NOT") return null;
-    if (operator === "AND" || operator === "OR") operators.add(operator);
-  }
-  if (parenthesisDepth !== 0 || bracketDepth !== 0 || operators.size !== 1) return null;
-  const operator = [...operators][0];
-  let groupingOpen = open;
-  let groupingClose = close;
-  while (
-    tokens[groupingOpen - 1]?.value === "("
-    && tokens[groupingClose + 1]?.value === ")"
-  ) {
-    const precedingWrapper = tokens[groupingOpen - 2];
-    if (
-      precedingWrapper !== undefined
-      && !isCheckParenthesis(precedingWrapper)
-      && checkBooleanOperatorToken(tokens, groupingOpen - 2, contextualTokenCategories) !== operator
-    ) break;
-    groupingOpen -= 1;
-    groupingClose += 1;
-  }
-  return checkBooleanOperatorToken(tokens, groupingOpen - 1, contextualTokenCategories) === operator
-    || checkBooleanOperatorToken(tokens, groupingClose + 1, contextualTokenCategories) === operator
-    ? operator
-    : null;
-};
-
 const buildBooleanGroupingFingerprint = (
-  sourceTokens,
-  destinationTokens,
-  ambiguityFingerprint,
   sourceBooleanNodeCounts,
   destinationBooleanNodeCounts,
-  sourceContextualTokenCategories,
-  destinationContextualTokenCategories,
 ) => {
   const validBooleanNodeCounts = (counts) => counts !== null
     && typeof counts === "object"
@@ -2766,63 +2685,7 @@ const buildBooleanGroupingFingerprint = (
     destinationBooleanNodeCounts,
     CHECK_BOOLEAN_OPERATORS,
   );
-  const notProven = () => ({ relation: "NOT_PROVEN", operator: null, booleanNodeDeltas });
-  const onlyParenthesisPair = (extra, other) => extra.PARENTHESIS === 2
-    && CHECK_EDIT_CATEGORIES.every((category) => category === "PARENTHESIS" || extra[category] === 0)
-    && CHECK_EDIT_CATEGORIES.every((category) => other[category] === 0);
-  let relation;
-  let extraTokens;
-  let baselineTokens;
-  let directionalDeltas;
-  let oppositeDeltas;
-  let extraContextualTokenCategories;
-  if (
-    ambiguityFingerprint.nonParenthesisTokenSequenceRelation === "MATCH"
-    && onlyParenthesisPair(ambiguityFingerprint.sourceOnly, ambiguityFingerprint.destinationOnly)
-  ) {
-    relation = "SOURCE_EXTRA_ASSOCIATIVE_GROUP";
-    extraTokens = sourceTokens;
-    baselineTokens = destinationTokens;
-    directionalDeltas = booleanNodeDeltas.sourceOnly;
-    oppositeDeltas = booleanNodeDeltas.destinationOnly;
-    extraContextualTokenCategories = sourceContextualTokenCategories;
-  } else if (
-    ambiguityFingerprint.nonParenthesisTokenSequenceRelation === "MATCH"
-    && onlyParenthesisPair(ambiguityFingerprint.destinationOnly, ambiguityFingerprint.sourceOnly)
-  ) {
-    relation = "DESTINATION_EXTRA_ASSOCIATIVE_GROUP";
-    extraTokens = destinationTokens;
-    baselineTokens = sourceTokens;
-    directionalDeltas = booleanNodeDeltas.destinationOnly;
-    oppositeDeltas = booleanNodeDeltas.sourceOnly;
-    extraContextualTokenCategories = destinationContextualTokenCategories;
-  } else {
-    return notProven();
-  }
-
-  const pairs = checkParenthesisPairs(extraTokens);
-  if (pairs === null) return notProven();
-  const matchingOperators = pairs.flatMap(([open, close]) => {
-    const withoutPair = extraTokens.filter((_token, index) => index !== open && index !== close);
-    if (!sameCheckTokenStream(withoutPair, baselineTokens)) return [];
-    const operator = associativeBooleanOperatorForPair(
-      extraTokens,
-      open,
-      close,
-      extraContextualTokenCategories,
-    );
-    return operator === null ? [] : [operator];
-  });
-  if (
-    matchingOperators.length === 0
-    || new Set(matchingOperators).size !== 1
-  ) return notProven();
-  const operator = matchingOperators[0];
-  if (
-    CHECK_BOOLEAN_OPERATORS.some((candidate) => directionalDeltas[candidate] !== (candidate === operator ? 1 : 0))
-    || CHECK_BOOLEAN_OPERATORS.some((candidate) => oppositeDeltas[candidate] !== 0)
-  ) return notProven();
-  return { relation, operator, booleanNodeDeltas };
+  return { relation: "NOT_PROVEN", operator: null, booleanNodeDeltas };
 };
 
 const unwrapCheckExpression = (tokens) => {
@@ -3100,13 +2963,8 @@ const buildCheckExpressionDifference = (source, destination) => {
       dependencies,
       ambiguityFingerprint,
       booleanGroupingFingerprint: buildBooleanGroupingFingerprint(
-        source.tokens,
-        destination.tokens,
-        ambiguityFingerprint,
         source.booleanNodeCounts,
         destination.booleanNodeCounts,
-        sourceContextualTokenCategories,
-        destinationContextualTokenCategories,
       ),
     };
   }
