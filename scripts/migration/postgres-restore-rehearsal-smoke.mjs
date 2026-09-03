@@ -22,6 +22,11 @@ import {
   tokenizeSchemaDump,
   writeClientFiles,
 } from "./run-postgres-restore-rehearsal.mjs";
+import {
+  KNOWN_CHECK_KEY,
+  captureKnownCheckStructure,
+  compareKnownCheckStructure,
+} from "./postgres-check-structure.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
 
 const { Client } = pg;
@@ -1034,6 +1039,51 @@ const main = async () => {
     if (!equalConstraintDiagnostic.semanticEqual || equalConstraintDiagnostic.mismatchFields.length !== 0) {
       fail("CONSTRAINT_CATALOG_PARITY_FAILED");
     }
+    const verifyKnownAssociativeStructure = async () => {
+      const clients = [new Client(config(sourcePort, "source")), new Client(config(targetPort, scratchName))];
+      const captures = [];
+      const entries = [];
+      try {
+        for (let side = 0; side < clients.length; side += 1) {
+          const client = clients[side];
+          await client.connect();
+          await client.query(`
+            CREATE TABLE "ConstitutionSourceReference" (
+              "pointKey" text, "pointOrder" integer, "sourceOrder" integer,
+              CONSTRAINT "ConstitutionSource_point_contract_check" CHECK (
+                ${side === 0
+                  ? '"pointOrder" BETWEEN 1 AND 10'
+                  : '"pointOrder" >= 1 AND "pointOrder" <= 10'}
+                AND "sourceOrder" >= 1
+                AND "pointKey" = 'point-' || "pointOrder"::text
+              )
+            )
+          `);
+          await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+          await client.query("SET LOCAL search_path = pg_catalog");
+          const manifest = await collectConstraintCatalogManifest(client, "ASSOCIATIVE_FIXTURE_CATALOG_FAILED");
+          const entry = manifest.get(KNOWN_CHECK_KEY);
+          if (!entry) fail("ASSOCIATIVE_FIXTURE_MISSING");
+          entries.push(entry);
+          captures.push(await captureKnownCheckStructure(client, entry));
+          await client.query("COMMIT");
+        }
+        const candidate = { source: entries[0], destination: entries[1] };
+        const proof = compareKnownCheckStructure(captures[0], captures[1], candidate, "MATCH");
+        if (proof.status !== "ASSOCIATIVE_GROUPING_ONLY" || proof.originalEqual || !proof.canonicalEqual || !proof.bindingsEqual) {
+          fail("ASSOCIATIVE_FIXTURE_PROOF_FAILED");
+        }
+        const serialized = JSON.stringify(proof);
+        if (/point-|BOOLEXPR|OPEXPR|CONST|VAR|conbin/u.test(serialized)) fail("ASSOCIATIVE_FIXTURE_LEAKED");
+      } finally {
+        for (const client of clients) {
+          await client.query("ROLLBACK").catch(() => {});
+          await client.query('DROP TABLE IF EXISTS "ConstitutionSourceReference"').catch(() => {});
+          await client.end().catch(() => {});
+        }
+      }
+    };
+    await verifyKnownAssociativeStructure();
     const timezoneConstraint = [...sourceConstraintManifest.values()].find((entry) => {
       try {
         return JSON.parse(entry.key)?.[3] === "QualifiedContextFixture_timezone_check";
