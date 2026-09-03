@@ -256,7 +256,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       })]);
       const detail = (expression, booleanNodeCounts) => {
         const result = checkDetail(expression, {
-          columnReferences: new Set(["private_a", "private_b", "private_c"]),
+          columnReferences: new Set(["private_a", "private_b", "private_c", "private_d", "private_e"]),
           booleanNodeCounts,
         });
         result.nodeTagCounts.BOOLEXPR = Object.values(booleanNodeCounts).reduce((total, count) => total + count, 0);
@@ -685,11 +685,20 @@ describe("PostgreSQL restore rehearsal runner", () => {
     it.each([
       ["mixed precedence", "private_a AND ((private_b OR private_c))", "private_a AND (private_b OR private_c)", { AND: 1, OR: 1, NOT: 0 }, { AND: 1, OR: 1, NOT: 0 }],
       ["Boolean NOT", "private_a AND ((NOT private_b))", "private_a AND (NOT private_b)", { AND: 1, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
+      ["NOT wrapper", "NOT ((private_a AND private_b)) AND private_c", "NOT (private_a AND private_b) AND private_c", { AND: 2, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
+      ["BETWEEN separator", "private_a AND ((private_b BETWEEN private_c AND private_d))", "private_a AND (private_b BETWEEN private_c AND private_d)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["BETWEEN SYMMETRIC separator", "private_a AND ((private_b BETWEEN SYMMETRIC private_c AND private_d))", "private_a AND (private_b BETWEEN SYMMETRIC private_c AND private_d)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["searched CASE", "private_a AND ((CASE WHEN private_b AND private_c THEN true ELSE false END))", "private_a AND (CASE WHEN private_b AND private_c THEN true ELSE false END)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["simple CASE", "private_a OR ((CASE private_b WHEN private_c THEN private_d OR private_e ELSE false END))", "private_a OR (CASE private_b WHEN private_c THEN private_d OR private_e ELSE false END)", { AND: 0, OR: 2, NOT: 0 }, { AND: 0, OR: 1, NOT: 0 }],
+      ["nested CASE", "private_a AND ((CASE WHEN private_b THEN CASE WHEN private_c OR private_d THEN true ELSE false END ELSE false END))", "private_a AND (CASE WHEN private_b THEN CASE WHEN private_c OR private_d THEN true ELSE false END ELSE false END)", { AND: 1, OR: 1, NOT: 0 }, { AND: 0, OR: 1, NOT: 0 }],
+      ["ARRAY Boolean content", "private_a AND ((ARRAY[private_b AND private_c]))", "private_a AND (ARRAY[private_b AND private_c])", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["function parentheses", "private_function((private_a AND private_b)) AND private_c", "private_function(private_a AND private_b) AND private_c", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["cast parentheses", "((private_a AND private_b))::boolean AND private_c", "(private_a AND private_b)::boolean AND private_c", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["relocated pair", "(private_a AND private_b) AND private_c", "private_a AND (private_b AND private_c)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["quoted AND lookalike", 'private_a AND (("AND"))', 'private_a AND ("AND")', { AND: 1, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["quoted OR lookalike", 'private_a OR (("OR"))', 'private_a OR ("OR")', { AND: 0, OR: 1, NOT: 0 }, { AND: 0, OR: 1, NOT: 0 }],
+      ["quoted CASE lookalike", 'private_a AND (("CASE"))', 'private_a AND ("CASE")', { AND: 1, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["quoted BETWEEN lookalike", 'private_a AND (("BETWEEN"))', 'private_a AND ("BETWEEN")', { AND: 1, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["unbalanced expression", "((private_a AND private_b AND private_c", "(private_a AND private_b AND private_c", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
       ["conflicting operator counts", "private_a AND ((private_b AND private_c))", "private_a AND (private_b AND private_c)", { AND: 1, OR: 1, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
     ])("keeps %s Boolean grouping NOT_PROVEN", async (
@@ -710,7 +719,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         operator: null,
       });
       const serialized = JSON.stringify(diagnostic);
-      for (const forbidden of ["private_a", "private_b", "private_c", "private_function"]) {
+      for (const forbidden of ["private_a", "private_b", "private_c", "private_d", "private_e", "private_function"]) {
         expect(serialized).not.toContain(forbidden);
       }
       expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
