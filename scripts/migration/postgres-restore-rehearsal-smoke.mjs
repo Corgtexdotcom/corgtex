@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
 import {
+  buildConstraintSemanticDiagnostic,
   cleanupScratchDatabase,
+  collectConstraintCatalogManifest,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
   writeClientFiles,
@@ -229,6 +231,44 @@ const main = async () => {
         "embedding" vector(3) NOT NULL,
         "values" integer[] NOT NULL
       );
+      CREATE DOMAIN "ConstraintDomain" AS text
+        CONSTRAINT "ConstraintDomain_check" CHECK (VALUE <> 'private-domain-sentinel');
+      CREATE TABLE "ConstraintParent" (
+        "id" integer PRIMARY KEY
+      );
+      CREATE TABLE "ConstraintFixture" (
+        "id" integer PRIMARY KEY,
+        "parentId" integer,
+        "kind" text,
+        "domainValue" "ConstraintDomain",
+        CONSTRAINT "ConstraintFixture_kind_check"
+          CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-gamma')),
+        CONSTRAINT "ConstraintFixture_kind_key"
+          UNIQUE ("kind") DEFERRABLE INITIALLY DEFERRED,
+        CONSTRAINT "ConstraintFixture_parentId_fkey"
+          FOREIGN KEY ("parentId") REFERENCES "ConstraintParent" ("id") ON DELETE CASCADE NOT VALID
+      );
+      CREATE FUNCTION "constraint_trigger_guard"() RETURNS trigger
+      LANGUAGE plpgsql AS $function$
+      BEGIN
+        RETURN NEW;
+      END;
+      $function$;
+      CREATE CONSTRAINT TRIGGER "ConstraintFixture_guard"
+        AFTER INSERT ON "ConstraintFixture"
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION "constraint_trigger_guard"();
+      CREATE TABLE "InheritedConstraintBase" (
+        "id" integer,
+        CONSTRAINT "InheritedConstraintBase_id_check" CHECK ("id" >= 0)
+      );
+      CREATE TABLE "InheritedConstraintChild" () INHERITS ("InheritedConstraintBase");
+      CREATE TABLE "PartitionedConstraintFixture" (
+        "id" integer,
+        CONSTRAINT "PartitionedConstraintFixture_id_check" CHECK ("id" >= 0)
+      ) PARTITION BY RANGE ("id");
+      CREATE TABLE "PartitionedConstraintFixture_first"
+        PARTITION OF "PartitionedConstraintFixture" FOR VALUES FROM (0) TO (10);
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
       CREATE TABLE _prisma_migrations (
@@ -447,6 +487,73 @@ const main = async () => {
         fail("SCHEMA_DIAGNOSTIC_BOUNDARY_FAILED");
       }
     }
+    const sourceConstraintReadback = new Client(config(
+      sourcePort,
+      "source",
+      "rehearsal_reader",
+      TEST_READER_PASSWORD,
+    ));
+    const targetConstraintReadback = new Client(config(targetPort, scratchName));
+    await sourceConstraintReadback.connect();
+    await targetConstraintReadback.connect();
+    let sourceConstraintManifest;
+    let targetConstraintManifest;
+    try {
+      await sourceConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await targetConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await sourceConstraintReadback.query("SET LOCAL search_path = pg_catalog");
+      await targetConstraintReadback.query("SET LOCAL search_path = pg_catalog");
+      sourceConstraintManifest = await collectConstraintCatalogManifest(
+        sourceConstraintReadback,
+        "SOURCE_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
+      );
+      targetConstraintManifest = await collectConstraintCatalogManifest(
+        targetConstraintReadback,
+        "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
+      );
+      await sourceConstraintReadback.query("COMMIT");
+      await targetConstraintReadback.query("COMMIT");
+    } finally {
+      await sourceConstraintReadback.end().catch(() => {});
+      await targetConstraintReadback.end().catch(() => {});
+    }
+    const equalConstraintDiagnostic = buildConstraintSemanticDiagnostic(
+      sourceConstraintManifest,
+      targetConstraintManifest,
+    );
+    if (!equalConstraintDiagnostic.semanticEqual || equalConstraintDiagnostic.mismatchFields.length !== 0) {
+      fail("CONSTRAINT_CATALOG_PARITY_FAILED");
+    }
+
+    const targetConstraintMutator = new Client(config(targetPort, scratchName));
+    await targetConstraintMutator.connect();
+    let changedTargetConstraintManifest;
+    try {
+      await targetConstraintMutator.query(
+        'ALTER TABLE "ConstraintFixture" DROP CONSTRAINT "ConstraintFixture_kind_check"',
+      );
+      await targetConstraintMutator.query(
+        `ALTER TABLE "ConstraintFixture" ADD CONSTRAINT "ConstraintFixture_kind_check"
+          CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-delta'))`,
+      );
+      await targetConstraintMutator.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await targetConstraintMutator.query("SET LOCAL search_path = pg_catalog");
+      changedTargetConstraintManifest = await collectConstraintCatalogManifest(
+        targetConstraintMutator,
+        "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
+      );
+      await targetConstraintMutator.query("COMMIT");
+    } finally {
+      await targetConstraintMutator.end().catch(() => {});
+    }
+    const changedConstraintDiagnostic = buildConstraintSemanticDiagnostic(
+      sourceConstraintManifest,
+      changedTargetConstraintManifest,
+    );
+    if (
+      changedConstraintDiagnostic.semanticEqual
+      || !changedConstraintDiagnostic.mismatchFields.includes("CHECK_EXPRESSION")
+    ) fail("CONSTRAINT_CATALOG_MUTATION_UNDETECTED");
     if (evidence.source.locale.provider !== "builtin" || JSON.stringify(evidence.source.locale) !== JSON.stringify(evidence.destination.locale)) {
       fail("LOCALE_PROVIDER_PARITY_FAILED");
     }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   analyzeSchemaDump,
   buildCreateDatabaseSql,
+  buildConstraintSemanticDiagnostic,
   buildLocaleDiagnostic,
   buildPgServiceContents,
   buildRestoreDiagnostic,
@@ -10,6 +11,7 @@ import {
   buildTargetConnectionProbeDiagnostic,
   buildSequenceUseList,
   classifyCollationVersionRelation,
+  collectConstraintCatalogManifest,
   collectLargeObjects,
   inspectLargeObjectAccess,
   isCurrentCollationVersion,
@@ -88,6 +90,62 @@ const largeObjectClient = (objects) => ({
     throw new Error("UNEXPECTED_QUERY");
   },
 });
+
+const constraintCatalogRow = (overrides = {}) => ({
+  namespace_name: "private_namespace",
+  constraint_name: "private_constraint",
+  object_kind: "TABLE",
+  relation_namespace_name: "private_namespace",
+  relation_name: "private_relation",
+  domain_namespace_name: null,
+  domain_name: null,
+  type: "c",
+  deferrable: false,
+  initially_deferred: false,
+  validated: true,
+  enforced: true,
+  locally_defined: true,
+  inheritance_count: "0",
+  no_inherit: false,
+  period: false,
+  foreign_key_update_action: " ",
+  foreign_key_delete_action: " ",
+  foreign_key_match_type: " ",
+  has_parent: false,
+  parent_constraint_name: null,
+  parent_relation_namespace_name: null,
+  parent_relation_name: null,
+  parent_domain_namespace_name: null,
+  parent_domain_name: null,
+  has_referenced_relation: false,
+  referenced_namespace_name: null,
+  referenced_relation_name: null,
+  has_supporting_index: false,
+  supporting_index_namespace_name: null,
+  supporting_index_name: null,
+  extension_name: null,
+  key_column_count: "1",
+  referenced_key_column_count: "0",
+  delete_set_column_count: "0",
+  primary_foreign_operator_count: "0",
+  primary_primary_operator_count: "0",
+  foreign_foreign_operator_count: "0",
+  exclusion_operator_count: "0",
+  key_columns: ["private_column"],
+  referenced_key_columns: [],
+  delete_set_columns: [],
+  primary_foreign_operators: [],
+  primary_primary_operators: [],
+  foreign_foreign_operators: [],
+  exclusion_operators: [],
+  definition: "CHECK ((private_column <> 'private-literal'::text))",
+  check_expression: "(private_column <> 'private-literal'::text)",
+  ...overrides,
+});
+
+const constraintManifest = async (rows) => collectConstraintCatalogManifest({
+  query: async () => ({ rows }),
+}, "CONSTRAINT_CATALOG_FAILED");
 
 describe("PostgreSQL restore rehearsal runner", () => {
   it("pins the immutable PostgreSQL 18.6 client", () => {
@@ -206,6 +264,132 @@ describe("PostgreSQL restore rehearsal runner", () => {
         expect(serialized).not.toContain(forbidden);
       }
       expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it("compares constraint semantics without serializing private catalog values", async () => {
+      const source = await constraintManifest([
+        constraintCatalogRow(),
+        constraintCatalogRow({
+          constraint_name: "private_second_constraint",
+          relation_name: "private_second_relation",
+          definition: "CHECK ((private_second_column > 7))",
+          check_expression: "(private_second_column > 7)",
+          key_columns: ["private_second_column"],
+        }),
+      ]);
+      const destination = await constraintManifest([
+        constraintCatalogRow({
+          constraint_name: "private_second_constraint",
+          relation_name: "private_second_relation",
+          definition: "CHECK ((private_second_column > 7))",
+          check_expression: "(private_second_column > 7)",
+          key_columns: ["private_second_column"],
+        }),
+        constraintCatalogRow(),
+      ]);
+
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH");
+      expect(diagnostic).toEqual({
+        schemaVersion: "1.0.0",
+        serverVersionRelation: "MATCH",
+        identitySetEqual: true,
+        counts: {
+          source: {
+            CHECK: 2, FOREIGN_KEY: 0, NOT_NULL: 0, PRIMARY_KEY: 0,
+            CONSTRAINT_TRIGGER: 0, UNIQUE: 0, EXCLUSION: 0,
+          },
+          destination: {
+            CHECK: 2, FOREIGN_KEY: 0, NOT_NULL: 0, PRIMARY_KEY: 0,
+            CONSTRAINT_TRIGGER: 0, UNIQUE: 0, EXCLUSION: 0,
+          },
+        },
+        semanticEqual: true,
+        mismatchCount: 0,
+        mismatchFields: [],
+        truncated: false,
+      });
+      const serialized = JSON.stringify(diagnostic);
+      for (const forbidden of [
+        "private_namespace",
+        "private_constraint",
+        "private_relation",
+        "private_column",
+        "private-literal",
+        "CHECK",
+      ]) {
+        if (forbidden !== "CHECK") expect(serialized).not.toContain(forbidden);
+      }
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it.each([
+      ["VALIDATION", { validated: false }],
+      ["ENFORCEMENT", { enforced: false }],
+      ["INHERITANCE", { no_inherit: true }],
+      ["DEFERRABILITY", { deferrable: true }],
+      ["PERIOD", { period: true }],
+      ["BINDING", { key_columns: ["other_private_column"] }],
+      ["DEFINITION", { definition: "CHECK ((private_column >= 'private-literal'::text))" }],
+      ["CHECK_EXPRESSION", { check_expression: "(private_column >= 'private-literal'::text)" }],
+      ["EXTENSION_OWNERSHIP", { extension_name: "private_extension" }],
+    ])("classifies a %s constraint semantic mismatch", async (field, overrides) => {
+      const source = await constraintManifest([constraintCatalogRow()]);
+      const destination = await constraintManifest([constraintCatalogRow(overrides)]);
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination);
+      expect(diagnostic.semanticEqual).toBe(false);
+      expect(diagnostic.mismatchCount).toBe(1);
+      expect(diagnostic.mismatchFields).toContain(field);
+    });
+
+    it("classifies identity, type, parentage, and foreign-key action mismatches", async () => {
+      const sourceCheck = await constraintManifest([constraintCatalogRow()]);
+      const changedIdentity = await constraintManifest([constraintCatalogRow({ relation_name: "other_private_relation" })]);
+      expect(buildConstraintSemanticDiagnostic(sourceCheck, changedIdentity)).toMatchObject({
+        identitySetEqual: false,
+        semanticEqual: false,
+        mismatchCount: 2,
+        mismatchFields: ["IDENTITY_SET"],
+      });
+
+      const changedType = await constraintManifest([constraintCatalogRow({ type: "n", check_expression: null })]);
+      expect(buildConstraintSemanticDiagnostic(sourceCheck, changedType).mismatchFields).toContain("TYPE");
+
+      const changedParentage = await constraintManifest([constraintCatalogRow({
+        has_parent: true,
+        parent_constraint_name: "private_parent_constraint",
+        parent_relation_namespace_name: "private_namespace",
+        parent_relation_name: "private_parent_relation",
+      })]);
+      expect(buildConstraintSemanticDiagnostic(sourceCheck, changedParentage).mismatchFields).toContain("PARENTAGE");
+
+      const foreignKey = constraintCatalogRow({
+        type: "f",
+        check_expression: null,
+        definition: "FOREIGN KEY (private_column) REFERENCES private_parent(private_column)",
+        has_referenced_relation: true,
+        referenced_namespace_name: "private_namespace",
+        referenced_relation_name: "private_parent",
+        referenced_key_columns: ["private_column"],
+        referenced_key_column_count: "1",
+        foreign_key_update_action: "a",
+        foreign_key_delete_action: "a",
+        foreign_key_match_type: "s",
+      });
+      const sourceForeignKey = await constraintManifest([foreignKey]);
+      const changedForeignKey = await constraintManifest([{ ...foreignKey, foreign_key_delete_action: "c" }]);
+      expect(buildConstraintSemanticDiagnostic(sourceForeignKey, changedForeignKey).mismatchFields).toContain("FK_ACTION");
+    });
+
+    it("fails closed on unsupported, duplicate, or unresolved constraint catalog rows", async () => {
+      await expect(constraintManifest([constraintCatalogRow({ type: "z" })]))
+        .rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
+      await expect(constraintManifest([constraintCatalogRow(), constraintCatalogRow()]))
+        .rejects.toThrow("DUPLICATE_CONSTRAINT_CATALOG_IDENTITY");
+      await expect(constraintManifest([constraintCatalogRow({
+        has_referenced_relation: true,
+        referenced_namespace_name: null,
+        referenced_relation_name: null,
+      })])).rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
     });
   });
 

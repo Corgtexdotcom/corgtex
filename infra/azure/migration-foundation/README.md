@@ -175,7 +175,16 @@ comments and whitespace outside those executable tokens. Malformed quotes,
 unterminated comments or dollar bodies, and any unexpected psql meta-command fail
 closed. A canonical mismatch still fails `SCHEMA_DIGEST_MISMATCH` and writes only
 fixed statement-class and token-domain counts to `schema-diagnostic.json`; it never
-persists SQL, names, literals, token values, or per-statement hashes. If only the
+persists SQL, names, literals, token values, OIDs, or per-statement hashes. The same
+private diagnostic also compares non-system table and domain constraints from
+`pg_constraint` inside the existing read-only source and destination transactions.
+It reports only the exact server-version relation, aggregate counts by fixed
+constraint type, identity-set and semantic equality booleans, a bounded mismatch
+count, fixed mismatch-field enums, and a truncation flag. Constraint definitions,
+expressions, object identities, bindings,
+and extension ownership are compared only in memory with `search_path` fixed to
+`pg_catalog`; no catalog value is serialized. This diagnostic classifies the next
+investigation but never relaxes schema parity. If only the
 legacy line-oriented digest differs while canonical tokens match, the private
 diagnostic records `NON_EXECUTABLE_DUMP_TEXT_ONLY` and schema parity remains proven.
 

@@ -31,6 +31,7 @@ const MAX_RESTORE_DIAGNOSTIC_LINE_BYTES = 4 * 1024;
 const MAX_RESTORE_STATUS_LINE_BYTES = 128;
 const MAX_COMMAND_STDERR_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DIAGNOSTIC_COUNT = 1_000_000;
+const MAX_CONSTRAINT_CATALOG_ROWS = 100_000;
 const FETCH_ROWS = 500;
 const LARGE_OBJECT_CHUNK_BYTES = 1024 * 1024;
 const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
@@ -64,6 +65,30 @@ const SCHEMA_STATEMENT_CLASSES = [
   "OTHER",
 ];
 const SCHEMA_TOKEN_DOMAINS = ["DDL_TOKEN", "STRING_LITERAL", "DOLLAR_BODY", "META_COMMAND"];
+const CONSTRAINT_TYPES = new Map([
+  ["c", "CHECK"],
+  ["f", "FOREIGN_KEY"],
+  ["n", "NOT_NULL"],
+  ["p", "PRIMARY_KEY"],
+  ["t", "CONSTRAINT_TRIGGER"],
+  ["u", "UNIQUE"],
+  ["x", "EXCLUSION"],
+]);
+const CONSTRAINT_MISMATCH_FIELDS = [
+  "IDENTITY_SET",
+  "TYPE",
+  "VALIDATION",
+  "ENFORCEMENT",
+  "INHERITANCE",
+  "DEFERRABILITY",
+  "PERIOD",
+  "FK_ACTION",
+  "PARENTAGE",
+  "BINDING",
+  "DEFINITION",
+  "CHECK_EXPRESSION",
+  "EXTENSION_OWNERSHIP",
+];
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -931,7 +956,9 @@ const databaseSettings = async (client) => {
     FROM pg_database
     WHERE datname = current_database()
   `, [], "DATABASE_SETTINGS_UNAVAILABLE");
-  const majorVersion = Math.floor(Number(row.server_version_num) / 10_000);
+  const serverVersionNumber = Number(row.server_version_num);
+  if (!Number.isInteger(serverVersionNumber)) fail("INVALID_POSTGRES_VERSION");
+  const majorVersion = Math.floor(serverVersionNumber / 10_000);
   if (majorVersion !== 18) fail("POSTGRES_18_REQUIRED");
   const provider = LOCALE_PROVIDERS.get(row.locale_provider);
   if (provider === undefined) fail("UNSUPPORTED_LOCALE_PROVIDER");
@@ -941,6 +968,7 @@ const databaseSettings = async (client) => {
   if (provider !== "icu" && icuRules !== null) fail("INVALID_ICU_RULES");
   if (provider !== "libc" && providerLocale === null) fail("MISSING_PROVIDER_LOCALE");
   return {
+    serverVersionNumber,
     majorVersion,
     encoding: assertNoControlCharacters(row.encoding, "INVALID_DATABASE_ENCODING"),
     collation: assertNoControlCharacters(row.collation, "INVALID_DATABASE_COLLATION"),
@@ -1356,6 +1384,433 @@ export const buildSchemaDifferenceDiagnostic = (sourceTokens, destinationTokens)
   };
 };
 
+const constraintCatalogQuery = `
+  SELECT
+    constraint_namespace.nspname AS namespace_name,
+    constraint_row.conname AS constraint_name,
+    CASE WHEN constraint_row.conrelid <> 0 THEN 'TABLE' ELSE 'DOMAIN' END AS object_kind,
+    relation_namespace.nspname AS relation_namespace_name,
+    relation.relname AS relation_name,
+    domain_namespace.nspname AS domain_namespace_name,
+    domain_type.typname AS domain_name,
+    constraint_row.contype::text AS type,
+    constraint_row.condeferrable AS deferrable,
+    constraint_row.condeferred AS initially_deferred,
+    constraint_row.convalidated AS validated,
+    constraint_row.conenforced AS enforced,
+    constraint_row.conislocal AS locally_defined,
+    constraint_row.coninhcount::text AS inheritance_count,
+    constraint_row.connoinherit AS no_inherit,
+    constraint_row.conperiod AS period,
+    constraint_row.confupdtype::text AS foreign_key_update_action,
+    constraint_row.confdeltype::text AS foreign_key_delete_action,
+    constraint_row.confmatchtype::text AS foreign_key_match_type,
+    constraint_row.conparentid <> 0 AS has_parent,
+    parent_constraint.conname AS parent_constraint_name,
+    parent_relation_namespace.nspname AS parent_relation_namespace_name,
+    parent_relation.relname AS parent_relation_name,
+    parent_domain_namespace.nspname AS parent_domain_namespace_name,
+    parent_domain.typname AS parent_domain_name,
+    constraint_row.confrelid <> 0 AS has_referenced_relation,
+    referenced_namespace.nspname AS referenced_namespace_name,
+    referenced_relation.relname AS referenced_relation_name,
+    constraint_row.conindid <> 0 AS has_supporting_index,
+    supporting_index_namespace.nspname AS supporting_index_namespace_name,
+    supporting_index.relname AS supporting_index_name,
+    extension_row.extname AS extension_name,
+    COALESCE(pg_catalog.cardinality(constraint_row.conkey), 0)::text AS key_column_count,
+    COALESCE(pg_catalog.cardinality(constraint_row.confkey), 0)::text AS referenced_key_column_count,
+    COALESCE(pg_catalog.cardinality(constraint_row.confdelsetcols), 0)::text AS delete_set_column_count,
+    COALESCE(pg_catalog.cardinality(constraint_row.conpfeqop), 0)::text AS primary_foreign_operator_count,
+    COALESCE(pg_catalog.cardinality(constraint_row.conppeqop), 0)::text AS primary_primary_operator_count,
+    COALESCE(pg_catalog.cardinality(constraint_row.conffeqop), 0)::text AS foreign_foreign_operator_count,
+    COALESCE(pg_catalog.cardinality(constraint_row.conexclop), 0)::text AS exclusion_operator_count,
+    COALESCE((
+      SELECT jsonb_agg(
+        CASE
+          WHEN key_column.attribute_number = 0 THEN pg_catalog.to_jsonb('<EXPRESSION>'::text)
+          ELSE pg_catalog.to_jsonb(attribute.attname)
+        END
+        ORDER BY key_column.ordinality
+      )
+      FROM unnest(constraint_row.conkey) WITH ORDINALITY AS key_column(attribute_number, ordinality)
+      LEFT JOIN pg_catalog.pg_attribute AS attribute
+        ON attribute.attrelid = constraint_row.conrelid
+       AND attribute.attnum = key_column.attribute_number
+       AND NOT attribute.attisdropped
+    ), '[]'::jsonb) AS key_columns,
+    COALESCE((
+      SELECT jsonb_agg(attribute.attname ORDER BY key_column.ordinality)
+      FROM unnest(constraint_row.confkey) WITH ORDINALITY AS key_column(attribute_number, ordinality)
+      JOIN pg_catalog.pg_attribute AS attribute
+        ON attribute.attrelid = constraint_row.confrelid
+       AND attribute.attnum = key_column.attribute_number
+       AND NOT attribute.attisdropped
+    ), '[]'::jsonb) AS referenced_key_columns,
+    COALESCE((
+      SELECT jsonb_agg(attribute.attname ORDER BY key_column.ordinality)
+      FROM unnest(constraint_row.confdelsetcols) WITH ORDINALITY AS key_column(attribute_number, ordinality)
+      JOIN pg_catalog.pg_attribute AS attribute
+        ON attribute.attrelid = constraint_row.conrelid
+       AND attribute.attnum = key_column.attribute_number
+       AND NOT attribute.attisdropped
+    ), '[]'::jsonb) AS delete_set_columns,
+    COALESCE((
+      SELECT jsonb_agg(jsonb_build_array(
+        operator_namespace.nspname,
+        operator_row.oprname,
+        left_type_namespace.nspname,
+        left_type.typname,
+        right_type_namespace.nspname,
+        right_type.typname
+      ) ORDER BY operator_identity.ordinality)
+      FROM unnest(constraint_row.conpfeqop) WITH ORDINALITY AS operator_identity(operator_oid, ordinality)
+      JOIN pg_catalog.pg_operator AS operator_row ON operator_row.oid = operator_identity.operator_oid
+      JOIN pg_catalog.pg_namespace AS operator_namespace ON operator_namespace.oid = operator_row.oprnamespace
+      JOIN pg_catalog.pg_type AS left_type ON left_type.oid = operator_row.oprleft
+      JOIN pg_catalog.pg_namespace AS left_type_namespace ON left_type_namespace.oid = left_type.typnamespace
+      JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
+      JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
+    ), '[]'::jsonb) AS primary_foreign_operators,
+    COALESCE((
+      SELECT jsonb_agg(jsonb_build_array(
+        operator_namespace.nspname,
+        operator_row.oprname,
+        left_type_namespace.nspname,
+        left_type.typname,
+        right_type_namespace.nspname,
+        right_type.typname
+      ) ORDER BY operator_identity.ordinality)
+      FROM unnest(constraint_row.conppeqop) WITH ORDINALITY AS operator_identity(operator_oid, ordinality)
+      JOIN pg_catalog.pg_operator AS operator_row ON operator_row.oid = operator_identity.operator_oid
+      JOIN pg_catalog.pg_namespace AS operator_namespace ON operator_namespace.oid = operator_row.oprnamespace
+      JOIN pg_catalog.pg_type AS left_type ON left_type.oid = operator_row.oprleft
+      JOIN pg_catalog.pg_namespace AS left_type_namespace ON left_type_namespace.oid = left_type.typnamespace
+      JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
+      JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
+    ), '[]'::jsonb) AS primary_primary_operators,
+    COALESCE((
+      SELECT jsonb_agg(jsonb_build_array(
+        operator_namespace.nspname,
+        operator_row.oprname,
+        left_type_namespace.nspname,
+        left_type.typname,
+        right_type_namespace.nspname,
+        right_type.typname
+      ) ORDER BY operator_identity.ordinality)
+      FROM unnest(constraint_row.conffeqop) WITH ORDINALITY AS operator_identity(operator_oid, ordinality)
+      JOIN pg_catalog.pg_operator AS operator_row ON operator_row.oid = operator_identity.operator_oid
+      JOIN pg_catalog.pg_namespace AS operator_namespace ON operator_namespace.oid = operator_row.oprnamespace
+      JOIN pg_catalog.pg_type AS left_type ON left_type.oid = operator_row.oprleft
+      JOIN pg_catalog.pg_namespace AS left_type_namespace ON left_type_namespace.oid = left_type.typnamespace
+      JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
+      JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
+    ), '[]'::jsonb) AS foreign_foreign_operators,
+    COALESCE((
+      SELECT jsonb_agg(jsonb_build_array(
+        operator_namespace.nspname,
+        operator_row.oprname,
+        left_type_namespace.nspname,
+        left_type.typname,
+        right_type_namespace.nspname,
+        right_type.typname
+      ) ORDER BY operator_identity.ordinality)
+      FROM unnest(constraint_row.conexclop) WITH ORDINALITY AS operator_identity(operator_oid, ordinality)
+      JOIN pg_catalog.pg_operator AS operator_row ON operator_row.oid = operator_identity.operator_oid
+      JOIN pg_catalog.pg_namespace AS operator_namespace ON operator_namespace.oid = operator_row.oprnamespace
+      JOIN pg_catalog.pg_type AS left_type ON left_type.oid = operator_row.oprleft
+      JOIN pg_catalog.pg_namespace AS left_type_namespace ON left_type_namespace.oid = left_type.typnamespace
+      JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
+      JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
+    ), '[]'::jsonb) AS exclusion_operators,
+    CASE
+      WHEN constraint_row.contype = 't'
+      THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
+      ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
+    END AS definition,
+    CASE
+      WHEN constraint_row.contype = 'c'
+      THEN pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)
+      ELSE NULL
+    END AS check_expression
+  FROM pg_catalog.pg_constraint AS constraint_row
+  JOIN pg_catalog.pg_namespace AS constraint_namespace ON constraint_namespace.oid = constraint_row.connamespace
+  LEFT JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+  LEFT JOIN pg_catalog.pg_namespace AS relation_namespace ON relation_namespace.oid = relation.relnamespace
+  LEFT JOIN pg_catalog.pg_type AS domain_type ON domain_type.oid = constraint_row.contypid
+  LEFT JOIN pg_catalog.pg_namespace AS domain_namespace ON domain_namespace.oid = domain_type.typnamespace
+  LEFT JOIN pg_catalog.pg_class AS referenced_relation ON referenced_relation.oid = constraint_row.confrelid
+  LEFT JOIN pg_catalog.pg_namespace AS referenced_namespace ON referenced_namespace.oid = referenced_relation.relnamespace
+  LEFT JOIN pg_catalog.pg_class AS supporting_index ON supporting_index.oid = constraint_row.conindid
+  LEFT JOIN pg_catalog.pg_namespace AS supporting_index_namespace ON supporting_index_namespace.oid = supporting_index.relnamespace
+  LEFT JOIN pg_catalog.pg_constraint AS parent_constraint ON parent_constraint.oid = constraint_row.conparentid
+  LEFT JOIN pg_catalog.pg_trigger AS constraint_trigger
+    ON constraint_row.contype = 't'
+   AND constraint_trigger.tgconstraint = constraint_row.oid
+   AND NOT constraint_trigger.tgisinternal
+  LEFT JOIN pg_catalog.pg_class AS parent_relation ON parent_relation.oid = parent_constraint.conrelid
+  LEFT JOIN pg_catalog.pg_namespace AS parent_relation_namespace ON parent_relation_namespace.oid = parent_relation.relnamespace
+  LEFT JOIN pg_catalog.pg_type AS parent_domain ON parent_domain.oid = parent_constraint.contypid
+  LEFT JOIN pg_catalog.pg_namespace AS parent_domain_namespace ON parent_domain_namespace.oid = parent_domain.typnamespace
+  LEFT JOIN pg_catalog.pg_depend AS extension_dependency
+    ON extension_dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+   AND extension_dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+   AND extension_dependency.objid = constraint_row.oid
+   AND extension_dependency.objsubid = 0
+   AND extension_dependency.deptype = 'e'
+  LEFT JOIN pg_catalog.pg_extension AS extension_row ON extension_row.oid = extension_dependency.refobjid
+  WHERE constraint_namespace.nspname <> 'information_schema'
+    AND constraint_namespace.nspname !~ '^pg_'
+    AND (constraint_row.conrelid <> 0 OR constraint_row.contypid <> 0)
+  ORDER BY
+    constraint_namespace.nspname COLLATE "C",
+    object_kind,
+    COALESCE(relation.relname, domain_type.typname) COLLATE "C",
+    constraint_row.conname COLLATE "C"
+  LIMIT ${MAX_CONSTRAINT_CATALOG_ROWS + 1}
+`;
+
+const isBoolean = (value) => typeof value === "boolean";
+const isNullableString = (value) => value === null || typeof value === "string";
+const isStringArray = (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string");
+const isOperatorIdentityArray = (value) => Array.isArray(value) && value.every(
+  (entry) => Array.isArray(entry) && entry.length === 6 && entry.every((part) => typeof part === "string"),
+);
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+
+const normalizeConstraintCatalogRow = (row) => {
+  const requiredStrings = [
+    "namespace_name",
+    "constraint_name",
+    "object_kind",
+    "type",
+    "definition",
+    "foreign_key_update_action",
+    "foreign_key_delete_action",
+    "foreign_key_match_type",
+  ];
+  const requiredBooleans = [
+    "deferrable",
+    "initially_deferred",
+    "validated",
+    "enforced",
+    "locally_defined",
+    "no_inherit",
+    "period",
+    "has_parent",
+    "has_referenced_relation",
+    "has_supporting_index",
+  ];
+  const nullableStrings = [
+    "relation_namespace_name",
+    "relation_name",
+    "domain_namespace_name",
+    "domain_name",
+    "parent_constraint_name",
+    "parent_relation_namespace_name",
+    "parent_relation_name",
+    "parent_domain_namespace_name",
+    "parent_domain_name",
+    "referenced_namespace_name",
+    "referenced_relation_name",
+    "supporting_index_namespace_name",
+    "supporting_index_name",
+    "extension_name",
+    "check_expression",
+  ];
+  const countedArrays = [
+    ["key_column_count", "key_columns"],
+    ["referenced_key_column_count", "referenced_key_columns"],
+    ["delete_set_column_count", "delete_set_columns"],
+    ["primary_foreign_operator_count", "primary_foreign_operators"],
+    ["primary_primary_operator_count", "primary_primary_operators"],
+    ["foreign_foreign_operator_count", "foreign_foreign_operators"],
+    ["exclusion_operator_count", "exclusion_operators"],
+  ];
+  if (
+    row === null
+    || typeof row !== "object"
+    || requiredStrings.some((field) => typeof row[field] !== "string" || row[field].length === 0)
+    || requiredBooleans.some((field) => !isBoolean(row[field]))
+    || nullableStrings.some((field) => !isNullableString(row[field]))
+    || !/^(?:0|[1-9][0-9]{0,4})$/u.test(row.inheritance_count)
+    || !CONSTRAINT_TYPES.has(row.type)
+    || !isStringArray(row.key_columns)
+    || !isStringArray(row.referenced_key_columns)
+    || !isStringArray(row.delete_set_columns)
+    || !isOperatorIdentityArray(row.primary_foreign_operators)
+    || !isOperatorIdentityArray(row.primary_primary_operators)
+    || !isOperatorIdentityArray(row.foreign_foreign_operators)
+    || !isOperatorIdentityArray(row.exclusion_operators)
+    || countedArrays.some(([countField, arrayField]) => (
+      !/^(?:0|[1-9][0-9]{0,4})$/u.test(row[countField])
+      || Number(row[countField]) !== row[arrayField].length
+    ))
+    || !/^[ arcdn]$/u.test(row.foreign_key_update_action)
+    || !/^[ arcdn]$/u.test(row.foreign_key_delete_action)
+    || !/^[ fps]$/u.test(row.foreign_key_match_type)
+  ) fail("INVALID_CONSTRAINT_CATALOG_ROW");
+  const tableIdentity = [row.relation_namespace_name, row.relation_name];
+  const domainIdentity = [row.domain_namespace_name, row.domain_name];
+  const objectIdentity = row.object_kind === "TABLE" ? tableIdentity : domainIdentity;
+  if (
+    !["TABLE", "DOMAIN"].includes(row.object_kind)
+    || objectIdentity.some((part) => typeof part !== "string" || part.length === 0)
+    || (row.object_kind === "TABLE" && domainIdentity.some((part) => part !== null))
+    || (row.object_kind === "DOMAIN" && tableIdentity.some((part) => part !== null))
+    || row.namespace_name !== objectIdentity[0]
+    || row.initially_deferred && !row.deferrable
+    || (row.type === "c") !== (row.check_expression !== null)
+    || (row.type === "f") !== row.has_referenced_relation
+  ) fail("INVALID_CONSTRAINT_CATALOG_ROW");
+  const referencedIdentity = row.has_referenced_relation
+    ? [row.referenced_namespace_name, row.referenced_relation_name]
+    : null;
+  const supportingIndexIdentity = row.has_supporting_index
+    ? [row.supporting_index_namespace_name, row.supporting_index_name]
+    : null;
+  const parentIdentity = row.has_parent
+    ? [
+        row.parent_relation_name === null ? "DOMAIN" : "TABLE",
+        row.parent_relation_name === null ? row.parent_domain_namespace_name : row.parent_relation_namespace_name,
+        row.parent_relation_name === null ? row.parent_domain_name : row.parent_relation_name,
+        row.parent_constraint_name,
+      ]
+    : null;
+  if (
+    (referencedIdentity === null
+      ? [row.referenced_namespace_name, row.referenced_relation_name].some((part) => part !== null)
+      : referencedIdentity.some((part) => typeof part !== "string" || part.length === 0))
+    || (supportingIndexIdentity === null
+      ? [row.supporting_index_namespace_name, row.supporting_index_name].some((part) => part !== null)
+      : supportingIndexIdentity.some((part) => typeof part !== "string" || part.length === 0))
+    || (parentIdentity === null
+      ? [
+          row.parent_constraint_name,
+          row.parent_relation_namespace_name,
+          row.parent_relation_name,
+          row.parent_domain_namespace_name,
+          row.parent_domain_name,
+        ].some((part) => part !== null)
+      : parentIdentity.slice(1).some((part) => typeof part !== "string" || part.length === 0))
+  ) fail("INVALID_CONSTRAINT_CATALOG_ROW");
+  const identity = [row.object_kind, ...objectIdentity, row.constraint_name];
+  return {
+    key: JSON.stringify(identity),
+    type: CONSTRAINT_TYPES.get(row.type),
+    semantics: {
+      TYPE: row.type,
+      VALIDATION: row.validated,
+      ENFORCEMENT: row.enforced,
+      INHERITANCE: [row.locally_defined, Number(row.inheritance_count), row.no_inherit],
+      DEFERRABILITY: [row.deferrable, row.initially_deferred],
+      PERIOD: row.period,
+      FK_ACTION: [row.foreign_key_match_type, row.foreign_key_update_action, row.foreign_key_delete_action],
+      PARENTAGE: parentIdentity,
+      BINDING: [
+        row.key_columns,
+        referencedIdentity,
+        row.referenced_key_columns,
+        row.delete_set_columns,
+        row.primary_foreign_operators,
+        row.primary_primary_operators,
+        row.foreign_foreign_operators,
+        row.exclusion_operators,
+        supportingIndexIdentity,
+      ],
+      DEFINITION: schemaTokenDigest(tokenizeSchemaDump(row.definition)),
+      CHECK_EXPRESSION: row.check_expression === null
+        ? null
+        : schemaTokenDigest(tokenizeSchemaDump(row.check_expression)),
+      EXTENSION_OWNERSHIP: row.extension_name,
+    },
+  };
+};
+
+export const collectConstraintCatalogManifest = async (client, failureCode) => {
+  try {
+    const result = await client.query(constraintCatalogQuery);
+    if (result.rows.length > MAX_CONSTRAINT_CATALOG_ROWS) fail("CONSTRAINT_CATALOG_LIMIT_EXCEEDED");
+    const manifest = new Map();
+    for (const rawRow of result.rows) {
+      const row = normalizeConstraintCatalogRow(rawRow);
+      if (manifest.has(row.key)) fail("DUPLICATE_CONSTRAINT_CATALOG_IDENTITY");
+      manifest.set(row.key, row);
+    }
+    return manifest;
+  } catch (error) {
+    if (isRehearsalError(error)) throw error;
+    fail(failureCode);
+  }
+};
+
+const emptyConstraintCounts = () => Object.fromEntries([...CONSTRAINT_TYPES.values()].map((type) => [type, 0]));
+
+export const buildConstraintSemanticDiagnostic = (
+  sourceManifest,
+  destinationManifest,
+  serverVersionRelation = "UNAVAILABLE",
+) => {
+  if (!(sourceManifest instanceof Map) || !(destinationManifest instanceof Map)) {
+    fail("INVALID_CONSTRAINT_CATALOG_MANIFEST");
+  }
+  if (!["MATCH", "DIFFERENT", "UNAVAILABLE"].includes(serverVersionRelation)) {
+    fail("INVALID_CONSTRAINT_SERVER_VERSION_RELATION");
+  }
+  const countsFor = (manifest) => {
+    const counts = emptyConstraintCounts();
+    for (const entry of manifest.values()) {
+      if (
+        !Object.hasOwn(counts, entry?.type)
+        || entry.semantics === null
+        || typeof entry.semantics !== "object"
+        || CONSTRAINT_MISMATCH_FIELDS.slice(1).some((field) => !Object.hasOwn(entry.semantics, field))
+      ) fail("INVALID_CONSTRAINT_CATALOG_MANIFEST");
+      counts[entry.type] += 1;
+    }
+    return counts;
+  };
+  const sourceKeys = [...sourceManifest.keys()].sort();
+  const destinationKeys = [...destinationManifest.keys()].sort();
+  const identitySetEqual = same(sourceKeys, destinationKeys);
+  const mismatchFields = new Set(identitySetEqual ? [] : ["IDENTITY_SET"]);
+  let mismatchCount = 0;
+  let truncated = false;
+  const addMismatch = () => {
+    if (mismatchCount === MAX_SCHEMA_DIAGNOSTIC_COUNT) truncated = true;
+    else mismatchCount += 1;
+  };
+  for (const key of new Set([...sourceKeys, ...destinationKeys])) {
+    const source = sourceManifest.get(key);
+    const destination = destinationManifest.get(key);
+    if (source === undefined || destination === undefined) {
+      addMismatch();
+      continue;
+    }
+    let constraintMismatch = false;
+    for (const field of CONSTRAINT_MISMATCH_FIELDS.slice(1)) {
+      if (!same(source.semantics?.[field], destination.semantics?.[field])) {
+        mismatchFields.add(field);
+        constraintMismatch = true;
+      }
+    }
+    if (constraintMismatch) addMismatch();
+  }
+  return {
+    schemaVersion: "1.0.0",
+    serverVersionRelation,
+    identitySetEqual,
+    counts: {
+      source: countsFor(sourceManifest),
+      destination: countsFor(destinationManifest),
+    },
+    semanticEqual: identitySetEqual && mismatchCount === 0,
+    mismatchCount,
+    mismatchFields: CONSTRAINT_MISMATCH_FIELDS.filter((field) => mismatchFields.has(field)),
+    truncated,
+  };
+};
+
 export const buildSequenceUseList = (content) => {
   if (typeof content !== "string") fail("INVALID_ARCHIVE_TOC");
   const selected = [];
@@ -1643,6 +2098,7 @@ export async function runPostgresRestoreRehearsal(options) {
     await sourceClient.query("SET LOCAL transaction_timeout = '0'");
     await sourceClient.query("SET LOCAL idle_in_transaction_session_timeout = '0'");
     await sourceClient.query("SET LOCAL timezone = 'UTC'");
+    await sourceClient.query("SET LOCAL search_path = pg_catalog");
     const timeouts = await querySingle(sourceClient, `
       SELECT
         current_setting('statement_timeout') AS statement_timeout,
@@ -1670,6 +2126,10 @@ export async function runPostgresRestoreRehearsal(options) {
       });
       fail("SOURCE_LARGE_OBJECT_READ_PRIVILEGE_MISSING");
     }
+    const sourceConstraintManifest = await collectConstraintCatalogManifest(
+      sourceClient,
+      "SOURCE_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
+    );
     if (afterSnapshot !== null) await afterSnapshot({ snapshot });
 
     await createScratchDatabase({
@@ -1774,16 +2234,11 @@ export async function runPostgresRestoreRehearsal(options) {
       network: dockerNetwork,
     });
     const destinationSchema = analyzeSchemaDump(readFileSync(destinationSchemaFile, "utf8"));
-    if (sourceSchema.digest !== destinationSchema.digest) {
-      writePrivateJson(
-        `${artifactDir}/schema-diagnostic.json`,
-        buildSchemaDifferenceDiagnostic(sourceSchema.tokens, destinationSchema.tokens),
-      );
-    } else if (sourceSchema.legacyDigest !== destinationSchema.legacyDigest) {
-      writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
-        classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY",
-      });
-    }
+    const schemaDifferenceDiagnostic = sourceSchema.digest !== destinationSchema.digest
+      ? buildSchemaDifferenceDiagnostic(sourceSchema.tokens, destinationSchema.tokens)
+      : sourceSchema.legacyDigest !== destinationSchema.legacyDigest
+        ? { classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY" }
+        : null;
     const destinationClient = new Client(nodeClientConfig(targetConfig, `corgtex_rehearsal_${domain}_readback`));
     await destinationClient.connect();
     let destinationEvidence;
@@ -1794,10 +2249,30 @@ export async function runPostgresRestoreRehearsal(options) {
       await destinationClient.query("SET LOCAL transaction_timeout = '0'");
       await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
       await destinationClient.query("SET LOCAL timezone = 'UTC'");
+      await destinationClient.query("SET LOCAL search_path = pg_catalog");
       const destinationLargeObjects = await inspectLargeObjectAccess(
         destinationClient,
         "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
       );
+      const destinationConstraintManifest = await collectConstraintCatalogManifest(
+        destinationClient,
+        "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
+      );
+      const destinationSettings = await databaseSettings(destinationClient);
+      if (schemaDifferenceDiagnostic?.classification === "EXECUTABLE_SCHEMA_DIFFERENCE") {
+        writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
+          ...schemaDifferenceDiagnostic,
+          constraintSemantics: buildConstraintSemanticDiagnostic(
+            sourceConstraintManifest,
+            destinationConstraintManifest,
+            sourceSettings.serverVersionNumber === destinationSettings.serverVersionNumber
+              ? "MATCH"
+              : "DIFFERENT",
+          ),
+        });
+      } else if (schemaDifferenceDiagnostic !== null) {
+        writePrivateJson(`${artifactDir}/schema-diagnostic.json`, schemaDifferenceDiagnostic);
+      }
       destinationEvidence = await collectDatabaseEvidence(
         destinationClient,
         { algorithm: destinationSchema.algorithm, digest: destinationSchema.digest },
