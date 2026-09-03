@@ -44,6 +44,9 @@ describe("exact Core CHECK repair", () => {
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("persist-credentials: false");
     expect(workflow).toContain("ref: ${{ github.sha }}");
+    expect(workflow).toContain('[[ "$current_main" == "$GITHUB_SHA" ]]');
+    expect(workflow).toContain("gh api repos/Corgtexdotcom/corgtex/git/ref/heads/main --jq .object.sha");
+    expect(workflow.indexOf('[[ "$current_main" == "$GITHUB_SHA" ]]')).toBeLessThan(workflow.indexOf("node scripts/migration/repair-core-check.mjs"));
     expect(workflow.indexOf("npm ci")).toBeLessThan(workflow.indexOf("secrets.PRODUCTION_DATABASE_URL"));
     expect(workflow).not.toMatch(/id-token:|azure\/login|release:db|migrate-and-seed/u);
     expect(workflow).toContain("options: [inspect, apply]");
