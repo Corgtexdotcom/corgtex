@@ -210,6 +210,12 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)");
     expect(runner).toContain("pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)");
     expect(runner).toContain("constraintSemantics: buildConstraintSemanticDiagnostic");
+    expect(runner).toContain("checkExpressionDifference");
+    expect(runner).toContain("buildUniqueCheckTokenEdit");
+    expect(runner).toContain("pg_catalog.pg_identify_object");
+    expect(runner).toContain('status: "AMBIGUOUS"');
+    expect(readme).toContain("fixed token-category counts");
+    expect(readme).toContain("never\nrelax schema parity");
     expect(readme).toContain("no catalog value is serialized");
     expect(validator).toContain('value.schema.algorithm !== SCHEMA_TOKEN_ALGORITHM');
     expect(readme).toContain("`PG_DUMP_SQL_TOKENS_V1`");

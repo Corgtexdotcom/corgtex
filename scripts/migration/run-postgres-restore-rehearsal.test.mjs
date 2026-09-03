@@ -9,6 +9,7 @@ import {
   buildRestoreDiagnostic,
   buildSchemaDifferenceDiagnostic,
   buildTargetConnectionProbeDiagnostic,
+  buildUniqueCheckTokenEdit,
   buildSequenceUseList,
   classifyCollationVersionRelation,
   collectConstraintCatalogManifest,
@@ -140,6 +141,12 @@ const constraintCatalogRow = (overrides = {}) => ({
   exclusion_operators: [],
   definition: "CHECK ((private_column <> 'private-literal'::text))",
   check_expression: "(private_column <> 'private-literal'::text)",
+  expression_tree: "{OPEXPR :args ({VAR} {RELABELTYPE :arg {CONST}})}",
+  dependencies: [
+    ["a", "table column", "private_namespace", "private_relation", "private_namespace.private_relation.private_column"],
+    ["n", "operator", "pg_catalog", "<>", "pg_catalog.<>(text,text)"],
+    ["n", "type", "pg_catalog", "text", "pg_catalog.text"],
+  ],
   ...overrides,
 });
 
@@ -306,6 +313,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         semanticEqual: true,
         mismatchCount: 0,
         mismatchFields: [],
+        checkExpressionDifference: null,
         truncated: false,
       });
       const serialized = JSON.stringify(diagnostic);
@@ -341,6 +349,113 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(diagnostic.mismatchFields).toContain(field);
     });
 
+    it("emits only fixed token, node, and dependency categories for one CHECK expression mismatch", async () => {
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: "((private_column <> 'private-literal'::text))",
+        definition: "CHECK (((private_column <> 'private-literal'::text)))",
+        expression_tree: "{RELABELTYPE :arg {OPEXPR :args ({VAR} {CONST})}}",
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: "(private_column <> 'private-literal'::text)",
+        definition: "CHECK ((private_column <> 'private-literal'::text))",
+        expression_tree: "{OPEXPR :args ({VAR} {CONST})}",
+      })]);
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH");
+      expect(diagnostic.checkExpressionDifference).toEqual({
+        tokenEdit: {
+          status: "UNIQUE",
+          sourceOnly: {
+            CAST_OPERATOR: 0,
+            BUILTIN_TYPE: 0,
+            PARENTHESIS: 2,
+            COLLATION: 0,
+            OPERATOR: 0,
+            FUNCTION: 0,
+            COLUMN_REFERENCE: 0,
+            STRING_LITERAL: 0,
+            OTHER: 0,
+          },
+          destinationOnly: {
+            CAST_OPERATOR: 0,
+            BUILTIN_TYPE: 0,
+            PARENTHESIS: 0,
+            COLLATION: 0,
+            OPERATOR: 0,
+            FUNCTION: 0,
+            COLUMN_REFERENCE: 0,
+            STRING_LITERAL: 0,
+            OTHER: 0,
+          },
+        },
+        nodeTagDeltas: {
+          sourceOnly: expect.objectContaining({ RELABELTYPE: 1, OTHER: 0 }),
+          destinationOnly: expect.objectContaining({ RELABELTYPE: 0, OTHER: 0 }),
+        },
+        dependencies: { identitySetEqual: true, changedClasses: [] },
+      });
+      const serialized = JSON.stringify(diagnostic);
+      for (const forbidden of [
+        "private_namespace",
+        "private_constraint",
+        "private_relation",
+        "private_column",
+        "private-literal",
+        "pg_catalog.<>",
+      ]) expect(serialized).not.toContain(forbidden);
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it("fails closed to ambiguous token edits and reports fixed dependency classes only", async () => {
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: "private_column OR private_column",
+        definition: "CHECK (private_column OR private_column)",
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: "private_column",
+        definition: "CHECK (private_column)",
+        dependencies: [
+          ["a", "table column", "private_namespace", "other_private_relation", "private_namespace.other_private_relation.private_column"],
+        ],
+      })]);
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination);
+      expect(diagnostic.checkExpressionDifference.tokenEdit).toEqual({
+        status: "AMBIGUOUS",
+        sourceOnly: null,
+        destinationOnly: null,
+      });
+      expect(diagnostic.checkExpressionDifference.dependencies).toEqual({
+        identitySetEqual: false,
+        changedClasses: ["OPERATOR", "RELATION", "TYPE"],
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain("other_private_relation");
+    });
+
+    it.each([
+      ["CAST_OPERATOR", "private_column::text", "private_column text"],
+      ["BUILTIN_TYPE", "private_column::text", "private_column::integer"],
+      ["COLLATION", "private_column COLLATE private_collation", "private_column"],
+      ["OPERATOR", "private_column > 1", "private_column < 1"],
+      ["FUNCTION", "private_function(private_column)", "other_function(private_column)"],
+      ["COLUMN_REFERENCE", "private_column > 1", "other_column > 1"],
+      ["STRING_LITERAL", "private_column = 'private-literal'", "private_column = 'other-literal'"],
+      ["OTHER", "private_column > 1", "private_column > 2"],
+    ])("classifies a unique %s CHECK token edit without values", (category, source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it("bounds CHECK edit analysis before allocating its comparison matrix", () => {
+      const oversized = Array.from({ length: 1025 }, () => ({ domain: "DDL_TOKEN", value: "private" }));
+      expect(buildUniqueCheckTokenEdit(oversized, [{ domain: "DDL_TOKEN", value: "other" }])).toEqual({
+        status: "LIMIT_EXCEEDED",
+        sourceOnly: null,
+        destinationOnly: null,
+      });
+      expect(() => buildUniqueCheckTokenEdit([], [])).toThrow("EMPTY_SCHEMA_TOKEN_STREAM");
+    });
+
     it("classifies identity, type, parentage, and foreign-key action mismatches", async () => {
       const sourceCheck = await constraintManifest([constraintCatalogRow()]);
       const changedIdentity = await constraintManifest([constraintCatalogRow({ relation_name: "other_private_relation" })]);
@@ -351,7 +466,11 @@ describe("PostgreSQL restore rehearsal runner", () => {
         mismatchFields: ["IDENTITY_SET"],
       });
 
-      const changedType = await constraintManifest([constraintCatalogRow({ type: "n", check_expression: null })]);
+      const changedType = await constraintManifest([constraintCatalogRow({
+        type: "n",
+        check_expression: null,
+        expression_tree: null,
+      })]);
       expect(buildConstraintSemanticDiagnostic(sourceCheck, changedType).mismatchFields).toContain("TYPE");
 
       const changedParentage = await constraintManifest([constraintCatalogRow({
@@ -365,6 +484,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       const foreignKey = constraintCatalogRow({
         type: "f",
         check_expression: null,
+        expression_tree: null,
         definition: "FOREIGN KEY (private_column) REFERENCES private_parent(private_column)",
         has_referenced_relation: true,
         referenced_namespace_name: "private_namespace",
@@ -390,6 +510,10 @@ describe("PostgreSQL restore rehearsal runner", () => {
         referenced_namespace_name: null,
         referenced_relation_name: null,
       })])).rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
+      await expect(constraintManifest([constraintCatalogRow({ dependencies: [["n", "type", null]] })]))
+        .rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
+      await expect(constraintManifest([constraintCatalogRow({ expression_tree: null })]))
+        .rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
     });
   });
 

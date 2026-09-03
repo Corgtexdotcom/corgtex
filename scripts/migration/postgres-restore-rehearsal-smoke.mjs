@@ -554,6 +554,22 @@ const main = async () => {
       changedConstraintDiagnostic.semanticEqual
       || !changedConstraintDiagnostic.mismatchFields.includes("CHECK_EXPRESSION")
     ) fail("CONSTRAINT_CATALOG_MUTATION_UNDETECTED");
+    const checkDifference = changedConstraintDiagnostic.checkExpressionDifference;
+    if (
+      checkDifference?.tokenEdit?.status !== "UNIQUE"
+      || checkDifference.tokenEdit.sourceOnly.STRING_LITERAL !== 1
+      || checkDifference.tokenEdit.destinationOnly.STRING_LITERAL !== 1
+      || Object.entries(checkDifference.tokenEdit.sourceOnly).some(
+        ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
+      )
+      || Object.entries(checkDifference.tokenEdit.destinationOnly).some(
+        ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
+      )
+      || !checkDifference.dependencies.identitySetEqual
+      || checkDifference.dependencies.changedClasses.length !== 0
+      || Object.values(checkDifference.nodeTagDeltas.sourceOnly).some((count) => count !== 0)
+      || Object.values(checkDifference.nodeTagDeltas.destinationOnly).some((count) => count !== 0)
+    ) fail("CONSTRAINT_CHECK_DIAGNOSTIC_CLASSIFICATION_FAILED");
     if (evidence.source.locale.provider !== "builtin" || JSON.stringify(evidence.source.locale) !== JSON.stringify(evidence.destination.locale)) {
       fail("LOCALE_PROVIDER_PARITY_FAILED");
     }

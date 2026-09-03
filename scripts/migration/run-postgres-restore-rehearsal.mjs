@@ -32,6 +32,7 @@ const MAX_RESTORE_STATUS_LINE_BYTES = 128;
 const MAX_COMMAND_STDERR_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_CONSTRAINT_CATALOG_ROWS = 100_000;
+const MAX_CHECK_EDIT_TOKENS = 1024;
 const FETCH_ROWS = 500;
 const LARGE_OBJECT_CHUNK_BYTES = 1024 * 1024;
 const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
@@ -88,7 +89,73 @@ const CONSTRAINT_MISMATCH_FIELDS = [
   "DEFINITION",
   "CHECK_EXPRESSION",
   "EXTENSION_OWNERSHIP",
+  "DEPENDENCY",
 ];
+const CHECK_EDIT_CATEGORIES = [
+  "CAST_OPERATOR",
+  "BUILTIN_TYPE",
+  "PARENTHESIS",
+  "COLLATION",
+  "OPERATOR",
+  "FUNCTION",
+  "COLUMN_REFERENCE",
+  "STRING_LITERAL",
+  "OTHER",
+];
+const CHECK_NODE_TAGS = [
+  "ARRAYCOERCEEXPR",
+  "ARRAYEXPR",
+  "BOOLEXPR",
+  "BOOLEANTEST",
+  "CASEEXPR",
+  "CASETESTEXPR",
+  "CASEWHEN",
+  "COALESCEEXPR",
+  "COERCETODOMAIN",
+  "COERCETODOMAINVALUE",
+  "COERCEVIAIO",
+  "COLLATEEXPR",
+  "CONST",
+  "CONVERTROWTYPEEXPR",
+  "DISTINCTEXPR",
+  "FIELDSELECT",
+  "FUNCEXPR",
+  "MINMAXEXPR",
+  "NAMEDARGEXPR",
+  "NEXTVALUEEXPR",
+  "NULLIFEXPR",
+  "NULLTEST",
+  "OPEXPR",
+  "PARAM",
+  "RELABELTYPE",
+  "ROWCOMPAREEXPR",
+  "ROWEXPR",
+  "SCALARARRAYOPEXPR",
+  "SETTODEFAULT",
+  "SQLVALUEFUNCTION",
+  "VAR",
+  "XMLEXPR",
+  "OTHER",
+];
+const CHECK_DEPENDENCY_CLASSES = [
+  "COLLATION",
+  "FUNCTION",
+  "OPERATOR",
+  "RELATION",
+  "TYPE",
+  "OTHER",
+];
+const BUILTIN_TYPE_NAMES = new Set([
+  "bigint", "bigserial", "bit", "boolean", "bpchar", "bytea", "char", "character",
+  "date", "decimal", "double", "float4", "float8", "inet", "int", "int2", "int4",
+  "int8", "integer", "interval", "json", "jsonb", "money", "name", "numeric", "oid",
+  "real", "record", "regclass", "regproc", "serial", "smallint", "smallserial", "text",
+  "time", "timestamp", "timestamptz", "timetz", "uuid", "varchar",
+]);
+const CHECK_OPERATOR_WORDS = new Set([
+  "all", "and", "any", "between", "false", "ilike", "in", "is", "like", "not",
+  "null", "or", "similar", "true",
+]);
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -1532,7 +1599,38 @@ const constraintCatalogQuery = `
       WHEN constraint_row.contype = 'c'
       THEN pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)
       ELSE NULL
-    END AS check_expression
+    END AS check_expression,
+    CASE
+      WHEN constraint_row.contype = 'c'
+      THEN constraint_row.conbin::text
+      ELSE NULL
+    END AS expression_tree,
+    COALESCE((
+      SELECT jsonb_agg(
+        jsonb_build_array(
+          dependency.deptype::text,
+          identified.type,
+          identified.schema,
+          identified.name,
+          identified.identity
+        )
+        ORDER BY
+          dependency.deptype::text COLLATE "C",
+          identified.type COLLATE "C",
+          COALESCE(identified.schema, '') COLLATE "C",
+          COALESCE(identified.name, '') COLLATE "C",
+          identified.identity COLLATE "C"
+      )
+      FROM pg_catalog.pg_depend AS dependency
+      CROSS JOIN LATERAL pg_catalog.pg_identify_object(
+        dependency.refclassid,
+        dependency.refobjid,
+        dependency.refobjsubid
+      ) AS identified
+      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+        AND dependency.objid = constraint_row.oid
+        AND dependency.objsubid = 0
+    ), '[]'::jsonb) AS dependencies
   FROM pg_catalog.pg_constraint AS constraint_row
   JOIN pg_catalog.pg_namespace AS constraint_namespace ON constraint_namespace.oid = constraint_row.connamespace
   LEFT JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
@@ -1576,7 +1674,39 @@ const isStringArray = (value) => Array.isArray(value) && value.every((entry) => 
 const isOperatorIdentityArray = (value) => Array.isArray(value) && value.every(
   (entry) => Array.isArray(entry) && entry.length === 6 && entry.every((part) => typeof part === "string"),
 );
+const isDependencyIdentityArray = (value) => Array.isArray(value) && value.every(
+  (entry) => Array.isArray(entry)
+    && entry.length === 5
+    && typeof entry[0] === "string"
+    && entry[0].length === 1
+    && typeof entry[1] === "string"
+    && entry[1].length > 0
+    && isNullableString(entry[2])
+    && isNullableString(entry[3])
+    && typeof entry[4] === "string"
+    && entry[4].length > 0,
+);
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+
+const checkNodeTagCounts = (expressionTree) => {
+  if (expressionTree === null) return null;
+  const counts = Object.fromEntries(CHECK_NODE_TAGS.map((tag) => [tag, 0]));
+  for (const match of expressionTree.matchAll(/\{([A-Z][A-Z0-9_]*)\b/gu)) {
+    const tag = CHECK_NODE_TAGS.includes(match[1]) ? match[1] : "OTHER";
+    counts[tag] += 1;
+  }
+  return counts;
+};
+
+const dependencyClass = (type) => {
+  const normalized = type.toLowerCase();
+  if (normalized === "collation") return "COLLATION";
+  if (normalized === "function") return "FUNCTION";
+  if (normalized === "operator") return "OPERATOR";
+  if (normalized === "table" || normalized === "table column" || normalized === "relation") return "RELATION";
+  if (normalized === "type") return "TYPE";
+  return "OTHER";
+};
 
 const normalizeConstraintCatalogRow = (row) => {
   const requiredStrings = [
@@ -1617,6 +1747,7 @@ const normalizeConstraintCatalogRow = (row) => {
     "supporting_index_name",
     "extension_name",
     "check_expression",
+    "expression_tree",
   ];
   const countedArrays = [
     ["key_column_count", "key_columns"],
@@ -1642,6 +1773,7 @@ const normalizeConstraintCatalogRow = (row) => {
     || !isOperatorIdentityArray(row.primary_primary_operators)
     || !isOperatorIdentityArray(row.foreign_foreign_operators)
     || !isOperatorIdentityArray(row.exclusion_operators)
+    || !isDependencyIdentityArray(row.dependencies)
     || countedArrays.some(([countField, arrayField]) => (
       !/^(?:0|[1-9][0-9]{0,4})$/u.test(row[countField])
       || Number(row[countField]) !== row[arrayField].length
@@ -1661,6 +1793,7 @@ const normalizeConstraintCatalogRow = (row) => {
     || row.namespace_name !== objectIdentity[0]
     || row.initially_deferred && !row.deferrable
     || (row.type === "c") !== (row.check_expression !== null)
+    || (row.type === "c") !== (row.expression_tree !== null)
     || (row.type === "f") !== row.has_referenced_relation
   ) fail("INVALID_CONSTRAINT_CATALOG_ROW");
   const referencedIdentity = row.has_referenced_relation
@@ -1723,6 +1856,12 @@ const normalizeConstraintCatalogRow = (row) => {
         ? null
         : schemaTokenDigest(tokenizeSchemaDump(row.check_expression)),
       EXTENSION_OWNERSHIP: row.extension_name,
+      DEPENDENCY: row.dependencies,
+    },
+    diagnostic: {
+      checkExpressionTokens: row.check_expression === null ? null : tokenizeSchemaDump(row.check_expression),
+      nodeTagCounts: checkNodeTagCounts(row.expression_tree),
+      dependencies: row.dependencies,
     },
   };
 };
@@ -1745,6 +1884,196 @@ export const collectConstraintCatalogManifest = async (client, failureCode) => {
 };
 
 const emptyConstraintCounts = () => Object.fromEntries([...CONSTRAINT_TYPES.values()].map((type) => [type, 0]));
+
+const emptyCheckEditCounts = () => Object.fromEntries(CHECK_EDIT_CATEGORIES.map((category) => [category, 0]));
+
+const sameSchemaToken = (left, right) => left?.domain === right?.domain && left?.value === right?.value;
+
+const checkEditCategory = (tokens, index) => {
+  const token = tokens[index];
+  if (token.domain === "STRING_LITERAL") return "STRING_LITERAL";
+  if (token.domain !== "DDL_TOKEN") return "OTHER";
+  if (token.value === "(" || token.value === ")") return "PARENTHESIS";
+  if (token.value === "::") return "CAST_OPERATOR";
+  const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
+  const previous = tokens[index - 1]?.value?.replace(/^"|"$/gu, "").toLowerCase();
+  if (normalized === "collate" || previous === "collate") return "COLLATION";
+  if (BUILTIN_TYPE_NAMES.has(normalized)) return "BUILTIN_TYPE";
+  if (isSchemaOperator(token.value) || CHECK_OPERATOR_WORDS.has(normalized)) return "OPERATOR";
+  if (/^"(?:[^"]|"")+"$/u.test(token.value) || /^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {
+    return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
+  }
+  return "OTHER";
+};
+
+const unwrapCheckExpression = (tokens) => {
+  let current = tokens;
+  let layers = 0;
+  while (current.length >= 3 && current[0]?.value === "(" && current.at(-1)?.value === ")") {
+    let depth = 0;
+    let wrapsWholeExpression = true;
+    for (let index = 0; index < current.length; index += 1) {
+      if (current[index].domain === "DDL_TOKEN" && current[index].value === "(") depth += 1;
+      if (current[index].domain === "DDL_TOKEN" && current[index].value === ")") depth -= 1;
+      if (depth < 0 || (depth === 0 && index < current.length - 1)) {
+        wrapsWholeExpression = false;
+        break;
+      }
+    }
+    if (!wrapsWholeExpression || depth !== 0) break;
+    current = current.slice(1, -1);
+    layers += 1;
+  }
+  return { tokens: current, layers };
+};
+
+export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
+  if (!Array.isArray(sourceTokens) || !Array.isArray(destinationTokens)) fail("INVALID_CHECK_TOKEN_STREAM");
+  if (sourceTokens.length > MAX_CHECK_EDIT_TOKENS || destinationTokens.length > MAX_CHECK_EDIT_TOKENS) {
+    return { status: "LIMIT_EXCEEDED", sourceOnly: null, destinationOnly: null };
+  }
+  schemaTokenDigest(sourceTokens);
+  schemaTokenDigest(destinationTokens);
+  const sourceUnwrapped = unwrapCheckExpression(sourceTokens);
+  const destinationUnwrapped = unwrapCheckExpression(destinationTokens);
+  if (
+    sourceUnwrapped.layers !== destinationUnwrapped.layers
+    && sourceUnwrapped.tokens.length === destinationUnwrapped.tokens.length
+    && sourceUnwrapped.tokens.every((token, index) => sameSchemaToken(token, destinationUnwrapped.tokens[index]))
+  ) {
+    const sourceOnly = emptyCheckEditCounts();
+    const destinationOnly = emptyCheckEditCounts();
+    if (sourceUnwrapped.layers > destinationUnwrapped.layers) {
+      sourceOnly.PARENTHESIS = (sourceUnwrapped.layers - destinationUnwrapped.layers) * 2;
+    } else {
+      destinationOnly.PARENTHESIS = (destinationUnwrapped.layers - sourceUnwrapped.layers) * 2;
+    }
+    return { status: "UNIQUE", sourceOnly, destinationOnly };
+  }
+  const rows = sourceTokens.length + 1;
+  const columns = destinationTokens.length + 1;
+  const costs = Array.from({ length: rows }, () => new Uint16Array(columns));
+  const ways = Array.from({ length: rows }, () => new Uint8Array(columns));
+  ways[0][0] = 1;
+  for (let sourceIndex = 1; sourceIndex < rows; sourceIndex += 1) {
+    costs[sourceIndex][0] = sourceIndex;
+    ways[sourceIndex][0] = 1;
+  }
+  for (let destinationIndex = 1; destinationIndex < columns; destinationIndex += 1) {
+    costs[0][destinationIndex] = destinationIndex;
+    ways[0][destinationIndex] = 1;
+  }
+  for (let sourceIndex = 1; sourceIndex < rows; sourceIndex += 1) {
+    for (let destinationIndex = 1; destinationIndex < columns; destinationIndex += 1) {
+      const candidates = [
+        { cost: costs[sourceIndex - 1][destinationIndex] + 1, ways: ways[sourceIndex - 1][destinationIndex] },
+        { cost: costs[sourceIndex][destinationIndex - 1] + 1, ways: ways[sourceIndex][destinationIndex - 1] },
+      ];
+      if (sameSchemaToken(sourceTokens[sourceIndex - 1], destinationTokens[destinationIndex - 1])) {
+        candidates.push({
+          cost: costs[sourceIndex - 1][destinationIndex - 1],
+          ways: ways[sourceIndex - 1][destinationIndex - 1],
+        });
+      } else {
+        candidates.push({
+          cost: costs[sourceIndex - 1][destinationIndex - 1] + 1,
+          ways: ways[sourceIndex - 1][destinationIndex - 1],
+        });
+      }
+      const minimum = Math.min(...candidates.map(({ cost }) => cost));
+      costs[sourceIndex][destinationIndex] = minimum;
+      ways[sourceIndex][destinationIndex] = Math.min(
+        2,
+        candidates.filter(({ cost }) => cost === minimum).reduce((sum, candidate) => sum + candidate.ways, 0),
+      );
+    }
+  }
+  if (ways.at(-1).at(-1) !== 1) {
+    return { status: "AMBIGUOUS", sourceOnly: null, destinationOnly: null };
+  }
+  const sourceOnly = emptyCheckEditCounts();
+  const destinationOnly = emptyCheckEditCounts();
+  let sourceIndex = sourceTokens.length;
+  let destinationIndex = destinationTokens.length;
+  while (sourceIndex > 0 || destinationIndex > 0) {
+    if (
+      sourceIndex > 0
+      && destinationIndex > 0
+      && sameSchemaToken(sourceTokens[sourceIndex - 1], destinationTokens[destinationIndex - 1])
+      && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex - 1]
+    ) {
+      sourceIndex -= 1;
+      destinationIndex -= 1;
+    } else if (
+      sourceIndex > 0
+      && destinationIndex > 0
+      && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex - 1] + 1
+    ) {
+      sourceOnly[checkEditCategory(sourceTokens, sourceIndex - 1)] += 1;
+      destinationOnly[checkEditCategory(destinationTokens, destinationIndex - 1)] += 1;
+      sourceIndex -= 1;
+      destinationIndex -= 1;
+    } else if (
+      sourceIndex > 0
+      && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex] + 1
+    ) {
+      sourceOnly[checkEditCategory(sourceTokens, sourceIndex - 1)] += 1;
+      sourceIndex -= 1;
+    } else if (
+      destinationIndex > 0
+      && costs[sourceIndex][destinationIndex] === costs[sourceIndex][destinationIndex - 1] + 1
+    ) {
+      destinationOnly[checkEditCategory(destinationTokens, destinationIndex - 1)] += 1;
+      destinationIndex -= 1;
+    } else {
+      fail("CHECK_TOKEN_EDIT_BACKTRACK_FAILED");
+    }
+  }
+  return { status: "UNIQUE", sourceOnly, destinationOnly };
+};
+
+const countDifference = (source, destination, keys) => ({
+  sourceOnly: Object.fromEntries(keys.map((key) => [key, Math.max(0, source[key] - destination[key])])),
+  destinationOnly: Object.fromEntries(keys.map((key) => [key, Math.max(0, destination[key] - source[key])])),
+});
+
+const dependencyDifference = (source, destination) => {
+  const groups = (dependencies) => {
+    const result = Object.fromEntries(CHECK_DEPENDENCY_CLASSES.map((kind) => [kind, new Map()]));
+    for (const dependency of dependencies) {
+      const kind = dependencyClass(dependency[1]);
+      const key = JSON.stringify(dependency);
+      result[kind].set(key, (result[kind].get(key) ?? 0) + 1);
+    }
+    return result;
+  };
+  const sourceGroups = groups(source);
+  const destinationGroups = groups(destination);
+  const changedClasses = CHECK_DEPENDENCY_CLASSES.filter((kind) => {
+    const keys = new Set([...sourceGroups[kind].keys(), ...destinationGroups[kind].keys()]);
+    return [...keys].some((key) => sourceGroups[kind].get(key) !== destinationGroups[kind].get(key));
+  });
+  return {
+    identitySetEqual: same(source, destination),
+    changedClasses,
+  };
+};
+
+const buildCheckExpressionDifference = (source, destination) => ({
+  tokenEdit: buildUniqueCheckTokenEdit(
+    source.diagnostic.checkExpressionTokens,
+    destination.diagnostic.checkExpressionTokens,
+  ),
+  nodeTagDeltas: countDifference(
+    source.diagnostic.nodeTagCounts,
+    destination.diagnostic.nodeTagCounts,
+    CHECK_NODE_TAGS,
+  ),
+  dependencies: dependencyDifference(
+    source.diagnostic.dependencies,
+    destination.diagnostic.dependencies,
+  ),
+});
 
 export const buildConstraintSemanticDiagnostic = (
   sourceManifest,
@@ -1776,6 +2105,7 @@ export const buildConstraintSemanticDiagnostic = (
   const mismatchFields = new Set(identitySetEqual ? [] : ["IDENTITY_SET"]);
   let mismatchCount = 0;
   let truncated = false;
+  let checkExpressionDifference = null;
   const addMismatch = () => {
     if (mismatchCount === MAX_SCHEMA_DIAGNOSTIC_COUNT) truncated = true;
     else mismatchCount += 1;
@@ -1788,13 +2118,29 @@ export const buildConstraintSemanticDiagnostic = (
       continue;
     }
     let constraintMismatch = false;
+    const constraintMismatchFields = [];
     for (const field of CONSTRAINT_MISMATCH_FIELDS.slice(1)) {
       if (!same(source.semantics?.[field], destination.semantics?.[field])) {
         mismatchFields.add(field);
+        constraintMismatchFields.push(field);
         constraintMismatch = true;
       }
     }
-    if (constraintMismatch) addMismatch();
+    if (constraintMismatch) {
+      addMismatch();
+      if (
+        checkExpressionDifference === null
+        && source.type === "CHECK"
+        && destination.type === "CHECK"
+        && constraintMismatchFields.includes("CHECK_EXPRESSION")
+        && Array.isArray(source.diagnostic?.checkExpressionTokens)
+        && Array.isArray(destination.diagnostic?.checkExpressionTokens)
+      ) {
+        checkExpressionDifference = buildCheckExpressionDifference(source, destination);
+      } else {
+        checkExpressionDifference = false;
+      }
+    }
   }
   return {
     schemaVersion: "1.0.0",
@@ -1807,6 +2153,9 @@ export const buildConstraintSemanticDiagnostic = (
     semanticEqual: identitySetEqual && mismatchCount === 0,
     mismatchCount,
     mismatchFields: CONSTRAINT_MISMATCH_FIELDS.filter((field) => mismatchFields.has(field)),
+    checkExpressionDifference: mismatchCount === 1 && checkExpressionDifference !== false
+      ? checkExpressionDifference
+      : null,
     truncated,
   };
 };
