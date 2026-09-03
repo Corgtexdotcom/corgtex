@@ -496,6 +496,45 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(edit.destinationOnly.OPERATOR).toBe(0);
     });
 
+    it.each([
+      ["private_column COLLATE private_schema.private_a", "private_column COLLATE private_schema.private_b", 1, 1],
+      ["private_column COLLATE private_schema.private_a", "private_column COLLATE other_schema.private_a", 1, 1],
+      ['private_column COLLATE "private schema"."private-a"', 'private_column COLLATE "private schema"."private-b"', 1, 1],
+      ['private_column COLLATE private_schema."private-a"', 'private_column COLLATE private_schema."private-b"', 1, 1],
+      ['private_column COLLATE "private""schema"."private-a"', 'private_column COLLATE "private""schema"."private-b"', 1, 1],
+      ['private_column COLLATE "C"', 'private_column COLLATE "POSIX"', 1, 1],
+      ["private_column COLLATE private_schema.private_a", "private_column COLLATE private_a", 2, 0],
+      ["private_column COLLATE private_a", "private_column COLLATE private_schema.private_a", 0, 2],
+      [
+        "private_a COLLATE private_schema.collation_a = private_b COLLATE other_schema.collation_b",
+        "private_a COLLATE private_schema.collation_c = private_b COLLATE other_schema.collation_b",
+        1,
+        1,
+      ],
+    ])("classifies bounded qualified COLLATE token edits without values", (source, destination, sourceCount, destinationCount) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLLATION).toBe(sourceCount);
+      expect(edit.destinationOnly.COLLATION).toBe(destinationCount);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ['private_column = "COLLATE"', 'private_column = "renamed"', "COLUMN_REFERENCE"],
+      ["private_column = 'COLLATE private_schema.private_a'", "private_column = 'other'", "STRING_LITERAL"],
+      ["private_column COLLATE catalog.private_schema.private_a", "private_column COLLATE catalog.private_schema.private_b", "COLUMN_REFERENCE"],
+      ["private_column COLLATE", "private_column renamed", "COLUMN_REFERENCE"],
+      ["private_column COLLATE private_schema.", "private_column renamed private_schema.", "COLUMN_REFERENCE"],
+      ["private_function(private_column)", "other_function(private_column)", "FUNCTION"],
+      ["private_column > 1", "private_column < 1", "OPERATOR"],
+    ])("does not infer COLLATE spans from malformed or unrelated tokens", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLLATION + edit.destinationOnly.COLLATION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
     it("bounds CHECK edit analysis before allocating its comparison matrix", () => {
       const oversized = Array.from({ length: 1025 }, () => ({ domain: "DDL_TOKEN", value: "private" }));
       expect(buildUniqueCheckTokenEdit(oversized, [{ domain: "DDL_TOKEN", value: "other" }])).toEqual({

@@ -2177,19 +2177,40 @@ const emptyCheckEditCounts = () => Object.fromEntries(CHECK_EDIT_CATEGORIES.map(
 
 const sameSchemaToken = (left, right) => left?.domain === right?.domain && left?.value === right?.value;
 
-const checkEditCategory = (tokens, index) => {
+const isCheckIdentifierToken = (token) => token?.domain === "DDL_TOKEN"
+  && (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value) || /^"(?:[^"]|"")+"$/u.test(token.value));
+
+const checkCollationTokenIndexes = (tokens) => {
+  const indexes = new Set();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token?.domain !== "DDL_TOKEN" || !/^collate$/iu.test(token.value)) continue;
+    if (!isCheckIdentifierToken(tokens[index + 1])) continue;
+    if (tokens[index + 2]?.value === ".") {
+      if (!isCheckIdentifierToken(tokens[index + 3]) || tokens[index + 4]?.value === ".") continue;
+      indexes.add(index);
+      indexes.add(index + 1);
+      indexes.add(index + 2);
+      indexes.add(index + 3);
+      continue;
+    }
+    indexes.add(index);
+    indexes.add(index + 1);
+  }
+  return indexes;
+};
+
+const checkEditCategory = (tokens, collationTokenIndexes, index) => {
   const token = tokens[index];
   if (token.domain === "STRING_LITERAL") return "STRING_LITERAL";
   if (token.domain !== "DDL_TOKEN") return "OTHER";
   if (token.value === "(" || token.value === ")") return "PARENTHESIS";
   if (token.value === "::") return "CAST_OPERATOR";
+  if (collationTokenIndexes.has(index)) return "COLLATION";
   if (/^"(?:[^"]|"")+"$/u.test(token.value)) {
     return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
   }
   const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
-  const previousIsCollateKeyword = tokens[index - 1]?.domain === "DDL_TOKEN"
-    && /^collate$/iu.test(tokens[index - 1].value);
-  if (normalized === "collate" || previousIsCollateKeyword) return "COLLATION";
   if (BUILTIN_TYPE_NAMES.has(normalized)) return "BUILTIN_TYPE";
   if (isSchemaOperator(token.value) || CHECK_OPERATOR_WORDS.has(normalized)) return "OPERATOR";
   if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {
@@ -2226,6 +2247,8 @@ export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
   }
   schemaTokenDigest(sourceTokens);
   schemaTokenDigest(destinationTokens);
+  const sourceCollationTokenIndexes = checkCollationTokenIndexes(sourceTokens);
+  const destinationCollationTokenIndexes = checkCollationTokenIndexes(destinationTokens);
   const sourceUnwrapped = unwrapCheckExpression(sourceTokens);
   const destinationUnwrapped = unwrapCheckExpression(destinationTokens);
   if (
@@ -2301,21 +2324,21 @@ export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
       && destinationIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex - 1] + 1
     ) {
-      sourceOnly[checkEditCategory(sourceTokens, sourceIndex - 1)] += 1;
-      destinationOnly[checkEditCategory(destinationTokens, destinationIndex - 1)] += 1;
+      sourceOnly[checkEditCategory(sourceTokens, sourceCollationTokenIndexes, sourceIndex - 1)] += 1;
+      destinationOnly[checkEditCategory(destinationTokens, destinationCollationTokenIndexes, destinationIndex - 1)] += 1;
       sourceIndex -= 1;
       destinationIndex -= 1;
     } else if (
       sourceIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex] + 1
     ) {
-      sourceOnly[checkEditCategory(sourceTokens, sourceIndex - 1)] += 1;
+      sourceOnly[checkEditCategory(sourceTokens, sourceCollationTokenIndexes, sourceIndex - 1)] += 1;
       sourceIndex -= 1;
     } else if (
       destinationIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex][destinationIndex - 1] + 1
     ) {
-      destinationOnly[checkEditCategory(destinationTokens, destinationIndex - 1)] += 1;
+      destinationOnly[checkEditCategory(destinationTokens, destinationCollationTokenIndexes, destinationIndex - 1)] += 1;
       destinationIndex -= 1;
     } else {
       fail("CHECK_TOKEN_EDIT_BACKTRACK_FAILED");
