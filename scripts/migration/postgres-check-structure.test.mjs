@@ -73,6 +73,14 @@ describe("known PostgreSQL CHECK structural proof", () => {
     }));
   });
 
+  it("does not treat identical trees as evidence of grouping-only drift", async () => {
+    const source = await capture(flat);
+    const destination = await capture(flat);
+    expect(compareKnownCheckStructure(source, destination, candidate(), "MATCH")).toEqual(expect.objectContaining({
+      status: "STRUCTURALLY_DIFFERENT", originalEqual: true, canonicalEqual: true,
+    }));
+  });
+
   it.each([
     ["unknown nodes", nested.replace("{VAR", "{FUNCEXPR")],
     ["duplicate fields", nested.replace(":location -1}", ":location -1 :location -1}")],
@@ -88,6 +96,18 @@ describe("known PostgreSQL CHECK structural proof", () => {
     const result = await capture(`{${"x".repeat(262_145)}}`);
     expect(result).toEqual({ status: "LIMIT_EXCEEDED" });
     expect(JSON.stringify(result)).not.toContain("xxx");
+  });
+
+  it("sanitizes catalog errors without exposing their message", async () => {
+    const client = clientFor(flat);
+    const query = client.query;
+    client.query = async (sql) => {
+      if (sql.includes("octet_length(c.conbin")) throw new Error("private-database-literal");
+      return query(sql);
+    };
+    const result = await captureKnownCheckStructure(client, entry("source"));
+    expect(result).toEqual({ status: "UNAVAILABLE" });
+    expect(JSON.stringify(result)).not.toContain("private-database-literal");
   });
 
   it("requires exact candidate, server, and mismatch shape", async () => {
