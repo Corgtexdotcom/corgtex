@@ -204,6 +204,12 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain('classification: "EXECUTABLE_SCHEMA_DIFFERENCE"');
     expect(runner).toContain('classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY"');
     expect(runner).toContain('`${artifactDir}/schema-diagnostic.json`');
+    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(2);
+    expect(runner).toContain("FROM pg_catalog.pg_constraint AS constraint_row");
+    expect(runner).toContain("pg_catalog.pg_get_constraintdef(constraint_row.oid, false)");
+    expect(runner).toContain("pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)");
+    expect(runner).toContain("constraintSemantics: buildConstraintSemanticDiagnostic");
+    expect(readme).toContain("no catalog value is serialized");
     expect(validator).toContain('value.schema.algorithm !== SCHEMA_TOKEN_ALGORITHM');
     expect(readme).toContain("`PG_DUMP_SQL_TOKENS_V1`");
     expect(runner).toContain("DECLARE ${quoteIdentifier(cursorName)} NO SCROLL CURSOR");
