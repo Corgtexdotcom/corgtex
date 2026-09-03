@@ -426,6 +426,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
 
   it.each([
     ["archive renderer", "1:0", "ARCHIVE_RENDER_FAILED"],
+    ["archive renderer with secondary script error", "1:3", "ARCHIVE_RENDER_FAILED"],
     ["connection", "0:2", "CONNECTION_ERROR"],
     ["psql client", "0:1", "PROCESS_ERROR"],
     ["unexpected consumer", "0:9", "PROCESS_ERROR"],
@@ -457,6 +458,12 @@ describe("PostgreSQL restore rehearsal runner", () => {
       statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
       signal: "SIGKILL",
     })).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    expect(buildRestoreDiagnostic({
+      section: "post-data",
+      stderrChunks: [],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:0\n", "utf8")],
+      status: 125,
+    })).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
   });
 
   it("rejects message-shaped and malformed SQLSTATE claims", () => {
@@ -480,12 +487,29 @@ describe("PostgreSQL restore rehearsal runner", () => {
       sqlstate: null,
       stderrTruncated: true,
     });
-    const malformed = buildRestoreDiagnostic({
+    const malformedStderr = buildRestoreDiagnostic({
       section: "data",
-      stderrChunks: [Buffer.from([0xff, 0xfe, 0xfd])],
+      stderrChunks: [Buffer.from([0xff, 0xfe, 0xfd]), Buffer.from("\nERROR:  42501\n", "utf8")],
+      statusChunks: [Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
+    expect(malformedStderr).toMatchObject({
+      processClass: "SCRIPT_ERROR",
+      category: "UNKNOWN",
+      sqlstate: null,
+      stderrTruncated: true,
+    });
+    const malformedStatus = buildRestoreDiagnostic({
+      section: "data",
+      stderrChunks: [Buffer.from("ERROR:  42501\n", "utf8")],
+      statusChunks: [Buffer.from([0xff]), Buffer.from("CORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
+    });
+    expect(malformedStatus).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    const oversizedStatus = buildRestoreDiagnostic({
+      section: "data",
+      stderrChunks: [Buffer.from("ERROR:  42501\n", "utf8")],
       statusChunks: [Buffer.alloc(256, 0x61), Buffer.from("\nCORGTEX_RESTORE_STATUS:0:3\n", "utf8")],
     });
-    expect(malformed).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
+    expect(oversizedStatus).toMatchObject({ processClass: "PROCESS_ERROR", sqlstate: null });
   });
 
   it("rejects duplicate selected archive entries", () => {

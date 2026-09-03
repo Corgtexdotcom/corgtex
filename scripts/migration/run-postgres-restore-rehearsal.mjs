@@ -18,7 +18,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, resolve } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 
@@ -134,9 +133,10 @@ const categoryFromSqlstate = (sqlstate) => {
 };
 
 export const createSqlstateClassifier = () => {
-  const decoder = new StringDecoder("utf8");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let partial = "";
   let discardingLine = false;
+  let invalid = false;
   let truncated = false;
   let observed = false;
   let sqlstate = null;
@@ -185,17 +185,34 @@ export const createSqlstateClassifier = () => {
     consume(chunk) {
       if (!Buffer.isBuffer(chunk)) {
         truncated = true;
+        invalid = true;
         return;
       }
-      consumeText(decoder.write(chunk));
+      if (invalid) return;
+      try {
+        consumeText(decoder.decode(chunk, { stream: true }));
+      } catch {
+        partial = "";
+        truncated = true;
+        invalid = true;
+      }
     },
     finish() {
-      consumeText(decoder.end(), true);
+      if (!invalid) {
+        try {
+          consumeText(decoder.decode(), true);
+        } catch {
+          truncated = true;
+          invalid = true;
+        }
+      }
       partial = "";
       return { sqlstate, observed, truncated };
     },
     discard() {
-      decoder.end();
+      if (!invalid) {
+        try { decoder.decode(); } catch { /* Discarded success-path diagnostics never broaden output. */ }
+      }
       partial = "";
       discardingLine = false;
     },
@@ -203,9 +220,10 @@ export const createSqlstateClassifier = () => {
 };
 
 export const createRestoreStatusClassifier = () => {
-  const decoder = new StringDecoder("utf8");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let partial = "";
   let discardingLine = false;
+  let invalid = false;
   let truncated = false;
   let statuses = null;
 
@@ -254,36 +272,56 @@ export const createRestoreStatusClassifier = () => {
     consume(chunk) {
       if (!Buffer.isBuffer(chunk)) {
         truncated = true;
+        invalid = true;
         return;
       }
-      consumeText(decoder.write(chunk));
+      if (invalid) return;
+      try {
+        consumeText(decoder.decode(chunk, { stream: true }));
+      } catch {
+        partial = "";
+        truncated = true;
+        invalid = true;
+      }
     },
     finish() {
-      consumeText(decoder.end(), true);
+      if (!invalid) {
+        try {
+          consumeText(decoder.decode(), true);
+        } catch {
+          truncated = true;
+          invalid = true;
+        }
+      }
       partial = "";
       return { statuses, truncated };
     },
     discard() {
-      decoder.end();
+      if (!invalid) {
+        try { decoder.decode(); } catch { /* Discarded success-path diagnostics never broaden output. */ }
+      }
       partial = "";
       discardingLine = false;
     },
   };
 };
 
-const restoreProcessClass = ({ statuses, spawnError, signal }) => {
+const restoreProcessClass = ({ statuses, status, spawnError, signal }) => {
   if (spawnError || signal !== null || statuses === null) return "PROCESS_ERROR";
+  if (statuses.producer !== 0 && !(statuses.producer === 141 && statuses.consumer !== 0)) {
+    return "ARCHIVE_RENDER_FAILED";
+  }
   if (statuses.consumer === 3) return "SCRIPT_ERROR";
   if (statuses.consumer === 2) return "CONNECTION_ERROR";
   if (statuses.consumer !== 0) return "PROCESS_ERROR";
-  if (statuses.producer !== 0) return "ARCHIVE_RENDER_FAILED";
-  return "OK";
+  return statuses.producer === 0 && status === 0 ? "OK" : "PROCESS_ERROR";
 };
 
 const restoreDiagnosticFromResults = ({
   section,
   sqlstateResult,
   statusResult,
+  status = 1,
   spawnError = false,
   signal = null,
 }) => {
@@ -295,6 +333,7 @@ const restoreDiagnosticFromResults = ({
   if (sectionName === undefined) fail("INVALID_RESTORE_SECTION");
   const processClass = restoreProcessClass({
     statuses: statusResult.truncated ? null : statusResult.statuses,
+    status,
     spawnError,
     signal,
   });
@@ -316,6 +355,7 @@ export const buildRestoreDiagnostic = ({
   section,
   stderrChunks,
   statusChunks,
+  status = 1,
   spawnError = false,
   signal = null,
 }) => {
@@ -327,6 +367,7 @@ export const buildRestoreDiagnostic = ({
     section,
     sqlstateResult: sqlstateClassifier.finish(),
     statusResult: statusClassifier.finish(),
+    status,
     spawnError,
     signal,
   });
@@ -658,12 +699,13 @@ const restoreArchiveSections = async ({
       network,
       stderrClassifier: createSqlstateClassifier(),
       stdoutClassifier: createRestoreStatusClassifier(),
-      onFailure: ({ stderr, stdout, spawnError, signal }) => writePrivateJson(
+      onFailure: ({ stderr, stdout, status, spawnError, signal }) => writePrivateJson(
         `${artifactDir}/restore-diagnostic.json`,
         restoreDiagnosticFromResults({
           section,
           sqlstateResult: stderr ?? { sqlstate: null, observed: false, truncated: false },
           statusResult: stdout ?? { statuses: null, truncated: false },
+          status,
           spawnError,
           signal,
         }),
