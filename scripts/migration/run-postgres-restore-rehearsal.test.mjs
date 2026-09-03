@@ -456,6 +456,21 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
   });
 
+  it("resets stale operation evidence for an unrecognized verbose object type", () => {
+    expect(buildRestoreDiagnostic([Buffer.from([
+      "pg_restore: creating EXTENSION \"public.vector\"\n",
+      "pg_restore: creating TRIGGER private.hostile\n",
+      "pg_restore: error: permission denied\n",
+    ].join(""), "utf8")])).toEqual({
+      phase: "DESTINATION_RESTORE",
+      category: "INSUFFICIENT_PRIVILEGE",
+      objectClass: "OTHER",
+      extensionClass: "UNKNOWN",
+      sqlstate: null,
+      truncated: false,
+    });
+  });
+
   it("drains and discards an oversized line while preserving later bounded evidence", () => {
     const diagnostic = buildRestoreDiagnostic([
       Buffer.alloc(5 * 1024, 0x61),

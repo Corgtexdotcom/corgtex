@@ -156,7 +156,11 @@ const verboseOperation = (line) => {
     return { objectClass: "TABLE_DATA", extensionClass: "UNKNOWN" };
   }
   const match = line.match(/^pg_restore: creating (EXTENSION|COMMENT|SCHEMA|TYPE|TABLE|SEQUENCE|FUNCTION|INDEX|(?:FK |CHECK )?CONSTRAINT|BLOB(?: COMMENTS)?|LARGE OBJECT)\b/u);
-  if (!match) return null;
+  if (!match) {
+    return line.startsWith("pg_restore: creating ")
+      ? { objectClass: "OTHER", extensionClass: "UNKNOWN" }
+      : null;
+  }
   const token = match[1];
   let objectClass = token.replaceAll(" ", "_");
   if (["FK_CONSTRAINT", "CHECK_CONSTRAINT"].includes(objectClass)) objectClass = "CONSTRAINT";
