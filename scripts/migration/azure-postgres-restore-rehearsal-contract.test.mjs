@@ -133,12 +133,16 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
 
     const rehearsalSelection = workflow.indexOf("Select and verify the exact Azure subscription\n");
     const authorityValidation = workflow.indexOf("Verify exact temporary rehearsal authority and foundation inventory");
+    const persistRecoveryIntent = workflow.indexOf("Persist recovery intent before any temporary mutation");
     const recoverySelection = workflow.indexOf("Select and verify the exact Azure subscription for recovery\n");
     const recoveryValidation = workflow.indexOf("Validate recovery authority and exact cleanup target");
+    const recoveryScratchDelete = workflow.indexOf("Remove the exact recovery scratch database");
     expect(rehearsalSelection).toBeGreaterThan(0);
     expect(rehearsalSelection).toBeLessThan(authorityValidation);
+    expect(authorityValidation).toBeLessThan(persistRecoveryIntent);
     expect(recoverySelection).toBeGreaterThan(0);
     expect(recoverySelection).toBeLessThan(recoveryValidation);
+    expect(recoveryValidation).toBeLessThan(recoveryScratchDelete);
 
     const subscriptionScopedCommands = /\baz (?:account get-access-token|role assignment list|group show|resource list|postgres flexible-server|identity show|rest)\b/u;
     const lines = workflow.split("\n");
