@@ -11,6 +11,7 @@ const CONTRIBUTOR_ROLE_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const OPAQUE_REF_PATTERN = /^sha256:[0-9a-f]{16}$/u;
 const SAFE_IDENTIFIER_PATTERN = /^[a-z][a-z0-9_]{0,62}$/u;
+const SCHEMA_TOKEN_ALGORITHM = "PG_DUMP_SQL_TOKENS_V1";
 const LOCALE_DEFINITION_FIELDS = ["encoding", "collation", "ctype", "provider", "providerLocale", "icuRules"];
 const BLOCKERS = [
   "REDIS_PARITY_UNPROVEN",
@@ -225,7 +226,8 @@ const validateDatabaseEvidence = (value, side) => {
   }
   if (!extensionKeys.has("plpgsql") || !extensionKeys.has("vector")) fail(`${prefix}_REQUIRED_EXTENSION_MISSING`);
 
-  expectExactKeys(value.schema, ["digest"], `${prefix}_SCHEMA_SHAPE_MISMATCH`);
+  expectExactKeys(value.schema, ["algorithm", "digest"], `${prefix}_SCHEMA_SHAPE_MISMATCH`);
+  if (value.schema.algorithm !== SCHEMA_TOKEN_ALGORITHM) fail(`${prefix}_SCHEMA_ALGORITHM_MISMATCH`);
   validateHash(value.schema.digest, `${prefix}_SCHEMA_DIGEST_INVALID`);
 
   if (!Array.isArray(value.tables) || value.tables.length === 0) fail(`${prefix}_TABLES_INVALID`);

@@ -380,7 +380,7 @@ const main = async () => {
     } catch (error) {
       diagnosticError = error?.code;
     }
-    if (diagnosticError !== "DESTINATION_RESTORE_FAILED") fail("EXPECTED_RESTORE_FAILURE_MISSING");
+    if (diagnosticError !== "DESTINATION_RESTORE_FAILED") fail(diagnosticError ?? "EXPECTED_RESTORE_FAILURE_MISSING");
     const restoreDiagnostic = JSON.parse(readFileSync(join(diagnosticArtifactDir, "restore-diagnostic.json"), "utf8"));
     if (JSON.stringify(restoreDiagnostic) !== JSON.stringify({
       phase: "DESTINATION_RESTORE",
@@ -436,6 +436,17 @@ const main = async () => {
     });
 
     const evidence = JSON.parse(readFileSync(join(artifactDir, "postgres-restore-evidence.json"), "utf8"));
+    if (
+      evidence.source.schema.algorithm !== "PG_DUMP_SQL_TOKENS_V1"
+      || JSON.stringify(evidence.source.schema) !== JSON.stringify(evidence.destination.schema)
+    ) fail("SCHEMA_TOKEN_PARITY_FAILED");
+    const schemaDiagnosticPath = join(artifactDir, "schema-diagnostic.json");
+    if (readdirSync(artifactDir).includes("schema-diagnostic.json")) {
+      const schemaDiagnostic = JSON.parse(readFileSync(schemaDiagnosticPath, "utf8"));
+      if (JSON.stringify(schemaDiagnostic) !== JSON.stringify({ classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY" })) {
+        fail("SCHEMA_DIAGNOSTIC_BOUNDARY_FAILED");
+      }
+    }
     if (evidence.source.locale.provider !== "builtin" || JSON.stringify(evidence.source.locale) !== JSON.stringify(evidence.destination.locale)) {
       fail("LOCALE_PROVIDER_PARITY_FAILED");
     }

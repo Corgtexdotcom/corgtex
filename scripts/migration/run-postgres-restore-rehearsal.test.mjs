@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  analyzeSchemaDump,
   buildCreateDatabaseSql,
   buildLocaleDiagnostic,
   buildPgServiceContents,
   buildRestoreDiagnostic,
+  buildSchemaDifferenceDiagnostic,
   buildTargetConnectionProbeDiagnostic,
   buildSequenceUseList,
   classifyCollationVersionRelation,
@@ -16,7 +18,11 @@ import {
   nodeClientConfig,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
+  SCHEMA_RESTRICT_KEY,
+  SCHEMA_TOKEN_ALGORITHM,
+  schemaTokenDigest,
   serializePgServiceValue,
+  tokenizeSchemaDump,
   validateSourceTlsRootCertificate,
   validateTargetTlsRootCertificate,
   waitForTargetConnection,
@@ -88,6 +94,119 @@ describe("PostgreSQL restore rehearsal runner", () => {
     expect(POSTGRES_CLIENT_IMAGE).toBe(
       "postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
     );
+  });
+
+  describe("schema-token parity", () => {
+    const dump = (body) => [
+      `\\restrict ${SCHEMA_RESTRICT_KEY}`,
+      body,
+      `\\unrestrict ${SCHEMA_RESTRICT_KEY}`,
+      "",
+    ].join("\n");
+
+    it("ignores only comments and whitespace outside executable tokens", () => {
+      const compact = dump('CREATE TABLE "Account" ("id" text DEFAULT \'active\');');
+      const formatted = dump([
+        "-- generated at a different instant",
+        "CREATE /* outer /* nested */ comment */ TABLE",
+        '  "Account" ( "id" text DEFAULT \'active\' ) ; -- trailing comment',
+      ].join("\n"));
+      const compactAnalysis = analyzeSchemaDump(compact);
+      const formattedAnalysis = analyzeSchemaDump(formatted);
+      expect(compactAnalysis.algorithm).toBe(SCHEMA_TOKEN_ALGORITHM);
+      expect(formattedAnalysis.digest).toBe(compactAnalysis.digest);
+      expect(formattedAnalysis.legacyDigest).not.toBe(compactAnalysis.legacyDigest);
+    });
+
+    it.each([
+      ["quoted identifier", 'CREATE TABLE "PrivateAccount" ("id" text);'],
+      ["default literal", 'CREATE TABLE "Account" ("id" text DEFAULT \'disabled\');'],
+      ["constraint", 'ALTER TABLE ONLY "Account" ADD CONSTRAINT "Account_pkey" PRIMARY KEY ("id", "tenantId");'],
+      ["index", 'CREATE UNIQUE INDEX "Account_email_key" ON "Account" USING btree ("email", "tenantId");'],
+      ["trigger", 'CREATE TRIGGER account_guard BEFORE UPDATE ON "Account" FOR EACH ROW EXECUTE FUNCTION guard_account_v2();'],
+      ["policy", 'CREATE POLICY account_policy ON "Account" USING (("tenantId" = current_setting(\'app.other_tenant\')));'],
+      ["view", 'CREATE OR REPLACE VIEW "ActiveAccount" AS SELECT "id" FROM "Account" WHERE "enabled" = false;'],
+      ["extension version", "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public VERSION '0.8.2';"],
+      ["comment", 'COMMENT ON TABLE "Account" IS \'private customer ledger\';'],
+    ])("detects an executable %s change", (_label, changedStatement) => {
+      const baseline = dump([
+        'CREATE TABLE "Account" ("id" text, "tenantId" text, "email" text, "enabled" boolean DEFAULT true);',
+        'ALTER TABLE ONLY "Account" ADD CONSTRAINT "Account_pkey" PRIMARY KEY ("id");',
+        'CREATE UNIQUE INDEX "Account_email_key" ON "Account" USING btree ("email");',
+        'CREATE TRIGGER account_guard BEFORE UPDATE ON "Account" FOR EACH ROW EXECUTE FUNCTION guard_account();',
+        'CREATE POLICY account_policy ON "Account" USING (("tenantId" = current_setting(\'app.tenant\')));',
+        'CREATE OR REPLACE VIEW "ActiveAccount" AS SELECT "id" FROM "Account" WHERE "enabled" = true;',
+        "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public VERSION '0.8.1';",
+        'COMMENT ON TABLE "Account" IS \'customer ledger\';',
+      ].join("\n"));
+      expect(analyzeSchemaDump(dump(changedStatement)).digest).not.toBe(analyzeSchemaDump(baseline).digest);
+    });
+
+    it("preserves every byte inside a dollar-quoted function body", () => {
+      const source = dump("CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $body$BEGIN PERFORM 1; -- executable-body-byte\nEND$body$;");
+      const destination = source.replace("PERFORM 1", "PERFORM 2");
+      expect(analyzeSchemaDump(destination).digest).not.toBe(analyzeSchemaDump(source).digest);
+    });
+
+    it.each([
+      ["unterminated string", dump("SELECT 'private;"), "UNTERMINATED_SCHEMA_STRING"],
+      ["unterminated identifier", dump('CREATE TABLE "private;'), "UNTERMINATED_SCHEMA_IDENTIFIER"],
+      ["unterminated dollar body", dump("CREATE FUNCTION f() RETURNS void AS $body$private;"), "UNTERMINATED_SCHEMA_DOLLAR_BODY"],
+      ["unterminated comment", dump("CREATE TABLE t (id text); /* private"), "UNTERMINATED_SCHEMA_COMMENT"],
+      ["unexpected meta command", `\\connect private\n${dump("SELECT 1;")}`, "UNEXPECTED_SCHEMA_META_COMMAND"],
+      ["inline meta command", `SELECT 1; \\restrict ${SCHEMA_RESTRICT_KEY}`, "UNEXPECTED_SCHEMA_META_COMMAND"],
+    ])("fails closed for %s", (_label, content, code) => {
+      expect(() => tokenizeSchemaDump(content)).toThrow(code);
+    });
+
+    it("length-frames token domains and values", () => {
+      expect(schemaTokenDigest([
+        { domain: "DDL_TOKEN", value: "ab" },
+        { domain: "DDL_TOKEN", value: "c" },
+      ])).not.toBe(schemaTokenDigest([
+        { domain: "DDL_TOKEN", value: "a" },
+        { domain: "DDL_TOKEN", value: "bc" },
+      ]));
+      expect(() => schemaTokenDigest([{ domain: "PRIVATE", value: "secret" }])).toThrow("INVALID_SCHEMA_TOKEN");
+    });
+
+    it("emits an enum-and-count-only diagnostic", () => {
+      const sourceName = "source_private_customer_table";
+      const destinationName = "destination_private_customer_table";
+      const sourceTokens = tokenizeSchemaDump(dump([
+        `CREATE TABLE "${sourceName}" ("private_column" text DEFAULT 'private-value');`,
+        `COMMENT ON TABLE "${sourceName}" IS 'private-comment';`,
+      ].join("\n")));
+      const destinationTokens = tokenizeSchemaDump(dump([
+        `CREATE TABLE "${destinationName}" ("private_column" text DEFAULT 'other-private-value');`,
+        `COMMENT ON TABLE "${destinationName}" IS 'other-private-comment';`,
+      ].join("\n")));
+      const diagnostic = buildSchemaDifferenceDiagnostic(sourceTokens, destinationTokens);
+      expect(diagnostic).toEqual({
+        schemaVersion: "1.0.0",
+        classification: "EXECUTABLE_SCHEMA_DIFFERENCE",
+        sourceOnly: {
+          statementClasses: {
+            EXTENSION: 0, TYPE: 0, FUNCTION: 0, TABLE: 1, CONSTRAINT: 0, INDEX: 0,
+            TRIGGER: 0, POLICY: 0, VIEW: 0, COMMENT: 1, OTHER: 0,
+          },
+          tokenDomains: { DDL_TOKEN: 15, STRING_LITERAL: 2, DOLLAR_BODY: 0, META_COMMAND: 0 },
+        },
+        destinationOnly: {
+          statementClasses: {
+            EXTENSION: 0, TYPE: 0, FUNCTION: 0, TABLE: 1, CONSTRAINT: 0, INDEX: 0,
+            TRIGGER: 0, POLICY: 0, VIEW: 0, COMMENT: 1, OTHER: 0,
+          },
+          tokenDomains: { DDL_TOKEN: 15, STRING_LITERAL: 2, DOLLAR_BODY: 0, META_COMMAND: 0 },
+        },
+        truncated: false,
+      });
+      const serialized = JSON.stringify(diagnostic);
+      for (const forbidden of [sourceName, destinationName, "private_column", "private-value", "private-comment"]) {
+        expect(serialized).not.toContain(forbidden);
+      }
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
   });
 
   it("parses a TLS-required source URL without retaining a raw URL field", () => {
