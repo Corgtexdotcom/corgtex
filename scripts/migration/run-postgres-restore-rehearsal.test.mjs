@@ -668,11 +668,29 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      ["private_column::private_schema.local_timestamp AT TIME ZONE 'UTC'", "private_column::other_schema.local_timestamp AT TIME ZONE 'UTC'"],
+      ["private_column::private_schema.private_type COLLATE private_collation", "private_column::other_schema.private_type COLLATE private_collation"],
+      ["private_column::private_schema.private_type IS NULL", "private_column::other_schema.private_type IS NULL"],
+      ["private_column::private_schema.private_type IS DISTINCT FROM NULL", "private_column::other_schema.private_type IS DISTINCT FROM NULL"],
+      ["private_column::private_schema.private_type = private_column", "private_column::other_schema.private_type = private_column"],
+      ["private_column::private_schema.private_type(10)", "private_column::other_schema.private_type(10)"],
+      ["private_column::private_schema.private_type[]", "private_column::other_schema.private_type[]"],
+      ["private_column::private_schema.private_type[1]", "private_column::other_schema.private_type[1]"],
+    ])("keeps qualified cast identities bounded before valid expression suffixes", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.destinationOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
       ["private_column::private_catalog.private_schema.private_type", "private_column::other_catalog.private_schema.private_type"],
       ["private_column::private_schema..private_type", "private_column::other_schema..private_type"],
       ["private_column::private_schema.", "private_column::other_schema."],
-      ["private_column::private_type varying(10)", "private_column::other_type varying(10)"],
-      ["private_column::double precision", "private_column::real precision"],
       ['private_column::U&"private_type"', 'private_column::U&"other_type"'],
     ])("fails closed for malformed or unsupported cast identity spans", (source, destination) => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
@@ -701,6 +719,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
     it.each([
       ["private_column::character varying(10)", "private_column::character(10)"],
       ["private_column::bit varying(8)", "private_column::bit(8)"],
+      ["private_column::double precision", "private_column::double"],
       ["private_column::CHARACTER VARYING(10)", "private_column::CHARACTER(10)"],
       ["private_column::character varying", "private_column::character"],
       ["private_column::character varying IS NOT NULL", "private_column::character IS NOT NULL"],
@@ -711,6 +730,45 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
       expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
       expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::time with time zone", "private_column::time without time zone"],
+      ["private_column::timestamp with time zone", "private_column::timestamp without time zone"],
+      ["private_column::timestamp(3) with time zone", "private_column::timestamp(3) without time zone"],
+    ])("classifies PG18 time-zone type identity edits without values", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.destinationOnly.BUILTIN_TYPE).toBe(1);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["text <> ''::text", "description <> ''::text"],
+      ["date IS NOT NULL", "created_at IS NOT NULL"],
+      ["name = 'value'", "label = 'value'"],
+      ['"text" <> \'\'', '"description" <> \'\''],
+    ])("keeps built-in-shaped bare identifiers in COLUMN_REFERENCE", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.destinationOnly.COLUMN_REFERENCE).toBe(1);
+      expect(edit.sourceOnly.BUILTIN_TYPE + edit.destinationOnly.BUILTIN_TYPE).toBe(0);
+    });
+
+    it.each([
+      ["text(private_column)", "description(private_column)"],
+      ["date(private_column)", "created_at(private_column)"],
+      ["name(private_column)", "label(private_column)"],
+    ])("keeps function-shaped built-in names in FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBe(1);
+      expect(edit.destinationOnly.FUNCTION).toBe(1);
+      expect(edit.sourceOnly.BUILTIN_TYPE + edit.destinationOnly.BUILTIN_TYPE).toBe(0);
     });
 
     it("keeps a multiword built-in typmod edit semantic", () => {

@@ -150,13 +150,6 @@ const CHECK_DEPENDENCY_CLASSES = [
   "TYPE",
   "OTHER",
 ];
-const BUILTIN_TYPE_NAMES = new Set([
-  "bigint", "bigserial", "bit", "boolean", "bpchar", "bytea", "char", "character",
-  "date", "decimal", "double", "float4", "float8", "inet", "int", "int2", "int4",
-  "int8", "integer", "interval", "json", "jsonb", "money", "name", "numeric", "oid",
-  "real", "record", "regclass", "regproc", "serial", "smallint", "smallserial", "text",
-  "time", "timestamp", "timestamptz", "timetz", "uuid", "varchar",
-]);
 const CHECK_OPERATOR_WORDS = new Set([
   "all", "and", "any", "between", "false", "ilike", "in", "is", "like", "not",
   "null", "operator", "or", "similar", "true",
@@ -2242,62 +2235,56 @@ const setMalformedCastIdentity = (categories, tokens, castIndex) => {
   setCheckContextCategory(categories, span, "OTHER");
 };
 
+const checkSinglePrecisionTypmodEnd = (tokens, start) => (
+  tokens[start]?.value === "("
+  && tokens[start + 1]?.domain === "DDL_TOKEN"
+  && /^[0-9]+$/u.test(tokens[start + 1].value)
+  && tokens[start + 2]?.domain === "DDL_TOKEN"
+  && tokens[start + 2].value === ")"
+    ? start + 3
+    : start
+);
+
+const checkMultiwordTypeSpan = (tokens, start) => {
+  const first = tokens[start];
+  const second = tokens[start + 1];
+  if (
+    (isUnquotedCheckWord(first, "character") || isUnquotedCheckWord(first, "bit"))
+    && isUnquotedCheckWord(second, "varying")
+  ) return [start, start + 1];
+  if (isUnquotedCheckWord(first, "double") && isUnquotedCheckWord(second, "precision")) {
+    return [start, start + 1];
+  }
+  if (!isUnquotedCheckWord(first, "time") && !isUnquotedCheckWord(first, "timestamp")) return null;
+  const suffixStart = checkSinglePrecisionTypmodEnd(tokens, start + 1);
+  if (
+    (isUnquotedCheckWord(tokens[suffixStart], "with") || isUnquotedCheckWord(tokens[suffixStart], "without"))
+    && isUnquotedCheckWord(tokens[suffixStart + 1], "time")
+    && isUnquotedCheckWord(tokens[suffixStart + 2], "zone")
+  ) return [start, suffixStart, suffixStart + 1, suffixStart + 2];
+  return null;
+};
+
 const checkContextualTokenCategories = (tokens) => {
   const categories = new Map();
   for (let castIndex = 0; castIndex < tokens.length; castIndex += 1) {
     if (tokens[castIndex]?.domain !== "DDL_TOKEN" || tokens[castIndex].value !== "::") continue;
     const first = tokens[castIndex + 1];
-    const second = tokens[castIndex + 2];
-    const isVaryingPhrase = (isUnquotedCheckWord(first, "character") || isUnquotedCheckWord(first, "bit"))
-      && isUnquotedCheckWord(second, "varying");
-    if (isVaryingPhrase) {
-      const afterPhrase = castIndex + 3;
-      if (tokens[afterPhrase]?.value === "(" && !(
-        tokens[afterPhrase + 1]?.domain === "DDL_TOKEN"
-        && /^[0-9]+$/u.test(tokens[afterPhrase + 1].value)
-        && tokens[afterPhrase + 2]?.domain === "DDL_TOKEN"
-        && tokens[afterPhrase + 2].value === ")"
-      )) {
-        setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "OTHER");
-        continue;
-      }
-      if (
-        isCheckIdentifierToken(tokens[afterPhrase])
-        && !CHECK_OPERATOR_WORDS.has(tokens[afterPhrase].value.toLowerCase())
-        && !isUnquotedCheckWord(tokens[afterPhrase], "collate")
-      ) {
-        setMalformedCastIdentity(categories, tokens, castIndex);
-        continue;
-      }
-      setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "BUILTIN_TYPE");
+    const multiwordTypeSpan = checkMultiwordTypeSpan(tokens, castIndex + 1);
+    if (multiwordTypeSpan !== null) {
+      setCheckContextCategory(categories, multiwordTypeSpan, "BUILTIN_TYPE");
       continue;
     }
     if (!isCheckIdentifierToken(first)) {
       setMalformedCastIdentity(categories, tokens, castIndex);
       continue;
     }
-    if (second?.value === ".") {
+    if (tokens[castIndex + 2]?.value === ".") {
       if (!isCheckIdentifierToken(tokens[castIndex + 3]) || tokens[castIndex + 4]?.value === ".") {
         setMalformedCastIdentity(categories, tokens, castIndex);
         continue;
       }
-      if (
-        isCheckIdentifierToken(tokens[castIndex + 4])
-        && !CHECK_OPERATOR_WORDS.has(tokens[castIndex + 4].value.toLowerCase())
-        && !isUnquotedCheckWord(tokens[castIndex + 4], "collate")
-      ) {
-        setMalformedCastIdentity(categories, tokens, castIndex);
-        continue;
-      }
       setCheckContextCategory(categories, [castIndex + 1, castIndex + 2, castIndex + 3], "BUILTIN_TYPE");
-      continue;
-    }
-    if (
-      isCheckIdentifierToken(second)
-      && !CHECK_OPERATOR_WORDS.has(second.value.toLowerCase())
-      && !isUnquotedCheckWord(second, "collate")
-    ) {
-      setMalformedCastIdentity(categories, tokens, castIndex);
       continue;
     }
     setCheckContextCategory(categories, [castIndex + 1], "BUILTIN_TYPE");
@@ -2363,9 +2350,11 @@ const checkContextualTokenCategories = (tokens) => {
     const terminalIsSqlConstruct = !terminal.value.startsWith('"')
       && CHECK_SQL_CONSTRUCTS.has(terminalNormalized);
     const terminalIsKeyword = !terminal.value.startsWith('"')
-      && (CHECK_OPERATOR_WORDS.has(terminalNormalized) || BUILTIN_TYPE_NAMES.has(terminalNormalized));
+      && CHECK_OPERATOR_WORDS.has(terminalNormalized);
     if (tokens[terminalIndex - 1]?.value !== ".") {
       if (terminalIsSqlConstruct) {
+        setCheckContextCategory(categories, [terminalIndex], "OTHER");
+      } else if (categories.get(terminalIndex - 1) === "BUILTIN_TYPE") {
         setCheckContextCategory(categories, [terminalIndex], "OTHER");
       } else if (tokens[terminalIndex - 1]?.value === "::") {
         setCheckContextCategory(categories, [terminalIndex], "OTHER");
@@ -2407,7 +2396,6 @@ const checkEditCategory = (tokens, contextualTokenCategories, index) => {
     return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
   }
   const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
-  if (BUILTIN_TYPE_NAMES.has(normalized)) return "BUILTIN_TYPE";
   if (isSchemaOperator(token.value) || CHECK_OPERATOR_WORDS.has(normalized)) return "OPERATOR";
   if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {
     return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
