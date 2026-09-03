@@ -503,6 +503,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ['private_column COLLATE private_schema."private-a"', 'private_column COLLATE private_schema."private-b"', 1, 1],
       ['private_column COLLATE "private""schema"."private-a"', 'private_column COLLATE "private""schema"."private-b"', 1, 1],
       ['private_column COLLATE "C"', 'private_column COLLATE "POSIX"', 1, 1],
+      ["private_column COLLATE private_a IS NULL", "private_column COLLATE private_b IS NULL", 1, 1],
       ["private_column COLLATE private_schema.private_a", "private_column COLLATE private_a", 2, 0],
       ["private_column COLLATE private_a", "private_column COLLATE private_schema.private_a", 0, 2],
       [
@@ -522,9 +523,9 @@ describe("PostgreSQL restore rehearsal runner", () => {
     it.each([
       ['private_column = "COLLATE"', 'private_column = "renamed"', "COLUMN_REFERENCE"],
       ["private_column = 'COLLATE private_schema.private_a'", "private_column = 'other'", "STRING_LITERAL"],
-      ["private_column COLLATE catalog.private_schema.private_a", "private_column COLLATE catalog.private_schema.private_b", "COLUMN_REFERENCE"],
-      ["private_column COLLATE", "private_column renamed", "COLUMN_REFERENCE"],
-      ["private_column COLLATE private_schema.", "private_column renamed private_schema.", "COLUMN_REFERENCE"],
+      ["private_column COLLATE catalog.private_schema.private_a", "private_column COLLATE catalog.private_schema.private_b", "OTHER"],
+      ["private_column COLLATE", "private_column renamed", "OTHER"],
+      ["private_column COLLATE private_schema.", "private_column renamed private_schema.", "OTHER"],
       ["private_function(private_column)", "other_function(private_column)", "FUNCTION"],
       ["private_column > 1", "private_column < 1", "OPERATOR"],
     ])("does not infer COLLATE spans from malformed or unrelated tokens", (source, destination, category) => {
@@ -532,6 +533,60 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(edit.status).toBe("UNIQUE");
       expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
       expect(edit.sourceOnly.COLLATION + edit.destinationOnly.COLLATION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_schema.validate(private_column)", "other_schema.validate(private_column)", 1, 1],
+      ["private_schema.validate(private_column)", "private_schema.other(private_column)", 1, 1],
+      ["private_schema.validate(private_column)", "validate(private_column)", 2, 0],
+      ["validate(private_column)", "private_schema.validate(private_column)", 0, 2],
+      ['"private schema"."private-function"(private_column)', '"other schema"."private-function"(private_column)', 1, 1],
+      ['private_schema."private-function"(private_column)', 'other_schema."private-function"(private_column)', 1, 1],
+      ['"private""schema"."private-function"(private_column)', '"other""schema"."private-function"(private_column)', 1, 1],
+      ["outer_function(private_schema.validate(private_column))", "outer_function(other_schema.validate(private_column))", 1, 1],
+      ["NOT private_schema.validate(private_column)", "NOT other_schema.validate(private_column)", 1, 1],
+      [
+        "private_schema.validate(private_column) AND other_schema.check_value(private_column)",
+        "changed_schema.validate(private_column) AND other_schema.check_value(private_column)",
+        1,
+        1,
+      ],
+      ['"COLLATE"(private_column)', '"renamed"(private_column)', 1, 1],
+    ])("classifies bounded qualified function token edits without values", (source, destination, sourceCount, destinationCount) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBe(sourceCount);
+      expect(edit.destinationOnly.FUNCTION).toBe(destinationCount);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_catalog.private_schema.validate(private_column)", "other_catalog.private_schema.validate(private_column)"],
+      [".validate(private_column)", ".other(private_column)"],
+      ["private_schema..validate(private_column)", "other_schema..validate(private_column)"],
+      ["private_schema.(private_column)", "other_schema.(private_column)"],
+    ])("fails closed for malformed or unsupported callable chains", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_schema.private_column > 0", "other_schema.private_column > 0", "COLUMN_REFERENCE"],
+      ["private_column IN (1, 2)", "other_column IN (1, 2)", "COLUMN_REFERENCE"],
+      ["private_column = ANY (private_array)", "other_column = ANY (private_array)", "COLUMN_REFERENCE"],
+      ["private_column = ALL (private_array)", "other_column = ALL (private_array)", "COLUMN_REFERENCE"],
+      ["private_column OPERATOR(pg_catalog.>) 0", "private_column OPERATOR(pg_catalog.<) 0", "OPERATOR"],
+      ["private_column::numeric(10, 2)", "private_column::varchar(10)", "BUILTIN_TYPE"],
+    ])("does not infer function spans from ordinary or operator contexts", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category] + edit.destinationOnly[category]).toBeGreaterThan(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
       expect(JSON.stringify(edit)).not.toContain("private");
     });
 

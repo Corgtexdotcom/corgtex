@@ -159,7 +159,7 @@ const BUILTIN_TYPE_NAMES = new Set([
 ]);
 const CHECK_OPERATOR_WORDS = new Set([
   "all", "and", "any", "between", "false", "ilike", "in", "is", "like", "not",
-  "null", "or", "similar", "true",
+  "null", "operator", "or", "similar", "true",
 ]);
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
@@ -2180,33 +2180,88 @@ const sameSchemaToken = (left, right) => left?.domain === right?.domain && left?
 const isCheckIdentifierToken = (token) => token?.domain === "DDL_TOKEN"
   && (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value) || /^"(?:[^"]|"")+"$/u.test(token.value));
 
-const checkCollationTokenIndexes = (tokens) => {
-  const indexes = new Set();
+const setCheckContextCategory = (categories, indexes, category) => {
+  const resolvedCategory = indexes.some((index) => categories.has(index) && categories.get(index) !== category)
+    ? "OTHER"
+    : category;
+  for (const index of indexes) categories.set(index, resolvedCategory);
+};
+
+const checkContextualTokenCategories = (tokens) => {
+  const categories = new Map();
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token?.domain !== "DDL_TOKEN" || !/^collate$/iu.test(token.value)) continue;
-    if (!isCheckIdentifierToken(tokens[index + 1])) continue;
-    if (tokens[index + 2]?.value === ".") {
-      if (!isCheckIdentifierToken(tokens[index + 3]) || tokens[index + 4]?.value === ".") continue;
-      indexes.add(index);
-      indexes.add(index + 1);
-      indexes.add(index + 2);
-      indexes.add(index + 3);
+    if (!isCheckIdentifierToken(tokens[index + 1])) {
+      setCheckContextCategory(categories, [index], "OTHER");
       continue;
     }
-    indexes.add(index);
-    indexes.add(index + 1);
+    if (tokens[index + 2]?.value !== ".") {
+      setCheckContextCategory(categories, [index, index + 1], "COLLATION");
+      continue;
+    }
+    const span = [index, index + 1, index + 2];
+    if (isCheckIdentifierToken(tokens[index + 3])) span.push(index + 3);
+    if (!isCheckIdentifierToken(tokens[index + 3]) || tokens[index + 4]?.value === ".") {
+      let cursor = index + 4;
+      while (tokens[cursor]?.value === "." || isCheckIdentifierToken(tokens[cursor])) {
+        span.push(cursor);
+        cursor += 1;
+      }
+      setCheckContextCategory(categories, span, "OTHER");
+      continue;
+    }
+    setCheckContextCategory(categories, span, "COLLATION");
   }
-  return indexes;
+  for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
+    if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;
+    const terminalIndex = parenthesisIndex - 1;
+    if (!isCheckIdentifierToken(tokens[terminalIndex])) {
+      if (tokens[terminalIndex]?.value !== ".") continue;
+      const span = [terminalIndex];
+      let cursor = terminalIndex - 1;
+      while (cursor >= 0 && (tokens[cursor]?.value === "." || isCheckIdentifierToken(tokens[cursor]))) {
+        span.unshift(cursor);
+        cursor -= 1;
+      }
+      setCheckContextCategory(categories, span, "OTHER");
+      continue;
+    }
+    const terminal = tokens[terminalIndex];
+    const terminalNormalized = terminal.value.toLowerCase();
+    const terminalIsKeyword = !terminal.value.startsWith('"')
+      && (CHECK_OPERATOR_WORDS.has(terminalNormalized) || BUILTIN_TYPE_NAMES.has(terminalNormalized));
+    if (tokens[terminalIndex - 1]?.value !== ".") {
+      if (!terminalIsKeyword) setCheckContextCategory(categories, [terminalIndex], "FUNCTION");
+      continue;
+    }
+    const span = [terminalIndex - 1, terminalIndex];
+    if (isCheckIdentifierToken(tokens[terminalIndex - 2])) span.unshift(terminalIndex - 2);
+    if (
+      terminalIsKeyword
+      || !isCheckIdentifierToken(tokens[terminalIndex - 2])
+      || tokens[terminalIndex - 3]?.value === "."
+    ) {
+      let cursor = terminalIndex - 3;
+      while (cursor >= 0 && (tokens[cursor]?.value === "." || isCheckIdentifierToken(tokens[cursor]))) {
+        span.unshift(cursor);
+        cursor -= 1;
+      }
+      setCheckContextCategory(categories, span, "OTHER");
+      continue;
+    }
+    setCheckContextCategory(categories, span, "FUNCTION");
+  }
+  return categories;
 };
 
-const checkEditCategory = (tokens, collationTokenIndexes, index) => {
+const checkEditCategory = (tokens, contextualTokenCategories, index) => {
   const token = tokens[index];
   if (token.domain === "STRING_LITERAL") return "STRING_LITERAL";
   if (token.domain !== "DDL_TOKEN") return "OTHER";
   if (token.value === "(" || token.value === ")") return "PARENTHESIS";
   if (token.value === "::") return "CAST_OPERATOR";
-  if (collationTokenIndexes.has(index)) return "COLLATION";
+  if (contextualTokenCategories.has(index)) return contextualTokenCategories.get(index);
   if (/^"(?:[^"]|"")+"$/u.test(token.value)) {
     return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
   }
@@ -2247,8 +2302,8 @@ export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
   }
   schemaTokenDigest(sourceTokens);
   schemaTokenDigest(destinationTokens);
-  const sourceCollationTokenIndexes = checkCollationTokenIndexes(sourceTokens);
-  const destinationCollationTokenIndexes = checkCollationTokenIndexes(destinationTokens);
+  const sourceContextualTokenCategories = checkContextualTokenCategories(sourceTokens);
+  const destinationContextualTokenCategories = checkContextualTokenCategories(destinationTokens);
   const sourceUnwrapped = unwrapCheckExpression(sourceTokens);
   const destinationUnwrapped = unwrapCheckExpression(destinationTokens);
   if (
@@ -2324,21 +2379,21 @@ export const buildUniqueCheckTokenEdit = (sourceTokens, destinationTokens) => {
       && destinationIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex - 1] + 1
     ) {
-      sourceOnly[checkEditCategory(sourceTokens, sourceCollationTokenIndexes, sourceIndex - 1)] += 1;
-      destinationOnly[checkEditCategory(destinationTokens, destinationCollationTokenIndexes, destinationIndex - 1)] += 1;
+      sourceOnly[checkEditCategory(sourceTokens, sourceContextualTokenCategories, sourceIndex - 1)] += 1;
+      destinationOnly[checkEditCategory(destinationTokens, destinationContextualTokenCategories, destinationIndex - 1)] += 1;
       sourceIndex -= 1;
       destinationIndex -= 1;
     } else if (
       sourceIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex - 1][destinationIndex] + 1
     ) {
-      sourceOnly[checkEditCategory(sourceTokens, sourceCollationTokenIndexes, sourceIndex - 1)] += 1;
+      sourceOnly[checkEditCategory(sourceTokens, sourceContextualTokenCategories, sourceIndex - 1)] += 1;
       sourceIndex -= 1;
     } else if (
       destinationIndex > 0
       && costs[sourceIndex][destinationIndex] === costs[sourceIndex][destinationIndex - 1] + 1
     ) {
-      destinationOnly[checkEditCategory(destinationTokens, destinationCollationTokenIndexes, destinationIndex - 1)] += 1;
+      destinationOnly[checkEditCategory(destinationTokens, destinationContextualTokenCategories, destinationIndex - 1)] += 1;
       destinationIndex -= 1;
     } else {
       fail("CHECK_TOKEN_EDIT_BACKTRACK_FAILED");
