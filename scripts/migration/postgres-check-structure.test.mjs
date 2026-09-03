@@ -81,6 +81,15 @@ describe("known PostgreSQL CHECK structural proof", () => {
     }));
   });
 
+  it("keeps equal-count regroupings outside the known diagnostic shape", async () => {
+    const source = await capture(nested);
+    const destination = await capture(bool("and", variable(1), bool("and", variable(2), variable(3))));
+    expect(compareKnownCheckStructure(source, destination, candidate(), "MATCH")).toEqual(expect.objectContaining({
+      status: "STRUCTURALLY_DIFFERENT", canonicalEqual: true, originalEqual: false,
+      sourceFlattened: 1, destinationFlattened: 1,
+    }));
+  });
+
   it.each([
     ["unknown nodes", nested.replace("{VAR", "{FUNCEXPR")],
     ["duplicate fields", nested.replace(":location -1}", ":location -1 :location -1}")],

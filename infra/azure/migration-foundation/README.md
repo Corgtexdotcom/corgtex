@@ -193,7 +193,10 @@ serialized expression tree and builtin/column bindings for the single known
 `ConstitutionSource_point_contract_check`. If it is later the sole mismatch, the
 destination tree is captured in the existing read-only transaction and the runner
 reports whether the only structural difference is ordered associative AND/OR
-grouping. It discards only validated numeric parser locations; it never reorders,
+grouping with unequal flatten counts, the observed discrepancy's admitted shape.
+Equal-count regroupings remain `STRUCTURALLY_DIFFERENT` with `canonicalEqual: true`;
+that is an out-of-shape diagnostic result, not evidence of different semantics.
+It discards only validated numeric parser locations; it never reorders,
 deduplicates, folds, or normalizes leaves, casts, operators, functions, collations,
 or columns. Trees, bindings, constants, and canonical forms remain process-private.
 Unsupported syntax, non-builtin executable references, limits, binding differences,
