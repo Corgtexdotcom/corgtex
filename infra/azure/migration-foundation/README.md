@@ -187,8 +187,11 @@ and extension ownership are compared only in memory with `search_path` fixed to
 expression differs, the private diagnostic also reports a unique-or-ambiguous
 minimal edit using only fixed token-category counts, fixed expression-node-tag
 deltas, and fixed dependency classes. Collection is two-phase: the broad manifest
-retains only bounded deparsed text, digests, and private snapshot-local locators;
-only the single matched CHECK candidate may proceed through SQL-side expression,
+retains only bounded deparsed text, digests, and private snapshot-local locators.
+The source snapshot is released before target restore; only the single matched CHECK
+candidate may be rebound by its full logical identity in a fresh, short read-only
+transaction after its complete phase-one semantics and locator are revalidated.
+That candidate may then proceed through SQL-side expression,
 tree, dependency, identity-byte, node-count, and token-count limits. Raw expression
 trees never cross the database boundary, and dependency identities, token text,
 positions, identifiers, literals, hashes, and lengths are never serialized.

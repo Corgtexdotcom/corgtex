@@ -1456,7 +1456,7 @@ export const buildSchemaDifferenceDiagnostic = (sourceTokens, destinationTokens)
   };
 };
 
-const constraintCatalogQuery = `
+const constraintCatalogQueryBase = `
   SELECT
     constraint_row.oid::text AS constraint_oid,
     constraint_namespace.nspname AS namespace_name,
@@ -1657,12 +1657,30 @@ const constraintCatalogQuery = `
   WHERE constraint_namespace.nspname <> 'information_schema'
     AND constraint_namespace.nspname !~ '^pg_'
     AND (constraint_row.conrelid <> 0 OR constraint_row.contypid <> 0)
+`;
+
+const constraintCatalogOrder = `
   ORDER BY
     constraint_namespace.nspname COLLATE "C",
     object_kind,
     COALESCE(relation.relname, domain_type.typname) COLLATE "C",
     constraint_row.conname COLLATE "C"
+`;
+
+const constraintCatalogQuery = `${constraintCatalogQueryBase}
+  ${constraintCatalogOrder}
   LIMIT ${MAX_CONSTRAINT_CATALOG_ROWS + 1}
+`;
+
+const constraintCatalogIdentityQuery = `${constraintCatalogQueryBase}
+    AND constraint_namespace.nspname = $1
+    AND constraint_row.conname = $2
+    AND (
+      ($3 = 'TABLE' AND constraint_row.conrelid <> 0 AND relation.relname = $4)
+      OR ($3 = 'DOMAIN' AND constraint_row.contypid <> 0 AND domain_type.typname = $4)
+    )
+  ${constraintCatalogOrder}
+  LIMIT 2
 `;
 
 const checkConstraintPreflightQuery = `
@@ -1959,16 +1977,20 @@ const normalizeConstraintCatalogRow = (row) => {
   };
 };
 
+const normalizeBoundedConstraintCatalogRow = (rawRow) => {
+  if (rawRow.definition_within_limit !== true || rawRow.check_expression_within_limit !== true) {
+    fail("CONSTRAINT_TEXT_LIMIT_EXCEEDED");
+  }
+  return normalizeConstraintCatalogRow(rawRow);
+};
+
 export const collectConstraintCatalogManifest = async (client, failureCode) => {
   try {
     const result = await client.query(constraintCatalogQuery);
     if (result.rows.length > MAX_CONSTRAINT_CATALOG_ROWS) fail("CONSTRAINT_CATALOG_LIMIT_EXCEEDED");
     const manifest = new Map();
     for (const rawRow of result.rows) {
-      if (rawRow.definition_within_limit !== true || rawRow.check_expression_within_limit !== true) {
-        fail("CONSTRAINT_TEXT_LIMIT_EXCEEDED");
-      }
-      const row = normalizeConstraintCatalogRow(rawRow);
+      const row = normalizeBoundedConstraintCatalogRow(rawRow);
       if (manifest.has(row.key)) fail("DUPLICATE_CONSTRAINT_CATALOG_IDENTITY");
       manifest.set(row.key, row);
     }
@@ -2092,6 +2114,63 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
   }
 };
 
+export const collectReboundSourceCheckDetail = async (
+  sourceConfig,
+  manifestEntry,
+  createClient = (config) => new Client(config),
+) => {
+  let client;
+  let transactionOpen = false;
+  try {
+    const identity = JSON.parse(manifestEntry?.key ?? "null");
+    if (
+      !Array.isArray(identity)
+      || identity.length !== 4
+      || !["TABLE", "DOMAIN"].includes(identity[0])
+      || identity.slice(1).some((part) => typeof part !== "string" || part.length === 0)
+    ) return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
+    client = createClient(nodeClientConfig(sourceConfig, "corgtex_rehearsal_source_check_rebind"));
+    await client.connect();
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    transactionOpen = true;
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    await client.query("SET LOCAL transaction_timeout = '60s'");
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '60s'");
+    await client.query("SET LOCAL search_path = pg_catalog");
+    const reboundResult = await client.query(constraintCatalogIdentityQuery, [
+      identity[1],
+      identity[3],
+      identity[0],
+      identity[2],
+    ]);
+    if (reboundResult.rowCount !== 1) return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
+    let rebound;
+    try {
+      rebound = normalizeBoundedConstraintCatalogRow(reboundResult.rows[0]);
+    } catch {
+      return checkDetailFailure("SOURCE_REBIND_DRIFT", "REBIND");
+    }
+    if (rebound.key !== manifestEntry.key || rebound.type !== "CHECK") {
+      return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
+    }
+    if (
+      rebound.diagnostic.constraintOid !== manifestEntry.diagnostic.constraintOid
+      || !same(rebound.semantics, manifestEntry.semantics)
+    ) return checkDetailFailure("SOURCE_REBIND_DRIFT", "REBIND");
+    const detail = await collectCheckConstraintDetail(client, rebound);
+    if (detail.ok !== true) return detail;
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return detail;
+  } catch {
+    return checkDetailFailure("COLLECTION_UNAVAILABLE", "REBIND");
+  } finally {
+    if (transactionOpen) await client?.query("ROLLBACK").catch(() => {});
+    await client?.end().catch(() => {});
+  }
+};
+
 const emptyConstraintCounts = () => Object.fromEntries([...CONSTRAINT_TYPES.values()].map((type) => [type, 0]));
 
 const emptyCheckEditCounts = () => Object.fromEntries(CHECK_EDIT_CATEGORIES.map((category) => [category, 0]));
@@ -2107,9 +2186,12 @@ const checkEditCategory = (tokens, index) => {
   const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
   const previous = tokens[index - 1]?.value?.replace(/^"|"$/gu, "").toLowerCase();
   if (normalized === "collate" || previous === "collate") return "COLLATION";
+  if (/^"(?:[^"]|"")+"$/u.test(token.value)) {
+    return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
+  }
   if (BUILTIN_TYPE_NAMES.has(normalized)) return "BUILTIN_TYPE";
   if (isSchemaOperator(token.value) || CHECK_OPERATOR_WORDS.has(normalized)) return "OPERATOR";
-  if (/^"(?:[^"]|"")+"$/u.test(token.value) || /^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {
+  if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {
     return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
   }
   return "OTHER";
@@ -2806,6 +2888,8 @@ export async function runPostgresRestoreRehearsal(options) {
       sourceLargeObjects,
       "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
     );
+    await sourceClient.query("COMMIT");
+    transactionOpen = false;
     await restoreArchiveSections({
       tempDir,
       clientFiles,
@@ -2861,7 +2945,7 @@ export async function runPostgresRestoreRehearsal(options) {
           destinationConstraintManifest,
         );
         const checkDetails = checkCandidate === null ? null : {
-          source: await collectCheckConstraintDetail(sourceClient, checkCandidate.source),
+          source: await collectReboundSourceCheckDetail(sourceConfig, checkCandidate.source),
           destination: await collectCheckConstraintDetail(destinationClient, checkCandidate.destination),
         };
         writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
@@ -2878,8 +2962,6 @@ export async function runPostgresRestoreRehearsal(options) {
       } else if (schemaDifferenceDiagnostic !== null) {
         writePrivateJson(`${artifactDir}/schema-diagnostic.json`, schemaDifferenceDiagnostic);
       }
-      await sourceClient.query("COMMIT");
-      transactionOpen = false;
       destinationEvidence = await collectDatabaseEvidence(
         destinationClient,
         { algorithm: destinationSchema.algorithm, digest: destinationSchema.digest },

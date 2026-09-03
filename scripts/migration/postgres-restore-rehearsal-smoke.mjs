@@ -12,6 +12,7 @@ import {
   cleanupScratchDatabase,
   collectCheckConstraintDetail,
   collectConstraintCatalogManifest,
+  collectReboundSourceCheckDetail,
   findSingleCheckExpressionMismatch,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
@@ -29,6 +30,7 @@ const WRONG_TARGET_TLS_HOST = "wrong-target.rehearsal.test";
 const CHECK_COLLECTION_FAILURES = new Map(
   ["SOURCE", "DESTINATION"].flatMap((side) => [
     [JSON.stringify([side, "IDENTITY_REBIND_FAILED", "REBIND", null]), `${side}_IDENTITY_REBIND_FAILED_REBIND`],
+    [JSON.stringify([side, "SOURCE_REBIND_DRIFT", "REBIND", null]), `${side}_SOURCE_REBIND_DRIFT_REBIND`],
     ...[
       "REBIND", "PREFLIGHT", "EXPRESSION_FETCH", "DEPENDENCY_PREFLIGHT",
       "DEPENDENCY_FETCH", "NODE_COUNT", "TOKENIZE",
@@ -562,10 +564,7 @@ const main = async () => {
     }
 
     const targetConstraintMutator = new Client(config(targetPort, scratchName));
-    const sourceConstraintDetailReadback = new Client(config(sourcePort, "source"));
     await targetConstraintMutator.connect();
-    await sourceConstraintDetailReadback.connect();
-    let changedSourceConstraintManifest;
     let changedTargetConstraintManifest;
     let changedCheckDetails;
     try {
@@ -577,36 +576,28 @@ const main = async () => {
           CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-delta'))`,
       );
       await targetConstraintMutator.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      await sourceConstraintDetailReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await targetConstraintMutator.query("SET LOCAL search_path = pg_catalog");
-      await sourceConstraintDetailReadback.query("SET LOCAL search_path = pg_catalog");
-      changedSourceConstraintManifest = await collectConstraintCatalogManifest(
-        sourceConstraintDetailReadback,
-        "SOURCE_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
-      );
       changedTargetConstraintManifest = await collectConstraintCatalogManifest(
         targetConstraintMutator,
         "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
       );
       const candidate = findSingleCheckExpressionMismatch(
-        changedSourceConstraintManifest,
+        sourceConstraintManifest,
         changedTargetConstraintManifest,
       );
       if (candidate === null) fail("CONSTRAINT_CHECK_DIAGNOSTIC_CANDIDATE_MISSING");
       changedCheckDetails = {
-        source: await collectCheckConstraintDetail(sourceConstraintDetailReadback, candidate.source),
+        source: await collectReboundSourceCheckDetail(sourceConfig, candidate.source),
         destination: await collectCheckConstraintDetail(targetConstraintMutator, candidate.destination),
       };
       assertCheckCollection("SOURCE", changedCheckDetails.source);
       assertCheckCollection("DESTINATION", changedCheckDetails.destination);
-      await sourceConstraintDetailReadback.query("COMMIT");
       await targetConstraintMutator.query("COMMIT");
     } finally {
-      await sourceConstraintDetailReadback.end().catch(() => {});
       await targetConstraintMutator.end().catch(() => {});
     }
     const changedConstraintDiagnostic = buildConstraintSemanticDiagnostic(
-      changedSourceConstraintManifest,
+      sourceConstraintManifest,
       changedTargetConstraintManifest,
       "MATCH",
       changedCheckDetails,

@@ -205,7 +205,12 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain('classification: "EXECUTABLE_SCHEMA_DIFFERENCE"');
     expect(runner).toContain('classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY"');
     expect(runner).toContain('`${artifactDir}/schema-diagnostic.json`');
-    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(2);
+    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(3);
+    expect(runner.indexOf('await sourceClient.query("COMMIT");'))
+      .toBeLessThan(runner.indexOf("await restoreArchiveSections({"));
+    expect(runner).toContain("constraintCatalogIdentityQuery");
+    expect(runner).toContain("LIMIT 2");
+    expect(runner).toContain('"SOURCE_REBIND_DRIFT"');
     expect(runner).toContain("FROM pg_catalog.pg_constraint AS constraint_row");
     expect(runner).toContain("pg_catalog.pg_get_constraintdef(constraint_row.oid, false)");
     expect(runner).toContain("pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)");

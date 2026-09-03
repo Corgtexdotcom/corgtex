@@ -14,6 +14,7 @@ import {
   classifyCollationVersionRelation,
   collectCheckConstraintDetail,
   collectConstraintCatalogManifest,
+  collectReboundSourceCheckDetail,
   collectLargeObjects,
   inspectLargeObjectAccess,
   isCurrentCollationVersion,
@@ -479,6 +480,21 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(JSON.stringify(edit)).not.toContain("private");
     });
 
+    it.each([
+      ['"order-total"', '"order_total"', "COLUMN_REFERENCE"],
+      ['"a+b"', '"a_b"', "COLUMN_REFERENCE"],
+      ['"<>"', '"comparison"', "COLUMN_REFERENCE"],
+      ['"a""b"', '"a_b"', "COLUMN_REFERENCE"],
+      ['"private-function"(private_column)', '"other_function"(private_column)', "FUNCTION"],
+    ])("classifies quoted identifier edits without treating embedded operators as syntax", (source, destination, category) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly[category]).toBe(1);
+      expect(edit.destinationOnly[category]).toBe(1);
+      expect(edit.sourceOnly.OPERATOR).toBe(0);
+      expect(edit.destinationOnly.OPERATOR).toBe(0);
+    });
+
     it("bounds CHECK edit analysis before allocating its comparison matrix", () => {
       const oversized = Array.from({ length: 1025 }, () => ({ domain: "DDL_TOKEN", value: "private" }));
       expect(buildUniqueCheckTokenEdit(oversized, [{ domain: "DDL_TOKEN", value: "other" }])).toEqual({
@@ -587,6 +603,68 @@ describe("PostgreSQL restore rehearsal runner", () => {
         limitKind,
       });
       expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it("rebinds the source CHECK by logical identity and validates all phase-one semantics before detail", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column <> 'private-literal'::text)";
+      const commands = [];
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql, values) => {
+          commands.push(sql);
+          if (/LIMIT 2\s*$/u.test(sql)) return { rowCount: 1, rows: [constraintCatalogRow()] };
+          if (sql.includes("AS expression_bytes")) return { rowCount: 1, rows: [{
+            namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+            relation_namespace_name: "private_namespace", relation_name: "private_relation",
+            domain_namespace_name: null, domain_name: null, type: "c",
+            expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+            dependency_count: "0", node_count: "1",
+          }] };
+          if (sql.includes("max(GREATEST")) return { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] };
+          if (sql.includes("AS check_expression")) return { rowCount: 1, rows: [{ check_expression: expression }] };
+          if (sql.includes("AS dependency_type")) return { rowCount: 0, rows: [] };
+          if (sql.includes("AS node_tag")) return { rowCount: 1, rows: [{ node_tag: "OPEXPR", node_count: "1" }] };
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      const detail = await collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client);
+      expect(detail.ok).toBe(true);
+      expect(commands.indexOf("COMMIT")).toBeGreaterThan(commands.findIndex((sql) => sql.includes("AS node_tag")));
+      expect(commands).not.toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    it("fails closed on source CHECK recreation before issuing any detail query", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const commands = [];
+      const client = {
+        connect: vi.fn(async () => {}),
+        end: vi.fn(async () => {}),
+        query: vi.fn(async (sql) => {
+          commands.push(sql);
+          if (/LIMIT 2\s*$/u.test(sql)) {
+            return { rowCount: 1, rows: [constraintCatalogRow({ constraint_oid: "124" })] };
+          }
+          return { rowCount: null, rows: [] };
+        }),
+      };
+      await expect(collectReboundSourceCheckDetail({
+        host: "127.0.0.1", port: 5432, user: "reader", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      }, entry, () => client)).resolves.toEqual({
+        ok: false,
+        status: "SOURCE_REBIND_DRIFT",
+        stage: "REBIND",
+        limitKind: null,
+      });
+      expect(commands.some((sql) => sql.includes("AS expression_bytes"))).toBe(false);
+      expect(commands).toContain("ROLLBACK");
+      expect(client.end).toHaveBeenCalledOnce();
     });
 
     it("classifies identity, type, parentage, and foreign-key action mismatches", async () => {
