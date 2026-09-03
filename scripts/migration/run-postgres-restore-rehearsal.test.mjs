@@ -671,6 +671,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ["private_column::bit varying(8)", "private_column::bit(8)"],
       ["private_column::CHARACTER VARYING(10)", "private_column::CHARACTER(10)"],
       ["private_column::character varying", "private_column::character"],
+      ["private_column::character varying IS NOT NULL", "private_column::character IS NOT NULL"],
       ["private_column::character varying(10)[]", "private_column::character(10)[]"],
     ])("classifies PG18 multiword built-in type edits without values", (source, destination) => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));

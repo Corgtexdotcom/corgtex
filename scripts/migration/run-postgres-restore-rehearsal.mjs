@@ -2287,7 +2287,11 @@ const checkContextualTokenCategories = (tokens) => {
         setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "OTHER");
         continue;
       }
-      if (isCheckIdentifierToken(tokens[afterPhrase])) {
+      if (
+        isCheckIdentifierToken(tokens[afterPhrase])
+        && !CHECK_OPERATOR_WORDS.has(tokens[afterPhrase].value.toLowerCase())
+        && !isUnquotedCheckWord(tokens[afterPhrase], "collate")
+      ) {
         setMalformedCastIdentity(categories, tokens, castIndex);
         continue;
       }
