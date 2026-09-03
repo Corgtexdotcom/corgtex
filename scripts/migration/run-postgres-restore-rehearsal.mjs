@@ -161,6 +161,7 @@ const CHECK_OPERATOR_WORDS = new Set([
   "all", "and", "any", "between", "false", "ilike", "in", "is", "like", "not",
   "null", "operator", "or", "similar", "true",
 ]);
+const CHECK_SQL_CONSTRUCTS = new Set(["coalesce", "greatest", "least", "nullif"]);
 const LOCALE_PROVIDERS = new Map([
   ["b", "builtin"],
   ["c", "libc"],
@@ -1596,37 +1597,37 @@ const constraintCatalogQueryBase = `
       JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
       JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
     ), '[]'::jsonb) AS exclusion_operators,
-    CASE WHEN pg_catalog.octet_length(CASE
+    CASE WHEN pg_catalog.octet_length(pg_catalog.convert_to(CASE
       WHEN constraint_row.contype = 't'
       THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
       ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
-    END) <= ${MAX_CONSTRAINT_TEXT_BYTES} THEN CASE
+    END, 'UTF8')) <= ${MAX_CONSTRAINT_TEXT_BYTES} THEN CASE
       WHEN constraint_row.contype = 't'
       THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
       ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
     END ELSE NULL END AS definition,
-    pg_catalog.octet_length(CASE
+    pg_catalog.octet_length(pg_catalog.convert_to(CASE
       WHEN constraint_row.contype = 't'
       THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
       ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
-    END) <= ${MAX_CONSTRAINT_TEXT_BYTES} AS definition_within_limit,
+    END, 'UTF8')) <= ${MAX_CONSTRAINT_TEXT_BYTES} AS definition_within_limit,
     CASE WHEN constraint_row.contype <> 'c' THEN NULL
-      WHEN pg_catalog.octet_length(pg_catalog.pg_get_expr(
+      WHEN pg_catalog.octet_length(pg_catalog.convert_to(pg_catalog.pg_get_expr(
         constraint_row.conbin,
         constraint_row.conrelid,
         false
-      )) <= ${MAX_CONSTRAINT_TEXT_BYTES}
+      ), 'UTF8')) <= ${MAX_CONSTRAINT_TEXT_BYTES}
       THEN pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)
       ELSE NULL
     END AS check_expression,
     CASE
       WHEN constraint_row.contype <> 'c' THEN true
       WHEN constraint_row.contype = 'c'
-      THEN pg_catalog.octet_length(pg_catalog.pg_get_expr(
+      THEN pg_catalog.octet_length(pg_catalog.convert_to(pg_catalog.pg_get_expr(
         constraint_row.conbin,
         constraint_row.conrelid,
         false
-      )) <= ${MAX_CONSTRAINT_TEXT_BYTES}
+      ), 'UTF8')) <= ${MAX_CONSTRAINT_TEXT_BYTES}
     END AS check_expression_within_limit
   FROM pg_catalog.pg_constraint AS constraint_row
   JOIN pg_catalog.pg_namespace AS constraint_namespace ON constraint_namespace.oid = constraint_row.connamespace
@@ -1693,11 +1694,12 @@ const checkConstraintPreflightQuery = `
     domain_namespace.nspname AS domain_namespace_name,
     domain_type.typname AS domain_name,
     constraint_row.contype::text AS type,
-    pg_catalog.octet_length(pg_catalog.pg_get_expr(
+    pg_catalog.current_setting('client_encoding') AS client_encoding,
+    pg_catalog.octet_length(pg_catalog.convert_to(pg_catalog.pg_get_expr(
       constraint_row.conbin,
       constraint_row.conrelid,
       false
-    ))::text AS expression_bytes,
+    ), 'UTF8'))::text AS expression_bytes,
     pg_catalog.octet_length(constraint_row.conbin::text)::text AS tree_bytes,
     (SELECT pg_catalog.count(*)::text
       FROM pg_catalog.pg_depend AS dependency
@@ -1742,18 +1744,18 @@ const checkConstraintDependencyPreflightQuery = `
   )
   SELECT
     COALESCE(pg_catalog.max(GREATEST(
-      pg_catalog.octet_length(dependency_type),
-      pg_catalog.octet_length(type),
-      pg_catalog.octet_length(COALESCE(schema, '')),
-      pg_catalog.octet_length(COALESCE(name, '')),
-      pg_catalog.octet_length(identity)
+      pg_catalog.octet_length(pg_catalog.convert_to(dependency_type, 'UTF8')),
+      pg_catalog.octet_length(pg_catalog.convert_to(type, 'UTF8')),
+      pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(schema, ''), 'UTF8')),
+      pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(name, ''), 'UTF8')),
+      pg_catalog.octet_length(pg_catalog.convert_to(identity, 'UTF8'))
     )), 0)::text AS max_field_bytes,
     COALESCE(pg_catalog.sum(
-      pg_catalog.octet_length(dependency_type)
-      + pg_catalog.octet_length(type)
-      + pg_catalog.octet_length(COALESCE(schema, ''))
-      + pg_catalog.octet_length(COALESCE(name, ''))
-      + pg_catalog.octet_length(identity)
+      pg_catalog.octet_length(pg_catalog.convert_to(dependency_type, 'UTF8'))
+      + pg_catalog.octet_length(pg_catalog.convert_to(type, 'UTF8'))
+      + pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(schema, ''), 'UTF8'))
+      + pg_catalog.octet_length(pg_catalog.convert_to(COALESCE(name, ''), 'UTF8'))
+      + pg_catalog.octet_length(pg_catalog.convert_to(identity, 'UTF8'))
     ), 0)::text AS total_bytes
   FROM dependency_identity
 `;
@@ -2046,6 +2048,9 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
     if (preflight.rowCount !== 1 || checkConstraintIdentityKey(preflight.rows[0]) !== manifestEntry.key) {
       return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
     }
+    if (preflight.rows[0].client_encoding !== "UTF8") {
+      return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+    }
     const expressionBytes = parseDiagnosticCount(preflight.rows[0].expression_bytes);
     const treeBytes = parseDiagnosticCount(preflight.rows[0].tree_bytes);
     const dependencyCount = parseDiagnosticCount(preflight.rows[0].dependency_count);
@@ -2081,6 +2086,8 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
     stage = "DEPENDENCY_FETCH";
     const dependencyResult = await client.query(checkConstraintDependencyQuery, [oid]);
     if (dependencyResult.rows.length !== dependencyCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+    let fetchedDependencyMaxFieldBytes = 0;
+    let fetchedDependencyTotalBytes = 0;
     const dependencies = dependencyResult.rows.map((row) => {
       const identity = [row.dependency_type, row.type, row.schema, row.name, row.identity];
       if (
@@ -2093,8 +2100,15 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
         || typeof identity[4] !== "string"
         || identity[4].length === 0
       ) throw new Error("INVALID_DEPENDENCY_IDENTITY");
+      const fieldBytes = identity.map((value) => Buffer.byteLength(value ?? "", "utf8"));
+      fetchedDependencyMaxFieldBytes = Math.max(fetchedDependencyMaxFieldBytes, ...fieldBytes);
+      fetchedDependencyTotalBytes += fieldBytes.reduce((total, value) => total + value, 0);
       return identity;
     });
+    if (
+      fetchedDependencyMaxFieldBytes !== maxFieldBytes
+      || fetchedDependencyTotalBytes !== totalBytes
+    ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
 
     stage = "NODE_COUNT";
     const nodeResult = await client.query(checkConstraintNodeQuery, [oid]);
@@ -2137,6 +2151,7 @@ export const collectReboundSourceCheckDetail = async (
     await client.query("SET LOCAL statement_timeout = '30s'");
     await client.query("SET LOCAL transaction_timeout = '60s'");
     await client.query("SET LOCAL idle_in_transaction_session_timeout = '60s'");
+    await client.query("SET LOCAL client_encoding = 'UTF8'");
     await client.query("SET LOCAL search_path = pg_catalog");
     const reboundResult = await client.query(constraintCatalogIdentityQuery, [
       identity[1],
@@ -2229,47 +2244,6 @@ const setMalformedCastIdentity = (categories, tokens, castIndex) => {
 
 const checkContextualTokenCategories = (tokens) => {
   const categories = new Map();
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    const isOperatorKeyword = isUnquotedCheckWord(token, "operator");
-    const isQuotedOperatorKeyword = token?.domain === "DDL_TOKEN" && /^"operator"$/iu.test(token.value);
-    if (!isOperatorKeyword && !isQuotedOperatorKeyword) continue;
-    const valid = isOperatorKeyword
-      && tokens[index + 1]?.value === "("
-      && isCheckIdentifierToken(tokens[index + 2])
-      && tokens[index + 3]?.value === "."
-      && isCheckOperatorToken(tokens[index + 4])
-      && tokens[index + 5]?.value === ")";
-    if (!valid) {
-      setMalformedDelimitedCheckContext(categories, tokens, index);
-      continue;
-    }
-    setCheckContextCategory(categories, [index, index + 2, index + 3, index + 4], "OPERATOR");
-  }
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (token?.domain !== "DDL_TOKEN" || !/^collate$/iu.test(token.value)) continue;
-    if (!isCheckIdentifierToken(tokens[index + 1])) {
-      setCheckContextCategory(categories, [index], "OTHER");
-      continue;
-    }
-    if (tokens[index + 2]?.value !== ".") {
-      setCheckContextCategory(categories, [index, index + 1], "COLLATION");
-      continue;
-    }
-    const span = [index, index + 1, index + 2];
-    if (isCheckIdentifierToken(tokens[index + 3])) span.push(index + 3);
-    if (!isCheckIdentifierToken(tokens[index + 3]) || tokens[index + 4]?.value === ".") {
-      let cursor = index + 4;
-      while (tokens[cursor]?.value === "." || isCheckIdentifierToken(tokens[cursor])) {
-        span.push(cursor);
-        cursor += 1;
-      }
-      setCheckContextCategory(categories, span, "OTHER");
-      continue;
-    }
-    setCheckContextCategory(categories, span, "COLLATION");
-  }
   for (let castIndex = 0; castIndex < tokens.length; castIndex += 1) {
     if (tokens[castIndex]?.domain !== "DDL_TOKEN" || tokens[castIndex].value !== "::") continue;
     const first = tokens[castIndex + 1];
@@ -2328,6 +2302,47 @@ const checkContextualTokenCategories = (tokens) => {
     }
     setCheckContextCategory(categories, [castIndex + 1], "BUILTIN_TYPE");
   }
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      !isUnquotedCheckWord(tokens[index], "operator")
+      || tokens[index + 1]?.value !== "("
+      || tokens[index - 1]?.value === "."
+      || categories.has(index)
+    ) continue;
+    const valid = isCheckIdentifierToken(tokens[index + 2])
+      && tokens[index + 3]?.value === "."
+      && isCheckOperatorToken(tokens[index + 4])
+      && tokens[index + 5]?.value === ")";
+    if (!valid) {
+      setMalformedDelimitedCheckContext(categories, tokens, index);
+      continue;
+    }
+    setCheckContextCategory(categories, [index, index + 2, index + 3, index + 4], "OPERATOR");
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token?.domain !== "DDL_TOKEN" || !/^collate$/iu.test(token.value)) continue;
+    if (!isCheckIdentifierToken(tokens[index + 1])) {
+      setCheckContextCategory(categories, [index], "OTHER");
+      continue;
+    }
+    if (tokens[index + 2]?.value !== ".") {
+      setCheckContextCategory(categories, [index, index + 1], "COLLATION");
+      continue;
+    }
+    const span = [index, index + 1, index + 2];
+    if (isCheckIdentifierToken(tokens[index + 3])) span.push(index + 3);
+    if (!isCheckIdentifierToken(tokens[index + 3]) || tokens[index + 4]?.value === ".") {
+      let cursor = index + 4;
+      while (tokens[cursor]?.value === "." || isCheckIdentifierToken(tokens[cursor])) {
+        span.push(cursor);
+        cursor += 1;
+      }
+      setCheckContextCategory(categories, span, "OTHER");
+      continue;
+    }
+    setCheckContextCategory(categories, span, "COLLATION");
+  }
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;
     const terminalIndex = parenthesisIndex - 1;
@@ -2345,10 +2360,14 @@ const checkContextualTokenCategories = (tokens) => {
     const terminal = tokens[terminalIndex];
     if (categories.get(terminalIndex) === "BUILTIN_TYPE") continue;
     const terminalNormalized = terminal.value.toLowerCase();
+    const terminalIsSqlConstruct = !terminal.value.startsWith('"')
+      && CHECK_SQL_CONSTRUCTS.has(terminalNormalized);
     const terminalIsKeyword = !terminal.value.startsWith('"')
       && (CHECK_OPERATOR_WORDS.has(terminalNormalized) || BUILTIN_TYPE_NAMES.has(terminalNormalized));
     if (tokens[terminalIndex - 1]?.value !== ".") {
-      if (tokens[terminalIndex - 1]?.value === "::") {
+      if (terminalIsSqlConstruct) {
+        setCheckContextCategory(categories, [terminalIndex], "OTHER");
+      } else if (tokens[terminalIndex - 1]?.value === "::") {
         setCheckContextCategory(categories, [terminalIndex], "OTHER");
       } else if (tokens[terminalIndex - 2]?.value === "::" && isCheckIdentifierToken(tokens[terminalIndex - 1])) {
         setCheckContextCategory(categories, [terminalIndex - 1, terminalIndex], "OTHER");
@@ -2360,8 +2379,7 @@ const checkContextualTokenCategories = (tokens) => {
     const span = [terminalIndex - 1, terminalIndex];
     if (isCheckIdentifierToken(tokens[terminalIndex - 2])) span.unshift(terminalIndex - 2);
     if (
-      terminalIsKeyword
-      || !isCheckIdentifierToken(tokens[terminalIndex - 2])
+      !isCheckIdentifierToken(tokens[terminalIndex - 2])
       || tokens[terminalIndex - 3]?.value === "."
       || tokens[terminalIndex - 3]?.value === "::"
     ) {
@@ -2981,6 +2999,7 @@ export async function runPostgresRestoreRehearsal(options) {
     await sourceClient.query("SET LOCAL transaction_timeout = '0'");
     await sourceClient.query("SET LOCAL idle_in_transaction_session_timeout = '0'");
     await sourceClient.query("SET LOCAL timezone = 'UTC'");
+    await sourceClient.query("SET LOCAL client_encoding = 'UTF8'");
     await sourceClient.query("SET LOCAL search_path = pg_catalog");
     const timeouts = await querySingle(sourceClient, `
       SELECT
@@ -3131,6 +3150,7 @@ export async function runPostgresRestoreRehearsal(options) {
       await destinationClient.query("SET LOCAL transaction_timeout = '0'");
       await destinationClient.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
       await destinationClient.query("SET LOCAL timezone = 'UTC'");
+      await destinationClient.query("SET LOCAL client_encoding = 'UTF8'");
       await destinationClient.query("SET LOCAL search_path = pg_catalog");
       const destinationLargeObjects = await inspectLargeObjectAccess(
         destinationClient,

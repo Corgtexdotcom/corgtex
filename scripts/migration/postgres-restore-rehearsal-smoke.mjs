@@ -240,7 +240,49 @@ const main = async () => {
     await sourceBootstrap.query(
       "CREATE DATABASE source TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER 'builtin' LC_COLLATE 'C' LC_CTYPE 'C' BUILTIN_LOCALE 'C.UTF-8'",
     );
+    await sourceBootstrap.query(
+      "CREATE DATABASE latin1_bytes TEMPLATE template0 ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C'",
+    );
     await sourceBootstrap.end();
+
+    const latin1Admin = new Client(config(sourcePort, "latin1_bytes"));
+    await latin1Admin.connect();
+    try {
+      await latin1Admin.query(`
+        CREATE TABLE "Utf8BoundaryFixture" (
+          "caf\u00e9" text,
+          CONSTRAINT "Utf8BoundaryFixture_check" CHECK ("caf\u00e9" <> '\u00e9')
+        )
+      `);
+      await latin1Admin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await latin1Admin.query("SET LOCAL client_encoding = 'UTF8'");
+      await latin1Admin.query("SET LOCAL search_path = pg_catalog");
+      const latin1Manifest = await collectConstraintCatalogManifest(
+        latin1Admin,
+        "LATIN1_CONSTRAINT_CATALOG_FAILED",
+      );
+      const latin1Entry = [...latin1Manifest.values()].find((entry) => entry.type === "CHECK");
+      if (latin1Entry === undefined) fail("LATIN1_CHECK_MISSING");
+      const byteProof = (await latin1Admin.query(`
+        SELECT
+          pg_catalog.octet_length(pg_catalog.pg_get_expr(conbin, conrelid, false))::integer AS database_bytes,
+          pg_catalog.octet_length(pg_catalog.convert_to(
+            pg_catalog.pg_get_expr(conbin, conrelid, false),
+            'UTF8'
+          ))::integer AS utf8_bytes
+        FROM pg_catalog.pg_constraint
+        WHERE oid = $1::pg_catalog.oid AND contype = 'c'
+      `, [latin1Entry.diagnostic.constraintOid])).rows[0];
+      if (!(byteProof?.utf8_bytes > byteProof?.database_bytes)) fail("LATIN1_UTF8_BYTE_DIFFERENCE_MISSING");
+      const latin1Detail = await collectCheckConstraintDetail(latin1Admin, latin1Entry);
+      if (latin1Detail.ok !== true) fail("LATIN1_UTF8_BOUNDARY_FAILED");
+      await latin1Admin.query("COMMIT");
+    } catch (error) {
+      await latin1Admin.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      await latin1Admin.end().catch(() => {});
+    }
 
     const sourceAdmin = new Client(config(sourcePort, "source"));
     await sourceAdmin.connect();
@@ -311,12 +353,22 @@ const main = async () => {
         PARTITION OF "PartitionedConstraintFixture" FOR VALUES FROM (0) TO (10);
       CREATE SCHEMA "context fixture";
       CREATE DOMAIN "context fixture"."bounded_text" AS text;
+      CREATE DOMAIN "context fixture"."operator" AS text;
       CREATE FUNCTION "context fixture"."greater_than"(integer, integer) RETURNS boolean
       LANGUAGE sql IMMUTABLE AS 'SELECT $1 > $2';
       CREATE OPERATOR "context fixture".> (
         LEFTARG = integer,
         RIGHTARG = integer,
         FUNCTION = "context fixture"."greater_than"
+      );
+      CREATE SCHEMA "operator";
+      CREATE DOMAIN "operator"."bounded_text" AS text;
+      CREATE FUNCTION "operator"."greater_than"(integer, integer) RETURNS boolean
+      LANGUAGE sql IMMUTABLE AS 'SELECT $1 > $2';
+      CREATE OPERATOR "operator".> (
+        LEFTARG = integer,
+        RIGHTARG = integer,
+        FUNCTION = "operator"."greater_than"
       );
       CREATE FUNCTION "type_context_varying"(text) RETURNS boolean
       LANGUAGE sql IMMUTABLE AS 'SELECT true';
@@ -335,7 +387,21 @@ const main = async () => {
         CONSTRAINT "QualifiedContextFixture_type_check"
           CHECK (("value"::"context fixture"."bounded_text") IS NOT NULL),
         CONSTRAINT "QualifiedContextFixture_operator_check"
-          CHECK ("amount" OPERATOR("context fixture".>) 0)
+          CHECK ("amount" OPERATOR("context fixture".>) 0),
+        CONSTRAINT "QualifiedContextFixture_operator_type_check"
+          CHECK (("value"::"context fixture"."operator") IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_operator_schema_type_check"
+          CHECK (("value"::"operator"."bounded_text") IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_operator_schema_operator_check"
+          CHECK ("amount" OPERATOR("operator".>) 0),
+        CONSTRAINT "QualifiedContextFixture_coalesce_check"
+          CHECK (COALESCE("amount", 0) >= 0),
+        CONSTRAINT "QualifiedContextFixture_nullif_check"
+          CHECK (NULLIF("amount", 0) IS NULL OR "amount" <> 0),
+        CONSTRAINT "QualifiedContextFixture_greatest_check"
+          CHECK (GREATEST("amount", 0) >= 0),
+        CONSTRAINT "QualifiedContextFixture_least_check"
+          CHECK (LEAST("amount", 0) <= 0)
       );
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
@@ -356,21 +422,34 @@ const main = async () => {
       VALUES ('11111111-1111-4111-8111-111111111111', repeat('a', 64), now(), '20260101000000_init', 1);
     `);
     await sourceAdmin.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await sourceAdmin.query("SET LOCAL client_encoding = 'UTF8'");
     await sourceAdmin.query("SET LOCAL search_path = pg_catalog");
     const typeContextExpressions = (await sourceAdmin.query(`
-      SELECT conname, pg_get_expr(conbin, conrelid) AS expression
+      SELECT
+        conname,
+        pg_get_expr(conbin, conrelid) AS expression,
+        position('{COALESCEEXPR ' IN conbin::text) > 0 AS has_coalesce_node,
+        position('{NULLIFEXPR ' IN conbin::text) > 0 AS has_nullif_node,
+        position('{MINMAXEXPR ' IN conbin::text) > 0 AS has_minmax_node
       FROM pg_constraint
       WHERE conname IN (
         'TypeContextFixture_character_check',
         'TypeContextFixture_bit_check',
         'TypeContextFixture_function_check',
         'QualifiedContextFixture_type_check',
-        'QualifiedContextFixture_operator_check'
+        'QualifiedContextFixture_operator_check',
+        'QualifiedContextFixture_operator_type_check',
+        'QualifiedContextFixture_operator_schema_type_check',
+        'QualifiedContextFixture_operator_schema_operator_check',
+        'QualifiedContextFixture_coalesce_check',
+        'QualifiedContextFixture_nullif_check',
+        'QualifiedContextFixture_greatest_check',
+        'QualifiedContextFixture_least_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 5) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 12) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -451,6 +530,58 @@ const main = async () => {
       || qualifiedOperatorEdit.destinationOnly.COLUMN_REFERENCE !== 0
       || JSON.stringify(qualifiedOperatorEdit).match(/context|greater|private/iu)
     ) fail("QUALIFIED_OPERATOR_CONTEXT_CLASSIFICATION_MISMATCH");
+    for (const [constraintName, pattern, replacement, category] of [
+      [
+        "QualifiedContextFixture_operator_type_check",
+        /\.(?:"operator"|operator)(?=\)|\s)/iu,
+        ".renamed_type",
+        "BUILTIN_TYPE",
+      ],
+      [
+        "QualifiedContextFixture_operator_schema_type_check",
+        /::(?:"operator"|operator)\./iu,
+        "::renamed_schema.",
+        "BUILTIN_TYPE",
+      ],
+      [
+        "QualifiedContextFixture_operator_schema_operator_check",
+        /OPERATOR\((?:"operator"|operator)(?=\.>)/iu,
+        "OPERATOR(renamed_schema",
+        "OPERATOR",
+      ],
+    ]) {
+      const expression = typeContextExpressions.find((row) => row.conname === constraintName)?.expression;
+      if (typeof expression !== "string" || !pattern.test(expression)) fail("OPERATOR_IDENTIFIER_PG18_DEPARSE_MISMATCH");
+      const renamed = expression.replace(pattern, replacement);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly[category] !== 1
+        || edit.destinationOnly[category] !== 1
+        || edit.sourceOnly.COLUMN_REFERENCE !== 0
+        || edit.destinationOnly.COLUMN_REFERENCE !== 0
+        || JSON.stringify(edit).match(/renamed|context|private/iu)
+      ) fail("OPERATOR_IDENTIFIER_CLASSIFICATION_MISMATCH");
+    }
+    for (const [constraintName, sourceName, destinationName, nodeField] of [
+      ["QualifiedContextFixture_coalesce_check", "COALESCE", "NULLIF", "has_coalesce_node"],
+      ["QualifiedContextFixture_nullif_check", "NULLIF", "COALESCE", "has_nullif_node"],
+      ["QualifiedContextFixture_greatest_check", "GREATEST", "LEAST", "has_minmax_node"],
+      ["QualifiedContextFixture_least_check", "LEAST", "GREATEST", "has_minmax_node"],
+    ]) {
+      const row = typeContextExpressions.find((entry) => entry.conname === constraintName);
+      if (typeof row?.expression !== "string" || row[nodeField] !== true) fail("SQL_CONSTRUCT_PG18_NODE_MISMATCH");
+      const renamed = row.expression.replace(new RegExp(`\\b${sourceName}\\b`, "iu"), destinationName);
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(row.expression), tokenizeSchemaDump(renamed));
+      if (
+        edit.status !== "UNIQUE"
+        || edit.sourceOnly.OTHER !== 1
+        || edit.destinationOnly.OTHER !== 1
+        || edit.sourceOnly.FUNCTION !== 0
+        || edit.destinationOnly.FUNCTION !== 0
+        || JSON.stringify(edit).match(/coalesce|nullif|greatest|least|private/iu)
+      ) fail("SQL_CONSTRUCT_CLASSIFICATION_MISMATCH");
+    }
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
     )).rows[0].oid);
@@ -665,6 +796,8 @@ const main = async () => {
     try {
       await sourceConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await targetConstraintReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await sourceConstraintReadback.query("SET LOCAL client_encoding = 'UTF8'");
+      await targetConstraintReadback.query("SET LOCAL client_encoding = 'UTF8'");
       await sourceConstraintReadback.query("SET LOCAL search_path = pg_catalog");
       await targetConstraintReadback.query("SET LOCAL search_path = pg_catalog");
       sourceConstraintManifest = await collectConstraintCatalogManifest(
@@ -702,6 +835,7 @@ const main = async () => {
           CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-delta'))`,
       );
       await targetConstraintMutator.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await targetConstraintMutator.query("SET LOCAL client_encoding = 'UTF8'");
       await targetConstraintMutator.query("SET LOCAL search_path = pg_catalog");
       changedTargetConstraintManifest = await collectConstraintCatalogManifest(
         targetConstraintMutator,

@@ -563,6 +563,33 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      ["COALESCE(private_column, 0)", "NULLIF(private_column, 0)"],
+      ["GREATEST(private_column, 0)", "LEAST(private_column, 0)"],
+      ["coalesce(private_column, 0)", "nullif(private_column, 0)"],
+    ])("classifies closed SQL constructs as syntax rather than functions", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER).toBe(1);
+      expect(edit.destinationOnly.OTHER).toBe(1);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_schema.coalesce(private_column, 0)", "other_schema.coalesce(private_column, 0)"],
+      ["private_schema.operator(private_column)", "other_schema.operator(private_column)"],
+      ['"COALESCE"(private_column, 0)', '"NULLIF"(private_column, 0)'],
+      ['"OPERATOR"(private_column)', '"renamed"(private_column)'],
+    ])("keeps quoted or qualified construct names in FUNCTION", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.FUNCTION).toBeGreaterThan(0);
+      expect(edit.destinationOnly.FUNCTION).toBeGreaterThan(0);
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
       ["private_catalog.private_schema.validate(private_column)", "other_catalog.private_schema.validate(private_column)"],
       [".validate(private_column)", ".other(private_column)"],
       ["private_schema..validate(private_column)", "other_schema..validate(private_column)"],
@@ -578,7 +605,9 @@ describe("PostgreSQL restore rehearsal runner", () => {
     it.each([
       ["private_column OPERATOR(private_schema.>) 0", "private_column OPERATOR(other_schema.>) 0", 1, 1],
       ["private_column OPERATOR(private_schema.>) 0", "private_column OPERATOR(private_schema.<) 0", 1, 1],
+      ["private_column OPERATOR(operator.>) 0", "private_column OPERATOR(other.>) 0", 1, 1],
       ['private_column OPERATOR("private schema".>) 0', 'private_column OPERATOR("other schema".>) 0', 1, 1],
+      ['private_column OPERATOR("operator".>) 0', 'private_column OPERATOR("other".>) 0', 1, 1],
       ['private_column OPERATOR("private""schema".>) 0', 'private_column OPERATOR("other""schema".>) 0', 1, 1],
       ["private_column OPERATOR(private_schema.+) 0", "private_column OPERATOR(other_schema.+) 0", 1, 1],
     ])("classifies bounded qualified operator token edits without values", (
@@ -601,7 +630,6 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ["private_column OPERATOR(private_schema..>) 0", "private_column OPERATOR(other_schema..>) 0"],
       ["private_column OPERATOR(private_schema.) 0", "private_column OPERATOR(other_schema.) 0"],
       ["private_column OPERATOR(private_schema.++) 0", "private_column OPERATOR(other_schema.++) 0"],
-      ['private_column "OPERATOR"(private_schema.>) 0', 'private_column "OPERATOR"(other_schema.>) 0'],
       ['private_column OPERATOR(private_schema."+") 0', 'private_column OPERATOR(other_schema."+") 0'],
     ])("fails closed for malformed or unsupported qualified operator contexts", (source, destination) => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
@@ -616,7 +644,11 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ["private_column::private_schema.private_type", "private_column::other_schema.private_type", 1, 1],
       ["private_column::private_schema.private_type", "private_column::private_schema.other_type", 1, 1],
       ["private_column::private_type", "private_column::other_type", 1, 1],
+      ["private_column::operator", "private_column::other_type", 1, 1],
+      ["private_column::operator.bounded_text", "private_column::other_schema.bounded_text", 1, 1],
+      ["private_column::operator(10)", "private_column::other_type(10)", 1, 1],
       ['private_column::"private schema"."private-type"', 'private_column::"other schema"."private-type"', 1, 1],
+      ['private_column::"operator"."private-type"', 'private_column::"other"."private-type"', 1, 1],
       ['private_column::private_schema."private-type"', 'private_column::other_schema."private-type"', 1, 1],
       ["private_column::private_schema.private_type(10)", "private_column::other_schema.private_type(10)", 1, 1],
       ["private_column::private_schema.private_type[]", "private_column::other_schema.private_type[]", 1, 1],
@@ -738,11 +770,21 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(queryText).not.toContain("pg_catalog.pg_identify_object");
       expect(queryText).toContain("definition_within_limit");
       expect(queryText).toContain("check_expression_within_limit");
+      expect(queryText).toContain("pg_catalog.convert_to");
+      expect(queryText).not.toMatch(/convert_to\(constraint_row\.conbin::text/iu);
     });
 
     it("collects one rebound CHECK detail only after every bounded preflight", async () => {
       const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
       const expression = "(private_column <> 'private-literal'::text)";
+      const dependency = {
+        dependency_type: "a",
+        type: "table column",
+        schema: "private_namespace",
+        name: "private_relation",
+        identity: "private_namespace.private_relation.private_column",
+      };
+      const dependencyFieldBytes = Object.values(dependency).map((value) => Buffer.byteLength(value, "utf8"));
       const calls = [];
       const responses = [
         { rows: [{
@@ -754,20 +796,18 @@ describe("PostgreSQL restore rehearsal runner", () => {
           domain_namespace_name: null,
           domain_name: null,
           type: "c",
+          client_encoding: "UTF8",
           expression_bytes: String(Buffer.byteLength(expression, "utf8")),
           tree_bytes: "128",
           dependency_count: "1",
           node_count: "2",
         }], rowCount: 1 },
-        { rows: [{ max_field_bytes: "64", total_bytes: "128" }], rowCount: 1 },
-        { rows: [{ check_expression: expression }], rowCount: 1 },
         { rows: [{
-          dependency_type: "a",
-          type: "table column",
-          schema: "private_namespace",
-          name: "private_relation",
-          identity: "private_namespace.private_relation.private_column",
+          max_field_bytes: String(Math.max(...dependencyFieldBytes)),
+          total_bytes: String(dependencyFieldBytes.reduce((total, value) => total + value, 0)),
         }], rowCount: 1 },
+        { rows: [{ check_expression: expression }], rowCount: 1 },
+        { rows: [dependency], rowCount: 1 },
         { rows: [{ node_tag: "OPEXPR", node_count: "1" }, { node_tag: "PRIVATE_NODE", node_count: "1" }], rowCount: 2 },
       ];
       const detail = await collectCheckConstraintDetail({
@@ -781,8 +821,12 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(calls).toHaveLength(5);
       expect(calls.every(({ values }) => values[0] === "123")).toBe(true);
       expect(calls[0].sql).not.toContain("AS expression_tree");
+      expect(calls[0].sql).toContain("current_setting('client_encoding')");
+      expect(calls[0].sql).toContain("convert_to(pg_catalog.pg_get_expr");
       expect(calls[1].sql).toContain("max(GREATEST(");
       expect(calls[1].sql).not.toContain("pg_catalog.greatest");
+      expect(calls[1].sql).toContain("convert_to(dependency_type, 'UTF8')");
+      expect(calls[1].sql).toContain("convert_to(identity, 'UTF8')");
       expect(calls[3].sql).toContain("LIMIT 257");
       expect(JSON.stringify(buildConstraintSemanticDiagnostic(
         await constraintManifest([constraintCatalogRow({ check_expression: `(${expression})` })]),
@@ -810,6 +854,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
           domain_namespace_name: null,
           domain_name: null,
           type: "c",
+          client_encoding: "UTF8",
           expression_bytes: "64",
           tree_bytes: "128",
           dependency_count: "1",
@@ -826,6 +871,107 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(query).toHaveBeenCalledTimes(1);
     });
 
+    it("requires UTF8 preflight before fetching protected CHECK values", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const query = vi.fn(async () => ({
+        rowCount: 1,
+        rows: [{
+          namespace_name: "private_namespace",
+          constraint_name: "private_constraint",
+          object_kind: "TABLE",
+          relation_namespace_name: "private_namespace",
+          relation_name: "private_relation",
+          domain_namespace_name: null,
+          domain_name: null,
+          type: "c",
+          client_encoding: "LATIN1",
+          expression_bytes: "64",
+          tree_bytes: "128",
+          dependency_count: "0",
+          node_count: "1",
+        }],
+      }));
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: "PREFLIGHT",
+        limitKind: null,
+      });
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses identical UTF8 byte counts before and after multibyte CHECK fetches", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(caf\u00e9 = '\u00e9')";
+      const dependency = {
+        dependency_type: "a",
+        type: "table column",
+        schema: "sch\u00e9ma",
+        name: "caf\u00e9",
+        identity: "sch\u00e9ma.caf\u00e9",
+      };
+      const fieldBytes = Object.values(dependency).map((value) => Buffer.byteLength(value, "utf8"));
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression, "utf8")), tree_bytes: "128",
+          dependency_count: "1", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{
+          max_field_bytes: String(Math.max(...fieldBytes)),
+          total_bytes: String(fieldBytes.reduce((total, value) => total + value, 0)),
+        }] },
+        { rowCount: 1, rows: [{ check_expression: expression }] },
+        { rowCount: 1, rows: [dependency] },
+        { rowCount: 1, rows: [{ node_tag: "OPEXPR", node_count: "1" }] },
+      ];
+      await expect(collectCheckConstraintDetail({
+        query: vi.fn(async () => responses.shift()),
+      }, entry)).resolves.toMatchObject({ ok: true });
+    });
+
+    it.each([
+      ["EXPRESSION_FETCH", true],
+      ["DEPENDENCY_FETCH", false],
+    ])("fails closed on a %s UTF8 byte-count mismatch", async (expectedStage, expressionMismatch) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(caf\u00e9 IS NOT NULL)";
+      const dependency = {
+        dependency_type: "a",
+        type: "table column",
+        schema: "sch\u00e9ma",
+        name: "caf\u00e9",
+        identity: "sch\u00e9ma.caf\u00e9",
+      };
+      const fieldBytes = Object.values(dependency).map((value) => Buffer.byteLength(value, "utf8"));
+      const totalBytes = fieldBytes.reduce((total, value) => total + value, 0);
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression, "utf8") - Number(expressionMismatch)),
+          tree_bytes: "128", dependency_count: "1", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{
+          max_field_bytes: String(Math.max(...fieldBytes)),
+          total_bytes: String(totalBytes - Number(!expressionMismatch)),
+        }] },
+        { rowCount: 1, rows: [{ check_expression: expression }] },
+        { rowCount: 1, rows: [dependency] },
+      ];
+      await expect(collectCheckConstraintDetail({
+        query: vi.fn(async () => responses.shift()),
+      }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: expectedStage,
+        limitKind: null,
+      });
+    });
+
     it("rebinds the source CHECK by logical identity and validates all phase-one semantics before detail", async () => {
       const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
       const expression = "(private_column <> 'private-literal'::text)";
@@ -840,6 +986,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
             namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
             relation_namespace_name: "private_namespace", relation_name: "private_relation",
             domain_namespace_name: null, domain_name: null, type: "c",
+            client_encoding: "UTF8",
             expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
             dependency_count: "0", node_count: "1",
           }] };
@@ -856,6 +1003,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       }, entry, () => client);
       expect(detail.ok).toBe(true);
       expect(commands.indexOf("COMMIT")).toBeGreaterThan(commands.findIndex((sql) => sql.includes("AS node_tag")));
+      expect(commands).toContain("SET LOCAL client_encoding = 'UTF8'");
       expect(commands).not.toContain("ROLLBACK");
       expect(client.end).toHaveBeenCalledOnce();
     });
