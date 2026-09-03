@@ -2183,12 +2183,13 @@ const checkEditCategory = (tokens, index) => {
   if (token.domain !== "DDL_TOKEN") return "OTHER";
   if (token.value === "(" || token.value === ")") return "PARENTHESIS";
   if (token.value === "::") return "CAST_OPERATOR";
-  const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
-  const previous = tokens[index - 1]?.value?.replace(/^"|"$/gu, "").toLowerCase();
-  if (normalized === "collate" || previous === "collate") return "COLLATION";
   if (/^"(?:[^"]|"")+"$/u.test(token.value)) {
     return tokens[index + 1]?.value === "(" ? "FUNCTION" : "COLUMN_REFERENCE";
   }
+  const normalized = token.value.replace(/^"|"$/gu, "").toLowerCase();
+  const previousIsCollateKeyword = tokens[index - 1]?.domain === "DDL_TOKEN"
+    && /^collate$/iu.test(tokens[index - 1].value);
+  if (normalized === "collate" || previousIsCollateKeyword) return "COLLATION";
   if (BUILTIN_TYPE_NAMES.has(normalized)) return "BUILTIN_TYPE";
   if (isSchemaOperator(token.value) || CHECK_OPERATOR_WORDS.has(normalized)) return "OPERATOR";
   if (/^[A-Za-z_][A-Za-z0-9_$]*$/u.test(token.value)) {

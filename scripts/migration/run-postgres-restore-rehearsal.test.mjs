@@ -485,6 +485,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       ['"a+b"', '"a_b"', "COLUMN_REFERENCE"],
       ['"<>"', '"comparison"', "COLUMN_REFERENCE"],
       ['"a""b"', '"a_b"', "COLUMN_REFERENCE"],
+      ['"collate" > 0', '"renamed" > 0', "COLUMN_REFERENCE"],
       ['"private-function"(private_column)', '"other_function"(private_column)', "FUNCTION"],
     ])("classifies quoted identifier edits without treating embedded operators as syntax", (source, destination, category) => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
