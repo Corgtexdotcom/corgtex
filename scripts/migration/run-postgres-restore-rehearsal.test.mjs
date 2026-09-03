@@ -167,6 +167,7 @@ const checkDetail = (expression, overrides = {}) => ({
     "PARAM", "RELABELTYPE", "ROWCOMPAREEXPR", "ROWEXPR", "SCALARARRAYOPEXPR", "SETTODEFAULT",
     "SQLVALUEFUNCTION", "VAR", "XMLEXPR", "OTHER",
   ].map((tag) => [tag, 0])),
+  booleanNodeCounts: { AND: 0, OR: 0, NOT: 0 },
   dependencies: [
     ["a", "table column", "private_namespace", "private_relation", "private_namespace.private_relation.private_column"],
     ["n", "operator", "pg_catalog", "<>", "pg_catalog.<>(text,text)"],
@@ -239,6 +240,33 @@ describe("PostgreSQL restore rehearsal runner", () => {
       `\\unrestrict ${SCHEMA_RESTRICT_KEY}`,
       "",
     ].join("\n");
+    const booleanGroupingDiagnostic = async ({
+      sourceExpression,
+      destinationExpression,
+      sourceBooleanNodeCounts,
+      destinationBooleanNodeCounts,
+    }) => {
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: sourceExpression,
+        definition: `CHECK (${sourceExpression})`,
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: destinationExpression,
+        definition: `CHECK (${destinationExpression})`,
+      })]);
+      const detail = (expression, booleanNodeCounts) => {
+        const result = checkDetail(expression, {
+          columnReferences: new Set(["private_a", "private_b", "private_c", "private_d", "private_e"]),
+          booleanNodeCounts,
+        });
+        result.nodeTagCounts.BOOLEXPR = Object.values(booleanNodeCounts).reduce((total, count) => total + count, 0);
+        return result;
+      };
+      return buildConstraintSemanticDiagnostic(source, destination, "MATCH", {
+        source: detail(sourceExpression, sourceBooleanNodeCounts),
+        destination: detail(destinationExpression, destinationBooleanNodeCounts),
+      });
+    };
 
     it("ignores only comments and whitespace outside executable tokens", () => {
       const compact = dump('CREATE TABLE "Account" ("id" text DEFAULT \'active\');');
@@ -473,6 +501,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         },
         dependencies: { identitySetEqual: true, changedClasses: [] },
         ambiguityFingerprint: null,
+        booleanGroupingFingerprint: null,
       });
       const serialized = JSON.stringify(diagnostic);
       for (const forbidden of [
@@ -524,6 +553,14 @@ describe("PostgreSQL restore rehearsal runner", () => {
           nonParenthesisTokenSequenceRelation: "DIFFERENT",
           sourceOnly: expect.objectContaining({ OTHER: 3 }),
           destinationOnly: expect.objectContaining({ COLUMN_REFERENCE: 1 }),
+        },
+        booleanGroupingFingerprint: {
+          relation: "NOT_PROVEN",
+          operator: null,
+          booleanNodeDeltas: {
+            sourceOnly: { AND: 0, OR: 0, NOT: 0 },
+            destinationOnly: { AND: 0, OR: 0, NOT: 0 },
+          },
         },
       });
       expect(JSON.stringify(diagnostic)).not.toContain("other_private_relation");
@@ -583,10 +620,112 @@ describe("PostgreSQL restore rehearsal runner", () => {
             OTHER: 0,
           },
         },
+        booleanGroupingFingerprint: {
+          relation: "NOT_PROVEN",
+          operator: null,
+          booleanNodeDeltas: {
+            sourceOnly: { AND: 0, OR: 0, NOT: 0 },
+            destinationOnly: { AND: 0, OR: 0, NOT: 0 },
+          },
+        },
       });
       const serialized = JSON.stringify(diagnostic);
       expect(serialized).not.toContain("private_column");
       expect(serialized).not.toContain("other_private_column");
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it.each([
+      ["AND", "private_a AND ((private_b AND private_c))", "private_a AND (private_b AND private_c)"],
+      ["OR", "private_a OR ((private_b OR private_c))", "private_a OR (private_b OR private_c)"],
+    ])("reports source-side %s node counts without inferring grouping", async (
+      operator,
+      sourceExpression,
+      destinationExpression,
+    ) => {
+      const sourceBooleanNodeCounts = { AND: 0, OR: 0, NOT: 0, [operator]: 2 };
+      const destinationBooleanNodeCounts = { AND: 0, OR: 0, NOT: 0, [operator]: 1 };
+      const diagnostic = await booleanGroupingDiagnostic({
+        sourceExpression,
+        destinationExpression,
+        sourceBooleanNodeCounts,
+        destinationBooleanNodeCounts,
+      });
+      expect(diagnostic.checkExpressionDifference?.booleanGroupingFingerprint).toEqual({
+        relation: "NOT_PROVEN",
+        operator: null,
+        booleanNodeDeltas: {
+          sourceOnly: { AND: operator === "AND" ? 1 : 0, OR: operator === "OR" ? 1 : 0, NOT: 0 },
+          destinationOnly: { AND: 0, OR: 0, NOT: 0 },
+        },
+      });
+      expect(diagnostic.checkExpressionDifference?.nodeTagDeltas.sourceOnly.BOOLEXPR).toBe(1);
+      const serialized = JSON.stringify(diagnostic);
+      for (const forbidden of ["private_a", "private_b", "private_c"]) expect(serialized).not.toContain(forbidden);
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it("reports destination-side Boolean node counts without inferring grouping", async () => {
+      const diagnostic = await booleanGroupingDiagnostic({
+        sourceExpression: "private_a OR (private_b OR private_c)",
+        destinationExpression: "private_a OR ((private_b OR private_c))",
+        sourceBooleanNodeCounts: { AND: 0, OR: 1, NOT: 0 },
+        destinationBooleanNodeCounts: { AND: 0, OR: 2, NOT: 0 },
+      });
+      expect(diagnostic.checkExpressionDifference?.booleanGroupingFingerprint).toEqual({
+        relation: "NOT_PROVEN",
+        operator: null,
+        booleanNodeDeltas: {
+          sourceOnly: { AND: 0, OR: 0, NOT: 0 },
+          destinationOnly: { AND: 0, OR: 1, NOT: 0 },
+        },
+      });
+    });
+
+    it.each([
+      ["mixed precedence", "private_a AND ((private_b OR private_c))", "private_a AND (private_b OR private_c)", { AND: 1, OR: 1, NOT: 0 }, { AND: 1, OR: 1, NOT: 0 }],
+      ["Boolean NOT", "private_a AND ((NOT private_b))", "private_a AND (NOT private_b)", { AND: 1, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
+      ["NOT wrapper", "NOT ((private_a AND private_b)) AND private_c", "NOT (private_a AND private_b) AND private_c", { AND: 2, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
+      ["IS TRUE postfix", "private_a AND ((private_b AND private_c)) IS TRUE", "private_a AND (private_b AND private_c) IS TRUE", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["IS FALSE postfix", "private_a AND ((private_b AND private_c)) IS FALSE", "private_a AND (private_b AND private_c) IS FALSE", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["IS UNKNOWN postfix", "private_a AND ((private_b AND private_c)) IS UNKNOWN", "private_a AND (private_b AND private_c) IS UNKNOWN", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["IS NOT TRUE postfix", "private_a AND ((private_b AND private_c)) IS NOT TRUE", "private_a AND (private_b AND private_c) IS NOT TRUE", { AND: 2, OR: 0, NOT: 1 }, { AND: 1, OR: 0, NOT: 1 }],
+      ["BETWEEN separator", "private_a AND ((private_b BETWEEN private_c AND private_d))", "private_a AND (private_b BETWEEN private_c AND private_d)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["BETWEEN SYMMETRIC separator", "private_a AND ((private_b BETWEEN SYMMETRIC private_c AND private_d))", "private_a AND (private_b BETWEEN SYMMETRIC private_c AND private_d)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["searched CASE", "private_a AND ((CASE WHEN private_b AND private_c THEN true ELSE false END))", "private_a AND (CASE WHEN private_b AND private_c THEN true ELSE false END)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["simple CASE", "private_a OR ((CASE private_b WHEN private_c THEN private_d OR private_e ELSE false END))", "private_a OR (CASE private_b WHEN private_c THEN private_d OR private_e ELSE false END)", { AND: 0, OR: 2, NOT: 0 }, { AND: 0, OR: 1, NOT: 0 }],
+      ["nested CASE", "private_a AND ((CASE WHEN private_b THEN CASE WHEN private_c OR private_d THEN true ELSE false END ELSE false END))", "private_a AND (CASE WHEN private_b THEN CASE WHEN private_c OR private_d THEN true ELSE false END ELSE false END)", { AND: 1, OR: 1, NOT: 0 }, { AND: 0, OR: 1, NOT: 0 }],
+      ["ARRAY Boolean content", "private_a AND ((ARRAY[private_b AND private_c]))", "private_a AND (ARRAY[private_b AND private_c])", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["function parentheses", "private_function((private_a AND private_b)) AND private_c", "private_function(private_a AND private_b) AND private_c", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["cast parentheses", "((private_a AND private_b))::boolean AND private_c", "(private_a AND private_b)::boolean AND private_c", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["relocated pair", "(private_a AND private_b) AND private_c", "private_a AND (private_b AND private_c)", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["quoted AND lookalike", 'private_a AND (("AND"))', 'private_a AND ("AND")', { AND: 1, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["quoted OR lookalike", 'private_a OR (("OR"))', 'private_a OR ("OR")', { AND: 0, OR: 1, NOT: 0 }, { AND: 0, OR: 1, NOT: 0 }],
+      ["quoted CASE lookalike", 'private_a AND (("CASE"))', 'private_a AND ("CASE")', { AND: 1, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["quoted BETWEEN lookalike", 'private_a AND (("BETWEEN"))', 'private_a AND ("BETWEEN")', { AND: 1, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["unbalanced expression", "((private_a AND private_b AND private_c", "(private_a AND private_b AND private_c", { AND: 2, OR: 0, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+      ["conflicting operator counts", "private_a AND ((private_b AND private_c))", "private_a AND (private_b AND private_c)", { AND: 1, OR: 1, NOT: 0 }, { AND: 1, OR: 0, NOT: 0 }],
+    ])("keeps %s Boolean grouping NOT_PROVEN", async (
+      _label,
+      sourceExpression,
+      destinationExpression,
+      sourceBooleanNodeCounts,
+      destinationBooleanNodeCounts,
+    ) => {
+      const diagnostic = await booleanGroupingDiagnostic({
+        sourceExpression,
+        destinationExpression,
+        sourceBooleanNodeCounts,
+        destinationBooleanNodeCounts,
+      });
+      expect(diagnostic.checkExpressionDifference?.booleanGroupingFingerprint).toMatchObject({
+        relation: "NOT_PROVEN",
+        operator: null,
+      });
+      const serialized = JSON.stringify(diagnostic);
+      for (const forbidden of ["private_a", "private_b", "private_c", "private_d", "private_e", "private_function"]) {
+        expect(serialized).not.toContain(forbidden);
+      }
       expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
     });
 
@@ -1421,6 +1560,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
       }, entry);
       expect(detail.ok).toBe(true);
       expect(detail.nodeTagCounts).toMatchObject({ OPEXPR: 1, OTHER: 1 });
+      expect(detail.booleanNodeCounts).toEqual({ AND: 0, OR: 0, NOT: 0 });
       expect(calls).toHaveLength(9);
       expect(calls[0]).toEqual({ sql: "SAVEPOINT corgtex_check_detail", values: undefined });
       expect(calls.at(-1)).toEqual({ sql: "RELEASE SAVEPOINT corgtex_check_detail", values: undefined });
@@ -1435,6 +1575,8 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(calls[3].sql).toContain("pg_get_keywords");
       expect(calls[4].sql).toContain("pg_get_keywords");
       expect(calls[6].sql).toContain("LIMIT 257");
+      expect(calls[7].sql).toContain(":boolop");
+      expect(calls[7].sql).not.toContain("AS expression_tree");
       const serializedDiagnostic = JSON.stringify(buildConstraintSemanticDiagnostic(
         await constraintManifest([constraintCatalogRow({ check_expression: `(${expression})` })]),
         await constraintManifest([constraintCatalogRow()]),
@@ -1444,6 +1586,36 @@ describe("PostgreSQL restore rehearsal runner", () => {
       for (const privateValue of ["private_namespace", "private_relation", "private_column", "private-literal"]) {
         expect(serializedDiagnostic).not.toContain(privateValue);
       }
+    });
+
+    it("fails closed when Boolean subtype totals disagree with BOOLEXPR nodes", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "private_column AND private_column";
+      const responses = [
+        { rowCount: 1, rows: [{
+          namespace_name: "private_namespace", constraint_name: "private_constraint", object_kind: "TABLE",
+          relation_namespace_name: "private_namespace", relation_name: "private_relation",
+          domain_namespace_name: null, domain_name: null, type: "c", client_encoding: "UTF8",
+          expression_bytes: String(Buffer.byteLength(expression)), tree_bytes: "128",
+          dependency_count: "0", node_count: "1",
+        }] },
+        { rowCount: 1, rows: [{ max_field_bytes: "0", total_bytes: "0" }] },
+        testKeywordPreflight(),
+        testKeywordFetch(),
+        { rowCount: 1, rows: [{ check_expression: expression }] },
+        { rowCount: 0, rows: [] },
+        { rowCount: 1, rows: [{ node_tag: "BOOLEXPR", node_count: "1", boolean_operator: null, boolean_count: null }] },
+      ];
+      await expect(collectCheckConstraintDetail({
+        query: vi.fn(async (sql) => /^(?:SAVEPOINT|RELEASE SAVEPOINT)/u.test(sql)
+          ? { rowCount: null, rows: [] }
+          : responses.shift()),
+      }, entry)).resolves.toEqual({
+        ok: false,
+        status: "COLLECTION_UNAVAILABLE",
+        stage: "NODE_COUNT",
+        limitKind: null,
+      });
     });
 
     it.each([

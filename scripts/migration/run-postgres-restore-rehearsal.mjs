@@ -143,6 +143,7 @@ const CHECK_NODE_TAGS = [
   "XMLEXPR",
   "OTHER",
 ];
+const CHECK_BOOLEAN_OPERATORS = ["AND", "OR", "NOT"];
 const CHECK_DEPENDENCY_CLASSES = [
   "COLLATION",
   "FUNCTION",
@@ -1839,15 +1840,38 @@ const checkConstraintDependencyQuery = `
 `;
 
 const checkConstraintNodeQuery = `
-  SELECT node_match[1] AS node_tag, pg_catalog.count(*)::text AS node_count
-  FROM pg_catalog.pg_constraint AS constraint_row
-  CROSS JOIN LATERAL pg_catalog.regexp_matches(
-    constraint_row.conbin::text,
-    '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
-    'g'
-  ) AS node_match
-  WHERE constraint_row.oid = $1::pg_catalog.oid AND constraint_row.contype = 'c'
-  GROUP BY node_match[1]
+  WITH check_tree AS MATERIALIZED (
+    SELECT constraint_row.conbin::text AS value
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.oid = $1::pg_catalog.oid AND constraint_row.contype = 'c'
+  ),
+  node_counts AS (
+    SELECT node_match[1] AS node_tag, pg_catalog.count(*)::text AS node_count
+    FROM check_tree
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(
+      check_tree.value,
+      '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
+      'g'
+    ) AS node_match
+    GROUP BY node_match[1]
+  ),
+  boolean_counts AS (
+    SELECT pg_catalog.upper(boolean_match[1]) AS boolean_operator,
+      pg_catalog.count(*)::text AS boolean_count
+    FROM check_tree
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(
+      check_tree.value,
+      '\\{BOOLEXPR[[:space:]]+:boolop[[:space:]]+(and|or|not)[[:space:]}]',
+      'g'
+    ) AS boolean_match
+    GROUP BY boolean_match[1]
+  )
+  SELECT node_tag, node_count, NULL::text AS boolean_operator, NULL::text AS boolean_count
+  FROM node_counts
+  UNION ALL
+  SELECT NULL::text AS node_tag, NULL::text AS node_count, boolean_operator, boolean_count
+  FROM boolean_counts
+  ORDER BY node_tag NULLS LAST, boolean_operator NULLS LAST
 `;
 
 const isBoolean = (value) => typeof value === "boolean";
@@ -2218,16 +2242,46 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
       stage = "NODE_COUNT";
       const nodeResult = await client.query(checkConstraintNodeQuery, [oid]);
       const nodeTagCounts = Object.fromEntries(CHECK_NODE_TAGS.map((tag) => [tag, 0]));
+      const booleanNodeCounts = Object.fromEntries(CHECK_BOOLEAN_OPERATORS.map((operator) => [operator, 0]));
+      const observedBooleanOperators = new Set();
       let observedNodeCount = 0;
       for (const row of nodeResult.rows) {
-        if (typeof row.node_tag !== "string") throw new Error("INVALID_NODE_TAG");
-        const count = parseDiagnosticCount(row.node_count);
-        const tag = CHECK_NODE_TAGS.includes(row.node_tag) ? row.node_tag : "OTHER";
-        nodeTagCounts[tag] += count;
-        observedNodeCount += count;
+        if (typeof row.node_tag === "string") {
+          if (
+            (row.boolean_operator !== null && row.boolean_operator !== undefined)
+            || (row.boolean_count !== null && row.boolean_count !== undefined)
+          ) {
+            throw new Error("INVALID_NODE_TAG_ROW");
+          }
+          const count = parseDiagnosticCount(row.node_count);
+          const tag = CHECK_NODE_TAGS.includes(row.node_tag) ? row.node_tag : "OTHER";
+          nodeTagCounts[tag] += count;
+          observedNodeCount += count;
+          continue;
+        }
+        if (
+          row.node_tag !== null
+          || (row.node_count !== null && row.node_count !== undefined)
+          || !CHECK_BOOLEAN_OPERATORS.includes(row.boolean_operator)
+          || observedBooleanOperators.has(row.boolean_operator)
+        ) throw new Error("INVALID_BOOLEAN_NODE_ROW");
+        observedBooleanOperators.add(row.boolean_operator);
+        booleanNodeCounts[row.boolean_operator] = parseDiagnosticCount(row.boolean_count);
       }
-      if (observedNodeCount !== nodeCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
-      return { ok: true, tokens, dependencies, nodeTagCounts, keywords, columnReferences, functionReferences };
+      if (
+        observedNodeCount !== nodeCount
+        || Object.values(booleanNodeCounts).reduce((total, count) => total + count, 0) !== nodeTagCounts.BOOLEXPR
+      ) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
+      return {
+        ok: true,
+        tokens,
+        dependencies,
+        nodeTagCounts,
+        booleanNodeCounts,
+        keywords,
+        columnReferences,
+        functionReferences,
+      };
     })();
   } catch {
     await runCheckDetailSavepointCommand(client, "ROLLBACK TO SAVEPOINT corgtex_check_detail");
@@ -2614,6 +2668,26 @@ const buildCheckAmbiguityFingerprint = (
   return { nonParenthesisTokenSequenceRelation, sourceOnly, destinationOnly };
 };
 
+const buildBooleanGroupingFingerprint = (
+  sourceBooleanNodeCounts,
+  destinationBooleanNodeCounts,
+) => {
+  const validBooleanNodeCounts = (counts) => counts !== null
+    && typeof counts === "object"
+    && CHECK_BOOLEAN_OPERATORS.every(
+      (operator) => Number.isSafeInteger(counts[operator]) && counts[operator] >= 0,
+    );
+  if (!validBooleanNodeCounts(sourceBooleanNodeCounts) || !validBooleanNodeCounts(destinationBooleanNodeCounts)) {
+    fail("INVALID_BOOLEAN_NODE_COUNTS");
+  }
+  const booleanNodeDeltas = countDifference(
+    sourceBooleanNodeCounts,
+    destinationBooleanNodeCounts,
+    CHECK_BOOLEAN_OPERATORS,
+  );
+  return { relation: "NOT_PROVEN", operator: null, booleanNodeDeltas };
+};
+
 const unwrapCheckExpression = (tokens) => {
   let current = tokens;
   let layers = 0;
@@ -2819,6 +2893,7 @@ const emptyCheckExpressionDifference = (status, limitKind = null, side = null, s
   nodeTagDeltas: null,
   dependencies: null,
   ambiguityFingerprint: null,
+  booleanGroupingFingerprint: null,
 });
 
 const buildCheckExpressionDifference = (source, destination) => {
@@ -2868,6 +2943,16 @@ const buildCheckExpressionDifference = (source, destination) => {
       columnReferences: destination.columnReferences,
       functionReferences: destination.functionReferences,
     });
+    const ambiguityFingerprint = buildCheckAmbiguityFingerprint(
+      source.tokens,
+      destination.tokens,
+      sourceContextualTokenCategories,
+      destinationContextualTokenCategories,
+      checkCatalogIdentifierCategories(source.tokens, sourceContextualTokenCategories, sourceContext),
+      checkCatalogIdentifierCategories(destination.tokens, destinationContextualTokenCategories, destinationContext),
+      sourceContext.keywords,
+      destinationContext.keywords,
+    );
     return {
       status: "AMBIGUOUS",
       limitKind: null,
@@ -2876,15 +2961,10 @@ const buildCheckExpressionDifference = (source, destination) => {
       tokenEdit: null,
       nodeTagDeltas,
       dependencies,
-      ambiguityFingerprint: buildCheckAmbiguityFingerprint(
-        source.tokens,
-        destination.tokens,
-        sourceContextualTokenCategories,
-        destinationContextualTokenCategories,
-        checkCatalogIdentifierCategories(source.tokens, sourceContextualTokenCategories, sourceContext),
-        checkCatalogIdentifierCategories(destination.tokens, destinationContextualTokenCategories, destinationContext),
-        sourceContext.keywords,
-        destinationContext.keywords,
+      ambiguityFingerprint,
+      booleanGroupingFingerprint: buildBooleanGroupingFingerprint(
+        source.booleanNodeCounts,
+        destination.booleanNodeCounts,
       ),
     };
   }
@@ -2897,6 +2977,7 @@ const buildCheckExpressionDifference = (source, destination) => {
     nodeTagDeltas,
     dependencies,
     ambiguityFingerprint: null,
+    booleanGroupingFingerprint: null,
   };
 };
 
