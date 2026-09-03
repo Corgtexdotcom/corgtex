@@ -2664,22 +2664,32 @@ export const runTargetCheckReparseDiagnostic = async ({
       "SET LOCAL search_path = pg_catalog",
     ]) await client.query(command);
 
-    stage = "DESTINATION_REBIND";
-    const reboundResult = await client.query(constraintCatalogIdentityQuery, [
-      identity[1], identity[3], identity[0], identity[2],
-    ]);
-    let rebound = null;
-    if (reboundResult.rowCount === 1) {
-      try { rebound = normalizeBoundedConstraintCatalogRow(reboundResult.rows[0]); } catch { /* Fixed drift result below. */ }
-    }
+    stage = "EVENT_TRIGGER_SUPPRESSION";
+    await client.query("SET LOCAL event_triggers = false");
+    const eventTriggerSetting = await client.query("SHOW event_triggers");
     if (
-      rebound === null
-      || rebound.key !== destinationManifestEntry.key
-      || rebound.type !== "CHECK"
-      || rebound.diagnostic.constraintOid !== destinationManifestEntry.diagnostic.constraintOid
-      || !same(rebound.semantics, destinationManifestEntry.semantics)
-    ) {
-      result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "DESTINATION_REBIND_DRIFT" });
+      eventTriggerSetting.rows.length !== 1
+      || eventTriggerSetting.rows[0].event_triggers !== "off"
+    ) result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "EVENT_TRIGGER_SUPPRESSION_UNPROVEN" });
+
+    if (result === null) {
+      stage = "DESTINATION_REBIND";
+      const reboundResult = await client.query(constraintCatalogIdentityQuery, [
+        identity[1], identity[3], identity[0], identity[2],
+      ]);
+      let rebound = null;
+      if (reboundResult.rowCount === 1) {
+        try { rebound = normalizeBoundedConstraintCatalogRow(reboundResult.rows[0]); } catch { /* Fixed drift result below. */ }
+      }
+      if (
+        rebound === null
+        || rebound.key !== destinationManifestEntry.key
+        || rebound.type !== "CHECK"
+        || rebound.diagnostic.constraintOid !== destinationManifestEntry.diagnostic.constraintOid
+        || !same(rebound.semantics, destinationManifestEntry.semantics)
+      ) {
+        result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "DESTINATION_REBIND_DRIFT" });
+      }
     }
 
     if (result === null) {
@@ -2841,7 +2851,12 @@ export const runTargetCheckReparseDiagnostic = async ({
   if (probeDdlAttempted) {
     let verifier;
     try {
-      verifier = createClient(nodeClientConfig(targetConfig, "corgtex_rehearsal_target_check_reparse_verify"));
+      verifier = createClient(nodeClientConfig(
+        targetConfig,
+        "corgtex_rehearsal_target_check_reparse_verify",
+        30_000,
+        15_000,
+      ));
       await verifier.connect();
       const absence = await verifier.query(`
         SELECT NOT EXISTS (

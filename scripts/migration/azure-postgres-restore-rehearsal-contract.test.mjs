@@ -219,6 +219,8 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("checkExpressionDifference");
     expect(runner).toContain("buildUniqueCheckTokenEdit");
     expect(runner).toContain("runTargetCheckReparseDiagnostic");
+    expect(runner).toContain('await client.query("SET LOCAL event_triggers = false")');
+    expect(runner).toContain('eventTriggerSetting.rows[0].event_triggers !== "off"');
     expect(runner).toContain("TARGET_REPARSE_ROLLBACK_UNPROVEN");
     expect(runner).toContain("TARGET_REPARSE_ABSENCE_UNPROVEN");
     expect(runner).toContain("pg_catalog.pg_identify_object");

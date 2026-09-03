@@ -2062,6 +2062,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
         absence = true,
         rebind = true,
         collision = false,
+        eventTriggerSetting = "off",
       } = {}) => {
         const sourceRow = constraintCatalogRow({
           definition: `CHECK (${sourceExpression})`,
@@ -2082,6 +2083,9 @@ describe("PostgreSQL restore rehearsal runner", () => {
           query: vi.fn(async (sql) => {
             commands.push(sql);
             if (failOn !== null && sql.includes(failOn)) throw new Error("private database error");
+            if (sql === "SHOW event_triggers") {
+              return { rowCount: null, rows: [{ event_triggers: eventTriggerSetting }] };
+            }
             if (/LIMIT 2\s*$/u.test(sql) && sql.includes("definition_within_limit")) {
               return rebind ? { rowCount: 1, rows: [destinationRow] } : { rowCount: 0, rows: [] };
             }
@@ -2165,9 +2169,44 @@ describe("PostgreSQL restore rehearsal runner", () => {
           mismatchFields: [],
         });
         expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(true);
+        expect(testCase.commands.indexOf("SET LOCAL event_triggers = false"))
+          .toBeLessThan(testCase.commands.findIndex((sql) => sql.startsWith("ALTER TABLE ONLY")));
         expect(testCase.commands.at(-1)).toBe("ROLLBACK");
         expect(testCase.verifier.query).toHaveBeenCalledOnce();
+        expect(testCase.createClient.mock.calls[1][0]).toMatchObject({
+          connectionTimeoutMillis: 30_000,
+          query_timeout: 15_000,
+        });
         expect(JSON.stringify(result)).not.toContain("private");
+      });
+
+      it("fails closed before DDL unless event-trigger suppression is verified", async () => {
+        const testCase = await fixture({ eventTriggerSetting: "on" });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          stage: "EVENT_TRIGGER_SUPPRESSION",
+          reason: "EVENT_TRIGGER_SUPPRESSION_UNPROVEN",
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+      });
+
+      it("rolls back without probe DDL when event-trigger suppression is denied", async () => {
+        const testCase = await fixture({ failOn: "SET LOCAL event_triggers = false" });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "UNAVAILABLE",
+          stage: "EVENT_TRIGGER_SUPPRESSION",
+        });
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+        expect(testCase.verifier.connect).not.toHaveBeenCalled();
+      });
+
+      it("makes a timed-out absence query a hard failure instead of MATCH", async () => {
+        const testCase = await fixture();
+        testCase.verifier.query.mockRejectedValueOnce(new Error("Query read timeout"));
+        await expect(testCase.run()).rejects.toThrow("TARGET_REPARSE_ABSENCE_UNPROVEN");
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.verifier.end).toHaveBeenCalledOnce();
       });
 
       it("reports fixed target-side mismatch dimensions", async () => {

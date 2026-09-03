@@ -1212,6 +1212,53 @@ const main = async () => {
           }
         }
 
+        const eventTriggerRacer = new Client(config(targetPort, scratchName));
+        await eventTriggerRacer.connect();
+        await eventTriggerRacer.query(`
+          CREATE FUNCTION public.corgtex_reparse_race_event_trigger() RETURNS event_trigger
+            LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''target reparse event trigger fired''; END'
+        `);
+        let raceTriggerCreated = false;
+        try {
+          const raceResult = await runTargetCheckReparseDiagnostic({
+            targetConfig: { ...targetAdminConfig, database: scratchName },
+            sourceManifestEntry: syntheticSource(destination, sourceExpression),
+            destinationManifestEntry: destination,
+            sourceExpression,
+            sourceDependencies: safeSourceDependencies,
+            destinationDetail,
+            serverVersionRelation: "MATCH",
+            createClient: (nodeConfig) => {
+              const diagnosticClient = new Client(nodeConfig);
+              const query = diagnosticClient.query.bind(diagnosticClient);
+              diagnosticClient.query = async (sql, values) => {
+                const queryResult = await query(sql, values);
+                if (
+                  !raceTriggerCreated
+                  && typeof sql === "string"
+                  && sql.includes("enabled_event_trigger_count")
+                ) {
+                  await eventTriggerRacer.query(`
+                    CREATE EVENT TRIGGER corgtex_reparse_race_event_trigger
+                      ON ddl_command_start WHEN TAG IN ('ALTER TABLE')
+                      EXECUTE FUNCTION public.corgtex_reparse_race_event_trigger()
+                  `);
+                  raceTriggerCreated = true;
+                }
+                return queryResult;
+              };
+              return diagnosticClient;
+            },
+          });
+          if (!raceTriggerCreated || raceResult.status !== "MATCH") {
+            fail("TARGET_REPARSE_EVENT_TRIGGER_RACE_SUPPRESSION_FAILED");
+          }
+        } finally {
+          await eventTriggerRacer.query("DROP EVENT TRIGGER IF EXISTS corgtex_reparse_race_event_trigger").catch(() => {});
+          await eventTriggerRacer.query("DROP FUNCTION IF EXISTS public.corgtex_reparse_race_event_trigger()").catch(() => {});
+          await eventTriggerRacer.end().catch(() => {});
+        }
+
         await client.query(`
           CREATE FUNCTION public.corgtex_reparse_event_trigger() RETURNS event_trigger
             LANGUAGE plpgsql AS 'BEGIN NULL; END';
