@@ -17,6 +17,7 @@ import {
   findSingleCheckExpressionMismatch,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
+  schemaTokenDigest,
   tokenizeSchemaDump,
   writeClientFiles,
 } from "./run-postgres-restore-rehearsal.mjs";
@@ -1042,6 +1043,73 @@ const main = async () => {
     if (timezoneConstraint === undefined) fail("TIMEZONE_REBIND_FIXTURE_MISSING");
     const timezoneDetail = await collectReboundSourceCheckDetail(sourceConfig, timezoneConstraint);
     if (timezoneDetail.ok !== true) fail("TIMEZONE_REBIND_DRIFT");
+
+    const ambiguousSourceExpression = "fixture_flag AND ((other_fixture_flag IS NOT NULL))";
+    const ambiguousDestinationExpression = "fixture_flag AND (other_fixture_flag IS NOT NULL)";
+    const ambiguousSourceManifest = new Map([[timezoneConstraint.key, {
+      ...timezoneConstraint,
+      semantics: {
+        ...timezoneConstraint.semantics,
+        DEFINITION: schemaTokenDigest(tokenizeSchemaDump(`CHECK (${ambiguousSourceExpression})`)),
+        CHECK_EXPRESSION: schemaTokenDigest(tokenizeSchemaDump(ambiguousSourceExpression)),
+      },
+    }]]);
+    const ambiguousDestinationManifest = new Map([[timezoneConstraint.key, {
+      ...timezoneConstraint,
+      semantics: {
+        ...timezoneConstraint.semantics,
+        DEFINITION: schemaTokenDigest(tokenizeSchemaDump(`CHECK (${ambiguousDestinationExpression})`)),
+        CHECK_EXPRESSION: schemaTokenDigest(tokenizeSchemaDump(ambiguousDestinationExpression)),
+      },
+    }]]);
+    const ambiguityDetail = (expression) => ({
+      ...timezoneDetail,
+      tokens: tokenizeSchemaDump(expression),
+      columnReferences: new Set(["fixture_flag", "other_fixture_flag"]),
+      functionReferences: new Set(),
+    });
+    const ambiguousDiagnostic = buildConstraintSemanticDiagnostic(
+      ambiguousSourceManifest,
+      ambiguousDestinationManifest,
+      "MATCH",
+      {
+        source: ambiguityDetail(ambiguousSourceExpression),
+        destination: ambiguityDetail(ambiguousDestinationExpression),
+      },
+    );
+    if (
+      ambiguousDiagnostic.mismatchCount !== 1
+      || JSON.stringify(ambiguousDiagnostic.mismatchFields) !== JSON.stringify(["DEFINITION", "CHECK_EXPRESSION"])
+    ) fail("CONSTRAINT_CHECK_AMBIGUITY_CANDIDATE_MISMATCH");
+    const ambiguity = ambiguousDiagnostic.checkExpressionDifference;
+    if (ambiguity?.status !== "AMBIGUOUS" || ambiguity.tokenEdit !== null) {
+      fail("CONSTRAINT_CHECK_AMBIGUITY_STATUS_MISMATCH");
+    }
+    if (ambiguity.ambiguityFingerprint?.nonParenthesisTokenSequenceRelation !== "MATCH") {
+      fail("CONSTRAINT_CHECK_AMBIGUITY_SEQUENCE_MISMATCH");
+    }
+    if (ambiguity.ambiguityFingerprint.sourceOnly.PARENTHESIS !== 2) {
+      fail("CONSTRAINT_CHECK_AMBIGUITY_PARENTHESIS_COUNT");
+    }
+    if (Object.entries(ambiguity.ambiguityFingerprint.sourceOnly).some(
+      ([category, count]) => category !== "PARENTHESIS" && count !== 0,
+    )) fail("CONSTRAINT_CHECK_AMBIGUITY_SOURCE_EXTRA_CATEGORY");
+    if (Object.values(ambiguity.ambiguityFingerprint.destinationOnly).some((count) => count !== 0)) {
+      fail("CONSTRAINT_CHECK_AMBIGUITY_DESTINATION_EXTRA_CATEGORY");
+    }
+    if (!ambiguity.dependencies.identitySetEqual || ambiguity.dependencies.changedClasses.length !== 0) {
+      fail("CONSTRAINT_CHECK_AMBIGUITY_DEPENDENCY_MISMATCH");
+    }
+    if (
+      Object.values(ambiguity.nodeTagDeltas.sourceOnly).some((count) => count !== 0)
+      || Object.values(ambiguity.nodeTagDeltas.destinationOnly).some((count) => count !== 0)
+    ) fail("CONSTRAINT_CHECK_AMBIGUITY_NODE_MISMATCH");
+    const serializedAmbiguity = JSON.stringify(ambiguity);
+    if (
+      serializedAmbiguity.includes("fixture_flag")
+      || serializedAmbiguity.includes("other_fixture_flag")
+      || /[a-f0-9]{64}/u.test(serializedAmbiguity)
+    ) fail("CONSTRAINT_CHECK_AMBIGUITY_PRIVACY_FAILED");
 
     const recoveryConstraint = [...targetConstraintManifest.values()].find((entry) => {
       try {

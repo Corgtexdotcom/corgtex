@@ -472,6 +472,7 @@ describe("PostgreSQL restore rehearsal runner", () => {
           destinationOnly: expect.objectContaining({ RELABELTYPE: 0, OTHER: 0 }),
         },
         dependencies: { identitySetEqual: true, changedClasses: [] },
+        ambiguityFingerprint: null,
       });
       const serialized = JSON.stringify(diagnostic);
       for (const forbidden of [
@@ -511,10 +512,136 @@ describe("PostgreSQL restore rehearsal runner", () => {
         side: null,
         stage: null,
         tokenEdit: null,
-        nodeTagDeltas: null,
-        dependencies: null,
+        nodeTagDeltas: {
+          sourceOnly: expect.objectContaining({ OTHER: 0 }),
+          destinationOnly: expect.objectContaining({ OTHER: 0 }),
+        },
+        dependencies: {
+          identitySetEqual: false,
+          changedClasses: ["OPERATOR", "RELATION", "TYPE"],
+        },
+        ambiguityFingerprint: {
+          nonParenthesisTokenSequenceRelation: "DIFFERENT",
+          sourceOnly: expect.objectContaining({ OTHER: 3 }),
+          destinationOnly: expect.objectContaining({ COLUMN_REFERENCE: 1 }),
+        },
       });
       expect(JSON.stringify(diagnostic)).not.toContain("other_private_relation");
+    });
+
+    it("fingerprints a repeated internal parenthesis pair without selecting an edit path", async () => {
+      const sourceExpression = "private_column AND ((other_private_column IS NOT NULL))";
+      const destinationExpression = "private_column AND (other_private_column IS NOT NULL)";
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: sourceExpression,
+        definition: `CHECK (${sourceExpression})`,
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: destinationExpression,
+        definition: `CHECK (${destinationExpression})`,
+      })]);
+      const detail = (expression) => checkDetail(expression, {
+        columnReferences: new Set(["private_column", "other_private_column"]),
+      });
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "DIFFERENT", {
+        source: detail(sourceExpression),
+        destination: detail(destinationExpression),
+      });
+      expect(diagnostic.checkExpressionDifference).toEqual({
+        status: "AMBIGUOUS",
+        limitKind: null,
+        side: null,
+        stage: null,
+        tokenEdit: null,
+        nodeTagDeltas: {
+          sourceOnly: expect.objectContaining({ OTHER: 0 }),
+          destinationOnly: expect.objectContaining({ OTHER: 0 }),
+        },
+        dependencies: { identitySetEqual: true, changedClasses: [] },
+        ambiguityFingerprint: {
+          nonParenthesisTokenSequenceRelation: "MATCH",
+          sourceOnly: {
+            CAST_OPERATOR: 0,
+            BUILTIN_TYPE: 0,
+            PARENTHESIS: 2,
+            COLLATION: 0,
+            OPERATOR: 0,
+            FUNCTION: 0,
+            COLUMN_REFERENCE: 0,
+            STRING_LITERAL: 0,
+            OTHER: 0,
+          },
+          destinationOnly: {
+            CAST_OPERATOR: 0,
+            BUILTIN_TYPE: 0,
+            PARENTHESIS: 0,
+            COLLATION: 0,
+            OPERATOR: 0,
+            FUNCTION: 0,
+            COLUMN_REFERENCE: 0,
+            STRING_LITERAL: 0,
+            OTHER: 0,
+          },
+        },
+      });
+      const serialized = JSON.stringify(diagnostic);
+      expect(serialized).not.toContain("private_column");
+      expect(serialized).not.toContain("other_private_column");
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
+    });
+
+    it("reports reordered non-parenthesis tokens even when their multisets match", async () => {
+      const sourceExpression = "private_flag AND private_flag AND other_flag AND private_flag AND other_flag";
+      const destinationExpression = "private_flag AND other_flag AND private_flag AND other_flag AND private_flag";
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: sourceExpression,
+        definition: `CHECK (${sourceExpression})`,
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: destinationExpression,
+        definition: `CHECK (${destinationExpression})`,
+      })]);
+      const detail = (expression) => checkDetail(expression, {
+        columnReferences: new Set(["private_flag", "other_flag"]),
+      });
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH", {
+        source: detail(sourceExpression),
+        destination: detail(destinationExpression),
+      });
+      const fingerprint = diagnostic.checkExpressionDifference?.ambiguityFingerprint;
+      expect(diagnostic.checkExpressionDifference?.status).toBe("AMBIGUOUS");
+      expect(fingerprint?.nonParenthesisTokenSequenceRelation).toBe("DIFFERENT");
+      expect(Object.values(fingerprint?.sourceOnly ?? {})).toEqual(expect.arrayContaining([0]));
+      expect(Object.values(fingerprint?.sourceOnly ?? {}).every((count) => count === 0)).toBe(true);
+      expect(Object.values(fingerprint?.destinationOnly ?? {}).every((count) => count === 0)).toBe(true);
+    });
+
+    it.each([
+      ["CAST_OPERATOR", "private_column::text OR private_column::text", "private_column::text"],
+      ["OPERATOR", "private_column > 1 OR private_column > 1", "private_column > 1"],
+      ["STRING_LITERAL", "private_column = 'private-literal' OR private_column = 'private-literal'", "private_column = 'private-literal'"],
+      ["COLUMN_REFERENCE", "private_column OR private_column", "private_column"],
+    ])("keeps ambiguous %s residuals distinguishable without token values", async (category, sourceExpression, destinationExpression) => {
+      const source = await constraintManifest([constraintCatalogRow({
+        check_expression: sourceExpression,
+        definition: `CHECK (${sourceExpression})`,
+      })]);
+      const destination = await constraintManifest([constraintCatalogRow({
+        check_expression: destinationExpression,
+        definition: `CHECK (${destinationExpression})`,
+      })]);
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH", {
+        source: checkDetail(sourceExpression),
+        destination: checkDetail(destinationExpression),
+      });
+      const fingerprint = diagnostic.checkExpressionDifference?.ambiguityFingerprint;
+      expect(diagnostic.checkExpressionDifference?.status).toBe("AMBIGUOUS");
+      expect((fingerprint?.sourceOnly[category] ?? 0) + (fingerprint?.destinationOnly[category] ?? 0))
+        .toBeGreaterThan(0);
+      const serialized = JSON.stringify(diagnostic);
+      expect(serialized).not.toContain("private_column");
+      expect(serialized).not.toContain("private-literal");
+      expect(serialized).not.toMatch(/[a-f0-9]{64}/u);
     });
 
     it.each([

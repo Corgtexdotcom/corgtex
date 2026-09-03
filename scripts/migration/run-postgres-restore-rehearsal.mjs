@@ -2560,6 +2560,60 @@ const checkEditCategory = (tokens, contextualTokenCategories, catalogIdentifierC
   return "OTHER";
 };
 
+const isCheckParenthesis = (token) => token?.domain === "DDL_TOKEN"
+  && (token.value === "(" || token.value === ")");
+
+const buildCheckAmbiguityFingerprint = (
+  sourceTokens,
+  destinationTokens,
+  sourceContextualTokenCategories,
+  destinationContextualTokenCategories,
+  sourceCatalogIdentifierCategories,
+  destinationCatalogIdentifierCategories,
+  sourceKeywords,
+  destinationKeywords,
+) => {
+  const withoutParentheses = (tokens) => tokens.filter((token) => !isCheckParenthesis(token));
+  const sourceWithoutParentheses = withoutParentheses(sourceTokens);
+  const destinationWithoutParentheses = withoutParentheses(destinationTokens);
+  const nonParenthesisTokenSequenceRelation = (
+    sourceWithoutParentheses.length === destinationWithoutParentheses.length
+    && sourceWithoutParentheses.every((token, index) => sameSchemaToken(token, destinationWithoutParentheses[index]))
+  ) ? "MATCH" : "DIFFERENT";
+  const signatureCounts = (tokens, contextualCategories, catalogCategories, keywords) => {
+    const counts = new Map();
+    for (let index = 0; index < tokens.length; index += 1) {
+      const category = checkEditCategory(tokens, contextualCategories, catalogCategories, keywords, index);
+      const signature = JSON.stringify([tokens[index].domain, tokens[index].value, category]);
+      const current = counts.get(signature);
+      counts.set(signature, { category, count: (current?.count ?? 0) + 1 });
+    }
+    return counts;
+  };
+  const sourceSignatures = signatureCounts(
+    sourceTokens,
+    sourceContextualTokenCategories,
+    sourceCatalogIdentifierCategories,
+    sourceKeywords,
+  );
+  const destinationSignatures = signatureCounts(
+    destinationTokens,
+    destinationContextualTokenCategories,
+    destinationCatalogIdentifierCategories,
+    destinationKeywords,
+  );
+  const sourceOnly = emptyCheckEditCounts();
+  const destinationOnly = emptyCheckEditCounts();
+  for (const signature of new Set([...sourceSignatures.keys(), ...destinationSignatures.keys()])) {
+    const source = sourceSignatures.get(signature);
+    const destination = destinationSignatures.get(signature);
+    const difference = (source?.count ?? 0) - (destination?.count ?? 0);
+    if (difference > 0) sourceOnly[source.category] += difference;
+    if (difference < 0) destinationOnly[destination.category] -= difference;
+  }
+  return { nonParenthesisTokenSequenceRelation, sourceOnly, destinationOnly };
+};
+
 const unwrapCheckExpression = (tokens) => {
   let current = tokens;
   let layers = 0;
@@ -2764,6 +2818,7 @@ const emptyCheckExpressionDifference = (status, limitKind = null, side = null, s
   tokenEdit: null,
   nodeTagDeltas: null,
   dependencies: null,
+  ambiguityFingerprint: null,
 });
 
 const buildCheckExpressionDifference = (source, destination) => {
@@ -2798,15 +2853,50 @@ const buildCheckExpressionDifference = (source, destination) => {
     },
   );
   if (tokenEdit.status === "LIMIT_EXCEEDED") return emptyCheckExpressionDifference("LIMIT_EXCEEDED", "TOKENS");
-  if (tokenEdit.status !== "UNIQUE") return emptyCheckExpressionDifference("AMBIGUOUS");
+  const nodeTagDeltas = countDifference(source.nodeTagCounts, destination.nodeTagCounts, CHECK_NODE_TAGS);
+  const dependencies = dependencyDifference(source.dependencies, destination.dependencies);
+  if (tokenEdit.status !== "UNIQUE") {
+    const sourceContextualTokenCategories = checkContextualTokenCategories(source.tokens);
+    const destinationContextualTokenCategories = checkContextualTokenCategories(destination.tokens);
+    const sourceContext = normalizeCheckIdentifierContext({
+      keywords: source.keywords,
+      columnReferences: source.columnReferences,
+      functionReferences: source.functionReferences,
+    });
+    const destinationContext = normalizeCheckIdentifierContext({
+      keywords: destination.keywords,
+      columnReferences: destination.columnReferences,
+      functionReferences: destination.functionReferences,
+    });
+    return {
+      status: "AMBIGUOUS",
+      limitKind: null,
+      side: null,
+      stage: null,
+      tokenEdit: null,
+      nodeTagDeltas,
+      dependencies,
+      ambiguityFingerprint: buildCheckAmbiguityFingerprint(
+        source.tokens,
+        destination.tokens,
+        sourceContextualTokenCategories,
+        destinationContextualTokenCategories,
+        checkCatalogIdentifierCategories(source.tokens, sourceContextualTokenCategories, sourceContext),
+        checkCatalogIdentifierCategories(destination.tokens, destinationContextualTokenCategories, destinationContext),
+        sourceContext.keywords,
+        destinationContext.keywords,
+      ),
+    };
+  }
   return {
     status: "UNIQUE",
     limitKind: null,
     side: null,
     stage: null,
     tokenEdit,
-    nodeTagDeltas: countDifference(source.nodeTagCounts, destination.nodeTagCounts, CHECK_NODE_TAGS),
-    dependencies: dependencyDifference(source.dependencies, destination.dependencies),
+    nodeTagDeltas,
+    dependencies,
+    ambiguityFingerprint: null,
   };
 };
 
