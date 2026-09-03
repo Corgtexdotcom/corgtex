@@ -10,7 +10,9 @@ import pg from "pg";
 import {
   buildConstraintSemanticDiagnostic,
   cleanupScratchDatabase,
+  collectCheckConstraintDetail,
   collectConstraintCatalogManifest,
+  findSingleCheckExpressionMismatch,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
   writeClientFiles,
@@ -24,11 +26,45 @@ const TEST_READER_PASSWORD = "local-rehearsal-reader-only";
 const TEST_TARGET_OPERATOR_PASSWORD = "local-rehearsal-target-operator-only";
 const TARGET_TLS_HOST = "target.rehearsal.test";
 const WRONG_TARGET_TLS_HOST = "wrong-target.rehearsal.test";
+const CHECK_COLLECTION_FAILURES = new Map(
+  ["SOURCE", "DESTINATION"].flatMap((side) => [
+    [JSON.stringify([side, "IDENTITY_REBIND_FAILED", "REBIND", null]), `${side}_IDENTITY_REBIND_FAILED_REBIND`],
+    ...[
+      "REBIND", "PREFLIGHT", "EXPRESSION_FETCH", "DEPENDENCY_PREFLIGHT",
+      "DEPENDENCY_FETCH", "NODE_COUNT", "TOKENIZE",
+    ].map((stage) => [
+      JSON.stringify([side, "COLLECTION_UNAVAILABLE", stage, null]),
+      `${side}_COLLECTION_UNAVAILABLE_${stage}`,
+    ]),
+    ...[
+      ["PREFLIGHT", "EXPRESSION_BYTES"],
+      ["PREFLIGHT", "TREE_BYTES"],
+      ["PREFLIGHT", "DEPENDENCY_COUNT"],
+      ["PREFLIGHT", "NODE_COUNT"],
+      ["DEPENDENCY_PREFLIGHT", "DEPENDENCY_BYTES"],
+      ["TOKENIZE", "TOKENS"],
+    ].map(([stage, limitKind]) => [
+      JSON.stringify([side, "LIMIT_EXCEEDED", stage, limitKind]),
+      `${side}_LIMIT_EXCEEDED_${limitKind}`,
+    ]),
+  ]),
+);
 
 const fail = (code) => {
   const error = new Error(code);
   error.code = code;
   throw error;
+};
+
+const assertCheckCollection = (side, detail) => {
+  if (detail?.ok === true) return;
+  const code = CHECK_COLLECTION_FAILURES.get(JSON.stringify([
+    side,
+    detail?.status,
+    detail?.stage,
+    detail?.limitKind ?? null,
+  ]));
+  fail(`CONSTRAINT_CHECK_DIAGNOSTIC_${code ?? "COLLECTION_STATUS_INVALID"}`);
 };
 
 const run = (command, args, code) => new Promise((resolvePromise, rejectPromise) => {
@@ -526,8 +562,12 @@ const main = async () => {
     }
 
     const targetConstraintMutator = new Client(config(targetPort, scratchName));
+    const sourceConstraintDetailReadback = new Client(config(sourcePort, "source"));
     await targetConstraintMutator.connect();
+    await sourceConstraintDetailReadback.connect();
+    let changedSourceConstraintManifest;
     let changedTargetConstraintManifest;
+    let changedCheckDetails;
     try {
       await targetConstraintMutator.query(
         'ALTER TABLE "ConstraintFixture" DROP CONSTRAINT "ConstraintFixture_kind_check"',
@@ -537,39 +577,70 @@ const main = async () => {
           CHECK ("kind" IN ('private-alpha', 'private-beta', 'private-delta'))`,
       );
       await targetConstraintMutator.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await sourceConstraintDetailReadback.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await targetConstraintMutator.query("SET LOCAL search_path = pg_catalog");
+      await sourceConstraintDetailReadback.query("SET LOCAL search_path = pg_catalog");
+      changedSourceConstraintManifest = await collectConstraintCatalogManifest(
+        sourceConstraintDetailReadback,
+        "SOURCE_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
+      );
       changedTargetConstraintManifest = await collectConstraintCatalogManifest(
         targetConstraintMutator,
         "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
       );
+      const candidate = findSingleCheckExpressionMismatch(
+        changedSourceConstraintManifest,
+        changedTargetConstraintManifest,
+      );
+      if (candidate === null) fail("CONSTRAINT_CHECK_DIAGNOSTIC_CANDIDATE_MISSING");
+      changedCheckDetails = {
+        source: await collectCheckConstraintDetail(sourceConstraintDetailReadback, candidate.source),
+        destination: await collectCheckConstraintDetail(targetConstraintMutator, candidate.destination),
+      };
+      assertCheckCollection("SOURCE", changedCheckDetails.source);
+      assertCheckCollection("DESTINATION", changedCheckDetails.destination);
+      await sourceConstraintDetailReadback.query("COMMIT");
       await targetConstraintMutator.query("COMMIT");
     } finally {
+      await sourceConstraintDetailReadback.end().catch(() => {});
       await targetConstraintMutator.end().catch(() => {});
     }
     const changedConstraintDiagnostic = buildConstraintSemanticDiagnostic(
-      sourceConstraintManifest,
+      changedSourceConstraintManifest,
       changedTargetConstraintManifest,
+      "MATCH",
+      changedCheckDetails,
     );
     if (
       changedConstraintDiagnostic.semanticEqual
       || !changedConstraintDiagnostic.mismatchFields.includes("CHECK_EXPRESSION")
     ) fail("CONSTRAINT_CATALOG_MUTATION_UNDETECTED");
     const checkDifference = changedConstraintDiagnostic.checkExpressionDifference;
-    if (
-      checkDifference?.tokenEdit?.status !== "UNIQUE"
-      || checkDifference.tokenEdit.sourceOnly.STRING_LITERAL !== 1
-      || checkDifference.tokenEdit.destinationOnly.STRING_LITERAL !== 1
-      || Object.entries(checkDifference.tokenEdit.sourceOnly).some(
-        ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
-      )
-      || Object.entries(checkDifference.tokenEdit.destinationOnly).some(
-        ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
-      )
-      || !checkDifference.dependencies.identitySetEqual
-      || checkDifference.dependencies.changedClasses.length !== 0
-      || Object.values(checkDifference.nodeTagDeltas.sourceOnly).some((count) => count !== 0)
-      || Object.values(checkDifference.nodeTagDeltas.destinationOnly).some((count) => count !== 0)
-    ) fail("CONSTRAINT_CHECK_DIAGNOSTIC_CLASSIFICATION_FAILED");
+    if (checkDifference === null) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DETAIL_MISSING");
+    if (checkDifference.status !== "UNIQUE" || checkDifference.limitKind !== null) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_COLLECTION_STATUS");
+    }
+    if (checkDifference.tokenEdit?.status !== "UNIQUE") fail("CONSTRAINT_CHECK_DIAGNOSTIC_TOKEN_STATUS");
+    if (checkDifference.tokenEdit.sourceOnly.STRING_LITERAL !== 1) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_LITERAL_COUNT");
+    }
+    if (checkDifference.tokenEdit.destinationOnly.STRING_LITERAL !== 1) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_DESTINATION_LITERAL_COUNT");
+    }
+    if (Object.entries(checkDifference.tokenEdit.sourceOnly).some(
+      ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
+    )) fail("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_EXTRA_CATEGORY");
+    if (Object.entries(checkDifference.tokenEdit.destinationOnly).some(
+      ([category, count]) => category !== "STRING_LITERAL" && count !== 0,
+    )) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DESTINATION_EXTRA_CATEGORY");
+    if (!checkDifference.dependencies.identitySetEqual) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DEPENDENCY_IDENTITY");
+    if (checkDifference.dependencies.changedClasses.length !== 0) fail("CONSTRAINT_CHECK_DIAGNOSTIC_DEPENDENCY_CLASS");
+    if (Object.values(checkDifference.nodeTagDeltas.sourceOnly).some((count) => count !== 0)) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_NODE_COUNTS");
+    }
+    if (Object.values(checkDifference.nodeTagDeltas.destinationOnly).some((count) => count !== 0)) {
+      fail("CONSTRAINT_CHECK_DIAGNOSTIC_DESTINATION_NODE_COUNTS");
+    }
     if (evidence.source.locale.provider !== "builtin" || JSON.stringify(evidence.source.locale) !== JSON.stringify(evidence.destination.locale)) {
       fail("LOCALE_PROVIDER_PARITY_FAILED");
     }

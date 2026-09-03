@@ -33,6 +33,12 @@ const MAX_COMMAND_STDERR_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_CONSTRAINT_CATALOG_ROWS = 100_000;
 const MAX_CHECK_EDIT_TOKENS = 1024;
+const MAX_CONSTRAINT_TEXT_BYTES = 65_536;
+const MAX_CHECK_TREE_BYTES = 262_144;
+const MAX_CHECK_DEPENDENCIES = 256;
+const MAX_CHECK_DEPENDENCY_FIELD_BYTES = 4096;
+const MAX_CHECK_DEPENDENCY_TOTAL_BYTES = 65_536;
+const MAX_CHECK_NODE_TAGS = 4096;
 const FETCH_ROWS = 500;
 const LARGE_OBJECT_CHUNK_BYTES = 1024 * 1024;
 const MAX_LARGE_OBJECT_BYTES = 4n * 1024n * 1024n * 1024n * 1024n;
@@ -89,7 +95,6 @@ const CONSTRAINT_MISMATCH_FIELDS = [
   "DEFINITION",
   "CHECK_EXPRESSION",
   "EXTENSION_OWNERSHIP",
-  "DEPENDENCY",
 ];
 const CHECK_EDIT_CATEGORIES = [
   "CAST_OPERATOR",
@@ -1453,6 +1458,7 @@ export const buildSchemaDifferenceDiagnostic = (sourceTokens, destinationTokens)
 
 const constraintCatalogQuery = `
   SELECT
+    constraint_row.oid::text AS constraint_oid,
     constraint_namespace.nspname AS namespace_name,
     constraint_row.conname AS constraint_name,
     CASE WHEN constraint_row.conrelid <> 0 THEN 'TABLE' ELSE 'DOMAIN' END AS object_kind,
@@ -1590,47 +1596,38 @@ const constraintCatalogQuery = `
       JOIN pg_catalog.pg_type AS right_type ON right_type.oid = operator_row.oprright
       JOIN pg_catalog.pg_namespace AS right_type_namespace ON right_type_namespace.oid = right_type.typnamespace
     ), '[]'::jsonb) AS exclusion_operators,
-    CASE
+    CASE WHEN pg_catalog.octet_length(CASE
       WHEN constraint_row.contype = 't'
       THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
       ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
-    END AS definition,
-    CASE
-      WHEN constraint_row.contype = 'c'
+    END) <= ${MAX_CONSTRAINT_TEXT_BYTES} THEN CASE
+      WHEN constraint_row.contype = 't'
+      THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
+      ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
+    END ELSE NULL END AS definition,
+    pg_catalog.octet_length(CASE
+      WHEN constraint_row.contype = 't'
+      THEN pg_catalog.pg_get_triggerdef(constraint_trigger.oid, false)
+      ELSE pg_catalog.pg_get_constraintdef(constraint_row.oid, false)
+    END) <= ${MAX_CONSTRAINT_TEXT_BYTES} AS definition_within_limit,
+    CASE WHEN constraint_row.contype <> 'c' THEN NULL
+      WHEN pg_catalog.octet_length(pg_catalog.pg_get_expr(
+        constraint_row.conbin,
+        constraint_row.conrelid,
+        false
+      )) <= ${MAX_CONSTRAINT_TEXT_BYTES}
       THEN pg_catalog.pg_get_expr(constraint_row.conbin, constraint_row.conrelid, false)
       ELSE NULL
     END AS check_expression,
     CASE
+      WHEN constraint_row.contype <> 'c' THEN true
       WHEN constraint_row.contype = 'c'
-      THEN constraint_row.conbin::text
-      ELSE NULL
-    END AS expression_tree,
-    COALESCE((
-      SELECT jsonb_agg(
-        jsonb_build_array(
-          dependency.deptype::text,
-          identified.type,
-          identified.schema,
-          identified.name,
-          identified.identity
-        )
-        ORDER BY
-          dependency.deptype::text COLLATE "C",
-          identified.type COLLATE "C",
-          COALESCE(identified.schema, '') COLLATE "C",
-          COALESCE(identified.name, '') COLLATE "C",
-          identified.identity COLLATE "C"
-      )
-      FROM pg_catalog.pg_depend AS dependency
-      CROSS JOIN LATERAL pg_catalog.pg_identify_object(
-        dependency.refclassid,
-        dependency.refobjid,
-        dependency.refobjsubid
-      ) AS identified
-      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
-        AND dependency.objid = constraint_row.oid
-        AND dependency.objsubid = 0
-    ), '[]'::jsonb) AS dependencies
+      THEN pg_catalog.octet_length(pg_catalog.pg_get_expr(
+        constraint_row.conbin,
+        constraint_row.conrelid,
+        false
+      )) <= ${MAX_CONSTRAINT_TEXT_BYTES}
+    END AS check_expression_within_limit
   FROM pg_catalog.pg_constraint AS constraint_row
   JOIN pg_catalog.pg_namespace AS constraint_namespace ON constraint_namespace.oid = constraint_row.connamespace
   LEFT JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
@@ -1668,35 +1665,131 @@ const constraintCatalogQuery = `
   LIMIT ${MAX_CONSTRAINT_CATALOG_ROWS + 1}
 `;
 
+const checkConstraintPreflightQuery = `
+  SELECT
+    constraint_namespace.nspname AS namespace_name,
+    constraint_row.conname AS constraint_name,
+    CASE WHEN constraint_row.conrelid <> 0 THEN 'TABLE' ELSE 'DOMAIN' END AS object_kind,
+    relation_namespace.nspname AS relation_namespace_name,
+    relation.relname AS relation_name,
+    domain_namespace.nspname AS domain_namespace_name,
+    domain_type.typname AS domain_name,
+    constraint_row.contype::text AS type,
+    pg_catalog.octet_length(pg_catalog.pg_get_expr(
+      constraint_row.conbin,
+      constraint_row.conrelid,
+      false
+    ))::text AS expression_bytes,
+    pg_catalog.octet_length(constraint_row.conbin::text)::text AS tree_bytes,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.pg_depend AS dependency
+      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+        AND dependency.objid = constraint_row.oid
+        AND dependency.objsubid = 0) AS dependency_count,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.regexp_matches(
+        CASE WHEN pg_catalog.octet_length(constraint_row.conbin::text) <= ${MAX_CHECK_TREE_BYTES}
+          THEN constraint_row.conbin::text ELSE '' END,
+        '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
+        'g'
+      )) AS node_count
+  FROM pg_catalog.pg_constraint AS constraint_row
+  JOIN pg_catalog.pg_namespace AS constraint_namespace ON constraint_namespace.oid = constraint_row.connamespace
+  LEFT JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+  LEFT JOIN pg_catalog.pg_namespace AS relation_namespace ON relation_namespace.oid = relation.relnamespace
+  LEFT JOIN pg_catalog.pg_type AS domain_type ON domain_type.oid = constraint_row.contypid
+  LEFT JOIN pg_catalog.pg_namespace AS domain_namespace ON domain_namespace.oid = domain_type.typnamespace
+  WHERE constraint_row.oid = $1::pg_catalog.oid
+    AND constraint_row.contype = 'c'
+`;
+
+const checkConstraintDependencyPreflightQuery = `
+  WITH dependency_identity AS MATERIALIZED (
+    SELECT
+      dependency.deptype::text AS dependency_type,
+      identified.type,
+      identified.schema,
+      identified.name,
+      identified.identity
+    FROM pg_catalog.pg_depend AS dependency
+    CROSS JOIN LATERAL pg_catalog.pg_identify_object(
+      dependency.refclassid,
+      dependency.refobjid,
+      dependency.refobjsubid
+    ) AS identified
+    WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+      AND dependency.objid = $1::pg_catalog.oid
+      AND dependency.objsubid = 0
+    LIMIT ${MAX_CHECK_DEPENDENCIES + 1}
+  )
+  SELECT
+    COALESCE(pg_catalog.max(GREATEST(
+      pg_catalog.octet_length(dependency_type),
+      pg_catalog.octet_length(type),
+      pg_catalog.octet_length(COALESCE(schema, '')),
+      pg_catalog.octet_length(COALESCE(name, '')),
+      pg_catalog.octet_length(identity)
+    )), 0)::text AS max_field_bytes,
+    COALESCE(pg_catalog.sum(
+      pg_catalog.octet_length(dependency_type)
+      + pg_catalog.octet_length(type)
+      + pg_catalog.octet_length(COALESCE(schema, ''))
+      + pg_catalog.octet_length(COALESCE(name, ''))
+      + pg_catalog.octet_length(identity)
+    ), 0)::text AS total_bytes
+  FROM dependency_identity
+`;
+
+const checkConstraintExpressionQuery = `
+  SELECT pg_catalog.pg_get_expr(conbin, conrelid, false) AS check_expression
+  FROM pg_catalog.pg_constraint
+  WHERE oid = $1::pg_catalog.oid AND contype = 'c'
+`;
+
+const checkConstraintDependencyQuery = `
+  SELECT
+    dependency.deptype::text AS dependency_type,
+    identified.type,
+    identified.schema,
+    identified.name,
+    identified.identity
+  FROM pg_catalog.pg_depend AS dependency
+  CROSS JOIN LATERAL pg_catalog.pg_identify_object(
+    dependency.refclassid,
+    dependency.refobjid,
+    dependency.refobjsubid
+  ) AS identified
+  WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+    AND dependency.objid = $1::pg_catalog.oid
+    AND dependency.objsubid = 0
+  ORDER BY
+    dependency.deptype::text COLLATE "C",
+    identified.type COLLATE "C",
+    COALESCE(identified.schema, '') COLLATE "C",
+    COALESCE(identified.name, '') COLLATE "C",
+    identified.identity COLLATE "C"
+  LIMIT ${MAX_CHECK_DEPENDENCIES + 1}
+`;
+
+const checkConstraintNodeQuery = `
+  SELECT node_match[1] AS node_tag, pg_catalog.count(*)::text AS node_count
+  FROM pg_catalog.pg_constraint AS constraint_row
+  CROSS JOIN LATERAL pg_catalog.regexp_matches(
+    constraint_row.conbin::text,
+    '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
+    'g'
+  ) AS node_match
+  WHERE constraint_row.oid = $1::pg_catalog.oid AND constraint_row.contype = 'c'
+  GROUP BY node_match[1]
+`;
+
 const isBoolean = (value) => typeof value === "boolean";
 const isNullableString = (value) => value === null || typeof value === "string";
 const isStringArray = (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string");
 const isOperatorIdentityArray = (value) => Array.isArray(value) && value.every(
   (entry) => Array.isArray(entry) && entry.length === 6 && entry.every((part) => typeof part === "string"),
 );
-const isDependencyIdentityArray = (value) => Array.isArray(value) && value.every(
-  (entry) => Array.isArray(entry)
-    && entry.length === 5
-    && typeof entry[0] === "string"
-    && entry[0].length === 1
-    && typeof entry[1] === "string"
-    && entry[1].length > 0
-    && isNullableString(entry[2])
-    && isNullableString(entry[3])
-    && typeof entry[4] === "string"
-    && entry[4].length > 0,
-);
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-
-const checkNodeTagCounts = (expressionTree) => {
-  if (expressionTree === null) return null;
-  const counts = Object.fromEntries(CHECK_NODE_TAGS.map((tag) => [tag, 0]));
-  for (const match of expressionTree.matchAll(/\{([A-Z][A-Z0-9_]*)\b/gu)) {
-    const tag = CHECK_NODE_TAGS.includes(match[1]) ? match[1] : "OTHER";
-    counts[tag] += 1;
-  }
-  return counts;
-};
 
 const dependencyClass = (type) => {
   const normalized = type.toLowerCase();
@@ -1730,6 +1823,8 @@ const normalizeConstraintCatalogRow = (row) => {
     "has_parent",
     "has_referenced_relation",
     "has_supporting_index",
+    "definition_within_limit",
+    "check_expression_within_limit",
   ];
   const nullableStrings = [
     "relation_namespace_name",
@@ -1747,7 +1842,6 @@ const normalizeConstraintCatalogRow = (row) => {
     "supporting_index_name",
     "extension_name",
     "check_expression",
-    "expression_tree",
   ];
   const countedArrays = [
     ["key_column_count", "key_columns"],
@@ -1773,7 +1867,8 @@ const normalizeConstraintCatalogRow = (row) => {
     || !isOperatorIdentityArray(row.primary_primary_operators)
     || !isOperatorIdentityArray(row.foreign_foreign_operators)
     || !isOperatorIdentityArray(row.exclusion_operators)
-    || !isDependencyIdentityArray(row.dependencies)
+    || !/^(?:0|[1-9][0-9]{0,9})$/u.test(row.constraint_oid)
+    || BigInt(row.constraint_oid) > MAX_POSTGRES_OID
     || countedArrays.some(([countField, arrayField]) => (
       !/^(?:0|[1-9][0-9]{0,4})$/u.test(row[countField])
       || Number(row[countField]) !== row[arrayField].length
@@ -1793,7 +1888,6 @@ const normalizeConstraintCatalogRow = (row) => {
     || row.namespace_name !== objectIdentity[0]
     || row.initially_deferred && !row.deferrable
     || (row.type === "c") !== (row.check_expression !== null)
-    || (row.type === "c") !== (row.expression_tree !== null)
     || (row.type === "f") !== row.has_referenced_relation
   ) fail("INVALID_CONSTRAINT_CATALOG_ROW");
   const referencedIdentity = row.has_referenced_relation
@@ -1828,6 +1922,8 @@ const normalizeConstraintCatalogRow = (row) => {
       : parentIdentity.slice(1).some((part) => typeof part !== "string" || part.length === 0))
   ) fail("INVALID_CONSTRAINT_CATALOG_ROW");
   const identity = [row.object_kind, ...objectIdentity, row.constraint_name];
+  const definitionTokens = tokenizeSchemaDump(row.definition);
+  const checkExpressionTokens = row.check_expression === null ? null : tokenizeSchemaDump(row.check_expression);
   return {
     key: JSON.stringify(identity),
     type: CONSTRAINT_TYPES.get(row.type),
@@ -1851,17 +1947,14 @@ const normalizeConstraintCatalogRow = (row) => {
         row.exclusion_operators,
         supportingIndexIdentity,
       ],
-      DEFINITION: schemaTokenDigest(tokenizeSchemaDump(row.definition)),
+      DEFINITION: schemaTokenDigest(definitionTokens),
       CHECK_EXPRESSION: row.check_expression === null
         ? null
-        : schemaTokenDigest(tokenizeSchemaDump(row.check_expression)),
+        : schemaTokenDigest(checkExpressionTokens),
       EXTENSION_OWNERSHIP: row.extension_name,
-      DEPENDENCY: row.dependencies,
     },
     diagnostic: {
-      checkExpressionTokens: row.check_expression === null ? null : tokenizeSchemaDump(row.check_expression),
-      nodeTagCounts: checkNodeTagCounts(row.expression_tree),
-      dependencies: row.dependencies,
+      constraintOid: row.constraint_oid,
     },
   };
 };
@@ -1872,6 +1965,9 @@ export const collectConstraintCatalogManifest = async (client, failureCode) => {
     if (result.rows.length > MAX_CONSTRAINT_CATALOG_ROWS) fail("CONSTRAINT_CATALOG_LIMIT_EXCEEDED");
     const manifest = new Map();
     for (const rawRow of result.rows) {
+      if (rawRow.definition_within_limit !== true || rawRow.check_expression_within_limit !== true) {
+        fail("CONSTRAINT_TEXT_LIMIT_EXCEEDED");
+      }
       const row = normalizeConstraintCatalogRow(rawRow);
       if (manifest.has(row.key)) fail("DUPLICATE_CONSTRAINT_CATALOG_IDENTITY");
       manifest.set(row.key, row);
@@ -1880,6 +1976,119 @@ export const collectConstraintCatalogManifest = async (client, failureCode) => {
   } catch (error) {
     if (isRehearsalError(error)) throw error;
     fail(failureCode);
+  }
+};
+
+const parseDiagnosticCount = (value) => {
+  if (!/^(?:0|[1-9][0-9]{0,9})$/u.test(value)) throw new Error("INVALID_DIAGNOSTIC_COUNT");
+  return Number(value);
+};
+
+const checkConstraintIdentityKey = (row) => {
+  if (
+    row === null
+    || typeof row !== "object"
+    || !["TABLE", "DOMAIN"].includes(row.object_kind)
+    || typeof row.namespace_name !== "string"
+    || typeof row.constraint_name !== "string"
+    || row.type !== "c"
+  ) return null;
+  const objectIdentity = row.object_kind === "TABLE"
+    ? [row.relation_namespace_name, row.relation_name]
+    : [row.domain_namespace_name, row.domain_name];
+  if (
+    objectIdentity.some((part) => typeof part !== "string" || part.length === 0)
+    || row.namespace_name !== objectIdentity[0]
+  ) return null;
+  return JSON.stringify([row.object_kind, ...objectIdentity, row.constraint_name]);
+};
+
+const checkDetailFailure = (status, stage, limitKind = null) => ({
+  ok: false,
+  status,
+  stage,
+  limitKind,
+});
+
+export const collectCheckConstraintDetail = async (client, manifestEntry) => {
+  let stage = "REBIND";
+  try {
+    if (
+      manifestEntry?.type !== "CHECK"
+      || !/^(?:0|[1-9][0-9]{0,9})$/u.test(manifestEntry?.diagnostic?.constraintOid)
+      || BigInt(manifestEntry.diagnostic.constraintOid) > MAX_POSTGRES_OID
+    ) return checkDetailFailure("IDENTITY_REBIND_FAILED", stage);
+    const oid = manifestEntry.diagnostic.constraintOid;
+    stage = "PREFLIGHT";
+    const preflight = await client.query(checkConstraintPreflightQuery, [oid]);
+    if (preflight.rowCount !== 1 || checkConstraintIdentityKey(preflight.rows[0]) !== manifestEntry.key) {
+      return checkDetailFailure("IDENTITY_REBIND_FAILED", "REBIND");
+    }
+    const expressionBytes = parseDiagnosticCount(preflight.rows[0].expression_bytes);
+    const treeBytes = parseDiagnosticCount(preflight.rows[0].tree_bytes);
+    const dependencyCount = parseDiagnosticCount(preflight.rows[0].dependency_count);
+    const nodeCount = parseDiagnosticCount(preflight.rows[0].node_count);
+    if (expressionBytes > MAX_CONSTRAINT_TEXT_BYTES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "EXPRESSION_BYTES");
+    if (treeBytes > MAX_CHECK_TREE_BYTES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "TREE_BYTES");
+    if (dependencyCount > MAX_CHECK_DEPENDENCIES) return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_COUNT");
+    if (nodeCount > MAX_CHECK_NODE_TAGS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "NODE_COUNT");
+
+    stage = "DEPENDENCY_PREFLIGHT";
+    const dependencyPreflight = await client.query(checkConstraintDependencyPreflightQuery, [oid]);
+    if (dependencyPreflight.rowCount !== 1) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+    const maxFieldBytes = parseDiagnosticCount(dependencyPreflight.rows[0].max_field_bytes);
+    const totalBytes = parseDiagnosticCount(dependencyPreflight.rows[0].total_bytes);
+    if (maxFieldBytes > MAX_CHECK_DEPENDENCY_FIELD_BYTES) {
+      return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
+    }
+    if (totalBytes > MAX_CHECK_DEPENDENCY_TOTAL_BYTES) {
+      return checkDetailFailure("LIMIT_EXCEEDED", stage, "DEPENDENCY_BYTES");
+    }
+
+    stage = "EXPRESSION_FETCH";
+    const expressionResult = await client.query(checkConstraintExpressionQuery, [oid]);
+    if (
+      expressionResult.rowCount !== 1
+      || typeof expressionResult.rows[0].check_expression !== "string"
+      || Buffer.byteLength(expressionResult.rows[0].check_expression, "utf8") !== expressionBytes
+    ) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+    stage = "TOKENIZE";
+    const tokens = tokenizeSchemaDump(expressionResult.rows[0].check_expression);
+    if (tokens.length > MAX_CHECK_EDIT_TOKENS) return checkDetailFailure("LIMIT_EXCEEDED", stage, "TOKENS");
+
+    stage = "DEPENDENCY_FETCH";
+    const dependencyResult = await client.query(checkConstraintDependencyQuery, [oid]);
+    if (dependencyResult.rows.length !== dependencyCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
+    const dependencies = dependencyResult.rows.map((row) => {
+      const identity = [row.dependency_type, row.type, row.schema, row.name, row.identity];
+      if (
+        typeof identity[0] !== "string"
+        || identity[0].length !== 1
+        || typeof identity[1] !== "string"
+        || identity[1].length === 0
+        || !isNullableString(identity[2])
+        || !isNullableString(identity[3])
+        || typeof identity[4] !== "string"
+        || identity[4].length === 0
+      ) throw new Error("INVALID_DEPENDENCY_IDENTITY");
+      return identity;
+    });
+
+    stage = "NODE_COUNT";
+    const nodeResult = await client.query(checkConstraintNodeQuery, [oid]);
+    const nodeTagCounts = Object.fromEntries(CHECK_NODE_TAGS.map((tag) => [tag, 0]));
+    let observedNodeCount = 0;
+    for (const row of nodeResult.rows) {
+      if (typeof row.node_tag !== "string") throw new Error("INVALID_NODE_TAG");
+      const count = parseDiagnosticCount(row.node_count);
+      const tag = CHECK_NODE_TAGS.includes(row.node_tag) ? row.node_tag : "OTHER";
+      nodeTagCounts[tag] += count;
+      observedNodeCount += count;
+    }
+    if (observedNodeCount !== nodeCount) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
+    return { ok: true, tokens, dependencies, nodeTagCounts };
+  } catch {
+    return checkDetailFailure("COLLECTION_UNAVAILABLE", stage);
   }
 };
 
@@ -2059,26 +2268,52 @@ const dependencyDifference = (source, destination) => {
   };
 };
 
-const buildCheckExpressionDifference = (source, destination) => ({
-  tokenEdit: buildUniqueCheckTokenEdit(
-    source.diagnostic.checkExpressionTokens,
-    destination.diagnostic.checkExpressionTokens,
-  ),
-  nodeTagDeltas: countDifference(
-    source.diagnostic.nodeTagCounts,
-    destination.diagnostic.nodeTagCounts,
-    CHECK_NODE_TAGS,
-  ),
-  dependencies: dependencyDifference(
-    source.diagnostic.dependencies,
-    destination.diagnostic.dependencies,
-  ),
+const emptyCheckExpressionDifference = (status, limitKind = null, side = null, stage = null) => ({
+  status,
+  limitKind,
+  side,
+  stage,
+  tokenEdit: null,
+  nodeTagDeltas: null,
+  dependencies: null,
 });
 
-export const buildConstraintSemanticDiagnostic = (
+const buildCheckExpressionDifference = (source, destination) => {
+  if (source?.ok !== true) {
+    return emptyCheckExpressionDifference(
+      source?.status ?? "COLLECTION_UNAVAILABLE",
+      source?.limitKind,
+      "SOURCE",
+      source?.stage ?? null,
+    );
+  }
+  if (destination?.ok !== true) {
+    return emptyCheckExpressionDifference(
+      destination?.status ?? "COLLECTION_UNAVAILABLE",
+      destination?.limitKind,
+      "DESTINATION",
+      destination?.stage ?? null,
+    );
+  }
+  const tokenEdit = buildUniqueCheckTokenEdit(source.tokens, destination.tokens);
+  if (tokenEdit.status === "LIMIT_EXCEEDED") return emptyCheckExpressionDifference("LIMIT_EXCEEDED", "TOKENS");
+  if (tokenEdit.status !== "UNIQUE") return emptyCheckExpressionDifference("AMBIGUOUS");
+  return {
+    status: "UNIQUE",
+    limitKind: null,
+    side: null,
+    stage: null,
+    tokenEdit,
+    nodeTagDeltas: countDifference(source.nodeTagCounts, destination.nodeTagCounts, CHECK_NODE_TAGS),
+    dependencies: dependencyDifference(source.dependencies, destination.dependencies),
+  };
+};
+
+const analyzeConstraintSemanticManifests = (
   sourceManifest,
   destinationManifest,
   serverVersionRelation = "UNAVAILABLE",
+  checkDetails = null,
 ) => {
   if (!(sourceManifest instanceof Map) || !(destinationManifest instanceof Map)) {
     fail("INVALID_CONSTRAINT_CATALOG_MANIFEST");
@@ -2105,7 +2340,7 @@ export const buildConstraintSemanticDiagnostic = (
   const mismatchFields = new Set(identitySetEqual ? [] : ["IDENTITY_SET"]);
   let mismatchCount = 0;
   let truncated = false;
-  let checkExpressionDifference = null;
+  let checkCandidate = null;
   const addMismatch = () => {
     if (mismatchCount === MAX_SCHEMA_DIAGNOSTIC_COUNT) truncated = true;
     else mismatchCount += 1;
@@ -2129,20 +2364,19 @@ export const buildConstraintSemanticDiagnostic = (
     if (constraintMismatch) {
       addMismatch();
       if (
-        checkExpressionDifference === null
+        checkCandidate === null
         && source.type === "CHECK"
         && destination.type === "CHECK"
         && constraintMismatchFields.includes("CHECK_EXPRESSION")
-        && Array.isArray(source.diagnostic?.checkExpressionTokens)
-        && Array.isArray(destination.diagnostic?.checkExpressionTokens)
       ) {
-        checkExpressionDifference = buildCheckExpressionDifference(source, destination);
+        checkCandidate = { source, destination };
       } else {
-        checkExpressionDifference = false;
+        checkCandidate = false;
       }
     }
   }
-  return {
+  const singleCheckCandidate = mismatchCount === 1 && checkCandidate !== false ? checkCandidate : null;
+  return { candidate: singleCheckCandidate, diagnostic: {
     schemaVersion: "1.0.0",
     serverVersionRelation,
     identitySetEqual,
@@ -2153,12 +2387,28 @@ export const buildConstraintSemanticDiagnostic = (
     semanticEqual: identitySetEqual && mismatchCount === 0,
     mismatchCount,
     mismatchFields: CONSTRAINT_MISMATCH_FIELDS.filter((field) => mismatchFields.has(field)),
-    checkExpressionDifference: mismatchCount === 1 && checkExpressionDifference !== false
-      ? checkExpressionDifference
+    checkExpressionDifference: singleCheckCandidate !== null && checkDetails !== null
+      ? buildCheckExpressionDifference(checkDetails.source, checkDetails.destination)
       : null,
     truncated,
-  };
+  } };
 };
+
+export const findSingleCheckExpressionMismatch = (sourceManifest, destinationManifest) => (
+  analyzeConstraintSemanticManifests(sourceManifest, destinationManifest).candidate
+);
+
+export const buildConstraintSemanticDiagnostic = (
+  sourceManifest,
+  destinationManifest,
+  serverVersionRelation = "UNAVAILABLE",
+  checkDetails = null,
+) => analyzeConstraintSemanticManifests(
+  sourceManifest,
+  destinationManifest,
+  serverVersionRelation,
+  checkDetails,
+).diagnostic;
 
 export const buildSequenceUseList = (content) => {
   if (typeof content !== "string") fail("INVALID_ARCHIVE_TOC");
@@ -2556,9 +2806,6 @@ export async function runPostgresRestoreRehearsal(options) {
       sourceLargeObjects,
       "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
     );
-    await sourceClient.query("COMMIT");
-    transactionOpen = false;
-
     await restoreArchiveSections({
       tempDir,
       clientFiles,
@@ -2609,6 +2856,14 @@ export async function runPostgresRestoreRehearsal(options) {
       );
       const destinationSettings = await databaseSettings(destinationClient);
       if (schemaDifferenceDiagnostic?.classification === "EXECUTABLE_SCHEMA_DIFFERENCE") {
+        const checkCandidate = findSingleCheckExpressionMismatch(
+          sourceConstraintManifest,
+          destinationConstraintManifest,
+        );
+        const checkDetails = checkCandidate === null ? null : {
+          source: await collectCheckConstraintDetail(sourceClient, checkCandidate.source),
+          destination: await collectCheckConstraintDetail(destinationClient, checkCandidate.destination),
+        };
         writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
           ...schemaDifferenceDiagnostic,
           constraintSemantics: buildConstraintSemanticDiagnostic(
@@ -2617,11 +2872,14 @@ export async function runPostgresRestoreRehearsal(options) {
             sourceSettings.serverVersionNumber === destinationSettings.serverVersionNumber
               ? "MATCH"
               : "DIFFERENT",
+            checkDetails,
           ),
         });
       } else if (schemaDifferenceDiagnostic !== null) {
         writePrivateJson(`${artifactDir}/schema-diagnostic.json`, schemaDifferenceDiagnostic);
       }
+      await sourceClient.query("COMMIT");
+      transactionOpen = false;
       destinationEvidence = await collectDatabaseEvidence(
         destinationClient,
         { algorithm: destinationSchema.algorithm, digest: destinationSchema.digest },

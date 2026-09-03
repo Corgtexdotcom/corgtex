@@ -10,6 +10,7 @@ const hasExactFoundationDatabases = (names) =>
 describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
   const workflow = read(".github/workflows/azure-migration-postgres-rehearsal.yml");
   const runner = read("scripts/migration/run-postgres-restore-rehearsal.mjs");
+  const smoke = read("scripts/migration/postgres-restore-rehearsal-smoke.mjs");
   const validator = read("scripts/migration/validate-postgres-restore-rehearsal.mjs");
   const readme = read("infra/azure/migration-foundation/README.md");
   const targetRootBundle = read("infra/azure/migration-foundation/azure-postgres-root-ca.pem");
@@ -214,6 +215,10 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("buildUniqueCheckTokenEdit");
     expect(runner).toContain("pg_catalog.pg_identify_object");
     expect(runner).toContain('status: "AMBIGUOUS"');
+    expect(smoke).not.toContain("CONSTRAINT_CHECK_DIAGNOSTIC_CLASSIFICATION_FAILED");
+    expect(smoke).toContain("CONSTRAINT_CHECK_DIAGNOSTIC_COLLECTION_STATUS");
+    expect(smoke).toContain("CONSTRAINT_CHECK_DIAGNOSTIC_DEPENDENCY_IDENTITY");
+    expect(smoke).toContain("CONSTRAINT_CHECK_DIAGNOSTIC_SOURCE_NODE_COUNTS");
     expect(readme).toContain("fixed token-category counts");
     expect(readme).toContain("never\nrelax schema parity");
     expect(readme).toContain("no catalog value is serialized");

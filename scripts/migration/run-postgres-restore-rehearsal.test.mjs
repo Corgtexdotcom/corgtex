@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   analyzeSchemaDump,
   buildCreateDatabaseSql,
@@ -12,6 +12,7 @@ import {
   buildUniqueCheckTokenEdit,
   buildSequenceUseList,
   classifyCollationVersionRelation,
+  collectCheckConstraintDetail,
   collectConstraintCatalogManifest,
   collectLargeObjects,
   inspectLargeObjectAccess,
@@ -93,6 +94,7 @@ const largeObjectClient = (objects) => ({
 });
 
 const constraintCatalogRow = (overrides = {}) => ({
+  constraint_oid: "123",
   namespace_name: "private_namespace",
   constraint_name: "private_constraint",
   object_kind: "TABLE",
@@ -140,8 +142,23 @@ const constraintCatalogRow = (overrides = {}) => ({
   foreign_foreign_operators: [],
   exclusion_operators: [],
   definition: "CHECK ((private_column <> 'private-literal'::text))",
+  definition_within_limit: true,
   check_expression: "(private_column <> 'private-literal'::text)",
-  expression_tree: "{OPEXPR :args ({VAR} {RELABELTYPE :arg {CONST}})}",
+  check_expression_within_limit: true,
+  ...overrides,
+});
+
+const checkDetail = (expression, overrides = {}) => ({
+  ok: true,
+  tokens: tokenizeSchemaDump(expression),
+  nodeTagCounts: Object.fromEntries([
+    "ARRAYCOERCEEXPR", "ARRAYEXPR", "BOOLEXPR", "BOOLEANTEST", "CASEEXPR", "CASETESTEXPR",
+    "CASEWHEN", "COALESCEEXPR", "COERCETODOMAIN", "COERCETODOMAINVALUE", "COERCEVIAIO",
+    "COLLATEEXPR", "CONST", "CONVERTROWTYPEEXPR", "DISTINCTEXPR", "FIELDSELECT", "FUNCEXPR",
+    "MINMAXEXPR", "NAMEDARGEXPR", "NEXTVALUEEXPR", "NULLIFEXPR", "NULLTEST", "OPEXPR",
+    "PARAM", "RELABELTYPE", "ROWCOMPAREEXPR", "ROWEXPR", "SCALARARRAYOPEXPR", "SETTODEFAULT",
+    "SQLVALUEFUNCTION", "VAR", "XMLEXPR", "OTHER",
+  ].map((tag) => [tag, 0])),
   dependencies: [
     ["a", "table column", "private_namespace", "private_relation", "private_namespace.private_relation.private_column"],
     ["n", "operator", "pg_catalog", "<>", "pg_catalog.<>(text,text)"],
@@ -360,8 +377,17 @@ describe("PostgreSQL restore rehearsal runner", () => {
         definition: "CHECK ((private_column <> 'private-literal'::text))",
         expression_tree: "{OPEXPR :args ({VAR} {CONST})}",
       })]);
-      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH");
+      const sourceDetail = checkDetail("((private_column <> 'private-literal'::text))");
+      sourceDetail.nodeTagCounts.RELABELTYPE = 1;
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "MATCH", {
+        source: sourceDetail,
+        destination: checkDetail("(private_column <> 'private-literal'::text)"),
+      });
       expect(diagnostic.checkExpressionDifference).toEqual({
+        status: "UNIQUE",
+        limitKind: null,
+        side: null,
+        stage: null,
         tokenEdit: {
           status: "UNIQUE",
           sourceOnly: {
@@ -417,15 +443,22 @@ describe("PostgreSQL restore rehearsal runner", () => {
           ["a", "table column", "private_namespace", "other_private_relation", "private_namespace.other_private_relation.private_column"],
         ],
       })]);
-      const diagnostic = buildConstraintSemanticDiagnostic(source, destination);
-      expect(diagnostic.checkExpressionDifference.tokenEdit).toEqual({
-        status: "AMBIGUOUS",
-        sourceOnly: null,
-        destinationOnly: null,
+      const diagnostic = buildConstraintSemanticDiagnostic(source, destination, "UNAVAILABLE", {
+        source: checkDetail("private_column OR private_column"),
+        destination: checkDetail("private_column", {
+          dependencies: [
+            ["a", "table column", "private_namespace", "other_private_relation", "private_namespace.other_private_relation.private_column"],
+          ],
+        }),
       });
-      expect(diagnostic.checkExpressionDifference.dependencies).toEqual({
-        identitySetEqual: false,
-        changedClasses: ["OPERATOR", "RELATION", "TYPE"],
+      expect(diagnostic.checkExpressionDifference).toEqual({
+        status: "AMBIGUOUS",
+        limitKind: null,
+        side: null,
+        stage: null,
+        tokenEdit: null,
+        nodeTagDeltas: null,
+        dependencies: null,
       });
       expect(JSON.stringify(diagnostic)).not.toContain("other_private_relation");
     });
@@ -454,6 +487,106 @@ describe("PostgreSQL restore rehearsal runner", () => {
         destinationOnly: null,
       });
       expect(() => buildUniqueCheckTokenEdit([], [])).toThrow("EMPTY_SCHEMA_TOKEN_STREAM");
+    });
+
+    it("keeps the broad constraint collection free of CHECK trees and dependency identities", async () => {
+      let queryText = "";
+      await collectConstraintCatalogManifest({
+        query: async (sql) => {
+          queryText = sql;
+          return { rows: [constraintCatalogRow()] };
+        },
+      }, "CONSTRAINT_CATALOG_FAILED");
+      expect(queryText).not.toContain("AS expression_tree");
+      expect(queryText).not.toContain("pg_catalog.pg_identify_object");
+      expect(queryText).toContain("definition_within_limit");
+      expect(queryText).toContain("check_expression_within_limit");
+    });
+
+    it("collects one rebound CHECK detail only after every bounded preflight", async () => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const expression = "(private_column <> 'private-literal'::text)";
+      const calls = [];
+      const responses = [
+        { rows: [{
+          namespace_name: "private_namespace",
+          constraint_name: "private_constraint",
+          object_kind: "TABLE",
+          relation_namespace_name: "private_namespace",
+          relation_name: "private_relation",
+          domain_namespace_name: null,
+          domain_name: null,
+          type: "c",
+          expression_bytes: String(Buffer.byteLength(expression, "utf8")),
+          tree_bytes: "128",
+          dependency_count: "1",
+          node_count: "2",
+        }], rowCount: 1 },
+        { rows: [{ max_field_bytes: "64", total_bytes: "128" }], rowCount: 1 },
+        { rows: [{ check_expression: expression }], rowCount: 1 },
+        { rows: [{
+          dependency_type: "a",
+          type: "table column",
+          schema: "private_namespace",
+          name: "private_relation",
+          identity: "private_namespace.private_relation.private_column",
+        }], rowCount: 1 },
+        { rows: [{ node_tag: "OPEXPR", node_count: "1" }, { node_tag: "PRIVATE_NODE", node_count: "1" }], rowCount: 2 },
+      ];
+      const detail = await collectCheckConstraintDetail({
+        query: async (sql, values) => {
+          calls.push({ sql, values });
+          return responses.shift();
+        },
+      }, entry);
+      expect(detail.ok).toBe(true);
+      expect(detail.nodeTagCounts).toMatchObject({ OPEXPR: 1, OTHER: 1 });
+      expect(calls).toHaveLength(5);
+      expect(calls.every(({ values }) => values[0] === "123")).toBe(true);
+      expect(calls[0].sql).not.toContain("AS expression_tree");
+      expect(calls[1].sql).toContain("max(GREATEST(");
+      expect(calls[1].sql).not.toContain("pg_catalog.greatest");
+      expect(calls[3].sql).toContain("LIMIT 257");
+      expect(JSON.stringify(buildConstraintSemanticDiagnostic(
+        await constraintManifest([constraintCatalogRow({ check_expression: `(${expression})` })]),
+        await constraintManifest([constraintCatalogRow()]),
+        "MATCH",
+        { source: detail, destination: detail },
+      ))).not.toContain("private_namespace");
+    });
+
+    it.each([
+      ["EXPRESSION_BYTES", { expression_bytes: "65537" }],
+      ["TREE_BYTES", { tree_bytes: "262145" }],
+      ["DEPENDENCY_COUNT", { dependency_count: "257" }],
+      ["NODE_COUNT", { node_count: "4097" }],
+    ])("stops CHECK collection before value fetch on the %s limit", async (limitKind, override) => {
+      const entry = (await constraintManifest([constraintCatalogRow()])).values().next().value;
+      const query = vi.fn(async () => ({
+        rowCount: 1,
+        rows: [{
+          namespace_name: "private_namespace",
+          constraint_name: "private_constraint",
+          object_kind: "TABLE",
+          relation_namespace_name: "private_namespace",
+          relation_name: "private_relation",
+          domain_namespace_name: null,
+          domain_name: null,
+          type: "c",
+          expression_bytes: "64",
+          tree_bytes: "128",
+          dependency_count: "1",
+          node_count: "2",
+          ...override,
+        }],
+      }));
+      await expect(collectCheckConstraintDetail({ query }, entry)).resolves.toEqual({
+        ok: false,
+        status: "LIMIT_EXCEEDED",
+        stage: "PREFLIGHT",
+        limitKind,
+      });
+      expect(query).toHaveBeenCalledTimes(1);
     });
 
     it("classifies identity, type, parentage, and foreign-key action mismatches", async () => {
@@ -510,10 +643,10 @@ describe("PostgreSQL restore rehearsal runner", () => {
         referenced_namespace_name: null,
         referenced_relation_name: null,
       })])).rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
-      await expect(constraintManifest([constraintCatalogRow({ dependencies: [["n", "type", null]] })]))
+      await expect(constraintManifest([constraintCatalogRow({ constraint_oid: "4294967296" })]))
         .rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
-      await expect(constraintManifest([constraintCatalogRow({ expression_tree: null })]))
-        .rejects.toThrow("INVALID_CONSTRAINT_CATALOG_ROW");
+      await expect(constraintManifest([constraintCatalogRow({ definition_within_limit: false, definition: null })]))
+        .rejects.toThrow("CONSTRAINT_TEXT_LIMIT_EXCEEDED");
     });
   });
 
