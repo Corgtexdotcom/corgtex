@@ -23,6 +23,7 @@ import {
   nodeClientConfig,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
+  runTargetCheckReparseDiagnostic,
   SCHEMA_RESTRICT_KEY,
   SCHEMA_TOKEN_ALGORITHM,
   schemaTokenDigest,
@@ -1559,6 +1560,8 @@ describe("PostgreSQL restore rehearsal runner", () => {
         },
       }, entry);
       expect(detail.ok).toBe(true);
+      expect(detail.privateExpression).toBe(expression);
+      expect(Object.getOwnPropertyDescriptor(detail, "privateExpression")?.enumerable).toBe(false);
       expect(detail.nodeTagCounts).toMatchObject({ OPEXPR: 1, OTHER: 1 });
       expect(detail.booleanNodeCounts).toEqual({ AND: 0, OR: 0, NOT: 0 });
       expect(calls).toHaveLength(9);
@@ -2042,6 +2045,317 @@ describe("PostgreSQL restore rehearsal runner", () => {
       expect(commands.some((sql) => sql.includes("AS expression_bytes"))).toBe(false);
       expect(commands).toContain("ROLLBACK");
       expect(client.end).toHaveBeenCalledOnce();
+    });
+
+    describe("target-side CHECK reparse diagnostic", () => {
+      const targetConfig = {
+        host: "127.0.0.1", port: 5432, user: "admin", password: "private-password",
+        database: "private_database", sslmode: "disable",
+      };
+      const fixture = async ({
+        sourceExpression = "(private_a AND (private_b OR private_c))",
+        destinationExpression = "((private_a AND private_b) OR private_c)",
+        eligibility = {},
+        comparison = {},
+        preflight = {},
+        failOn = null,
+        absence = true,
+        rebind = true,
+        collision = false,
+        eventTriggerSetting = "off",
+      } = {}) => {
+        const sourceRow = constraintCatalogRow({
+          definition: `CHECK (${sourceExpression})`,
+          check_expression: sourceExpression,
+        });
+        const destinationRow = constraintCatalogRow({
+          definition: `CHECK (${destinationExpression})`,
+          check_expression: destinationExpression,
+        });
+        const sourceManifestEntry = (await constraintManifest([sourceRow])).values().next().value;
+        const destinationManifestEntry = (await constraintManifest([destinationRow])).values().next().value;
+        const commands = [];
+        const primary = {
+          connect: vi.fn(async () => {
+            if (failOn === "CONNECT") throw new Error("private connection error");
+          }),
+          end: vi.fn(async () => {}),
+          query: vi.fn(async (sql) => {
+            commands.push(sql);
+            if (failOn !== null && sql.includes(failOn)) throw new Error("private database error");
+            if (sql === "SHOW event_triggers") {
+              return { rowCount: null, rows: [{ event_triggers: eventTriggerSetting }] };
+            }
+            if (/LIMIT 2\s*$/u.test(sql) && sql.includes("definition_within_limit")) {
+              return rebind ? { rowCount: 1, rows: [destinationRow] } : { rowCount: 0, rows: [] };
+            }
+            if (sql.includes("relation.relkind::text AS relation_kind")) return { rowCount: 1, rows: [{
+              relation_kind: "r",
+              relation_persistence: "p",
+              relispartition: false,
+              conislocal: true,
+              inheritance_count: "0",
+              parent_constraint_oid: "0",
+              tree_bytes: "256",
+              expression_bytes: "128",
+              dependency_count: "3",
+              node_count: "6",
+              has_inheritance: false,
+              enabled_event_trigger_count: "0",
+              unsafe_executable_dependency_count: "0",
+              unsafe_type_dependency_count: "0",
+              ...eligibility,
+            }] };
+            if (sql.includes("SELECT EXISTS")) return { rowCount: 1, rows: [{ present: collision }] };
+            if (sql.includes("constraint_row.oid::text AS constraint_oid")) {
+              return { rowCount: 1, rows: [{ constraint_oid: "456" }] };
+            }
+            if (sql.includes("AS max_dependency_count")) return { rowCount: 1, rows: [{
+              constraint_count: "2",
+              max_tree_bytes: "256",
+              max_expression_bytes: "128",
+              max_dependency_count: "3",
+              max_node_count: "6",
+              ...preflight,
+            }] };
+            if (sql.includes("tree_equal")) return { rowCount: 1, rows: [{
+              tree_equal: true,
+              deparse_equal: true,
+              dependencies_equal: true,
+              node_tags_equal: true,
+              boolean_nodes_equal: true,
+              ...comparison,
+            }] };
+            return { rowCount: null, rows: [] };
+          }),
+        };
+        const verifier = {
+          connect: vi.fn(async () => {}),
+          end: vi.fn(async () => {}),
+          query: vi.fn(async () => ({ rowCount: 1, rows: [{ absent: absence }] })),
+        };
+        const clients = [primary, verifier];
+        const createClient = vi.fn(() => clients.shift());
+        return {
+          sourceManifestEntry,
+          destinationManifestEntry,
+          commands,
+          primary,
+          verifier,
+          createClient,
+          run: (overrides = {}) => runTargetCheckReparseDiagnostic({
+            targetConfig,
+            sourceManifestEntry,
+            destinationManifestEntry,
+            sourceExpression,
+            sourceDependencies: checkDetail(sourceExpression).dependencies,
+            destinationDetail: { ok: true },
+            serverVersionRelation: "MATCH",
+            createClient,
+            randomBytesFn: () => Buffer.alloc(12, 7),
+            ...overrides,
+          }),
+        };
+      };
+
+      it("reports only fixed MATCH evidence after rollback and fresh absence proof", async () => {
+        const testCase = await fixture();
+        const result = await testCase.run();
+        expect(result).toEqual({
+          status: "MATCH",
+          stage: "COMPLETE",
+          reason: null,
+          limitKind: null,
+          mismatchFields: [],
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(true);
+        expect(testCase.commands.indexOf("SET LOCAL event_triggers = false"))
+          .toBeLessThan(testCase.commands.findIndex((sql) => sql.startsWith("ALTER TABLE ONLY")));
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.verifier.query).toHaveBeenCalledOnce();
+        expect(testCase.createClient.mock.calls[1][0]).toMatchObject({
+          connectionTimeoutMillis: 30_000,
+          query_timeout: 15_000,
+        });
+        expect(JSON.stringify(result)).not.toContain("private");
+      });
+
+      it("fails closed before DDL unless event-trigger suppression is verified", async () => {
+        const testCase = await fixture({ eventTriggerSetting: "on" });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          stage: "EVENT_TRIGGER_SUPPRESSION",
+          reason: "EVENT_TRIGGER_SUPPRESSION_UNPROVEN",
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+      });
+
+      it("rolls back without probe DDL when event-trigger suppression is denied", async () => {
+        const testCase = await fixture({ failOn: "SET LOCAL event_triggers = false" });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "UNAVAILABLE",
+          stage: "EVENT_TRIGGER_SUPPRESSION",
+        });
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+        expect(testCase.verifier.connect).not.toHaveBeenCalled();
+      });
+
+      it("makes a timed-out absence query a hard failure instead of MATCH", async () => {
+        const testCase = await fixture();
+        testCase.verifier.query.mockRejectedValueOnce(new Error("Query read timeout"));
+        await expect(testCase.run()).rejects.toThrow("TARGET_REPARSE_ABSENCE_UNPROVEN");
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.verifier.end).toHaveBeenCalledOnce();
+      });
+
+      it("reports fixed target-side mismatch dimensions", async () => {
+        const testCase = await fixture({
+          comparison: { tree_equal: false, boolean_nodes_equal: false },
+        });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "DIFFERENT",
+          mismatchFields: ["TREE", "BOOLEAN_NODES"],
+        });
+      });
+
+      it("keeps MATCH as observation only in the strict semantic diagnostic", async () => {
+        const testCase = await fixture();
+        const targetReparse = await testCase.run();
+        const diagnostic = buildConstraintSemanticDiagnostic(
+          new Map([[testCase.sourceManifestEntry.key, testCase.sourceManifestEntry]]),
+          new Map([[testCase.destinationManifestEntry.key, testCase.destinationManifestEntry]]),
+          "MATCH",
+          {
+            source: checkDetail("(private_a AND (private_b OR private_c))"),
+            destination: checkDetail("((private_a AND private_b) OR private_c)"),
+            targetReparse,
+          },
+        );
+        expect(diagnostic.semanticEqual).toBe(false);
+        expect(diagnostic.checkExpressionDifference.targetReparse).toEqual(targetReparse);
+      });
+
+      it("does not attempt DDL when an enabled event trigger makes the target ineligible", async () => {
+        const testCase = await fixture({ eligibility: { enabled_event_trigger_count: "1" } });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "EVENT_TRIGGER_ENABLED",
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+      });
+
+      it("requires successful destination detail evidence before connecting", async () => {
+        const testCase = await fixture();
+        await expect(testCase.run({
+          destinationDetail: { ok: false, status: "LIMIT_EXCEEDED", stage: "PREFLIGHT", limitKind: "TREE_BYTES" },
+        })).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "DESTINATION_DETAIL_UNAVAILABLE",
+        });
+        expect(testCase.createClient).not.toHaveBeenCalled();
+      });
+
+      it("enforces fresh destination bounds before DDL", async () => {
+        const testCase = await fixture({ eligibility: { node_count: "4097" } });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "LIMIT_EXCEEDED",
+          stage: "ELIGIBILITY",
+          limitKind: "NODE_COUNT",
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+      });
+
+      it("does not confuse a random-name collision with a leaked probe", async () => {
+        const testCase = await fixture({ collision: true, absence: false });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "PROBE_NAME_COLLISION",
+        });
+        expect(testCase.verifier.query).not.toHaveBeenCalled();
+      });
+
+      it("allows semicolons inside a literal but rejects statement boundaries before connecting", async () => {
+        const safe = await fixture({ sourceExpression: "(private_column <> ';'::text)" });
+        await expect(safe.run()).resolves.toMatchObject({ status: "MATCH" });
+        const unsafe = await fixture({ sourceExpression: "(private_column IS NOT NULL); SELECT true" });
+        await expect(unsafe.run()).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "UNSAFE_SOURCE_EXPRESSION",
+        });
+        expect(unsafe.createClient).not.toHaveBeenCalled();
+      });
+
+      it("rejects meta-commands before connecting", async () => {
+        const testCase = await fixture();
+        await expect(testCase.run({ sourceExpression: `\\restrict ${SCHEMA_RESTRICT_KEY}` })).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "UNSAFE_SOURCE_EXPRESSION",
+        });
+        expect(testCase.createClient).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["function", "EXECUTABLE_DEPENDENCY"],
+        ["operator", "EXECUTABLE_DEPENDENCY"],
+        ["type", "TYPE_DEPENDENCY"],
+      ])("rejects a non-catalog source %s dependency before connecting", async (dependencyType, reason) => {
+        const testCase = await fixture();
+        await expect(testCase.run({
+          sourceDependencies: [["n", dependencyType, "private_schema", "private_name", "private_identity"]],
+        })).resolves.toMatchObject({ status: "NOT_ELIGIBLE", reason });
+        expect(testCase.createClient).not.toHaveBeenCalled();
+      });
+
+      it("enforces target comparison bounds before tree comparison", async () => {
+        const testCase = await fixture({ preflight: { max_node_count: "4097" } });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "LIMIT_EXCEEDED",
+          stage: "COMPARE_PREFLIGHT",
+          limitKind: "NODE_COUNT",
+        });
+        expect(testCase.commands.some((sql) => sql.includes("tree_equal"))).toBe(false);
+      });
+
+      it("fails closed on destination identity drift before DDL", async () => {
+        const testCase = await fixture({ rebind: false });
+        await expect(testCase.run()).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "DESTINATION_REBIND_DRIFT",
+        });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+      });
+
+      it("reduces DDL errors to fixed output only after rollback and absence proof", async () => {
+        const testCase = await fixture({ failOn: "ALTER TABLE ONLY" });
+        await expect(testCase.run()).resolves.toEqual({
+          status: "UNAVAILABLE",
+          stage: "ADD_PROBE",
+          reason: null,
+          limitKind: null,
+          mismatchFields: [],
+        });
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.verifier.query).toHaveBeenCalledOnce();
+      });
+
+      it("makes rollback and absence-proof failures hard errors", async () => {
+        const rollbackCase = await fixture({ failOn: "ROLLBACK" });
+        await expect(rollbackCase.run()).rejects.toThrow("TARGET_REPARSE_ROLLBACK_UNPROVEN");
+        expect(rollbackCase.verifier.query).not.toHaveBeenCalled();
+
+        const absenceCase = await fixture({ absence: false });
+        await expect(absenceCase.run()).rejects.toThrow("TARGET_REPARSE_ABSENCE_UNPROVEN");
+      });
+
+      it("requires the exact two-field mismatch and matching server versions", async () => {
+        const testCase = await fixture();
+        await expect(testCase.run({ serverVersionRelation: "DIFFERENT" })).resolves.toMatchObject({
+          status: "NOT_ELIGIBLE",
+          reason: "SERVER_VERSION_MISMATCH",
+        });
+        expect(testCase.createClient).not.toHaveBeenCalled();
+      });
     });
 
     it("classifies identity, type, parentage, and foreign-key action mismatches", async () => {

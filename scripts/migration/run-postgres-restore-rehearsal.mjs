@@ -144,6 +144,7 @@ const CHECK_NODE_TAGS = [
   "OTHER",
 ];
 const CHECK_BOOLEAN_OPERATORS = ["AND", "OR", "NOT"];
+const TARGET_REPARSE_MISMATCH_FIELDS = ["TREE", "DEPARSE", "DEPENDENCIES", "NODE_TAGS", "BOOLEAN_NODES"];
 const CHECK_DEPENDENCY_CLASSES = [
   "COLLATION",
   "FUNCTION",
@@ -1874,6 +1875,186 @@ const checkConstraintNodeQuery = `
   ORDER BY node_tag NULLS LAST, boolean_operator NULLS LAST
 `;
 
+const targetCheckReparseEligibilityQuery = `
+  SELECT
+    relation.relkind::text AS relation_kind,
+    relation.relpersistence::text AS relation_persistence,
+    relation.relispartition,
+    constraint_row.conislocal,
+    constraint_row.coninhcount::text AS inheritance_count,
+    constraint_row.conparentid::text AS parent_constraint_oid,
+    pg_catalog.octet_length(constraint_row.conbin::text)::text AS tree_bytes,
+    pg_catalog.octet_length(pg_catalog.convert_to(pg_catalog.pg_get_expr(
+      constraint_row.conbin,
+      constraint_row.conrelid,
+      false
+    ), 'UTF8'))::text AS expression_bytes,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.pg_depend AS dependency
+      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+        AND dependency.objid = constraint_row.oid
+        AND dependency.objsubid = 0) AS dependency_count,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.regexp_matches(
+        CASE WHEN pg_catalog.octet_length(constraint_row.conbin::text) <= ${MAX_CHECK_TREE_BYTES}
+          THEN constraint_row.conbin::text ELSE '' END,
+        '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
+        'g'
+      )) AS node_count,
+    EXISTS (
+      SELECT 1 FROM pg_catalog.pg_inherits
+      WHERE inhrelid = relation.oid OR inhparent = relation.oid
+    ) AS has_inheritance,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.pg_event_trigger
+      WHERE evtenabled <> 'D') AS enabled_event_trigger_count,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.pg_depend AS dependency
+      LEFT JOIN pg_catalog.pg_proc AS referenced_function
+        ON dependency.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+       AND dependency.refobjid = referenced_function.oid
+       AND dependency.refobjsubid = 0
+      LEFT JOIN pg_catalog.pg_operator AS referenced_operator
+        ON dependency.refclassid = 'pg_catalog.pg_operator'::pg_catalog.regclass
+       AND dependency.refobjid = referenced_operator.oid
+       AND dependency.refobjsubid = 0
+      LEFT JOIN pg_catalog.pg_namespace AS executable_namespace
+        ON executable_namespace.oid = COALESCE(referenced_function.pronamespace, referenced_operator.oprnamespace)
+      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+        AND dependency.objid = constraint_row.oid
+        AND dependency.objsubid = 0
+        AND executable_namespace.nspname IS DISTINCT FROM 'pg_catalog'
+        AND (referenced_function.oid IS NOT NULL OR referenced_operator.oid IS NOT NULL)
+    ) AS unsafe_executable_dependency_count,
+    (SELECT pg_catalog.count(*)::text
+      FROM pg_catalog.pg_depend AS dependency
+      JOIN pg_catalog.pg_type AS referenced_type
+        ON dependency.refclassid = 'pg_catalog.pg_type'::pg_catalog.regclass
+       AND dependency.refobjid = referenced_type.oid
+       AND dependency.refobjsubid = 0
+      JOIN pg_catalog.pg_namespace AS type_namespace ON type_namespace.oid = referenced_type.typnamespace
+      WHERE dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+        AND dependency.objid = constraint_row.oid
+        AND dependency.objsubid = 0
+        AND type_namespace.nspname <> 'pg_catalog'
+        AND referenced_type.typtype IN ('b', 'd', 'r', 'm')
+    ) AS unsafe_type_dependency_count
+  FROM pg_catalog.pg_constraint AS constraint_row
+  JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+  WHERE constraint_row.oid = $1::pg_catalog.oid
+    AND constraint_row.contype = 'c'
+`;
+
+const targetCheckReparsePreflightQuery = `
+  WITH constraints AS MATERIALIZED (
+    SELECT oid, conbin, conrelid
+    FROM pg_catalog.pg_constraint
+    WHERE oid IN ($1::pg_catalog.oid, $2::pg_catalog.oid)
+      AND contype = 'c'
+  )
+  SELECT
+    pg_catalog.count(*)::text AS constraint_count,
+    pg_catalog.max(pg_catalog.octet_length(conbin::text))::text AS max_tree_bytes,
+    pg_catalog.max(pg_catalog.octet_length(pg_catalog.convert_to(
+      pg_catalog.pg_get_expr(conbin, conrelid, false), 'UTF8'
+    )))::text AS max_expression_bytes,
+    (SELECT pg_catalog.max(dependency_count)::text FROM (
+      SELECT pg_catalog.count(dependency.objid) AS dependency_count
+      FROM constraints AS counted_constraint
+      LEFT JOIN pg_catalog.pg_depend AS dependency
+        ON dependency.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+       AND dependency.objid = counted_constraint.oid
+       AND dependency.objsubid = 0
+      GROUP BY counted_constraint.oid
+    ) AS dependency_counts) AS max_dependency_count,
+    (SELECT pg_catalog.max(node_count)::text FROM (
+      SELECT pg_catalog.count(*) AS node_count
+      FROM constraints AS counted_constraint
+      CROSS JOIN LATERAL pg_catalog.regexp_matches(
+        CASE WHEN pg_catalog.octet_length(counted_constraint.conbin::text) <= ${MAX_CHECK_TREE_BYTES}
+          THEN counted_constraint.conbin::text ELSE '' END,
+        '\\{([A-Z][A-Z0-9_]*)[[:space:]}]',
+        'g'
+      )
+      GROUP BY counted_constraint.oid
+    ) AS node_counts) AS max_node_count
+  FROM constraints
+`;
+
+const targetCheckReparseComparisonQuery = `
+  WITH constraints AS MATERIALIZED (
+    SELECT oid, conbin, conrelid
+    FROM pg_catalog.pg_constraint
+    WHERE oid IN ($1::pg_catalog.oid, $2::pg_catalog.oid)
+      AND contype = 'c'
+  ),
+  source_constraint AS MATERIALIZED (
+    SELECT conbin, conrelid FROM constraints WHERE oid = $1::pg_catalog.oid
+  ),
+  probe_constraint AS MATERIALIZED (
+    SELECT conbin, conrelid FROM constraints WHERE oid = $2::pg_catalog.oid
+  ),
+  source_dependencies AS MATERIALIZED (
+    SELECT refclassid, refobjid, refobjsubid, deptype
+    FROM pg_catalog.pg_depend
+    WHERE classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+      AND objid = $1::pg_catalog.oid AND objsubid = 0
+  ),
+  probe_dependencies AS MATERIALIZED (
+    SELECT refclassid, refobjid, refobjsubid, deptype
+    FROM pg_catalog.pg_depend
+    WHERE classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+      AND objid = $2::pg_catalog.oid AND objsubid = 0
+  ),
+  source_nodes AS MATERIALIZED (
+    SELECT node_match[1] AS node_tag, pg_catalog.count(*) AS node_count
+    FROM source_constraint
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(
+      source_constraint.conbin::text, '\\{([A-Z][A-Z0-9_]*)[[:space:]}]', 'g'
+    ) AS node_match
+    GROUP BY node_match[1]
+  ),
+  probe_nodes AS MATERIALIZED (
+    SELECT node_match[1] AS node_tag, pg_catalog.count(*) AS node_count
+    FROM probe_constraint
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(
+      probe_constraint.conbin::text, '\\{([A-Z][A-Z0-9_]*)[[:space:]}]', 'g'
+    ) AS node_match
+    GROUP BY node_match[1]
+  ),
+  source_boolean_nodes AS MATERIALIZED (
+    SELECT pg_catalog.upper(boolean_match[1]) AS boolean_operator, pg_catalog.count(*) AS node_count
+    FROM source_constraint
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(
+      source_constraint.conbin::text,
+      '\\{BOOLEXPR[[:space:]]+:boolop[[:space:]]+(and|or|not)[[:space:]}]', 'g'
+    ) AS boolean_match
+    GROUP BY boolean_match[1]
+  ),
+  probe_boolean_nodes AS MATERIALIZED (
+    SELECT pg_catalog.upper(boolean_match[1]) AS boolean_operator, pg_catalog.count(*) AS node_count
+    FROM probe_constraint
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(
+      probe_constraint.conbin::text,
+      '\\{BOOLEXPR[[:space:]]+:boolop[[:space:]]+(and|or|not)[[:space:]}]', 'g'
+    ) AS boolean_match
+    GROUP BY boolean_match[1]
+  )
+  SELECT
+    (source_constraint.conbin::text = probe_constraint.conbin::text) AS tree_equal,
+    (pg_catalog.md5(pg_catalog.pg_get_expr(source_constraint.conbin, source_constraint.conrelid, false))
+      = pg_catalog.md5(pg_catalog.pg_get_expr(probe_constraint.conbin, probe_constraint.conrelid, false))
+      AND pg_catalog.pg_get_expr(source_constraint.conbin, source_constraint.conrelid, false)
+        = pg_catalog.pg_get_expr(probe_constraint.conbin, probe_constraint.conrelid, false)) AS deparse_equal,
+    NOT EXISTS ((SELECT * FROM source_dependencies EXCEPT ALL SELECT * FROM probe_dependencies)
+      UNION ALL (SELECT * FROM probe_dependencies EXCEPT ALL SELECT * FROM source_dependencies)) AS dependencies_equal,
+    NOT EXISTS ((SELECT * FROM source_nodes EXCEPT ALL SELECT * FROM probe_nodes)
+      UNION ALL (SELECT * FROM probe_nodes EXCEPT ALL SELECT * FROM source_nodes)) AS node_tags_equal,
+    NOT EXISTS ((SELECT * FROM source_boolean_nodes EXCEPT ALL SELECT * FROM probe_boolean_nodes)
+      UNION ALL (SELECT * FROM probe_boolean_nodes EXCEPT ALL SELECT * FROM source_boolean_nodes)) AS boolean_nodes_equal
+  FROM source_constraint CROSS JOIN probe_constraint
+`;
+
 const isBoolean = (value) => typeof value === "boolean";
 const isNullableString = (value) => value === null || typeof value === "string";
 const isStringArray = (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string");
@@ -2272,7 +2453,7 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
         observedNodeCount !== nodeCount
         || Object.values(booleanNodeCounts).reduce((total, count) => total + count, 0) !== nodeTagCounts.BOOLEXPR
       ) return checkDetailFailure("COLLECTION_UNAVAILABLE", "NODE_COUNT");
-      return {
+      const result = {
         ok: true,
         tokens,
         dependencies,
@@ -2282,6 +2463,11 @@ export const collectCheckConstraintDetail = async (client, manifestEntry) => {
         columnReferences,
         functionReferences,
       };
+      Object.defineProperty(result, "privateExpression", {
+        value: expressionResult.rows[0].check_expression,
+        enumerable: false,
+      });
+      return result;
     })();
   } catch {
     await runCheckDetailSavepointCommand(client, "ROLLBACK TO SAVEPOINT corgtex_check_detail");
@@ -2350,6 +2536,346 @@ export const collectReboundSourceCheckDetail = async (
     if (transactionOpen) await client?.query("ROLLBACK").catch(() => {});
     await client?.end().catch(() => {});
   }
+};
+
+const targetCheckReparseResult = (
+  status,
+  { stage = null, reason = null, limitKind = null, mismatchFields = [] } = {},
+) => ({
+  status,
+  stage,
+  reason,
+  limitKind,
+  mismatchFields,
+});
+
+const constraintSemanticMismatchFields = (source, destination) => (
+  CONSTRAINT_MISMATCH_FIELDS.slice(1).filter((field) => !same(source?.semantics?.[field], destination?.semantics?.[field]))
+);
+
+export const runTargetCheckReparseDiagnostic = async ({
+  targetConfig,
+  sourceManifestEntry,
+  destinationManifestEntry,
+  sourceExpression,
+  sourceDependencies,
+  destinationDetail,
+  serverVersionRelation,
+  createClient = (config) => new Client(config),
+  randomBytesFn = randomBytes,
+}) => {
+  if (serverVersionRelation !== "MATCH") {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "SERVER_VERSION_MISMATCH" });
+  }
+  if (
+    sourceManifestEntry?.type !== "CHECK"
+    || destinationManifestEntry?.type !== "CHECK"
+    || sourceManifestEntry.key !== destinationManifestEntry.key
+    || !same(
+      constraintSemanticMismatchFields(sourceManifestEntry, destinationManifestEntry),
+      ["DEFINITION", "CHECK_EXPRESSION"],
+    )
+  ) return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "MISMATCH_SHAPE" });
+  if (destinationDetail?.ok !== true) {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "DESTINATION_DETAIL_UNAVAILABLE" });
+  }
+  let identity;
+  try {
+    identity = JSON.parse(sourceManifestEntry.key);
+  } catch {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "IDENTITY_INVALID" });
+  }
+  if (
+    !Array.isArray(identity)
+    || identity.length !== 4
+    || identity[0] !== "TABLE"
+    || identity.slice(1).some((part) => typeof part !== "string" || part.length === 0)
+  ) return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "RELATION_KIND" });
+  if (typeof sourceExpression !== "string" || sourceExpression.length === 0) {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "SOURCE_DETAIL_UNAVAILABLE" });
+  }
+  if (Buffer.byteLength(sourceExpression, "utf8") > MAX_CONSTRAINT_TEXT_BYTES) {
+    return targetCheckReparseResult("LIMIT_EXCEEDED", { stage: "SOURCE_EXPRESSION", limitKind: "EXPRESSION_BYTES" });
+  }
+  let tokens;
+  try {
+    tokens = tokenizeSchemaDump(sourceExpression);
+  } catch {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "UNSAFE_SOURCE_EXPRESSION" });
+  }
+  if (tokens.length > MAX_CHECK_EDIT_TOKENS) {
+    return targetCheckReparseResult("LIMIT_EXCEEDED", { stage: "SOURCE_EXPRESSION", limitKind: "TOKENS" });
+  }
+  if (tokens.some((token) => token.domain === "META_COMMAND" || token.domain === "DOLLAR_BODY"
+    || (token.domain === "DDL_TOKEN" && token.value === ";"))) {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "UNSAFE_SOURCE_EXPRESSION" });
+  }
+  if (!Array.isArray(sourceDependencies)) {
+    return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "SOURCE_DEPENDENCY_UNAVAILABLE" });
+  }
+  if (sourceDependencies.length > MAX_CHECK_DEPENDENCIES) {
+    return targetCheckReparseResult("LIMIT_EXCEEDED", { stage: "SOURCE_DEPENDENCIES", limitKind: "DEPENDENCY_COUNT" });
+  }
+  if (sourceDependencies.some((dependency) => (
+    !Array.isArray(dependency)
+    || dependency.length !== 5
+    || typeof dependency[0] !== "string"
+    || typeof dependency[1] !== "string"
+    || !isNullableString(dependency[2])
+    || !isNullableString(dependency[3])
+    || typeof dependency[4] !== "string"
+  ))) return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "SOURCE_DEPENDENCY_UNAVAILABLE" });
+  if (sourceDependencies.some((dependency) => (
+    ["function", "operator"].includes(dependency[1].toLowerCase()) && dependency[2] !== "pg_catalog"
+  ))) return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "EXECUTABLE_DEPENDENCY" });
+  if (sourceDependencies.some((dependency) => (
+    dependency[1].toLowerCase() === "type" && dependency[2] !== "pg_catalog"
+  ))) return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "TYPE_DEPENDENCY" });
+
+  let randomValue;
+  try {
+    randomValue = randomBytesFn(12);
+  } catch {
+    return targetCheckReparseResult("UNAVAILABLE", { stage: "PROBE_NAME" });
+  }
+  if (!Buffer.isBuffer(randomValue) || randomValue.length !== 12) {
+    return targetCheckReparseResult("UNAVAILABLE", { stage: "PROBE_NAME" });
+  }
+  const probeName = `corgtex_reparse_${randomValue.toString("hex")}`;
+  let client;
+  let transactionOpen = false;
+  let probeDdlAttempted = false;
+  let stage = "CONNECT";
+  let result = null;
+  let rollbackFailed = false;
+  try {
+    client = createClient(nodeClientConfig(targetConfig, "corgtex_rehearsal_target_check_reparse", 30_000, 65_000));
+    await client.connect();
+    stage = "BEGIN";
+    await client.query("BEGIN");
+    transactionOpen = true;
+    for (const command of [
+      "SET LOCAL lock_timeout = '5s'",
+      "SET LOCAL statement_timeout = '30s'",
+      "SET LOCAL transaction_timeout = '60s'",
+      "SET LOCAL idle_in_transaction_session_timeout = '60s'",
+      "SET LOCAL timezone = 'UTC'",
+      "SET LOCAL client_encoding = 'UTF8'",
+      "SET LOCAL search_path = pg_catalog",
+    ]) await client.query(command);
+
+    stage = "EVENT_TRIGGER_SUPPRESSION";
+    await client.query("SET LOCAL event_triggers = false");
+    const eventTriggerSetting = await client.query("SHOW event_triggers");
+    if (
+      eventTriggerSetting.rows.length !== 1
+      || eventTriggerSetting.rows[0].event_triggers !== "off"
+    ) result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "EVENT_TRIGGER_SUPPRESSION_UNPROVEN" });
+
+    if (result === null) {
+      stage = "DESTINATION_REBIND";
+      const reboundResult = await client.query(constraintCatalogIdentityQuery, [
+        identity[1], identity[3], identity[0], identity[2],
+      ]);
+      let rebound = null;
+      if (reboundResult.rowCount === 1) {
+        try { rebound = normalizeBoundedConstraintCatalogRow(reboundResult.rows[0]); } catch { /* Fixed drift result below. */ }
+      }
+      if (
+        rebound === null
+        || rebound.key !== destinationManifestEntry.key
+        || rebound.type !== "CHECK"
+        || rebound.diagnostic.constraintOid !== destinationManifestEntry.diagnostic.constraintOid
+        || !same(rebound.semantics, destinationManifestEntry.semantics)
+      ) {
+        result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "DESTINATION_REBIND_DRIFT" });
+      }
+    }
+
+    if (result === null) {
+      stage = "ELIGIBILITY";
+      const eligibility = await client.query(targetCheckReparseEligibilityQuery, [
+        destinationManifestEntry.diagnostic.constraintOid,
+      ]);
+      if (eligibility.rowCount !== 1) {
+        result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "RELATION_DRIFT" });
+      } else {
+        const row = eligibility.rows[0];
+        const enabledEventTriggers = parseDiagnosticCount(row.enabled_event_trigger_count);
+        const unsafeExecutables = parseDiagnosticCount(row.unsafe_executable_dependency_count);
+        const unsafeTypes = parseDiagnosticCount(row.unsafe_type_dependency_count);
+        const treeBytes = parseDiagnosticCount(row.tree_bytes);
+        const expressionBytes = parseDiagnosticCount(row.expression_bytes);
+        const dependencyCount = parseDiagnosticCount(row.dependency_count);
+        const nodeCount = parseDiagnosticCount(row.node_count);
+        if (treeBytes > MAX_CHECK_TREE_BYTES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "TREE_BYTES" });
+        } else if (expressionBytes > MAX_CONSTRAINT_TEXT_BYTES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "EXPRESSION_BYTES" });
+        } else if (dependencyCount > MAX_CHECK_DEPENDENCIES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "DEPENDENCY_COUNT" });
+        } else if (nodeCount > MAX_CHECK_NODE_TAGS) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "NODE_COUNT" });
+        } else if (
+          row.relation_kind !== "r"
+          || row.relation_persistence !== "p"
+          || row.relispartition !== false
+          || row.conislocal !== true
+          || row.inheritance_count !== "0"
+          || row.parent_constraint_oid !== "0"
+          || row.has_inheritance !== false
+        ) result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "RELATION_KIND" });
+        else if (enabledEventTriggers !== 0) {
+          result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "EVENT_TRIGGER_ENABLED" });
+        } else if (unsafeExecutables !== 0) {
+          result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "EXECUTABLE_DEPENDENCY" });
+        } else if (unsafeTypes !== 0) {
+          result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "TYPE_DEPENDENCY" });
+        }
+      }
+    }
+
+    if (result === null) {
+      stage = "PROBE_NAME";
+      const collision = await client.query(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_constraint AS constraint_row
+          JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+          JOIN pg_catalog.pg_namespace AS relation_namespace ON relation_namespace.oid = relation.relnamespace
+          WHERE relation_namespace.nspname = $1 AND relation.relname = $2 AND constraint_row.conname = $3
+        ) AS present
+      `, [identity[1], identity[2], probeName]);
+      if (collision.rowCount !== 1 || typeof collision.rows[0].present !== "boolean") {
+        result = targetCheckReparseResult("UNAVAILABLE", { stage });
+      } else if (collision.rows[0].present) {
+        result = targetCheckReparseResult("NOT_ELIGIBLE", { stage, reason: "PROBE_NAME_COLLISION" });
+      }
+    }
+
+    let probeOid = null;
+    if (result === null) {
+      stage = "ADD_PROBE";
+      probeDdlAttempted = true;
+      await client.query(
+        `ALTER TABLE ONLY ${quoteIdentifier(identity[1])}.${quoteIdentifier(identity[2])} ADD CONSTRAINT ${quoteIdentifier(probeName)} CHECK (${sourceExpression}) NO INHERIT NOT VALID`,
+      );
+      stage = "PROBE_REBIND";
+      const probe = await client.query(`
+        SELECT constraint_row.oid::text AS constraint_oid
+        FROM pg_catalog.pg_constraint AS constraint_row
+        JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace AS relation_namespace ON relation_namespace.oid = relation.relnamespace
+        WHERE relation_namespace.nspname = $1 AND relation.relname = $2
+          AND constraint_row.conname = $3 AND constraint_row.contype = 'c'
+        LIMIT 2
+      `, [identity[1], identity[2], probeName]);
+      if (
+        probe.rowCount !== 1
+        || !/^(?:0|[1-9][0-9]{0,9})$/u.test(probe.rows[0].constraint_oid)
+        || BigInt(probe.rows[0].constraint_oid) > MAX_POSTGRES_OID
+      ) result = targetCheckReparseResult("UNAVAILABLE", { stage });
+      else probeOid = probe.rows[0].constraint_oid;
+    }
+
+    if (result === null) {
+      stage = "COMPARE_PREFLIGHT";
+      const comparisonPreflight = await client.query(targetCheckReparsePreflightQuery, [
+        destinationManifestEntry.diagnostic.constraintOid,
+        probeOid,
+      ]);
+      if (comparisonPreflight.rowCount !== 1) {
+        result = targetCheckReparseResult("UNAVAILABLE", { stage });
+      } else {
+        const row = comparisonPreflight.rows[0];
+        const constraintCount = parseDiagnosticCount(row.constraint_count);
+        const maxTreeBytes = parseDiagnosticCount(row.max_tree_bytes);
+        const maxExpressionBytes = parseDiagnosticCount(row.max_expression_bytes);
+        const maxDependencyCount = parseDiagnosticCount(row.max_dependency_count);
+        const maxNodeCount = parseDiagnosticCount(row.max_node_count);
+        if (constraintCount !== 2) result = targetCheckReparseResult("UNAVAILABLE", { stage });
+        else if (maxTreeBytes > MAX_CHECK_TREE_BYTES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "TREE_BYTES" });
+        } else if (maxExpressionBytes > MAX_CONSTRAINT_TEXT_BYTES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "EXPRESSION_BYTES" });
+        } else if (maxDependencyCount > MAX_CHECK_DEPENDENCIES) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "DEPENDENCY_COUNT" });
+        } else if (maxNodeCount > MAX_CHECK_NODE_TAGS) {
+          result = targetCheckReparseResult("LIMIT_EXCEEDED", { stage, limitKind: "NODE_COUNT" });
+        }
+      }
+    }
+
+    if (result === null) {
+      stage = "COMPARE";
+      const comparison = await client.query(targetCheckReparseComparisonQuery, [
+        destinationManifestEntry.diagnostic.constraintOid,
+        probeOid,
+      ]);
+      if (comparison.rowCount !== 1) {
+        result = targetCheckReparseResult("UNAVAILABLE", { stage });
+      } else {
+        const row = comparison.rows[0];
+        const comparisons = [
+          ["TREE", row.tree_equal],
+          ["DEPARSE", row.deparse_equal],
+          ["DEPENDENCIES", row.dependencies_equal],
+          ["NODE_TAGS", row.node_tags_equal],
+          ["BOOLEAN_NODES", row.boolean_nodes_equal],
+        ];
+        if (comparisons.some(([, value]) => typeof value !== "boolean")) {
+          result = targetCheckReparseResult("UNAVAILABLE", { stage });
+        } else {
+          const mismatchFields = comparisons.filter(([, equal]) => !equal).map(([field]) => field);
+          result = targetCheckReparseResult(mismatchFields.length === 0 ? "MATCH" : "DIFFERENT", {
+            stage: "COMPLETE",
+            mismatchFields: TARGET_REPARSE_MISMATCH_FIELDS.filter((field) => mismatchFields.includes(field)),
+          });
+        }
+      }
+    }
+  } catch {
+    result = targetCheckReparseResult("UNAVAILABLE", { stage });
+  } finally {
+    if (transactionOpen) {
+      try {
+        await client.query("ROLLBACK");
+        transactionOpen = false;
+      } catch {
+        rollbackFailed = true;
+      }
+    }
+    await client?.end().catch(() => {});
+  }
+  if (rollbackFailed) fail("TARGET_REPARSE_ROLLBACK_UNPROVEN");
+  if (probeDdlAttempted) {
+    let verifier;
+    try {
+      verifier = createClient(nodeClientConfig(
+        targetConfig,
+        "corgtex_rehearsal_target_check_reparse_verify",
+        30_000,
+        15_000,
+      ));
+      await verifier.connect();
+      const absence = await verifier.query(`
+        SELECT NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_constraint AS constraint_row
+          JOIN pg_catalog.pg_class AS relation ON relation.oid = constraint_row.conrelid
+          JOIN pg_catalog.pg_namespace AS relation_namespace ON relation_namespace.oid = relation.relnamespace
+          WHERE relation_namespace.nspname = $1 AND relation.relname = $2 AND constraint_row.conname = $3
+        ) AS absent
+      `, [identity[1], identity[2], probeName]);
+      if (absence.rowCount !== 1 || absence.rows[0].absent !== true) fail("TARGET_REPARSE_ABSENCE_UNPROVEN");
+    } catch (error) {
+      if (isRehearsalError(error)) throw error;
+      fail("TARGET_REPARSE_ABSENCE_UNPROVEN");
+    } finally {
+      await verifier?.end().catch(() => {});
+    }
+  }
+  return result ?? targetCheckReparseResult("UNAVAILABLE", { stage });
 };
 
 const emptyConstraintCounts = () => Object.fromEntries([...CONSTRAINT_TYPES.values()].map((type) => [type, 0]));
@@ -2981,6 +3507,13 @@ const buildCheckExpressionDifference = (source, destination) => {
   };
 };
 
+const buildCheckExpressionDiagnostic = (checkDetails) => {
+  const diagnostic = buildCheckExpressionDifference(checkDetails.source, checkDetails.destination);
+  return Object.hasOwn(checkDetails, "targetReparse")
+    ? { ...diagnostic, targetReparse: checkDetails.targetReparse }
+    : diagnostic;
+};
+
 const analyzeConstraintSemanticManifests = (
   sourceManifest,
   destinationManifest,
@@ -3060,7 +3593,7 @@ const analyzeConstraintSemanticManifests = (
     mismatchCount,
     mismatchFields: CONSTRAINT_MISMATCH_FIELDS.filter((field) => mismatchFields.has(field)),
     checkExpressionDifference: singleCheckCandidate !== null && checkDetails !== null
-      ? buildCheckExpressionDifference(checkDetails.source, checkDetails.destination)
+      ? buildCheckExpressionDiagnostic(checkDetails)
       : null,
     truncated,
   } };
@@ -3513,6 +4046,11 @@ export async function runPostgresRestoreRehearsal(options) {
     const destinationClient = new Client(nodeClientConfig(targetConfig, `corgtex_rehearsal_${domain}_readback`));
     await destinationClient.connect();
     let destinationEvidence;
+    let destinationConstraintManifest;
+    let destinationSettings;
+    let checkCandidate = null;
+    let checkDetails = null;
+    let constraintServerVersionRelation = "UNAVAILABLE";
     try {
       await destinationClient.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await destinationClient.query("SET LOCAL lock_timeout = '5s'");
@@ -3526,17 +4064,20 @@ export async function runPostgresRestoreRehearsal(options) {
         destinationClient,
         "DESTINATION_LARGE_OBJECT_EVIDENCE_FAILED",
       );
-      const destinationConstraintManifest = await collectConstraintCatalogManifest(
+      destinationConstraintManifest = await collectConstraintCatalogManifest(
         destinationClient,
         "DESTINATION_CONSTRAINT_CATALOG_EVIDENCE_FAILED",
       );
-      const destinationSettings = await databaseSettings(destinationClient);
+      destinationSettings = await databaseSettings(destinationClient);
+      constraintServerVersionRelation = sourceSettings.serverVersionNumber === destinationSettings.serverVersionNumber
+        ? "MATCH"
+        : "DIFFERENT";
       if (schemaDifferenceDiagnostic?.classification === "EXECUTABLE_SCHEMA_DIFFERENCE") {
-        const checkCandidate = findSingleCheckExpressionMismatch(
+        checkCandidate = findSingleCheckExpressionMismatch(
           sourceConstraintManifest,
           destinationConstraintManifest,
         );
-        const checkDetails = checkCandidate === null ? null : {
+        checkDetails = checkCandidate === null ? null : {
           source: await collectReboundSourceCheckDetail(sourceConfig, checkCandidate.source),
           destination: await collectCheckConstraintDetail(destinationClient, checkCandidate.destination),
         };
@@ -3545,9 +4086,7 @@ export async function runPostgresRestoreRehearsal(options) {
           constraintSemantics: buildConstraintSemanticDiagnostic(
             sourceConstraintManifest,
             destinationConstraintManifest,
-            sourceSettings.serverVersionNumber === destinationSettings.serverVersionNumber
-              ? "MATCH"
-              : "DIFFERENT",
+            constraintServerVersionRelation,
             checkDetails,
           ),
         });
@@ -3603,6 +4142,31 @@ export async function runPostgresRestoreRehearsal(options) {
       throw error;
     } finally {
       await destinationClient.end().catch(() => {});
+    }
+
+    if (
+      schemaDifferenceDiagnostic?.classification === "EXECUTABLE_SCHEMA_DIFFERENCE"
+      && checkCandidate !== null
+      && checkDetails !== null
+    ) {
+      checkDetails.targetReparse = await runTargetCheckReparseDiagnostic({
+        targetConfig,
+        sourceManifestEntry: checkCandidate.source,
+        destinationManifestEntry: checkCandidate.destination,
+        sourceExpression: checkDetails.source?.privateExpression,
+        sourceDependencies: checkDetails.source?.dependencies,
+        destinationDetail: checkDetails.destination,
+        serverVersionRelation: constraintServerVersionRelation,
+      });
+      writePrivateJson(`${artifactDir}/schema-diagnostic.json`, {
+        ...schemaDifferenceDiagnostic,
+        constraintSemantics: buildConstraintSemanticDiagnostic(
+          sourceConstraintManifest,
+          destinationConstraintManifest,
+          constraintServerVersionRelation,
+          checkDetails,
+        ),
+      });
     }
 
     const evidence = {
