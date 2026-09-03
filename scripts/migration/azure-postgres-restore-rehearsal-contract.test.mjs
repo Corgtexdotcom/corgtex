@@ -101,6 +101,54 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(validator).not.toContain("RBAC_ADMIN_ROLE_ID");
   });
 
+  it("separates tenant login from bounded exact-subscription selection", () => {
+    const rehearsalLogin = workflow.slice(
+      workflow.indexOf("Log in to the exact Azure tenant\n"),
+      workflow.indexOf("Select and verify the exact Azure subscription\n"),
+    );
+    const recoveryLogin = workflow.slice(
+      workflow.indexOf("Log in to the exact Azure tenant for recovery\n"),
+      workflow.indexOf("Select and verify the exact Azure subscription for recovery\n"),
+    );
+    expect(rehearsalLogin).toContain("allow-no-subscriptions: true");
+    expect(recoveryLogin).toContain("allow-no-subscriptions: true");
+    expect(rehearsalLogin).not.toContain("subscription-id:");
+    expect(recoveryLogin).not.toContain("subscription-id:");
+    expect(workflow.match(/for attempt in 1 2 3 4;/gu)).toHaveLength(2);
+    expect(workflow.match(/az account list \\\n\s+--refresh --output json --only-show-errors/gu)).toHaveLength(2);
+    expect(workflow.match(/sleep 25/gu)).toHaveLength(2);
+    expect(workflow.match(/if \[\[ "\$match_count" == "1" \]\]/gu)).toHaveLength(2);
+    expect(workflow.match(/\(\( match_count > 1 \)\)/gu)).toHaveLength(2);
+    expect(workflow.match(/and \.state == "Enabled"/gu)).toHaveLength(2);
+    expect(workflow.match(/az account set \\/gu)).toHaveLength(2);
+    expect(workflow.match(/\$\{actual_subscription,,\}" == "\$\{AZURE_SUBSCRIPTION_ID,,\}/gu)).toHaveLength(2);
+    expect(workflow.match(/\$\{actual_tenant,,\}" == "\$\{AZURE_TENANT_ID,,\}/gu)).toHaveLength(2);
+    expect(workflow.match(/"\$actual_state" == "Enabled"/gu)).toHaveLength(2);
+    expect(workflow.match(/Exact enabled Azure subscription selected\./gu)).toHaveLength(2);
+
+    const rehearsalSelection = workflow.indexOf("Select and verify the exact Azure subscription\n");
+    const authorityValidation = workflow.indexOf("Verify exact temporary rehearsal authority and foundation inventory");
+    const recoverySelection = workflow.indexOf("Select and verify the exact Azure subscription for recovery\n");
+    const recoveryValidation = workflow.indexOf("Validate recovery authority and exact cleanup target");
+    expect(rehearsalSelection).toBeGreaterThan(0);
+    expect(rehearsalSelection).toBeLessThan(authorityValidation);
+    expect(recoverySelection).toBeGreaterThan(0);
+    expect(recoverySelection).toBeLessThan(recoveryValidation);
+
+    const subscriptionScopedCommands = /\baz (?:account get-access-token|role assignment list|group show|resource list|postgres flexible-server|identity show|rest)\b/u;
+    const lines = workflow.split("\n");
+    const commands = lines.flatMap((line, index) => {
+      if (!subscriptionScopedCommands.test(line)) return [];
+      const command = [line];
+      for (let offset = 1; command.at(-1)?.trimEnd().endsWith("\\"); offset += 1) {
+        command.push(lines[index + offset] ?? "");
+      }
+      return [command.join("\n")];
+    });
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.every((command) => command.includes('--subscription "$AZURE_SUBSCRIPTION_ID"'))).toBe(true);
+  });
+
   it("reconfirms the exact non-authoritative 13-resource foundation and no runtimes", () => {
     expect(workflow).toContain('authority == "non-authoritative-restore-target"');
     expect(workflow).toContain("length == 6");

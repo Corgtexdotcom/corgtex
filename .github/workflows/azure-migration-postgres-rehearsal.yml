@@ -147,24 +147,84 @@ jobs:
           printf '%s\n' '{"client":"PostgreSQL 18.6","image":"immutable-digest"}' \
             > "$ARTIFACT_DIR/postgres-client-receipt.json"
 
-      - name: Log in to the exact Azure subscription
+      - name: Log in to the exact Azure tenant
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
+
+      - name: Select and verify the exact Azure subscription
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_inventory="$(mktemp "${RUNNER_TEMP}/azure-account-list.XXXXXX.json")"
+          cleanup_account_inventory() {
+            rm -f "$account_inventory"
+          }
+          trap cleanup_account_inventory EXIT
+
+          subscription_selected=false
+          for attempt in 1 2 3 4; do
+            match_count=""
+            if AZURE_CORE_COLLECT_TELEMETRY=no az account list \
+              --refresh --output json --only-show-errors > "$account_inventory"; then
+              match_count="$(jq -er \
+                --arg subscription "$AZURE_SUBSCRIPTION_ID" \
+                --arg tenant "$AZURE_TENANT_ID" '
+                  [.[] | select(
+                    ((.id // "") | ascii_downcase) == ($subscription | ascii_downcase)
+                    and ((.tenantId // "") | ascii_downcase) == ($tenant | ascii_downcase)
+                    and .state == "Enabled"
+                  )] | length
+                ' "$account_inventory")" || match_count=""
+            fi
+            if [[ "$match_count" == "1" ]]; then
+              subscription_selected=true
+              break
+            fi
+            if [[ "$match_count" =~ ^[0-9]+$ ]] && (( match_count > 1 )); then
+              echo "::error::The exact Azure subscription is ambiguous."
+              exit 1
+            fi
+            if (( attempt < 4 )); then
+              sleep 25
+            fi
+          done
+          [[ "$subscription_selected" == "true" ]] || {
+            echo "::error::The exact enabled Azure subscription was unavailable after bounded refresh."
+            exit 1
+          }
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az account set \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query id --output tsv --only-show-errors)"
+          actual_tenant="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query tenantId --output tsv --only-show-errors)"
+          actual_state="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query state --output tsv --only-show-errors)"
+          [[ "${actual_subscription,,}" == "${AZURE_SUBSCRIPTION_ID,,}" \
+            && "${actual_tenant,,}" == "${AZURE_TENANT_ID,,}" \
+            && "$actual_state" == "Enabled" ]] || {
+              echo "::error::The selected Azure subscription identity or state mismatched."
+              exit 1
+            }
+          echo "Exact enabled Azure subscription selected."
 
       - name: Verify exact temporary rehearsal authority and foundation inventory
         shell: bash
         run: |
           set -euo pipefail
-          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show --query id --output tsv --only-show-errors)"
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query id --output tsv --only-show-errors)"
           [[ "$actual_subscription" == "$AZURE_SUBSCRIPTION_ID" ]] || {
             echo "::error::Azure subscription mismatch."
             exit 1
           }
 
           access_token="$(AZURE_CORE_COLLECT_TELEMETRY=no az account get-access-token \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --resource https://management.azure.com/ --query accessToken --output tsv --only-show-errors)"
           principal_id="$(AZURE_ACCESS_TOKEN="$access_token" node -e '
             const token = process.env.AZURE_ACCESS_TOKEN ?? "";
@@ -180,6 +240,7 @@ jobs:
           AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
             --assignee-object-id "$principal_id" \
             --scope "$principal_scope" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --include-groups \
             --include-inherited \
             --fill-principal-name false \
@@ -200,7 +261,8 @@ jobs:
           jq . "$ARTIFACT_DIR/principal-receipt.json"
 
           AZURE_CORE_COLLECT_TELEMETRY=no az group show \
-            --name "$RESOURCE_GROUP" --output json --only-show-errors \
+            --name "$RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors \
             > "$ARTIFACT_DIR/resource-group.json"
           jq -e --arg location "$LOCATION" '
             (.location | ascii_downcase) == ($location | ascii_downcase)
@@ -214,7 +276,8 @@ jobs:
           }
 
           AZURE_CORE_COLLECT_TELEMETRY=no az resource list \
-            --resource-group "$RESOURCE_GROUP" --output json --only-show-errors \
+            --resource-group "$RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors \
             > "$ARTIFACT_DIR/top-level-inventory.json"
           jq -e '
             length == 6
@@ -249,6 +312,7 @@ jobs:
 
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server show \
             --resource-group "$RESOURCE_GROUP" --name "$postgres_name" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --output json --only-show-errors > "$ARTIFACT_DIR/postgres-server.json"
           jq -e '
             .version == "18"
@@ -260,6 +324,7 @@ jobs:
           }
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server parameter show \
             --resource-group "$RESOURCE_GROUP" --server-name "$postgres_name" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --name azure.extensions --output json --only-show-errors \
             > "$ARTIFACT_DIR/postgres-extensions.json"
           jq -e '.value == "vector" and .source == "user-override"' \
@@ -269,11 +334,13 @@ jobs:
           }
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server db show \
             --resource-group "$RESOURCE_GROUP" --server-name "$postgres_name" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --name corgtex --output json --only-show-errors \
             > "$ARTIFACT_DIR/postgres-foundation-database.json"
           postgres_id="$(jq -er '.id' "$ARTIFACT_DIR/postgres-server.json")"
           AZURE_CORE_COLLECT_TELEMETRY=no az rest \
             --method get \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --url "https://management.azure.com${postgres_id}/databases?api-version=2023-12-01-preview" \
             --output json --only-show-errors > "$ARTIFACT_DIR/postgres-databases.json"
           jq -e '(.value | map(.name | split("/") | last) | sort) == ["azure_maintenance", "azure_sys", "corgtex", "postgres"]' \
@@ -283,6 +350,7 @@ jobs:
           }
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
             --resource-group "$RESOURCE_GROUP" --server-name "$postgres_name" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --output json --only-show-errors > "$ARTIFACT_DIR/firewall-before.json"
           jq -e 'length == 0' "$ARTIFACT_DIR/firewall-before.json" > /dev/null || {
             echo "::error::Unexpected PostgreSQL firewall rules exist."
@@ -291,10 +359,12 @@ jobs:
 
           AZURE_CORE_COLLECT_TELEMETRY=no az rest \
             --method get \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --url "https://management.azure.com${storage_id}/blobServices/default?api-version=2023-05-01" \
             --output json --only-show-errors > "$ARTIFACT_DIR/storage-blob-service.json"
           AZURE_CORE_COLLECT_TELEMETRY=no az rest \
             --method get \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --url "https://management.azure.com${storage_id}/blobServices/default/containers?api-version=2023-05-01" \
             --output json --only-show-errors > "$ARTIFACT_DIR/storage-containers.json"
           jq -e '.value | length == 2 and (map(.name | split("/") | last) | sort) == ["migration-restore", "objects"]' \
@@ -303,7 +373,8 @@ jobs:
             exit 1
           }
           AZURE_CORE_COLLECT_TELEMETRY=no az identity show \
-            --ids "$foundation_identity_id" --output json --only-show-errors \
+            --ids "$foundation_identity_id" --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors \
             > "$ARTIFACT_DIR/foundation-identity.json"
           foundation_principal_id="$(jq -er '.principalId' "$ARTIFACT_DIR/foundation-identity.json")"
           role_index=0
@@ -312,7 +383,8 @@ jobs:
             role_id="${tuple##*:}"
             role_file="$ARTIFACT_DIR/foundation-role-${role_index}.json"
             AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
-              --scope "$scope" --fill-principal-name false --output json --only-show-errors \
+              --scope "$scope" --subscription "$AZURE_SUBSCRIPTION_ID" \
+              --fill-principal-name false --output json --only-show-errors \
               > "$role_file"
             jq -e --arg scope "${scope,,}" --arg role "/roledefinitions/${role_id}" --arg principal "${foundation_principal_id,,}" '
                   length == 1
@@ -420,6 +492,7 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --server-name "$NAME_PREFIX-restore-pg" \
             --name "$FIREWALL_RULE_NAME" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --start-ip-address "$runner_ip" \
             --end-ip-address "$runner_ip" \
             --output json --only-show-errors > "$ARTIFACT_DIR/firewall-create.json"
@@ -506,9 +579,11 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --server-name "$NAME_PREFIX-restore-pg" \
             --name "$FIREWALL_RULE_NAME" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --yes --only-show-errors || true
           remaining="$(AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
             --resource-group "$RESOURCE_GROUP" --server-name "$NAME_PREFIX-restore-pg" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --query "[?name=='${FIREWALL_RULE_NAME}'] | length(@)" --output tsv --only-show-errors)"
           [[ "$remaining" == "0" ]] || {
             echo "::error::The exact firewall rule remains."
@@ -628,12 +703,70 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.recovery_run_id }}
 
-      - name: Log in to the exact Azure subscription for recovery
+      - name: Log in to the exact Azure tenant for recovery
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
+
+      - name: Select and verify the exact Azure subscription for recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          account_inventory="$(mktemp "${RUNNER_TEMP}/azure-account-list.XXXXXX.json")"
+          cleanup_account_inventory() {
+            rm -f "$account_inventory"
+          }
+          trap cleanup_account_inventory EXIT
+
+          subscription_selected=false
+          for attempt in 1 2 3 4; do
+            match_count=""
+            if AZURE_CORE_COLLECT_TELEMETRY=no az account list \
+              --refresh --output json --only-show-errors > "$account_inventory"; then
+              match_count="$(jq -er \
+                --arg subscription "$AZURE_SUBSCRIPTION_ID" \
+                --arg tenant "$AZURE_TENANT_ID" '
+                  [.[] | select(
+                    ((.id // "") | ascii_downcase) == ($subscription | ascii_downcase)
+                    and ((.tenantId // "") | ascii_downcase) == ($tenant | ascii_downcase)
+                    and .state == "Enabled"
+                  )] | length
+                ' "$account_inventory")" || match_count=""
+            fi
+            if [[ "$match_count" == "1" ]]; then
+              subscription_selected=true
+              break
+            fi
+            if [[ "$match_count" =~ ^[0-9]+$ ]] && (( match_count > 1 )); then
+              echo "::error::The exact Azure subscription is ambiguous."
+              exit 1
+            fi
+            if (( attempt < 4 )); then
+              sleep 25
+            fi
+          done
+          [[ "$subscription_selected" == "true" ]] || {
+            echo "::error::The exact enabled Azure subscription was unavailable after bounded refresh."
+            exit 1
+          }
+
+          AZURE_CORE_COLLECT_TELEMETRY=no az account set \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query id --output tsv --only-show-errors)"
+          actual_tenant="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query tenantId --output tsv --only-show-errors)"
+          actual_state="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query state --output tsv --only-show-errors)"
+          [[ "${actual_subscription,,}" == "${AZURE_SUBSCRIPTION_ID,,}" \
+            && "${actual_tenant,,}" == "${AZURE_TENANT_ID,,}" \
+            && "$actual_state" == "Enabled" ]] || {
+              echo "::error::The selected Azure subscription identity or state mismatched."
+              exit 1
+            }
+          echo "Exact enabled Azure subscription selected."
 
       - name: Validate recovery authority and exact cleanup target
         shell: bash
@@ -648,12 +781,14 @@ jobs:
             exit 1
           }
 
-          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show --query id --output tsv --only-show-errors)"
+          actual_subscription="$(AZURE_CORE_COLLECT_TELEMETRY=no az account show \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --query id --output tsv --only-show-errors)"
           [[ "$actual_subscription" == "$AZURE_SUBSCRIPTION_ID" ]] || {
             echo "::error::Azure subscription mismatch."
             exit 1
           }
           access_token="$(AZURE_CORE_COLLECT_TELEMETRY=no az account get-access-token \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --resource https://management.azure.com/ --query accessToken --output tsv --only-show-errors)"
           principal_id="$(AZURE_ACCESS_TOKEN="$access_token" node -e '
             const token = process.env.AZURE_ACCESS_TOKEN ?? "";
@@ -668,6 +803,7 @@ jobs:
           AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
             --assignee-object-id "$principal_id" \
             --scope "$principal_scope" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --include-groups \
             --include-inherited \
             --fill-principal-name false \
@@ -687,7 +823,8 @@ jobs:
             > "$RECOVERY_ARTIFACT_DIR/principal-receipt.json"
 
           AZURE_CORE_COLLECT_TELEMETRY=no az group show \
-            --name "$RESOURCE_GROUP" --output json --only-show-errors \
+            --name "$RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors \
             > "$RECOVERY_ARTIFACT_DIR/resource-group.json"
           jq -e '
             .tags.purpose == "railway-to-azure-migration-foundation"
@@ -701,6 +838,7 @@ jobs:
           postgres_name="${NAME_PREFIX}-restore-pg"
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server show \
             --resource-group "$RESOURCE_GROUP" --name "$postgres_name" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --output json --only-show-errors > "$RECOVERY_ARTIFACT_DIR/postgres-server.json"
           postgres_id="$(jq -er '.id' "$RECOVERY_ARTIFACT_DIR/postgres-server.json")"
           expected_postgres_id="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.DBforPostgreSQL/flexibleServers/${postgres_name}"
@@ -762,7 +900,8 @@ jobs:
           api_url="https://management.azure.com${POSTGRES_RESOURCE_ID}/databases?api-version=2023-12-01-preview"
           expected_id="${POSTGRES_RESOURCE_ID}/databases/${SCRATCH_DATABASE_NAME}"
           AZURE_CORE_COLLECT_TELEMETRY=no az rest \
-            --method get --url "$api_url" --output json --only-show-errors \
+            --method get --url "$api_url" --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors \
             > "$RECOVERY_ARTIFACT_DIR/databases-before-cleanup.json"
           matching="$(jq -c --arg name "$SCRATCH_DATABASE_NAME" \
             '[.value[] | select((.name | split("/") | last) == $name)]' \
@@ -788,7 +927,8 @@ jobs:
               --yes --only-show-errors
           fi
           AZURE_CORE_COLLECT_TELEMETRY=no az rest \
-            --method get --url "$api_url" --output json --only-show-errors \
+            --method get --url "$api_url" --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --output json --only-show-errors \
             > "$RECOVERY_ARTIFACT_DIR/databases-after-cleanup.json"
           jq -e --arg name "$SCRATCH_DATABASE_NAME" \
             '[.value[] | select((.name | split("/") | last) == $name)] | length == 0' \
@@ -827,6 +967,7 @@ jobs:
           fi
           remaining="$(AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule list \
             --resource-group "$RESOURCE_GROUP" --server-name "$NAME_PREFIX-restore-pg" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --query "[?name=='${FIREWALL_RULE_NAME}'] | length(@)" --output tsv --only-show-errors)"
           [[ "$remaining" == "0" ]] || {
             echo "::error::The exact recovery firewall rule remains."
