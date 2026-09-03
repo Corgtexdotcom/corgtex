@@ -90,7 +90,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(readme).toContain("CA-authenticated `verify-ca`");
   });
 
-  it("pins the exact UAMI to one temporary RG-scoped Contributor role", () => {
+  it("pins the exact UAMI to temporary subscription Reader and RG Contributor roles", () => {
     expect(workflow).toContain("--assignee-object-id \"$principal_id\"");
     expect(workflow).toContain("--include-groups");
     expect(workflow).toContain("--include-inherited");
@@ -98,6 +98,11 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(workflow).toContain("--mode=principal");
     expect(validator).toContain('status: "EXACT_REHEARSAL_PRINCIPAL"');
     expect(validator).toContain("UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT");
+    expect(validator).toContain('const READER_ROLE_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"');
+    expect(validator).toContain("document.assignments.length !== 2");
+    expect(validator).toContain('kind: "reader", scope: subscriptionScope');
+    expect(validator).toContain('kind: "contributor", scope: expectedScope');
+    expect(validator).toContain('effectiveRoleAssignmentCount: 2');
     expect(validator).not.toContain("RBAC_ADMIN_ROLE_ID");
   });
 

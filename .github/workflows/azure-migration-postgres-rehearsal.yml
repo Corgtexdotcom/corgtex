@@ -237,6 +237,8 @@ jobs:
           unset access_token
 
           principal_scope="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}"
+          # Include inherited and transitive-group grants so the validator sees the
+          # complete management-plane authority effective at the exact target RG.
           AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
             --assignee-object-id "$principal_id" \
             --scope "$principal_scope" \
@@ -800,6 +802,7 @@ jobs:
           ')"
           unset access_token
           principal_scope="/subscriptions/${actual_subscription}/resourceGroups/${RESOURCE_GROUP}"
+          # Recovery requires the same exact temporary Reader plus Contributor pair.
           AZURE_CORE_COLLECT_TELEMETRY=no az role assignment list \
             --assignee-object-id "$principal_id" \
             --scope "$principal_scope" \

@@ -8,6 +8,7 @@ import { expectedResourceGroupId } from "./validate-azure-what-if.mjs";
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 const EXPECTED_CLIENT_SHA256 = "707be00bd89b2c0cf1ebdf8c0d389ff24b5f69d9f2ba35a113cddf8f073296bf";
 const CONTRIBUTOR_ROLE_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c";
+const READER_ROLE_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const OPAQUE_REF_PATTERN = /^sha256:[0-9a-f]{16}$/u;
 const SAFE_IDENTIFIER_PATTERN = /^[a-z][a-z0-9_]{0,62}$/u;
@@ -68,23 +69,41 @@ export function validateRehearsalPrincipal(document, options = {}) {
   if (sha256(clientId) !== expectedClientSha256) fail("UNEXPECTED_AZURE_CLIENT");
   const principalId = normalizeUuid(document.principalId, "INVALID_PRINCIPAL_ID");
   const expectedScope = expectedResourceGroupId(document.subscriptionId, document.resourceGroup).toLowerCase();
-  if (!Array.isArray(document.assignments) || document.assignments.length !== 1) {
+  const subscriptionScope = expectedScope.split("/resourcegroups/")[0];
+  if (!Array.isArray(document.assignments) || document.assignments.length !== 2) {
     fail("UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT");
   }
 
-  const assignment = document.assignments[0];
-  if (!isRecord(assignment)) fail("INVALID_ROLE_ASSIGNMENT");
-  validateAssignmentId(assignment.id, expectedScope);
-  if (normalizeResourceId(assignment.scope) !== expectedScope) fail("INHERITED_OR_FOREIGN_ROLE_ASSIGNMENT");
-  if (normalizeUuid(assignment.principalId, "ROLE_PRINCIPAL_MISMATCH") !== principalId) fail("ROLE_PRINCIPAL_MISMATCH");
-  if (String(assignment.principalType ?? "").toLowerCase() !== "serviceprincipal") {
-    fail("ROLE_PRINCIPAL_TYPE_MISMATCH");
+  const expectedRoles = new Map([
+    [
+      `${subscriptionScope}/providers/microsoft.authorization/roledefinitions/${READER_ROLE_ID}`,
+      { kind: "reader", scope: subscriptionScope },
+    ],
+    [
+      `${subscriptionScope}/providers/microsoft.authorization/roledefinitions/${CONTRIBUTOR_ROLE_ID}`,
+      { kind: "contributor", scope: expectedScope },
+    ],
+  ]);
+  const seenRoles = new Set();
+
+  for (const assignment of document.assignments) {
+    if (!isRecord(assignment)) fail("INVALID_ROLE_ASSIGNMENT");
+    const expectedRole = expectedRoles.get(normalizeResourceId(assignment.roleDefinitionId));
+    if (!expectedRole || seenRoles.has(expectedRole.kind)) fail("UNEXPECTED_ROLE_DEFINITION");
+    seenRoles.add(expectedRole.kind);
+
+    validateAssignmentId(assignment.id, expectedRole.scope);
+    if (normalizeResourceId(assignment.scope) !== expectedRole.scope) fail("INHERITED_OR_FOREIGN_ROLE_ASSIGNMENT");
+    if (normalizeUuid(assignment.principalId, "ROLE_PRINCIPAL_MISMATCH") !== principalId) fail("ROLE_PRINCIPAL_MISMATCH");
+    if (String(assignment.principalType ?? "").toLowerCase() !== "serviceprincipal") {
+      fail("ROLE_PRINCIPAL_TYPE_MISMATCH");
+    }
+    if (assignment.condition !== null && assignment.condition !== undefined) {
+      fail(expectedRole.kind === "reader" ? "UNEXPECTED_READER_CONDITION" : "UNEXPECTED_CONTRIBUTOR_CONDITION");
+    }
   }
-  const roleDefinitionId = normalizeResourceId(assignment.roleDefinitionId);
-  const subscriptionScope = expectedScope.split("/resourcegroups/")[0];
-  const expectedRoleDefinitionId = `${subscriptionScope}/providers/microsoft.authorization/roledefinitions/${CONTRIBUTOR_ROLE_ID}`;
-  if (roleDefinitionId !== expectedRoleDefinitionId) fail("UNEXPECTED_ROLE_DEFINITION");
-  if (assignment.condition !== null && assignment.condition !== undefined) fail("UNEXPECTED_CONTRIBUTOR_CONDITION");
+
+  if (seenRoles.size !== 2) fail("INCOMPLETE_ROLE_SET");
 
   return {
     schemaVersion: "1.0.0",
@@ -92,7 +111,7 @@ export function validateRehearsalPrincipal(document, options = {}) {
     clientRef: `sha256:${expectedClientSha256.slice(0, 16)}`,
     principalRef: `sha256:${sha256(principalId).slice(0, 16)}`,
     scopeRef: `sha256:${sha256(expectedScope).slice(0, 16)}`,
-    effectiveRoleAssignmentCount: 1,
+    effectiveRoleAssignmentCount: 2,
   };
 }
 
