@@ -309,6 +309,15 @@ const main = async () => {
       ) PARTITION BY RANGE ("id");
       CREATE TABLE "PartitionedConstraintFixture_first"
         PARTITION OF "PartitionedConstraintFixture" FOR VALUES FROM (0) TO (10);
+      CREATE SCHEMA "context fixture";
+      CREATE DOMAIN "context fixture"."bounded_text" AS text;
+      CREATE FUNCTION "context fixture"."greater_than"(integer, integer) RETURNS boolean
+      LANGUAGE sql IMMUTABLE AS 'SELECT $1 > $2';
+      CREATE OPERATOR "context fixture".> (
+        LEFTARG = integer,
+        RIGHTARG = integer,
+        FUNCTION = "context fixture"."greater_than"
+      );
       CREATE FUNCTION "type_context_varying"(text) RETURNS boolean
       LANGUAGE sql IMMUTABLE AS 'SELECT true';
       CREATE TABLE "TypeContextFixture" (
@@ -319,6 +328,14 @@ const main = async () => {
           CHECK (("value"::bit varying(8)) IS NOT NULL),
         CONSTRAINT "TypeContextFixture_function_check"
           CHECK ("type_context_varying"("value"))
+      );
+      CREATE TABLE "QualifiedContextFixture" (
+        "value" text,
+        "amount" integer,
+        CONSTRAINT "QualifiedContextFixture_type_check"
+          CHECK (("value"::"context fixture"."bounded_text") IS NOT NULL),
+        CONSTRAINT "QualifiedContextFixture_operator_check"
+          CHECK ("amount" OPERATOR("context fixture".>) 0)
       );
       CREATE SEQUENCE "legacy_id_seq" START 41;
       SELECT nextval('"legacy_id_seq"');
@@ -346,12 +363,14 @@ const main = async () => {
       WHERE conname IN (
         'TypeContextFixture_character_check',
         'TypeContextFixture_bit_check',
-        'TypeContextFixture_function_check'
+        'TypeContextFixture_function_check',
+        'QualifiedContextFixture_type_check',
+        'QualifiedContextFixture_operator_check'
       )
       ORDER BY conname COLLATE "C"
     `)).rows;
     await sourceAdmin.query("COMMIT");
-    if (typeContextExpressions.length !== 3) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
+    if (typeContextExpressions.length !== 5) fail("TYPE_CONTEXT_EXPRESSION_COUNT");
     for (const [constraintName, typeName, typmod] of [
       ["TypeContextFixture_character_check", "character", "10"],
       ["TypeContextFixture_bit_check", "bit", "8"],
@@ -386,6 +405,52 @@ const main = async () => {
       || functionEdit.destinationOnly.FUNCTION !== 1
       || JSON.stringify(functionEdit).match(/varying|private|type_context/iu)
     ) fail("FUNCTION_CONTEXT_CLASSIFICATION_MISMATCH");
+    const qualifiedTypeExpression = typeContextExpressions.find(
+      (row) => row.conname === "QualifiedContextFixture_type_check",
+    )?.expression;
+    if (
+      typeof qualifiedTypeExpression !== "string"
+      || !/::"context fixture"\.bounded_text/iu.test(qualifiedTypeExpression)
+    ) fail("QUALIFIED_TYPE_CONTEXT_PG18_DEPARSE_MISMATCH");
+    const renamedQualifiedTypeExpression = qualifiedTypeExpression.replace(
+      /"context fixture"\.bounded_text/iu,
+      '"other context".bounded_text',
+    );
+    const qualifiedTypeEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(qualifiedTypeExpression),
+      tokenizeSchemaDump(renamedQualifiedTypeExpression),
+    );
+    if (
+      qualifiedTypeEdit.status !== "UNIQUE"
+      || qualifiedTypeEdit.sourceOnly.BUILTIN_TYPE !== 1
+      || qualifiedTypeEdit.destinationOnly.BUILTIN_TYPE !== 1
+      || qualifiedTypeEdit.sourceOnly.COLUMN_REFERENCE !== 0
+      || qualifiedTypeEdit.destinationOnly.COLUMN_REFERENCE !== 0
+      || JSON.stringify(qualifiedTypeEdit).match(/context|bounded|private/iu)
+    ) fail("QUALIFIED_TYPE_CONTEXT_CLASSIFICATION_MISMATCH");
+    const qualifiedOperatorExpression = typeContextExpressions.find(
+      (row) => row.conname === "QualifiedContextFixture_operator_check",
+    )?.expression;
+    if (
+      typeof qualifiedOperatorExpression !== "string"
+      || !/OPERATOR\("context fixture"\.>\)/iu.test(qualifiedOperatorExpression)
+    ) fail("QUALIFIED_OPERATOR_CONTEXT_PG18_DEPARSE_MISMATCH");
+    const renamedQualifiedOperatorExpression = qualifiedOperatorExpression.replace(
+      /"context fixture"(?=\.>)/iu,
+      '"other context"',
+    );
+    const qualifiedOperatorEdit = buildUniqueCheckTokenEdit(
+      tokenizeSchemaDump(qualifiedOperatorExpression),
+      tokenizeSchemaDump(renamedQualifiedOperatorExpression),
+    );
+    if (
+      qualifiedOperatorEdit.status !== "UNIQUE"
+      || qualifiedOperatorEdit.sourceOnly.OPERATOR !== 1
+      || qualifiedOperatorEdit.destinationOnly.OPERATOR !== 1
+      || qualifiedOperatorEdit.sourceOnly.COLUMN_REFERENCE !== 0
+      || qualifiedOperatorEdit.destinationOnly.COLUMN_REFERENCE !== 0
+      || JSON.stringify(qualifiedOperatorEdit).match(/context|greater|private/iu)
+    ) fail("QUALIFIED_OPERATOR_CONTEXT_CLASSIFICATION_MISMATCH");
     const largeObjectOid = String((await sourceAdmin.query(
       "SELECT lo_from_bytea(0, decode('00112233445566778899aabbccddeeff', 'hex')) AS oid",
     )).rows[0].oid);

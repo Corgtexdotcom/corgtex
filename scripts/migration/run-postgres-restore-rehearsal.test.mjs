@@ -576,6 +576,82 @@ describe("PostgreSQL restore rehearsal runner", () => {
     });
 
     it.each([
+      ["private_column OPERATOR(private_schema.>) 0", "private_column OPERATOR(other_schema.>) 0", 1, 1],
+      ["private_column OPERATOR(private_schema.>) 0", "private_column OPERATOR(private_schema.<) 0", 1, 1],
+      ['private_column OPERATOR("private schema".>) 0', 'private_column OPERATOR("other schema".>) 0', 1, 1],
+      ['private_column OPERATOR("private""schema".>) 0', 'private_column OPERATOR("other""schema".>) 0', 1, 1],
+      ["private_column OPERATOR(private_schema.+) 0", "private_column OPERATOR(other_schema.+) 0", 1, 1],
+    ])("classifies bounded qualified operator token edits without values", (
+      source,
+      destination,
+      sourceCount,
+      destinationCount,
+    ) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OPERATOR).toBe(sourceCount);
+      expect(edit.destinationOnly.OPERATOR).toBe(destinationCount);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column OPERATOR(private_catalog.private_schema.>) 0", "private_column OPERATOR(other_catalog.private_schema.>) 0"],
+      ["private_column OPERATOR(private_schema..>) 0", "private_column OPERATOR(other_schema..>) 0"],
+      ["private_column OPERATOR(private_schema.) 0", "private_column OPERATOR(other_schema.) 0"],
+      ["private_column OPERATOR(private_schema.++) 0", "private_column OPERATOR(other_schema.++) 0"],
+      ['private_column "OPERATOR"(private_schema.>) 0', 'private_column "OPERATOR"(other_schema.>) 0'],
+      ['private_column OPERATOR(private_schema."+") 0', 'private_column OPERATOR(other_schema."+") 0'],
+    ])("fails closed for malformed or unsupported qualified operator contexts", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::private_schema.private_type", "private_column::other_schema.private_type", 1, 1],
+      ["private_column::private_schema.private_type", "private_column::private_schema.other_type", 1, 1],
+      ["private_column::private_type", "private_column::other_type", 1, 1],
+      ['private_column::"private schema"."private-type"', 'private_column::"other schema"."private-type"', 1, 1],
+      ['private_column::private_schema."private-type"', 'private_column::other_schema."private-type"', 1, 1],
+      ["private_column::private_schema.private_type(10)", "private_column::other_schema.private_type(10)", 1, 1],
+      ["private_column::private_schema.private_type[]", "private_column::other_schema.private_type[]", 1, 1],
+    ])("classifies bounded qualified cast type edits without values", (
+      source,
+      destination,
+      sourceCount,
+      destinationCount,
+    ) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.BUILTIN_TYPE).toBe(sourceCount);
+      expect(edit.destinationOnly.BUILTIN_TYPE).toBe(destinationCount);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
+      ["private_column::private_catalog.private_schema.private_type", "private_column::other_catalog.private_schema.private_type"],
+      ["private_column::private_schema..private_type", "private_column::other_schema..private_type"],
+      ["private_column::private_schema.", "private_column::other_schema."],
+      ["private_column::private_type varying(10)", "private_column::other_type varying(10)"],
+      ["private_column::double precision", "private_column::real precision"],
+      ['private_column::U&"private_type"', 'private_column::U&"other_type"'],
+    ])("fails closed for malformed or unsupported cast identity spans", (source, destination) => {
+      const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));
+      expect(edit.status).toBe("UNIQUE");
+      expect(edit.sourceOnly.OTHER + edit.destinationOnly.OTHER).toBeGreaterThan(0);
+      expect(edit.sourceOnly.COLUMN_REFERENCE + edit.destinationOnly.COLUMN_REFERENCE).toBe(0);
+      expect(edit.sourceOnly.FUNCTION + edit.destinationOnly.FUNCTION).toBe(0);
+      expect(JSON.stringify(edit)).not.toContain("private");
+    });
+
+    it.each([
       ["private_schema.private_column > 0", "other_schema.private_column > 0", "COLUMN_REFERENCE"],
       ["private_column IN (1, 2)", "other_column IN (1, 2)", "COLUMN_REFERENCE"],
       ["private_column = ANY (private_array)", "other_column = ANY (private_array)", "COLUMN_REFERENCE"],
@@ -619,7 +695,6 @@ describe("PostgreSQL restore rehearsal runner", () => {
     it.each([
       ['private_column::"character" varying(10)', 'other_column::"character" varying(10)'],
       ["private_column::character varying(10", "other_column::character varying(10"],
-      ["private_column::app.varying(10)", "other_column::app.varying(10)"],
       ["private_column::custom varying(10)", "other_column::custom varying(10)"],
     ])("fails closed for unsupported cast type contexts", (source, destination) => {
       const edit = buildUniqueCheckTokenEdit(tokenizeSchemaDump(source), tokenizeSchemaDump(destination));

@@ -2190,8 +2190,62 @@ const setCheckContextCategory = (categories, indexes, category) => {
 const isUnquotedCheckWord = (token, word) => token?.domain === "DDL_TOKEN"
   && new RegExp(`^${word}$`, "iu").test(token.value);
 
+const isCheckOperatorToken = (token) => {
+  if (
+    token?.domain !== "DDL_TOKEN"
+    || !/^[~!@#%^&|`?+*\/<>=-]+$/u.test(token.value)
+    || token.value === "::"
+  ) return false;
+  return token.value.length === 1
+    || !/[+-]$/u.test(token.value)
+    || /[~!@#%^&|`?]/u.test(token.value);
+};
+
+const setMalformedDelimitedCheckContext = (categories, tokens, keywordIndex) => {
+  const span = [keywordIndex];
+  if (tokens[keywordIndex + 1]?.value !== "(") {
+    setCheckContextCategory(categories, span, "OTHER");
+    return;
+  }
+  for (let cursor = keywordIndex + 2; cursor < tokens.length && tokens[cursor]?.value !== ")"; cursor += 1) {
+    if (tokens[cursor]?.domain === "DDL_TOKEN" && tokens[cursor].value !== "(") span.push(cursor);
+  }
+  setCheckContextCategory(categories, span, "OTHER");
+};
+
+const setMalformedCastIdentity = (categories, tokens, castIndex) => {
+  const span = [];
+  let cursor = castIndex + 1;
+  while (
+    cursor < tokens.length
+    && (isCheckIdentifierToken(tokens[cursor]) || tokens[cursor]?.value === ".")
+  ) {
+    span.push(cursor);
+    cursor += 1;
+  }
+  if (span.length === 0 && tokens[castIndex + 1]?.domain === "DDL_TOKEN") span.push(castIndex + 1);
+  setCheckContextCategory(categories, span, "OTHER");
+};
+
 const checkContextualTokenCategories = (tokens) => {
   const categories = new Map();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const isOperatorKeyword = isUnquotedCheckWord(token, "operator");
+    const isQuotedOperatorKeyword = token?.domain === "DDL_TOKEN" && /^"operator"$/iu.test(token.value);
+    if (!isOperatorKeyword && !isQuotedOperatorKeyword) continue;
+    const valid = isOperatorKeyword
+      && tokens[index + 1]?.value === "("
+      && isCheckIdentifierToken(tokens[index + 2])
+      && tokens[index + 3]?.value === "."
+      && isCheckOperatorToken(tokens[index + 4])
+      && tokens[index + 5]?.value === ")";
+    if (!valid) {
+      setMalformedDelimitedCheckContext(categories, tokens, index);
+      continue;
+    }
+    setCheckContextCategory(categories, [index, index + 2, index + 3, index + 4], "OPERATOR");
+  }
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token?.domain !== "DDL_TOKEN" || !/^collate$/iu.test(token.value)) continue;
@@ -2220,17 +2274,55 @@ const checkContextualTokenCategories = (tokens) => {
     if (tokens[castIndex]?.domain !== "DDL_TOKEN" || tokens[castIndex].value !== "::") continue;
     const first = tokens[castIndex + 1];
     const second = tokens[castIndex + 2];
+    const isVaryingPhrase = (isUnquotedCheckWord(first, "character") || isUnquotedCheckWord(first, "bit"))
+      && isUnquotedCheckWord(second, "varying");
+    if (isVaryingPhrase) {
+      const afterPhrase = castIndex + 3;
+      if (tokens[afterPhrase]?.value === "(" && !(
+        tokens[afterPhrase + 1]?.domain === "DDL_TOKEN"
+        && /^[0-9]+$/u.test(tokens[afterPhrase + 1].value)
+        && tokens[afterPhrase + 2]?.domain === "DDL_TOKEN"
+        && tokens[afterPhrase + 2].value === ")"
+      )) {
+        setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "OTHER");
+        continue;
+      }
+      if (isCheckIdentifierToken(tokens[afterPhrase])) {
+        setMalformedCastIdentity(categories, tokens, castIndex);
+        continue;
+      }
+      setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "BUILTIN_TYPE");
+      continue;
+    }
+    if (!isCheckIdentifierToken(first)) {
+      setMalformedCastIdentity(categories, tokens, castIndex);
+      continue;
+    }
+    if (second?.value === ".") {
+      if (!isCheckIdentifierToken(tokens[castIndex + 3]) || tokens[castIndex + 4]?.value === ".") {
+        setMalformedCastIdentity(categories, tokens, castIndex);
+        continue;
+      }
+      if (
+        isCheckIdentifierToken(tokens[castIndex + 4])
+        && !CHECK_OPERATOR_WORDS.has(tokens[castIndex + 4].value.toLowerCase())
+        && !isUnquotedCheckWord(tokens[castIndex + 4], "collate")
+      ) {
+        setMalformedCastIdentity(categories, tokens, castIndex);
+        continue;
+      }
+      setCheckContextCategory(categories, [castIndex + 1, castIndex + 2, castIndex + 3], "BUILTIN_TYPE");
+      continue;
+    }
     if (
-      !(isUnquotedCheckWord(first, "character") || isUnquotedCheckWord(first, "bit"))
-      || !isUnquotedCheckWord(second, "varying")
-    ) continue;
-    if (tokens[castIndex + 3]?.value === "(" && !(
-      tokens[castIndex + 4]?.domain === "DDL_TOKEN"
-      && /^[0-9]+$/u.test(tokens[castIndex + 4].value)
-      && tokens[castIndex + 5]?.domain === "DDL_TOKEN"
-      && tokens[castIndex + 5].value === ")"
-    )) continue;
-    setCheckContextCategory(categories, [castIndex + 1, castIndex + 2], "BUILTIN_TYPE");
+      isCheckIdentifierToken(second)
+      && !CHECK_OPERATOR_WORDS.has(second.value.toLowerCase())
+      && !isUnquotedCheckWord(second, "collate")
+    ) {
+      setMalformedCastIdentity(categories, tokens, castIndex);
+      continue;
+    }
+    setCheckContextCategory(categories, [castIndex + 1], "BUILTIN_TYPE");
   }
   for (let parenthesisIndex = 0; parenthesisIndex < tokens.length; parenthesisIndex += 1) {
     if (tokens[parenthesisIndex]?.domain !== "DDL_TOKEN" || tokens[parenthesisIndex].value !== "(") continue;
