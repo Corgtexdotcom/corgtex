@@ -205,7 +205,7 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain('classification: "EXECUTABLE_SCHEMA_DIFFERENCE"');
     expect(runner).toContain('classification: "NON_EXECUTABLE_DUMP_TEXT_ONLY"');
     expect(runner).toContain('`${artifactDir}/schema-diagnostic.json`');
-    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(3);
+    expect(runner.match(/SET LOCAL search_path = pg_catalog/gu)).toHaveLength(4);
     expect(runner.indexOf('await sourceClient.query("COMMIT");'))
       .toBeLessThan(runner.indexOf("await restoreArchiveSections({"));
     expect(runner).toContain("constraintCatalogIdentityQuery");
@@ -218,6 +218,9 @@ describe("Azure PostgreSQL restore rehearsal workflow contract", () => {
     expect(runner).toContain("constraintSemantics: buildConstraintSemanticDiagnostic");
     expect(runner).toContain("checkExpressionDifference");
     expect(runner).toContain("buildUniqueCheckTokenEdit");
+    expect(runner).toContain("runTargetCheckReparseDiagnostic");
+    expect(runner).toContain("TARGET_REPARSE_ROLLBACK_UNPROVEN");
+    expect(runner).toContain("TARGET_REPARSE_ABSENCE_UNPROVEN");
     expect(runner).toContain("pg_catalog.pg_identify_object");
     expect(runner).toContain('status: "AMBIGUOUS"');
     expect(smoke).not.toContain("CONSTRAINT_CHECK_DIAGNOSTIC_CLASSIFICATION_FAILED");

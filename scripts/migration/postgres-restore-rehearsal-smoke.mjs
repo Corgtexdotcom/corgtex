@@ -17,6 +17,7 @@ import {
   findSingleCheckExpressionMismatch,
   probeTargetClientConnection,
   runPostgresRestoreRehearsal,
+  runTargetCheckReparseDiagnostic,
   schemaTokenDigest,
   tokenizeSchemaDump,
   writeClientFiles,
@@ -1135,6 +1136,189 @@ const main = async () => {
       }
     };
     await verifyBooleanOperatorExtraction();
+
+    const verifyTargetCheckReparse = async () => {
+      const client = new Client(config(targetPort, scratchName));
+      await client.connect();
+      const tableName = "Target Reparse; Fixture";
+      const constraintName = "Target Reparse Flat Check";
+      const partitionedTableName = "Target Reparse Partitioned Fixture";
+      const functionTableName = "Target Reparse Function Fixture";
+      const destinationExpression = '"flag; a" AND "flag b" AND "flag c"';
+      const sourceExpression = '("flag; a" AND "flag b") AND "flag c"';
+      const syntheticSource = (destination, expression) => ({
+        ...destination,
+        semantics: {
+          ...destination.semantics,
+          DEFINITION: schemaTokenDigest(tokenizeSchemaDump(`CHECK (${expression}) NO INHERIT NOT VALID`)),
+          CHECK_EXPRESSION: schemaTokenDigest(tokenizeSchemaDump(expression)),
+        },
+      });
+      try {
+        await client.query(`
+          CREATE TABLE "${tableName}" (
+            "flag; a" boolean,
+            "flag b" boolean,
+            "flag c" boolean
+          );
+          INSERT INTO "${tableName}" VALUES (false, false, false);
+          ALTER TABLE "${tableName}" ADD CONSTRAINT "${constraintName}"
+            CHECK (${destinationExpression}) NO INHERIT NOT VALID
+        `);
+        await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        await client.query("SET LOCAL timezone = 'UTC'");
+        await client.query("SET LOCAL client_encoding = 'UTF8'");
+        await client.query("SET LOCAL search_path = pg_catalog");
+        const manifest = await collectConstraintCatalogManifest(client, "TARGET_REPARSE_CATALOG_FAILED");
+        const destination = [...manifest.values()].find((entry) => {
+          try { return JSON.parse(entry.key)?.[3] === constraintName; } catch { return false; }
+        });
+        if (destination === undefined) fail("TARGET_REPARSE_FIXTURE_MISSING");
+        const destinationDetail = await collectCheckConstraintDetail(client, destination);
+        if (destinationDetail.ok !== true) fail("TARGET_REPARSE_FIXTURE_DETAIL_FAILED");
+        const safeSourceDependencies = destinationDetail.dependencies;
+        await client.query("COMMIT");
+
+        const matching = await runTargetCheckReparseDiagnostic({
+          targetConfig: { ...targetAdminConfig, database: scratchName },
+          sourceManifestEntry: syntheticSource(destination, sourceExpression),
+          destinationManifestEntry: destination,
+          sourceExpression,
+          sourceDependencies: safeSourceDependencies,
+          serverVersionRelation: "MATCH",
+        });
+        if (matching.status !== "MATCH" || matching.mismatchFields.length !== 0) {
+          fail(`TARGET_REPARSE_GROUPING_MATCH_FAILED_${matching.status}_${matching.stage ?? "NONE"}_${matching.reason ?? "NONE"}_${matching.mismatchFields.join("_")}`);
+        }
+
+        for (const expression of [
+          '"flag; a" AND ("flag b" OR "flag c")',
+          '"flag; a" AND ("flag b" = "flag c")',
+          '"flag; a" AND "flag b" AND ("flag c" IS TRUE)',
+          '"flag; a" AND "flag b" AND "flag b"',
+        ]) {
+          const different = await runTargetCheckReparseDiagnostic({
+            targetConfig: { ...targetAdminConfig, database: scratchName },
+            sourceManifestEntry: syntheticSource(destination, expression),
+            destinationManifestEntry: destination,
+            sourceExpression: expression,
+            sourceDependencies: safeSourceDependencies,
+            serverVersionRelation: "MATCH",
+          });
+          if (different.status !== "DIFFERENT" || different.mismatchFields.length === 0) {
+            fail("TARGET_REPARSE_NEGATIVE_CONTROL_FAILED");
+          }
+        }
+
+        await client.query(`
+          CREATE FUNCTION public.corgtex_reparse_event_trigger() RETURNS event_trigger
+            LANGUAGE plpgsql AS 'BEGIN NULL; END';
+          CREATE EVENT TRIGGER corgtex_reparse_event_trigger
+            ON ddl_command_start EXECUTE FUNCTION public.corgtex_reparse_event_trigger()
+        `);
+        const eventTriggerResult = await runTargetCheckReparseDiagnostic({
+          targetConfig: { ...targetAdminConfig, database: scratchName },
+          sourceManifestEntry: syntheticSource(destination, sourceExpression),
+          destinationManifestEntry: destination,
+          sourceExpression,
+          sourceDependencies: safeSourceDependencies,
+          serverVersionRelation: "MATCH",
+        });
+        await client.query("DROP EVENT TRIGGER corgtex_reparse_event_trigger");
+        await client.query("DROP FUNCTION public.corgtex_reparse_event_trigger()");
+        if (eventTriggerResult.status !== "NOT_ELIGIBLE" || eventTriggerResult.reason !== "EVENT_TRIGGER_ENABLED") {
+          fail("TARGET_REPARSE_EVENT_TRIGGER_GATE_FAILED");
+        }
+
+        await client.query(`
+          CREATE TABLE "${partitionedTableName}" (
+            "flag" boolean,
+            CONSTRAINT "Target Reparse Partitioned Check" CHECK ("flag" IS NOT NULL)
+          ) PARTITION BY LIST ("flag");
+          CREATE FUNCTION public.corgtex_reparse_custom(boolean) RETURNS boolean
+            LANGUAGE sql IMMUTABLE AS 'SELECT $1';
+          CREATE TABLE "${functionTableName}" ("flag" boolean);
+          ALTER TABLE "${functionTableName}" ADD CONSTRAINT "Target Reparse Function Check"
+            CHECK (public.corgtex_reparse_custom("flag")) NO INHERIT NOT VALID
+        `);
+        await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        await client.query("SET LOCAL timezone = 'UTC'");
+        await client.query("SET LOCAL client_encoding = 'UTF8'");
+        await client.query("SET LOCAL search_path = pg_catalog");
+        const ineligibleManifest = await collectConstraintCatalogManifest(client, "TARGET_REPARSE_CATALOG_FAILED");
+        await client.query("COMMIT");
+        const findConstraint = (name) => [...ineligibleManifest.values()].find((entry) => {
+          try { return JSON.parse(entry.key)?.[3] === name; } catch { return false; }
+        });
+        const partitionedConstraint = findConstraint("Target Reparse Partitioned Check");
+        const functionConstraint = findConstraint("Target Reparse Function Check");
+        if (partitionedConstraint === undefined || functionConstraint === undefined) {
+          fail("TARGET_REPARSE_INELIGIBLE_FIXTURE_MISSING");
+        }
+        const partitionedExpression = '(("flag" IS NOT NULL))';
+        const partitionedResult = await runTargetCheckReparseDiagnostic({
+          targetConfig: { ...targetAdminConfig, database: scratchName },
+          sourceManifestEntry: syntheticSource(partitionedConstraint, partitionedExpression),
+          destinationManifestEntry: partitionedConstraint,
+          sourceExpression: partitionedExpression,
+          sourceDependencies: safeSourceDependencies,
+          serverVersionRelation: "MATCH",
+        });
+        if (partitionedResult.status !== "NOT_ELIGIBLE" || partitionedResult.reason !== "RELATION_KIND") {
+          fail("TARGET_REPARSE_RELATION_KIND_GATE_FAILED");
+        }
+        const functionExpression = '(public.corgtex_reparse_custom("flag"))';
+        const functionResult = await runTargetCheckReparseDiagnostic({
+          targetConfig: { ...targetAdminConfig, database: scratchName },
+          sourceManifestEntry: syntheticSource(functionConstraint, functionExpression),
+          destinationManifestEntry: functionConstraint,
+          sourceExpression: functionExpression,
+          sourceDependencies: safeSourceDependencies,
+          serverVersionRelation: "MATCH",
+        });
+        if (functionResult.status !== "NOT_ELIGIBLE" || functionResult.reason !== "EXECUTABLE_DEPENDENCY") {
+          fail("TARGET_REPARSE_EXECUTABLE_DEPENDENCY_GATE_FAILED");
+        }
+
+        await client.query(`
+          ALTER TABLE "${tableName}" DROP CONSTRAINT "${constraintName}";
+          ALTER TABLE "${tableName}" ADD CONSTRAINT "${constraintName}"
+            CHECK (${destinationExpression}) NO INHERIT NOT VALID
+        `);
+        const driftResult = await runTargetCheckReparseDiagnostic({
+          targetConfig: { ...targetAdminConfig, database: scratchName },
+          sourceManifestEntry: syntheticSource(destination, sourceExpression),
+          destinationManifestEntry: destination,
+          sourceExpression,
+          sourceDependencies: safeSourceDependencies,
+          serverVersionRelation: "MATCH",
+        });
+        if (driftResult.status !== "NOT_ELIGIBLE" || driftResult.reason !== "DESTINATION_REBIND_DRIFT") {
+          fail("TARGET_REPARSE_IDENTITY_DRIFT_GATE_FAILED");
+        }
+
+        const probeCount = Number((await client.query(`
+          SELECT count(*) AS count FROM pg_catalog.pg_constraint
+          WHERE conname LIKE 'corgtex_reparse_%'
+        `)).rows[0].count);
+        if (probeCount !== 0) fail("TARGET_REPARSE_PROBE_REMAINS");
+        const violatingRows = Number((await client.query(`SELECT count(*) AS count FROM "${tableName}"`)).rows[0].count);
+        if (violatingRows !== 1) fail("TARGET_REPARSE_NOT_VALID_SCANNED_ROWS");
+        const serialized = JSON.stringify({ matching, eventTriggerResult });
+        for (const forbidden of [tableName, constraintName, "flag; a", sourceExpression, destinationExpression]) {
+          if (serialized.includes(forbidden)) fail("TARGET_REPARSE_PRIVACY_FAILED");
+        }
+      } finally {
+        await client.query("DROP EVENT TRIGGER IF EXISTS corgtex_reparse_event_trigger").catch(() => {});
+        await client.query("DROP FUNCTION IF EXISTS public.corgtex_reparse_event_trigger()").catch(() => {});
+        await client.query(`DROP TABLE IF EXISTS "${functionTableName}"`).catch(() => {});
+        await client.query("DROP FUNCTION IF EXISTS public.corgtex_reparse_custom(boolean)").catch(() => {});
+        await client.query(`DROP TABLE IF EXISTS "${partitionedTableName}"`).catch(() => {});
+        await client.query(`DROP TABLE IF EXISTS "${tableName}"`).catch(() => {});
+        await client.end().catch(() => {});
+      }
+    };
+    await verifyTargetCheckReparse();
 
     const ambiguousSourceExpression = "fixture_flag AND ((other_fixture_flag IS NOT NULL))";
     const ambiguousDestinationExpression = "fixture_flag AND (other_fixture_flag IS NOT NULL)";
