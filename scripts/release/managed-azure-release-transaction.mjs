@@ -126,6 +126,22 @@ function leaseArgs(handle, extra = {}) {
   return { deploymentId: handle.deploymentId, leaseId: handle.leaseId, capability: handle.capability, fence: handle.fence, ...extra };
 }
 
+function compatibleRecoveryTerminal(status, input, handle, evidence, approvalDigest) {
+  return status?.status === "RECOVERED_COMPATIBLE"
+    && status.terminal === true
+    && status.deploymentId === input.deploymentId
+    && status.leaseId === handle.leaseId
+    && status.fence === handle.fence
+    && status.originatingLeaseId === handle.leaseId
+    && status.originatingFence === handle.fence
+    && status.releaseImageTag === evidence.imageTag
+    && status.releaseVersion === evidence.releaseVersion
+    && status.webDigest === evidence.webDigest
+    && status.workerDigest === evidence.workerDigest
+    && status.approvalDigest === approvalDigest
+    && status.acceptanceEvidenceDigest === evidence.acceptanceEvidenceDigest;
+}
+
 function safeResult(input, inventory, status, detail = {}) {
   return Object.freeze({
     status,
@@ -275,7 +291,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
 
   let handle;
   let mutationBegun = false;
-  let drainCompleted = false;
+  let exclusiveDrainStarted = false;
   let firstForwardPatchAttempted = false;
   const forwardTemplates = {};
   const heartbeat = () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
@@ -376,30 +392,67 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     if (!observed?.verified) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_OBSERVATION_FAILED", detail);
     const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
       webDigest: recoveryPlan.roles.web.digest, workerDigest: recoveryPlan.roles.worker.digest })).digest("hex")}`;
-    const finalized = await deps.lease("finalize_compatible_recovery", leaseArgs(handle, { reason: input.reason, evidence: {
+    const evidence = {
       gitSha: recoveryRelease.gitSha, imageTag: recoveryRelease.imageTag, releaseVersion: recoveryRelease.version,
       webDigest: recoveryPlan.roles.web.digest, workerDigest: recoveryPlan.roles.worker.digest, acceptanceEvidenceDigest,
-    } }));
-    if (finalized?.status !== "RECOVERED_COMPATIBLE") return markRecovery("FENCING", "COMPATIBLE_RECOVERY_RECORDING_FAILED", detail);
+    };
+    let finalized = null;
+    try {
+      finalized = await deps.lease("finalize_compatible_recovery", leaseArgs(handle, { reason: input.reason, evidence }));
+    } catch { /* Reconcile exactly once by readback; never replay an uncertain finalization. */ }
+    if (finalized?.status !== "RECOVERED_COMPATIBLE") {
+      let readback = null;
+      try {
+        readback = await deps.lease("get_recovery", {
+          deploymentId: input.deploymentId,
+          acrName: input.acrName,
+          acrServer: input.acrServer,
+        });
+      } catch { /* Missing or uncertain terminal proof retains the fence. */ }
+      const approvalDigest = `sha256:${recoveryConfig.schemaCompatibilityApprovalDigest}`;
+      if (!compatibleRecoveryTerminal(readback, input, handle, evidence, approvalDigest)) {
+        return safeResult(input, inventory, "RECOVERY_REQUIRED", {
+          phase: "FENCING",
+          code: "COMPATIBLE_RECOVERY_FINALIZE_AMBIGUOUS",
+          ...detail,
+        });
+      }
+      return safeResult(input, inventory, "RECOVERED_COMPATIBLE", {
+        phase: stage,
+        code,
+        recoveryReleaseImageTag: recoveryRelease.imageTag,
+        reconciled: true,
+        ...detail,
+      });
+    }
     return safeResult(input, inventory, "RECOVERED_COMPATIBLE", { phase: stage, code, recoveryReleaseImageTag: recoveryRelease.imageTag, ...detail });
   };
 
-  const restoreDrainedBaseline = async (stage, code) => {
-    try {
-      for (const role of ROLES) {
-        const activated = await deps.setRevisionActive({ target: preflight.target, role, revisionName: baselines[role].revisionName,
+  const restoreDrainedBaseline = async (stage, code, detail = {}) => {
+    const activations = {};
+    for (const role of ["worker", "web"]) {
+      try {
+        activations[role] = await deps.setRevisionActive({ target: preflight.target, role, revisionName: baselines[role].revisionName,
           active: true, onProgress: recoveryHeartbeat });
-        if (!activated?.terminal || !activated?.succeeded) return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS");
-      }
-      for (const role of ROLES) {
+      } catch { activations[role] = null; }
+    }
+    if (ROLES.some((role) => !activations[role]?.terminal || !activations[role]?.succeeded)) {
+      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
+    }
+    for (const role of ROLES) {
+      try {
         const restored = await deps.readApp({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest });
-        if (restored.templateDigest !== baselines[role].templateDigest) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT");
+        if (restored.templateDigest !== baselines[role].templateDigest) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
+      } catch {
+        return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
       }
+    }
+    try {
       const health = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
-      if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED");
-      return compensate(stage, code, forwardTemplates, { containment: "BASELINE_REACTIVATED" });
+      if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED", detail);
+      return compensate(stage, code, forwardTemplates, { ...detail, containment: "BASELINE_REACTIVATED" });
     } catch {
-      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS");
+      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
     }
   };
 
@@ -452,10 +505,10 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await deps.lease("begin", leaseArgs(handle, { reason: input.reason }));
     if (configured.target.activationPolicy === "EXCLUSIVE") {
       await recoveryHeartbeat();
+      exclusiveDrainStarted = true;
       const drained = await deps.drainBaseline({ target: preflight.target, baselines, handle, onProgress: recoveryHeartbeat });
-      if (!drained?.terminal || !drained?.succeeded) return markRecovery("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
+      if (!drained?.terminal || !drained?.succeeded) return restoreDrainedBaseline("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
         drained?.code ? { providerCode: drained.code } : {});
-      drainCompleted = true;
       await recoveryHeartbeat();
     }
     for (const role of ROLES) {
@@ -523,7 +576,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason })).catch(() => undefined);
       throw error;
     }
-    if (drainCompleted && !firstForwardPatchAttempted) {
+    if (exclusiveDrainStarted && !firstForwardPatchAttempted) {
       return restoreDrainedBaseline("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
     }
     return markRecovery("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");

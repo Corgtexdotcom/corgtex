@@ -285,16 +285,90 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.drainBaseline).toHaveBeenCalledWith(expect.objectContaining({ baselines: expect.objectContaining({ web: expect.anything(), worker: expect.anything() }) }));
   });
 
-  it("keeps the fence and performs no candidate mutation when an exclusive drain is ambiguous", async () => {
-    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE", drain: { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" } });
+  it("restores both exact baselines and converges to compatible recovery when an exclusive drain is ambiguous", async () => {
+    const { deps, events, current } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.drainBaseline.mockImplementation(async () => {
+      current.worker = "UNKNOWN";
+      return { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" };
+    });
+    deps.setRevisionActive.mockImplementation(async ({ role }) => {
+      events.push(`activate:${role}`);
+      current[role] = "BASELINE";
+      return { terminal: true, succeeded: true };
+    });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "BASELINE_DRAIN_AMBIGUOUS", providerCode: "AZURE_REVISION_READBACK_AMBIGUOUS" });
-    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "BASELINE_DRAIN_AMBIGUOUS",
+      providerCode: "AZURE_REVISION_READBACK_AMBIGUOUS", containment: "BASELINE_REACTIVATED" });
+    expect(events.filter((event) => event.startsWith("activate:"))).toEqual(["activate:worker", "activate:web"]);
+    expect(events.filter((event) => event.includes(":forward"))).toEqual([]);
+    expect(events.filter((event) => event.includes(":rollback"))).toEqual(["patch:web:rollback", "patch:worker:rollback"]);
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
+  it("contains a thrown partial drain before any candidate patch", async () => {
+    const { deps, events, current } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.drainBaseline.mockImplementation(async () => {
+      current.worker = "UNKNOWN";
+      throw new Error("web drain response lost");
+    });
+    deps.setRevisionActive.mockImplementation(async ({ role }) => {
+      events.push(`activate:${role}`);
+      current[role] = "BASELINE";
+      return { terminal: true, succeeded: true };
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS",
+      containment: "BASELINE_REACTIVATED" });
+    expect(events.filter((event) => event.startsWith("activate:"))).toEqual(["activate:worker", "activate:web"]);
+    expect(events.filter((event) => event.includes(":forward"))).toEqual([]);
+  });
+
+  it("attempts both baseline activations before retaining the fence for an uncertain activation", async () => {
+    const { deps, events, current } = dependencies({ activationPolicy: "EXCLUSIVE",
+      drain: { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" } });
+    deps.setRevisionActive.mockImplementation(async ({ role }) => {
+      events.push(`activate:${role}`);
+      current[role] = "BASELINE";
+      if (role === "worker") throw new Error("activation response lost");
+      return { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" };
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "BASELINE_REACTIVATION_AMBIGUOUS" });
+    expect(events.filter((event) => event.startsWith("activate:"))).toEqual(["activate:worker", "activate:web"]);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+
+  it("retains the fence when exact baseline readback is missing or drifted", async () => {
+    for (const scenario of ["missing", "drifted"]) {
+      const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
+      let drainAttempted = false;
+      deps.drainBaseline.mockImplementation(async () => {
+        drainAttempted = true;
+        return { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" };
+      });
+      const baseReadApp = deps.readApp.getMockImplementation();
+      deps.readApp.mockImplementation(async (request) => {
+        if (drainAttempted && request.release.gitSha === baseSha) {
+          if (scenario === "missing") throw new Error("baseline read unavailable");
+          return { ...state(request.role, "BASELINE"), templateDigest: `sha256:${"0".repeat(64)}` };
+        }
+        return baseReadApp(request);
+      });
+      const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+      expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING",
+        code: scenario === "missing" ? "BASELINE_REACTIVATION_AMBIGUOUS" : "BASELINE_REACTIVATION_DRIFT" });
+      expect(deps.patchTemplate).not.toHaveBeenCalled();
+      expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+    }
+  });
+
   it("reports recovery recording failure without clearing or finalizing the fenced transaction", async () => {
-    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE", drain: { terminal: false, succeeded: false } });
+    const { deps, current } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.drainBaseline.mockImplementation(async () => {
+      current.web = "UNKNOWN";
+      return { terminal: false, succeeded: false };
+    });
     const lease = deps.lease.getMockImplementation();
     deps.lease.mockImplementation(async (operation, args) => {
       if (operation === "mark_recovery") throw new Error("control plane unavailable");
@@ -302,7 +376,7 @@ describe("managed Azure single-target transaction", () => {
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
     expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "RECOVERY_RECORDING_FAILED",
-      originatingPhase: "FENCING", originatingCode: "BASELINE_DRAIN_AMBIGUOUS" });
+      originatingPhase: "FENCING", originatingCode: "BASELINE_REACTIVATION_AMBIGUOUS" });
     expect(deps.lease).not.toHaveBeenCalledWith("abort", expect.anything());
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
@@ -326,7 +400,7 @@ describe("managed Azure single-target transaction", () => {
     expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS",
       containment: "BASELINE_REACTIVATED", recoveryReleaseImageTag: `sha-${recoverySha}` });
     expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
-      .toEqual([["web", "web-app--base-web", true], ["worker", "worker-app--base-worker", true]]);
+      .toEqual([["worker", "worker-app--base-worker", true], ["web", "web-app--base-web", true]]);
     expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web", "worker"]);
     expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }) }));
     expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }), operationId: expect.any(String) }));
@@ -337,6 +411,115 @@ describe("managed Azure single-target transaction", () => {
       acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/),
     }) }));
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+
+  it("reconciles one lost compatible-finalization response through the exact terminal receipt", async () => {
+    const { deps } = dependencies();
+    deps.patchTemplate.mockResolvedValueOnce({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
+    const baseLease = deps.lease.getMockImplementation();
+    let evidence;
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "finalize_compatible_recovery") {
+        evidence = args.evidence;
+        throw new Error("committed response lost");
+      }
+      if (operation === "get_recovery") return {
+        status: "RECOVERED_COMPATIBLE",
+        terminal: true,
+        deploymentId,
+        leaseId,
+        fence: 7,
+        originatingLeaseId: leaseId,
+        originatingFence: 7,
+        releaseImageTag: evidence.imageTag,
+        releaseVersion: evidence.releaseVersion,
+        webDigest: evidence.webDigest,
+        workerDigest: evidence.workerDigest,
+        approvalDigest: `sha256:${"9".repeat(64)}`,
+        acceptanceEvidenceDigest: evidence.acceptanceEvidenceDigest,
+      };
+      return baseLease(operation, args);
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", reconciled: true,
+      recoveryReleaseImageTag: `sha-${recoverySha}` });
+    expect(result).not.toHaveProperty("effects");
+    expect(deps.lease.mock.calls.filter(([operation]) => operation === "finalize_compatible_recovery")).toHaveLength(1);
+    expect(deps.lease.mock.calls.filter(([operation]) => operation === "get_recovery")).toHaveLength(1);
+    expect(deps.lease).not.toHaveBeenCalledWith("mark_recovery", expect.anything());
+  });
+
+  it("retains the fence when compatible-finalization readback is absent or not exact", async () => {
+    const otherLeaseId = "123e4567-e89b-42d3-a456-426614174099";
+    const scenarios = [
+      ["deployment", (receipt) => ({ ...receipt, deploymentId: otherLeaseId })],
+      ["lease", (receipt) => ({ ...receipt, leaseId: otherLeaseId })],
+      ["fence", (receipt) => ({ ...receipt, fence: 8 })],
+      ["originating lease", (receipt) => ({ ...receipt, originatingLeaseId: otherLeaseId })],
+      ["originating fence", (receipt) => ({ ...receipt, originatingFence: 6 })],
+      ["tag", (receipt) => ({ ...receipt, releaseImageTag: `sha-${baseSha}` })],
+      ["version", (receipt) => ({ ...receipt, releaseVersion: "other-recovery" })],
+      ["web digest", (receipt) => ({ ...receipt, webDigest: digests.nextWeb })],
+      ["worker digest", (receipt) => ({ ...receipt, workerDigest: digests.nextWorker })],
+      ["approval", (receipt) => ({ ...receipt, approvalDigest: `sha256:${"8".repeat(64)}` })],
+      ["acceptance", (receipt) => ({ ...receipt, acceptanceEvidenceDigest: `sha256:${"6".repeat(64)}` })],
+      ["nonterminal", (receipt) => ({ ...receipt, terminal: false })],
+      ["absent", () => null],
+    ];
+    for (const [scenario, mutate] of scenarios) {
+      const { deps } = dependencies();
+      deps.patchTemplate.mockResolvedValueOnce({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
+      const baseLease = deps.lease.getMockImplementation();
+      let evidence;
+      deps.lease.mockImplementation(async (operation, args) => {
+        if (operation === "finalize_compatible_recovery") {
+          evidence = args.evidence;
+          throw new Error("finalization response unavailable");
+        }
+        if (operation === "get_recovery") {
+          const receipt = {
+            status: "RECOVERED_COMPATIBLE",
+            terminal: true,
+            deploymentId,
+            leaseId,
+            fence: 7,
+            originatingLeaseId: leaseId,
+            originatingFence: 7,
+            releaseImageTag: evidence.imageTag,
+            releaseVersion: evidence.releaseVersion,
+            webDigest: evidence.webDigest,
+            workerDigest: evidence.workerDigest,
+            approvalDigest: `sha256:${"9".repeat(64)}`,
+            acceptanceEvidenceDigest: evidence.acceptanceEvidenceDigest,
+          };
+          return mutate(receipt);
+        }
+        return baseLease(operation, args);
+      });
+      const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+      expect(result, scenario).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING",
+        code: "COMPATIBLE_RECOVERY_FINALIZE_AMBIGUOUS" });
+      expect(deps.lease.mock.calls.filter(([operation]) => operation === "finalize_compatible_recovery"), scenario).toHaveLength(1);
+      expect(deps.lease.mock.calls.filter(([operation]) => operation === "get_recovery"), scenario).toHaveLength(1);
+      expect(deps.lease, scenario).not.toHaveBeenCalledWith("mark_recovery", expect.anything());
+    }
+  });
+
+  it("retains the fence when compatible-finalization readback is unavailable", async () => {
+    const { deps } = dependencies();
+    deps.patchTemplate.mockResolvedValueOnce({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
+    const baseLease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "finalize_compatible_recovery") return { status: "RECOVERY_REQUIRED" };
+      if (operation === "get_recovery") throw new Error("receipt readback unavailable");
+      return baseLease(operation, args);
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING",
+      code: "COMPATIBLE_RECOVERY_FINALIZE_AMBIGUOUS" });
+    expect(deps.lease.mock.calls.filter(([operation]) => operation === "finalize_compatible_recovery")).toHaveLength(1);
+    expect(deps.lease.mock.calls.filter(([operation]) => operation === "get_recovery")).toHaveLength(1);
+    expect(deps.lease).not.toHaveBeenCalledWith("mark_recovery", expect.anything());
   });
 
   it("retains the fence when compatible recovery acceptance cannot be proven", async () => {
