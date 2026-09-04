@@ -103,6 +103,10 @@ describe("Brain source support recovery", () => {
   it("rejects a prior run even if its workflow job is absent", async () => {
     db.agentRun.count.mockResolvedValue(1);
     await expect(reconcileBrainSource(actor, params)).rejects.toThrow("existing_counterpart");
+    expect(db.agentRun.count).toHaveBeenCalledWith({ where: expect.objectContaining({
+      workspaceId: "ws", agentKey: "brain-absorb",
+      OR: expect.arrayContaining([{ planJson: { path: ["payload", "sourceId"], equals: "source" } }]),
+    }) });
   });
 
   it("rejects outbound subscriptions and competing runtime jobs", async () => {

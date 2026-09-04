@@ -8297,6 +8297,34 @@ describe("control plane domain", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["brain.source_recovery", "list_brain_source_recovery", "SOURCE_CHANGED", []],
+    ["brain.reconcile_source", "reconcile_brain_source", "SOURCE_CHANGED", ["started", "failed"]],
+    ["brain.reconcile_source", "reconcile_brain_source", "RUNTIME_NOT_QUIET", ["started", "failed"]],
+  ] as const)("records marked MCP rejection for %s (%s / %s) as failed", async (action, tool, code, phases) => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValue({ id: "op-source-error", action });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({ id: "inst-1", label: "Acme", url: "https://customer.test", supportMcpUrl: "https://customer.test/api/mcp", supportCredentialEnc: "encrypted-token", supportConnectorStatus: "connected" });
+    prismaMock.supportOperation.update.mockResolvedValue({ id: "op-source-error", status: "FAILED" });
+    global.fetch = vi.fn(async (_input, init) => {
+      const name = JSON.parse(String(init?.body)).params.name;
+      return name === tool ? mcpToolResult({ code, message: code }, true) : mcpToolResult({ ok: true });
+    }) as any;
+
+    await expect(runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1", action, reason: "Approved recovery", arguments: { sourceId: "source", expectedSourceIdentity: "a".repeat(64) },
+    })).rejects.toMatchObject({ code: "REMOTE_SUPPORT_OPERATION_FAILED", status: 502 });
+
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledTimes(1);
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "op-source-error" }, data: expect.objectContaining({ status: "FAILED", error: expect.stringContaining(code) }),
+    }));
+    const calls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)).params);
+    expect(calls.filter((call) => call.name === tool)).toHaveLength(1);
+    expect(calls.filter((call) => call.name === "record_support_audit").map((call) => call.arguments.phase)).toEqual(phases);
+    expect(calls).toHaveLength(phases.length + 1);
+  });
+
   it("runs the support proposal reopen repair through the audited connector", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({

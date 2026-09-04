@@ -68,4 +68,38 @@ describe("source recovery database admission", () => {
     expect(await prisma.agentRun.count()).toBe(0);
     expect(await prisma.modelUsage.count()).toBe(0);
   });
+
+  it.each(["RUNNING", "FAILED", "COMPLETED"] as const)("blocks a %s prior attempt whose only durable source link is its plan", async (status) => {
+    const { source, actor, params } = await fixture();
+    await prisma.agentRun.create({ data: {
+      workspaceId: source.workspaceId, agentKey: "brain-absorb", triggerType: "EVENT",
+      status, goal: "Synthetic interrupted attempt", planJson: { payload: { sourceId: source.id } },
+    } });
+    expect(await prisma.workflowJob.count()).toBe(0);
+    expect(await prisma.agentStep.count()).toBe(0);
+    expect(await prisma.agentToolCall.count()).toBe(0);
+    expect((await listBrainSourceRecovery(actor, { workspaceId: source.workspaceId })).items[0]).toMatchObject({ priorRunCount: 1, blockReason: "existing_counterpart" });
+    await expect(reconcileBrainSource(actor, params)).rejects.toMatchObject({ code: "RECOVERY_NOT_ELIGIBLE" });
+    expect(await prisma.workflowJob.count()).toBe(0);
+    expect(await prisma.auditLog.count({ where: { action: "brain-source.reconciled" } })).toBe(0);
+  });
+
+  it("rejects a plan-only attempt appearing after admission and ignores other-tenant plans", async () => {
+    const { source, actor, params } = await fixture();
+    const other = await fixture();
+    await prisma.agentRun.create({ data: {
+      workspaceId: other.workspace.id, agentKey: "brain-absorb", triggerType: "EVENT", status: "RUNNING",
+      goal: "Synthetic unrelated tenant", planJson: { payload: { sourceId: source.id } },
+    } });
+    const job = await reconcileBrainSource(actor, params);
+    await expect(assertBrainSourceRecoveryJob({ ...params, workflowJobId: job.id })).resolves.toBeUndefined();
+    await prisma.agentRun.create({ data: {
+      workspaceId: source.workspaceId, agentKey: "brain-absorb", triggerType: "EVENT", status: "RUNNING",
+      goal: "Synthetic interrupted attempt", planJson: { payload: { sourceId: source.id } },
+    } });
+    await expect(assertBrainSourceRecoveryJob({ ...params, workflowJobId: job.id })).rejects.toMatchObject({ code: "RECOVERY_NOT_ELIGIBLE" });
+    expect(await prisma.agentStep.count()).toBe(0);
+    expect(await prisma.agentToolCall.count()).toBe(0);
+    expect(await prisma.modelUsage.count()).toBe(0);
+  });
 });

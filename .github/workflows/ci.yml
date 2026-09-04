@@ -323,14 +323,6 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: node scripts/wait-health.mjs https://app.corgtex.com/api/health --label backup-app
 
-      # Controlled rollout owns production migrations. CI verifies readiness
-      # without starting the application or running bootstrap/fixture writes.
-      - name: Verify bundled production migrations
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        run: node --input-type=module -e 'import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();'
-        env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
-
       - name: Detect production app release requirement
         id: app-release
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -422,10 +414,6 @@ jobs:
           path: .artifacts/production-app-release-context/release-context.json
           if-no-files-found: error
 
-      - run: node scripts/check-migration-health.mjs
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
       - run: node scripts/self-serve-production-readiness.mjs --base-url=https://selfserve.corgtex.com
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
@@ -433,6 +421,19 @@ jobs:
         env:
           CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.app-release.outputs.skip_release_match }}
           CORGTEX_RELEASE_MATCH_TIMEOUT_MS: 1200000
+
+      # Controlled rollout owns production migrations. Wait for its exact
+      # release before read-only DB verification; never bootstrap from CI.
+      - name: Verify bundled production migrations
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: node --input-type=module -e 'import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();'
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      - run: node scripts/check-migration-health.mjs
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
       - name: Mark production smoke proof available
         id: smoke-proof
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'

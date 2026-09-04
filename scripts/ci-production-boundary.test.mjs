@@ -10,10 +10,14 @@ function job(name) {
 }
 
 describe("automatic production CI boundary", () => {
-  it("verifies bundled migrations after readiness without bootstrap or ingestion writes", () => {
+  it("verifies bundled migrations after the exact-release wait without bootstrap or ingestion writes", () => {
     const smoke = job("smoke-prod");
     expect(smoke).toContain('import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();');
-    expect(smoke.indexOf("await verifyMigrations()")).toBeGreaterThan(smoke.indexOf("--label backup-app"));
+    const releaseWait = smoke.indexOf("node scripts/railway-smoke.mjs");
+    for (const check of ["await verifyMigrations()", "node scripts/check-migration-health.mjs"]) {
+      expect(smoke.indexOf(check)).toBeGreaterThan(releaseWait);
+      expect(smoke.indexOf(check)).toBeLessThan(smoke.indexOf("id: smoke-proof"));
+    }
     expect(smoke).toContain("DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}");
     expect(smoke).not.toMatch(/release:db|release-db\.mjs|prisma\s+migrate\s+deploy|prisma\s+db\s+seed|npm run seed|migrate-and-seed|ingestion-guidance-smoke\.mjs|check:(?:migration|seed)-fixtures/);
     expect(smoke).not.toMatch(/run:.*(?:node scripts\/start-web\.mjs|\.main\(\))/);

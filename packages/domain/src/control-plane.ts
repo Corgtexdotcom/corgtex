@@ -10782,6 +10782,10 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       toolName,
       arguments: args,
     });
+    if (params.action === "brain.source_recovery" || params.action === "brain.reconcile_source") {
+      const markedError = mcpToolMarkedErrorMessage(result);
+      if (markedError) throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", markedError);
+    }
     const summarized = summarizeMcpResponse(result);
     const remoteError = supportMcpErrorMessage(summarized);
     if (remoteError) {

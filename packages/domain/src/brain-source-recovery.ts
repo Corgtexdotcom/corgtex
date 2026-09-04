@@ -29,7 +29,7 @@ async function sourceEvidence(tx: Prisma.TransactionClient, source: RecoverySour
     tx.workflowJob.findMany({ where: { workspaceId: source.workspaceId, type: { in: ["agent.brain-absorb", "agent.company-understanding"] }, OR: [{ payload: { path: ["sourceId"], equals: source.id } }, { event: { aggregateId: source.id, workspaceId: source.workspaceId } }] }, select: jobSelect, take: 20 }),
     tx.brainArticle.count({ where: { workspaceId: source.workspaceId, sourceIds: { has: source.id } } }),
     tx.webhookEndpoint.count({ where: { workspaceId: source.workspaceId, status: "ACTIVE", OR: [{ eventTypes: { isEmpty: true } }, { eventTypes: { hasSome: recoveryEventTypes } }] } }),
-    tx.agentRun.count({ where: { workspaceId: source.workspaceId, agentKey: "brain-absorb", OR: [{ steps: { some: { inputJson: { path: ["sourceId"], equals: source.id } } } }, { toolCalls: { some: { inputJson: { path: ["sourceId"], equals: source.id } } } }] } }),
+    tx.agentRun.count({ where: { workspaceId: source.workspaceId, agentKey: "brain-absorb", OR: [{ planJson: { path: ["payload", "sourceId"], equals: source.id } }, { steps: { some: { inputJson: { path: ["sourceId"], equals: source.id } } } }, { toolCalls: { some: { inputJson: { path: ["sourceId"], equals: source.id } } } }] } }),
   ]);
   const original = events.length === 1 ? events[0] : null;
   const payload = original?.payload as Record<string, unknown> | undefined;
