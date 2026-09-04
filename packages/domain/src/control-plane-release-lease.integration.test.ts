@@ -21,7 +21,7 @@ import {
   markManagedReleaseRecoveryRequired,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
-import { managedAzureTargetDigest, managedAzureTargets } from "./managed-azure-targets";
+import { managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, managedAzureTargets } from "./managed-azure-targets";
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
 const SYNTHETIC_CANARY_PREFLIGHT_DEPLOYMENT_ID = "123e4567-e89b-42d3-a456-426614174099";
@@ -692,6 +692,12 @@ describe("selected hosted Azure release lifecycle", () => {
     await recordManagedReleaseRollbackRecord(original, rollbackPayloadV2());
     await beginManagedReleaseMutation(original);
     const envelope = (await releaseState(row.id)).deployment.releaseLeaseRollbackRecord;
+    const originalConfig = JSON.parse(process.env.MANAGED_RELEASE_TARGETS_JSON!);
+    const rotatedConfig = { ...originalConfig, targets: originalConfig.targets.map((target: Record<string, unknown>) => ({
+      ...target, releaseApproval: { gitSha: "0".repeat(40), schemaApprovalDigest: "9".repeat(64) },
+    })) };
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify(rotatedConfig));
+    await expectCode(heartbeatManagedReleaseLease(original), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
     vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", "");
     await expectCode(finalizeManagedReleaseSuccess(original), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
     await expectCode(getManagedReleaseLeaseTarget(original, ACR_IDENTITY), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
@@ -701,6 +707,7 @@ describe("selected hosted Azure release lifecycle", () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await expire(row.id);
       const status = await getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY);
+      if ("terminal" in status) throw new Error("Expected active recovery status.");
       expect(status.originatingLease).toEqual({ leaseId: original.leaseId, fence: original.fence });
       const claimed = await claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: handle.leaseId, expectedFence: handle.fence, owner: `recovery:${attempt}` });
       handle = { deploymentId: row.id, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
@@ -715,6 +722,28 @@ describe("selected hosted Azure release lifecycle", () => {
     })).resolves.toMatchObject({ status: "RECOVERED_COMPATIBLE", releaseImageTag: `sha-${"c".repeat(40)}` });
     expect((await releaseState(row.id)).deployment).toMatchObject({ releaseLeaseId: null, releaseLeasePhase: null,
       releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1" });
+    await expect(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY)).resolves.toMatchObject({
+      status: "RECOVERED_COMPATIBLE", terminal: true, leaseId: handle.leaseId, fence: handle.fence,
+      originatingLeaseId: original.leaseId, originatingFence: original.fence,
+      recoveryAuthorityDigest: managedAzureRecoveryAuthorityDigest(rotatedConfig.targets[0]),
+      releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}`,
+    });
+    const terminal = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: {
+      deploymentId: row.id, action: "control_plane.release_lease.compatible_recovery_succeeded",
+    } });
+    const terminalMeta = terminal.meta as Prisma.JsonObject;
+    expect(terminalMeta).toMatchObject({ schemaVersion: 1, recoveryAuthorityDigest: `sha256:${managedAzureRecoveryAuthorityDigest(rotatedConfig.targets[0])}`,
+      receiptDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) });
+    await prisma.customerDeploymentEvent.update({ where: { id: terminal.id }, data: { meta: { ...terminalMeta, webDigest: DIGESTS[2] } } });
+    await expectCode(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    const currentTarget = managedAzureTargets()[0]!;
+    const later = await acquireManagedReleaseLease({ deploymentId: row.id, expectedImageTag: `sha-${"c".repeat(40)}`,
+      incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:later",
+      expectedTargetDigest: managedAzureTargetDigest(currentTarget) });
+    await abortManagedReleaseLease({ deploymentId: row.id, leaseId: later.leaseId, capability: later.capability, fence: later.fence });
+    await expectCode(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY), "MANAGED_RELEASE_RECOVERY_REQUIRED");
   });
   it("blocks forward and recovery lifecycle work after current-primary reassignment", async () => {
     const row = await hosted(); const handle = await acquire(row.id);
@@ -745,7 +774,7 @@ describe("selected hosted Azure release lifecycle", () => {
     const row = await hosted(); const handle = await acquire(row.id);
     const acquisition = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: { deploymentId: row.id, action: "control_plane.release_lease.acquired" } });
     const meta = acquisition.meta as Prisma.JsonObject;
-    for (const change of [{ ...meta, provenance: null }, { ...meta, owner: "revoked-owner" }, { ...meta, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: "another-account" } } }]) {
+    for (const change of [{ ...meta, provenance: null }, { ...meta, recoveryAuthorityDigest: null }, { ...meta, owner: "revoked-owner" }, { ...meta, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: "another-account" } } }]) {
       await prisma.customerDeploymentEvent.update({ where: { id: acquisition.id }, data: { meta: change } });
       await expectCode(abortManagedReleaseLease(handle), "MANAGED_RELEASE_PROVENANCE_CONFLICT");
       expect((await releaseState(row.id)).deployment.releaseLeaseId).toBe(handle.leaseId);

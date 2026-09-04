@@ -41,6 +41,17 @@ export function managedAzureTargets(raw = process.env.MANAGED_RELEASE_TARGETS_JS
 export function managedAzureTargetDigest(target: ManagedAzureTarget) {
   return createHash("sha256").update(JSON.stringify(managedAzureTargetSchema.parse(target))).digest("hex");
 }
+
+export function managedAzureRecoveryAuthorityDigest(target: ManagedAzureTarget) {
+  const parsed = managedAzureTargetSchema.parse(target);
+  return createHash("sha256").update(JSON.stringify({
+    deploymentId: parsed.deploymentId, customerAccountId: parsed.customerAccountId,
+    deploymentKind: parsed.deploymentKind, origin: parsed.origin, subscriptionId: parsed.subscriptionId,
+    resourceGroup: parsed.resourceGroup, webAppName: parsed.webAppName, workerAppName: parsed.workerAppName,
+    acrName: parsed.acrName, acrServer: parsed.acrServer, acrResourceGroup: parsed.acrResourceGroup,
+    evidenceSha256: parsed.evidenceSha256, activationPolicy: parsed.activationPolicy, recovery: parsed.recovery,
+  })).digest("hex");
+}
 function appName(value: string | null, target: ManagedAzureTarget) {
   if (!value?.startsWith("/")) return value;
   const prefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroup}/providers/Microsoft.App/containerApps/`;

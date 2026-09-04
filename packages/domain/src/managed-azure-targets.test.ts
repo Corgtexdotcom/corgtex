@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { CustomerDeployment } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertManagedAzureTargetBinding, managedAzureTargetDigest, managedAzureTargets, managedAzureMetadataDigest } from "./managed-azure-targets";
+import { assertManagedAzureTargetBinding, managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, managedAzureTargets, managedAzureMetadataDigest } from "./managed-azure-targets";
 const target = { deploymentId: randomUUID(), customerAccountId: randomUUID(), deploymentKind: "HOSTED_DEDICATED" as const,
   origin: "https://client.example.test", subscriptionId: randomUUID(), resourceGroup: "rg-client", webAppName: "client-web", workerAppName: "client-worker",
   acrName: "clientacr", acrServer: "clientacr.azurecr.io", acrResourceGroup: "rg-registry", evidenceSha256: "a".repeat(64), activationPolicy: "EXCLUSIVE" as const,
@@ -51,5 +51,20 @@ describe("protected Azure target configuration", () => {
     const original = managedAzureMetadataDigest(row(), account);
     expect(managedAzureMetadataDigest({ ...row(), url: "https://changed.example.test" }, account)).not.toBe(original);
     expect(managedAzureMetadataDigest(row(), { ...account, managementAuthority: "SELF_MANAGED" })).not.toBe(original);
+  });
+  it("separates forward approval rotation from recovery authority", () => {
+    const recoveryDigest = managedAzureRecoveryAuthorityDigest(target);
+    const rotatedForward = { ...target, releaseApproval: { gitSha: "f".repeat(40), schemaApprovalDigest: "0".repeat(64) } };
+    expect(managedAzureTargetDigest(rotatedForward)).not.toBe(managedAzureTargetDigest(target));
+    expect(managedAzureRecoveryAuthorityDigest(rotatedForward)).toBe(recoveryDigest);
+    for (const changed of [
+      { ...target, activationPolicy: "STANDARD" as const },
+      { ...target, evidenceSha256: "0".repeat(64) },
+      { ...target, acrResourceGroup: "other-registry-group" },
+      { ...target, webAppName: "replacement-web" },
+      { ...target, recovery: { ...target.recovery, gitSha: "0".repeat(40) } },
+      { ...target, recovery: { ...target.recovery, releaseVersion: "recovery-2" } },
+      { ...target, recovery: { ...target.recovery, schemaCompatibilityApprovalDigest: "0".repeat(64) } },
+    ]) expect(managedAzureRecoveryAuthorityDigest(changed)).not.toBe(recoveryDigest);
   });
 });

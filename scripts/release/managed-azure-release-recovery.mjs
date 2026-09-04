@@ -78,6 +78,30 @@ function recoveryTargetMatchesInput(target, input) {
     && target.acrName === input.acrName && target.acrServer === input.acrServer;
 }
 
+function compatibleRecoveryTerminal(status, input, expected = null) {
+  const valid = status?.status === "RECOVERED_COMPATIBLE" && status.terminal === true
+    && status.deploymentId === input.deploymentId && UUID.test(status.leaseId)
+    && Number.isSafeInteger(status.fence) && status.fence > 0 && status.fence <= MAX_INT
+    && UUID.test(status.originatingLeaseId) && Number.isSafeInteger(status.originatingFence)
+    && status.originatingFence > 0 && status.originatingFence <= status.fence
+    && SHA_IMAGE_TAG.test(status.releaseImageTag)
+    && typeof status.releaseVersion === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(status.releaseVersion)
+    && /^sha256:[0-9a-f]{64}$/.test(status.webDigest) && /^sha256:[0-9a-f]{64}$/.test(status.workerDigest)
+    && /^sha256:[0-9a-f]{64}$/.test(status.approvalDigest) && /^sha256:[0-9a-f]{64}$/.test(status.acceptanceEvidenceDigest);
+  if (!valid) return null;
+  if (expected && (status.leaseId !== expected.leaseId || status.originatingLeaseId !== expected.originatingLeaseId
+    || status.originatingFence !== expected.originatingFence || status.releaseImageTag !== expected.imageTag
+    || status.releaseVersion !== expected.releaseVersion || status.webDigest !== expected.webDigest
+    || status.workerDigest !== expected.workerDigest || status.acceptanceEvidenceDigest !== expected.acceptanceEvidenceDigest)) return null;
+  return status;
+}
+
+function compatibleRecoveryResult(input, receipt, reconciled) {
+  return Object.freeze({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY", deploymentId: input.deploymentId,
+    fence: receipt.fence, releaseImageTag: receipt.releaseImageTag, releaseVersion: receipt.releaseVersion,
+    ...(reconciled ? { reconciled: true, effects: 0 } : {}) });
+}
+
 function leaseArgs(handle, extra = {}) {
   return { deploymentId: handle.deploymentId, leaseId: handle.leaseId, capability: handle.capability, fence: handle.fence, ...extra };
 }
@@ -254,6 +278,8 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
   const input = canonicalInput(rawInput);
   const deps = dependencies;
   const status = await deps.lease("get_recovery", { deploymentId: input.deploymentId, acrName: input.acrName, acrServer: input.acrServer });
+  const alreadyCompleted = compatibleRecoveryTerminal(status, input);
+  if (alreadyCompleted) return compatibleRecoveryResult(input, alreadyCompleted, true);
   if (status.deploymentId !== input.deploymentId || (status.phase !== "MUTATING" && status.phase !== "RECOVERY_REQUIRED")
     || !UUID.test(status.leaseId) || !Number.isSafeInteger(status.fence) || status.fence < 1 || status.fence > MAX_INT
     || !recoveryTargetMatchesInput(status.target, input)) fail("MANAGED_RELEASE_RECOVERY_STATUS_INVALID");
@@ -344,11 +370,23 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
         origin: status.origin, release: recoveryRelease, imageDigests: { web: recovery.web.digest, worker: recovery.worker.digest },
         operationId, reason: input.reason, heartbeat, failurePrefix: "MANAGED_RELEASE_RECOVERY_COMPATIBLE", handle });
-      const finalized = await deps.lease("finalize_compatible_recovery", leaseArgs(handle, { reason: input.reason, evidence: {
+      const evidence = {
         gitSha: recovery.gitSha, imageTag: recovery.imageTag, releaseVersion: recovery.releaseVersion,
         webDigest: recovery.web.digest, workerDigest: recovery.worker.digest, acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest,
-      } }));
-      if (finalized?.status !== "RECOVERED_COMPATIBLE") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
+      };
+      let finalized = null;
+      try { finalized = await deps.lease("finalize_compatible_recovery", leaseArgs(handle, { reason: input.reason, evidence })); }
+      catch { /* Reconcile exactly once by readback; never replay an uncertain finalization. */ }
+      if (finalized?.status !== "RECOVERED_COMPATIBLE") {
+        let readback = null;
+        try {
+          readback = await deps.lease("get_recovery", { deploymentId: input.deploymentId, acrName: input.acrName, acrServer: input.acrServer });
+        } catch { /* An absent or uncertain terminal receipt remains blocked. */ }
+        const reconciled = compatibleRecoveryTerminal(readback, input, { ...evidence, leaseId: handle.leaseId,
+          originatingLeaseId: originatingLease.leaseId, originatingFence: originatingLease.fence });
+        if (!reconciled) fail("MANAGED_RELEASE_RECOVERY_FINALIZE_AMBIGUOUS");
+        return compatibleRecoveryResult(input, reconciled, true);
+      }
       return Object.freeze({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY", deploymentId: input.deploymentId,
         previousLeaseId: status.leaseId, previousFence: status.fence, fence: finalized.fence,
         releaseImageTag: finalized.releaseImageTag, releaseVersion: finalized.releaseVersion });
