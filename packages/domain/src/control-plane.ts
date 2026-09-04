@@ -11662,6 +11662,7 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
         incomingImageTag: params.incomingImageTag as string,
         incomingVersion: params.incomingVersion as string,
         owner: params.owner as string,
+        expectedTargetDigest: params.expectedTargetDigest as string | undefined,
       });
     case "heartbeat":
       return heartbeatManagedReleaseLease(managedReleaseHandle(params));

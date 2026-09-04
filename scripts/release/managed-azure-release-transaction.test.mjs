@@ -122,6 +122,7 @@ function dependencies(options = {}) {
   const currentTemplates = { web: null, worker: null };
   let patchCount = 0;
   const hosted = options.hosted !== false;
+  const targetDigest = "7".repeat(64);
   const deployment = { deploymentId, deploymentKind: hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: hosted ? "hosted-dedicated" : "managed-customers", workload: hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
   const preflight = { deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const deps = {
@@ -132,7 +133,7 @@ function dependencies(options = {}) {
       canonicalDigest: `sha256:${"d".repeat(64)}`,
       preflightDigest: options.inventoryPreflightDigest ?? preflightDigest(preflight),
     } }); }),
-    targetConfig: vi.fn(async () => ({ status: "RECONCILIATION_READY", effects: 0, target: { ...target, acrResourceGroup: input.acrResourceGroup, activationPolicy: options.activationPolicy ?? "STANDARD",
+    targetConfig: vi.fn(async () => ({ status: "RECONCILIATION_READY", effects: 0, targetDigest: options.targetDigest ?? targetDigest, target: { ...target, acrResourceGroup: input.acrResourceGroup, activationPolicy: options.activationPolicy ?? "STANDARD",
       releaseApproval: options.releaseApproval ?? { gitSha: nextSha, schemaApprovalDigest: "8".repeat(64) },
       recovery: { gitSha: recoverySha, releaseVersion: "recovery-1", schemaCompatibilityApprovalDigest: "9".repeat(64) } } })),
     drainBaseline: vi.fn(async () => options.drain ?? { terminal: true, succeeded: true }),
@@ -141,7 +142,7 @@ function dependencies(options = {}) {
       events.push(`lease:${operation}`);
       if (operation === "preflight") return preflight;
       if (operation === "acquire") return { deploymentId, leaseId, capability: "private-capability", fence: 7 };
-      if (operation === "get_target") return { deploymentId, deployment: options.leasedDeployment ?? deployment, authorityDigest: options.leasedAuthorityDigest ?? "e".repeat(64), target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
+      if (operation === "get_target") return { deploymentId, deployment: options.leasedDeployment ?? deployment, authorityDigest: options.leasedAuthorityDigest ?? "e".repeat(64), targetDigest: options.leasedTargetDigest ?? targetDigest, target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
       if (operation === "finalize_compatible_recovery") return { status: "RECOVERED_COMPATIBLE", fence: 7 };
       if (operation === "finalize_rollback") return { status: "ROLLED_BACK", fence: 7 };
       return { deploymentId, operation, args };
@@ -773,8 +774,10 @@ describe("authoritative hosted primary release", () => {
     const { deps } = dependencies({ hosted: true });
     expect(await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).toMatchObject({ status: "SUCCEEDED" });
     expect(deps.resolveRelease).toHaveBeenCalledWith(expect.objectContaining({ deployment: expect.objectContaining({ deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated" }) }));
+    expect(deps.lease).toHaveBeenCalledWith("acquire", expect.objectContaining({ expectedTargetDigest: "7".repeat(64) }));
   });
-  it.each([{ leasedAuthorityDigest: "f".repeat(64) }, { leasedDeployment: { deploymentKind: "REMOTE_MANAGED" } }])("rejects leased authority/classification drift before import: %j", async (options) => {
+  it.each([{ leasedAuthorityDigest: "f".repeat(64) }, { leasedDeployment: { deploymentKind: "REMOTE_MANAGED" } },
+    { leasedTargetDigest: "6".repeat(64) }])("rejects leased authority/classification/config drift before import: %j", async (options) => {
     const { deps } = dependencies({ hosted: true, webDestination: "ABSENT", ...options });
     await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).rejects.toThrow("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
     expect(deps.importRole).not.toHaveBeenCalled();

@@ -9357,11 +9357,13 @@ describe("managed Azure release control-plane boundary", () => {
       operation: "acquire",
       deploymentId,
       expectedImageTag: `sha-${"a".repeat(40)}`,
+      expectedTargetDigest: "c".repeat(64),
       incomingImageTag: `sha-${"b".repeat(40)}`,
       incomingVersion: "release-2",
       owner: "workflow:42",
       reason: "Approved exact-target release.",
     })).resolves.toMatchObject({ fence: 1 });
+    expect(leaseMocks.acquireManagedReleaseLease).toHaveBeenCalledWith(expect.objectContaining({ expectedTargetDigest: "c".repeat(64) }));
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
       operation: "acquire",
       deploymentId,

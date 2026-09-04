@@ -653,6 +653,7 @@ const tools = [
         expectedLeaseId: { type: "string" },
         expectedFence: { type: "number" },
         expectedImageTag: { type: "string" },
+        expectedTargetDigest: { type: "string" },
         incomingImageTag: { type: "string" },
         incomingVersion: { type: "string" },
         owner: { type: "string" },

@@ -192,7 +192,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     ? await deps.targetConfig({ deploymentId: input.deploymentId, execute: false, reason: input.reason })
     : { status: "RECONCILIATION_READY", effects: 0, target: { acrName: input.acrName, acrResourceGroup: input.acrResourceGroup, activationPolicy: "STANDARD" } };
   if (configured?.status !== "RECONCILIATION_READY" || configured.effects !== 0 || configured.target?.acrName !== input.acrName
-    || configured.target?.acrResourceGroup !== input.acrResourceGroup || !["STANDARD", "EXCLUSIVE"].includes(configured.target?.activationPolicy)) fail("MANAGED_RELEASE_TARGET_INVALID");
+    || configured.target?.acrResourceGroup !== input.acrResourceGroup || !["STANDARD", "EXCLUSIVE"].includes(configured.target?.activationPolicy)
+    || (protectedHosted && !SHA256.test(configured.targetDigest))) fail("MANAGED_RELEASE_TARGET_INVALID");
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });
   let releasePlan;
@@ -396,9 +397,12 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       incomingVersion: nextRelease.version,
       owner: deps.owner,
       reason: input.reason,
+      ...(protectedHosted ? { expectedTargetDigest: configured.targetDigest } : {}),
     });
     const leasedTarget = await deps.lease("get_target", leaseArgs(handle, { acrName: input.acrName, acrServer: input.acrServer }));
-    if (!same(leasedTarget.target, preflight.target) || !same(leasedTarget.deployment, preflight.deployment) || leasedTarget.authorityDigest !== preflight.authorityDigest || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag) {
+    if (!same(leasedTarget.target, preflight.target) || !same(leasedTarget.deployment, preflight.deployment)
+      || leasedTarget.authorityDigest !== preflight.authorityDigest || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag
+      || (protectedHosted && leasedTarget.targetDigest !== configured.targetDigest)) {
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
       fail("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
     }

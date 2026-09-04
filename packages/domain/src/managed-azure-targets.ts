@@ -46,6 +46,13 @@ function appName(value: string | null, target: ManagedAzureTarget) {
   const prefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroup}/providers/Microsoft.App/containerApps/`;
   return value.toLowerCase().startsWith(prefix.toLowerCase()) ? value.slice(prefix.length) : null;
 }
+function canonicalHttpsOrigin(value: string) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.port
+      && parsed.pathname === "/" && !parsed.search && !parsed.hash ? parsed.origin : null;
+  } catch { return null; }
+}
 function azureContainerAppResourceId(value: string | null) {
   const matched = typeof value === "string"
     ? /^\/subscriptions\/([0-9a-f-]{36})\/resourceGroups\/([^/]+)\/providers\/Microsoft\.App\/containerApps\/([^/]+)$/i.exec(value)
@@ -56,7 +63,7 @@ function deploymentAliasesTarget(
   row: Pick<CustomerDeployment, "url" | "providerSubscriptionId" | "providerResourceGroup" | "providerWebServiceId" | "providerWorkerServiceId">,
   target: ManagedAzureTarget,
 ) {
-  if (row.url.replace(/\/$/, "") === target.origin) return true;
+  if (canonicalHttpsOrigin(row.url) === target.origin) return true;
   const targetApps = new Set([target.webAppName.toLowerCase(), target.workerAppName.toLowerCase()]);
   const targetSubscription = target.subscriptionId.toLowerCase();
   const targetResourceGroup = target.resourceGroup.toLowerCase();
@@ -136,15 +143,10 @@ export async function reconcileManagedAzureTarget(input: z.infer<typeof reconcil
       && !["SUSPENDED", "RETIRED"].includes(row.deploymentStatus), 409, "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", "Current deployment/account authority is required.");
     invariant(!row.releaseLeaseId && !row.releaseLeasePhase && !row.releaseLeaseRollbackRecord,
       409, "MANAGED_RELEASE_RECOVERY_REQUIRED", "Reconcile the retained operation before changing target metadata.");
-    const targetResourcePrefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroup}/providers/Microsoft.App/containerApps/`;
-    const fullServiceIds = [target.webAppName, target.workerAppName].map((name) => `${targetResourcePrefix}${name}`);
-    const aliases = await tx.customerDeployment.findMany({ where: { id: { not: row.id }, OR: [
-      { url: { in: [target.origin, `${target.origin}/`] } },
-      { providerSubscriptionId: { equals: target.subscriptionId, mode: "insensitive" },
-        providerResourceGroup: { equals: target.resourceGroup, mode: "insensitive" } },
-      { providerWebServiceId: { in: fullServiceIds, mode: "insensitive" } },
-      { providerWorkerServiceId: { in: fullServiceIds, mode: "insensitive" } },
-    ] }, select: { url: true, providerSubscriptionId: true, providerResourceGroup: true,
+    // Canonical HTTPS identity includes default-port and trailing-slash aliases that
+    // cannot be represented by a finite exact-string candidate list, so inspect every
+    // other stable deployment while holding the reconciliation advisory lock.
+    const aliases = await tx.customerDeployment.findMany({ where: { id: { not: row.id } }, select: { url: true, providerSubscriptionId: true, providerResourceGroup: true,
       providerWebServiceId: true, providerWorkerServiceId: true } });
     invariant(!aliases.some((other) => deploymentAliasesTarget(other, target)),
       409, "MANAGED_RELEASE_TARGET_OVERLAP", "Target belongs to another deployment.");
