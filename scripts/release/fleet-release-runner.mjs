@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -67,6 +68,20 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     const manifest = await resolveManifest(args, deps);
     const result = checkReleaseImages(manifest, deps);
     console.log(JSON.stringify({ stage: "image-check", ...result }, null, 2));
+    return result;
+  }
+  if (command === "preflight-provider") {
+    const env = deps.env ?? process.env;
+    const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default");
+    if (!selectedGroups.includes("ops")) {
+      const result = { status: "READY", effects: 0, targets: [] };
+      console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
+      return result;
+    }
+    const targets = filterTargetsByGroups(await discoverTargets(deps), ["ops"]);
+    if (targets.length !== 1) throw new Error("Ops provider preflight requires exactly one configured Ops target.");
+    const result = { status: "READY", effects: 0, targets: [await preflightOpsRailwayProvider(targets[0], deps)] };
+    console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
     return result;
   }
   if (command !== "deploy") {
@@ -803,6 +818,10 @@ async function readOpsRailwayStage(target, service, deps) {
   if (!instance?.source?.image || instance.source.repo || !config?.source
     || config.source.image !== instance.source.image || config.source.repo
     || config.source.autoUpdates != null) fail("source configuration conflicts with a staged image release");
+  const expectedRepository = `ghcr.io/corgtexdotcom/corgtex/${service.key}:`;
+  if (!instance.source.image.startsWith(expectedRepository)
+    || !/^sha-[0-9a-f]{40}$/.test(instance.source.image.slice(expectedRepository.length))) fail("source image is not an immutable canonical release");
+  if (instance.startCommand != null || instance.preDeployCommand != null) fail("has an unexpected command override");
   if (!Array.isArray(data.pending?.edges) || data.pending.edges.length
     || data.pending.pageInfo?.hasNextPage !== false) fail("has an active or uncertain deployment");
   const latest = instance.latestDeployment;
@@ -836,6 +855,21 @@ async function readOpsRailwayStage(target, service, deps) {
     history,
     hasMoreHistory: data.deployments.pageInfo.hasNextPage,
   };
+}
+
+export async function preflightOpsRailwayProvider(target, deps = {}) {
+  if (target?.group !== "ops" || target?.provider !== "railway" || !target.railway?.projectId
+    || !target.railway.environmentId || !target.railway.webServiceId || !target.railway.workerServiceId) {
+    throw new Error("Ops provider preflight target is invalid.");
+  }
+  const services = [
+    { key: "web", serviceId: target.railway.webServiceId },
+    { key: "worker", serviceId: target.railway.workerServiceId },
+  ];
+  const stages = [];
+  for (const service of services) stages.push(await readOpsRailwayStage(target, service, deps));
+  const baselineDigest = createHash("sha256").update(JSON.stringify(stages)).digest("hex");
+  return { targetId: target.id, provider: "railway", status: "READY", effects: 0, serviceCount: stages.length, baselineDigest };
 }
 
 function optionalText(value) {

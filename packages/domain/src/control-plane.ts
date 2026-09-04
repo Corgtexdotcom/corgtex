@@ -1,5 +1,6 @@
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { createHash, randomUUID } from "node:crypto";
+import { reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema } from "./managed-azure-targets";
 import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
@@ -63,6 +64,7 @@ import {
   beginManagedReleaseMutation,
   claimManagedReleaseRecovery,
   finalizeManagedReleaseRollback,
+  finalizeManagedReleaseCompatibleRecovery,
   finalizeManagedReleaseSuccess,
   getManagedReleaseBootstrapTarget,
   getManagedReleaseLeaseTarget,
@@ -107,6 +109,7 @@ const CONTROL_PLANE_DETAIL_SNAPSHOT_LIMIT = 6;
 const CONTROL_PLANE_DETAIL_SNAPSHOT_SUMMARY_PREVIEW_BYTES = 4096;
 const CONTROL_PLANE_OPERATION_SUMMARY_PREVIEW_BYTES = 2048;
 const CONTROL_PLANE_OPERATION_LIST_LIMIT = 30;
+const UUID_VALUE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
   "HEALTH",
   "RELEASE",
@@ -117,6 +120,7 @@ const CONTROL_PLANE_SNAPSHOT_KINDS = new Set<FleetSnapshotKind>([
 ]);
 
 const MUTATING_SUPPORT_ACTIONS = new Set([
+  "runtime.release_diagnostic",
   "members.invite",
   "members.update",
   "members.deactivate",
@@ -161,6 +165,7 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "agent_config.update_policy",
   "support.break_glass_note",
 ]);
+const REMOTE_SUPPORT_AUDIT_ACTIONS = new Set([...MUTATING_SUPPORT_ACTIONS].filter((action) => action !== "runtime.release_diagnostic"));
 
 const SUPPORT_ACTION_TO_MCP_TOOL = {
   "members.list": "list_members",
@@ -179,6 +184,8 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "tool_links.archive": "archive_tool_link",
   "agents.list_runs": "list_agent_runs",
   "runtime.list_jobs": "list_runtime_jobs",
+  "runtime.release_diagnostic": "dispatch_release_diagnostic",
+  "runtime.get_release_diagnostic": "get_release_diagnostic",
   "brain.source_recovery": "list_brain_source_recovery",
   "brain.reconcile_source": "reconcile_brain_source",
   "runtime.list_failed_jobs": "list_failed_jobs",
@@ -10747,12 +10754,26 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     ...(typeof args.enabled === "boolean" ? { enabled: args.enabled, configProvided: true } : { reportImportsEnabled: args.reportImportsEnabled }),
     expectedConfigIdentity: args.expectedConfigIdentity,
   } : redactObject(args);
+  const idempotencyKey = normalizeSupportAuditIdempotencyKey(params.idempotencyKey);
+  if (idempotencyKey) {
+    const existing = await findSupportAuditByIdempotencyKey({ idempotencyKey, deploymentId: params.deploymentId,
+      operationAction: params.action, reason, inputSummary });
+    if (existing) return existing;
+  }
   const connector = await loadSupportConnector(params.deploymentId);
+  let operationWorkspaceId = params.remoteWorkspaceId?.trim() || null;
+  if (params.action === "runtime.release_diagnostic") {
+    const connection = await callMcpTool({ mcpUrl: connector.mcpUrl, bearerToken: connector.bearerToken,
+      toolName: "get_current_connection", arguments: {} });
+    operationWorkspaceId = managedReleaseConnectionWorkspace(connection, connector.deployment);
+    invariant(!params.remoteWorkspaceId?.trim() || params.remoteWorkspaceId.trim() === operationWorkspaceId,
+      409, "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT", "Managed release workspace binding changed.");
+  }
 
   const operation = await prisma.supportOperation.create({
     data: {
       deploymentId: params.deploymentId,
-      workspaceId: params.remoteWorkspaceId?.trim() || null,
+      workspaceId: operationWorkspaceId,
       actorUserId: actorUserId(actor),
       actorLabel: SUPPORT_ACTOR_LABEL,
       action: params.action,
@@ -10760,12 +10781,12 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       status: "RUNNING",
       startedAt: new Date(),
       inputSummary: inputSummary as Prisma.InputJsonObject,
-      idempotencyKey: params.idempotencyKey?.trim() || null,
+      idempotencyKey,
     },
   });
 
   try {
-    if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
+    if (REMOTE_SUPPORT_AUDIT_ACTIONS.has(params.action)) {
       await recordRemoteSupportAudit({
         mcpUrl: connector.mcpUrl,
         bearerToken: connector.bearerToken,
@@ -10795,7 +10816,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       ? normalizeFinanceConfigMutationResult(summarized, typeof args.reportImportsEnabled === "boolean" ? { reportImportsEnabled: args.reportImportsEnabled } : { enabled: args.enabled as boolean })
       : summarized && typeof summarized === "object" ? redactObject(summarized as JsonRecord) : { result: summarized };
 
-    if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
+    if (REMOTE_SUPPORT_AUDIT_ACTIONS.has(params.action)) {
       await recordRemoteSupportAudit({
         mcpUrl: connector.mcpUrl,
         bearerToken: connector.bearerToken,
@@ -10817,7 +10838,7 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Support operation failed.";
-    if (MUTATING_SUPPORT_ACTIONS.has(params.action)) {
+    if (REMOTE_SUPPORT_AUDIT_ACTIONS.has(params.action)) {
       await recordRemoteSupportAudit({
         mcpUrl: connector.mcpUrl,
         bearerToken: connector.bearerToken,
@@ -10839,6 +10860,50 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     });
     throw error;
   }
+}
+
+export async function readControlPlaneManagedReleaseAuth(actor: AppActor, params: {
+  deploymentId: string;
+  mode: "preflight" | "status";
+  operationId?: string;
+  expectedGitSha?: string;
+}) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  const connector = await loadSupportConnector(params.deploymentId);
+  const status = params.mode === "status";
+  invariant(params.mode === "preflight" || params.mode === "status", 400, "INVALID_INPUT", "Managed release auth read is invalid.");
+  if (status) invariant(UUID_VALUE_PATTERN.test(params.operationId ?? "") && /^[a-f0-9]{40}$/.test(params.expectedGitSha ?? ""),
+    400, "INVALID_INPUT", "Managed release diagnostic identity is invalid.");
+  const result = await callMcpTool({ mcpUrl: connector.mcpUrl, bearerToken: connector.bearerToken,
+    toolName: status ? "get_release_diagnostic" : "get_current_connection",
+    arguments: status ? { operationId: params.operationId, expectedGitSha: params.expectedGitSha } : {} });
+  const summarized = summarizeMcpResponse(result);
+  const remoteError = supportMcpErrorMessage(summarized) ?? mcpToolMarkedErrorMessage(result);
+  invariant(!remoteError, 502, "REMOTE_SUPPORT_OPERATION_FAILED", "Authenticated managed release read failed.");
+  if (!status) return { status: "READY", effects: 0, workspaceId: managedReleaseConnectionWorkspace(result, connector.deployment) } as const;
+  const response = jsonRecord(summarized);
+  invariant(response && response.operationId === params.operationId && response.expectedGitSha === params.expectedGitSha,
+    409, "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT", "Managed release diagnostic read did not match the operation.");
+  const workspaceId = typeof response.workspaceId === "string" ? response.workspaceId : "";
+  invariant(UUID_VALUE_PATTERN.test(workspaceId) && (!connector.deployment.remoteWorkspaceId || connector.deployment.remoteWorkspaceId === workspaceId),
+    409, "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT", "Managed release workspace binding changed.");
+  return response;
+}
+
+function managedReleaseConnectionWorkspace(result: unknown, deployment: { remoteWorkspaceId?: string | null }) {
+  const summarized = summarizeMcpResponse(result);
+  const remoteError = supportMcpErrorMessage(summarized) ?? mcpToolMarkedErrorMessage(result);
+  invariant(!remoteError, 502, "REMOTE_SUPPORT_OPERATION_FAILED", "Authenticated managed release connection read failed.");
+  const connection = jsonRecord(summarized);
+  const workspace = jsonRecord(connection?.workspace);
+  const workspaceId = typeof workspace?.id === "string" ? workspace.id : "";
+  const scopes = Array.isArray(connection?.scopes) ? connection.scopes.filter((scope): scope is string => typeof scope === "string") : [];
+  invariant(UUID_VALUE_PATTERN.test(workspaceId) && ["workspace:read", "runtime:read", "runtime:write"].every((scope) => scopes.includes(scope)),
+    409, "MANAGED_RELEASE_AUTH_SCOPE_REQUIRED", "Managed release connector lacks its workspace or runtime scope.");
+  invariant(!deployment.remoteWorkspaceId || deployment.remoteWorkspaceId === workspaceId,
+    409, "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT", "Managed release workspace binding changed.");
+  return workspaceId;
 }
 
 async function findSupportAuditByIdempotencyKey(params: {
@@ -11300,6 +11365,13 @@ async function requireManagedReleaseOperationalWorkspaceId() {
   return workspace.id;
 }
 
+export async function reconcileControlPlaneManagedAzureTarget(actor: AppActor, input: unknown) {
+  requireControlPlaneScope(actor, "control-plane:releases:write");
+  const params = reconcileManagedAzureTargetSchema.parse(input);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
+  return reconcileManagedAzureTarget(params);
+}
+
 export async function freezeControlPlaneManagedReleaseInventory(actor: AppActor, params: {
   deploymentId: string;
   workloadClass: ExactTargetInventoryWorkloadClass;
@@ -11581,6 +11653,8 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
       return finalizeManagedReleaseSuccess(managedReleaseHandle(params));
     case "finalize_rollback":
       return finalizeManagedReleaseRollback(managedReleaseHandle(params));
+    case "finalize_compatible_recovery":
+      return finalizeManagedReleaseCompatibleRecovery(managedReleaseHandle(params), params.evidence);
     case "mark_recovery":
       return markManagedReleaseRecoveryRequired(managedReleaseHandle(params), {
         stage: params.stage as "INVENTORY" | "PREFLIGHT" | "IMPORT" | "WEB" | "WORKER" | "READBACK" | "OBSERVATION" | "ROLLBACK" | "FENCING",

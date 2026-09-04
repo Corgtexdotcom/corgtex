@@ -11,6 +11,10 @@ on:
         description: Audited reason for clearing an expired fenced recovery lease
         required: true
         type: string
+      acr_name:
+        description: Exact protected target Azure Container Registry name
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,7 +28,7 @@ jobs:
   clear-recovery:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: managed-azure-release-production
     steps:
       - uses: actions/checkout@v5
@@ -43,7 +47,7 @@ jobs:
         env:
           CONTROL_PLANE_URL: ${{ vars.CONTROL_PLANE_URL }}
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
-          MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
+          MANAGED_AZURE_ACR_NAME: ${{ inputs.acr_name }}
           RECOVERY_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           RECOVERY_REASON: ${{ inputs.reason }}
         run: >-

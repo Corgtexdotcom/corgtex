@@ -13,6 +13,7 @@ import {
   finalizeControlPlaneClientMigration,
   fetchCustomerSupportSnapshot,
   freezeControlPlaneManagedReleaseInventory,
+  reconcileControlPlaneManagedAzureTarget,
   enqueueControlPlaneAgendaPreparation,
   getControlPlaneClientMigrationStatus,
   getControlPlaneDeployLatestPreflight,
@@ -48,6 +49,7 @@ import {
   runControlPlanePostDeployProbe,
   runControlPlaneReleaseOperation,
   runCustomerSupportOperation,
+  readControlPlaneManagedReleaseAuth,
   planControlPlaneClientMigration,
   setControlPlaneFeatureFlag,
   validateControlPlaneRailwayReleaseExecutor,
@@ -568,6 +570,29 @@ const tools = [
     },
   },
   {
+    name: "reconcile_managed_azure_target",
+    description: "Inspect or reconcile existing deployment metadata against protected provider evidence. Preserves stable identity, credentials, lifecycle status and release selection.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: { deploymentId: { type: "string" }, execute: { type: "boolean" }, reason: { type: "string" },
+        expectedMetadataDigest: { type: "string" }, expectedTargetDigest: { type: "string" } },
+      required: ["deploymentId", "execute", "reason"],
+    },
+  },
+  {
+    name: "read_managed_release_auth",
+    description: "Read authenticated client release readiness or one exact diagnostic receipt without creating an Ops operation.",
+    inputSchema: { type: "object", additionalProperties: false, properties: { deploymentId: { type: "string" }, mode: { type: "string" },
+      operationId: { type: "string" }, expectedGitSha: { type: "string" } }, required: ["deploymentId", "mode"] },
+  },
+  {
+    name: "dispatch_managed_release_diagnostic",
+    description: "Dispatch one idempotent authenticated web and worker release diagnostic under release authority.",
+    inputSchema: { type: "object", additionalProperties: false, properties: { deploymentId: { type: "string" },
+      operationId: { type: "string" }, expectedGitSha: { type: "string" }, reason: { type: "string" } },
+      required: ["deploymentId", "operationId", "expectedGitSha", "reason"] },
+  },
+  {
     name: "freeze_managed_release_inventory",
     description: "Create one private immutable managed-Azure exact-target inventory asset for a deployment and workload class.",
     inputSchema: {
@@ -772,6 +797,9 @@ const toolScopes: Record<string, string> = {
   enqueue_fleet_snapshot_jobs: "control-plane:fleet:write",
   prepare_release_upgrade: "control-plane:releases:write",
   freeze_managed_release_inventory: "control-plane:releases:write",
+  read_managed_release_auth: "control-plane:releases:write",
+  dispatch_managed_release_diagnostic: "control-plane:releases:write",
+  reconcile_managed_azure_target: "control-plane:releases:write",
   get_managed_release_bootstrap_target: "control-plane:releases:write",
   get_managed_release_inventory: "control-plane:releases:write",
   managed_release_lease: "control-plane:releases:write",
@@ -1297,6 +1325,23 @@ export async function POST(request: NextRequest) {
         acrServer: argString(args, "acrServer"),
       })));
     }
+    if (name === "reconcile_managed_azure_target") {
+      return rpcResult(id, textContent(await reconcileControlPlaneManagedAzureTarget(actor, args)));
+    }
+    if (name === "read_managed_release_auth") {
+      return rpcResult(id, textContent(await readControlPlaneManagedReleaseAuth(actor, {
+        deploymentId: argString(args, "deploymentId"), mode: argString(args, "mode") as "preflight" | "status",
+        operationId: argOptionalString(args, "operationId") ?? undefined, expectedGitSha: argOptionalString(args, "expectedGitSha") ?? undefined,
+      })));
+    }
+    if (name === "dispatch_managed_release_diagnostic") {
+      const operationId = argString(args, "operationId");
+      return rpcResult(id, textContent(await runCustomerSupportOperation(actor, {
+        deploymentId: argString(args, "deploymentId"), action: "runtime.release_diagnostic",
+        reason: argString(args, "reason"), arguments: { operationId, expectedGitSha: argString(args, "expectedGitSha") },
+        idempotencyKey: `release-diagnostic-start:${operationId}`, scopeOverride: "control-plane:releases:write",
+      })));
+    }
     if (name === "freeze_managed_release_inventory") {
       return rpcResult(id, textContent(await freezeControlPlaneManagedReleaseInventory(actor, {
         deploymentId: argString(args, "deploymentId"),
@@ -1365,6 +1410,8 @@ export async function POST(request: NextRequest) {
         action: argString(args, "action") as SupportAction,
         reason: typeof args.reason === "string" ? args.reason : null,
         arguments: objectArgs(args.arguments),
+        remoteWorkspaceId: argOptionalString(args, "remoteWorkspaceId"),
+        idempotencyKey: argOptionalString(args, "idempotencyKey"),
       });
       return rpcResult(id, textContent(operation));
     }

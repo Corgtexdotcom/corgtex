@@ -27,6 +27,7 @@ function usage() {
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs probe-health <deploymentId> <reason>",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs post-deploy-probe <deploymentId> <reason> [releaseImageTag] [releaseVersion]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs record-release <deploymentId> <releaseImageTag> <reason> [releaseVersion] [managedAzureTargetJson]",
+    "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs reconcile-managed-azure-target '<json-args>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs set-feature <deploymentId> <flag> <enabled> <reason> [json-config]",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs run-support <deploymentId> <action> <reason> '<json-args>'",
     "  CONTROL_PLANE_AGENT_API_KEY=... node scripts/control-plane.mjs record-support-audit <deploymentId> <action> <reason> '<json-audit>' [idempotencyKey]",
@@ -179,6 +180,8 @@ try {
       releaseVersion: args[3] || undefined,
       managedAzureTarget: args[4] ? parseJsonArg(args[4]) : undefined,
     }));
+  } else if (command === "reconcile-managed-azure-target") {
+    print(await callTool("reconcile_managed_azure_target", parseJsonArg(args[0])));
   } else if (command === "set-feature") {
     print(await callTool("set_customer_feature_flag", {
       deploymentId: requireValue(args[0], "deploymentId"),

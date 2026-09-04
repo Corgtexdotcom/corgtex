@@ -23,10 +23,15 @@ RUN npm ci --ignore-scripts
 RUN npx prisma generate
 
 FROM deps AS build
+ARG CORGTEX_RELEASE_GIT_SHA
+ARG RAILWAY_GIT_COMMIT_SHA
+ARG GITHUB_SHA
 COPY . .
+RUN node scripts/write-release-build.mjs worker
 
 FROM base AS runtime
 ENV NODE_ENV=production
+COPY --from=build /app/release-build.json ./release-build.json
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/worker ./apps/worker

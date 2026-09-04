@@ -63,6 +63,8 @@ export const MCP_TOOL_CAPABILITIES = {
   get_model_budget: { scopes: ["agents:read"] },
   update_model_budget: { scopes: ["support:write"], sensitive: true },
   list_runtime_jobs: { scopes: ["runtime:read"] },
+  dispatch_release_diagnostic: { scopes: ["runtime:write"] },
+  get_release_diagnostic: { scopes: ["runtime:read"] },
   list_brain_source_recovery: { scopes: ["support:write", "brain:read", "runtime:read"] },
   reconcile_brain_source: { scopes: ["support:write", "brain:read", "runtime:read", "runtime:write"], sensitive: true },
   list_failed_jobs: { scopes: ["runtime:read"] },

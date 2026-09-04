@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { azureReleaseVariables, latestRailwayStatus, preflightOpsRailwayProvider, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
 import { MCP_CONNECTOR_DEFAULT_SCOPES } from "./fleet-release-core.mjs";
 import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-release-alerts.mjs";
 import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
@@ -85,15 +85,17 @@ beforeEach(() => { railwayStages = new Map(); });
 function railwayStage(serviceId) {
   if (!railwayStages.has(serviceId)) {
     const prior = { id: `prior-${serviceId}`, status: "SUCCESS" };
+    const role = serviceId === "web-1" ? "web" : "worker";
+    const image = `ghcr.io/corgtexdotcom/corgtex/${role}:sha-${"a".repeat(40)}`;
     railwayStages.set(serviceId, {
       instance: {
-        source: { image: `ghcr.io/example/${serviceId}:prior`, repo: null },
+        source: { image, repo: null },
         startCommand: null, preDeployCommand: null,
         latestDeployment: prior, activeDeployments: [prior],
       },
       variables: { CORGTEX_STARTUP_MODE: "combined", UNRELATED_SECRET: "synthetic-private-value" },
       environment: { config: { services: { [serviceId]: {
-        source: { image: `ghcr.io/example/${serviceId}:prior` },
+        source: { image },
         deploy: { registryCredentials: { username: "***", password: "***" } },
       } } } },
       deployments: { edges: [{ node: prior }], pageInfo: { hasNextPage: true } },
@@ -1253,6 +1255,32 @@ describe("fleet release runner", () => {
     ]);
   });
 
+  it("runs an Ops-only provider preflight without staging a deployment or exposing credentials", async () => {
+    const calls = [];
+    const fetchImpl = vi.fn(async (url, options) => {
+      expect(String(url)).toContain("backboard.railway.com");
+      const body = JSON.parse(options.body); calls.push(body);
+      return successfulRailwayResponse(body);
+    });
+    const result = await runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve,ops"], {
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "synthetic-token" }, fetchImpl,
+    });
+    expect(result).toMatchObject({ status: "READY", effects: 0, targets: [{ targetId: "ops", provider: "railway", status: "READY", effects: 0, serviceCount: 2,
+      baselineDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }] });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.query.includes("OpsStageReadback"))).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/token|password|username|deploymentId/i);
+  });
+
+  it.each(["startCommand", "preDeployCommand"])("rejects an Ops %s override during provider preflight", async (field) => {
+    railwayStage("web-1").instance[field] = "unsafe override";
+    const target = JSON.parse(targetJson())[0];
+    await expect(preflightOpsRailwayProvider(target, {
+      env: { RAILWAY_API_TOKEN: "synthetic-token" },
+      fetchImpl: async (_url, options) => successfulRailwayResponse(JSON.parse(options.body)),
+    })).rejects.toThrow("unexpected command override");
+  });
+
   it("fails clearly when canonical GHCR images are missing", async () => {
     const runCommand = vi.fn()
       .mockReturnValueOnce({ stdout: "", stderr: "" })
@@ -1282,7 +1310,8 @@ describe("fleet release runner", () => {
         const attempt = { id: `failed-candidate-${serviceId}`, status: failedCandidate };
         stage.instance.latestDeployment = attempt;
         stage.deployments.edges.unshift({ node: attempt });
-        stage.instance.source.image = `ghcr.io/example/${serviceId}:sha-${SHA}`;
+        const role = serviceId === "web-1" ? "web" : "worker";
+        stage.instance.source.image = `ghcr.io/corgtexdotcom/corgtex/${role}:sha-${SHA}`;
         stage.environment.config.services[serviceId].source.image = stage.instance.source.image;
         stage.variables.CORGTEX_RELEASE_GIT_SHA = SHA;
       }

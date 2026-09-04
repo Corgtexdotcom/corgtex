@@ -22,9 +22,12 @@ const mocks = vi.hoisted(() => ({
   getControlPlaneSlackSetupTarget: vi.fn(),
   getControlPlaneMeetingOperationsReadiness: vi.fn(),
   freezeControlPlaneManagedReleaseInventory: vi.fn(),
+  reconcileControlPlaneManagedAzureTarget: vi.fn(),
+  readControlPlaneManagedReleaseAuth: vi.fn(),
   getControlPlaneManagedReleaseBootstrapTarget: vi.fn(),
   getControlPlaneManagedReleaseInventory: vi.fn(),
   runControlPlaneManagedReleaseLeaseOperation: vi.fn(),
+  runCustomerSupportOperation: vi.fn(),
   enqueueControlPlaneAgendaPreparation: vi.fn(),
   recordCustomerSupportAudit: vi.fn(),
 }));
@@ -40,6 +43,8 @@ vi.mock("@corgtex/domain", () => ({
   getControlPlaneAiGovernanceStatus: vi.fn(), getControlPlaneContextHealth: vi.fn(),
   getControlPlaneDeployment: vi.fn(), getControlPlaneIntegrationStatus: vi.fn(), getControlPlaneMeetingOperationsReadiness: mocks.getControlPlaneMeetingOperationsReadiness, getControlPlaneProviderStatus: mocks.getControlPlaneProviderStatus, getControlPlaneReleaseStatus: vi.fn(), getControlPlaneSlackSetupTarget: mocks.getControlPlaneSlackSetupTarget,
   freezeControlPlaneManagedReleaseInventory: mocks.freezeControlPlaneManagedReleaseInventory,
+  reconcileControlPlaneManagedAzureTarget: mocks.reconcileControlPlaneManagedAzureTarget,
+  readControlPlaneManagedReleaseAuth: mocks.readControlPlaneManagedReleaseAuth,
   getControlPlaneManagedReleaseBootstrapTarget: mocks.getControlPlaneManagedReleaseBootstrapTarget,
   getControlPlaneManagedReleaseInventory: mocks.getControlPlaneManagedReleaseInventory,
   listControlPlaneCustomerMembers: vi.fn(),
@@ -58,7 +63,7 @@ vi.mock("@corgtex/domain", () => ({
   refreshControlPlaneFleetSnapshots: vi.fn(),
   rollbackControlPlaneClientMigration: vi.fn(),
   revokeControlPlaneAgentCredential: vi.fn(),
-  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneClientMigrationDryRun: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneManagedReleaseLeaseOperation: mocks.runControlPlaneManagedReleaseLeaseOperation, runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: vi.fn(),
+  resendControlPlaneCustomerMemberAccessLink: vi.fn(), runControlPlaneClientMigrationDryRun: vi.fn(), runControlPlaneContextOperation: vi.fn(), runControlPlaneMeetingRecorderOperation: vi.fn(), runControlPlaneManagedReleaseLeaseOperation: mocks.runControlPlaneManagedReleaseLeaseOperation, runControlPlaneReleaseOperation: vi.fn(), runCustomerSupportOperation: mocks.runCustomerSupportOperation,
   planControlPlaneClientMigration: vi.fn(),
   validateControlPlaneRailwayReleaseExecutor: vi.fn(),
   setControlPlaneFeatureFlag: vi.fn(), updateControlPlaneAgentCredentialScopes: vi.fn(), updateControlPlaneAgentPolicy: vi.fn(), updateControlPlaneCustomerMemberStatus: vi.fn(), updateControlPlaneModelBudget: vi.fn(),
@@ -101,6 +106,9 @@ describe("/api/control-plane/mcp", () => {
     mocks.getControlPlaneManagedReleaseInventory.mockResolvedValue({ inventoryRef: "inventory-1", sha256: "a".repeat(64) });
     mocks.getControlPlaneManagedReleaseBootstrapTarget.mockResolvedValue({ deploymentId: "deployment-1", target: { resourceGroup: "rg-managed" } });
     mocks.runControlPlaneManagedReleaseLeaseOperation.mockResolvedValue({ phase: "RESERVED" });
+    mocks.reconcileControlPlaneManagedAzureTarget.mockResolvedValue({ status: "RECONCILIATION_READY", effects: 0 });
+    mocks.readControlPlaneManagedReleaseAuth.mockResolvedValue({ status: "READY", effects: 0 });
+    mocks.runCustomerSupportOperation.mockResolvedValue({ status: "COMPLETED", workspaceId: "123e4567-e89b-42d3-a456-426614174000" });
     mocks.enqueueControlPlaneAgendaPreparation.mockResolvedValue({ deploymentId: "inst-1", workflowJobId: "job-1" });
     mocks.recordCustomerSupportAudit.mockResolvedValue({ id: "op-audit", status: "COMPLETED" });
   });
@@ -173,6 +181,9 @@ describe("/api/control-plane/mcp", () => {
       "refresh_fleet_snapshots",
       "run_post_deploy_probe",
       "enqueue_fleet_snapshot_jobs",
+      "reconcile_managed_azure_target",
+      "read_managed_release_auth",
+      "dispatch_managed_release_diagnostic",
       "freeze_managed_release_inventory",
       "get_managed_release_bootstrap_target",
       "get_managed_release_inventory",
@@ -187,8 +198,33 @@ describe("/api/control-plane/mcp", () => {
   });
 
   it("requires release scope and forwards bounded managed release operations", async () => {
-    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", scopes: ["control-plane:releases:write"] });
+    mocks.resolveControlPlaneRequestActor.mockResolvedValue({ kind: "agent", scopes: ["control-plane:releases:write"] });
     const { POST } = await import("./route");
+    const reconcile = await POST(request({ jsonrpc: "2.0", id: 39, method: "tools/call", params: {
+      name: "reconcile_managed_azure_target", arguments: { deploymentId: "123e4567-e89b-42d3-a456-426614174001", execute: false, reason: "Inspect protected target." },
+    } }) as never);
+    expect(reconcile.status).toBe(200);
+    expect(mocks.reconcileControlPlaneManagedAzureTarget).toHaveBeenCalledWith(expect.anything(), {
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001", execute: false, reason: "Inspect protected target.",
+    });
+    const authRead = await POST(request({ jsonrpc: "2.0", id: 39.5, method: "tools/call", params: {
+      name: "read_managed_release_auth", arguments: { deploymentId: "123e4567-e89b-42d3-a456-426614174001", mode: "preflight" },
+    } }) as never);
+    expect(authRead.status).toBe(200);
+    expect(mocks.readControlPlaneManagedReleaseAuth).toHaveBeenCalledWith(expect.anything(), {
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001", mode: "preflight", operationId: undefined, expectedGitSha: undefined,
+    });
+    const operationId = "123e4567-e89b-42d3-a456-426614174009";
+    const diagnostic = await POST(request({ jsonrpc: "2.0", id: 39.75, method: "tools/call", params: {
+      name: "dispatch_managed_release_diagnostic", arguments: { deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+        operationId, expectedGitSha: "a".repeat(40), reason: "Verify the exact candidate release." },
+    } }) as never);
+    expect(diagnostic.status).toBe(200);
+    expect(mocks.runCustomerSupportOperation).toHaveBeenCalledWith(expect.anything(), {
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001", action: "runtime.release_diagnostic",
+      reason: "Verify the exact candidate release.", arguments: { operationId, expectedGitSha: "a".repeat(40) },
+      idempotencyKey: `release-diagnostic-start:${operationId}`, scopeOverride: "control-plane:releases:write",
+    });
     const freeze = await POST(request({
       jsonrpc: "2.0",
       id: 40,

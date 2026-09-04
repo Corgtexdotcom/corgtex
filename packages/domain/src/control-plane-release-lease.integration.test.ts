@@ -49,6 +49,33 @@ async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedC
     providerResourceGroup: RG, providerWebServiceId: WEB, providerWorkerServiceId: WORKER, ...overrides,
   } });
 }
+function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>) {
+  vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+  vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({
+    schemaVersion: 1,
+    targets: [{
+      deploymentId: row.id,
+      customerAccountId: row.customerAccountId,
+      deploymentKind: "HOSTED_DEDICATED",
+      origin: row.url.replace(/\/$/, ""),
+      subscriptionId: row.providerSubscriptionId,
+      resourceGroup: row.providerResourceGroup,
+      webAppName: row.providerWebServiceId,
+      workerAppName: row.providerWorkerServiceId,
+      acrName: ACR_IDENTITY.acrName,
+      acrServer: ACR_IDENTITY.acrServer,
+      acrResourceGroup: RG,
+      evidenceSha256: "e".repeat(64),
+      activationPolicy: "EXCLUSIVE",
+      releaseApproval: { gitSha: "b".repeat(40), schemaApprovalDigest: "d".repeat(64) },
+      recovery: {
+        gitSha: "a".repeat(40),
+        releaseVersion: "release-1",
+        schemaCompatibilityApprovalDigest: "f".repeat(64),
+      },
+    }],
+  }));
+}
 async function acquire(deploymentId: string, overrides = {}) {
   const result = await acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test", ...overrides });
   return { deploymentId: result.deploymentId, leaseId: result.leaseId, capability: result.capability, fence: result.fence };
@@ -505,7 +532,7 @@ describe("managed release lease CAS", () => {
 describe("selected hosted Azure release lifecycle", () => {
   async function hosted() {
     const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
-    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    authorizeHosted(row);
     return row;
   }
   it("runs a selected hosted release through V2 recording and success without relabelling", async () => {
@@ -561,6 +588,7 @@ describe("selected hosted Azure release lifecycle", () => {
   it.each(["HOSTED_DEDICATED", "REMOTE_MANAGED"] as const)("keeps database metadata and delete guards for %s", async (deploymentKind) => {
     const row = await deployment({ deploymentKind });
     vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    if (deploymentKind === "HOSTED_DEDICATED") authorizeHosted(row);
     const handle = await acquire(row.id);
     for (const data of [{ deploymentStatus: "SUSPENDED" as const }, { deploymentKind: "SHARED_WORKSPACE" as const }, { customerAccountId: null }, { url: "https://reassigned.example.test" }, { providerWebServiceId: "other-web" }]) {
       await expect(prisma.customerDeployment.update({ where: { id: row.id }, data })).rejects.toThrow("MANAGED_RELEASE_LEASE_UPDATE_CONFLICT");
@@ -615,6 +643,7 @@ it("applies the exact hosted migration without changing retained remote leases, 
   }, { timeout: 15_000 });
   await abortManagedReleaseLease(handle);
   vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", hosted.id);
+  authorizeHosted(hosted);
   const hostedHandle = await acquire(hosted.id);
   await abortManagedReleaseLease(hostedHandle);
 });

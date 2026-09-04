@@ -36,6 +36,14 @@ on:
         required: true
         type: boolean
         default: false
+      acr_name:
+        description: Exact protected target Azure Container Registry name
+        required: true
+        type: string
+      acr_resource_group:
+        description: Exact protected target Azure Container Registry resource group
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -77,8 +85,8 @@ jobs:
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
           GHCR_IMPORT_USERNAME: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
-          MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
-          MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ vars.MANAGED_AZURE_ACR_RESOURCE_GROUP }}
+          MANAGED_AZURE_ACR_NAME: ${{ inputs.acr_name }}
+          MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ inputs.acr_resource_group }}
           RELEASE_INPUT_INVENTORY_REF: ${{ inputs.inventory_ref }}
           RELEASE_INPUT_INVENTORY_SHA256: ${{ inputs.inventory_sha256 }}
           RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
@@ -100,7 +108,7 @@ jobs:
   execute:
     if: github.ref == 'refs/heads/main' && inputs.execute == true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: managed-azure-release-production
     steps:
       - uses: actions/checkout@v5
@@ -127,8 +135,8 @@ jobs:
           CONTROL_PLANE_AGENT_API_KEY: ${{ secrets.CONTROL_PLANE_AGENT_API_KEY }}
           GHCR_IMPORT_USERNAME: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
-          MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
-          MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ vars.MANAGED_AZURE_ACR_RESOURCE_GROUP }}
+          MANAGED_AZURE_ACR_NAME: ${{ inputs.acr_name }}
+          MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ inputs.acr_resource_group }}
           RELEASE_INPUT_INVENTORY_REF: ${{ inputs.inventory_ref }}
           RELEASE_INPUT_INVENTORY_SHA256: ${{ inputs.inventory_sha256 }}
           RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}

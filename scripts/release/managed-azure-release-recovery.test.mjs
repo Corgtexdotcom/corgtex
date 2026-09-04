@@ -108,15 +108,21 @@ function rig(overrides = {}) {
       if (operation === "claim_recovery") return { deploymentId, leaseId: claimedLeaseId, fence: 8, capability: "private-capability" };
       if (operation === "get_rollback") return rollbackPayload;
       if (operation === "finalize_rollback") return { deploymentId, fence: 8, status: "ROLLED_BACK", releaseImageTag: `sha-${baseSha}`, releaseVersion: "release-1" };
-      if (operation === "heartbeat") return { deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
+      if (operation === "heartbeat" || operation === "heartbeat_recovery") return { deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
       if (operation === "mark_recovery") return { deploymentId, fence: 8, phase: "RECOVERY_REQUIRED" };
       if (operation === "finalize_success") return { deploymentId, fence: 8, status: "SUCCEEDED", releaseImageTag: `sha-${nextSha}`, releaseVersion: "release-2" };
+      if (operation === "finalize_compatible_recovery") return { deploymentId, fence: 8, status: "RECOVERED_COMPATIBLE", releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1" };
       throw new Error("unexpected lease operation");
     }),
     readApp: vi.fn(async ({ role }) => state(role)),
     patchTemplate: vi.fn(async () => ({ terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" })),
     waitForState: vi.fn(async () => undefined),
     healthProbe: vi.fn(async () => ({ ok: true })),
+    authPreflight: vi.fn(async () => ({ ok: true })),
+    acceptanceProbe: vi.fn(async ({ operationId, release }) => ({ accepted: true, webGitSha: release.gitSha,
+      receipt: { workerGitSha: release.gitSha, operationId } })),
+    observeNewRelease: vi.fn(async () => ({ verified: true })),
+    setRevisionActive: vi.fn(async () => ({ terminal: true, succeeded: true })),
     ...depOverrides,
   };
   return { deps, calls };
@@ -167,6 +173,56 @@ describe("managed Azure release recovery", () => {
     expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
     expect(writeManagedAzureRecoveryCliResult(result, { stdout: { write: vi.fn() }, stderr: { write: vi.fn() } })).toBe(1);
+  });
+
+  it("uses the approved compatible pair after a partial forward migration and records the actual recovery release", async () => {
+    const recoverySha = "c".repeat(40); const recoveryWeb = `sha256:${"5".repeat(64)}`; const recoveryWorker = `sha256:${"6".repeat(64)}`;
+    const rollbackPayload = { ...structuredClone(rollback), schemaVersion: 2,
+      incoming: { ...rollback.incoming, schemaApprovalDigest: `sha256:${"a".repeat(64)}` }, compatibleRecovery: {
+      gitSha: recoverySha, imageTag: `sha-${recoverySha}`, releaseVersion: "recovery-1",
+      web: { image: `${target.acrServer}/corgtex/web@${recoveryWeb}`, digest: recoveryWeb }, worker: { image: `${target.acrServer}/corgtex/worker@${recoveryWorker}`, digest: recoveryWorker },
+      schemaCompatibilityApprovalDigest: `sha256:${"9".repeat(64)}`, acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy: "EXCLUSIVE",
+    } };
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", { revisionName: `${target.webAppName}--${webSuffix}`, revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image, imageDigest: rollback.incoming.webDigest, template: webTemplate, templateDigest: managedAzureTemplateDigest(webTemplate) });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps, calls } = rig({ rollbackPayload, readApp });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover partial schema activation safely.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY", releaseImageTag: `sha-${recoverySha}` });
+    expect(deps.patchTemplate).toHaveBeenCalledTimes(2);
+    expect(deps.patchTemplate.mock.calls.map(([arg]) => arg.template.containers[0].image)).toEqual([rollbackPayload.compatibleRecovery.web.image, rollbackPayload.compatibleRecovery.worker.image]);
+    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }) }));
+    expect(calls.map(([operation]) => operation)).toContain("finalize_compatible_recovery");
+    expect(calls.map(([operation]) => operation)).not.toContain("finalize_success");
+  });
+
+  it("retains compatible recovery when the worker cannot produce an exact receipt", async () => {
+    const recoverySha = "c".repeat(40); const recoveryWeb = `sha256:${"5".repeat(64)}`; const recoveryWorker = `sha256:${"6".repeat(64)}`;
+    const rollbackPayload = { ...structuredClone(rollback), schemaVersion: 2,
+      incoming: { ...rollback.incoming, schemaApprovalDigest: `sha256:${"a".repeat(64)}` }, compatibleRecovery: {
+      gitSha: recoverySha, imageTag: `sha-${recoverySha}`, releaseVersion: "recovery-1",
+      web: { image: `${target.acrServer}/corgtex/web@${recoveryWeb}`, digest: recoveryWeb }, worker: { image: `${target.acrServer}/corgtex/worker@${recoveryWorker}`, digest: recoveryWorker },
+      schemaCompatibilityApprovalDigest: `sha256:${"9".repeat(64)}`, acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy: "EXCLUSIVE",
+    } };
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const webSuffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const webTemplate = template("web", rollback.incoming.webDigest, webSuffix, incoming);
+    const readApp = vi.fn(async ({ role, release }) => {
+      if (role === "web" && release.gitSha === nextSha) return state("web", { revisionName: `${target.webAppName}--${webSuffix}`, revisionSuffix: webSuffix,
+        image: webTemplate.containers[0].image, imageDigest: rollback.incoming.webDigest, template: webTemplate, templateDigest: managedAzureTemplateDigest(webTemplate) });
+      if (role === "worker" && release.gitSha === baseSha) return state("worker");
+      throw new Error("state mismatch");
+    });
+    const { deps } = rig({ rollbackPayload, readApp, acceptanceProbe: vi.fn(async () => ({ accepted: false })) });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover partial schema activation safely.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "MANAGED_RELEASE_RECOVERY_COMPATIBLE_DIAGNOSTIC_FAILED" });
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
   });
 
   it("completes a recorded forward release when web is forward and worker is still baseline", async () => {
@@ -504,7 +560,7 @@ describe("managed Azure release recovery", () => {
     const workflow = readFileSync(new URL("../../.github/workflows/managed-azure-release-recovery.yml", import.meta.url), "utf8");
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("environment: managed-azure-release-production");
-    expect(workflow).toContain("timeout-minutes: 30");
+    expect(workflow).toContain("timeout-minutes: 45");
     expect(workflow).toContain("group: managed-azure-release-${{ inputs.deployment_id }}");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("id-token: write");

@@ -16,6 +16,7 @@ const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
 const leaseId = "123e4567-e89b-42d3-a456-426614174003";
 const baseSha = "a".repeat(40); const nextSha = "b".repeat(40);
+const recoverySha = "c".repeat(40);
 const inventoryBytesBase64 = "e30=";
 const inventorySha256 = createHash("sha256").update(Buffer.from(inventoryBytesBase64, "base64")).digest("hex");
 const input = Object.freeze({ inventoryRef, inventorySha256, deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY", releaseSha: nextSha, releaseVersion: "release-2", reason: "Approved exact target release.", execute: false, acrName: "acr12", acrResourceGroup: "rg-acr" });
@@ -130,16 +131,21 @@ function dependencies(options = {}) {
       canonicalDigest: `sha256:${"d".repeat(64)}`,
       preflightDigest: options.inventoryPreflightDigest ?? preflightDigest(preflight),
     } }); }),
+    targetConfig: vi.fn(async () => ({ status: "RECONCILIATION_READY", effects: 0, target: { ...target, acrResourceGroup: input.acrResourceGroup, activationPolicy: options.activationPolicy ?? "STANDARD",
+      releaseApproval: options.releaseApproval ?? { gitSha: nextSha, schemaApprovalDigest: "8".repeat(64) },
+      recovery: { gitSha: recoverySha, releaseVersion: "recovery-1", schemaCompatibilityApprovalDigest: "9".repeat(64) } } })),
+    drainBaseline: vi.fn(async () => options.drain ?? { terminal: true, succeeded: true }),
     lease: vi.fn(async (operation, args) => {
       events.push(`lease:${operation}`);
       if (operation === "preflight") return preflight;
       if (operation === "acquire") return { deploymentId, leaseId, capability: "private-capability", fence: 7 };
       if (operation === "get_target") return { deploymentId, deployment: options.leasedDeployment ?? deployment, authorityDigest: options.leasedAuthorityDigest ?? "e".repeat(64), target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
+      if (operation === "finalize_compatible_recovery") return { status: "RECOVERED_COMPATIBLE", fence: 7 };
       return { deploymentId, operation, args };
     }),
-    resolveRelease: vi.fn(async () => ({ roles: {
-      web: { role: "web", digest: digests.nextWeb, image: `${target.acrServer}/corgtex/web@${digests.nextWeb}`, destinationState: options.webDestination ?? "MATCH" },
-      worker: { role: "worker", digest: digests.nextWorker, image: `${target.acrServer}/corgtex/worker@${digests.nextWorker}`, destinationState: options.workerDestination ?? "MATCH" },
+    resolveRelease: vi.fn(async ({ gitSha }) => ({ roles: {
+      web: { role: "web", digest: gitSha === nextSha ? digests.nextWeb : digests.web, image: `${target.acrServer}/corgtex/web@${gitSha === nextSha ? digests.nextWeb : digests.web}`, destinationState: options.webDestination ?? "MATCH" },
+      worker: { role: "worker", digest: gitSha === nextSha ? digests.nextWorker : digests.worker, image: `${target.acrServer}/corgtex/worker@${gitSha === nextSha ? digests.nextWorker : digests.worker}`, destinationState: options.workerDestination ?? "MATCH" },
     } })),
     importRole: vi.fn(async (role) => { events.push(`import:${role.role}`); return options.importResult ?? { terminal: true, succeeded: true, ambiguous: false, code: "IMPORT_VERIFIED" }; }),
     verifyImport: vi.fn(async (role) => {
@@ -175,6 +181,9 @@ function dependencies(options = {}) {
       return state(role, current[role], expectedTemplate);
     }),
     healthProbe: vi.fn(async () => options.health ?? { ok: true }),
+    authPreflight: vi.fn(async () => options.authPreflight ?? { ok: true }),
+    acceptanceProbe: vi.fn(async ({ operationId, release }) => options.acceptance ?? { accepted: true, webGitSha: release.gitSha, receipt: { workerGitSha: release.gitSha, operationId } }),
+    observeNewRelease: vi.fn(async () => options.observation ?? { verified: true }),
   };
   return { deps, events, current };
 }
@@ -220,6 +229,18 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.readApp).not.toHaveBeenCalled();
   });
 
+  it("requires the protected target to approve the exact candidate and schema matrix", async () => {
+    for (const releaseApproval of [
+      { gitSha: baseSha, schemaApprovalDigest: "8".repeat(64) },
+      { gitSha: nextSha, schemaApprovalDigest: "invalid" },
+    ]) {
+      const { deps } = dependencies({ releaseApproval });
+      await expect(runManagedAzureReleaseTransaction(input, deps)).rejects.toMatchObject({ code: "MANAGED_RELEASE_SCHEMA_APPROVAL_REQUIRED" });
+      expect(deps.readApp).not.toHaveBeenCalled();
+      expect(deps.importRole).not.toHaveBeenCalled();
+    }
+  });
+
   it("imports before mutation, updates web then worker, proves readback, and finalizes success", async () => {
     const { deps, events } = dependencies({ webDestination: "ABSENT", workerDestination: "ABSENT" });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
@@ -227,11 +248,64 @@ describe("managed Azure single-target transaction", () => {
     expect(events.indexOf("lease:acquire")).toBeLessThan(events.indexOf("import:web"));
     expect(events.indexOf("import:worker")).toBeLessThan(events.indexOf("lease:begin"));
     expect(events.indexOf("patch:web:forward")).toBeLessThan(events.indexOf("patch:worker:forward"));
-    expect(events.filter((event) => event === "lease:heartbeat")).toHaveLength(12);
+    expect(events.filter((event) => event === "lease:heartbeat")).toHaveLength(18);
     expect(events.at(-1)).toBe("lease:finalize_success");
     const recorded = deps.lease.mock.calls.find(([operation]) => operation === "record_rollback")[1].rollback;
     expect(recorded.previous.web).toMatchObject({ image: `${target.acrServer}/corgtex/web@${digests.web}`, templateDigest: expect.stringMatching(/^sha256:/) });
     expect(JSON.stringify(recorded)).not.toContain("private-capability");
+  });
+
+  it("drains exact old worker and web consumers after mutation fencing and before an exclusive schema activation", async () => {
+    const { deps, events } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.drainBaseline.mockImplementation(async () => { events.push("drain:baseline-pair"); return { terminal: true, succeeded: true }; });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result.status).toBe("SUCCEEDED");
+    expect(events.indexOf("lease:begin")).toBeLessThan(events.indexOf("drain:baseline-pair"));
+    expect(events.indexOf("drain:baseline-pair")).toBeLessThan(events.indexOf("patch:web:forward"));
+    expect(deps.drainBaseline).toHaveBeenCalledWith(expect.objectContaining({ baselines: expect.objectContaining({ web: expect.anything(), worker: expect.anything() }) }));
+  });
+
+  it("keeps the fence and performs no candidate mutation when an exclusive drain is ambiguous", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE", drain: { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "BASELINE_DRAIN_AMBIGUOUS", providerCode: "AZURE_REVISION_READBACK_AMBIGUOUS" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
+  it("requires authenticated app/worker acceptance and observation before success recording", async () => {
+    for (const options of [{ acceptance: { accepted: false } }, { observation: { verified: false, code: "OBSERVATION_REGRESSION" } }]) {
+      const { deps } = dependencies(options);
+      const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+      expect(result.status).not.toBe("SUCCEEDED");
+      expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+      if (result.status === "RECOVERED_COMPATIBLE") {
+        expect(deps.lease).toHaveBeenCalledWith("finalize_compatible_recovery", expect.objectContaining({ evidence: expect.objectContaining({ acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/) }) }));
+      } else {
+        expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "OBSERVATION" });
+      }
+    }
+  });
+
+  it("requires a distinct authenticated worker receipt before compatible recovery is finalized", async () => {
+    const { deps } = dependencies({ acceptance: { accepted: false } });
+    deps.patchTemplate.mockResolvedValueOnce({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "OBSERVATION", code: "COMPATIBLE_RECOVERY_DIAGNOSTIC_FAILED" });
+    const probes = deps.acceptanceProbe.mock.calls.map(([request]) => request);
+    expect(probes).toHaveLength(1);
+    expect(probes[0]).toMatchObject({ release: { gitSha: recoverySha } });
+    expect(probes[0].operationId).not.toBe(leaseId);
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+
+  it("verifies actual provider digests, health and auth before a same-release zero-effect result", async () => {
+    const { deps } = dependencies({ releaseApproval: { gitSha: baseSha, schemaApprovalDigest: "8".repeat(64) } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, releaseSha: baseSha, releaseVersion: "release-1" }, deps);
+    expect(result).toMatchObject({ status: "ALREADY_CURRENT", effects: 0 });
+    expect(deps.resolveRelease).toHaveBeenCalled(); expect(deps.readApp).toHaveBeenCalledTimes(2);
+    expect(deps.healthProbe).toHaveBeenCalled(); expect(deps.authPreflight).toHaveBeenCalled();
+    expect(deps.lease).toHaveBeenCalledTimes(1); expect(deps.importRole).not.toHaveBeenCalled();
   });
 
   it("continues when an ambiguous import is proven by exact destination digest readback", async () => {
@@ -288,9 +362,9 @@ describe("managed Azure single-target transaction", () => {
       ],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "WORKER", code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
-    expect(events.filter((event) => event.startsWith("patch:"))).toEqual(["patch:web:forward", "patch:worker:forward", "patch:web:rollback"]);
-    expect(events.at(-1)).toBe("lease:finalize_rollback");
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "WORKER", code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
+    expect(events.filter((event) => event.startsWith("patch:"))).toEqual(["patch:web:forward", "patch:worker:forward", "patch:web:rollback", "patch:worker:rollback"]);
+    expect(events.at(-1)).toBe("lease:finalize_compatible_recovery");
   });
 
   it("retains recovery instead of compensating unknown provider state", async () => {
@@ -318,7 +392,7 @@ describe("managed Azure single-target transaction", () => {
       patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "ROLLBACK", code: "ROLLBACK_READBACK_AMBIGUOUS", providerCode: "InvalidParameterValueInContainerTemplate" });
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "WORKER", code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
   });
 
   it("aborts a pre-mutation reservation when the leased target differs from preflight", async () => {
@@ -560,6 +634,25 @@ describe("managed Azure Container Apps transport", () => {
     const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "token-value-with-enough-length", sleep: async () => { now += 1_000; }, clock: () => now });
     const readback = await transport.waitForState({ target, role: "web", imageDigest: digests.nextWeb, release: transportNextRelease, expectedTemplate: raw.properties.template });
     expect(readback.revisionName).toBe("web-app--next"); expect(readback.templateDigest).toBe(managedAzureTemplateDigest(raw.properties.template));
+  });
+
+  it("deactivates each exact baseline revision and proves zero replicas, reconciling a lost action reply", async () => {
+    const calls = [];
+    const fetchImpl = vi.fn(async (url, init) => {
+      calls.push({ url, method: init.method });
+      if (init.method === "POST" && calls.filter((call) => call.method === "POST").length === 1) throw new Error("lost reply");
+      if (init.method === "POST") return new Response(null, { status: 204 });
+      if (String(url).includes("/replicas?")) return Response.json({ value: [] });
+      return Response.json({ properties: { active: false } });
+    });
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough", sleep: async () => {}, clock: (() => { let now = 0; return () => ++now; })() });
+    const baselines = { worker: { revisionName: `${target.workerAppName}--worker-old` }, web: { revisionName: `${target.webAppName}--web-old` } };
+    await expect(transport.drainBaseline({ target, baselines, onProgress: vi.fn() })).resolves.toEqual({ terminal: true, succeeded: true, code: "AZURE_BASELINE_PAIR_DRAINED" });
+    expect(calls.filter((call) => call.method === "POST").map((call) => call.url)).toEqual([
+      expect.stringContaining(`/containerApps/${target.workerAppName}/revisions/${target.workerAppName}--worker-old/deactivate?`),
+      expect.stringContaining(`/containerApps/${target.webAppName}/revisions/${target.webAppName}--web-old/deactivate?`),
+    ]);
+    expect(calls.filter((call) => String(call.url).includes("/replicas?")).length).toBe(2);
   });
 
   it("uses bounded non-disclosing errors", () => {

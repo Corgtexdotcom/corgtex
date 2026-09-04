@@ -29,6 +29,7 @@ ARG GITHUB_SHA
 ARG NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
 ARG REQUIRE_NEXT_SERVER_ACTIONS_KEY=false
 COPY . .
+RUN node scripts/write-release-build.mjs web
 RUN --mount=type=secret,id=next_server_actions_encryption_key \
   set -eu; \
   key="${NEXT_SERVER_ACTIONS_ENCRYPTION_KEY:-}"; \
@@ -44,6 +45,7 @@ RUN --mount=type=secret,id=next_server_actions_encryption_key \
 
 FROM base AS runtime
 ENV NODE_ENV=production
+COPY --from=build /app/release-build.json ./release-build.json
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/web ./apps/web

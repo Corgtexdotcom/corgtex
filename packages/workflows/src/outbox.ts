@@ -1,6 +1,7 @@
 import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
 import { logger, prisma } from "@corgtex/shared";
 import { deriveJobsForEvent } from "./derive-jobs";
+import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
 import { deriveNotificationsForEvent } from "./derive-notifications";
 import { recordWorkflowJobProcessedMetric } from "./job-metrics";
 import { handleKnowledgeSync, handleMeetingKnowledgeSync, handleDocumentKnowledgeSync, handleExternalResourceKnowledgeSync, handleExternalContentKnowledgeSync, handleEventKnowledgeSync, handleTensionKnowledgeSync, handleActionKnowledgeSync, handleCircleKnowledgeSync, handleRoleKnowledgeSync, handleSlackMessageKnowledgeSync, handleCalendarSync, handleOAuthDocumentsSync, handleOAuthEmailSync, handleContextGraphSync, handleContextGraphStalenessSweep, handleContextGraphReconcile } from "./handlers";
@@ -12,6 +13,7 @@ import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import { runDailyDigest, runSlackAgent, runSlackContextSummary, runSlackProactiveScan, sendDemoWelcomeNewspaper } from "@corgtex/agents";
 import {
   createWebhookDeliveries,
+  RELEASE_DIAGNOSTIC_JOB_TYPE,
   captureReferencesForSource,
   CONTROL_PLANE_CLIENT_MIGRATION_VERIFY_JOB_TYPE,
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE,
@@ -1123,16 +1125,26 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   let failure: unknown = null;
   try {
     await recordMeetingProgressForJob(job, "ACTIVE");
-    const result = await handleJob(job);
+    const diagnostic = job.type === RELEASE_DIAGNOSTIC_JOB_TYPE;
+    const result = diagnostic ? await handleReleaseDiagnostic(job, workerId) : await handleJob(job);
     await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED");
-    await completeJob(job.id);
+    if (!diagnostic) await completeJob(job.id);
   } catch (error) {
     failed = true;
     failure = error;
     if (job.attempts >= MAX_ATTEMPTS) {
       await recordMeetingProgressForJob(job, "FAILED", { error });
     }
-    await failJob(job, error);
+    if (job.type === RELEASE_DIAGNOSTIC_JOB_TYPE) {
+      // An obsolete diagnostic worker must not overwrite a reclaimed/completed job.
+      // Fail this operation once; a release runner reconciles it instead of blindly retrying.
+      await prisma.workflowJob.updateMany({
+        where: { id: job.id, workspaceId: job.workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "RUNNING", lockedBy: workerId },
+        data: { status: "FAILED", lockedAt: null, lockedBy: null, error: "Release diagnostic failed; reconcile the exact operation." },
+      });
+    } else {
+      await failJob(job, error);
+    }
   }
 
   // Emit per-job timing outside the try/catch so a logging error can never be

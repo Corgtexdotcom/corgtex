@@ -8134,6 +8134,68 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
   });
 
+  it("derives the release workspace from the authenticated connector and records one idempotent diagnostic", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment());
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-release", action: "runtime.release_diagnostic", workspaceId });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({ id: "op-release", action: "runtime.release_diagnostic", workspaceId, status: "COMPLETED" });
+    global.fetch = vi.fn(async (_input, init) => {
+      const name = JSON.parse(String(init?.body)).params.name;
+      if (name === "get_current_connection") return mcpToolResult({ workspace: { id: workspaceId }, scopes: ["workspace:read", "runtime:read", "runtime:write"] });
+      return mcpToolResult({ operationId: "123e4567-e89b-42d3-a456-426614174001", workspaceId, accepted: false });
+    }) as any;
+
+    await expect(runCustomerSupportOperation(operatorActor, {
+      deploymentId: "inst-1", action: "runtime.release_diagnostic", reason: "Verify exact release worker.",
+      arguments: { operationId: "123e4567-e89b-42d3-a456-426614174001", expectedGitSha: "a".repeat(40) },
+      idempotencyKey: "release-diagnostic-start:123e4567-e89b-42d3-a456-426614174001",
+    })).resolves.toMatchObject({ status: "COMPLETED", workspaceId });
+    expect(prismaMock.supportOperation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ workspaceId }) }));
+    const names = vi.mocked(global.fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)).params.name);
+    expect(names).toEqual(["get_current_connection", "dispatch_release_diagnostic"]);
+  });
+
+  it("replays a completed release diagnostic before any connector call", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    const operationId = "123e4567-e89b-42d3-a456-426614174001";
+    const args = { operationId, expectedGitSha: "a".repeat(40) };
+    prismaMock.supportOperation.findUnique.mockResolvedValueOnce({ id: "op-release", deploymentId: "inst-1",
+      action: "runtime.release_diagnostic", reason: "Verify exact release worker.", status: "COMPLETED", inputSummary: args });
+    await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "runtime.release_diagnostic",
+      reason: "Verify exact release worker.", arguments: args, idempotencyKey: `release-diagnostic-start:${operationId}` }))
+      .resolves.toMatchObject({ id: "op-release", idempotentReplay: true });
+    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reads release auth without an Ops operation and rejects missing runtime scope", async () => {
+    const { readControlPlaneManagedReleaseAuth } = await import("./control-plane");
+    const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment({ remoteWorkspaceId: workspaceId }));
+    global.fetch = vi.fn(async () => mcpToolResult({ workspace: { id: workspaceId }, scopes: ["workspace:read", "runtime:read", "runtime:write"] })) as any;
+    await expect(readControlPlaneManagedReleaseAuth(operatorActor, { deploymentId: "inst-1", mode: "preflight" }))
+      .resolves.toEqual({ status: "READY", effects: 0, workspaceId });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    global.fetch = vi.fn(async () => mcpToolResult({ workspace: { id: workspaceId }, scopes: ["workspace:read", "runtime:read"] })) as any;
+    await expect(readControlPlaneManagedReleaseAuth(operatorActor, { deploymentId: "inst-1", mode: "preflight" }))
+      .rejects.toMatchObject({ code: "MANAGED_RELEASE_AUTH_SCOPE_REQUIRED" });
+  });
+
+  it("binds a release diagnostic status read to the deployment workspace", async () => {
+    const { readControlPlaneManagedReleaseAuth } = await import("./control-plane");
+    const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
+    const operationId = "123e4567-e89b-42d3-a456-426614174001";
+    const expectedGitSha = "a".repeat(40);
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment({ remoteWorkspaceId: workspaceId }));
+    global.fetch = vi.fn(async () => mcpToolResult({ workspaceId, operationId, expectedGitSha, accepted: true })) as any;
+    await expect(readControlPlaneManagedReleaseAuth(operatorActor, { deploymentId: "inst-1", mode: "status", operationId, expectedGitSha }))
+      .resolves.toMatchObject({ workspaceId, operationId, expectedGitSha, accepted: true });
+    global.fetch = vi.fn(async () => mcpToolResult({ workspaceId: "123e4567-e89b-42d3-a456-426614174009", operationId, expectedGitSha, accepted: true })) as any;
+    await expect(readControlPlaneManagedReleaseAuth(operatorActor, { deploymentId: "inst-1", mode: "status", operationId, expectedGitSha }))
+      .rejects.toMatchObject({ code: "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT" });
+  });
+
   it("routes remote meeting, recorder, and Finance support operations through audited MCP tools", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValue({
