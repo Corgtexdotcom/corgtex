@@ -806,11 +806,16 @@ async function readOpsRailwayStage(target, service, deps) {
     || data.pending.pageInfo?.hasNextPage !== false) fail("has an active or uncertain deployment");
   const latest = instance.latestDeployment;
   const active = instance.activeDeployments;
-  if (!latest?.id || latest.status !== "SUCCESS" || !Array.isArray(active) || active.length !== 1
-    || active[0].id !== latest.id || active[0].status !== "SUCCESS") fail("serving deployment is not settled");
+  if (!latest?.id || !Array.isArray(active) || active.length !== 1 || active[0].status !== "SUCCESS"
+    || !active[0].id) fail("serving deployment is not settled");
+  const serving = active[0];
+  // A failed candidate can remain latest while the prior healthy deployment
+  // still serves. Allow explicit rollback without relaxing the no-pending gate.
+  if (latest.status === "SUCCESS" ? latest.id !== serving.id
+    : !["FAILED", "CRASHED", "REMOVED", "SKIPPED"].includes(latest.status)) fail("latest deployment is not settled");
   const history = data.deployments?.edges?.map((edge) => ({ id: edge.node?.id, status: edge.node?.status }));
   if (!Array.isArray(history) || !history.length || history.some((item) => !item.id || !item.status)
-    || !history.some((item) => item.id === latest.id)
+    || ![latest, serving].every((anchor) => history.some((item) => item.id === anchor.id && item.status === anchor.status))
     || typeof data.deployments.pageInfo?.hasNextPage !== "boolean") fail("deployment history lacks its serving anchor");
   // The recent window detects any new deployment since baseline. Pending work
   // outside that window is checked independently by the unbounded status filter.
@@ -826,6 +831,7 @@ async function readOpsRailwayStage(target, service, deps) {
     registryCredentialsPresent: true,
     releaseVariables: variables,
     latestDeployment: { id: latest.id, status: latest.status },
+    servingDeployment: { id: serving.id, status: serving.status },
     history,
     hasMoreHistory: data.deployments.pageInfo.hasNextPage,
   };

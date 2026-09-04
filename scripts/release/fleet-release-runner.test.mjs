@@ -1273,7 +1273,19 @@ describe("fleet release runner", () => {
   it.each([SHA, "a".repeat(40)].flatMap((releaseSha) => [
     { releaseSha, durableCredential: false },
     { releaseSha, durableCredential: true },
-  ]))("updates and rolls back Ops without seeding or changing unrelated configuration: $releaseSha, durable=$durableCredential", async ({ releaseSha, durableCredential }) => {
+  ]).concat(["FAILED", "CRASHED", "REMOVED", "SKIPPED"].map((failedCandidate) => ({
+    releaseSha: "a".repeat(40), durableCredential: false, failedCandidate,
+  }))))("updates and rolls back Ops without seeding or changing unrelated configuration: $releaseSha, durable=$durableCredential, failed=$failedCandidate", async ({ releaseSha, durableCredential, failedCandidate }) => {
+    if (failedCandidate) {
+      for (const serviceId of ["web-1", "worker-1"]) {
+        const stage = railwayStage(serviceId);
+        const attempt = { id: `failed-candidate-${serviceId}`, status: failedCandidate };
+        stage.instance.latestDeployment = attempt;
+        stage.deployments.edges.unshift({ node: attempt });
+        stage.instance.source.image = `ghcr.io/example/${serviceId}:sha-${SHA}`;
+        stage.variables.CORGTEX_RELEASE_GIT_SHA = SHA;
+      }
+    }
     const railwayCalls = [];
     const operations = [];
     const fetchImpl = vi.fn(async (url, options) => {
@@ -1363,6 +1375,7 @@ describe("fleet release runner", () => {
     });
 
     expect(result.results).toHaveLength(1);
+    expect(result.results[0].status).toBe("succeeded");
     const updateCalls = railwayCalls.filter((call) => call.query.includes("serviceInstanceUpdate"));
     expect(updateCalls).toHaveLength(2);
     const credentials = durableCredential ? {
@@ -1467,7 +1480,8 @@ describe("fleet release runner", () => {
 
   it.each([
     "variable-mismatch", "missing-variable", "source-drift", "missing-credentials", "unmasked-credentials",
-    "new-deployment", "pending-deployment", "pending-page", "missing-anchor", "auto-updates", "repository-source", "readback-failure",
+    "new-deployment", "pending-deployment", "pending-page", "missing-anchor", "missing-serving-anchor",
+    "no-serving-deployment", "multiple-serving-deployments", "serving-drift", "auto-updates", "repository-source", "readback-failure",
   ])("stops after the first Ops stage on %s without leaking configuration", async (failure) => {
     const mutations = [];
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1491,6 +1505,18 @@ describe("fleet release runner", () => {
           if (failure === "pending-deployment") stage.pending.edges = [{ node: { id: "older-queued-operation", status: "QUEUED" } }];
           if (failure === "pending-page") stage.pending.pageInfo.hasNextPage = true;
           if (failure === "missing-anchor") stage.deployments.edges = [{ node: { id: "unrelated-history", status: "REMOVED" } }];
+          if (failure === "missing-serving-anchor") {
+            stage.instance.latestDeployment = { id: "failed-candidate", status: "FAILED" };
+            stage.deployments.edges = [{ node: stage.instance.latestDeployment }];
+          }
+          if (failure === "no-serving-deployment") stage.instance.activeDeployments = [];
+          if (failure === "multiple-serving-deployments") stage.instance.activeDeployments.push({ id: "other-serving", status: "SUCCESS" });
+          if (failure === "serving-drift") {
+            const other = { id: "other-serving", status: "SUCCESS" };
+            stage.instance.latestDeployment = { id: "failed-candidate", status: "FAILED" };
+            stage.instance.activeDeployments = [other];
+            stage.deployments.edges.unshift({ node: stage.instance.latestDeployment }, { node: other });
+          }
           if (failure === "auto-updates") config.source.autoUpdates = { enabled: true };
           if (failure === "repository-source") stage.instance.source.repo = "example/repository";
           return publicJsonResponse(payload);
