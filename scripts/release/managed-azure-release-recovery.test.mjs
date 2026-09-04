@@ -198,7 +198,7 @@ describe("managed Azure release recovery", () => {
       releaseVersion: "release-2",
       resolution: "FORWARD_COMPLETED",
     });
-    expect(calls.map(([operation]) => operation)).toEqual(["get_recovery", "claim_recovery", "get_rollback", "heartbeat", "finalize_success"]);
+    expect(calls.map(([operation]) => operation)).toEqual(["get_recovery", "claim_recovery", "get_rollback", "heartbeat", "heartbeat", "finalize_success"]);
     expect(deps.patchTemplate).toHaveBeenCalledTimes(1);
     expect(deps.patchTemplate.mock.calls[0][0]).toMatchObject({ role: "worker", target, location: "West US" });
     expect(deps.patchTemplate.mock.calls[0][0].template.containers[0].image).toBe(`${target.acrServer}/corgtex/worker@${rollback.incoming.workerDigest}`);
@@ -516,5 +516,62 @@ describe("managed Azure release recovery", () => {
     expect(workflow).not.toContain('--deployment-id "${{ inputs.deployment_id }}"');
     expect(workflow).not.toContain('--reason "${{ inputs.reason }}"');
     expect(workflow).not.toContain("GHCR_IMPORT_TOKEN");
+  });
+});
+
+describe("recovery after hosted selection removal", () => {
+  function removedSelectionRig(bothForward, failure = null) {
+    const incoming = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const current = {};
+    for (const role of ["web", "worker"]) {
+      const forward = role === "web" || bothForward;
+      const selected = forward ? template(role, rollback.incoming[`${role}Digest`], managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role, phase: "forward" }), incoming) : templates[role];
+      current[role] = { selected, sha: forward ? nextSha : baseSha };
+    }
+    const { deps, calls } = rig();
+    const lease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "heartbeat") throw Object.assign(new Error("forward denied"), { code: failure ?? "MANAGED_RELEASE_FORWARD_NOT_ALLOWED" });
+      if (operation === "heartbeat_recovery") { calls.push([operation, args]); return { phase: "RECOVERY_REQUIRED" }; }
+      return lease(operation, args);
+    });
+    deps.readApp.mockImplementation(async ({ role, release }) => {
+      const { selected, sha } = current[role];
+      if (sha !== release.gitSha) throw new Error("state mismatch");
+      return state(role, { revisionName: `${role === "web" ? target.webAppName : target.workerAppName}--${selected.revisionSuffix}`, revisionSuffix: selected.revisionSuffix,
+        image: selected.containers[0].image, imageDigest: selected.containers[0].image.split("@")[1], template: selected, templateDigest: managedAzureTemplateDigest(selected) });
+    });
+    deps.patchTemplate.mockImplementation(async ({ role, template: selected }) => {
+      current[role] = { selected, sha: baseSha };
+      return { terminal: true, succeeded: true };
+    });
+    return { deps, calls };
+  }
+  it.each([false, true])("rolls back only recognized owned revisions, worker before web (both=%s)", async (both) => {
+    const { deps } = removedSelectionRig(both);
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover removed primary selection.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "ROLLED_BACK_SELECTION_REMOVED", releaseImageTag: `sha-${baseSha}` });
+    expect(deps.patchTemplate.mock.calls.map(([args]) => args.role)).toEqual(both ? ["worker", "web"] : ["web"]);
+    for (const [{ role, template: restored }] of deps.patchTemplate.mock.calls) {
+      expect(restored.containers[0].image).toBe(rollback.previous[role].image);
+      expect(restored.revisionSuffix).toBe(managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role, phase: "rollback" }));
+    }
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+    expect(deps.lease).toHaveBeenCalledWith("heartbeat_recovery", expect.anything());
+    expect(deps.healthProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }) }));
+  });
+  it("does not treat auth revocation as selection removal or mutate the provider", async () => {
+    const { deps } = removedSelectionRig(true, "FORBIDDEN");
+    expect(await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover revoked authorization.", acrName: "acr12" }, deps)).toMatchObject({ status: "RECOVERY_BLOCKED" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+  it("retains an ambiguous rollback instead of clearing or retrying the lease", async () => {
+    const { deps } = removedSelectionRig(true);
+    deps.patchTemplate.mockResolvedValue({ terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" });
+    expect(await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover interrupted rollback.", acrName: "acr12" }, deps)).toMatchObject({ status: "RECOVERY_BLOCKED" });
+    expect(deps.patchTemplate).toHaveBeenCalledTimes(1);
+    expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ stage: "ROLLBACK" }));
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 });

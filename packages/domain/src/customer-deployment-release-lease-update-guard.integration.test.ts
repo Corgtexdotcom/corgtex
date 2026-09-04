@@ -284,7 +284,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
     expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } })).toEqual(before);
   });
 
-  it("rolls verified-release publication back after completing health proof", async () => {
+  it("rejects verified-release publication under a retained lease after health proof", async () => {
     const deployment = await createManaged();
     const handle = await acquire(deployment.id);
     const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
@@ -306,7 +306,10 @@ describe("CustomerDeployment retained-lease update guard", () => {
       reason: "Synthetic post-health verification.",
     }));
     expect(fetchMock).toHaveBeenCalledOnce();
-    expectUpdateGuard(error, [handle.capability, before.releaseLeaseTokenHash!, WEB, SUBSCRIPTION]);
+    expect(error).toMatchObject({ status: 409, code: "MANAGED_AZURE_TARGET_DRIFT" });
+    for (const secret of [handle.capability, before.releaseLeaseTokenHash!, WEB, SUBSCRIPTION]) {
+      expect(errorDetail(error)).not.toContain(secret);
+    }
     expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } })).toEqual(before);
     expect(await prisma.customerReleaseTarget.count({ where: { deploymentId: deployment.id } })).toBe(0);
     expect(await prisma.customerDeploymentEvent.count({ where: { deploymentId: deployment.id, action: "control_plane.release.verified_recorded" } })).toBe(0);

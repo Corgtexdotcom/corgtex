@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks, storageMock, leaseMocks, inventoryEvaluatorMock } = vi.hoisted(() => ({
@@ -7037,14 +7037,14 @@ describe("control plane domain", () => {
     expect(result.status).toBe("ok");
   });
 
-  it("records a verified live release and clears release drift metadata", async () => {
+  it.each([false, true])("records a verified live release with consistent selected hosted admission (hosted=%s)", async (hosted) => {
     const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
     const oldSha = "1".repeat(40);
     const newSha = "2".repeat(40);
     const oldTag = `sha-${oldSha}`;
     const newTag = `sha-${newSha}`;
     const deployment = {
-      id: "inst-1",
+      id: "123e4567-e89b-42d3-a456-426614174001",
       label: "Acme Production",
       customerAccountId: "cust-1",
       url: "https://customer.test",
@@ -7063,6 +7063,12 @@ describe("control plane domain", () => {
       bootstrapStatus: "completed",
       lastProvisioningError: null,
     };
+    const managedAzureTarget = { subscriptionId: "123e4567-e89b-42d3-a456-426614174010", resourceGroup: "rg-managed", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-a", workerAppName: "worker-b", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
+    if (hosted) {
+      vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", deployment.id);
+      Object.assign(deployment, { cloudProvider: "AZURE", deploymentKind: "HOSTED_DEDICATED" });
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ ...deployment, deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", providerSubscriptionId: managedAzureTarget.subscriptionId, providerResourceGroup: managedAzureTarget.resourceGroup, providerWebServiceId: managedAzureTarget.webAppName, providerWorkerServiceId: managedAzureTarget.workerAppName, releaseLeaseId: null }]);
+    }
     prismaMock.customerDeployment.findUnique
       .mockResolvedValueOnce(deployment)
       .mockResolvedValueOnce({
@@ -7073,7 +7079,7 @@ describe("control plane domain", () => {
         lastHealthError: null,
         provisioningStatus: "active",
       });
-    prismaMock.customerDeployment.update.mockResolvedValueOnce({ id: "inst-1" });
+    prismaMock.customerDeployment.update.mockResolvedValueOnce({ id: "123e4567-e89b-42d3-a456-426614174001" });
     prismaMock.customerDeploymentEvent.findMany.mockResolvedValueOnce([]);
     global.fetch = vi.fn(async () => ({
       ok: true,
@@ -7087,14 +7093,15 @@ describe("control plane domain", () => {
     })) as any;
 
     const result = await recordVerifiedControlPlaneRelease(operatorActor, {
-      deploymentId: "inst-1",
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001",
       releaseImageTag: newTag,
       releaseVersion: "main-2026-05-20",
       reason: "Verified live health after recovery deploy.",
+      ...(hosted ? { managedAzureTarget } : {}),
     });
 
     expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "inst-1" },
+      where: { id: "123e4567-e89b-42d3-a456-426614174001" },
       data: expect.objectContaining({
         releaseImageTag: newTag,
         releaseVersion: "main-2026-05-20",
@@ -7107,7 +7114,7 @@ describe("control plane domain", () => {
     expect(prismaMock.customerReleaseTarget.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         deploymentId_targetReleaseImageTag: {
-          deploymentId: "inst-1",
+          deploymentId: "123e4567-e89b-42d3-a456-426614174001",
           targetReleaseImageTag: newTag,
         },
       },
@@ -8697,6 +8704,8 @@ describe("control plane domain", () => {
   });
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("managed Azure release control-plane boundary", () => {
   const actor: AppActor = {
     kind: "agent",
@@ -8708,6 +8717,8 @@ describe("managed Azure release control-plane boundary", () => {
   const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
   const canaryPreflight = {
     deploymentId,
+    authorityDigest: "d".repeat(64),
+    deployment: { deploymentId, deploymentKind: "HOSTED_DEDICATED", workloadClass: "ACTIVE_CLIENT_CANARY", releaseEligible: false, group: "hosted-dedicated" },
     origin: "https://corporate-rebels.corgtex.com",
     release: {
       baselineImageTag: `sha-${"7".repeat(40)}`,
@@ -9103,6 +9114,11 @@ describe("managed Azure release control-plane boundary", () => {
     })).resolves.toEqual({ deploymentId, phase: "PREFLIGHT" });
     expect(leaseMocks.getManagedReleaseTargetPreflight).toHaveBeenCalledWith(deploymentId, { acrName: "acr12", acrServer: "acr12.azurecr.io" }, "ACTIVE_CLIENT_CANARY");
 
+    await runControlPlaneManagedReleaseLeaseOperation(actor, { operation: "heartbeat_recovery", deploymentId, leaseId: "lease-1", capability: "capability", fence: 1, reason: "Retain fenced rollback authority." });
+    expect(leaseMocks.heartbeatManagedReleaseLease).toHaveBeenCalledWith({ deploymentId, leaseId: "lease-1", capability: "capability", fence: 1 }, true);
+    const callsBeforeRevocation = leaseMocks.heartbeatManagedReleaseLease.mock.calls.length;
+    await expect(runControlPlaneManagedReleaseLeaseOperation({ ...actor, scopes: ["control-plane:read"] } as AppActor, { operation: "heartbeat_recovery", deploymentId, reason: "Rejected revoked release scope." })).rejects.toMatchObject({ status: 403 });
+    expect(leaseMocks.heartbeatManagedReleaseLease).toHaveBeenCalledTimes(callsBeforeRevocation);
     leaseMocks.getManagedReleaseRecoveryStatus.mockResolvedValue({ deploymentId, phase: "RECOVERY_REQUIRED", leaseId: "lease-1", fence: 1 });
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
       operation: "get_recovery",

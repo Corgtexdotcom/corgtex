@@ -219,3 +219,14 @@ describe("managed Azure release intent primitives", () => {
     }
   });
 });
+
+test("validates actual hosted-primary shape without relabelling it as remote", () => {
+  const candidate = input();
+  Object.assign(candidate.deployments[0], { deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", workload: "hosted-dedicated" });
+  expect(releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate)).toBeTruthy();
+  candidate.deployments[0].releaseEligible = false;
+  expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
+  candidate.deployments[0].releaseEligible = true;
+  candidate.deployments[0].group = "managed-customers";
+  expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate));
+});

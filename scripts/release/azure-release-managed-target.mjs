@@ -112,9 +112,11 @@ function targetFromDeployment(row, deploymentId) {
     || row.deploymentStatus !== "ACTIVE" || row.provisioningStatus !== "active" || row.provider !== "azure") invalid();
   const primary = row.workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "REMOTE_MANAGED"
     && row.releaseEligible === true && row.group === "managed-customers" && row.workload === "managed-customers";
+  const hostedPrimary = row.workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "HOSTED_DEDICATED"
+    && row.releaseEligible === true && row.group === "hosted-dedicated" && row.workload === "hosted-dedicated";
   const canary = row.workloadClass === "ACTIVE_CLIENT_CANARY" && row.deploymentKind === "HOSTED_DEDICATED"
     && row.group === "hosted-dedicated" && row.workload === "active-client-canary";
-  if (!primary && !canary) invalid();
+  if (!primary && !hostedPrimary && !canary) invalid();
   return targetProjection(row.azure);
 }
 function manifestDigest(raw) {

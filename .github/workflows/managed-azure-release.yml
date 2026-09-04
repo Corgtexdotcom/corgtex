@@ -79,15 +79,22 @@ jobs:
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
           MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ vars.MANAGED_AZURE_ACR_RESOURCE_GROUP }}
+          RELEASE_INPUT_INVENTORY_REF: ${{ inputs.inventory_ref }}
+          RELEASE_INPUT_INVENTORY_SHA256: ${{ inputs.inventory_sha256 }}
+          RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RELEASE_INPUT_WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          RELEASE_INPUT_RELEASE_SHA: ${{ inputs.release_sha }}
+          RELEASE_INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_INPUT_REASON: ${{ inputs.reason }}
         run: >-
           node scripts/release/managed-azure-release-transaction.mjs
-          --inventory-ref "${{ inputs.inventory_ref }}"
-          --inventory-sha256 "${{ inputs.inventory_sha256 }}"
-          --deployment-id "${{ inputs.deployment_id }}"
-          --workload-class "${{ inputs.workload_class }}"
-          --release-sha "${{ inputs.release_sha }}"
-          --release-version "${{ inputs.release_version }}"
-          --reason "${{ inputs.reason }}"
+          --inventory-ref "$RELEASE_INPUT_INVENTORY_REF"
+          --inventory-sha256 "$RELEASE_INPUT_INVENTORY_SHA256"
+          --deployment-id "$RELEASE_INPUT_DEPLOYMENT_ID"
+          --workload-class "$RELEASE_INPUT_WORKLOAD_CLASS"
+          --release-sha "$RELEASE_INPUT_RELEASE_SHA"
+          --release-version "$RELEASE_INPUT_RELEASE_VERSION"
+          --reason "$RELEASE_INPUT_REASON"
           --execute false
 
   execute:
@@ -122,13 +129,20 @@ jobs:
           GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
           MANAGED_AZURE_ACR_NAME: ${{ vars.MANAGED_AZURE_ACR_NAME }}
           MANAGED_AZURE_ACR_RESOURCE_GROUP: ${{ vars.MANAGED_AZURE_ACR_RESOURCE_GROUP }}
+          RELEASE_INPUT_INVENTORY_REF: ${{ inputs.inventory_ref }}
+          RELEASE_INPUT_INVENTORY_SHA256: ${{ inputs.inventory_sha256 }}
+          RELEASE_INPUT_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          RELEASE_INPUT_WORKLOAD_CLASS: ${{ inputs.workload_class }}
+          RELEASE_INPUT_RELEASE_SHA: ${{ inputs.release_sha }}
+          RELEASE_INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_INPUT_REASON: ${{ inputs.reason }}
         run: >-
           node scripts/release/managed-azure-release-transaction.mjs
-          --inventory-ref "${{ inputs.inventory_ref }}"
-          --inventory-sha256 "${{ inputs.inventory_sha256 }}"
-          --deployment-id "${{ inputs.deployment_id }}"
-          --workload-class "${{ inputs.workload_class }}"
-          --release-sha "${{ inputs.release_sha }}"
-          --release-version "${{ inputs.release_version }}"
-          --reason "${{ inputs.reason }}"
+          --inventory-ref "$RELEASE_INPUT_INVENTORY_REF"
+          --inventory-sha256 "$RELEASE_INPUT_INVENTORY_SHA256"
+          --deployment-id "$RELEASE_INPUT_DEPLOYMENT_ID"
+          --workload-class "$RELEASE_INPUT_WORKLOAD_CLASS"
+          --release-sha "$RELEASE_INPUT_RELEASE_SHA"
+          --release-version "$RELEASE_INPUT_RELEASE_VERSION"
+          --reason "$RELEASE_INPUT_REASON"
           --execute true
