@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
 import { MCP_CONNECTOR_DEFAULT_SCOPES } from "./fleet-release-core.mjs";
@@ -79,8 +79,43 @@ function selfServeRegistry(overrides = {}) {
   };
 }
 
+let railwayStages;
+beforeEach(() => { railwayStages = new Map(); });
+
+function railwayStage(serviceId) {
+  if (!railwayStages.has(serviceId)) {
+    const prior = { id: `prior-${serviceId}`, status: "SUCCESS" };
+    railwayStages.set(serviceId, {
+      instance: {
+        source: { image: `ghcr.io/example/${serviceId}:prior`, repo: null },
+        startCommand: null, preDeployCommand: null,
+        latestDeployment: prior, activeDeployments: [prior],
+      },
+      variables: { CORGTEX_STARTUP_MODE: "combined", UNRELATED_SECRET: "synthetic-private-value" },
+      environment: { config: { services: { [serviceId]: {
+        source: { image: `ghcr.io/example/${serviceId}:prior` },
+        deploy: { registryCredentials: { username: "***", password: "***" } },
+      } } } },
+      deployments: { edges: [{ node: prior }], pageInfo: { hasNextPage: true } },
+      pending: { edges: [], pageInfo: { hasNextPage: false } },
+    });
+  }
+  return railwayStages.get(serviceId);
+}
+
 function successfulRailwayResponse(body) {
+  const stage = railwayStage(body.variables.serviceId);
+  if (body.query.includes("OpsStageReadback")) return publicJsonResponse({ data: structuredClone(stage) });
+  if (body.query.includes("serviceInstanceUpdate")) {
+    stage.instance.source.image = body.variables.input.source.image;
+    stage.environment.config.services[body.variables.serviceId].source.image = body.variables.input.source.image;
+  }
+  if (body.query.includes("variableCollectionUpsert")) Object.assign(stage.variables, body.variables.variables);
   if (body.query.includes("serviceInstanceDeployV2")) {
+    const deployment = { id: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker", status: "SUCCESS" };
+    stage.instance.latestDeployment = deployment;
+    stage.instance.activeDeployments = [deployment];
+    stage.deployments.edges.unshift({ node: deployment });
     return {
       ok: true,
       json: async () => ({
@@ -1235,12 +1270,25 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Release Images workflow before fleet promotion");
   });
 
-  it.each([SHA, "a".repeat(40)])("updates and rolls back Ops without seeding or changing unrelated configuration: %s", async (releaseSha) => {
+  it.each([SHA, "a".repeat(40)].flatMap((releaseSha) => [
+    { releaseSha, durableCredential: false },
+    { releaseSha, durableCredential: true },
+  ]))("updates and rolls back Ops without seeding or changing unrelated configuration: $releaseSha, durable=$durableCredential", async ({ releaseSha, durableCredential }) => {
     const railwayCalls = [];
+    const operations = [];
     const fetchImpl = vi.fn(async (url, options) => {
       if (String(url).includes("backboard.railway.com")) {
         const body = JSON.parse(options.body);
         railwayCalls.push(body);
+        if (body.query.includes("OpsStageReadback")) {
+          operations.push(`read:${body.variables.serviceId}`);
+          return successfulRailwayResponse(body);
+        }
+        const response = successfulRailwayResponse(body);
+        const operation = body.query.includes("serviceInstanceUpdate") ? "source"
+          : body.query.includes("variableCollectionUpsert") ? "variables"
+            : body.query.includes("serviceInstanceDeployV2") ? "deploy" : "wait";
+        operations.push(`${operation}:${body.variables.serviceId}`);
         if (body.query.includes("serviceInstanceDeployV2")) {
           return {
             ok: true,
@@ -1268,9 +1316,10 @@ describe("fleet release runner", () => {
             }),
           };
         }
-        return { ok: true, json: async () => ({ data: {} }) };
+        return response;
       }
       if (String(url).includes("/api/control-plane/mcp")) throw new Error("Ops API unavailable during recovery");
+      operations.push("health");
       return {
         ok: true,
         json: async () => ({
@@ -1301,6 +1350,7 @@ describe("fleet release runner", () => {
         SEED_SCRIPTS: "scripts/existing-private-seed.mjs",
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
+        ...(durableCredential ? { GHCR_IMPORT_TOKEN: "synthetic-durable-import-token" } : {}),
         GITHUB_TOKEN: "github-token",
         APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
         POSTHOG_ENABLED: "true",
@@ -1315,28 +1365,26 @@ describe("fleet release runner", () => {
     expect(result.results).toHaveLength(1);
     const updateCalls = railwayCalls.filter((call) => call.query.includes("serviceInstanceUpdate"));
     expect(updateCalls).toHaveLength(2);
-    expect(updateCalls[0].variables.input).toMatchObject({
+    const credentials = durableCredential ? {
+      registryCredentials: { username: "github-user", password: "synthetic-durable-import-token" },
+    } : {};
+    expect(updateCalls[0].variables.input).toEqual({
       source: {
         image: `ghcr.io/corgtexdotcom/corgtex/web:sha-${releaseSha}`,
       },
-      registryCredentials: {
-        username: "github-user",
-        password: "github-token",
-      },
+      ...credentials,
     });
-    expect(updateCalls[1].variables.input).toMatchObject({
+    expect(updateCalls[1].variables.input).toEqual({
       source: {
         image: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${releaseSha}`,
       },
-      registryCredentials: {
-        username: "github-user",
-        password: "github-token",
-      },
+      ...credentials,
     });
     const variableCalls = railwayCalls.filter((call) => call.query.includes("variableCollectionUpsert"));
     expect(variableCalls).toHaveLength(2);
     for (const call of variableCalls) {
       expect(call.query).toContain("replace: false");
+      expect(call.query).toContain("skipDeploys: true");
       expect(call.variables.variables).toEqual({
         CORGTEX_RELEASE_VERSION: `main-${releaseSha.slice(0, 12)}`,
         CORGTEX_RELEASE_IMAGE_TAG: `sha-${releaseSha}`,
@@ -1345,7 +1393,7 @@ describe("fleet release runner", () => {
       });
     }
     const deployAndWaitCalls = railwayCalls
-      .filter((call) => call.query.includes("serviceInstanceDeployV2") || call.query.includes("deployments("))
+      .filter((call) => !call.query.includes("OpsStageReadback") && (call.query.includes("serviceInstanceDeployV2") || call.query.includes("deployments(")))
       .map((call) => `${call.query.includes("serviceInstanceDeployV2") ? "deploy" : "wait"}:${call.variables.serviceId}`);
     expect(deployAndWaitCalls).toEqual([
       "deploy:web-1",
@@ -1353,6 +1401,151 @@ describe("fleet release runner", () => {
       "deploy:worker-1",
       "wait:worker-1",
     ]);
+    expect(operations).toEqual([
+      "read:web-1", "read:worker-1",
+      "variables:web-1", "read:web-1", "read:worker-1",
+      "variables:worker-1", "read:web-1", "read:worker-1",
+      "source:web-1", "read:web-1", "read:worker-1",
+      "source:worker-1", "read:web-1", "read:worker-1",
+      "deploy:web-1", "wait:web-1", "health", "read:worker-1", "deploy:worker-1", "wait:worker-1", "health",
+    ]);
+  });
+
+  it.each([
+    "source:web-1", "variables:web-1", "source:worker-1", "variables:worker-1",
+    "web-provider-failure", "unhealthy-web", "database-down", "schema-not-ready", "wrong-release",
+  ])("stops Ops rollout before worker deployment on %s", async (failure) => {
+    const operations = [];
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const fetchImpl = vi.fn(async (url, options) => {
+        if (String(url).includes("backboard.railway.com")) {
+          const body = JSON.parse(options.body);
+          if (body.query.includes("OpsStageReadback")) return successfulRailwayResponse(body);
+          const operation = body.query.includes("serviceInstanceUpdate") ? "source"
+            : body.query.includes("variableCollectionUpsert") ? "variables"
+              : body.query.includes("serviceInstanceDeployV2") ? "deploy" : "wait";
+          const event = `${operation}:${body.variables.serviceId}`;
+          operations.push(event);
+          if (event === failure) throw new Error(`Uncertain staging: ${failure}`);
+          if (event === "wait:web-1" && failure === "web-provider-failure") {
+            return publicJsonResponse({ data: { deployments: { edges: [{ node: { id: "deploy-web", status: "FAILED" } }] } } });
+          }
+          return successfulRailwayResponse(body);
+        }
+        operations.push("health");
+        const body = await healthResponse().json();
+        if (failure === "unhealthy-web") body.status = "degraded";
+        if (failure === "database-down") body.database = "down";
+        if (failure === "schema-not-ready") body.schema = "pending";
+        if (failure === "wrong-release") body.release = { imageTag: `sha-${"a".repeat(40)}`, gitSha: "a".repeat(40) };
+        return publicJsonResponse(body);
+      });
+      await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Verify bounded failure stop."], {
+        env: {
+          FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+          RAILWAY_API_TOKEN: "railway-token",
+          GITHUB_TOKEN: "ephemeral-workflow-token",
+          FLEET_RELEASE_HEALTH_TIMEOUT_MS: "1000",
+          ...railwayObservabilityEnv,
+        },
+        fetchImpl,
+        runCommand: vi.fn(),
+        sleep: async () => { clock.mockReturnValue(1001); },
+      })).rejects.toThrow("Ring 3 failed; later rings were stopped.");
+      expect(operations).not.toContain("deploy:worker-1");
+      if (failure.includes(":")) {
+        expect(operations).not.toContain("deploy:web-1");
+        expect(operations.at(-1)).toBe(failure);
+      } else {
+        expect(operations.filter((operation) => operation === "deploy:web-1")).toHaveLength(1);
+      }
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each([
+    "variable-mismatch", "missing-variable", "source-drift", "missing-credentials", "unmasked-credentials",
+    "new-deployment", "pending-deployment", "pending-page", "missing-anchor", "auto-updates", "repository-source", "readback-failure",
+  ])("stops after the first Ops stage on %s without leaking configuration", async (failure) => {
+    const mutations = [];
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const fetchImpl = vi.fn(async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (!String(url).includes("backboard.railway.com")) throw new Error("Unexpected non-Railway request");
+        if (body.query.includes("mutation ")) mutations.push(body);
+        const response = successfulRailwayResponse(body);
+        if (body.query.includes("OpsStageReadback") && mutations.length > 0) {
+          if (failure === "readback-failure") throw new Error("Ambiguous readback");
+          const payload = await response.json();
+          const stage = payload.data;
+          const config = stage.environment.config.services[body.variables.serviceId];
+          if (failure === "variable-mismatch") stage.variables.CORGTEX_STARTUP_MODE = "combined";
+          if (failure === "missing-variable") delete stage.variables.CORGTEX_RELEASE_GIT_SHA;
+          if (failure === "source-drift") stage.instance.source.image = "ghcr.io/example/unexpected:tag";
+          if (failure === "missing-credentials") delete config.deploy.registryCredentials;
+          if (failure === "unmasked-credentials") config.deploy.registryCredentials.password = "synthetic-unmasked-secret";
+          if (failure === "new-deployment") stage.deployments.edges.unshift({ node: { id: "unexpected-deployment", status: "SUCCESS" } });
+          if (failure === "pending-deployment") stage.pending.edges = [{ node: { id: "older-queued-operation", status: "QUEUED" } }];
+          if (failure === "pending-page") stage.pending.pageInfo.hasNextPage = true;
+          if (failure === "missing-anchor") stage.deployments.edges = [{ node: { id: "unrelated-history", status: "REMOVED" } }];
+          if (failure === "auto-updates") config.source.autoUpdates = { enabled: true };
+          if (failure === "repository-source") stage.instance.source.repo = "example/repository";
+          return publicJsonResponse(payload);
+        }
+        return response;
+      });
+      await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Verify staged stop."], {
+        env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+        fetchImpl, runCommand: vi.fn(), sleep: vi.fn(),
+      })).rejects.toThrow("Ring 3 failed");
+      expect(mutations).toHaveLength(1);
+      expect(mutations[0].query).toContain("variableCollectionUpsert");
+      expect(mutations[0].variables.serviceId).toBe("web-1");
+      const output = JSON.stringify(log.mock.calls);
+      expect(output).not.toContain("synthetic-private-value");
+      expect(output).not.toContain("synthetic-unmasked-secret");
+      expect(output).not.toContain("UNRELATED_SECRET");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("rejects missing baseline registry authorization before any Ops mutation", async () => {
+    delete railwayStage("worker-1").environment.config.services["worker-1"].deploy.registryCredentials;
+    const calls = [];
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Require saved authorization."], {
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push(body);
+        return successfulRailwayResponse(body);
+      },
+      runCommand: vi.fn(), sleep: vi.fn(),
+    })).rejects.toThrow("Ring 3 failed");
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.query.includes("OpsStageReadback"))).toBe(true);
+    expect(calls[0].query).toContain("status: { notIn: [SUCCESS, REMOVED, FAILED, CRASHED, SKIPPED] }");
+  });
+
+  it("rechecks the untouched Ops worker after web health and stops on drift", async () => {
+    const deploys = [];
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Require unchanged worker."], {
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+      fetchImpl: async (url, options) => {
+        if (String(url).includes("backboard.railway.com")) {
+          const body = JSON.parse(options.body);
+          if (body.query.includes("serviceInstanceDeployV2")) deploys.push(body.variables.serviceId);
+          return successfulRailwayResponse(body);
+        }
+        railwayStage("worker-1").variables.CORGTEX_STARTUP_MODE = "combined";
+        return healthResponse();
+      },
+      runCommand: vi.fn(), sleep: vi.fn(),
+    })).rejects.toThrow("Ring 3 failed");
+    expect(deploys).toEqual(["web-1"]);
   });
 
   it("preserves customer PostHog instance ids during Railway customer releases", async () => {
@@ -1442,6 +1635,7 @@ describe("fleet release runner", () => {
     const variableCalls = railwayCalls.filter((call) => call.query.includes("variableCollectionUpsert"));
     expect(variableCalls).toHaveLength(2);
     for (const call of variableCalls) {
+      expect(call.query).not.toContain("skipDeploys: true");
       expect(call.variables.variables).toMatchObject({
         POSTHOG_ENABLED: "true",
         POSTHOG_PROJECT_TOKEN: "posthog-project-token",
@@ -1449,6 +1643,11 @@ describe("fleet release runner", () => {
         CORGTEX_RELEASE_GIT_SHA: SHA,
       });
       expect(call.variables.variables).not.toHaveProperty("POSTHOG_INSTANCE_ID");
+    }
+    const customerUpdates = railwayCalls.filter((call) => call.query.includes("serviceInstanceUpdate"));
+    expect(customerUpdates).toHaveLength(2);
+    for (const call of customerUpdates) {
+      expect(call.variables.input.registryCredentials).toEqual({ username: "github-user", password: "github-token" });
     }
   });
 

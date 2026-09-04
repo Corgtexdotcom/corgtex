@@ -675,7 +675,20 @@ async function deployRailwayTarget(target, manifest, deps) {
     { key: "web", serviceId: target.railway.webServiceId, image: manifest.ghcrWebImage },
     { key: "worker", serviceId: target.railway.workerServiceId, image: manifest.ghcrWorkerImage },
   ].filter((service) => service.serviceId);
-  for (const service of services) {
+  const opsOnly = target.group === "ops";
+  const expected = new Map();
+  if (opsOnly) {
+    for (const service of services) expected.set(service.serviceId, await readOpsRailwayStage(target, service, deps));
+  }
+  async function verifyStaging(selected = services) {
+    for (const service of selected) {
+      const current = await readOpsRailwayStage(target, service, deps);
+      if (JSON.stringify(current) !== JSON.stringify(expected.get(service.serviceId))) {
+        throw new Error(`${target.label} ${service.key} Ops staging drift; reconcile before retrying`);
+      }
+    }
+  }
+  async function updateSource(service) {
     await railwayGraphql(`
       mutation UpdateSource($environmentId: String!, $serviceId: String!, $input: ServiceInstanceUpdateInput!) {
         serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
@@ -683,8 +696,19 @@ async function deployRailwayTarget(target, manifest, deps) {
     `, {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
-      input: railwayServiceUpdateInput(service.image, deps),
+      input: railwayServiceUpdateInput(service.image, deps, { preserveCredentials: opsOnly }),
     }, deps);
+    if (opsOnly) {
+      expected.get(service.serviceId).image = service.image;
+      await verifyStaging();
+    }
+  }
+  async function updateVariables(service) {
+    const variables = releaseVariables(manifest, deps.env ?? process.env, {
+      opsRuntimeOnly: opsOnly,
+      includePostHogInstanceId: target.group !== "managed-customers",
+      includeCanaryPreflightDeploymentId: opsOnly,
+    });
     await railwayGraphql(`
       mutation UpsertVariables($projectId: String!, $environmentId: String!, $serviceId: String!, $variables: EnvironmentVariables!) {
         variableCollectionUpsert(input: {
@@ -693,18 +717,30 @@ async function deployRailwayTarget(target, manifest, deps) {
           serviceId: $serviceId
           variables: $variables
           replace: false
+          ${opsOnly ? "skipDeploys: true" : ""}
         })
       }
     `, {
       projectId: target.railway.projectId,
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
-      variables: releaseVariables(manifest, deps.env ?? process.env, {
-        opsRuntimeOnly: target.group === "ops",
-        includePostHogInstanceId: target.group !== "managed-customers",
-        includeCanaryPreflightDeploymentId: target.group === "ops",
-      }),
+      variables,
     }, deps);
+    if (opsOnly) {
+      expected.get(service.serviceId).releaseVariables = variables;
+      await verifyStaging();
+    }
+  }
+  if (opsOnly) {
+    // No-seed startup settings must precede any image change. Both services are
+    // fully staged and read back before the first explicit deployment.
+    for (const service of services) await updateVariables(service);
+    for (const service of services) await updateSource(service);
+  } else {
+    for (const service of services) {
+      await updateSource(service);
+      await updateVariables(service);
+    }
   }
   const deployments = [];
   for (const service of services) {
@@ -719,8 +755,80 @@ async function deployRailwayTarget(target, manifest, deps) {
     const deployment = { ...service, deploymentId: result.deploymentId };
     deployments.push(deployment);
     await waitForRailwayDeployment(target, deployment, deps);
+    if (opsOnly && service.key === "web") {
+      const health = await pollHealth(target.url, manifest, deps);
+      assertHealthProof(health, manifest, target.label);
+      await verifyStaging(services.filter((item) => item.key === "worker"));
+    }
   }
   return { deployments };
+}
+
+async function readOpsRailwayStage(target, service, deps) {
+  const data = await railwayGraphql(`
+    query OpsStageReadback($projectId: String!, $environmentId: String!, $serviceId: String!) {
+      instance: serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+        source { image repo }
+        startCommand preDeployCommand
+        latestDeployment { id status }
+        activeDeployments { id status }
+      }
+      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, unrendered: true)
+      environment(id: $environmentId) { config }
+      deployments(first: 100, input: { projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId }) {
+        edges { node { id status } }
+        pageInfo { hasNextPage }
+      }
+      pending: deployments(first: 1, input: {
+        projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId,
+        status: { notIn: [SUCCESS, REMOVED, FAILED, CRASHED, SKIPPED] }
+      }) { edges { node { id status } } pageInfo { hasNextPage } }
+    }
+  `, {
+    projectId: target.railway.projectId,
+    environmentId: target.railway.environmentId,
+    serviceId: service.serviceId,
+  }, deps);
+  const fail = (reason) => { throw new Error(`${target.label} ${service.key} Ops staging ${reason}; reconcile before retrying`); };
+  const instance = data.instance;
+  const config = data.environment?.config?.services?.[service.serviceId];
+  // Railway exposes these as JSON scalars, not field-selectable objects. Retain
+  // only the four release variables and masked credential presence, never the
+  // original configuration, other variables, credential values or their hashes.
+  const credentials = config?.deploy?.registryCredentials;
+  if (!credentials || !/^\*+$/.test(credentials.password ?? "")
+    || !Object.values(credentials).every((value) => typeof value === "string" && /^\*+$/.test(value))) {
+    fail("registry authorization is missing or not safely observable");
+  }
+  if (!instance?.source?.image || instance.source.repo || !config?.source
+    || config.source.autoUpdates != null) fail("source configuration conflicts with a staged image release");
+  if (!Array.isArray(data.pending?.edges) || data.pending.edges.length
+    || data.pending.pageInfo?.hasNextPage !== false) fail("has an active or uncertain deployment");
+  const latest = instance.latestDeployment;
+  const active = instance.activeDeployments;
+  if (!latest?.id || latest.status !== "SUCCESS" || !Array.isArray(active) || active.length !== 1
+    || active[0].id !== latest.id || active[0].status !== "SUCCESS") fail("serving deployment is not settled");
+  const history = data.deployments?.edges?.map((edge) => ({ id: edge.node?.id, status: edge.node?.status }));
+  if (!Array.isArray(history) || !history.length || history.some((item) => !item.id || !item.status)
+    || !history.some((item) => item.id === latest.id)
+    || typeof data.deployments.pageInfo?.hasNextPage !== "boolean") fail("deployment history lacks its serving anchor");
+  // The recent window detects any new deployment since baseline. Pending work
+  // outside that window is checked independently by the unbounded status filter.
+  if (!data.variables || typeof data.variables !== "object" || Array.isArray(data.variables)) fail("release variables are unavailable");
+  const variables = {};
+  for (const key of Object.keys(releaseVariables({}, {}, { opsRuntimeOnly: true }))) {
+    if (Object.hasOwn(data.variables, key)) variables[key] = data.variables[key];
+  }
+  return {
+    image: instance.source.image,
+    startCommand: instance.startCommand,
+    preDeployCommand: instance.preDeployCommand,
+    registryCredentialsPresent: true,
+    releaseVariables: variables,
+    latestDeployment: { id: latest.id, status: latest.status },
+    history,
+    hasMoreHistory: data.deployments.pageInfo.hasNextPage,
+  };
 }
 
 function optionalText(value) {
@@ -840,12 +948,16 @@ function azureObservabilitySecrets(env = process.env) {
   return secrets;
 }
 
-function railwayServiceUpdateInput(image, deps) {
+function railwayServiceUpdateInput(image, deps, options = {}) {
   const input = { source: { image } };
   if (!image.startsWith("ghcr.io/")) return input;
 
   const env = deps.env ?? process.env;
-  const password = env.GHCR_IMPORT_TOKEN?.trim() || env.GITHUB_TOKEN?.trim();
+  // Ops already has private-registry authorization. Never replace it with the
+  // short-lived workflow token; an explicit durable import token is opt-in.
+  const password = env.GHCR_IMPORT_TOKEN?.trim()
+    || (options.preserveCredentials ? undefined : env.GITHUB_TOKEN?.trim());
+  if (options.preserveCredentials && !password) return input;
   const username = env.GHCR_IMPORT_USERNAME?.trim() || env.GITHUB_ACTOR?.trim();
   if (!password || !username) {
     throw new Error("GHCR_IMPORT_TOKEN or GITHUB_TOKEN is required for Railway to pull private GHCR images.");
