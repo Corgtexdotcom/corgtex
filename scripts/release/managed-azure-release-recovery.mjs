@@ -308,7 +308,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       const health = await deps.healthProbe({ origin: status.origin, release: baseline });
       if (!health.ok) await block("OBSERVATION", health.code ?? "MANAGED_RELEASE_RECOVERY_REACTIVATION_HEALTH_FAILED");
     }
-    if (rollback.schemaVersion === 2 && (exclusiveCompatibleRecovery || web.kind !== "BASELINE" || worker.kind !== "BASELINE")) {
+    if (rollback.schemaVersion === 2) {
       const recovery = rollback.compatibleRecovery;
       const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
       const recoveryRelease = releaseIdentity(recovery.imageTag, recovery.releaseVersion);

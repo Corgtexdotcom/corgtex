@@ -248,7 +248,21 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   if (baselineRelease.imageTag === nextRelease.imageTag) {
     if (baselineRelease.version !== nextRelease.version
       || ROLES.some((role) => baselines[role].imageDigest !== releasePlan.roles[role].digest)) fail("MANAGED_RELEASE_ALREADY_CURRENT_DRIFT");
-    return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 0 });
+    if (!protectedHosted || !input.execute) return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 0 });
+    const operationId = diagnosticOperationId(input.inventoryRef, nextRelease.gitSha, "already-current");
+    const noProgress = async () => {};
+    const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
+      operationId, release: nextRelease, reason: input.reason, onProgress: noProgress });
+    if (!acceptance?.accepted || acceptance.webGitSha !== input.releaseSha || acceptance.receipt?.workerGitSha !== input.releaseSha
+      || acceptance.receipt?.operationId !== operationId) fail("MANAGED_RELEASE_ALREADY_CURRENT_DIAGNOSTIC_FAILED");
+    const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
+      release: nextRelease, imageDigests: { web: releasePlan.roles.web.digest, worker: releasePlan.roles.worker.digest },
+      durationMs: 15 * 60_000, onProgress: noProgress });
+    if (!observed?.verified) fail("MANAGED_RELEASE_ALREADY_CURRENT_OBSERVATION_FAILED");
+    const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ baselineHealth, acceptance, observed,
+      webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest })).digest("hex")}`;
+    return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 1, providerEffects: 0,
+      verificationEffect: "AUTHENTICATED_DIAGNOSTIC_AND_OBSERVATION", acceptanceEvidenceDigest });
   }
   if (!input.execute) {
     return safeResult(input, inventory, "DRY_RUN_READY", {

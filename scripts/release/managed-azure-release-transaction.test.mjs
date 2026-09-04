@@ -385,13 +385,41 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
   });
 
-  it("verifies actual provider digests, health and auth before a same-release zero-effect result", async () => {
+  it("keeps a same-release dry run zero-effect after provider, health and auth verification", async () => {
     const { deps } = dependencies({ releaseApproval: { gitSha: baseSha, schemaApprovalDigest: "8".repeat(64) } });
     const result = await runManagedAzureReleaseTransaction({ ...input, releaseSha: baseSha, releaseVersion: "release-1" }, deps);
     expect(result).toMatchObject({ status: "ALREADY_CURRENT", effects: 0 });
     expect(deps.resolveRelease).toHaveBeenCalled(); expect(deps.readApp).toHaveBeenCalledTimes(2);
     expect(deps.healthProbe).toHaveBeenCalled(); expect(deps.authPreflight).toHaveBeenCalled();
     expect(deps.lease).toHaveBeenCalledTimes(1); expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.acceptanceProbe).not.toHaveBeenCalled(); expect(deps.observeNewRelease).not.toHaveBeenCalled();
+  });
+
+  it("runs authenticated web and worker diagnostics plus observation for an already-current hosted release", async () => {
+    const { deps } = dependencies({ releaseApproval: { gitSha: baseSha, schemaApprovalDigest: "8".repeat(64) } });
+    const result = await runManagedAzureReleaseTransaction({ ...input, releaseSha: baseSha, releaseVersion: "release-1", execute: true }, deps);
+    expect(result).toMatchObject({ status: "ALREADY_CURRENT", effects: 1, providerEffects: 0,
+      verificationEffect: "AUTHENTICATED_DIAGNOSTIC_AND_OBSERVATION", acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/) });
+    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({
+      release: expect.objectContaining({ gitSha: baseSha }), operationId: expect.any(String),
+    }));
+    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({
+      release: expect.objectContaining({ gitSha: baseSha }), durationMs: 15 * 60_000,
+    }));
+    expect(deps.lease).toHaveBeenCalledTimes(1);
+    expect(deps.importRole).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["diagnostic rejection", { acceptance: { accepted: false } }, "MANAGED_RELEASE_ALREADY_CURRENT_DIAGNOSTIC_FAILED"],
+    ["wrong worker SHA", { acceptance: { accepted: true, webGitSha: baseSha, receipt: { workerGitSha: nextSha } } }, "MANAGED_RELEASE_ALREADY_CURRENT_DIAGNOSTIC_FAILED"],
+    ["observation failure", { observation: { verified: false } }, "MANAGED_RELEASE_ALREADY_CURRENT_OBSERVATION_FAILED"],
+  ])("rejects an already-current hosted release after %s", async (_scenario, options, expectedCode) => {
+    const { deps } = dependencies({ releaseApproval: { gitSha: baseSha, schemaApprovalDigest: "8".repeat(64) }, ...options });
+    await expect(runManagedAzureReleaseTransaction({ ...input, releaseSha: baseSha, releaseVersion: "release-1", execute: true }, deps))
+      .rejects.toMatchObject({ code: expectedCode });
+    expect(deps.lease).toHaveBeenCalledTimes(1);
+    expect(deps.importRole).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
   });
 
   it("rejects a same-SHA no-op when the requested release version differs", async () => {

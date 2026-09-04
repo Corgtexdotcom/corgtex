@@ -5186,8 +5186,8 @@ describe("control plane domain", () => {
       managedWorkspace: null,
       supportCredentialEnc: "encrypted-token",
       supportConnectorStatus: "connected",
-      supportLastSyncAt: new Date("2026-05-24T00:00:00.000Z"),
       remoteWorkspaceId: "remote-ws-1",
+      supportLastSyncAt: new Date("2026-05-24T00:00:00.000Z"),
     });
     prismaMock.supportOperation.findMany.mockResolvedValueOnce([]);
     prismaMock.fleetHealthSnapshot.findFirst.mockResolvedValueOnce({
@@ -8198,6 +8198,34 @@ describe("control plane domain", () => {
     expect(result).toMatchObject({ id: "op-1", status: "COMPLETED" });
   });
 
+  it("binds generic support-operation audit attribution to the selected deployment before effects or replay", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique
+      .mockResolvedValueOnce(supportAuditDeployment({ remoteWorkspaceId: "remote-ws-1" }))
+      .mockResolvedValueOnce(supportAuditDeployment({ remoteWorkspaceId: null }));
+    for (const remoteWorkspaceId of ["other-workspace", "invented-workspace"]) {
+      await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "members.invite",
+        reason: "Reject mismatched audit attribution.", arguments: { email: "new@example.com", role: "CONTRIBUTOR" },
+        remoteWorkspaceId, idempotencyKey: "existing-support-operation" })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    }
+    expect(prismaMock.supportOperation.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps generic support-operation idempotency reason-bound", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    const args = { email: "new@example.com", role: "CONTRIBUTOR" };
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(supportAuditDeployment({ remoteWorkspaceId: "remote-ws-1" }));
+    prismaMock.supportOperation.findUnique.mockResolvedValueOnce({ id: "op-existing", deploymentId: "inst-1",
+      action: "members.invite", reason: "Original approved reason.", status: "COMPLETED", inputSummary: args });
+    await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "members.invite",
+      reason: "Changed approved reason.", arguments: args, remoteWorkspaceId: "remote-ws-1",
+      idempotencyKey: "existing-support-operation" })).rejects.toMatchObject({ status: 409, code: "IDEMPOTENCY_KEY_CONFLICT" });
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   it("derives the release workspace from the authenticated connector and records one idempotent diagnostic", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
@@ -8220,17 +8248,22 @@ describe("control plane domain", () => {
     expect(names).toEqual(["get_current_connection", "dispatch_release_diagnostic"]);
   });
 
-  it("replays a completed release diagnostic before any connector call", async () => {
+  it("replays an exact completed release diagnostic across changed recovery reasons after current workspace validation", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
+    const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
     const operationId = "123e4567-e89b-42d3-a456-426614174001";
     const args = { operationId, expectedGitSha: "a".repeat(40) };
     prismaMock.supportOperation.findUnique.mockResolvedValueOnce({ id: "op-release", deploymentId: "inst-1",
       action: "runtime.release_diagnostic", reason: "Verify exact release worker.", status: "COMPLETED", inputSummary: args });
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(supportAuditDeployment({ remoteWorkspaceId: workspaceId }));
+    global.fetch = vi.fn(async () => mcpToolResult({ workspace: { id: workspaceId },
+      scopes: ["workspace:read", "runtime:read", "runtime:write"] })) as any;
     await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "runtime.release_diagnostic",
-      reason: "Verify exact release worker.", arguments: args, idempotencyKey: `release-diagnostic-start:${operationId}` }))
+      reason: "Resume recovery with fresh operator context.", arguments: args, idempotencyKey: `release-diagnostic-start:${operationId}` }))
       .resolves.toMatchObject({ id: "op-release", idempotentReplay: true });
-    expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(vi.mocked(global.fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)).params.name))
+      .toEqual(["get_current_connection"]);
   });
 
   it("reclaims a failed local release diagnostic and reuses its remote operation identity", async () => {
@@ -8251,7 +8284,7 @@ describe("control plane domain", () => {
     }) as any;
 
     await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "runtime.release_diagnostic",
-      reason: "Verify exact release worker.", arguments: args, idempotencyKey: `release-diagnostic-start:${operationId}` }))
+      reason: "Resume the failed diagnostic with fresh context.", arguments: args, idempotencyKey: `release-diagnostic-start:${operationId}` }))
       .resolves.toMatchObject({ id: "op-release", status: "COMPLETED" });
     expect(prismaMock.supportOperation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: "op-release", status: "FAILED" }, data: expect.objectContaining({ status: "RUNNING", error: null }),

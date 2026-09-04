@@ -10771,21 +10771,24 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     expectedConfigIdentity: args.expectedConfigIdentity,
   } : redactObject(args);
   const idempotencyKey = normalizeSupportAuditIdempotencyKey(params.idempotencyKey);
-  let retryableOperation: Awaited<ReturnType<typeof findSupportAuditByIdempotencyKey>> = null;
-  if (idempotencyKey) {
-    const existing = await findSupportAuditByIdempotencyKey({ idempotencyKey, deploymentId: params.deploymentId,
-      operationAction: params.action, reason, inputSummary, retryFailed: params.action === "runtime.release_diagnostic" });
-    if (existing && "idempotentReplay" in existing) return existing;
-    retryableOperation = existing;
-  }
   const connector = await loadSupportConnector(params.deploymentId);
-  let operationWorkspaceId = params.remoteWorkspaceId?.trim() || null;
+  let operationWorkspaceId: string | null;
   if (params.action === "runtime.release_diagnostic") {
     const connection = await callMcpTool({ mcpUrl: connector.mcpUrl, bearerToken: connector.bearerToken,
       toolName: "get_current_connection", arguments: {} });
     operationWorkspaceId = managedReleaseConnectionWorkspace(connection, connector.deployment);
     invariant(!params.remoteWorkspaceId?.trim() || params.remoteWorkspaceId.trim() === operationWorkspaceId,
       409, "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT", "Managed release workspace binding changed.");
+  } else {
+    operationWorkspaceId = supportAuditRemoteWorkspaceId(connector.deployment, params.remoteWorkspaceId);
+  }
+  let retryableOperation: Awaited<ReturnType<typeof findSupportAuditByIdempotencyKey>> = null;
+  if (idempotencyKey) {
+    const existing = await findSupportAuditByIdempotencyKey({ idempotencyKey, deploymentId: params.deploymentId,
+      operationAction: params.action, reason, inputSummary, retryFailed: params.action === "runtime.release_diagnostic",
+      reasonBound: params.action !== "runtime.release_diagnostic" });
+    if (existing && "idempotentReplay" in existing) return existing;
+    retryableOperation = existing;
   }
 
   const operationData = {
@@ -10941,6 +10944,7 @@ async function findSupportAuditByIdempotencyKey(params: {
   reason: string;
   inputSummary: JsonRecord;
   retryFailed?: boolean;
+  reasonBound?: boolean;
 }) {
   const existing = await prisma.supportOperation.findUnique({
     where: { idempotencyKey: params.idempotencyKey },
@@ -10953,7 +10957,8 @@ async function findSupportAuditByIdempotencyKey(params: {
     "Idempotency key was already used for a different support operation.",
   );
   invariant(
-    existing.reason === params.reason && stableJson(existing.inputSummary ?? null) === stableJson(params.inputSummary),
+    (params.reasonBound === false || existing.reason === params.reason)
+      && stableJson(existing.inputSummary ?? null) === stableJson(params.inputSummary),
     409,
     "IDEMPOTENCY_KEY_CONFLICT",
     "Idempotency key was already used for different support audit evidence.",

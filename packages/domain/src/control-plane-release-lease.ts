@@ -701,8 +701,7 @@ export async function finalizeManagedReleaseRollback(handle: LeaseHandle, eviden
     await requireAdmission(tx, row, true);
     if (row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const envelope = await originatingRollbackEnvelope(tx, row);
-    if (envelope.payload.schemaVersion === 2
-      && envelope.payload.compatibleRecovery.activationPolicy === "EXCLUSIVE") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (envelope.payload.schemaVersion === 2) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const accepted = evidence === undefined ? null : validateRollbackAcceptanceEvidence(evidence, row, envelope);
     await tx.customerDeployment.update({ where: { id: row.id }, data: clearLeaseData() });
     if (accepted) {

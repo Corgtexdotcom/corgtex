@@ -278,13 +278,35 @@ describe("managed Azure release recovery", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
-  it("does not clear an exclusive recovery when compatible acceptance proof fails", async () => {
+  it("routes a standard-policy V2 baseline through the approved compatible recovery", async () => {
     const rollbackPayload = { ...structuredClone(rollback), schemaVersion: 2,
       incoming: { ...rollback.incoming, schemaApprovalDigest: `sha256:${"a".repeat(64)}` }, compatibleRecovery: {
       gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
       web: { image: `${target.acrServer}/corgtex/web@sha256:${"5".repeat(64)}`, digest: `sha256:${"5".repeat(64)}` },
       worker: { image: `${target.acrServer}/corgtex/worker@sha256:${"6".repeat(64)}`, digest: `sha256:${"6".repeat(64)}` },
-      schemaCompatibilityApprovalDigest: `sha256:${"9".repeat(64)}`, acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy: "EXCLUSIVE",
+      schemaCompatibilityApprovalDigest: `sha256:${"9".repeat(64)}`, acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy: "STANDARD",
+    } };
+    const live = resumableSchemaV2State(rollbackPayload, { web: "BASELINE", worker: "BASELINE" });
+    const { deps } = rig({ rollbackPayload, readApp: live.readApp, patchTemplate: live.patchTemplate });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover the approved compatible schema pair.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY",
+      releaseImageTag: rollbackPayload.compatibleRecovery.imageTag });
+    expect(deps.setRevisionActive).not.toHaveBeenCalled();
+    expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web", "worker"]);
+    expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: rollbackPayload.compatibleRecovery.gitSha }) }));
+    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: rollbackPayload.compatibleRecovery.gitSha }) }));
+    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: rollbackPayload.compatibleRecovery.gitSha }) }));
+    expect(deps.lease).toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+
+  it.each(["EXCLUSIVE", "STANDARD"])("does not clear a %s recovery when compatible acceptance proof fails", async (activationPolicy) => {
+    const rollbackPayload = { ...structuredClone(rollback), schemaVersion: 2,
+      incoming: { ...rollback.incoming, schemaApprovalDigest: `sha256:${"a".repeat(64)}` }, compatibleRecovery: {
+      gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      web: { image: `${target.acrServer}/corgtex/web@sha256:${"5".repeat(64)}`, digest: `sha256:${"5".repeat(64)}` },
+      worker: { image: `${target.acrServer}/corgtex/worker@sha256:${"6".repeat(64)}`, digest: `sha256:${"6".repeat(64)}` },
+      schemaCompatibilityApprovalDigest: `sha256:${"9".repeat(64)}`, acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy,
     } };
     for (const scenario of ["auth", "diagnostic", "observation"]) {
       const overrides = scenario === "diagnostic" ? { acceptanceProbe: vi.fn(async () => ({ accepted: false })) }

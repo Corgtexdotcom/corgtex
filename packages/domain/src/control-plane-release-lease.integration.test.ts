@@ -40,7 +40,7 @@ function rollbackPayload() {
     incoming: { webDigest: DIGESTS[2], workerDigest: DIGESTS[3] },
   };
 }
-function rollbackPayloadV2() {
+function rollbackPayloadV2(activationPolicy: "EXCLUSIVE" | "STANDARD" = "EXCLUSIVE") {
   const base = rollbackPayload(); const recoveryGitSha = "c".repeat(40);
   return { ...base, schemaVersion: 2 as const,
     incoming: { ...base.incoming, schemaApprovalDigest: `sha256:${"d".repeat(64)}` },
@@ -49,7 +49,7 @@ function rollbackPayloadV2() {
       worker: { image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, digest: DIGESTS[1] },
       schemaCompatibilityApprovalDigest: `sha256:${"f".repeat(64)}`,
       acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1" as const,
-      activationPolicy: "EXCLUSIVE" as const } };
+      activationPolicy } };
 }
 function diagnosticOperationId(leaseId: string, gitSha: string, purpose: string) {
   const value = createHash("sha256").update(`${purpose}:${leaseId}:${gitSha}`).digest("hex").slice(0, 32).split("");
@@ -67,7 +67,7 @@ async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedC
     providerResourceGroup: RG, providerWebServiceId: WEB, providerWorkerServiceId: WORKER, ...overrides,
   } });
 }
-async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>) {
+async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>, activationPolicy: "EXCLUSIVE" | "STANDARD" = "EXCLUSIVE") {
   await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: row.id } });
   vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
   vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({
@@ -85,7 +85,7 @@ async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>) {
       acrServer: ACR_IDENTITY.acrServer,
       acrResourceGroup: RG,
       evidenceSha256: "e".repeat(64),
-      activationPolicy: "EXCLUSIVE",
+      activationPolicy,
       releaseApproval: { gitSha: "b".repeat(40), schemaApprovalDigest: "d".repeat(64) },
       recovery: {
         gitSha: "c".repeat(40),
@@ -589,9 +589,9 @@ describe("managed release lease CAS", () => {
 });
 
 describe("selected hosted Azure release lifecycle", () => {
-  async function hosted() {
+  async function hosted(activationPolicy: "EXCLUSIVE" | "STANDARD" = "EXCLUSIVE") {
     const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
-    await authorizeHosted(row);
+    await authorizeHosted(row, activationPolicy);
     return row;
   }
   it("admits a selected CORGTEX-owned onboarding primary without changing its lifecycle state", async () => {
@@ -659,8 +659,8 @@ describe("selected hosted Azure release lifecycle", () => {
     expect(final.releaseLeaseId).toBeNull();
     expect(final.providerPostgresServiceId).toBe(row.providerPostgresServiceId);
   });
-  it("requires compatible recovery and never finalizes a V2 exclusive baseline rollback", async () => {
-    const row = await hosted(); const handle = await acquire(row.id); const rollback = rollbackPayloadV2();
+  it.each(["EXCLUSIVE", "STANDARD"] as const)("requires compatible recovery and never finalizes a V2 %s baseline rollback", async (activationPolicy) => {
+    const row = await hosted(activationPolicy); const handle = await acquire(row.id); const rollback = rollbackPayloadV2(activationPolicy);
     await recordManagedReleaseRollbackRecord(handle, rollback); await beginManagedReleaseMutation(handle);
     await expectCode(finalizeManagedReleaseRollback(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const operationId = diagnosticOperationId(handle.leaseId, "a".repeat(40), "baseline-rollback");
