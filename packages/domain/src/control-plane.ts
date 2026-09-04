@@ -11666,7 +11666,7 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
     case "finalize_success":
       return finalizeManagedReleaseSuccess(managedReleaseHandle(params));
     case "finalize_rollback":
-      return finalizeManagedReleaseRollback(managedReleaseHandle(params));
+      return finalizeManagedReleaseRollback(managedReleaseHandle(params), params.evidence);
     case "finalize_compatible_recovery":
       return finalizeManagedReleaseCompatibleRecovery(managedReleaseHandle(params), params.evidence);
     case "mark_recovery":

@@ -341,7 +341,26 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       }
       const health = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
       if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED");
-      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      try { await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: baselineRelease }); }
+      catch { return markRecovery("FENCING", "BASELINE_REACTIVATION_AUTH_FAILED"); }
+      const operationId = diagnosticOperationId(handle.leaseId, baselineRelease.gitSha, "baseline-rollback");
+      const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
+        operationId, release: baselineRelease, reason: input.reason, onProgress: recoveryHeartbeat });
+      if (!acceptance?.accepted || acceptance.webGitSha !== baselineRelease.gitSha
+        || acceptance.receipt?.workerGitSha !== baselineRelease.gitSha || acceptance.receipt?.operationId !== operationId) {
+        return markRecovery("FENCING", "BASELINE_REACTIVATION_DIAGNOSTIC_FAILED");
+      }
+      const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target,
+        origin: preflight.origin, release: baselineRelease,
+        imageDigests: { web: baselines.web.imageDigest, worker: baselines.worker.imageDigest },
+        durationMs: 15 * 60_000, onProgress: recoveryHeartbeat });
+      if (!observed?.verified) return markRecovery("FENCING", "BASELINE_REACTIVATION_OBSERVATION_FAILED");
+      const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
+        webDigest: baselines.web.imageDigest, workerDigest: baselines.worker.imageDigest })).digest("hex")}`;
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason, evidence: {
+        gitSha: baselineRelease.gitSha, imageTag: baselineRelease.imageTag, releaseVersion: baselineRelease.version,
+        webDigest: baselines.web.imageDigest, workerDigest: baselines.worker.imageDigest, operationId, acceptanceEvidenceDigest,
+      } }));
       if (finalized?.status !== "ROLLED_BACK") return markRecovery("FENCING", "BASELINE_REACTIVATION_RECORDING_FAILED");
       return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code });
     } catch {
@@ -585,12 +604,23 @@ function runtimeDependencies(env = process.env) {
         deploymentId, operationId, expectedGitSha: release.gitSha, reason,
       }, env);
       if (start?.status !== "COMPLETED" || !UUID.test(start.workspaceId)) return { accepted: false };
+      let retryRequested = false;
       for (let attempt = 0; attempt < 30; attempt += 1) {
         await onProgress();
         const value = await callControlPlane("read_managed_release_auth", { deploymentId, mode: "status",
           operationId, expectedGitSha: release.gitSha }, env);
         if (value?.accepted === true && value.workspaceId === start.workspaceId) return value;
-        if (value?.status === "FAILED") return { accepted: false };
+        if (value?.status === "FAILED") {
+          if (value.attempts !== 1 || retryRequested) return { accepted: false };
+          retryRequested = true;
+          try {
+            const retry = await callControlPlane("dispatch_managed_release_diagnostic", {
+              deploymentId, operationId, expectedGitSha: release.gitSha, reason, retryAttempt: 1,
+            }, env);
+            if (retry?.status !== "COMPLETED" || retry.workspaceId !== start.workspaceId) return { accepted: false };
+          } catch { /* Reconcile an uncertain retry response by status; never issue it twice in this run. */ }
+          continue;
+        }
         await new Promise((resolve) => setTimeout(resolve, 10_000));
       }
       return { accepted: false };

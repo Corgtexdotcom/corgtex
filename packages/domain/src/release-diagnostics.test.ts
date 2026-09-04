@@ -1,26 +1,29 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentActor } from "@corgtex/shared";
-const mocks = vi.hoisted(() => ({ read: vi.fn(), membership: vi.fn(), upsert: vi.fn(), find: vi.fn() }));
+const mocks = vi.hoisted(() => ({ read: vi.fn(), membership: vi.fn(), upsert: vi.fn(), find: vi.fn(), updateMany: vi.fn() }));
 vi.mock("node:fs", () => ({ readFileSync: mocks.read }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership: mocks.membership }));
-vi.mock("@corgtex/shared", () => ({ prisma: { workflowJob: { upsert: mocks.upsert, findUnique: mocks.find } } }));
+vi.mock("@corgtex/shared", () => ({ prisma: { workflowJob: { upsert: mocks.upsert, findUnique: mocks.find, updateMany: mocks.updateMany } } }));
 import { dispatchReleaseDiagnostic, getReleaseDiagnostic, readReleaseBuildSha, RELEASE_DIAGNOSTIC_JOB_TYPE } from "./release-diagnostics";
 
 const workspaceId = randomUUID(), expectedGitSha = "a".repeat(40);
 const actor: AgentActor = { kind: "agent", authProvider: "credential", label: "Synthetic", workspaceIds: [workspaceId], scopes: ["runtime:read", "runtime:write"] };
 const request = () => ({ operationId: randomUUID(), expectedGitSha });
-function stored(input = request()) {
+function stored(input = request(), overrides = {}) {
   const id = randomUUID();
-  return { id, workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "PENDING", payload: { ...input, schemaVersion: 1,
-    jobId: id, workspaceId, nonce: randomUUID(), webGitSha: expectedGitSha } };
+  return { id, workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "PENDING", attempts: 0, lockedAt: null, lockedBy: null,
+    startedAt: null, completedAt: null, error: null, payload: { ...input, schemaVersion: 1,
+      jobId: id, workspaceId, nonce: randomUUID(), webGitSha: expectedGitSha }, ...overrides };
 }
 
 describe("release diagnostics", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.read.mockReturnValue(JSON.stringify({ schemaVersion: 1, role: "web", gitSha: expectedGitSha }));
-    mocks.upsert.mockImplementation(({ create }) => ({ ...create, status: "PENDING" }));
+    mocks.upsert.mockImplementation(({ create }) => ({ ...create, status: "PENDING", attempts: 0,
+      lockedAt: null, lockedBy: null, startedAt: null, completedAt: null, error: null }));
+    mocks.updateMany.mockResolvedValue({ count: 1 });
   });
   it("creates only a bounded diagnostic with server-owned identity", async () => {
     const result = await dispatchReleaseDiagnostic(actor, workspaceId, request());
@@ -55,6 +58,36 @@ describe("release diagnostics", () => {
     const input = request(), job = stored(input);
     mocks.upsert.mockResolvedValue(job);
     expect(await dispatchReleaseDiagnostic(actor, workspaceId, input)).toEqual(await dispatchReleaseDiagnostic(actor, workspaceId, input));
+  });
+  it("rearms only the first terminal failure with the same job and a fresh nonce", async () => {
+    const input = request(); const job = stored(input, { status: "FAILED", attempts: 1, completedAt: new Date(), error: "failed" });
+    mocks.find.mockResolvedValue(job);
+    const result = await dispatchReleaseDiagnostic(actor, workspaceId, { ...input, retryAttempt: 1 });
+    expect(result).toMatchObject({ jobId: job.id, operationId: input.operationId, status: "PENDING", attempts: 1 });
+    expect(result.nonce).not.toBe(job.payload.nonce);
+    expect(mocks.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: job.id, status: "FAILED", attempts: 1, payload: { equals: job.payload } }),
+      data: expect.objectContaining({ status: "PENDING" }),
+    }));
+    expect(mocks.updateMany.mock.calls[0][0].data).not.toHaveProperty("attempts");
+  });
+  it("keeps pending, running, completed and second-failure retries read-only", async () => {
+    const input = request();
+    for (const job of [stored(input), stored(input, { status: "RUNNING", attempts: 1, lockedAt: new Date(), lockedBy: "worker" }),
+      stored(input, { status: "COMPLETED", attempts: 1 }), stored(input, { status: "FAILED", attempts: 2 })]) {
+      mocks.find.mockResolvedValueOnce(job);
+      await expect(dispatchReleaseDiagnostic(actor, workspaceId, { ...input, retryAttempt: 1 })).resolves.toMatchObject({
+        jobId: job.id, status: job.status, attempts: job.attempts,
+      });
+    }
+    expect(mocks.updateMany).not.toHaveBeenCalled();
+  });
+  it("never creates a job from a retry request", async () => {
+    mocks.find.mockResolvedValue(null);
+    await expect(dispatchReleaseDiagnostic(actor, workspaceId, { ...request(), retryAttempt: 1 }))
+      .rejects.toMatchObject({ code: "RELEASE_DIAGNOSTIC_CONFLICT" });
+    expect(mocks.upsert).not.toHaveBeenCalled();
+    expect(mocks.updateMany).not.toHaveBeenCalled();
   });
   it("rejects operation-ID reuse with another requested release", async () => {
     const input = request();

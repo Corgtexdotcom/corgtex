@@ -68,4 +68,12 @@ describe("Azure target reconciliation", () => {
     await expect(reconcileManagedAzureTarget(request)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_OVERLAP" });
     expect(await prisma.customerDeploymentEvent.count()).toBe(0);
   });
+  it("detects scalar aliases with differently cased protected coordinates", async () => {
+    const { target, request } = await fixture();
+    await prisma.customerDeployment.create({ data: { label: "Other", url: `https://${randomUUID()}.example.test`,
+      providerSubscriptionId: target.subscriptionId.toUpperCase(), providerResourceGroup: target.resourceGroup.toUpperCase(),
+      providerWebServiceId: target.webAppName, providerWorkerServiceId: "different-worker" } });
+    await expect(reconcileManagedAzureTarget(request)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_OVERLAP" });
+    expect(await prisma.customerDeploymentEvent.count()).toBe(0);
+  });
 });

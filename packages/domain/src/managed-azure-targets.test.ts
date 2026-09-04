@@ -11,7 +11,7 @@ function row() { return { id: target.deploymentId, customerAccountId: target.cus
   cloudProvider: "AZURE", environment: "production", url: target.origin, providerSubscriptionId: target.subscriptionId,
   providerResourceGroup: target.resourceGroup, providerWebServiceId: target.webAppName, providerWorkerServiceId: target.workerAppName,
   updatedAt: new Date("2026-01-01T00:00:00Z") } as CustomerDeployment; }
-function install(value = target) { vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ schemaVersion: 1, targets: [value] })); }
+function install(value: unknown = target) { vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ schemaVersion: 1, targets: [value] })); }
 describe("protected Azure target configuration", () => {
   afterEach(() => vi.unstubAllEnvs());
   it("binds stable deployment/account identity and exact provider target including registry", () => {
@@ -33,6 +33,17 @@ describe("protected Azure target configuration", () => {
     for (const value of ["broken", JSON.stringify({ schemaVersion: 1, targets: [{ ...target, acrServer: "other.azurecr.io" }] }),
       JSON.stringify({ schemaVersion: 1, targets: [{ ...target, releaseEligible: true }] }),
       JSON.stringify({ schemaVersion: 1, targets: [target, { ...target, deploymentId: randomUUID() }] })]) expect(() => managedAzureTargets(value)).toThrow();
+  });
+  it("canonicalizes subscription UUIDs and rejects case-only target aliases", () => {
+    const upper = { ...target, subscriptionId: target.subscriptionId.toUpperCase() };
+    const parsed = managedAzureTargets(JSON.stringify({ schemaVersion: 1, targets: [upper] }));
+    expect(parsed[0].subscriptionId).toBe(target.subscriptionId);
+    install(upper);
+    expect(assertManagedAzureTargetBinding(row())).toMatchObject({ subscriptionId: target.subscriptionId });
+    expect(() => managedAzureTargets(JSON.stringify({ schemaVersion: 1, targets: [target, {
+      ...target, deploymentId: randomUUID(), customerAccountId: randomUUID(), origin: "https://alias.example.test",
+      subscriptionId: target.subscriptionId.toUpperCase(),
+    }] }))).toThrow();
   });
   it("binds provider evidence and observed metadata changes into comparison digests", () => {
     expect(managedAzureTargetDigest(target)).not.toBe(managedAzureTargetDigest({ ...target, evidenceSha256: "b".repeat(64) }));

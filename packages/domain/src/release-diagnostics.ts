@@ -10,6 +10,9 @@ const sha = z.string().regex(/^[a-f0-9]{40}$/);
 export const releaseDiagnosticRequestSchema = z.object({
   operationId: z.string().uuid(), expectedGitSha: sha,
 }).strict();
+export const releaseDiagnosticDispatchSchema = releaseDiagnosticRequestSchema.extend({
+  retryAttempt: z.literal(1).optional(),
+}).strict();
 export const releaseDiagnosticPayloadSchema = releaseDiagnosticRequestSchema.extend({
   schemaVersion: z.literal(1), jobId: z.string().uuid(), workspaceId: z.string().uuid(),
   nonce: z.string().uuid(), webGitSha: sha,
@@ -36,7 +39,7 @@ async function requireDiagnosticAccess(actor: AppActor, workspaceId: string, wri
   await requireWorkspaceMembership({ actor, workspaceId, ...(actor.kind === "user" ? { allowedRoles: ["ADMIN", "FACILITATOR"] as ("ADMIN" | "FACILITATOR")[] } : {}) });
 }
 
-function diagnosticView(job: { id: string; workspaceId: string | null; type: string; status: string; payload: unknown }, request: ReleaseDiagnosticRequest) {
+function diagnosticView(job: { id: string; workspaceId: string | null; type: string; status: string; payload: unknown; attempts: number }, request: ReleaseDiagnosticRequest) {
   const raw = job.payload as Record<string, unknown> | null;
   const { receipt: rawReceipt, ...input } = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const payload = releaseDiagnosticPayloadSchema.safeParse(input);
@@ -49,24 +52,52 @@ function diagnosticView(job: { id: string; workspaceId: string | null; type: str
     && receipt.data.workerGitSha === request.expectedGitSha && payload.data.webGitSha === request.expectedGitSha;
   return { jobId: job.id, workspaceId: job.workspaceId, operationId: request.operationId,
     nonce: payload.data.nonce, expectedGitSha: request.expectedGitSha, webGitSha: payload.data.webGitSha,
-    status: job.status, accepted, receipt: accepted && receipt.success ? receipt.data : null };
+    status: job.status, attempts: job.attempts, accepted, receipt: accepted && receipt.success ? receipt.data : null };
 }
 
-export async function dispatchReleaseDiagnostic(actor: AppActor, workspaceId: string, input: ReleaseDiagnosticRequest) {
+export async function dispatchReleaseDiagnostic(actor: AppActor, workspaceId: string, input: z.infer<typeof releaseDiagnosticDispatchSchema>) {
   await requireDiagnosticAccess(actor, workspaceId, true);
-  const request = releaseDiagnosticRequestSchema.parse(input);
+  const dispatch = releaseDiagnosticDispatchSchema.parse(input);
+  const request = releaseDiagnosticRequestSchema.parse({ operationId: dispatch.operationId, expectedGitSha: dispatch.expectedGitSha });
   const webGitSha = readReleaseBuildSha("web");
   invariant(webGitSha === request.expectedGitSha, 409, "RELEASE_BUILD_MISMATCH", "The serving web build differs from the requested release.");
   const id = randomUUID();
   const payload = { ...request, schemaVersion: 1 as const, jobId: id, workspaceId, nonce: randomUUID(), webGitSha };
-  // A lost response is retried with the same operation ID. Upsert never replaces
-  // the original nonce/job or schedules a second diagnostic.
-  const job = await prisma.workflowJob.upsert({
-    where: { dedupeKey: `${RELEASE_DIAGNOSTIC_JOB_TYPE}:${workspaceId}:${request.operationId}` }, update: {},
-    create: { id, workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, payload,
-      dedupeKey: `${RELEASE_DIAGNOSTIC_JOB_TYPE}:${workspaceId}:${request.operationId}` },
-    select: { id: true, workspaceId: true, type: true, status: true, payload: true },
-  });
+  const dedupeKey = `${RELEASE_DIAGNOSTIC_JOB_TYPE}:${workspaceId}:${request.operationId}`;
+  const select = { id: true, workspaceId: true, type: true, status: true, payload: true, attempts: true,
+    lockedAt: true, lockedBy: true, startedAt: true, completedAt: true, error: true } as const;
+  // A retry may only re-arm the durable job created by the original dispatch.
+  // An initial lost response still uses upsert and can never replace its nonce/job.
+  let job = dispatch.retryAttempt === 1
+    ? await prisma.workflowJob.findUnique({ where: { dedupeKey }, select })
+    : await prisma.workflowJob.upsert({
+      where: { dedupeKey }, update: {},
+      create: { id, workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, payload, dedupeKey }, select,
+    });
+  invariant(job, 409, "RELEASE_DIAGNOSTIC_CONFLICT", "The original diagnostic does not exist.");
+  diagnosticView(job, request);
+  if (dispatch.retryAttempt === 1 && job.status === "FAILED" && job.attempts === 1) {
+    const failedPayload = releaseDiagnosticPayloadSchema.safeParse(job.payload);
+    invariant(failedPayload.success && !job.lockedAt && !job.lockedBy,
+      409, "RELEASE_DIAGNOSTIC_CONFLICT", "Failed diagnostic state is not safely retryable.");
+    const retryPayload = { ...failedPayload.data, nonce: randomUUID() };
+    const retried = await prisma.workflowJob.updateMany({
+      where: { id: job.id, workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, status: "FAILED", attempts: 1,
+        lockedAt: null, lockedBy: null, payload: { equals: failedPayload.data } },
+      data: { status: "PENDING", payload: retryPayload, runAfter: new Date(), startedAt: null,
+        completedAt: null, error: null, lockedAt: null, lockedBy: null },
+    });
+    if (retried.count === 1) {
+      job = { ...job, status: "PENDING", payload: retryPayload, startedAt: null, completedAt: null, error: null };
+    } else {
+      const current = await prisma.workflowJob.findUnique({
+        where: { id: job.id },
+        select,
+      });
+      invariant(current, 409, "RELEASE_DIAGNOSTIC_CONFLICT", "Diagnostic retry identity disappeared.");
+      job = current;
+    }
+  }
   return diagnosticView(job, request);
 }
 
@@ -77,7 +108,7 @@ export async function getReleaseDiagnostic(actor: AppActor, workspaceId: string,
   invariant(webGitSha === request.expectedGitSha, 409, "RELEASE_BUILD_MISMATCH", "The serving web build differs from the requested release.");
   const job = await prisma.workflowJob.findUnique({
     where: { dedupeKey: `${RELEASE_DIAGNOSTIC_JOB_TYPE}:${workspaceId}:${request.operationId}` },
-    select: { id: true, workspaceId: true, type: true, status: true, payload: true },
+    select: { id: true, workspaceId: true, type: true, status: true, payload: true, attempts: true },
   });
   invariant(job && job.workspaceId === workspaceId, 404, "NOT_FOUND", "Release diagnostic not found.");
   return diagnosticView(job, request);

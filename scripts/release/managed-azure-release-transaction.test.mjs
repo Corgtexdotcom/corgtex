@@ -293,7 +293,33 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
       .toEqual([["web", "web-app--base-web", true], ["worker", "worker-app--base-worker", true]]);
     expect(deps.patchTemplate).not.toHaveBeenCalled();
-    expect(deps.lease).toHaveBeenCalledWith("finalize_rollback", expect.anything());
+    expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }) }));
+    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }), operationId: expect.any(String) }));
+    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }),
+      imageDigests: { web: digests.web, worker: digests.worker }, durationMs: 15 * 60_000 }));
+    expect(deps.lease).toHaveBeenCalledWith("finalize_rollback", expect.objectContaining({ evidence: expect.objectContaining({
+      gitSha: baseSha, webDigest: digests.web, workerDigest: digests.worker,
+      acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/),
+    }) }));
+  });
+
+  it("retains the fence when exclusive baseline acceptance cannot be proven", async () => {
+    for (const scenario of ["auth", "diagnostic", "observation"]) {
+      const options = scenario === "diagnostic" ? { acceptance: { accepted: false } }
+        : scenario === "observation" ? { observation: { verified: false } } : {};
+      const { deps } = dependencies({ activationPolicy: "EXCLUSIVE", ...options });
+      const baseLease = deps.lease.getMockImplementation(); let drained = false; let failed = false;
+      deps.drainBaseline.mockImplementation(async () => { drained = true; return { terminal: true, succeeded: true }; });
+      deps.lease.mockImplementation(async (operation, args) => {
+        if (drained && !failed && operation === "heartbeat_recovery") { failed = true; throw new Error("lost heartbeat response"); }
+        return baseLease(operation, args);
+      });
+      if (scenario === "auth") deps.authPreflight.mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error("revoked"));
+      const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+      expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING",
+        code: `BASELINE_REACTIVATION_${scenario === "auth" ? "AUTH" : scenario === "diagnostic" ? "DIAGNOSTIC" : "OBSERVATION"}_FAILED` });
+      expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+    }
   });
 
   it("requires authenticated app/worker acceptance and observation before success recording", async () => {

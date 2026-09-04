@@ -208,6 +208,29 @@ async function classifyCompatibleRecoveryRole(deps, status, rollback, role, base
   return { kind: "UNKNOWN", state: null };
 }
 
+async function verifyRecoveryReleaseAcceptance(deps, { deploymentId, target, origin, release, imageDigests,
+  operationId, reason, heartbeat, failurePrefix, handle }) {
+  const block = async (stage, code) => {
+    await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason })).catch(() => undefined);
+    fail(code);
+  };
+  const health = await deps.healthProbe({ origin, release });
+  if (!health.ok) await block("OBSERVATION", health.code ?? `${failurePrefix}_HEALTH_FAILED`);
+  try { await deps.authPreflight({ deploymentId, reason, release }); }
+  catch { await block("AUTH", `${failurePrefix}_AUTH_FAILED`); }
+  const acceptance = await deps.acceptanceProbe({ deploymentId, origin, operationId, release, reason, onProgress: heartbeat });
+  if (!acceptance?.accepted || acceptance.webGitSha !== release.gitSha
+    || acceptance.receipt?.workerGitSha !== release.gitSha || acceptance.receipt?.operationId !== operationId) {
+    await block("DIAGNOSTIC", `${failurePrefix}_DIAGNOSTIC_FAILED`);
+  }
+  const observed = await deps.observeNewRelease({ deploymentId, target, origin, release, imageDigests,
+    durationMs: 15 * 60_000, onProgress: heartbeat });
+  if (!observed?.verified) await block("OBSERVATION", `${failurePrefix}_OBSERVATION_FAILED`);
+  const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
+    webDigest: imageDigests.web, workerDigest: imageDigests.worker })).digest("hex")}`;
+  return { health, acceptance, observed, acceptanceEvidenceDigest };
+}
+
 export function managedAzureRecoveryCliResultAccepted(result) {
   return result?.status === "RECOVERY_CLEARED";
 }
@@ -305,16 +328,26 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         releaseImageTag: finalized.releaseImageTag, releaseVersion: finalized.releaseVersion });
     }
     if (web.kind === "BASELINE" && worker.kind === "BASELINE") {
-      if (rollback.schemaVersion === 2 && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE") {
+      const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
+      const exclusive = rollback.schemaVersion === 2 && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE";
+      let rollbackEvidence;
+      if (exclusive) {
         for (const role of ["web", "worker"]) {
           const activated = await deps.setRevisionActive({ target: status.target, role, revisionName: rollback.previous[role].readyRevision,
-            active: true, onProgress: () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason })) });
+            active: true, onProgress: heartbeat });
           if (!activated.terminal || !activated.succeeded) fail("MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS");
         }
-        const health = await deps.healthProbe({ origin: status.origin, release: baseline });
-        if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_HEALTH_FAILED");
+        const operationId = diagnosticOperationId(originatingLease.leaseId, baseline.gitSha, "baseline-rollback");
+        const imageDigests = { web: digestFromImage(rollback.previous.web.image), worker: digestFromImage(rollback.previous.worker.image) };
+        const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
+          origin: status.origin, release: baseline, imageDigests, operationId, reason: input.reason, heartbeat,
+          failurePrefix: "MANAGED_RELEASE_RECOVERY_ROLLBACK", handle });
+        rollbackEvidence = { gitSha: baseline.gitSha, imageTag: baseline.imageTag, releaseVersion: baseline.version,
+          webDigest: imageDigests.web, workerDigest: imageDigests.worker, operationId,
+          acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest };
       }
-      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason,
+        ...(rollbackEvidence ? { evidence: rollbackEvidence } : {}) }));
       if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({
         status: "RECOVERY_CLEARED",
@@ -358,9 +391,22 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         const restored = await classifyBaselineRole(deps, status, rollback, role, baseline, rollbackSuffixes[role]);
         if (restored.kind !== "BASELINE") fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_AMBIGUOUS");
       }
-      const health = await deps.healthProbe({ origin: status.origin, release: baseline });
-      if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_HEALTH_FAILED");
-      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      let rollbackEvidence;
+      if (rollback.schemaVersion === 2 && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE") {
+        const operationId = diagnosticOperationId(originatingLease.leaseId, baseline.gitSha, "baseline-rollback");
+        const imageDigests = { web: digestFromImage(rollback.previous.web.image), worker: digestFromImage(rollback.previous.worker.image) };
+        const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
+          origin: status.origin, release: baseline, imageDigests, operationId, reason: input.reason, heartbeat,
+          failurePrefix: "MANAGED_RELEASE_RECOVERY_ROLLBACK", handle });
+        rollbackEvidence = { gitSha: baseline.gitSha, imageTag: baseline.imageTag, releaseVersion: baseline.version,
+          webDigest: imageDigests.web, workerDigest: imageDigests.worker, operationId,
+          acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest };
+      } else {
+        const health = await deps.healthProbe({ origin: status.origin, release: baseline });
+        if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_HEALTH_FAILED");
+      }
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason,
+        ...(rollbackEvidence ? { evidence: rollbackEvidence } : {}) }));
       if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({ status: "RECOVERY_CLEARED", deploymentId: input.deploymentId, previousLeaseId: status.leaseId,
         previousFence: status.fence, fence: finalized.fence, releaseImageTag: finalized.releaseImageTag,
@@ -398,11 +444,11 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code: "WEB_READBACK_MISMATCH", reason: input.reason })).catch(() => undefined);
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: "WEB_READBACK_MISMATCH" });
       }
-      const health = await deps.healthProbe({ origin: status.origin, release: incoming });
-      if (!health.ok) {
-        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "OBSERVATION", code: health.code ?? "HEALTH_PROBE_FAILED", reason: input.reason })).catch(() => undefined);
-        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: health.code ?? "HEALTH_PROBE_FAILED" });
-      }
+      await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
+        origin: status.origin, release: incoming, imageDigests: { web: rollback.incoming.webDigest, worker: rollback.incoming.workerDigest },
+        operationId: originatingLease.leaseId, reason: input.reason,
+        heartbeat: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })),
+        failurePrefix: "MANAGED_RELEASE_RECOVERY_FORWARD", handle });
       const finalized = await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
       if (finalized?.status !== "SUCCEEDED") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({
@@ -417,11 +463,11 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       });
     }
     if (web.kind === "FORWARD" && worker.kind === "FORWARD") {
-      const health = await deps.healthProbe({ origin: status.origin, release: incoming });
-      if (!health.ok) {
-        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "OBSERVATION", code: health.code ?? "HEALTH_PROBE_FAILED", reason: input.reason })).catch(() => undefined);
-        return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: health.code ?? "HEALTH_PROBE_FAILED" });
-      }
+      await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
+        origin: status.origin, release: incoming, imageDigests: { web: rollback.incoming.webDigest, worker: rollback.incoming.workerDigest },
+        operationId: originatingLease.leaseId, reason: input.reason,
+        heartbeat: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })),
+        failurePrefix: "MANAGED_RELEASE_RECOVERY_FORWARD", handle });
       const finalized = await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
       if (finalized?.status !== "SUCCEEDED") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({
@@ -536,12 +582,23 @@ function runtimeDependencies(env = process.env) {
         deploymentId, operationId, expectedGitSha: release.gitSha, reason,
       }, env);
       if (start?.status !== "COMPLETED" || !UUID.test(start.workspaceId)) return { accepted: false };
+      let retryRequested = false;
       for (let attempt = 0; attempt < 30; attempt += 1) {
         await onProgress();
         const value = await callControlPlane("read_managed_release_auth", { deploymentId, mode: "status",
           operationId, expectedGitSha: release.gitSha }, env);
         if (value?.accepted === true && value.workspaceId === start.workspaceId) return value;
-        if (value?.status === "FAILED") return { accepted: false };
+        if (value?.status === "FAILED") {
+          if (value.attempts !== 1 || retryRequested) return { accepted: false };
+          retryRequested = true;
+          try {
+            const retry = await callControlPlane("dispatch_managed_release_diagnostic", {
+              deploymentId, operationId, expectedGitSha: release.gitSha, reason, retryAttempt: 1,
+            }, env);
+            if (retry?.status !== "COMPLETED" || retry.workspaceId !== start.workspaceId) return { accepted: false };
+          } catch { /* Reconcile an uncertain retry response by status; never issue it twice in this run. */ }
+          continue;
+        }
         await new Promise((resolve) => setTimeout(resolve, 10_000));
       }
       return { accepted: false };

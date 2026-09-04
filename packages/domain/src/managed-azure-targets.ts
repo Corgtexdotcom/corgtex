@@ -4,7 +4,7 @@ import { prisma } from "@corgtex/shared";
 import { z } from "zod";
 import { invariant } from "./errors";
 
-const uuid = z.string().uuid();
+const uuid = z.string().uuid().transform((value) => value.toLowerCase());
 const group = z.string().min(1).max(90).regex(/^[A-Za-z0-9][A-Za-z0-9_.()-]*$/);
 const app = z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*[a-z0-9]$/).refine((value) => !value.includes("--"));
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -31,7 +31,8 @@ export function managedAzureTargets(raw = process.env.MANAGED_RELEASE_TARGETS_JS
   const parsed = z.object({ schemaVersion: z.literal(1), targets: z.array(managedAzureTargetSchema).min(1).max(100) }).strict().safeParse(value);
   invariant(parsed.success, 409, "MANAGED_RELEASE_TARGET_CONFIG_INVALID", "Protected target configuration is invalid.");
   const targets = parsed.data.targets;
-  const apps = targets.flatMap((target) => [target.webAppName, target.workerAppName].map((name) => `${target.subscriptionId}/${target.resourceGroup.toLowerCase()}/${name}`));
+  const apps = targets.flatMap((target) => [target.webAppName, target.workerAppName]
+    .map((name) => `${target.subscriptionId.toLowerCase()}/${target.resourceGroup.toLowerCase()}/${name}`));
   invariant(new Set(targets.map((target) => target.deploymentId)).size === targets.length && new Set(apps).size === apps.length,
     409, "MANAGED_RELEASE_TARGET_CONFIG_INVALID", "Protected targets overlap.");
   return targets;
@@ -74,7 +75,8 @@ export function assertManagedAzureTargetBinding(row: CustomerDeployment, acr?: {
   if (!target) return null; // Preserve unmapped historical REMOTE_MANAGED behavior.
   invariant(row.customerAccountId === target.customerAccountId && row.deploymentKind === target.deploymentKind
     && row.cloudProvider === "AZURE" && row.environment === "production" && row.url.replace(/\/$/, "") === target.origin
-    && row.providerSubscriptionId === target.subscriptionId && row.providerResourceGroup?.toLowerCase() === target.resourceGroup.toLowerCase()
+    && row.providerSubscriptionId?.toLowerCase() === target.subscriptionId.toLowerCase()
+    && row.providerResourceGroup?.toLowerCase() === target.resourceGroup.toLowerCase()
     && appName(row.providerWebServiceId, target) === target.webAppName && appName(row.providerWorkerServiceId, target) === target.workerAppName
     && (!acr || (acr.acrName === target.acrName && acr.acrServer === target.acrServer)),
     409, "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT", "Deployment or registry differs from the protected target.");
@@ -129,7 +131,8 @@ export async function reconcileManagedAzureTarget(input: z.infer<typeof reconcil
     const fullServiceIds = [target.webAppName, target.workerAppName].map((name) => `${targetResourcePrefix}${name}`);
     const aliases = await tx.customerDeployment.findMany({ where: { id: { not: row.id }, OR: [
       { url: { in: [target.origin, `${target.origin}/`] } },
-      { providerSubscriptionId: target.subscriptionId, providerResourceGroup: { equals: target.resourceGroup, mode: "insensitive" } },
+      { providerSubscriptionId: { equals: target.subscriptionId, mode: "insensitive" },
+        providerResourceGroup: { equals: target.resourceGroup, mode: "insensitive" } },
       { providerWebServiceId: { in: fullServiceIds, mode: "insensitive" } },
       { providerWorkerServiceId: { in: fullServiceIds, mode: "insensitive" } },
     ] }, select: { url: true, providerSubscriptionId: true, providerResourceGroup: true,

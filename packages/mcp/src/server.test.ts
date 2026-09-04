@@ -90,7 +90,7 @@ const resolveDeliberationEntryMock = vi.fn();
 const getWorkspacePermanentPathForEntityMock = vi.fn();
 
 vi.mock("@corgtex/domain", async () => {
-  const { releaseDiagnosticRequestSchema } = await import("../../domain/src/release-diagnostics");
+  const { releaseDiagnosticDispatchSchema, releaseDiagnosticRequestSchema } = await import("../../domain/src/release-diagnostics");
   const { MCP_TOOL_CAPABILITIES } = await import("../../domain/src/mcp-tool-capabilities");
   const { coerceWorkItemPriorityInput, formatWorkItemPriority } = await import("../../domain/src/work-item-priority");
   const {
@@ -101,6 +101,7 @@ vi.mock("@corgtex/domain", async () => {
   } = await import("../../domain/src/work-item-normalization");
 
   return {
+  releaseDiagnosticDispatchSchema,
   releaseDiagnosticRequestSchema,
   dispatchReleaseDiagnostic: dispatchReleaseDiagnosticMock,
   getReleaseDiagnostic: getReleaseDiagnosticMock,
@@ -2184,10 +2185,12 @@ describe("createCorgtexMcpServer", () => {
     const server = createCorgtexMcpServer({ actor: { kind: "agent", authProvider: "credential", label: "release", scopes: ["runtime:read", "runtime:write"] } as any,
       workspaceId: "ws-1", authKind: "agent", scopes: ["runtime:read", "runtime:write"] });
     await (server as any)._registeredTools.dispatch_release_diagnostic.handler({ operationId, expectedGitSha });
+    await (server as any)._registeredTools.dispatch_release_diagnostic.handler({ operationId, expectedGitSha, retryAttempt: 1 });
     await (server as any)._registeredTools.get_release_diagnostic.handler({ operationId, expectedGitSha });
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "runtime:write");
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "runtime:read");
     expect(dispatchReleaseDiagnosticMock).toHaveBeenCalledWith(expect.anything(), "ws-1", { operationId, expectedGitSha });
+    expect(dispatchReleaseDiagnosticMock).toHaveBeenCalledWith(expect.anything(), "ws-1", { operationId, expectedGitSha, retryAttempt: 1 });
     expect(getReleaseDiagnosticMock).toHaveBeenCalledWith(expect.anything(), "ws-1", { operationId, expectedGitSha });
   });
 

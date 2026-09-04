@@ -111,6 +111,7 @@ import {
   listRuntimeJobs,
   dispatchReleaseDiagnostic,
   getReleaseDiagnostic,
+  releaseDiagnosticDispatchSchema,
   releaseDiagnosticRequestSchema,
   listFailedJobs,
   replayWorkflowJob,
@@ -2295,8 +2296,8 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
   tool(
     "dispatch_release_diagnostic",
     "Verify this authenticated web build and enqueue one idempotent no-content worker diagnostic. No inference, delivery or business processing.",
-    releaseDiagnosticRequestSchema.shape,
-    async (params: { operationId: string; expectedGitSha: string }) => {
+    releaseDiagnosticDispatchSchema.shape,
+    async (params: { operationId: string; expectedGitSha: string; retryAttempt?: 1 }) => {
       requireScope(sessionCtx, "runtime:write");
       return jsonResult(await dispatchReleaseDiagnostic(actor, workspaceId, params));
     },

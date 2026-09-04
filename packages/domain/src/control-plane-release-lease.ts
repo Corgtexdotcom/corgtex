@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Prisma, type CustomerDeployment, type CustomerDeploymentEvent } from "@prisma/client";
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
@@ -58,6 +58,40 @@ function validateRecoveryEvidence(value: RecoveryEvidence) {
   requireInput(typeof raw.code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(raw.code));
   return Object.freeze({ stage, code: raw.code });
 }
+function diagnosticOperationId(leaseId: string, gitSha: string, purpose: string) {
+  const value = createHash("sha256").update(`${purpose}:${leaseId}:${gitSha}`).digest("hex").slice(0, 32).split("");
+  value[12] = "5";
+  value[16] = (8 + (Number.parseInt(value[16]!, 16) % 4)).toString(16);
+  const hex = value.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function imageDigest(image: string) {
+  const matched = /@(sha256:[0-9a-f]{64})$/.exec(image);
+  if (!matched) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  return matched[1]!;
+}
+function validateRollbackAcceptanceEvidence(value: unknown, row: CustomerDeployment, envelope: RollbackEnvelope) {
+  const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_INVALID_INPUT", 400));
+  const raw = reader.exactRecord(value, ["gitSha", "imageTag", "releaseVersion", "webDigest", "workerDigest", "operationId", "acceptanceEvidenceDigest"] as const);
+  const gitSha = reader.gitSha(raw.gitSha);
+  const accepted = {
+    gitSha,
+    imageTag: reader.imageTag(raw.imageTag, gitSha),
+    releaseVersion: reader.version(raw.releaseVersion),
+    webDigest: reader.digest(raw.webDigest),
+    workerDigest: reader.digest(raw.workerDigest),
+    operationId: reader.uuid(raw.operationId),
+    acceptanceEvidenceDigest: reader.digest(raw.acceptanceEvidenceDigest),
+  };
+  const previous = envelope.payload.previous;
+  if (accepted.imageTag !== row.releaseImageTag || accepted.releaseVersion !== row.releaseVersion
+    || accepted.releaseVersion !== previous.releaseVersion
+    || accepted.webDigest !== imageDigest(previous.web.image) || accepted.workerDigest !== imageDigest(previous.worker.image)
+    || accepted.operationId !== diagnosticOperationId(envelope.leaseId, accepted.gitSha, "baseline-rollback")) {
+    reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  }
+  return Object.freeze(accepted);
+}
 function targetInputs(handle: LeaseHandle, acrIdentity: AcrIdentity) {
   requireInput(!hasEnumerablePrototypeField(Object.prototype) && !hasEnumerablePrototypeField(Array.prototype));
   const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_INVALID_INPUT", 400));
@@ -99,7 +133,8 @@ function azureDeploymentAppName(reader: ReturnType<typeof createManagedReleasePr
 }
 function projectedDeploymentTarget(row: CustomerDeployment) {
   const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
-  const subscriptionId = reader.uuid(row.providerSubscriptionId);
+  const subscriptionId = reader.uuid(typeof row.providerSubscriptionId === "string"
+    ? row.providerSubscriptionId.toLowerCase() : row.providerSubscriptionId);
   const resourceGroup = reader.azureResourceGroup(row.providerResourceGroup);
   return {
     subscriptionId,
@@ -118,7 +153,7 @@ function targetView(row: LockedDeployment, acrIdentity: AcrIdentity) {
     || !row.releaseLeaseIncomingImageTag || !IMAGE_TAG.test(row.releaseLeaseIncomingImageTag)
     || row.releaseLeaseIncomingImageTag === row.releaseImageTag
     || !row.releaseLeasePhase || !ACTIVE_PHASES.includes(row.releaseLeasePhase)
-    || !row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    || !row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId.toLowerCase())) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
   const baselineVersion = row.releaseVersion === null ? null : reader.version(row.releaseVersion);
   const incomingVersion = row.releaseLeaseIncomingVersion;
   if (typeof incomingVersion !== "string") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
@@ -373,7 +408,8 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
     }
     await assertNoTargetOverlap(tx, row);
     const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
-    if (!row.releaseImageTag || !IMAGE_TAG.test(row.releaseImageTag) || !row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (!row.releaseImageTag || !IMAGE_TAG.test(row.releaseImageTag) || !row.providerSubscriptionId
+      || !UUID.test(row.providerSubscriptionId.toLowerCase())) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const acrName = reader.azureAcrName(input.acrIdentity.acrName);
     const { subscriptionId, resourceGroup, webAppName, workerAppName } = projectedDeploymentTarget(row);
     const target = reader.exactRecord({
@@ -408,7 +444,7 @@ export async function getManagedReleaseBootstrapTarget(deploymentId: string, acr
     }
     await assertNoTargetOverlap(tx, row);
     const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
-    if (!row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (!row.providerSubscriptionId || !UUID.test(row.providerSubscriptionId.toLowerCase())) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const acrName = reader.azureAcrName(input.acrIdentity.acrName);
     const { subscriptionId, resourceGroup, webAppName, workerAppName } = projectedDeploymentTarget(row);
     const target = reader.exactRecord({
@@ -618,14 +654,28 @@ export async function finalizeManagedReleaseCompatibleRecovery(handle: LeaseHand
   });
 }
 
-export async function finalizeManagedReleaseRollback(handle: LeaseHandle) {
+export async function finalizeManagedReleaseRollback(handle: LeaseHandle, evidence?: unknown) {
   return transact(async (tx) => {
     const row = await owned(tx, handle);
     await requireAdmission(tx, row, true);
     if (row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
-    storedRollbackPayload(row);
+    const envelope = await originatingRollbackEnvelope(tx, row);
+    const acceptanceRequired = envelope.payload.schemaVersion === 2
+      && envelope.payload.compatibleRecovery.activationPolicy === "EXCLUSIVE";
+    const accepted = evidence === undefined ? null : validateRollbackAcceptanceEvidence(evidence, row, envelope);
+    if (acceptanceRequired && !accepted) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     await tx.customerDeployment.update({ where: { id: row.id }, data: clearLeaseData() });
-    await event(tx, row, "control_plane.release_lease.rolled_back");
+    if (accepted) {
+      await tx.customerDeploymentEvent.create({ data: { deploymentId: row.id, action: "control_plane.release_lease.rolled_back",
+        meta: { leaseId: row.releaseLeaseId, fence: row.releaseLeaseFence, owner: row.releaseLeaseOwner,
+          expectedImageTag: row.releaseLeaseExpectedImageTag, incomingImageTag: row.releaseLeaseIncomingImageTag,
+          incomingVersion: row.releaseLeaseIncomingVersion, releaseImageTag: accepted.imageTag,
+          releaseVersion: accepted.releaseVersion, webDigest: accepted.webDigest, workerDigest: accepted.workerDigest,
+          diagnosticOperationId: accepted.operationId, acceptanceEvidenceDigest: accepted.acceptanceEvidenceDigest,
+          originatingLeaseId: envelope.leaseId } } });
+    } else {
+      await event(tx, row, "control_plane.release_lease.rolled_back");
+    }
     return { deploymentId: row.id, fence: row.releaseLeaseFence, status: "ROLLED_BACK" as const,
       releaseImageTag: row.releaseImageTag, releaseVersion: row.releaseVersion };
   });

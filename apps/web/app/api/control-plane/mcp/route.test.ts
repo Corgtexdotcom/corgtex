@@ -225,6 +225,21 @@ describe("/api/control-plane/mcp", () => {
       reason: "Verify the exact candidate release.", arguments: { operationId, expectedGitSha: "a".repeat(40) },
       idempotencyKey: `release-diagnostic-start:${operationId}`, scopeOverride: "control-plane:releases:write",
     });
+    const retry = await POST(request({ jsonrpc: "2.0", id: 39.875, method: "tools/call", params: {
+      name: "dispatch_managed_release_diagnostic", arguments: { deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+        operationId, expectedGitSha: "a".repeat(40), reason: "Retry the exact failed diagnostic once.", retryAttempt: 1 },
+    } }) as never);
+    expect(retry.status).toBe(200);
+    expect(mocks.runCustomerSupportOperation).toHaveBeenLastCalledWith(expect.anything(), {
+      deploymentId: "123e4567-e89b-42d3-a456-426614174001", action: "runtime.release_diagnostic",
+      reason: "Retry the exact failed diagnostic once.", arguments: { operationId, expectedGitSha: "a".repeat(40), retryAttempt: 1 },
+      idempotencyKey: `release-diagnostic-retry:${operationId}:1`, scopeOverride: "control-plane:releases:write",
+    });
+    const invalidRetry = await POST(request({ jsonrpc: "2.0", id: 39.9, method: "tools/call", params: {
+      name: "dispatch_managed_release_diagnostic", arguments: { deploymentId: "123e4567-e89b-42d3-a456-426614174001",
+        operationId, expectedGitSha: "a".repeat(40), reason: "Reject another retry.", retryAttempt: 2 },
+    } }) as never);
+    expect(invalidRetry.status).toBe(400);
     const freeze = await POST(request({
       jsonrpc: "2.0",
       id: 40,

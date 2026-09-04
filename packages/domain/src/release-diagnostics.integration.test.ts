@@ -46,4 +46,31 @@ describe("durable release diagnostics", () => {
     await expect(handleReleaseDiagnostic(job, "worker-old")).rejects.toMatchObject({ code: "RELEASE_DIAGNOSTIC_OWNERSHIP_LOST" });
     expect(await prisma.workflowJob.findUnique({ where: { id: job.id } })).toMatchObject({ status: "RUNNING", lockedBy: "worker-new", payload: job.payload });
   });
+  it("rearms one failed attempt exactly once and rejects the stale first-attempt worker", async () => {
+    const { actor, workspaceId, request } = await fixture();
+    const first = await dispatchReleaseDiagnostic(actor, workspaceId, request);
+    const oldJob = await prisma.workflowJob.update({ where: { id: first.jobId }, data: {
+      status: "FAILED", attempts: 1, completedAt: new Date(), error: "synthetic failure", lockedAt: null, lockedBy: null,
+    } });
+    const retries = await Promise.all([
+      dispatchReleaseDiagnostic(actor, workspaceId, { ...request, retryAttempt: 1 }),
+      dispatchReleaseDiagnostic(actor, workspaceId, { ...request, retryAttempt: 1 }),
+    ]);
+    expect(retries[0]).toEqual(retries[1]);
+    expect(retries[0]).toMatchObject({ jobId: first.jobId, status: "PENDING", attempts: 1 });
+    expect(retries[0].nonce).not.toBe(first.nonce);
+    expect(await prisma.workflowJob.count()).toBe(1);
+    const claimed = await prisma.workflowJob.update({ where: { id: first.jobId }, data: {
+      status: "RUNNING", attempts: 2, lockedAt: new Date(), lockedBy: "worker-new",
+    } });
+    build.role = "worker";
+    await expect(handleReleaseDiagnostic(oldJob, "worker-old")).rejects.toMatchObject({ code: "RELEASE_DIAGNOSTIC_OWNERSHIP_LOST" });
+    await handleReleaseDiagnostic(claimed, "worker-new");
+    build.role = "web";
+    await expect(getReleaseDiagnostic(actor, workspaceId, request)).resolves.toMatchObject({ accepted: true, attempts: 2,
+      receipt: { nonce: retries[0].nonce, workerId: "worker-new" } });
+    await prisma.workflowJob.update({ where: { id: first.jobId }, data: { status: "FAILED", completedAt: new Date(), error: "second failure" } });
+    await expect(dispatchReleaseDiagnostic(actor, workspaceId, { ...request, retryAttempt: 1 }))
+      .resolves.toMatchObject({ status: "FAILED", attempts: 2 });
+  });
 });

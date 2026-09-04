@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
@@ -37,6 +37,22 @@ function rollbackPayload() {
       worker: { containerName: "worker--old", image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, readyRevision: `${WORKER}--rev-2`, templateDigest: DIGESTS[3] } },
     incoming: { webDigest: DIGESTS[2], workerDigest: DIGESTS[3] },
   };
+}
+function rollbackPayloadV2() {
+  const base = rollbackPayload(); const recoveryGitSha = "a".repeat(40);
+  return { ...base, schemaVersion: 2 as const,
+    incoming: { ...base.incoming, schemaApprovalDigest: `sha256:${"5".repeat(64)}` },
+    compatibleRecovery: { gitSha: recoveryGitSha, imageTag: `sha-${recoveryGitSha}`, releaseVersion: "release-1",
+      web: { image: `${ACR}/corgtex/web@${DIGESTS[0]}`, digest: DIGESTS[0] },
+      worker: { image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, digest: DIGESTS[1] },
+      schemaCompatibilityApprovalDigest: `sha256:${"6".repeat(64)}`,
+      acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1" as const,
+      activationPolicy: "EXCLUSIVE" as const } };
+}
+function diagnosticOperationId(leaseId: string, gitSha: string, purpose: string) {
+  const value = createHash("sha256").update(`${purpose}:${leaseId}:${gitSha}`).digest("hex").slice(0, 32).split("");
+  value[12] = "5"; value[16] = (8 + (Number.parseInt(value[16]!, 16) % 4)).toString(16); const hex = value.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 function reverseKeys(value: unknown): unknown { if (!value || typeof value !== "object" || Array.isArray(value)) return value; return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reverseKeys(item)])); }
 async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput> = {}) {
@@ -309,7 +325,6 @@ describe("managed release lease CAS", () => {
     await truncateAllTables();
     const unsafeCases: Array<{ overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput>; incomingVersion?: string; acquireCode?: string; acquireStatus?: number }> = [
       { overrides: { url: "https://Upper.example.test" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { url: "https://path.example.test/private" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
-      { overrides: { providerSubscriptionId: SUBSCRIPTION.toUpperCase() }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerResourceGroup: "bad." }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerWebServiceId: "Web-app" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { providerWorkerServiceId: WEB } },
       { overrides: { releaseVersion: "bad/version" } }, { overrides: {}, incomingVersion: "bad/version" },
@@ -454,6 +469,24 @@ describe("managed release lease CAS", () => {
     await expectCode(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
   });
+  it("blocks a scalar Azure coordinate alias with differently cased subscription metadata", async () => {
+    const target = await deployment();
+    await deployment({ providerSubscriptionId: SUBSCRIPTION.toUpperCase(), providerResourceGroup: RG.toLowerCase(),
+      providerWebServiceId: WEB, providerWorkerServiceId: "different-worker" });
+    await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
+  });
+  it("normalizes a mixed-case Azure subscription UUID in lease projections", async () => {
+    const target = await deployment({ providerSubscriptionId: SUBSCRIPTION.toUpperCase() });
+    await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toMatchObject({
+      target: { subscriptionId: SUBSCRIPTION },
+    });
+    const handle = await acquire(target.id);
+    await expect(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).resolves.toMatchObject({
+      target: { subscriptionId: SUBSCRIPTION },
+    });
+    await abortManagedReleaseLease(handle);
+  });
   it("rejects Azure resource IDs whose embedded target does not match the deployment row", async () => {
     const wrongSubscription = `/subscriptions/${randomUUID()}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
     const wrongResourceGroup = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-other/providers/Microsoft.App/containerApps/${WEB}`;
@@ -557,6 +590,21 @@ describe("selected hosted Azure release lifecycle", () => {
     expect(final.deploymentKind).toBe("HOSTED_DEDICATED");
     expect(final.releaseLeaseId).toBeNull();
     expect(final.providerPostgresServiceId).toBe(row.providerPostgresServiceId);
+  });
+  it("requires exact authenticated baseline acceptance before finalizing an exclusive rollback", async () => {
+    const row = await hosted(); const handle = await acquire(row.id); const rollback = rollbackPayloadV2();
+    await recordManagedReleaseRollbackRecord(handle, rollback); await beginManagedReleaseMutation(handle);
+    await expectCode(finalizeManagedReleaseRollback(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const operationId = diagnosticOperationId(handle.leaseId, "a".repeat(40), "baseline-rollback");
+    const evidence = { gitSha: "a".repeat(40), imageTag: BASE, releaseVersion: "release-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], operationId,
+      acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}` };
+    await expectCode(finalizeManagedReleaseRollback(handle, { ...evidence, operationId: randomUUID() }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    await expect(finalizeManagedReleaseRollback(handle, evidence)).resolves.toMatchObject({ status: "ROLLED_BACK" });
+    const event = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: {
+      deploymentId: row.id, action: "control_plane.release_lease.rolled_back" } });
+    expect(event.meta).toMatchObject({ originatingLeaseId: handle.leaseId, diagnosticOperationId: operationId,
+      acceptanceEvidenceDigest: evidence.acceptanceEvidenceDigest, webDigest: DIGESTS[0], workerDigest: DIGESTS[1] });
   });
   it.each([false, true])("selection removal before mutation blocks forward work and permits abort (envelope=%s)", async (recorded) => {
     const row = await hosted(); const handle = await acquire(row.id);

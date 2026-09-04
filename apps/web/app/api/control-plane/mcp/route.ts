@@ -589,7 +589,8 @@ const tools = [
     name: "dispatch_managed_release_diagnostic",
     description: "Dispatch one idempotent authenticated web and worker release diagnostic under release authority.",
     inputSchema: { type: "object", additionalProperties: false, properties: { deploymentId: { type: "string" },
-      operationId: { type: "string" }, expectedGitSha: { type: "string" }, reason: { type: "string" } },
+      operationId: { type: "string" }, expectedGitSha: { type: "string" }, reason: { type: "string" },
+      retryAttempt: { type: "number", enum: [1] } },
       required: ["deploymentId", "operationId", "expectedGitSha", "reason"] },
   },
   {
@@ -1336,10 +1337,16 @@ export async function POST(request: NextRequest) {
     }
     if (name === "dispatch_managed_release_diagnostic") {
       const operationId = argString(args, "operationId");
+      const retryAttempt = argNumber(args, "retryAttempt", 0);
+      if (Object.prototype.hasOwnProperty.call(args, "retryAttempt") && retryAttempt !== 1) {
+        throw inputError("retryAttempt must be 1.");
+      }
       return rpcResult(id, textContent(await runCustomerSupportOperation(actor, {
         deploymentId: argString(args, "deploymentId"), action: "runtime.release_diagnostic",
-        reason: argString(args, "reason"), arguments: { operationId, expectedGitSha: argString(args, "expectedGitSha") },
-        idempotencyKey: `release-diagnostic-start:${operationId}`, scopeOverride: "control-plane:releases:write",
+        reason: argString(args, "reason"), arguments: { operationId, expectedGitSha: argString(args, "expectedGitSha"),
+          ...(retryAttempt === 1 ? { retryAttempt: 1 } : {}) },
+        idempotencyKey: retryAttempt === 1 ? `release-diagnostic-retry:${operationId}:1` : `release-diagnostic-start:${operationId}`,
+        scopeOverride: "control-plane:releases:write",
       })));
     }
     if (name === "freeze_managed_release_inventory") {

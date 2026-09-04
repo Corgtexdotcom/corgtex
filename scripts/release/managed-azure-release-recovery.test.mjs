@@ -264,7 +264,35 @@ describe("managed Azure release recovery", () => {
     expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
       .toEqual([["web", `${target.webAppName}--web-base`, true], ["worker", `${target.workerAppName}--worker-base`, true]]);
     expect(deps.healthProbe).toHaveBeenCalledWith({ origin: "https://selfserve.example", release: { gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" } });
-    expect(deps.lease).toHaveBeenCalledWith("finalize_rollback", expect.anything());
+    expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }) }));
+    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }), operationId: expect.any(String) }));
+    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }),
+      imageDigests: { web: digests.web, worker: digests.worker }, durationMs: 15 * 60_000 }));
+    expect(deps.lease).toHaveBeenCalledWith("finalize_rollback", expect.objectContaining({ evidence: expect.objectContaining({
+      gitSha: baseSha, webDigest: digests.web, workerDigest: digests.worker,
+      acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/),
+    }) }));
+  });
+
+  it("does not clear an exclusive rollback when baseline acceptance proof fails", async () => {
+    const rollbackPayload = { ...structuredClone(rollback), schemaVersion: 2,
+      incoming: { ...rollback.incoming, schemaApprovalDigest: `sha256:${"a".repeat(64)}` }, compatibleRecovery: {
+      gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      web: { image: `${target.acrServer}/corgtex/web@sha256:${"5".repeat(64)}`, digest: `sha256:${"5".repeat(64)}` },
+      worker: { image: `${target.acrServer}/corgtex/worker@sha256:${"6".repeat(64)}`, digest: `sha256:${"6".repeat(64)}` },
+      schemaCompatibilityApprovalDigest: `sha256:${"9".repeat(64)}`, acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy: "EXCLUSIVE",
+    } };
+    for (const scenario of ["auth", "diagnostic", "observation"]) {
+      const overrides = scenario === "diagnostic" ? { acceptanceProbe: vi.fn(async () => ({ accepted: false })) }
+        : scenario === "observation" ? { observeNewRelease: vi.fn(async () => ({ verified: false })) }
+          : { authPreflight: vi.fn(async () => { throw new Error("revoked"); }) };
+      const { deps } = rig({ rollbackPayload, ...overrides });
+      const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Require exact rollback proof.", acrName: "acr12" }, deps);
+      expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId,
+        code: `MANAGED_RELEASE_RECOVERY_ROLLBACK_${scenario === "auth" ? "AUTH" : scenario === "diagnostic" ? "DIAGNOSTIC" : "OBSERVATION"}_FAILED` });
+      expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+      expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.anything());
+    }
   });
 
   it("retains compatible recovery when the worker cannot produce an exact receipt", async () => {
