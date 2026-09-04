@@ -801,6 +801,7 @@ async function readOpsRailwayStage(target, service, deps) {
     fail("registry authorization is missing or not safely observable");
   }
   if (!instance?.source?.image || instance.source.repo || !config?.source
+    || config.source.image !== instance.source.image || config.source.repo
     || config.source.autoUpdates != null) fail("source configuration conflicts with a staged image release");
   if (!Array.isArray(data.pending?.edges) || data.pending.edges.length
     || data.pending.pageInfo?.hasNextPage !== false) fail("has an active or uncertain deployment");

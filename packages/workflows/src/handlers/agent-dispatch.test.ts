@@ -50,6 +50,36 @@ describe("runAgentWorkflowJob", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it.each(["agent_disabled", "kill_switch", "budget_exceeded", "agent_identity_inactive", "daily_rate_limit", "hourly_rate_limit", "concurrency_limit", "untrusted private diagnostic"])("rejects recovery runtime skip %s instead of returning a completable result", async (reason) => {
+    const { runAgentWorkflowJob } = await import("./agent-dispatch");
+    execute.mockResolvedValue({ skipped: true, reason });
+    const job = { id: "job", workspaceId: "ws", type: "agent.brain-absorb", payload: { sourceId: "source", supportRecovery: true, expectedSourceIdentity: "a".repeat(64) } };
+    const completed = vi.fn();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(runAgentWorkflowJob(job).then(completed)).rejects.toThrow("Brain source recovery was skipped by agent runtime before processing.");
+    }
+    expect(completed).not.toHaveBeenCalled();
+    expect(recoveryGuard).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(recoveryGuard.mock.invocationCallOrder[1]).toBeLessThan(execute.mock.invocationCallOrder[1]);
+    expect(absorb).not.toHaveBeenCalled();
+  });
+
+  it("returns successful recovery and ordinary absorption skips unchanged", async () => {
+    const { runAgentWorkflowJob } = await import("./agent-dispatch");
+    const job = { id: "job", workspaceId: "ws", type: "agent.brain-absorb", payload: { sourceId: "source" } };
+    const success = { id: "run", status: "COMPLETED" };
+    execute.mockResolvedValueOnce(success);
+    await expect(runAgentWorkflowJob({ ...job, payload: { ...job.payload, supportRecovery: true, expectedSourceIdentity: "a".repeat(64) } })).resolves.toBe(success);
+    recoveryGuard.mockClear();
+    for (const reason of ["agent_disabled", "kill_switch", "budget_exceeded", "agent_identity_inactive", "daily_rate_limit", "hourly_rate_limit", "concurrency_limit"]) {
+      const skipped = { skipped: true, reason };
+      execute.mockResolvedValueOnce(skipped);
+      await expect(runAgentWorkflowJob(job)).resolves.toBe(skipped);
+    }
+    expect(recoveryGuard).not.toHaveBeenCalled();
+  });
+
   it("dispatches company-understanding jobs with source context", async () => {
     const { runAgentWorkflowJob } = await import("./agent-dispatch");
 

@@ -1283,6 +1283,7 @@ describe("fleet release runner", () => {
         stage.instance.latestDeployment = attempt;
         stage.deployments.edges.unshift({ node: attempt });
         stage.instance.source.image = `ghcr.io/example/${serviceId}:sha-${SHA}`;
+        stage.environment.config.services[serviceId].source.image = stage.instance.source.image;
         stage.variables.CORGTEX_RELEASE_GIT_SHA = SHA;
       }
     }
@@ -1479,7 +1480,7 @@ describe("fleet release runner", () => {
   });
 
   it.each([
-    "variable-mismatch", "missing-variable", "source-drift", "missing-credentials", "unmasked-credentials",
+    "variable-mismatch", "missing-variable", "source-drift", "configured-image-mismatch", "configured-image-missing", "configured-repository", "missing-credentials", "unmasked-credentials",
     "new-deployment", "pending-deployment", "pending-page", "missing-anchor", "missing-serving-anchor",
     "no-serving-deployment", "multiple-serving-deployments", "serving-drift", "auto-updates", "repository-source", "readback-failure",
   ])("stops after the first Ops stage on %s without leaking configuration", async (failure) => {
@@ -1499,6 +1500,9 @@ describe("fleet release runner", () => {
           if (failure === "variable-mismatch") stage.variables.CORGTEX_STARTUP_MODE = "combined";
           if (failure === "missing-variable") delete stage.variables.CORGTEX_RELEASE_GIT_SHA;
           if (failure === "source-drift") stage.instance.source.image = "ghcr.io/example/unexpected:tag";
+          if (failure === "configured-image-mismatch") config.source.image = "ghcr.io/example/other:tag";
+          if (failure === "configured-image-missing") delete config.source.image;
+          if (failure === "configured-repository") config.source.repo = "example/repository";
           if (failure === "missing-credentials") delete config.deploy.registryCredentials;
           if (failure === "unmasked-credentials") config.deploy.registryCredentials.password = "synthetic-unmasked-secret";
           if (failure === "new-deployment") stage.deployments.edges.unshift({ node: { id: "unexpected-deployment", status: "SUCCESS" } });
@@ -1554,6 +1558,25 @@ describe("fleet release runner", () => {
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => call.query.includes("OpsStageReadback"))).toBe(true);
     expect(calls[0].query).toContain("status: { notIn: [SUCCESS, REMOVED, FAILED, CRASHED, SKIPPED] }");
+  });
+
+  it.each(["image-mismatch", "image-missing", "repository"])("rejects configured source %s at baseline before any Ops mutation", async (failure) => {
+    const source = railwayStage("worker-1").environment.config.services["worker-1"].source;
+    if (failure === "image-mismatch") source.image = "ghcr.io/example/other:tag";
+    if (failure === "image-missing") delete source.image;
+    if (failure === "repository") source.repo = "example/repository";
+    const calls = [];
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Reject contradictory source evidence."], {
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push(body);
+        return successfulRailwayResponse(body);
+      },
+      runCommand: vi.fn(), sleep: vi.fn(),
+    })).rejects.toThrow("Ring 3 failed");
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.query.includes("OpsStageReadback"))).toBe(true);
   });
 
   it("rechecks the untouched Ops worker after web health and stops on drift", async () => {

@@ -115,7 +115,7 @@ export async function runAgentWorkflowJob(job: {
     if (expectedSourceIdentity) {
       await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
     }
-    return executeAgentRun({
+    const result = await executeAgentRun({
       agentKey: "brain-absorb",
       workspaceId: job.workspaceId,
       triggerType: "EVENT",
@@ -137,6 +137,10 @@ export async function runAgentWorkflowJob(job: {
           return { resultJson: result };
         }),
     });
+    if (payload.supportRecovery === true && result && "skipped" in result && result.skipped === true) {
+      throw new Error("Brain source recovery was skipped by agent runtime before processing.");
+    }
+    return result;
   }
 
   if (job.type === "agent.company-understanding") {
