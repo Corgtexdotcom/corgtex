@@ -240,7 +240,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   if (!baselineHealth.ok) fail("MANAGED_RELEASE_BASELINE_HEALTH_FAILED");
   await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: baselineRelease });
   if (baselineRelease.imageTag === nextRelease.imageTag) {
-    if (ROLES.some((role) => baselines[role].imageDigest !== releasePlan.roles[role].digest)) fail("MANAGED_RELEASE_ALREADY_CURRENT_DRIFT");
+    if (baselineRelease.version !== nextRelease.version
+      || ROLES.some((role) => baselines[role].imageDigest !== releasePlan.roles[role].digest)) fail("MANAGED_RELEASE_ALREADY_CURRENT_DRIFT");
     return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 0 });
   }
   if (!input.execute) {
@@ -254,6 +255,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
 
   let handle;
   let mutationBegun = false;
+  let drainCompleted = false;
+  let firstForwardPatchAttempted = false;
   const heartbeat = () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
   const recoveryHeartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
   const markRecovery = async (stage, code, detail = {}) => {
@@ -325,6 +328,27 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     return safeResult(input, inventory, "RECOVERED_COMPATIBLE", { phase: stage, code, recoveryReleaseImageTag: recoveryRelease.imageTag, ...detail });
   };
 
+  const restoreDrainedBaseline = async (stage, code) => {
+    try {
+      for (const role of ROLES) {
+        const activated = await deps.setRevisionActive({ target: preflight.target, role, revisionName: baselines[role].revisionName,
+          active: true, onProgress: recoveryHeartbeat });
+        if (!activated?.terminal || !activated?.succeeded) return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS");
+      }
+      for (const role of ROLES) {
+        const restored = await deps.readApp({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest });
+        if (restored.templateDigest !== baselines[role].templateDigest) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT");
+      }
+      const health = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
+      if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED");
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      if (finalized?.status !== "ROLLED_BACK") return markRecovery("FENCING", "BASELINE_REACTIVATION_RECORDING_FAILED");
+      return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code });
+    } catch {
+      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS");
+    }
+  };
+
   try {
     handle = await deps.lease("acquire", {
       deploymentId: input.deploymentId,
@@ -374,6 +398,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       const drained = await deps.drainBaseline({ target: preflight.target, baselines, handle, onProgress: recoveryHeartbeat });
       if (!drained?.terminal || !drained?.succeeded) return markRecovery("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
         drained?.code ? { providerCode: drained.code } : {});
+      drainCompleted = true;
       await recoveryHeartbeat();
     }
     const forwardTemplates = {};
@@ -390,6 +415,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
 
     await heartbeat();
+    firstForwardPatchAttempted = true;
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
     if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS",
       webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
@@ -437,6 +463,9 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     if (!mutationBegun) {
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason })).catch(() => undefined);
       throw error;
+    }
+    if (drainCompleted && !firstForwardPatchAttempted) {
+      return restoreDrainedBaseline("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
     }
     return markRecovery("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
   }
@@ -536,6 +565,7 @@ function runtimeDependencies(env = process.env) {
     patchTemplate: apps.patchTemplate,
     waitForState: apps.waitForState,
     drainBaseline: apps.drainBaseline,
+    setRevisionActive: apps.setRevisionActive,
     healthProbe: async ({ origin, release }) => {
       try {
         const response = await fetch(`${origin}/api/health`, { method: "GET", redirect: "error", signal: AbortSignal.timeout(20_000) });

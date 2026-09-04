@@ -446,6 +446,14 @@ describe("managed release lease CAS", () => {
     await expectCode(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
   });
+  it("blocks a full resource-ID alias whose sibling scalar coordinates are stale", async () => {
+    const target = await deployment();
+    await deployment({ providerSubscriptionId: randomUUID(), providerResourceGroup: "rg-stale",
+      providerWebServiceId: "different-web", providerWorkerServiceId: ARM_WEB_UPPER_RG });
+    await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
+  });
   it("rejects Azure resource IDs whose embedded target does not match the deployment row", async () => {
     const wrongSubscription = `/subscriptions/${randomUUID()}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
     const wrongResourceGroup = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-other/providers/Microsoft.App/containerApps/${WEB}`;

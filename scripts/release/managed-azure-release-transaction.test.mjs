@@ -135,12 +135,14 @@ function dependencies(options = {}) {
       releaseApproval: options.releaseApproval ?? { gitSha: nextSha, schemaApprovalDigest: "8".repeat(64) },
       recovery: { gitSha: recoverySha, releaseVersion: "recovery-1", schemaCompatibilityApprovalDigest: "9".repeat(64) } } })),
     drainBaseline: vi.fn(async () => options.drain ?? { terminal: true, succeeded: true }),
+    setRevisionActive: vi.fn(async () => ({ terminal: true, succeeded: true })),
     lease: vi.fn(async (operation, args) => {
       events.push(`lease:${operation}`);
       if (operation === "preflight") return preflight;
       if (operation === "acquire") return { deploymentId, leaseId, capability: "private-capability", fence: 7 };
       if (operation === "get_target") return { deploymentId, deployment: options.leasedDeployment ?? deployment, authorityDigest: options.leasedAuthorityDigest ?? "e".repeat(64), target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
       if (operation === "finalize_compatible_recovery") return { status: "RECOVERED_COMPATIBLE", fence: 7 };
+      if (operation === "finalize_rollback") return { status: "ROLLED_BACK", fence: 7 };
       return { deploymentId, operation, args };
     }),
     resolveRelease: vi.fn(async ({ gitSha }) => ({ roles: {
@@ -273,6 +275,27 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
+  it("reactivates and verifies both exact baselines when a pre-patch heartbeat fails after an exclusive drain", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    const baseLease = deps.lease.getMockImplementation();
+    let drained = false;
+    let failed = false;
+    deps.drainBaseline.mockImplementation(async () => { drained = true; return { terminal: true, succeeded: true }; });
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (drained && !failed && operation === "heartbeat_recovery") {
+        failed = true;
+        throw new Error("lost heartbeat response");
+      }
+      return baseLease(operation, args);
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS" });
+    expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
+      .toEqual([["web", "web-app--base-web", true], ["worker", "worker-app--base-worker", true]]);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+
   it("requires authenticated app/worker acceptance and observation before success recording", async () => {
     for (const options of [{ acceptance: { accepted: false } }, { observation: { verified: false, code: "OBSERVATION_REGRESSION" } }]) {
       const { deps } = dependencies(options);
@@ -306,6 +329,15 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.resolveRelease).toHaveBeenCalled(); expect(deps.readApp).toHaveBeenCalledTimes(2);
     expect(deps.healthProbe).toHaveBeenCalled(); expect(deps.authPreflight).toHaveBeenCalled();
     expect(deps.lease).toHaveBeenCalledTimes(1); expect(deps.importRole).not.toHaveBeenCalled();
+  });
+
+  it("rejects a same-SHA no-op when the requested release version differs", async () => {
+    const { deps } = dependencies({ releaseApproval: { gitSha: baseSha, schemaApprovalDigest: "8".repeat(64) } });
+    await expect(runManagedAzureReleaseTransaction({ ...input, releaseSha: baseSha, releaseVersion: "release-renamed" }, deps))
+      .rejects.toThrow("MANAGED_RELEASE_ALREADY_CURRENT_DRIFT");
+    expect(deps.lease).toHaveBeenCalledTimes(1);
+    expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
   });
 
   it("continues when an ambiguous import is proven by exact destination digest readback", async () => {
@@ -490,6 +522,16 @@ describe("managed Azure single-target transaction", () => {
     expect(workflow).toContain("--deployment-id");
     expect(workflow).not.toContain("repository_dispatch:");
     expect(workflow).not.toMatch(/schedule:|targets:|matrix:/);
+  });
+
+  it("passes immutable SHA build arguments to both self-serve staging images", () => {
+    const workflow = readFileSync(new URL("../../.github/workflows/azure-selfserve-staging.yml", import.meta.url), "utf8");
+    for (const role of ["web", "worker"]) {
+      const block = workflow.split(`- name: Build and push ${role} image`)[1]?.split("      - name:")[0] ?? "";
+      expect(block).toContain("build-args: |");
+      expect(block).toContain("CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}");
+      expect(block).toContain("GITHUB_SHA=${{ github.sha }}");
+    }
   });
 });
 

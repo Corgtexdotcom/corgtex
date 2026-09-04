@@ -349,6 +349,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
   },
   encryptSecretMock: vi.fn((value: string) => `encrypted:${value}`),
@@ -8167,6 +8168,57 @@ describe("control plane domain", () => {
       .resolves.toMatchObject({ id: "op-release", idempotentReplay: true });
     expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reclaims a failed local release diagnostic and reuses its remote operation identity", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
+    const operationId = "123e4567-e89b-42d3-a456-426614174001";
+    const args = { operationId, expectedGitSha: "a".repeat(40) };
+    prismaMock.supportOperation.findUnique.mockResolvedValueOnce({ id: "op-release", deploymentId: "inst-1", workspaceId,
+      action: "runtime.release_diagnostic", reason: "Verify exact release worker.", status: "FAILED", inputSummary: args });
+    prismaMock.supportOperation.updateMany.mockResolvedValueOnce({ count: 1 });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment({ remoteWorkspaceId: workspaceId }));
+    prismaMock.supportOperation.update.mockResolvedValueOnce({ id: "op-release", action: "runtime.release_diagnostic", workspaceId, status: "COMPLETED" });
+    global.fetch = vi.fn(async (_input, init) => {
+      const name = JSON.parse(String(init?.body)).params.name;
+      return name === "get_current_connection"
+        ? mcpToolResult({ workspace: { id: workspaceId }, scopes: ["workspace:read", "runtime:read", "runtime:write"] })
+        : mcpToolResult({ operationId, workspaceId, accepted: false });
+    }) as any;
+
+    await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "runtime.release_diagnostic",
+      reason: "Verify exact release worker.", arguments: args, idempotencyKey: `release-diagnostic-start:${operationId}` }))
+      .resolves.toMatchObject({ id: "op-release", status: "COMPLETED" });
+    expect(prismaMock.supportOperation.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "op-release", status: "FAILED" }, data: expect.objectContaining({ status: "RUNNING", error: null }),
+    }));
+    expect(prismaMock.supportOperation.create).not.toHaveBeenCalled();
+    expect(vi.mocked(global.fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)).params.name))
+      .toEqual(["get_current_connection", "dispatch_release_diagnostic"]);
+  });
+
+  it("records an MCP-marked release diagnostic as failed instead of completed", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    const workspaceId = "123e4567-e89b-42d3-a456-426614174000";
+    const operationId = "123e4567-e89b-42d3-a456-426614174001";
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(supportAuditDeployment({ remoteWorkspaceId: workspaceId }));
+    prismaMock.supportOperation.create.mockResolvedValueOnce({ id: "op-release", action: "runtime.release_diagnostic", workspaceId });
+    prismaMock.supportOperation.update.mockResolvedValueOnce({ id: "op-release", status: "FAILED" });
+    global.fetch = vi.fn(async (_input, init) => {
+      const name = JSON.parse(String(init?.body)).params.name;
+      return name === "get_current_connection"
+        ? mcpToolResult({ workspace: { id: workspaceId }, scopes: ["workspace:read", "runtime:read", "runtime:write"] })
+        : mcpToolResult({ error: "RELEASE_BUILD_UNAVAILABLE" }, true);
+    }) as any;
+
+    await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "runtime.release_diagnostic",
+      reason: "Verify exact release worker.", arguments: { operationId, expectedGitSha: "a".repeat(40) },
+      idempotencyKey: `release-diagnostic-start:${operationId}` })).rejects.toMatchObject({ code: "REMOTE_SUPPORT_OPERATION_FAILED" });
+    expect(prismaMock.supportOperation.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "op-release" }, data: expect.objectContaining({ status: "FAILED" }),
+    }));
+    expect(prismaMock.supportOperation.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "COMPLETED" }) }));
   });
 
   it("reads release auth without an Ops operation and rejects missing runtime scope", async () => {

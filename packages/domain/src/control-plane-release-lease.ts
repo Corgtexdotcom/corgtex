@@ -324,15 +324,36 @@ function clearLeaseData() {
 
 async function assertNoTargetOverlap(tx: Prisma.TransactionClient, row: CustomerDeployment) {
   const target = projectedDeploymentTarget(row);
+  const targetResourcePrefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroup}/providers/Microsoft.App/containerApps/`;
+  const fullWebId = `${targetResourcePrefix}${target.webAppName}`;
+  const fullWorkerId = `${targetResourcePrefix}${target.workerAppName}`;
   const candidates = await tx.$queryRaw<CustomerDeployment[]>`
     SELECT * FROM "CustomerDeployment"
     WHERE "id" <> ${row.id}
-      AND lower(COALESCE("providerSubscriptionId", '')) = lower(${target.subscriptionId})
-      AND lower(COALESCE("providerResourceGroup", '')) = lower(${target.resourceGroup})
+      AND (
+        (lower(COALESCE("providerSubscriptionId", '')) = lower(${target.subscriptionId})
+          AND lower(COALESCE("providerResourceGroup", '')) = lower(${target.resourceGroup}))
+        OR lower(COALESCE("providerWebServiceId", '')) IN (lower(${fullWebId}), lower(${fullWorkerId}))
+        OR lower(COALESCE("providerWorkerServiceId", '')) IN (lower(${fullWebId}), lower(${fullWorkerId}))
+      )
   `;
   for (const candidate of candidates) {
-    const projected = projectedDeploymentTarget(candidate);
-    if ([projected.webAppName, projected.workerAppName].some((appName) => appName === target.webAppName || appName === target.workerAppName)) {
+    const sameCoordinates = candidate.providerSubscriptionId?.toLowerCase() === target.subscriptionId.toLowerCase()
+      && candidate.providerResourceGroup?.toLowerCase() === target.resourceGroup.toLowerCase();
+    const candidateTarget = sameCoordinates ? projectedDeploymentTarget(candidate) : null;
+    const identities = candidateTarget
+      ? [candidateTarget.webAppName, candidateTarget.workerAppName].map((appName) => ({
+        subscriptionId: target.subscriptionId.toLowerCase(), resourceGroup: target.resourceGroup.toLowerCase(), appName,
+      }))
+      : [candidate.providerWebServiceId, candidate.providerWorkerServiceId].map((value) => {
+        const matched = typeof value === "string"
+          ? /^\/subscriptions\/([0-9a-f-]{36})\/resourceGroups\/([^/]+)\/providers\/Microsoft\.App\/containerApps\/([^/]+)$/i.exec(value)
+          : null;
+        return matched ? { subscriptionId: matched[1]!.toLowerCase(), resourceGroup: matched[2]!.toLowerCase(), appName: matched[3]!.toLowerCase() } : null;
+      }).filter((value): value is { subscriptionId: string; resourceGroup: string; appName: string } => value !== null);
+    if (identities.some((identity) => identity.subscriptionId === target.subscriptionId.toLowerCase()
+      && identity.resourceGroup === target.resourceGroup.toLowerCase()
+      && (identity.appName === target.webAppName || identity.appName === target.workerAppName))) {
       reject("MANAGED_RELEASE_TARGET_OVERLAP");
     }
   }

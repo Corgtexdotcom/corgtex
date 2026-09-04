@@ -59,4 +59,13 @@ describe("Azure target reconciliation", () => {
     await expect(reconcileManagedAzureTarget(request)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_OVERLAP" });
     expect(await prisma.customerDeploymentEvent.count()).toBe(0);
   });
+  it("detects a full resource-ID alias even when the sibling scalar metadata is stale", async () => {
+    const { target, request } = await fixture();
+    const fullWorkerId = `/subscriptions/${target.subscriptionId.toUpperCase()}/resourceGroups/${target.resourceGroup.toUpperCase()}/providers/Microsoft.App/containerApps/${target.workerAppName}`;
+    await prisma.customerDeployment.create({ data: { label: "Other", url: `https://${randomUUID()}.example.test`,
+      providerSubscriptionId: randomUUID(), providerResourceGroup: "rg-stale", providerWebServiceId: "different-web",
+      providerWorkerServiceId: fullWorkerId } });
+    await expect(reconcileManagedAzureTarget(request)).rejects.toMatchObject({ code: "MANAGED_RELEASE_TARGET_OVERLAP" });
+    expect(await prisma.customerDeploymentEvent.count()).toBe(0);
+  });
 });

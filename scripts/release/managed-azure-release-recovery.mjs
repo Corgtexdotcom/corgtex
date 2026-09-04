@@ -181,6 +181,33 @@ async function classifyForwardRole(deps, status, rollback, role, baseline, incom
   return { kind: "UNKNOWN", state: null };
 }
 
+function verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix) {
+  if (state.imageDigest !== recovery[role].digest || state.image !== recovery[role].image
+    || state.revisionSuffix !== expectedRevisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+  const reconstructedBaseline = buildManagedAzureReleaseTemplate({
+    baseline: state,
+    role,
+    image: rollback.previous[role].image,
+    release: baseline,
+    revisionSuffix: matchingBaselineRevisionSuffix(role, state, rollback, baseline, rollback.previous[role].templateDigest),
+  });
+  if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+  assertManagedAzureTemplateDelta({ ...state, template: reconstructedBaseline }, state.template, {
+    role, image: recovery[role].image, release: recoveryRelease, revisionSuffix: expectedRevisionSuffix,
+  });
+  if (state.appName !== status.target[role === "web" ? "webAppName" : "workerAppName"]) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
+}
+
+async function classifyCompatibleRecoveryRole(deps, status, rollback, role, baseline, recovery, recoveryRelease, expectedRevisionSuffix) {
+  try {
+    const state = await deps.readApp({ target: status.target, role, release: recoveryRelease,
+      imageDigest: recovery[role].digest, ambiguous: true });
+    verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix);
+    return { kind: "COMPATIBLE_RECOVERY", state };
+  } catch { /* Unknown live state remains blocked for manual investigation. */ }
+  return { kind: "UNKNOWN", state: null };
+}
+
 export function managedAzureRecoveryCliResultAccepted(result) {
   return result?.status === "RECOVERY_CLEARED";
 }
@@ -226,24 +253,33 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       const pendingIncoming = incomingReleaseIdentity(status);
       if (web.kind !== "BASELINE") web = await classifyForwardRole(deps, status, rollback, "web", baseline, pendingIncoming, forwardSuffixes.web);
       if (worker.kind !== "BASELINE") worker = await classifyForwardRole(deps, status, rollback, "worker", baseline, pendingIncoming, forwardSuffixes.worker);
+      const recovery = rollback.compatibleRecovery;
+      const recoveryRelease = releaseIdentity(recovery.imageTag, recovery.releaseVersion);
+      if (web.kind === "UNKNOWN") web = await classifyCompatibleRecoveryRole(deps, status, rollback, "web", baseline, recovery, recoveryRelease, rollbackSuffixes.web);
+      if (worker.kind === "UNKNOWN") worker = await classifyCompatibleRecoveryRole(deps, status, rollback, "worker", baseline, recovery, recoveryRelease, rollbackSuffixes.worker);
     }
     if (rollback.schemaVersion === 2 && (web.kind !== "BASELINE" || worker.kind !== "BASELINE")) {
       const recovery = rollback.compatibleRecovery;
       const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
       const recoveryRelease = releaseIdentity(recovery.imageTag, recovery.releaseVersion);
       const current = { web, worker };
-      const templates = {};
       for (const role of ["web", "worker"]) {
         if (!current[role].state) fail("MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
+        if (current[role].kind === "COMPATIBLE_RECOVERY") {
+          continue;
+        }
         const revisionSuffix = rollbackSuffixes[role];
         const image = recovery[role].image;
         const template = buildManagedAzureReleaseTemplate({ baseline: current[role].state, role, image, release: recoveryRelease, revisionSuffix });
         assertManagedAzureTemplateDelta(current[role].state, template, { role, image, release: recoveryRelease, revisionSuffix });
-        templates[role] = template;
         await heartbeat();
         const patched = await deps.patchTemplate({ target: status.target, role, location: current[role].state.location, template, onProgress: heartbeat });
         if (!patched.terminal || !patched.succeeded) fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_PATCH_AMBIGUOUS");
         await deps.waitForState({ target: status.target, role, release: recoveryRelease, imageDigest: recovery[role].digest, expectedTemplate: template, onProgress: heartbeat });
+      }
+      for (const role of ["web", "worker"]) {
+        const verified = await classifyCompatibleRecoveryRole(deps, status, rollback, role, baseline, recovery, recoveryRelease, rollbackSuffixes[role]);
+        if (verified.kind !== "COMPATIBLE_RECOVERY") fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_READBACK_AMBIGUOUS");
       }
       const health = await deps.healthProbe({ origin: status.origin, release: recoveryRelease });
       if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_HEALTH_FAILED");
@@ -270,7 +306,6 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     }
     if (web.kind === "BASELINE" && worker.kind === "BASELINE") {
       if (rollback.schemaVersion === 2 && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE") {
-        if (status.recovery?.code !== "BASELINE_DRAIN_AMBIGUOUS") fail("MANAGED_RELEASE_RECOVERY_DRAIN_STATE_AMBIGUOUS");
         for (const role of ["web", "worker"]) {
           const activated = await deps.setRevisionActive({ target: status.target, role, revisionName: rollback.previous[role].readyRevision,
             active: true, onProgress: () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason })) });

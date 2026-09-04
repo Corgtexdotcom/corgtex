@@ -10755,10 +10755,12 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
     expectedConfigIdentity: args.expectedConfigIdentity,
   } : redactObject(args);
   const idempotencyKey = normalizeSupportAuditIdempotencyKey(params.idempotencyKey);
+  let retryableOperation: Awaited<ReturnType<typeof findSupportAuditByIdempotencyKey>> = null;
   if (idempotencyKey) {
     const existing = await findSupportAuditByIdempotencyKey({ idempotencyKey, deploymentId: params.deploymentId,
-      operationAction: params.action, reason, inputSummary });
-    if (existing) return existing;
+      operationAction: params.action, reason, inputSummary, retryFailed: params.action === "runtime.release_diagnostic" });
+    if (existing && "idempotentReplay" in existing) return existing;
+    retryableOperation = existing;
   }
   const connector = await loadSupportConnector(params.deploymentId);
   let operationWorkspaceId = params.remoteWorkspaceId?.trim() || null;
@@ -10770,20 +10772,29 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       409, "MANAGED_RELEASE_DIAGNOSTIC_CONFLICT", "Managed release workspace binding changed.");
   }
 
-  const operation = await prisma.supportOperation.create({
-    data: {
+  const operationData = {
       deploymentId: params.deploymentId,
       workspaceId: operationWorkspaceId,
       actorUserId: actorUserId(actor),
       actorLabel: SUPPORT_ACTOR_LABEL,
       action: params.action,
       reason,
-      status: "RUNNING",
+      status: "RUNNING" as const,
       startedAt: new Date(),
       inputSummary: inputSummary as Prisma.InputJsonObject,
       idempotencyKey,
-    },
-  });
+  };
+  let operation;
+  if (retryableOperation) {
+    const claimed = await prisma.supportOperation.updateMany({
+      where: { id: retryableOperation.id, status: "FAILED" },
+      data: { status: "RUNNING", startedAt: new Date(), completedAt: null, error: null, workspaceId: operationWorkspaceId },
+    });
+    invariant(claimed.count === 1, 409, "IDEMPOTENCY_KEY_IN_PROGRESS", "Idempotent diagnostic retry is already in progress.");
+    operation = { ...retryableOperation, ...operationData, status: "RUNNING" };
+  } else {
+    operation = await prisma.supportOperation.create({ data: operationData });
+  }
 
   try {
     if (REMOTE_SUPPORT_AUDIT_ACTIONS.has(params.action)) {
@@ -10803,7 +10814,8 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
       toolName,
       arguments: args,
     });
-    if (params.action === "brain.source_recovery" || params.action === "brain.reconcile_source") {
+    if (params.action === "brain.source_recovery" || params.action === "brain.reconcile_source"
+      || params.action === "runtime.release_diagnostic") {
       const markedError = mcpToolMarkedErrorMessage(result);
       if (markedError) throw new AppError(502, "REMOTE_SUPPORT_OPERATION_FAILED", markedError);
     }
@@ -10912,6 +10924,7 @@ async function findSupportAuditByIdempotencyKey(params: {
   operationAction: string;
   reason: string;
   inputSummary: JsonRecord;
+  retryFailed?: boolean;
 }) {
   const existing = await prisma.supportOperation.findUnique({
     where: { idempotencyKey: params.idempotencyKey },
@@ -10935,6 +10948,7 @@ async function findSupportAuditByIdempotencyKey(params: {
       idempotentReplay: true,
     };
   }
+  if (existing.status === "FAILED" && params.retryFailed) return existing;
   invariant(
     false,
     409,

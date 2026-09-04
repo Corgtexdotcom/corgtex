@@ -45,6 +45,29 @@ function appName(value: string | null, target: ManagedAzureTarget) {
   const prefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroup}/providers/Microsoft.App/containerApps/`;
   return value.toLowerCase().startsWith(prefix.toLowerCase()) ? value.slice(prefix.length) : null;
 }
+function azureContainerAppResourceId(value: string | null) {
+  const matched = typeof value === "string"
+    ? /^\/subscriptions\/([0-9a-f-]{36})\/resourceGroups\/([^/]+)\/providers\/Microsoft\.App\/containerApps\/([^/]+)$/i.exec(value)
+    : null;
+  return matched ? { subscriptionId: matched[1]!.toLowerCase(), resourceGroup: matched[2]!.toLowerCase(), appName: matched[3]!.toLowerCase() } : null;
+}
+function deploymentAliasesTarget(
+  row: Pick<CustomerDeployment, "url" | "providerSubscriptionId" | "providerResourceGroup" | "providerWebServiceId" | "providerWorkerServiceId">,
+  target: ManagedAzureTarget,
+) {
+  if (row.url.replace(/\/$/, "") === target.origin) return true;
+  const targetApps = new Set([target.webAppName.toLowerCase(), target.workerAppName.toLowerCase()]);
+  const targetSubscription = target.subscriptionId.toLowerCase();
+  const targetResourceGroup = target.resourceGroup.toLowerCase();
+  return [row.providerWebServiceId, row.providerWorkerServiceId].some((value) => {
+    const resource = azureContainerAppResourceId(value);
+    if (resource) return resource.subscriptionId === targetSubscription
+      && resource.resourceGroup === targetResourceGroup && targetApps.has(resource.appName);
+    return row.providerSubscriptionId?.toLowerCase() === targetSubscription
+      && row.providerResourceGroup?.toLowerCase() === targetResourceGroup
+      && targetApps.has(value?.toLowerCase() ?? "");
+  });
+}
 export function assertManagedAzureTargetBinding(row: CustomerDeployment, acr?: { acrName: string; acrServer: string }, required = row.deploymentKind === "HOSTED_DEDICATED") {
   const target = managedAzureTargets().find((item) => item.deploymentId === row.id);
   invariant(target || !required, 409, "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED", "An authoritative protected target is required.");
@@ -102,12 +125,16 @@ export async function reconcileManagedAzureTarget(input: z.infer<typeof reconcil
       && !["SUSPENDED", "RETIRED"].includes(row.deploymentStatus), 409, "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", "Current deployment/account authority is required.");
     invariant(!row.releaseLeaseId && !row.releaseLeasePhase && !row.releaseLeaseRollbackRecord,
       409, "MANAGED_RELEASE_RECOVERY_REQUIRED", "Reconcile the retained operation before changing target metadata.");
+    const targetResourcePrefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroup}/providers/Microsoft.App/containerApps/`;
+    const fullServiceIds = [target.webAppName, target.workerAppName].map((name) => `${targetResourcePrefix}${name}`);
     const aliases = await tx.customerDeployment.findMany({ where: { id: { not: row.id }, OR: [
       { url: { in: [target.origin, `${target.origin}/`] } },
       { providerSubscriptionId: target.subscriptionId, providerResourceGroup: { equals: target.resourceGroup, mode: "insensitive" } },
-    ] }, select: { url: true, providerWebServiceId: true, providerWorkerServiceId: true } });
-    invariant(!aliases.some((other) => other.url.replace(/\/$/, "") === target.origin
-      || [other.providerWebServiceId, other.providerWorkerServiceId].some((value) => [target.webAppName, target.workerAppName].includes(appName(value, target) ?? ""))),
+      { providerWebServiceId: { in: fullServiceIds, mode: "insensitive" } },
+      { providerWorkerServiceId: { in: fullServiceIds, mode: "insensitive" } },
+    ] }, select: { url: true, providerSubscriptionId: true, providerResourceGroup: true,
+      providerWebServiceId: true, providerWorkerServiceId: true } });
+    invariant(!aliases.some((other) => deploymentAliasesTarget(other, target)),
       409, "MANAGED_RELEASE_TARGET_OVERLAP", "Target belongs to another deployment.");
     const beforeDigest = managedAzureMetadataDigest(row, account);
     if (!request.execute) return { deploymentId: row.id, status: "RECONCILIATION_READY", effects: 0, metadataDigest: beforeDigest, targetDigest, target };

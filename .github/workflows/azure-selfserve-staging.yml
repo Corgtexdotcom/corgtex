@@ -308,6 +308,9 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.worker
+          build-args: |
+            CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
+            GITHUB_SHA=${{ github.sha }}
           push: true
           tags: ${{ steps.image.outputs.worker }}
 
