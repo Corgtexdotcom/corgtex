@@ -104,6 +104,13 @@ export async function absorbSource(params: {
     where: { id: params.sourceId },
   });
 
+  function assertRecoveryIdentity(current: typeof source) {
+    if (params.expectedSourceIdentity && (!current || brainSourceRecoveryIdentity(current) !== params.expectedSourceIdentity)) {
+      throw new Error("SOURCE_CHANGED: Refresh source recovery evidence before processing.");
+    }
+  }
+  assertRecoveryIdentity(source);
+
   if (!source) {
     return { skipped: true, reason: "not_found" };
   }
@@ -112,12 +119,6 @@ export async function absorbSource(params: {
   if (initialSkipReason) {
     return { skipped: true, reason: initialSkipReason };
   }
-  function assertRecoveryIdentity(current: typeof source) {
-    if (params.expectedSourceIdentity && (!current || brainSourceRecoveryIdentity(current) !== params.expectedSourceIdentity)) {
-      throw new Error("SOURCE_CHANGED: Refresh source recovery evidence before processing.");
-    }
-  }
-  assertRecoveryIdentity(source);
   const sourceId = source.id;
 
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {

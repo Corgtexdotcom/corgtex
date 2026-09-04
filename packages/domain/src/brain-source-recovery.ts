@@ -113,6 +113,25 @@ export async function reconcileBrainSource(actor: AppActor, params: { workspaceI
 // Called only by the trusted worker, before agent runtime/budget/model activity.
 // This is a fresh admission check, not a persistent pause of other producers.
 export async function assertBrainSourceRecoveryJob(params: { workspaceId: string; sourceId: string; workflowJobId: string; expectedSourceIdentity: string }) {
+  const storedJob = await prisma.workflowJob.findUnique({ where: { id: params.workflowJobId }, select: { ...jobSelect, workspaceId: true } });
+  const storedPayload = storedJob?.payload as Record<string, unknown> | undefined;
+  invariant(storedJob?.workspaceId === params.workspaceId && storedJob.type === "agent.brain-absorb"
+    && storedPayload?.sourceId === params.sourceId && storedPayload.supportRecovery === true
+    && storedPayload.expectedSourceIdentity === params.expectedSourceIdentity,
+  409, "RECOVERY_NOT_ELIGIBLE", "Recovery job does not match source.");
+  const ownRuns = await prisma.agentRun.findMany({
+    where: { workspaceId: params.workspaceId, agentKey: "brain-absorb", triggerType: "EVENT", triggerRef: params.workflowJobId },
+    select: { id: true, status: true, planJson: true, resultJson: true }, take: 2,
+  });
+  const ownRun = ownRuns.length === 1 ? ownRuns[0] : null;
+  const plan = ownRun?.planJson as { payload?: { sourceId?: unknown } } | null;
+  const result = ownRun?.resultJson as { absorbed?: unknown; sourceId?: unknown } | null;
+  // Absorption and its run can commit before the outbox acknowledgement. This
+  // only acknowledges that exact durable success; it never resumes processing.
+  if (ownRun?.status === "COMPLETED" && plan?.payload?.sourceId === params.sourceId
+    && result?.absorbed === true && result.sourceId === params.sourceId) {
+    return { alreadyCompleted: true as const, agentRunId: ownRun.id, workflowJobId: storedJob.id, sourceId: params.sourceId };
+  }
   const source = await prisma.brainSource.findFirst({ where: { id: params.sourceId, workspaceId: params.workspaceId }, select: sourceSelect });
   invariant(source && brainSourceRecoveryIdentity(source) === params.expectedSourceIdentity, 409, "SOURCE_CHANGED", "Source changed; refresh recovery evidence.");
   const evidence = await sourceEvidence(prisma, source);

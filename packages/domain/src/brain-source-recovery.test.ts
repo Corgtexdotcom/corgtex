@@ -6,13 +6,13 @@ const { db, access } = vi.hoisted(() => ({
     $transaction: vi.fn(), $executeRaw: vi.fn(), $queryRaw: vi.fn(),
     brainSource: { findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn() },
     event: { findMany: vi.fn() }, workflowJob: { findMany: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn() },
-    brainArticle: { count: vi.fn() }, webhookEndpoint: { count: vi.fn() }, agentRun: { count: vi.fn() }, auditLog: { create: vi.fn() },
+    brainArticle: { count: vi.fn() }, webhookEndpoint: { count: vi.fn() }, agentRun: { count: vi.fn(), findMany: vi.fn() }, auditLog: { create: vi.fn() },
   },
   access: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: db }));
 vi.mock("./brain-access", () => ({ resolveKnowledgeAccessDomains: access }));
-import { brainSourceRecoveryIdentity, listBrainSourceRecovery, reconcileBrainSource } from "./brain-source-recovery";
+import { assertBrainSourceRecoveryJob, brainSourceRecoveryIdentity, listBrainSourceRecovery, reconcileBrainSource } from "./brain-source-recovery";
 
 const actor: AppActor = { kind: "agent", authProvider: "credential", label: "Corgtex Support", workspaceIds: ["ws"], scopes: ["support:write", "brain:read", "runtime:read", "runtime:write"] };
 const source = { id: "source", workspaceId: "ws", accessDomain: "WORKSPACE" as const, sourceType: "DOC" as const, tier: 1, title: "PRIVATE TITLE", channel: "PRIVATE CHANNEL", content: "PRIVATE CONTENT", ingestionGuidanceMd: "PRIVATE GUIDANCE", absorbedAt: null, archivedAt: null, createdAt: new Date("2026-01-01T00:00:00Z") };
@@ -35,6 +35,7 @@ describe("Brain source support recovery", () => {
     db.brainArticle.count.mockResolvedValue(0);
     db.webhookEndpoint.count.mockResolvedValue(0);
     db.agentRun.count.mockResolvedValue(0);
+    db.agentRun.findMany.mockResolvedValue([]);
   });
 
   it("returns only metadata and applies the resolved access domain", async () => {
@@ -141,5 +142,51 @@ describe("Brain source support recovery", () => {
     db.workflowJob.findUnique.mockResolvedValue({ id: "unrelated" });
     await expect(reconcileBrainSource(actor, params)).rejects.toMatchObject({ code: "RECOVERY_IDENTITY_CONFLICT" });
     expect(db.workflowJob.create).not.toHaveBeenCalled();
+  });
+
+  describe("completed own-run acknowledgement", () => {
+    const job = { id: "job", workspaceId: "ws", type: "agent.brain-absorb", payload: { sourceId: "source", supportRecovery: true, expectedSourceIdentity: params.expectedSourceIdentity } };
+    const run = { id: "run", status: "COMPLETED", planJson: { payload: { sourceId: "source" } }, resultJson: { absorbed: true, sourceId: "source", summary: "PRIVATE RESULT" } };
+    const guardParams = { ...params, workflowJobId: "job" };
+    beforeEach(() => {
+      db.workflowJob.findUnique.mockResolvedValue(job);
+      db.agentRun.findMany.mockResolvedValue([run]);
+      db.brainSource.findFirst.mockResolvedValue({ ...source, absorbedAt: new Date() });
+    });
+
+    it("returns only the durable completion receipt before comparing the changed source", async () => {
+      expect(await assertBrainSourceRecoveryJob(guardParams)).toEqual({ alreadyCompleted: true, agentRunId: "run", workflowJobId: "job", sourceId: "source" });
+      expect(db.agentRun.findMany).toHaveBeenCalledExactlyOnceWith({ where: { workspaceId: "ws", agentKey: "brain-absorb", triggerType: "EVENT", triggerRef: "job" }, select: { id: true, status: true, planJson: true, resultJson: true }, take: 2 });
+      expect(db.brainSource.findFirst).not.toHaveBeenCalled();
+      expect(db.workflowJob.create).not.toHaveBeenCalled();
+      expect(db.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { workspaceId: "other" }, { type: "agent.company-understanding" },
+      { payload: { ...job.payload, sourceId: "other" } },
+      { payload: { ...job.payload, supportRecovery: false } },
+      { payload: { ...job.payload, expectedSourceIdentity: "b".repeat(64) } },
+    ])("rejects mismatched stored job provenance %#", async (change) => {
+      db.workflowJob.findUnique.mockResolvedValue({ ...job, ...change });
+      await expect(assertBrainSourceRecoveryJob(guardParams)).rejects.toMatchObject({ code: "RECOVERY_NOT_ELIGIBLE" });
+      expect(db.agentRun.findMany).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { status: "RUNNING" }, { status: "FAILED" }, { status: "WAITING_APPROVAL" },
+      { status: "CANCELLED" }, { status: "PENDING" },
+      { planJson: { payload: { sourceId: "other" } } },
+      { resultJson: { skipped: true, sourceId: "source" } },
+      { resultJson: { absorbed: true, sourceId: "other" } }, { resultJson: null },
+    ])("retains fresh admission failure for an unproven completion %#", async (change) => {
+      db.agentRun.findMany.mockResolvedValue([{ ...run, ...change }]);
+      await expect(assertBrainSourceRecoveryJob(guardParams)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
+
+    it("does not acknowledge ambiguous own runs", async () => {
+      db.agentRun.findMany.mockResolvedValue([run, { ...run, id: "other-run" }]);
+      await expect(assertBrainSourceRecoveryJob(guardParams)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    });
   });
 });

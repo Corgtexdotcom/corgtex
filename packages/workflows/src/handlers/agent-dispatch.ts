@@ -113,7 +113,8 @@ export async function runAgentWorkflowJob(job: {
       throw new Error("Invalid source recovery identity.");
     }
     if (expectedSourceIdentity) {
-      await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
+      const admission = await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
+      if (admission?.alreadyCompleted) return admission;
     }
     const result = await executeAgentRun({
       agentKey: "brain-absorb",
@@ -134,6 +135,9 @@ export async function runAgentWorkflowJob(job: {
             model,
             ...(expectedSourceIdentity ? { expectedSourceIdentity } : {}),
           });
+          if (payload.supportRecovery === true && "skipped" in result && result.skipped === true) {
+            throw new Error("Brain source recovery did not complete absorption.");
+          }
           return { resultJson: result };
         }),
     });
