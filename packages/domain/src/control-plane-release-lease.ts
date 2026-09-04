@@ -296,7 +296,7 @@ async function acquisitionProvenance(tx: Prisma.TransactionClient, row: Customer
 }
 async function requireAdmission(tx: Prisma.TransactionClient, row: LockedDeployment, recovery = false) {
   if (!activeManagedAzureDeployment(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
-  await requireManagedAzureAccountAuthority(tx, row);
+  if (row.deploymentKind === "HOSTED_DEDICATED") await requireManagedAzureAccountAuthority(tx, row);
   const provenance = await acquisitionProvenance(tx, row);
   if (provenance) assertProvenance(row, provenance, recovery);
   const envelope = row.rollbackRecordPresent ? storedRollbackEnvelope(row) : null;
@@ -401,7 +401,9 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
   return transact(async (tx) => {
     const row = await lock(tx, deploymentId);
     if (!readOnlyPreflightEligible(row, workloadClass)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
-    await requireManagedAzureAccountAuthority(tx, row);
+    if (workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "HOSTED_DEDICATED") {
+      await requireManagedAzureAccountAuthority(tx, row);
+    }
     if (workloadClass === "ACTIVE_CLIENT_PRIMARY") assertManagedAzureTargetBinding(row, input.acrIdentity);
     if (row.releaseLeaseId && (row.releaseLeasePhase !== "RESERVED" || row.releaseLeaseExpiresAt! > row.databaseNow)) {
       reject(row.releaseLeasePhase === "RESERVED" ? "MANAGED_RELEASE_LEASE_CONFLICT" : "MANAGED_RELEASE_RECOVERY_REQUIRED");
@@ -437,7 +439,9 @@ export async function getManagedReleaseBootstrapTarget(deploymentId: string, acr
   return transact(async (tx) => {
     const row = await lock(tx, deploymentId);
     if (!readOnlyPreflightEligible(row, workloadClass)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
-    await requireManagedAzureAccountAuthority(tx, row);
+    if (workloadClass === "ACTIVE_CLIENT_PRIMARY" && row.deploymentKind === "HOSTED_DEDICATED") {
+      await requireManagedAzureAccountAuthority(tx, row);
+    }
     if (workloadClass === "ACTIVE_CLIENT_PRIMARY") assertManagedAzureTargetBinding(row, input.acrIdentity);
     if (row.releaseLeaseId && (row.releaseLeasePhase !== "RESERVED" || row.releaseLeaseExpiresAt! > row.databaseNow)) {
       reject(row.releaseLeasePhase === "RESERVED" ? "MANAGED_RELEASE_LEASE_CONFLICT" : "MANAGED_RELEASE_RECOVERY_REQUIRED");
@@ -472,7 +476,7 @@ export async function acquireManagedReleaseLease(params: { deploymentId: string;
     const row = await lock(tx, params.deploymentId);
     if (!eligible(row)) reject("MANAGED_RELEASE_TARGET_INELIGIBLE");
     await assertNoTargetOverlap(tx, row);
-    await requireManagedAzureAccountAuthority(tx, row);
+    if (row.deploymentKind === "HOSTED_DEDICATED") await requireManagedAzureAccountAuthority(tx, row);
     assertManagedAzureTargetBinding(row);
     if (row.releaseLeaseId && row.releaseLeaseExpiresAt! > row.databaseNow) reject("MANAGED_RELEASE_LEASE_CONFLICT");
     if (row.releaseLeaseId && row.releaseLeasePhase !== "RESERVED") reject("MANAGED_RELEASE_RECOVERY_REQUIRED");

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
@@ -7044,10 +7044,11 @@ describe("control plane domain", () => {
     const newSha = "2".repeat(40);
     const oldTag = `sha-${oldSha}`;
     const newTag = `sha-${newSha}`;
+    const customerAccountId = "123e4567-e89b-42d3-a456-426614174011";
     const deployment = {
       id: "123e4567-e89b-42d3-a456-426614174001",
       label: "Acme Production",
-      customerAccountId: "cust-1",
+      customerAccountId,
       url: "https://customer.test",
       managedWorkspaceId: null,
       managedWorkspace: null,
@@ -7067,8 +7068,19 @@ describe("control plane domain", () => {
     const managedAzureTarget = { subscriptionId: "123e4567-e89b-42d3-a456-426614174010", resourceGroup: "rg-managed", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-a", workerAppName: "worker-b", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
     if (hosted) {
       vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", deployment.id);
+      vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ schemaVersion: 1, targets: [{
+        deploymentId: deployment.id, customerAccountId, deploymentKind: "HOSTED_DEDICATED", origin: deployment.url,
+        subscriptionId: managedAzureTarget.subscriptionId, resourceGroup: managedAzureTarget.resourceGroup,
+        acrName: managedAzureTarget.acrName, acrServer: managedAzureTarget.acrServer,
+        webAppName: managedAzureTarget.webAppName, workerAppName: managedAzureTarget.workerAppName,
+        acrResourceGroup: "rg-acr", evidenceSha256: "a".repeat(64), activationPolicy: "EXCLUSIVE",
+        releaseApproval: { gitSha: newSha, schemaApprovalDigest: "b".repeat(64) },
+        recovery: { gitSha: oldSha, releaseVersion: "main-recovery", schemaCompatibilityApprovalDigest: "c".repeat(64) },
+      }] }));
       Object.assign(deployment, { cloudProvider: "AZURE", deploymentKind: "HOSTED_DEDICATED" });
-      prismaMock.$queryRaw.mockResolvedValueOnce([{ ...deployment, deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", providerSubscriptionId: managedAzureTarget.subscriptionId, providerResourceGroup: managedAzureTarget.resourceGroup, providerWebServiceId: managedAzureTarget.webAppName, providerWorkerServiceId: managedAzureTarget.workerAppName, releaseLeaseId: null }]);
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([{ ...deployment, deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", providerSubscriptionId: managedAzureTarget.subscriptionId, providerResourceGroup: managedAzureTarget.resourceGroup, providerWebServiceId: managedAzureTarget.webAppName, providerWorkerServiceId: managedAzureTarget.workerAppName, releaseLeaseId: null }])
+        .mockResolvedValueOnce([{ id: customerAccountId, status: "ONBOARDING", managementAuthority: "CORGTEX", primaryDeploymentId: deployment.id }]);
     }
     prismaMock.customerDeployment.findUnique
       .mockResolvedValueOnce(deployment)
@@ -7135,6 +7147,57 @@ describe("control plane domain", () => {
       releaseVersion: "main-2026-05-20",
       observedRelease: { gitSha: newSha, imageTag: newTag, version: "main-2026-05-20" },
     });
+    if (hosted) expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects protected hosted recording after target, selection, lease, authority or primary drift", async () => {
+    const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
+    const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
+    const customerAccountId = "123e4567-e89b-42d3-a456-426614174011";
+    const oldSha = "1".repeat(40); const newSha = "2".repeat(40);
+    const target = { subscriptionId: "123e4567-e89b-42d3-a456-426614174010", resourceGroup: "rg-managed",
+      acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-a", workerAppName: "worker-b" };
+    const protectedConfig = { deploymentId, customerAccountId, deploymentKind: "HOSTED_DEDICATED", origin: "https://customer.test",
+      ...target, acrResourceGroup: "rg-acr", evidenceSha256: "a".repeat(64), activationPolicy: "EXCLUSIVE",
+      releaseApproval: { gitSha: newSha, schemaApprovalDigest: "b".repeat(64) },
+      recovery: { gitSha: oldSha, releaseVersion: "main-recovery", schemaCompatibilityApprovalDigest: "c".repeat(64) } };
+    const baseDeployment = { id: deploymentId, label: "Acme Production", customerAccountId, url: protectedConfig.origin,
+      managedWorkspaceId: null, managedWorkspace: null, supportCredentialEnc: null, releaseImageTag: `sha-${oldSha}`,
+      releaseVersion: "main-old", lastHealthStatus: "ok", lastHealthError: null, lastHealthCheck: new Date(),
+      lastWorkerHealthStatus: "ok", lastWorkerHealthCheck: new Date(), lastReleaseCheck: new Date(),
+      provisioningStatus: "active", bootstrapStatus: "completed", lastProvisioningError: null,
+      deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE",
+      providerSubscriptionId: target.subscriptionId, providerResourceGroup: target.resourceGroup,
+      providerWebServiceId: target.webAppName, providerWorkerServiceId: target.workerAppName, releaseLeaseId: null };
+    const liveHealth = { database: "up", schema: "ready", runtime: { redis: "configured", storage: "configured" },
+      release: { gitSha: newSha, imageTag: `sha-${newSha}`, version: "main-new" } };
+    const scenarios = [
+      { name: "forged ACR", supplied: { ...target, acrName: "otheracr", acrServer: "otheracr.azurecr.io" }, account: {} },
+      { name: "selection removed", selected: false, account: {} },
+      { name: "retained lease", row: { releaseLeaseId: randomUUID() }, account: {} },
+      { name: "suspended", account: { status: "SUSPENDED" } },
+      { name: "churned", account: { status: "CHURNED" } },
+      { name: "authority revoked", account: { managementAuthority: "SELF_MANAGED" } },
+      { name: "primary reassigned", account: { primaryDeploymentId: null } },
+    ];
+    for (const scenario of scenarios) {
+      vi.clearAllMocks();
+      vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", scenario.selected === false ? "" : deploymentId);
+      vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ schemaVersion: 1, targets: [protectedConfig] }));
+      prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(baseDeployment);
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([{ ...baseDeployment, ...scenario.row }])
+        .mockResolvedValueOnce([{ id: customerAccountId, status: "ONBOARDING", managementAuthority: "CORGTEX",
+          primaryDeploymentId: deploymentId, ...scenario.account }]);
+      global.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => liveHealth })) as any;
+      await expect(recordVerifiedControlPlaneRelease(operatorActor, {
+        deploymentId, releaseImageTag: `sha-${newSha}`, releaseVersion: "main-new", reason: `Reject ${scenario.name} drift.`,
+        managedAzureTarget: { ...target, ...scenario.supplied, workloadClass: "ACTIVE_CLIENT_PRIMARY" },
+      }), scenario.name).rejects.toBeTruthy();
+      expect(prismaMock.customerDeployment.update, scenario.name).not.toHaveBeenCalled();
+      expect(prismaMock.customerReleaseTarget.upsert, scenario.name).not.toHaveBeenCalled();
+      expect(prismaMock.customerDeploymentEvent.create, scenario.name).not.toHaveBeenCalled();
+    }
   });
 
   it("rejects verified release records when the supplied version differs from live health", async () => {
@@ -7221,7 +7284,7 @@ describe("control plane domain", () => {
         providerWebServiceId: "web-a",
         providerWorkerServiceId: "worker-b",
         releaseLeaseId: null,
-      }]);
+      }]).mockResolvedValueOnce([{ id: "cust-1", status: "ACTIVE", managementAuthority: "CORGTEX", primaryDeploymentId: "inst-1" }]);
     global.fetch = vi.fn(async () => ({
       ok: true,
       status: 200,
@@ -7290,7 +7353,7 @@ describe("control plane domain", () => {
       providerWebServiceId: "web-a",
       providerWorkerServiceId: "worker-b",
       releaseLeaseId: null,
-    }]);
+    }]).mockResolvedValueOnce([{ id: "cust-1", status: "ACTIVE", managementAuthority: "CORGTEX", primaryDeploymentId: "inst-1" }]);
     global.fetch = vi.fn(async () => ({
       ok: true,
       status: 200,

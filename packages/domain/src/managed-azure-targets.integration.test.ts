@@ -4,11 +4,12 @@ import { prisma } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { reconcileManagedAzureTarget, requireManagedAzureAccountAuthority } from "./managed-azure-targets";
 
-async function fixture() {
-  const account = await prisma.customerAccount.create({ data: { slug: randomUUID(), displayName: "Synthetic", status: "ACTIVE" } });
+async function fixture(accountStatus: "ACTIVE" | "ONBOARDING" = "ACTIVE") {
+  const account = await prisma.customerAccount.create({ data: { slug: randomUUID(), displayName: "Synthetic", status: accountStatus } });
   const row = await prisma.customerDeployment.create({ data: { label: "Synthetic", url: `https://${randomUUID()}.example.test`, customerAccountId: account.id,
     cloudProvider: "RAILWAY", deploymentKind: "HOSTED_DEDICATED", deploymentStatus: "DEGRADED", supportCredentialEnc: "synthetic-preserved-ciphertext",
     providerPostgresServiceId: "preserve-db", providerRedisServiceId: "preserve-redis", releaseLeaseFence: 26 } });
+  await prisma.customerAccount.update({ where: { id: account.id }, data: { primaryDeploymentId: row.id } });
   const target = { deploymentId: row.id, customerAccountId: account.id, deploymentKind: "HOSTED_DEDICATED", origin: `https://${randomUUID()}.example.test`,
     subscriptionId: randomUUID(), resourceGroup: "rg-client", webAppName: "client-web", workerAppName: "client-worker", acrName: "clientacr",
     acrServer: "clientacr.azurecr.io", acrResourceGroup: "rg-registry", evidenceSha256: "a".repeat(64), activationPolicy: "EXCLUSIVE",
@@ -34,6 +35,14 @@ describe("Azure target reconciliation", () => {
     expect(events[0].meta).toMatchObject({ beforeDigest: request.expectedMetadataDigest, afterDigest: result.metadataDigest, evidenceSha256: target.evidenceSha256 });
     expect(JSON.stringify(events)).not.toContain(row.supportCredentialEnc);
   });
+  it("accepts a CORGTEX-owned onboarding primary without changing lifecycle or routing authority", async () => {
+    const { account, row, request } = await fixture("ONBOARDING");
+    await reconcileManagedAzureTarget(request);
+    const afterAccount = await prisma.customerAccount.findUniqueOrThrow({ where: { id: account.id } });
+    expect(afterAccount.status).toBe("ONBOARDING");
+    expect(afterAccount.managementAuthority).toBe("CORGTEX");
+    expect(afterAccount.primaryDeploymentId).toBe(row.id);
+  });
   it("allows only one writer against the exact observed metadata version", async () => {
     const { request } = await fixture();
     const results = await Promise.allSettled([reconcileManagedAzureTarget(request), reconcileManagedAzureTarget(request)]);
@@ -45,13 +54,23 @@ describe("Azure target reconciliation", () => {
     await expect(reconcileManagedAzureTarget({ ...request, expectedMetadataDigest: "b".repeat(64) })).rejects.toThrow();
     vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ schemaVersion: 1, targets: [{ ...target, evidenceSha256: "b".repeat(64) }] }));
     await expect(reconcileManagedAzureTarget(request)).rejects.toThrow();
-    for (const data of [{ status: "SUSPENDED" as const }, { status: "ACTIVE" as const, managementAuthority: "SELF_MANAGED" as const }]) {
+    for (const data of [{ status: "SUSPENDED" as const }, { status: "CHURNED" as const },
+      { status: "ACTIVE" as const, managementAuthority: "SELF_MANAGED" as const }]) {
       await prisma.customerAccount.update({ where: { id: account.id }, data });
       await expect(reconcileManagedAzureTarget(request)).rejects.toThrow();
       await expect(requireManagedAzureAccountAuthority(prisma, row)).rejects.toThrow();
     }
     expect(await prisma.customerDeploymentEvent.count()).toBe(0);
     expect((await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } })).cloudProvider).toBe("RAILWAY");
+  });
+  it("rejects missing primary routing without rewriting account lifecycle or deployment metadata", async () => {
+    const { row, account, request } = await fixture("ONBOARDING");
+    await prisma.customerAccount.update({ where: { id: account.id }, data: { primaryDeploymentId: null } });
+    await expect(reconcileManagedAzureTarget(request)).rejects.toMatchObject({ code: "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED" });
+    await expect(requireManagedAzureAccountAuthority(prisma, row)).rejects.toMatchObject({ code: "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED" });
+    expect((await prisma.customerAccount.findUniqueOrThrow({ where: { id: account.id } })).status).toBe("ONBOARDING");
+    expect((await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } })).cloudProvider).toBe("RAILWAY");
+    expect(await prisma.customerDeploymentEvent.count()).toBe(0);
   });
   it("does not silently alias another stable deployment", async () => {
     const { target, request } = await fixture();

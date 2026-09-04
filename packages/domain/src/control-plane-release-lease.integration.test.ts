@@ -65,7 +65,8 @@ async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedC
     providerResourceGroup: RG, providerWebServiceId: WEB, providerWorkerServiceId: WORKER, ...overrides,
   } });
 }
-function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>) {
+async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>) {
+  await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: row.id } });
   vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
   vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({
     schemaVersion: 1,
@@ -586,9 +587,22 @@ describe("managed release lease CAS", () => {
 describe("selected hosted Azure release lifecycle", () => {
   async function hosted() {
     const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
-    authorizeHosted(row);
+    await authorizeHosted(row);
     return row;
   }
+  it("admits a selected CORGTEX-owned onboarding primary without changing its lifecycle state", async () => {
+    const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
+    await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { status: "ONBOARDING" } });
+    await authorizeHosted(row);
+    await expect(getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY)).resolves.toMatchObject({
+      deployment: { deploymentId: row.id, releaseEligible: true },
+    });
+    const handle = await acquire(row.id);
+    expect(await prisma.customerAccount.findUniqueOrThrow({ where: { id: row.customerAccountId! } })).toMatchObject({
+      status: "ONBOARDING", primaryDeploymentId: row.id, managementAuthority: "CORGTEX",
+    });
+    await abortManagedReleaseLease(handle);
+  });
   it("runs a selected hosted release through V2 recording and success without relabelling", async () => {
     const row = await hosted();
     const preflight = await getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY);
@@ -656,10 +670,24 @@ describe("selected hosted Azure release lifecycle", () => {
     }
     await expect(finalizeManagedReleaseRollback(handle)).resolves.toMatchObject({ status: "ROLLED_BACK", releaseImageTag: BASE });
   });
+  it("blocks forward and recovery lifecycle work after current-primary reassignment", async () => {
+    const row = await hosted(); const handle = await acquire(row.id);
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());
+    await beginManagedReleaseMutation(handle);
+    await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: null } });
+    const message = "The hosted deployment must remain the account's current primary target.";
+    await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    await expectCode(heartbeatManagedReleaseLease(handle, true), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    await expectCode(finalizeManagedReleaseSuccess(handle), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    await expectCode(getManagedReleaseRollbackRecord(handle), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      releaseLeaseId: handle.leaseId, releaseLeasePhase: "MUTATING",
+    });
+  });
   it.each(["HOSTED_DEDICATED", "REMOTE_MANAGED"] as const)("keeps database metadata and delete guards for %s", async (deploymentKind) => {
     const row = await deployment({ deploymentKind });
     vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
-    if (deploymentKind === "HOSTED_DEDICATED") authorizeHosted(row);
+    if (deploymentKind === "HOSTED_DEDICATED") await authorizeHosted(row);
     const handle = await acquire(row.id);
     for (const data of [{ deploymentStatus: "SUSPENDED" as const }, { deploymentKind: "SHARED_WORKSPACE" as const }, { customerAccountId: null }, { url: "https://reassigned.example.test" }, { providerWebServiceId: "other-web" }]) {
       await expect(prisma.customerDeployment.update({ where: { id: row.id }, data })).rejects.toThrow("MANAGED_RELEASE_LEASE_UPDATE_CONFLICT");
@@ -714,7 +742,7 @@ it("applies the exact hosted migration without changing retained remote leases, 
   }, { timeout: 15_000 });
   await abortManagedReleaseLease(handle);
   vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", hosted.id);
-  authorizeHosted(hosted);
+  await authorizeHosted(hosted);
   const hostedHandle = await acquire(hosted.id);
   await abortManagedReleaseLease(hostedHandle);
 });

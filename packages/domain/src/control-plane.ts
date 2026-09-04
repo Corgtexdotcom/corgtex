@@ -1,6 +1,7 @@
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { createHash, randomUUID } from "node:crypto";
-import { reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema } from "./managed-azure-targets";
+import { assertManagedAzureTargetBinding, reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema,
+  requireManagedAzureAccountAuthority } from "./managed-azure-targets";
 import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
 import type { AgentActor, AppActor } from "@corgtex/shared";
@@ -9787,10 +9788,10 @@ type LockedManagedAzureRecordDeployment = {
   id: string;
   url: string;
   customerAccountId: string | null;
-  deploymentKind: string;
-  cloudProvider: string;
+  deploymentKind: CustomerDeploymentKind;
+  cloudProvider: CustomerDeploymentCloudProvider;
   environment: string;
-  deploymentStatus: string;
+  deploymentStatus: CustomerDeploymentStatus;
   provisioningStatus: string;
   providerSubscriptionId: string | null;
   providerResourceGroup: string | null;
@@ -9887,10 +9888,25 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
   await prisma.$transaction(async (tx) => {
     if (params.managedAzureTarget || deployment.cloudProvider === "AZURE") {
       const current = await lockManagedAzureRecordDeployment(tx, params.deploymentId);
-      invariant(current && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url
-        && (params.managedAzureTarget ? managedAzureTargetMatchesDeployment(current, params.managedAzureTarget)
-          : current.deploymentKind === "REMOTE_MANAGED" && managedAzureRecordEligible(current, "ACTIVE_CLIENT_PRIMARY")),
+      invariant(current && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
         409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed before the release baseline could be recorded.");
+      if (current.deploymentKind === "HOSTED_DEDICATED") {
+        await requireManagedAzureAccountAuthority(tx, current);
+        const supplied = params.managedAzureTarget;
+        invariant(supplied?.workloadClass === "ACTIVE_CLIENT_PRIMARY", 409, "MANAGED_AZURE_TARGET_DRIFT",
+          "Protected hosted release recording requires the selected primary workload.");
+        const protectedTarget = assertManagedAzureTargetBinding(current, { acrName: supplied.acrName!, acrServer: supplied.acrServer! });
+        invariant(protectedTarget && supplied.subscriptionId === protectedTarget.subscriptionId
+          && supplied.resourceGroup === protectedTarget.resourceGroup && supplied.webAppName === protectedTarget.webAppName
+          && supplied.workerAppName === protectedTarget.workerAppName && supplied.acrName === protectedTarget.acrName
+          && supplied.acrServer === protectedTarget.acrServer && managedAzureTargetMatchesDeployment(current, supplied),
+        409, "MANAGED_AZURE_TARGET_DRIFT", "Protected hosted release target or selection changed before recording.");
+      } else {
+        invariant(current.deploymentKind === "REMOTE_MANAGED"
+          && (params.managedAzureTarget ? managedAzureTargetMatchesDeployment(current, params.managedAzureTarget)
+            : managedAzureRecordEligible(current, "ACTIVE_CLIENT_PRIMARY")),
+          409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure release authority changed before recording.");
+      }
     }
     await tx.customerDeployment.update({
       where: { id: params.deploymentId },

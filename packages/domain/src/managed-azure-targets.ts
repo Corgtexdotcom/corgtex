@@ -69,7 +69,9 @@ function deploymentAliasesTarget(
       && targetApps.has(value?.toLowerCase() ?? "");
   });
 }
-export function assertManagedAzureTargetBinding(row: CustomerDeployment, acr?: { acrName: string; acrServer: string }, required = row.deploymentKind === "HOSTED_DEDICATED") {
+type ManagedAzureBindingRow = Pick<CustomerDeployment, "id" | "customerAccountId" | "deploymentKind" | "cloudProvider" | "environment" | "url"
+  | "providerSubscriptionId" | "providerResourceGroup" | "providerWebServiceId" | "providerWorkerServiceId">;
+export function assertManagedAzureTargetBinding(row: ManagedAzureBindingRow, acr?: { acrName: string; acrServer: string }, required = row.deploymentKind === "HOSTED_DEDICATED") {
   const target = managedAzureTargets().find((item) => item.deploymentId === row.id);
   invariant(target || !required, 409, "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED", "An authoritative protected target is required.");
   if (!target) return null; // Preserve unmapped historical REMOTE_MANAGED behavior.
@@ -83,12 +85,16 @@ export function assertManagedAzureTargetBinding(row: CustomerDeployment, acr?: {
   return target;
 }
 
-export async function requireManagedAzureAccountAuthority(tx: Prisma.TransactionClient, row: CustomerDeployment) {
-  const accounts = await tx.$queryRaw<Pick<CustomerAccount, "id" | "status" | "managementAuthority">[]>`
-    SELECT id, status, "managementAuthority" FROM "CustomerAccount" WHERE id = ${row.customerAccountId} FOR SHARE`;
+export async function requireManagedAzureAccountAuthority(tx: Prisma.TransactionClient,
+  row: Pick<CustomerDeployment, "id" | "customerAccountId" | "deploymentKind">) {
+  const accounts = await tx.$queryRaw<Pick<CustomerAccount, "id" | "status" | "managementAuthority" | "primaryDeploymentId">[]>`
+    SELECT id, status, "managementAuthority", "primaryDeploymentId" FROM "CustomerAccount" WHERE id = ${row.customerAccountId} FOR SHARE`;
   const account = accounts[0];
-  invariant(account && account.managementAuthority === "CORGTEX" && !["SUSPENDED", "CHURNED"].includes(account.status),
+  invariant(account && account.managementAuthority === "CORGTEX"
+    && !["SUSPENDED", "CHURNED"].includes(account.status),
     409, "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", "Current account management authority is required.");
+  invariant(account.primaryDeploymentId === row.id,
+    409, "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", "The hosted deployment must remain the account's current primary target.");
 }
 
 type MetadataAccount = Pick<CustomerAccount, "id" | "status" | "managementAuthority" | "primaryDeploymentId" | "updatedAt">;
@@ -122,8 +128,11 @@ export async function reconcileManagedAzureTarget(input: z.infer<typeof reconcil
     const [row] = await tx.$queryRaw<CustomerDeployment[]>`SELECT * FROM "CustomerDeployment" WHERE id = ${request.deploymentId} FOR UPDATE`;
     invariant(row, 404, "NOT_FOUND", "Deployment not found.");
     const [account] = await tx.$queryRaw<MetadataAccount[]>`SELECT id, status, "managementAuthority", "primaryDeploymentId", "updatedAt" FROM "CustomerAccount" WHERE id = ${row.customerAccountId} FOR SHARE`;
+    const protectedHosted = target.deploymentKind === "HOSTED_DEDICATED";
     invariant(account?.id === target.customerAccountId && account.managementAuthority === "CORGTEX"
-      && account.status === "ACTIVE" && row.deploymentKind === target.deploymentKind && row.environment === "production"
+      && (protectedHosted ? !["SUSPENDED", "CHURNED"].includes(account.status) : account.status === "ACTIVE")
+      && (!protectedHosted || account.primaryDeploymentId === row.id)
+      && row.deploymentKind === target.deploymentKind && row.environment === "production"
       && !["SUSPENDED", "RETIRED"].includes(row.deploymentStatus), 409, "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", "Current deployment/account authority is required.");
     invariant(!row.releaseLeaseId && !row.releaseLeasePhase && !row.releaseLeaseRollbackRecord,
       409, "MANAGED_RELEASE_RECOVERY_REQUIRED", "Reconcile the retained operation before changing target metadata.");

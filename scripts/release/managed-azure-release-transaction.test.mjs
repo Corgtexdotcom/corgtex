@@ -121,7 +121,8 @@ function dependencies(options = {}) {
   const current = { web: "BASELINE", worker: "BASELINE" };
   const currentTemplates = { web: null, worker: null };
   let patchCount = 0;
-  const deployment = { deploymentId, deploymentKind: options.hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: options.hosted ? "hosted-dedicated" : "managed-customers", workload: options.hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
+  const hosted = options.hosted !== false;
+  const deployment = { deploymentId, deploymentKind: hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: hosted ? "hosted-dedicated" : "managed-customers", workload: hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
   const preflight = { deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const deps = {
     owner: "github:42:1",
@@ -192,12 +193,14 @@ function dependencies(options = {}) {
 
 describe("managed Azure single-target transaction", () => {
   it("keeps dry-run read-only while proving inventory, target, images, and both baselines", async () => {
-    const { deps, events } = dependencies({ webDestination: "ABSENT" });
+    const { deps, events } = dependencies({ hosted: false, webDestination: "ABSENT" });
     const result = await runManagedAzureReleaseTransaction(input, deps);
     expect(result).toMatchObject({ status: "DRY_RUN_READY", deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY", executionAllowed: true, effects: 0, importsRequired: ["web"] });
+    expect(result).not.toHaveProperty("schemaApprovalDigest"); expect(result).not.toHaveProperty("recoveryImportsRequired");
     expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
     expect(deps.importRole).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
     expect(deps.healthProbe).toHaveBeenCalledTimes(1);
+    expect(deps.targetConfig).not.toHaveBeenCalled(); expect(deps.authPreflight).not.toHaveBeenCalled();
     expect(deps.resolveRelease).toHaveBeenCalledWith({ deploymentId, target: { ...target, acrResourceGroup: input.acrResourceGroup }, gitSha: input.releaseSha, workloadClass: "ACTIVE_CLIENT_PRIMARY", deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED" }) });
     expect(deps.readApp).toHaveBeenCalledWith(expect.objectContaining({ target }));
     expect(JSON.stringify(result)).not.toContain("private-capability"); expect(JSON.stringify(result)).not.toContain(target.resourceGroup);
@@ -221,6 +224,20 @@ describe("managed Azure single-target transaction", () => {
     expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
     expect(deps.importRole).not.toHaveBeenCalled();
     expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.targetConfig).not.toHaveBeenCalled();
+    expect(deps.authPreflight).not.toHaveBeenCalled();
+  });
+
+  it("keeps remote-managed execution on the historical V1 health-gated path", async () => {
+    const { deps } = dependencies({ hosted: false });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "SUCCEEDED", phase: "COMPLETE" });
+    expect(result).not.toHaveProperty("schemaApprovalDigest");
+    const rollback = deps.lease.mock.calls.find(([operation]) => operation === "record_rollback")[1].rollback;
+    expect(rollback).toMatchObject({ schemaVersion: 1, incoming: { webDigest: digests.nextWeb, workerDigest: digests.nextWorker } });
+    expect(rollback).not.toHaveProperty("compatibleRecovery");
+    expect(deps.targetConfig).not.toHaveBeenCalled(); expect(deps.authPreflight).not.toHaveBeenCalled();
+    expect(deps.acceptanceProbe).not.toHaveBeenCalled(); expect(deps.observeNewRelease).not.toHaveBeenCalled();
   });
 
   it("rejects inventories frozen against a different preflight projection", async () => {
