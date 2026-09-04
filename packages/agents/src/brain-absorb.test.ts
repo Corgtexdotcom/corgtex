@@ -9,9 +9,11 @@ const {
   rebuildBacklinksMock,
   syncBrainArticleKnowledgeMock,
   lockWorkspaceArchiveArtifactMock,
+  recoveryIdentityMock,
 } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
     brainSource: {
       findUnique: vi.fn(),
     },
@@ -32,6 +34,7 @@ const {
   rebuildBacklinksMock: vi.fn(),
   syncBrainArticleKnowledgeMock: vi.fn(),
   lockWorkspaceArchiveArtifactMock: vi.fn(),
+  recoveryIdentityMock: vi.fn(),
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -52,6 +55,7 @@ vi.mock("@corgtex/domain", () => ({
   markSourceAbsorbed: markSourceAbsorbedMock,
   rebuildBacklinks: rebuildBacklinksMock,
   lockWorkspaceArchiveArtifact: lockWorkspaceArchiveArtifactMock,
+  brainSourceRecoveryIdentity: recoveryIdentityMock,
 }));
 
 vi.mock("@corgtex/knowledge", () => ({
@@ -61,6 +65,7 @@ vi.mock("@corgtex/knowledge", () => ({
 describe("absorbSource", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    recoveryIdentityMock.mockReturnValue("a".repeat(64));
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock));
     lockWorkspaceArchiveArtifactMock.mockResolvedValue(undefined);
     prismaMock.brainSource.findUnique.mockResolvedValue({
@@ -104,6 +109,45 @@ describe("absorbSource", () => {
       instruction: expect.stringContaining("Prioritize launch blockers."),
       input: expect.stringContaining("Prioritize launch blockers."),
     }));
+  });
+
+  it("rejects changed recovery input before inference", async () => {
+    const { absorbSource } = await import("./brain-absorb");
+    await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-1", expectedSourceIdentity: "b".repeat(64) })).rejects.toThrow("SOURCE_CHANGED");
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "archived", "absorbed", "wrong_workspace"])("rejects %s recovery input before an initial skip can become success", async (state) => {
+    const { absorbSource } = await import("./brain-absorb");
+    prismaMock.brainSource.findUnique.mockResolvedValueOnce(state === "missing" ? null : {
+      id: "source-1", workspaceId: state === "wrong_workspace" ? "other" : "workspace-1",
+      absorbedAt: state === "absorbed" ? new Date() : null,
+      archivedAt: state === "archived" ? new Date() : null,
+    });
+    recoveryIdentityMock.mockReturnValue("b".repeat(64));
+    await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-1", expectedSourceIdentity: "a".repeat(64) })).rejects.toThrow("SOURCE_CHANGED");
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+    expect(modelGatewayMock.chat).not.toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves ordinary missing-source skips", async () => {
+    const { absorbSource } = await import("./brain-absorb");
+    prismaMock.brainSource.findUnique.mockResolvedValueOnce(null);
+    await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-1" })).resolves.toEqual({ skipped: true, reason: "not_found" });
+    expect(recoveryIdentityMock).not.toHaveBeenCalled();
+    expect(modelGatewayMock.extract).not.toHaveBeenCalled();
+  });
+
+  it("rechecks recovery identity under the source row lock before any output write", async () => {
+    const { absorbSource } = await import("./brain-absorb");
+    recoveryIdentityMock.mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("a".repeat(64)).mockReturnValueOnce("b".repeat(64));
+    await expect(absorbSource({ workspaceId: "workspace-1", sourceId: "source-1", agentRunId: "run-1", expectedSourceIdentity: "a".repeat(64) })).rejects.toThrow("SOURCE_CHANGED");
+    expect(prismaMock.$queryRaw).toHaveBeenCalled();
+    expect(createArticleMock).not.toHaveBeenCalled();
+    expect(markSourceAbsorbedMock).not.toHaveBeenCalled();
   });
 
   it("skips archived sources before sending content to the model", async () => {

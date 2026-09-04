@@ -1,6 +1,7 @@
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
+import { assertBrainSourceRecoveryJob } from "@corgtex/domain";
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -107,7 +108,15 @@ export async function runAgentWorkflowJob(job: {
   if (job.type === "agent.brain-absorb") {
     const sourceId = asString(payload.sourceId);
     if (!sourceId) return null;
-    return executeAgentRun({
+    const expectedSourceIdentity = payload.supportRecovery === true ? asString(payload.expectedSourceIdentity) : undefined;
+    if (payload.supportRecovery === true && !/^[a-f0-9]{64}$/.test(expectedSourceIdentity ?? "")) {
+      throw new Error("Invalid source recovery identity.");
+    }
+    if (expectedSourceIdentity) {
+      const admission = await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
+      if (admission?.alreadyCompleted) return admission;
+    }
+    const result = await executeAgentRun({
       agentKey: "brain-absorb",
       workspaceId: job.workspaceId,
       triggerType: "EVENT",
@@ -124,10 +133,18 @@ export async function runAgentWorkflowJob(job: {
             sourceId,
             agentRunId: runId,
             model,
+            ...(expectedSourceIdentity ? { expectedSourceIdentity } : {}),
           });
+          if (payload.supportRecovery === true && "skipped" in result && result.skipped === true) {
+            throw new Error("Brain source recovery did not complete absorption.");
+          }
           return { resultJson: result };
         }),
     });
+    if (payload.supportRecovery === true && result && "skipped" in result && result.skipped === true) {
+      throw new Error("Brain source recovery was skipped by agent runtime before processing.");
+    }
+    return result;
   }
 
   if (job.type === "agent.company-understanding") {

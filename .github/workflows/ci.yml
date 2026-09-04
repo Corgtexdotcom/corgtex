@@ -315,14 +315,6 @@ jobs:
       - run: npx prisma generate
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
 
-      - name: Run production DB release
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        run: npm run release:db
-        env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
-          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-
       - name: Wait for healthy self-serve deployment
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: node scripts/wait-health.mjs https://selfserve.corgtex.com/api/health --label self-serve
@@ -422,10 +414,6 @@ jobs:
           path: .artifacts/production-app-release-context/release-context.json
           if-no-files-found: error
 
-      - run: node scripts/check-migration-health.mjs
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
-        env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
       - run: node scripts/self-serve-production-readiness.mjs --base-url=https://selfserve.corgtex.com
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
@@ -433,7 +421,15 @@ jobs:
         env:
           CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.app-release.outputs.skip_release_match }}
           CORGTEX_RELEASE_MATCH_TIMEOUT_MS: 1200000
-      - run: node scripts/ingestion-guidance-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
+
+      # Controlled rollout owns production migrations. Wait for its exact
+      # release before read-only DB verification; never bootstrap from CI.
+      - name: Verify bundled production migrations
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        run: node --input-type=module -e 'import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();'
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      - run: node scripts/check-migration-health.mjs
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}

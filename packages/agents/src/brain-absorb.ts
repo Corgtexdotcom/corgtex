@@ -7,6 +7,7 @@ import {
   markSourceAbsorbed,
   rebuildBacklinks,
   lockWorkspaceArchiveArtifact,
+  brainSourceRecoveryIdentity,
 } from "@corgtex/domain";
 import { syncBrainArticleKnowledge } from "@corgtex/knowledge";
 import type { AppActor } from "@corgtex/shared";
@@ -97,10 +98,18 @@ export async function absorbSource(params: {
   sourceId: string;
   agentRunId: string;
   model?: string;
+  expectedSourceIdentity?: string;
 }) {
   const source = await prisma.brainSource.findUnique({
     where: { id: params.sourceId },
   });
+
+  function assertRecoveryIdentity(current: typeof source) {
+    if (params.expectedSourceIdentity && (!current || brainSourceRecoveryIdentity(current) !== params.expectedSourceIdentity)) {
+      throw new Error("SOURCE_CHANGED: Refresh source recovery evidence before processing.");
+    }
+  }
+  assertRecoveryIdentity(source);
 
   if (!source) {
     return { skipped: true, reason: "not_found" };
@@ -113,6 +122,11 @@ export async function absorbSource(params: {
   const sourceId = source.id;
 
   async function currentSkipReason(client: Pick<typeof prisma, "brainSource"> = prisma) {
+    if (params.expectedSourceIdentity) {
+      const current = await client.brainSource.findUnique({ where: { id: params.sourceId } });
+      assertRecoveryIdentity(current);
+      return sourceSkipReason(current, params.workspaceId);
+    }
     const current = await client.brainSource.findUnique({
       where: { id: params.sourceId },
       select: { workspaceId: true, absorbedAt: true, archivedAt: true },
@@ -128,6 +142,9 @@ export async function absorbSource(params: {
   async function runSourceWritePhase<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | SourceSkipResult> {
     return prisma.$transaction(async (tx) => {
       await lockWorkspaceArchiveArtifact(tx, "BrainSource", sourceId);
+      if (params.expectedSourceIdentity) {
+        await tx.$queryRaw`SELECT id FROM "BrainSource" WHERE id = ${sourceId} AND "workspaceId" = ${params.workspaceId} FOR UPDATE`;
+      }
       const reason = await currentSkipReason(tx);
       if (reason) return { skipped: true, reason, sourceId };
       return operation(tx);
