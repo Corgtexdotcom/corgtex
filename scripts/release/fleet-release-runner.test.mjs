@@ -795,6 +795,15 @@ describe("fleet release runner", () => {
     expect(output).not.toContain("ph-project-secret");
   });
 
+  it("passes immutable release identity into standalone production worker builds", () => {
+    const source = readFileSync(new URL("../azure-selfserve-production-release.mjs", import.meta.url), "utf8");
+    const workerBuild = source.split("`${workerRepository}:${imageTag}`,")[1]?.split("  ]);")[0] ?? "";
+    expect(workerBuild).toContain('"deploy/Dockerfile.worker"');
+    expect(workerBuild).toContain('"--build-arg"');
+    expect(workerBuild).toContain("`CORGTEX_RELEASE_GIT_SHA=${releaseGitSha}`");
+    expect(workerBuild).toContain("`GITHUB_SHA=${releaseGitSha}`");
+  });
+
   it("prints a dry-run plan without mutating providers", async () => {
     const outputs = {};
     const runCommand = vi.fn();
