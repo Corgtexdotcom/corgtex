@@ -1235,7 +1235,7 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Release Images workflow before fleet promotion");
   });
 
-  it("passes GHCR registry credentials to Railway image updates", async () => {
+  it.each([SHA, "a".repeat(40)])("updates and rolls back Ops without seeding or changing unrelated configuration: %s", async (releaseSha) => {
     const railwayCalls = [];
     const fetchImpl = vi.fn(async (url, options) => {
       if (String(url).includes("backboard.railway.com")) {
@@ -1270,6 +1270,7 @@ describe("fleet release runner", () => {
         }
         return { ok: true, json: async () => ({ data: {} }) };
       }
+      if (String(url).includes("/api/control-plane/mcp")) throw new Error("Ops API unavailable during recovery");
       return {
         ok: true,
         json: async () => ({
@@ -1277,8 +1278,8 @@ describe("fleet release runner", () => {
           database: "up",
           schema: "ready",
           release: {
-            imageTag: `sha-${SHA}`,
-            gitSha: SHA,
+            imageTag: `sha-${releaseSha}`,
+            gitSha: releaseSha,
           },
         }),
       };
@@ -1287,14 +1288,17 @@ describe("fleet release runner", () => {
     const result = await runFleetRelease([
       "deploy",
       "--release",
-      SHA,
+      releaseSha,
       "--targets",
       "ops",
       "--reason",
       "Deploy release.",
     ], {
       env: {
-        FLEET_RELEASE_TARGETS_JSON: targetJson(),
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify([{ id: "unselected-customer", deploymentId: "unselected-customer", group: "managed-customers", provider: "railway" }]),
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        CONTROL_PLANE_AGENT_API_KEY: "synthetic-control-plane-token",
+        SEED_SCRIPTS: "scripts/existing-private-seed.mjs",
         RAILWAY_API_TOKEN: "railway-token",
         GHCR_IMPORT_USERNAME: "github-user",
         GITHUB_TOKEN: "github-token",
@@ -1313,7 +1317,7 @@ describe("fleet release runner", () => {
     expect(updateCalls).toHaveLength(2);
     expect(updateCalls[0].variables.input).toMatchObject({
       source: {
-        image: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}`,
+        image: `ghcr.io/corgtexdotcom/corgtex/web:sha-${releaseSha}`,
       },
       registryCredentials: {
         username: "github-user",
@@ -1322,7 +1326,7 @@ describe("fleet release runner", () => {
     });
     expect(updateCalls[1].variables.input).toMatchObject({
       source: {
-        image: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}`,
+        image: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${releaseSha}`,
       },
       registryCredentials: {
         username: "github-user",
@@ -1332,16 +1336,12 @@ describe("fleet release runner", () => {
     const variableCalls = railwayCalls.filter((call) => call.query.includes("variableCollectionUpsert"));
     expect(variableCalls).toHaveLength(2);
     for (const call of variableCalls) {
-      expect(call.variables.variables).toMatchObject({
-        APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
-        POSTHOG_ENABLED: "true",
-        POSTHOG_PROJECT_TOKEN: "posthog-project-token",
-        POSTHOG_API_HOST: "https://us.i.posthog.com",
-        POSTHOG_ENVIRONMENT: "production",
-        CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
-        CORGTEX_RELEASE_GIT_SHA: SHA,
-        CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
-        MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "123e4567-e89b-42d3-a456-426614174000",
+      expect(call.query).toContain("replace: false");
+      expect(call.variables.variables).toEqual({
+        CORGTEX_RELEASE_VERSION: `main-${releaseSha.slice(0, 12)}`,
+        CORGTEX_RELEASE_IMAGE_TAG: `sha-${releaseSha}`,
+        CORGTEX_RELEASE_GIT_SHA: releaseSha,
+        CORGTEX_STARTUP_MODE: "migrate-and-web",
       });
     }
     const deployAndWaitCalls = railwayCalls

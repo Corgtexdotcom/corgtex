@@ -700,6 +700,7 @@ async function deployRailwayTarget(target, manifest, deps) {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
       variables: releaseVariables(manifest, deps.env ?? process.env, {
+        opsRuntimeOnly: target.group === "ops",
         includePostHogInstanceId: target.group !== "managed-customers",
         includeCanaryPreflightDeploymentId: target.group === "ops",
       }),
@@ -788,6 +789,14 @@ function clearPostHogInstanceId(variables, env, options) {
 }
 
 export function releaseVariables(manifest, env = process.env, options = {}) {
+  if (options.opsRuntimeOnly === true) {
+    return {
+      CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
+      CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
+      CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
+      CORGTEX_STARTUP_MODE: "migrate-and-web",
+    };
+  }
   const variables = {
     CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
     CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
