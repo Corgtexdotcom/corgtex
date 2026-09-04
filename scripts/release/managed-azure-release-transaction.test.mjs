@@ -120,20 +120,21 @@ function dependencies(options = {}) {
   const current = { web: "BASELINE", worker: "BASELINE" };
   const currentTemplates = { web: null, worker: null };
   let patchCount = 0;
-  const preflight = { deploymentId, origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+  const deployment = { deploymentId, deploymentKind: options.hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: options.hosted ? "hosted-dedicated" : "managed-customers", workload: options.hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
+  const preflight = { deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const deps = {
     owner: "github:42:1",
     templateDigest: managedAzureTemplateDigest,
-    loadInventory: vi.fn(async (request) => ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: {
+    loadInventory: vi.fn(async (request) => { if (request.workloadClass === "ACTIVE_CLIENT_CANARY") Object.assign(deployment, { workloadClass: request.workloadClass, deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", workload: "active-client-canary", releaseEligible: false }); return ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: {
       workloadClass: request.workloadClass,
       canonicalDigest: `sha256:${"d".repeat(64)}`,
       preflightDigest: options.inventoryPreflightDigest ?? preflightDigest(preflight),
-    } })),
+    } }); }),
     lease: vi.fn(async (operation, args) => {
       events.push(`lease:${operation}`);
       if (operation === "preflight") return preflight;
       if (operation === "acquire") return { deploymentId, leaseId, capability: "private-capability", fence: 7 };
-      if (operation === "get_target") return { deploymentId, target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
+      if (operation === "get_target") return { deploymentId, deployment: options.leasedDeployment ?? deployment, authorityDigest: options.leasedAuthorityDigest ?? "e".repeat(64), target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
       return { deploymentId, operation, args };
     }),
     resolveRelease: vi.fn(async () => ({ roles: {
@@ -186,7 +187,7 @@ describe("managed Azure single-target transaction", () => {
     expect(events.filter((event) => event.startsWith("lease:"))).toEqual(["lease:preflight"]);
     expect(deps.importRole).not.toHaveBeenCalled(); expect(deps.patchTemplate).not.toHaveBeenCalled();
     expect(deps.healthProbe).toHaveBeenCalledTimes(1);
-    expect(deps.resolveRelease).toHaveBeenCalledWith({ deploymentId, target: { ...target, acrResourceGroup: input.acrResourceGroup }, gitSha: input.releaseSha, workloadClass: "ACTIVE_CLIENT_PRIMARY" });
+    expect(deps.resolveRelease).toHaveBeenCalledWith({ deploymentId, target: { ...target, acrResourceGroup: input.acrResourceGroup }, gitSha: input.releaseSha, workloadClass: "ACTIVE_CLIENT_PRIMARY", deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED" }) });
     expect(deps.readApp).toHaveBeenCalledWith(expect.objectContaining({ target }));
     expect(JSON.stringify(result)).not.toContain("private-capability"); expect(JSON.stringify(result)).not.toContain(target.resourceGroup);
   });
@@ -226,7 +227,7 @@ describe("managed Azure single-target transaction", () => {
     expect(events.indexOf("lease:acquire")).toBeLessThan(events.indexOf("import:web"));
     expect(events.indexOf("import:worker")).toBeLessThan(events.indexOf("lease:begin"));
     expect(events.indexOf("patch:web:forward")).toBeLessThan(events.indexOf("patch:worker:forward"));
-    expect(events.filter((event) => event === "lease:heartbeat")).toHaveLength(9);
+    expect(events.filter((event) => event === "lease:heartbeat")).toHaveLength(12);
     expect(events.at(-1)).toBe("lease:finalize_success");
     const recorded = deps.lease.mock.calls.find(([operation]) => operation === "record_rollback")[1].rollback;
     expect(recorded.previous.web).toMatchObject({ image: `${target.acrServer}/corgtex/web@${digests.web}`, templateDigest: expect.stringMatching(/^sha256:/) });
@@ -240,7 +241,8 @@ describe("managed Azure single-target transaction", () => {
     expect(result).toMatchObject({ status: "SUCCEEDED", phase: "COMPLETE" });
     expect(events).toContain("import:web");
     expect(events).toContain("verifyImport:web");
-    expect(events.indexOf("verifyImport:web")).toBeLessThan(events.indexOf("lease:heartbeat"));
+    expect(events.indexOf("lease:heartbeat")).toBeLessThan(events.indexOf("import:web"));
+    expect(events.indexOf("verifyImport:web")).toBeLessThan(events.indexOf("lease:begin"));
     expect(events.indexOf("patch:web:forward")).toBeGreaterThan(events.indexOf("verifyImport:web"));
     expect(deps.lease).toHaveBeenCalledWith("finalize_success", expect.anything());
   });
@@ -565,5 +567,37 @@ describe("managed Azure Container Apps transport", () => {
     let error;
     try { canonicalizeManagedAzureContainerAppState(polluted, { target, role: "web", imageDigest: digests.web, release: transportBaseRelease }); } catch (caught) { error = caught; }
     expect(error).toBeInstanceOf(ManagedAzureContainerAppError); expect(JSON.stringify(error)).not.toContain("private-value");
+  });
+});
+
+describe("authoritative hosted primary release", () => {
+  it("passes actual hosted classification through resolution and completes the existing path", async () => {
+    const { deps } = dependencies({ hosted: true });
+    expect(await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).toMatchObject({ status: "SUCCEEDED" });
+    expect(deps.resolveRelease).toHaveBeenCalledWith(expect.objectContaining({ deployment: expect.objectContaining({ deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated" }) }));
+  });
+  it.each([{ leasedAuthorityDigest: "f".repeat(64) }, { leasedDeployment: { deploymentKind: "REMOTE_MANAGED" } }])("rejects leased authority/classification drift before import: %j", async (options) => {
+    const { deps } = dependencies({ hosted: true, webDestination: "ABSENT", ...options });
+    await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).rejects.toThrow("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
+    expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+  it("rechecks admission before imports and stops when selection is removed", async () => {
+    const { deps } = dependencies({ hosted: true, webDestination: "ABSENT" });
+    const lease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "heartbeat") throw Object.assign(new Error("selection removed"), { code: "MANAGED_RELEASE_FORWARD_NOT_ALLOWED" });
+      return lease(operation, args);
+    });
+    await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).rejects.toThrow("selection removed");
+    expect(deps.importRole).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).toHaveBeenCalledWith("abort", expect.anything());
+  });
+  it("keeps dispatch inputs out of shell source", () => {
+    const workflow = readFileSync(new URL("../../.github/workflows/managed-azure-release.yml", import.meta.url), "utf8");
+    for (const block of workflow.split("run: >-").slice(1)) expect(block.split(/\n\n/)[0]).not.toContain("${{ inputs.");
+    expect(workflow).toContain('"$RELEASE_INPUT_REASON"');
+    expect(workflow).toContain("environment: managed-azure-release-production");
   });
 });

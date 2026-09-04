@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import {
@@ -76,6 +77,8 @@ async function expire(deploymentId: string) {
     releaseLeaseAcquiredAt: new Date(now - 600_000), releaseLeaseHeartbeatAt: new Date(now - 360_000), releaseLeaseExpiresAt: new Date(now - 60_000),
   } });
 }
+afterEach(() => vi.unstubAllEnvs());
+
 const originalCanaryPreflightDeploymentId = process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID;
 
 beforeEach(async () => {
@@ -176,7 +179,7 @@ describe("managed release lease CAS", () => {
     const changed = rollbackPayload(); changed.previous.web.containerName = "web--changed";
     await expectCode(recordManagedReleaseRollbackRecord(handle, changed), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const reserved = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
-    expect(reserved.releaseLeaseRollbackRecord).toMatchObject({ version: 1, deploymentId: target.id, leaseId: handle.leaseId, fence: handle.fence, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2" });
+    expect(reserved.releaseLeaseRollbackRecord).toMatchObject({ version: 2, deploymentId: target.id, leaseId: handle.leaseId, fence: handle.fence, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2" });
     expect((reserved.releaseLeaseRollbackRecord as { payload: unknown }).payload).toEqual(payload);
     await beginManagedReleaseMutation(handle); expect(await beginManagedReleaseMutation(handle)).not.toHaveProperty("capability");
     await prisma.customerDeployment.update({ where: { id: target.id }, data: { releaseLeaseRollbackRecord: { version: 1 } } }); await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
@@ -209,9 +212,10 @@ describe("managed release lease CAS", () => {
     const nullHandle = Object.assign(Object.create(null), handle); const nullAcr = Object.assign(Object.create(null), ACR_IDENTITY);
     const before = await releaseState(target.id); const projected = await getManagedReleaseLeaseTarget(nullHandle, nullAcr);
     expect(projected).toEqual({ deploymentId: target.id, leaseId: handle.leaseId, fence: handle.fence, phase: "RESERVED",
+      deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED" }), authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       release: { baselineImageTag: BASE, baselineVersion: "release-1", target: { kind: "FORWARD", imageTag: NEXT, version: "release-2" } },
       origin: target.url, target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER } });
-    expect(Object.keys(projected)).toEqual(["deploymentId", "leaseId", "fence", "phase", "release", "origin", "target"]);
+    expect(Object.keys(projected)).toEqual(["deploymentId", "leaseId", "fence", "phase", "release", "deployment", "authorityDigest", "origin", "target"]);
     expect(Object.keys(projected.release)).toEqual(["baselineImageTag", "baselineVersion", "target"]);
     expect(Object.keys(projected.target)).toEqual(["subscriptionId", "resourceGroup", "acrName", "acrServer", "webAppName", "workerAppName"]);
     expect([projected, projected.release, projected.release.target, projected.target].every(Object.isFrozen)).toBe(true);
@@ -277,7 +281,7 @@ describe("managed release lease CAS", () => {
     expect(await releaseState(ineligible.id)).toEqual(ineligibleBefore);
     await truncateAllTables();
     const unsafeCases: Array<{ overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput>; incomingVersion?: string; acquireCode?: string; acquireStatus?: number }> = [
-      { overrides: { url: "https://Upper.example.test" } }, { overrides: { url: "https://path.example.test/private" } },
+      { overrides: { url: "https://Upper.example.test" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { url: "https://path.example.test/private" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerSubscriptionId: SUBSCRIPTION.toUpperCase() }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerResourceGroup: "bad." }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerWebServiceId: "Web-app" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { providerWorkerServiceId: WEB } },
@@ -340,6 +344,8 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
+      deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
+      authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
       release: { baselineImageTag: BASE, baselineVersion: "release-1" },
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
@@ -358,6 +364,8 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(canary.id);
     await expect(getManagedReleaseTargetPreflight(canary.id, ACR_IDENTITY, "ACTIVE_CLIENT_CANARY")).resolves.toEqual({
       deploymentId: canary.id,
+      deployment: expect.objectContaining({ deploymentKind: "HOSTED_DEDICATED", workloadClass: "ACTIVE_CLIENT_CANARY", releaseEligible: false }),
+      authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: canary.url,
       release: { baselineImageTag: BASE, baselineVersion: "release-1" },
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
@@ -378,6 +386,8 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
+      deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
+      authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
       release: { baselineImageTag: BASE, baselineVersion: "release-1" },
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
@@ -394,6 +404,8 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
+      deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
+      authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
       target: { subscriptionId: SUBSCRIPTION, resourceGroup: RG, acrName: "acr12", acrServer: ACR, webAppName: WEB, workerAppName: WORKER },
     });
@@ -488,4 +500,121 @@ describe("managed release lease CAS", () => {
     await expect(finalizeManagedReleaseRollback(currentHandle)).resolves.toMatchObject({ status: "ROLLED_BACK" });
     await expectCode(claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: stale.leaseId, expectedFence: stale.fence, owner: "recovery:test" }), "MANAGED_RELEASE_LEASE_CONFLICT");
   });
+});
+
+describe("selected hosted Azure release lifecycle", () => {
+  async function hosted() {
+    const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
+    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    return row;
+  }
+  it("runs a selected hosted release through V2 recording and success without relabelling", async () => {
+    const row = await hosted();
+    const preflight = await getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY);
+    expect(preflight.deployment).toMatchObject({ deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", releaseEligible: true });
+    const handle = await acquire(row.id);
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+    expect((await releaseState(row.id)).deployment.releaseLeaseRollbackRecord).toMatchObject({ version: 2, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: row.customerAccountId } } });
+    await beginManagedReleaseMutation(handle);
+    await heartbeatManagedReleaseLease(handle);
+    await expect(finalizeManagedReleaseSuccess(handle)).resolves.toMatchObject({ status: "SUCCEEDED", releaseImageTag: NEXT });
+    const final = (await releaseState(row.id)).deployment;
+    expect(final.deploymentKind).toBe("HOSTED_DEDICATED");
+    expect(final.releaseLeaseId).toBeNull();
+    expect(final.providerPostgresServiceId).toBe(row.providerPostgresServiceId);
+  });
+  it.each([false, true])("selection removal before mutation blocks forward work and permits abort (envelope=%s)", async (recorded) => {
+    const row = await hosted(); const handle = await acquire(row.id);
+    if (recorded) await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", "");
+    await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    await expectCode(recordManagedReleaseRollbackRecord(handle, rollbackPayload()), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    await expect(heartbeatManagedReleaseLease(handle, true)).resolves.toMatchObject({ phase: "RESERVED" });
+    await expect(abortManagedReleaseLease(handle)).resolves.toMatchObject({ aborted: true });
+    await expectCode(acquire(row.id), "MANAGED_RELEASE_TARGET_INELIGIBLE");
+  });
+  it("retains provenance and rollback through selection removal and repeated fenced recovery claims", async () => {
+    const row = await hosted(); const original = await acquire(row.id);
+    await recordManagedReleaseRollbackRecord(original, rollbackPayload());
+    await beginManagedReleaseMutation(original);
+    const envelope = (await releaseState(row.id)).deployment.releaseLeaseRollbackRecord;
+    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", "");
+    await expectCode(finalizeManagedReleaseSuccess(original), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    await expectCode(getManagedReleaseLeaseTarget(original, ACR_IDENTITY), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    await markManagedReleaseRecoveryRequired(original, { stage: "WORKER", code: "SELECTION_REMOVED" });
+    await expect(getManagedReleaseRollbackRecord(original)).resolves.toEqual(rollbackPayload());
+    let handle = original;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expire(row.id);
+      const status = await getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY);
+      expect(status.originatingLease).toEqual({ leaseId: original.leaseId, fence: original.fence });
+      const claimed = await claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: handle.leaseId, expectedFence: handle.fence, owner: `recovery:${attempt}` });
+      handle = { deploymentId: row.id, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
+      expect((await releaseState(row.id)).deployment.releaseLeaseRollbackRecord).toEqual(envelope);
+      await expect(heartbeatManagedReleaseLease(handle, true)).resolves.toMatchObject({ phase: "RECOVERY_REQUIRED" });
+      await expectCode(heartbeatManagedReleaseLease(original, true), "MANAGED_RELEASE_LEASE_CONFLICT");
+      await expectCode(finalizeManagedReleaseSuccess(handle), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    }
+    await expect(finalizeManagedReleaseRollback(handle)).resolves.toMatchObject({ status: "ROLLED_BACK", releaseImageTag: BASE });
+  });
+  it.each(["HOSTED_DEDICATED", "REMOTE_MANAGED"] as const)("keeps database metadata and delete guards for %s", async (deploymentKind) => {
+    const row = await deployment({ deploymentKind });
+    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    const handle = await acquire(row.id);
+    for (const data of [{ deploymentStatus: "SUSPENDED" as const }, { deploymentKind: "SHARED_WORKSPACE" as const }, { customerAccountId: null }, { url: "https://reassigned.example.test" }, { providerWebServiceId: "other-web" }]) {
+      await expect(prisma.customerDeployment.update({ where: { id: row.id }, data })).rejects.toThrow("MANAGED_RELEASE_LEASE_UPDATE_CONFLICT");
+    }
+    await expect(prisma.customerDeployment.delete({ where: { id: row.id } })).rejects.toThrow("MANAGED_RELEASE_LEASE_DELETE_CONFLICT");
+    await abortManagedReleaseLease(handle);
+  });
+  it("rejects missing or forged hosted acquisition provenance and wrong current owner without clearing the lease", async () => {
+    const row = await hosted(); const handle = await acquire(row.id);
+    const acquisition = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: { deploymentId: row.id, action: "control_plane.release_lease.acquired" } });
+    const meta = acquisition.meta as Prisma.JsonObject;
+    for (const change of [{ ...meta, provenance: null }, { ...meta, owner: "revoked-owner" }, { ...meta, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: "another-account" } } }]) {
+      await prisma.customerDeploymentEvent.update({ where: { id: acquisition.id }, data: { meta: change } });
+      await expectCode(abortManagedReleaseLease(handle), "MANAGED_RELEASE_PROVENANCE_CONFLICT");
+      expect((await releaseState(row.id)).deployment.releaseLeaseId).toBe(handle.leaseId);
+    }
+    await prisma.customerDeploymentEvent.update({ where: { id: acquisition.id }, data: { meta } });
+    await abortManagedReleaseLease(handle);
+  });
+  it("keeps historical V1 remote envelopes readable", async () => {
+    const { row, handle } = await seededLease();
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+    expect((await releaseState(row.id)).deployment.releaseLeaseRollbackRecord).toMatchObject({ version: 1 });
+    await beginManagedReleaseMutation(handle);
+    await expect(getManagedReleaseRollbackRecord(handle)).resolves.toEqual(rollbackPayload());
+    await finalizeManagedReleaseRollback(handle);
+  });
+});
+
+
+it("applies the exact hosted migration without changing retained remote leases, data or other guards", async () => {
+  const remote = await deployment(); const handle = await acquire(remote.id);
+  await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+  const hosted = await deployment({ deploymentKind: "HOSTED_DEDICATED", providerSubscriptionId: randomUUID() });
+  const original = readFileSync(new URL("../../../prisma/migrations/20260810200000_customer_deployment_release_lease_eligibility/migration.sql", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../../../prisma/migrations/20260904000000_hosted_azure_release_lease_eligibility/migration.sql", import.meta.url), "utf8");
+  await prisma.$transaction(async (tx) => {
+    const rows = await tx.customerDeployment.findMany({ orderBy: { id: "asc" } });
+    const events = await tx.customerDeploymentEvent.findMany({ orderBy: { id: "asc" } });
+    const guards = () => tx.$queryRaw`SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = '"CustomerDeployment"'::regclass AND conname <> 'CustomerDeployment_release_lease_eligibility_check' ORDER BY conname`;
+    const triggers = () => tx.$queryRaw`SELECT tgname, tgenabled, pg_get_triggerdef(oid) AS definition FROM pg_trigger WHERE tgrelid = '"CustomerDeployment"'::regclass ORDER BY tgname`;
+    const beforeGuards = await guards(); const beforeTriggers = await triggers();
+    await tx.$executeRawUnsafe('ALTER TABLE "CustomerDeployment" DROP CONSTRAINT "CustomerDeployment_release_lease_eligibility_check"');
+    for (const sql of original.split(";").map((part) => part.trim()).filter(Boolean)) await tx.$executeRawUnsafe(sql);
+    for (const sql of migration.split(";").map((part) => part.trim()).filter((part) => part && part !== "BEGIN" && part !== "COMMIT")) await tx.$executeRawUnsafe(sql);
+    const [constraint] = await tx.$queryRaw<Array<{ convalidated: boolean; definition: string }>>`SELECT convalidated, pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid = '"CustomerDeployment"'::regclass AND conname = 'CustomerDeployment_release_lease_eligibility_check'`;
+    expect(constraint?.convalidated).toBe(true);
+    expect(constraint?.definition).toContain("HOSTED_DEDICATED");
+    expect(await guards()).toEqual(beforeGuards); expect(await triggers()).toEqual(beforeTriggers);
+    expect(await tx.customerDeployment.findMany({ orderBy: { id: "asc" } })).toEqual(rows);
+    expect(await tx.customerDeploymentEvent.findMany({ orderBy: { id: "asc" } })).toEqual(events);
+  }, { timeout: 15_000 });
+  await abortManagedReleaseLease(handle);
+  vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", hosted.id);
+  const hostedHandle = await acquire(hosted.id);
+  await abortManagedReleaseLease(hostedHandle);
 });

@@ -44,6 +44,8 @@ function canonicalJson(value) {
 function preflightProjection(preflight) {
   return Object.freeze({
     deploymentId: preflight.deploymentId,
+    ...(preflight.deployment ? { deployment: preflight.deployment } : {}),
+    authorityDigest: preflight.authorityDigest,
     origin: preflight.origin,
     release: {
       baselineImageTag: preflight.release?.baselineImageTag,
@@ -175,13 +177,14 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   const preflight = await deps.lease("preflight", { deploymentId: input.deploymentId, workloadClass: input.workloadClass, acrName: input.acrName, acrServer: input.acrServer });
   if (preflight.deploymentId !== input.deploymentId || preflight.target?.acrName !== input.acrName || preflight.target?.acrServer !== input.acrServer) fail("MANAGED_RELEASE_TARGET_INVALID");
   if (inventory.evaluation.preflightDigest !== preflightDigest(preflight)) fail("MANAGED_RELEASE_TARGET_INVALID");
+  if (!SHA256.test(preflight.authorityDigest) || preflight.deployment?.deploymentId !== input.deploymentId || preflight.deployment?.workloadClass !== input.workloadClass) fail("MANAGED_RELEASE_TARGET_INVALID");
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
   if (baselineRelease.imageTag === `sha-${input.releaseSha}`) fail("MANAGED_RELEASE_ALREADY_CURRENT");
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });
   let releasePlan;
   try {
     releasePlan = await deps.resolveRelease({ deploymentId: input.deploymentId,
-      target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: input.releaseSha, workloadClass: input.workloadClass });
+      target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: input.releaseSha, workloadClass: input.workloadClass, deployment: preflight.deployment });
   } catch (error) {
     failReleaseResolution(error);
   }
@@ -212,6 +215,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   let handle;
   let mutationBegun = false;
   const heartbeat = () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
+  const recoveryHeartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
   const markRecovery = async (stage, code, detail = {}) => {
     if (handle) await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason: input.reason })).catch(() => undefined);
     return safeResult(input, inventory, "RECOVERY_REQUIRED", { phase: stage, code, ...detail });
@@ -233,7 +237,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     const classified = {};
     for (const role of ROLES) classified[role] = await classifyRole(role, forwardTemplates[role]);
     if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code, detail);
-    await heartbeat();
+    await recoveryHeartbeat();
     for (const role of ["worker", "web"]) {
       if (classified[role].kind !== "FORWARD") continue;
       const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "rollback" });
@@ -245,14 +249,14 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
         revisionSuffix: suffix,
       });
       assertManagedAzureTemplateDelta(classified[role].state, template, { role, image: baselines[role].image, release: baselineRelease, revisionSuffix: suffix });
-      const patched = await deps.patchTemplate({ target: preflight.target, role, location: classified[role].state.location, template, onProgress: heartbeat });
+      const patched = await deps.patchTemplate({ target: preflight.target, role, location: classified[role].state.location, template, onProgress: recoveryHeartbeat });
       const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
       if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code, rollbackDetail);
-      await heartbeat();
+      await recoveryHeartbeat();
       try {
-        await deps.waitForState({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest, expectedTemplate: template, onProgress: heartbeat });
+        await deps.waitForState({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest, expectedTemplate: template, onProgress: recoveryHeartbeat });
       } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS", rollbackDetail); }
-      await heartbeat();
+      await recoveryHeartbeat();
     }
     await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
     return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code, ...detail });
@@ -268,7 +272,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       reason: input.reason,
     });
     const leasedTarget = await deps.lease("get_target", leaseArgs(handle, { acrName: input.acrName, acrServer: input.acrServer }));
-    if (!same(leasedTarget.target, preflight.target) || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag) {
+    if (!same(leasedTarget.target, preflight.target) || !same(leasedTarget.deployment, preflight.deployment) || leasedTarget.authorityDigest !== preflight.authorityDigest || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag) {
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
       fail("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
     }
@@ -282,6 +286,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await deps.lease("record_rollback", leaseArgs(handle, { rollback, reason: input.reason }));
     for (const role of ROLES) {
       if (releasePlan.roles[role].destinationState !== "ABSENT") continue;
+      await heartbeat();
       let imported = await deps.importRole(releasePlan.roles[role]);
       if ((!imported.terminal || !imported.succeeded) && imported.ambiguous) {
         const verified = await verifyImportedRole(deps, releasePlan.roles[role]);
@@ -314,6 +319,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       assertManagedAzureTemplateDelta(baselines[role], forwardTemplates[role], { role, image: releasePlan.roles[role].image, release: nextRelease, revisionSuffix: suffix });
     }
 
+    await heartbeat();
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
     if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS",
       webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
@@ -456,12 +462,9 @@ function runtimeDependencies(env = process.env) {
         return { ok: managedAzureHealthReady(body, release), code: "HEALTH_RELEASE_MISMATCH" };
       } catch { return { ok: false, code: "HEALTH_PROBE_AMBIGUOUS" }; }
     },
-    resolveRelease: async ({ deploymentId, target, gitSha, workloadClass }) => {
+    resolveRelease: async ({ deploymentId, target, gitSha, deployment }) => {
       const manifests = await sourceResolver.resolveManagedAzureSourceManifests({ gitSha });
-      const deployment = workloadClass === "ACTIVE_CLIENT_CANARY"
-        ? { deploymentId, deploymentKind: "HOSTED_DEDICATED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: false, provider: "azure", group: "hosted-dedicated", workload: "active-client-canary", workloadClass, azure: target }
-        : { deploymentId, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: "managed-customers", workload: "managed-customers", workloadClass, azure: target };
-      const intent = canonicalizeManagedAzureReleaseIntentV1({ deploymentId, deployments: [deployment], gitSha, manifests: manifests.manifests });
+      const intent = canonicalizeManagedAzureReleaseIntentV1({ deploymentId, deployments: [{ ...deployment, azure: target }], gitSha, manifests: manifests.manifests });
       const requests = { web: canonicalizeManagedAzureImportRequestV1({ intent, role: "web" }), worker: canonicalizeManagedAzureImportRequestV1({ intent, role: "worker" }) };
       await provider.observeRegistryPreflight({ webRequest: requests.web, workerRequest: requests.worker });
       const roles = {};

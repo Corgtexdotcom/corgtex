@@ -1,3 +1,4 @@
+import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { createHash, randomUUID } from "node:crypto";
 import type { CustomerDeploymentAccessRole, CustomerDeploymentCloudProvider, CustomerDeploymentKind, CustomerDeploymentStatus, FleetSnapshotKind, MeetingRecorderProvider, MemberRole, ModuleAccessLevel as PrismaModuleAccessLevel, ModuleGrantPrincipalType as PrismaModuleGrantPrincipalType, Prisma } from "@prisma/client";
 import { decryptSecret, encryptSecret, env, prisma, toInputJson } from "@corgtex/shared";
@@ -9774,6 +9775,7 @@ type ManagedAzureRecordTarget = {
 
 type LockedManagedAzureRecordDeployment = {
   id: string;
+  url: string;
   customerAccountId: string | null;
   deploymentKind: string;
   cloudProvider: string;
@@ -9787,19 +9789,8 @@ type LockedManagedAzureRecordDeployment = {
   releaseLeaseId: string | null;
 };
 
-function allowedCanaryPreflightDeploymentId() {
-  const value = process.env.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID?.trim();
-  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value) ? value : null;
-}
-
 function managedAzureRecordEligible(deployment: LockedManagedAzureRecordDeployment, workloadClass: string) {
-  if (!deployment.customerAccountId || deployment.cloudProvider !== "AZURE" || deployment.environment !== "production"
-    || deployment.deploymentStatus !== "ACTIVE" || deployment.provisioningStatus !== "active"
-    || deployment.releaseLeaseId) return false;
-  if (workloadClass === "ACTIVE_CLIENT_PRIMARY") return deployment.deploymentKind === "REMOTE_MANAGED";
-  return workloadClass === "ACTIVE_CLIENT_CANARY"
-    && deployment.id === allowedCanaryPreflightDeploymentId()
-    && deployment.deploymentKind === "HOSTED_DEDICATED";
+  return !deployment.releaseLeaseId && managedAzureReleaseEligible(deployment, workloadClass);
 }
 
 function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecordDeployment, target: ManagedAzureRecordTarget) {
@@ -9815,7 +9806,7 @@ function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecor
 
 async function lockManagedAzureRecordDeployment(tx: Prisma.TransactionClient, deploymentId: string) {
   const [deployment] = await tx.$queryRaw<LockedManagedAzureRecordDeployment[]>`
-    SELECT "id", "customerAccountId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
+    SELECT "id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
       "provisioningStatus", "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId",
       "providerWorkerServiceId", "releaseLeaseId"
     FROM "CustomerDeployment"
@@ -9884,9 +9875,11 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
   };
 
   await prisma.$transaction(async (tx) => {
-    if (params.managedAzureTarget) {
+    if (params.managedAzureTarget || deployment.cloudProvider === "AZURE") {
       const current = await lockManagedAzureRecordDeployment(tx, params.deploymentId);
-      invariant(current && managedAzureTargetMatchesDeployment(current, params.managedAzureTarget),
+      invariant(current && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url
+        && (params.managedAzureTarget ? managedAzureTargetMatchesDeployment(current, params.managedAzureTarget)
+          : current.deploymentKind === "REMOTE_MANAGED" && managedAzureRecordEligible(current, "ACTIVE_CLIENT_PRIMARY")),
         409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed before the release baseline could be recorded.");
     }
     await tx.customerDeployment.update({
@@ -11049,6 +11042,8 @@ const MANAGED_RELEASE_OPERATIONAL_WORKSPACE = {
   description: "Internal workspace for private managed-release operational artifacts.",
 } as const;
 type ManagedReleasePreflightProjection = {
+  deployment?: Record<string, unknown>;
+  authorityDigest?: string;
   deploymentId: string;
   origin: string;
   release: {
@@ -11102,6 +11097,8 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   return {
     deploymentId: record.deploymentId,
+    ...(record.deployment ? { deployment: record.deployment as Record<string, unknown> } : {}),
+    ...(typeof record.authorityDigest === "string" ? { authorityDigest: record.authorityDigest } : {}),
     origin: record.origin,
     release: {
       baselineImageTag: release.baselineImageTag,
@@ -11544,6 +11541,7 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
 ) {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   await requireControlPlaneAccess(actor);
+  await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId as string);
   if (!MANAGED_RELEASE_READ_OPERATIONS.has(params.operation)) requireMutationReason(params.reason as string | null | undefined);
   switch (params.operation) {
     case "preflight":
@@ -11558,6 +11556,8 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
       });
     case "heartbeat":
       return heartbeatManagedReleaseLease(managedReleaseHandle(params));
+    case "heartbeat_recovery":
+      return heartbeatManagedReleaseLease(managedReleaseHandle(params), true);
     case "get_target":
       return getManagedReleaseLeaseTarget(managedReleaseHandle(params), managedReleaseAcr(params));
     case "get_rollback":

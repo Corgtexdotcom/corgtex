@@ -225,6 +225,43 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     const incoming = incomingReleaseIdentity(status);
     if (web.kind !== "BASELINE") web = await classifyForwardRole(deps, status, rollback, "web", baseline, incoming, forwardSuffixes.web);
     if (worker.kind !== "BASELINE") worker = await classifyForwardRole(deps, status, rollback, "worker", baseline, incoming, forwardSuffixes.worker);
+    if (web.kind === "UNKNOWN" || worker.kind === "UNKNOWN") fail("MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
+    let forwardAllowed = true;
+    try { await deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })); }
+    catch (error) {
+      if (error?.code !== "MANAGED_RELEASE_FORWARD_NOT_ALLOWED") throw error;
+      forwardAllowed = false;
+    }
+    if (!forwardAllowed) {
+      const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
+      for (const [role, current] of [["worker", worker], ["web", web]]) {
+        if (current.kind !== "FORWARD") continue;
+        await heartbeat();
+        const image = rollback.previous[role].image;
+        const revisionSuffix = rollbackSuffixes[role];
+        const template = buildManagedAzureReleaseTemplate({ baseline: current.state, role, image, release: baseline, revisionSuffix });
+        assertManagedAzureTemplateDelta(current.state, template, { role, image, release: baseline, revisionSuffix });
+        const patched = await deps.patchTemplate({ target: status.target, role, location: current.state.location, template, onProgress: heartbeat });
+        if (!patched.terminal || !patched.succeeded) {
+          await deps.lease("mark_recovery", leaseArgs(handle, { stage: "ROLLBACK", code: patched.code ?? "ROLLBACK_PATCH_AMBIGUOUS", reason: input.reason })).catch(() => undefined);
+          fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_AMBIGUOUS");
+        }
+        await heartbeat();
+        await deps.waitForState({ target: status.target, role, release: baseline, imageDigest: digestFromImage(image), expectedTemplate: template, onProgress: heartbeat });
+      }
+      await heartbeat();
+      for (const role of ["web", "worker"]) {
+        const restored = await classifyBaselineRole(deps, status, rollback, role, baseline, rollbackSuffixes[role]);
+        if (restored.kind !== "BASELINE") fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_AMBIGUOUS");
+      }
+      const health = await deps.healthProbe({ origin: status.origin, release: baseline });
+      if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_HEALTH_FAILED");
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
+      return Object.freeze({ status: "RECOVERY_CLEARED", deploymentId: input.deploymentId, previousLeaseId: status.leaseId,
+        previousFence: status.fence, fence: finalized.fence, releaseImageTag: finalized.releaseImageTag,
+        releaseVersion: finalized.releaseVersion, resolution: "ROLLED_BACK_SELECTION_REMOVED" });
+    }
     if (web.kind === "FORWARD" && worker.kind === "BASELINE") {
       await deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
       const revisionSuffix = forwardSuffixes.worker;
@@ -356,6 +393,7 @@ async function callControlPlane(name, args, env, fetchImpl = fetch) {
   const text = await response.text();
   if (Buffer.byteLength(text, "utf8") > 192_000) fail("MANAGED_RELEASE_RECOVERY_CONTROL_PLANE_INVALID");
   let body; try { body = JSON.parse(text); } catch { fail("MANAGED_RELEASE_RECOVERY_CONTROL_PLANE_INVALID"); }
+  if (response.status === 409 && body?.error?.code === "MANAGED_RELEASE_FORWARD_NOT_ALLOWED") fail("MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
   if (!response.ok || body?.error) fail("MANAGED_RELEASE_RECOVERY_CONTROL_PLANE_REJECTED");
   const payload = body?.result?.content?.find((item) => item?.type === "text")?.text;
   if (typeof payload !== "string") fail("MANAGED_RELEASE_RECOVERY_CONTROL_PLANE_INVALID");
