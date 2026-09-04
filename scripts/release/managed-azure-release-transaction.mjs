@@ -257,10 +257,23 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   let mutationBegun = false;
   let drainCompleted = false;
   let firstForwardPatchAttempted = false;
+  const forwardTemplates = {};
   const heartbeat = () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
   const recoveryHeartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
   const markRecovery = async (stage, code, detail = {}) => {
-    if (handle) await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason: input.reason })).catch(() => undefined);
+    if (handle) {
+      try {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason: input.reason }));
+      } catch {
+        return safeResult(input, inventory, "RECOVERY_REQUIRED", {
+          phase: "FENCING",
+          code: "RECOVERY_RECORDING_FAILED",
+          originatingPhase: stage,
+          originatingCode: code,
+          ...detail,
+        });
+      }
+    }
     return safeResult(input, inventory, "RECOVERY_REQUIRED", { phase: stage, code, ...detail });
   };
 
@@ -306,13 +319,14 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
     const health = await deps.healthProbe({ origin: preflight.origin, release: recoveryRelease });
     if (!health.ok) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_HEALTH_FAILED", detail);
-    await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: recoveryRelease });
+    try { await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: recoveryRelease }); }
+    catch { return markRecovery("AUTH", "COMPATIBLE_RECOVERY_AUTH_FAILED", detail); }
     const operationId = diagnosticOperationId(handle.leaseId, recoveryRelease.gitSha, "compatible-recovery");
     const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
       operationId, release: recoveryRelease, reason: input.reason, onProgress: recoveryHeartbeat });
     if (!acceptance?.accepted || acceptance.webGitSha !== recoveryRelease.gitSha
       || acceptance.receipt?.workerGitSha !== recoveryRelease.gitSha || acceptance.receipt?.operationId !== operationId) {
-      return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_DIAGNOSTIC_FAILED", detail);
+      return markRecovery("DIAGNOSTIC", "COMPATIBLE_RECOVERY_DIAGNOSTIC_FAILED", detail);
     }
     const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
       release: recoveryRelease, imageDigests: { web: recoveryPlan.roles.web.digest, worker: recoveryPlan.roles.worker.digest },
@@ -341,28 +355,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       }
       const health = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
       if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED");
-      try { await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: baselineRelease }); }
-      catch { return markRecovery("FENCING", "BASELINE_REACTIVATION_AUTH_FAILED"); }
-      const operationId = diagnosticOperationId(handle.leaseId, baselineRelease.gitSha, "baseline-rollback");
-      const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
-        operationId, release: baselineRelease, reason: input.reason, onProgress: recoveryHeartbeat });
-      if (!acceptance?.accepted || acceptance.webGitSha !== baselineRelease.gitSha
-        || acceptance.receipt?.workerGitSha !== baselineRelease.gitSha || acceptance.receipt?.operationId !== operationId) {
-        return markRecovery("FENCING", "BASELINE_REACTIVATION_DIAGNOSTIC_FAILED");
-      }
-      const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target,
-        origin: preflight.origin, release: baselineRelease,
-        imageDigests: { web: baselines.web.imageDigest, worker: baselines.worker.imageDigest },
-        durationMs: 15 * 60_000, onProgress: recoveryHeartbeat });
-      if (!observed?.verified) return markRecovery("FENCING", "BASELINE_REACTIVATION_OBSERVATION_FAILED");
-      const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
-        webDigest: baselines.web.imageDigest, workerDigest: baselines.worker.imageDigest })).digest("hex")}`;
-      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason, evidence: {
-        gitSha: baselineRelease.gitSha, imageTag: baselineRelease.imageTag, releaseVersion: baselineRelease.version,
-        webDigest: baselines.web.imageDigest, workerDigest: baselines.worker.imageDigest, operationId, acceptanceEvidenceDigest,
-      } }));
-      if (finalized?.status !== "ROLLED_BACK") return markRecovery("FENCING", "BASELINE_REACTIVATION_RECORDING_FAILED");
-      return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code });
+      return compensate(stage, code, forwardTemplates, { containment: "BASELINE_REACTIVATED" });
     } catch {
       return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS");
     }
@@ -420,7 +413,6 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       drainCompleted = true;
       await recoveryHeartbeat();
     }
-    const forwardTemplates = {};
     for (const role of ROLES) {
       const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "forward" });
       forwardTemplates[role] = buildManagedAzureReleaseTemplate({
@@ -468,7 +460,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
       operationId, release: nextRelease, reason: input.reason, onProgress: heartbeat });
     if (!acceptance?.accepted || acceptance.webGitSha !== input.releaseSha || acceptance.receipt?.workerGitSha !== input.releaseSha
-      || acceptance.receipt?.operationId !== operationId) return compensate("OBSERVATION", "AUTHENTICATED_RELEASE_DIAGNOSTIC_FAILED", forwardTemplates);
+      || acceptance.receipt?.operationId !== operationId) return compensate("DIAGNOSTIC", "AUTHENTICATED_RELEASE_DIAGNOSTIC_FAILED", forwardTemplates);
     await heartbeat();
     const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
       release: nextRelease, imageDigests: { web: releasePlan.roles.web.digest, worker: releasePlan.roles.worker.digest },

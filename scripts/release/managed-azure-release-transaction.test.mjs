@@ -275,7 +275,23 @@ describe("managed Azure single-target transaction", () => {
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
-  it("reactivates and verifies both exact baselines when a pre-patch heartbeat fails after an exclusive drain", async () => {
+  it("reports recovery recording failure without clearing or finalizing the fenced transaction", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE", drain: { terminal: false, succeeded: false } });
+    const lease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "mark_recovery") throw new Error("control plane unavailable");
+      return lease(operation, args);
+    });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "RECOVERY_RECORDING_FAILED",
+      originatingPhase: "FENCING", originatingCode: "BASELINE_DRAIN_AMBIGUOUS" });
+    expect(deps.lease).not.toHaveBeenCalledWith("abort", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+
+  it("uses exact baselines only for containment before compatible recovery after an exclusive drain", async () => {
     const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
     const baseLease = deps.lease.getMockImplementation();
     let drained = false;
@@ -289,21 +305,23 @@ describe("managed Azure single-target transaction", () => {
       return baseLease(operation, args);
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "ROLLED_BACK", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS" });
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS",
+      containment: "BASELINE_REACTIVATED", recoveryReleaseImageTag: `sha-${recoverySha}` });
     expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
       .toEqual([["web", "web-app--base-web", true], ["worker", "worker-app--base-worker", true]]);
-    expect(deps.patchTemplate).not.toHaveBeenCalled();
-    expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }) }));
-    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }), operationId: expect.any(String) }));
-    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: baseSha }),
+    expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web", "worker"]);
+    expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }) }));
+    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }), operationId: expect.any(String) }));
+    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }),
       imageDigests: { web: digests.web, worker: digests.worker }, durationMs: 15 * 60_000 }));
-    expect(deps.lease).toHaveBeenCalledWith("finalize_rollback", expect.objectContaining({ evidence: expect.objectContaining({
-      gitSha: baseSha, webDigest: digests.web, workerDigest: digests.worker,
+    expect(deps.lease).toHaveBeenCalledWith("finalize_compatible_recovery", expect.objectContaining({ evidence: expect.objectContaining({
+      gitSha: recoverySha, webDigest: digests.web, workerDigest: digests.worker,
       acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/),
     }) }));
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
-  it("retains the fence when exclusive baseline acceptance cannot be proven", async () => {
+  it("retains the fence when compatible recovery acceptance cannot be proven", async () => {
     for (const scenario of ["auth", "diagnostic", "observation"]) {
       const options = scenario === "diagnostic" ? { acceptance: { accepted: false } }
         : scenario === "observation" ? { observation: { verified: false } } : {};
@@ -316,8 +334,9 @@ describe("managed Azure single-target transaction", () => {
       });
       if (scenario === "auth") deps.authPreflight.mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error("revoked"));
       const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-      expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING",
-        code: `BASELINE_REACTIVATION_${scenario === "auth" ? "AUTH" : scenario === "diagnostic" ? "DIAGNOSTIC" : "OBSERVATION"}_FAILED` });
+      expect(result).toMatchObject({ status: "RECOVERY_REQUIRED",
+        phase: scenario === "auth" ? "AUTH" : scenario === "diagnostic" ? "DIAGNOSTIC" : "OBSERVATION",
+        code: `COMPATIBLE_RECOVERY_${scenario === "auth" ? "AUTH" : scenario === "diagnostic" ? "DIAGNOSTIC" : "OBSERVATION"}_FAILED` });
       expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
     }
   });
@@ -331,7 +350,7 @@ describe("managed Azure single-target transaction", () => {
       if (result.status === "RECOVERED_COMPATIBLE") {
         expect(deps.lease).toHaveBeenCalledWith("finalize_compatible_recovery", expect.objectContaining({ evidence: expect.objectContaining({ acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/) }) }));
       } else {
-        expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "OBSERVATION" });
+        expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: options.acceptance ? "DIAGNOSTIC" : "OBSERVATION" });
       }
     }
   });
@@ -340,7 +359,7 @@ describe("managed Azure single-target transaction", () => {
     const { deps } = dependencies({ acceptance: { accepted: false } });
     deps.patchTemplate.mockResolvedValueOnce({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "OBSERVATION", code: "COMPATIBLE_RECOVERY_DIAGNOSTIC_FAILED" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "DIAGNOSTIC", code: "COMPATIBLE_RECOVERY_DIAGNOSTIC_FAILED" });
     const probes = deps.acceptanceProbe.mock.calls.map(([request]) => request);
     expect(probes).toHaveLength(1);
     expect(probes[0]).toMatchObject({ release: { gitSha: recoverySha } });
@@ -548,6 +567,7 @@ describe("managed Azure single-target transaction", () => {
     expect(workflow).toContain("--deployment-id");
     expect(workflow).not.toContain("repository_dispatch:");
     expect(workflow).not.toMatch(/schedule:|targets:|matrix:/);
+    expect(workflow).toContain("timeout-minutes: 150");
   });
 
   it("passes immutable SHA build arguments to both self-serve staging images", () => {

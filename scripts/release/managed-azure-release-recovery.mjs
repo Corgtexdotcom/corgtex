@@ -211,7 +211,7 @@ async function classifyCompatibleRecoveryRole(deps, status, rollback, role, base
 async function verifyRecoveryReleaseAcceptance(deps, { deploymentId, target, origin, release, imageDigests,
   operationId, reason, heartbeat, failurePrefix, handle }) {
   const block = async (stage, code) => {
-    await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason })).catch(() => undefined);
+    await recordRecoveryOrFail(deps, handle, { stage, code, reason });
     fail(code);
   };
   const health = await deps.healthProbe({ origin, release });
@@ -229,6 +229,14 @@ async function verifyRecoveryReleaseAcceptance(deps, { deploymentId, target, ori
   const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
     webDigest: imageDigests.web, workerDigest: imageDigests.worker })).digest("hex")}`;
   return { health, acceptance, observed, acceptanceEvidenceDigest };
+}
+
+async function recordRecoveryOrFail(deps, handle, evidence) {
+  try {
+    await deps.lease("mark_recovery", leaseArgs(handle, evidence));
+  } catch {
+    fail("MANAGED_RELEASE_RECOVERY_RECORDING_FAILED");
+  }
 }
 
 export function managedAzureRecoveryCliResultAccepted(result) {
@@ -258,6 +266,10 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
   });
   const handle = { deploymentId: input.deploymentId, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
   try {
+    const block = async (stage, code) => {
+      await recordRecoveryOrFail(deps, handle, { stage, code, reason: input.reason });
+      fail(code);
+    };
     const rollback = await deps.lease("get_rollback", leaseArgs(handle));
     const baseline = releaseIdentity(status.release?.baselineImageTag, rollback?.previous?.releaseVersion);
     if (!same(rollback.target, status.target)) fail("MANAGED_RELEASE_RECOVERY_TARGET_DRIFT");
@@ -281,13 +293,28 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       if (web.kind === "UNKNOWN") web = await classifyCompatibleRecoveryRole(deps, status, rollback, "web", baseline, recovery, recoveryRelease, rollbackSuffixes.web);
       if (worker.kind === "UNKNOWN") worker = await classifyCompatibleRecoveryRole(deps, status, rollback, "worker", baseline, recovery, recoveryRelease, rollbackSuffixes.worker);
     }
-    if (rollback.schemaVersion === 2 && (web.kind !== "BASELINE" || worker.kind !== "BASELINE")) {
+    const exclusiveCompatibleRecovery = rollback.schemaVersion === 2
+      && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE";
+    if (exclusiveCompatibleRecovery && web.kind === "BASELINE" && worker.kind === "BASELINE") {
+      const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
+      for (const role of ["web", "worker"]) {
+        const activated = await deps.setRevisionActive({ target: status.target, role, revisionName: rollback.previous[role].readyRevision,
+          active: true, onProgress: heartbeat });
+        if (!activated.terminal || !activated.succeeded) await block("FENCING", "MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS");
+      }
+      web = await classifyBaselineRole(deps, status, rollback, "web", baseline, rollbackSuffixes.web);
+      worker = await classifyBaselineRole(deps, status, rollback, "worker", baseline, rollbackSuffixes.worker);
+      if (web.kind !== "BASELINE" || worker.kind !== "BASELINE") await block("FENCING", "MANAGED_RELEASE_RECOVERY_REACTIVATION_DRIFT");
+      const health = await deps.healthProbe({ origin: status.origin, release: baseline });
+      if (!health.ok) await block("OBSERVATION", health.code ?? "MANAGED_RELEASE_RECOVERY_REACTIVATION_HEALTH_FAILED");
+    }
+    if (rollback.schemaVersion === 2 && (exclusiveCompatibleRecovery || web.kind !== "BASELINE" || worker.kind !== "BASELINE")) {
       const recovery = rollback.compatibleRecovery;
       const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
       const recoveryRelease = releaseIdentity(recovery.imageTag, recovery.releaseVersion);
       const current = { web, worker };
       for (const role of ["web", "worker"]) {
-        if (!current[role].state) fail("MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
+        if (!current[role].state) await block("FENCING", "MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
         if (current[role].kind === "COMPATIBLE_RECOVERY") {
           continue;
         }
@@ -296,31 +323,30 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         const template = buildManagedAzureReleaseTemplate({ baseline: current[role].state, role, image, release: recoveryRelease, revisionSuffix });
         assertManagedAzureTemplateDelta(current[role].state, template, { role, image, release: recoveryRelease, revisionSuffix });
         await heartbeat();
-        const patched = await deps.patchTemplate({ target: status.target, role, location: current[role].state.location, template, onProgress: heartbeat });
-        if (!patched.terminal || !patched.succeeded) fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_PATCH_AMBIGUOUS");
-        await deps.waitForState({ target: status.target, role, release: recoveryRelease, imageDigest: recovery[role].digest, expectedTemplate: template, onProgress: heartbeat });
+        let patched;
+        try {
+          patched = await deps.patchTemplate({ target: status.target, role, location: current[role].state.location, template, onProgress: heartbeat });
+        } catch {
+          await block("ROLLBACK", "MANAGED_RELEASE_RECOVERY_COMPATIBLE_PATCH_AMBIGUOUS");
+        }
+        if (!patched.terminal || !patched.succeeded) await block("ROLLBACK", "MANAGED_RELEASE_RECOVERY_COMPATIBLE_PATCH_AMBIGUOUS");
+        try {
+          await deps.waitForState({ target: status.target, role, release: recoveryRelease, imageDigest: recovery[role].digest, expectedTemplate: template, onProgress: heartbeat });
+        } catch {
+          await block("READBACK", "MANAGED_RELEASE_RECOVERY_COMPATIBLE_READBACK_AMBIGUOUS");
+        }
       }
       for (const role of ["web", "worker"]) {
         const verified = await classifyCompatibleRecoveryRole(deps, status, rollback, role, baseline, recovery, recoveryRelease, rollbackSuffixes[role]);
-        if (verified.kind !== "COMPATIBLE_RECOVERY") fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_READBACK_AMBIGUOUS");
+        if (verified.kind !== "COMPATIBLE_RECOVERY") await block("READBACK", "MANAGED_RELEASE_RECOVERY_COMPATIBLE_READBACK_AMBIGUOUS");
       }
-      const health = await deps.healthProbe({ origin: status.origin, release: recoveryRelease });
-      if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_HEALTH_FAILED");
-      await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: recoveryRelease });
       const operationId = diagnosticOperationId(originatingLease.leaseId, recoveryRelease.gitSha, "compatible-recovery");
-      const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: status.origin,
-        operationId, release: recoveryRelease, reason: input.reason, onProgress: heartbeat });
-      if (!acceptance?.accepted || acceptance.webGitSha !== recoveryRelease.gitSha
-        || acceptance.receipt?.workerGitSha !== recoveryRelease.gitSha || acceptance.receipt?.operationId !== operationId) {
-        fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_DIAGNOSTIC_FAILED");
-      }
-      const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: status.target, origin: status.origin,
-        release: recoveryRelease, imageDigests: { web: recovery.web.digest, worker: recovery.worker.digest }, durationMs: 15 * 60_000, onProgress: heartbeat });
-      if (!observed?.verified) fail("MANAGED_RELEASE_RECOVERY_COMPATIBLE_OBSERVATION_FAILED");
-      const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed, webDigest: recovery.web.digest, workerDigest: recovery.worker.digest })).digest("hex")}`;
+      const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
+        origin: status.origin, release: recoveryRelease, imageDigests: { web: recovery.web.digest, worker: recovery.worker.digest },
+        operationId, reason: input.reason, heartbeat, failurePrefix: "MANAGED_RELEASE_RECOVERY_COMPATIBLE", handle });
       const finalized = await deps.lease("finalize_compatible_recovery", leaseArgs(handle, { reason: input.reason, evidence: {
         gitSha: recovery.gitSha, imageTag: recovery.imageTag, releaseVersion: recovery.releaseVersion,
-        webDigest: recovery.web.digest, workerDigest: recovery.worker.digest, acceptanceEvidenceDigest,
+        webDigest: recovery.web.digest, workerDigest: recovery.worker.digest, acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest,
       } }));
       if (finalized?.status !== "RECOVERED_COMPATIBLE") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY", deploymentId: input.deploymentId,
@@ -328,26 +354,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         releaseImageTag: finalized.releaseImageTag, releaseVersion: finalized.releaseVersion });
     }
     if (web.kind === "BASELINE" && worker.kind === "BASELINE") {
-      const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
-      const exclusive = rollback.schemaVersion === 2 && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE";
-      let rollbackEvidence;
-      if (exclusive) {
-        for (const role of ["web", "worker"]) {
-          const activated = await deps.setRevisionActive({ target: status.target, role, revisionName: rollback.previous[role].readyRevision,
-            active: true, onProgress: heartbeat });
-          if (!activated.terminal || !activated.succeeded) fail("MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS");
-        }
-        const operationId = diagnosticOperationId(originatingLease.leaseId, baseline.gitSha, "baseline-rollback");
-        const imageDigests = { web: digestFromImage(rollback.previous.web.image), worker: digestFromImage(rollback.previous.worker.image) };
-        const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
-          origin: status.origin, release: baseline, imageDigests, operationId, reason: input.reason, heartbeat,
-          failurePrefix: "MANAGED_RELEASE_RECOVERY_ROLLBACK", handle });
-        rollbackEvidence = { gitSha: baseline.gitSha, imageTag: baseline.imageTag, releaseVersion: baseline.version,
-          webDigest: imageDigests.web, workerDigest: imageDigests.worker, operationId,
-          acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest };
-      }
-      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason,
-        ...(rollbackEvidence ? { evidence: rollbackEvidence } : {}) }));
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
       if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({
         status: "RECOVERY_CLEARED",
@@ -380,7 +387,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         assertManagedAzureTemplateDelta(current.state, template, { role, image, release: baseline, revisionSuffix });
         const patched = await deps.patchTemplate({ target: status.target, role, location: current.state.location, template, onProgress: heartbeat });
         if (!patched.terminal || !patched.succeeded) {
-          await deps.lease("mark_recovery", leaseArgs(handle, { stage: "ROLLBACK", code: patched.code ?? "ROLLBACK_PATCH_AMBIGUOUS", reason: input.reason })).catch(() => undefined);
+          await recordRecoveryOrFail(deps, handle, { stage: "ROLLBACK", code: patched.code ?? "ROLLBACK_PATCH_AMBIGUOUS", reason: input.reason });
           fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_AMBIGUOUS");
         }
         await heartbeat();
@@ -391,22 +398,9 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
         const restored = await classifyBaselineRole(deps, status, rollback, role, baseline, rollbackSuffixes[role]);
         if (restored.kind !== "BASELINE") fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_AMBIGUOUS");
       }
-      let rollbackEvidence;
-      if (rollback.schemaVersion === 2 && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE") {
-        const operationId = diagnosticOperationId(originatingLease.leaseId, baseline.gitSha, "baseline-rollback");
-        const imageDigests = { web: digestFromImage(rollback.previous.web.image), worker: digestFromImage(rollback.previous.worker.image) };
-        const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
-          origin: status.origin, release: baseline, imageDigests, operationId, reason: input.reason, heartbeat,
-          failurePrefix: "MANAGED_RELEASE_RECOVERY_ROLLBACK", handle });
-        rollbackEvidence = { gitSha: baseline.gitSha, imageTag: baseline.imageTag, releaseVersion: baseline.version,
-          webDigest: imageDigests.web, workerDigest: imageDigests.worker, operationId,
-          acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest };
-      } else {
-        const health = await deps.healthProbe({ origin: status.origin, release: baseline });
-        if (!health.ok) fail("MANAGED_RELEASE_RECOVERY_ROLLBACK_HEALTH_FAILED");
-      }
-      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason,
-        ...(rollbackEvidence ? { evidence: rollbackEvidence } : {}) }));
+      const health = await deps.healthProbe({ origin: status.origin, release: baseline });
+      if (!health.ok) await block("OBSERVATION", "MANAGED_RELEASE_RECOVERY_ROLLBACK_HEALTH_FAILED");
+      const finalized = await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
       if (finalized?.status !== "ROLLED_BACK") fail("MANAGED_RELEASE_RECOVERY_FINALIZE_REJECTED");
       return Object.freeze({ status: "RECOVERY_CLEARED", deploymentId: input.deploymentId, previousLeaseId: status.leaseId,
         previousFence: status.fence, fence: finalized.fence, releaseImageTag: finalized.releaseImageTag,
@@ -424,11 +418,11 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
       } catch (error) {
         const code = error instanceof ManagedAzureContainerAppError ? error.code : "WORKER_PATCH_AMBIGUOUS";
-        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code, reason: input.reason })).catch(() => undefined);
+        await recordRecoveryOrFail(deps, handle, { stage: "WORKER", code, reason: input.reason });
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code });
       }
       if (!patched.terminal || !patched.succeeded) {
-        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "WORKER", code: patched.code ?? "WORKER_PATCH_AMBIGUOUS", reason: input.reason })).catch(() => undefined);
+        await recordRecoveryOrFail(deps, handle, { stage: "WORKER", code: patched.code ?? "WORKER_PATCH_AMBIGUOUS", reason: input.reason });
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: patched.code ?? "WORKER_PATCH_AMBIGUOUS" });
       }
       try {
@@ -436,12 +430,12 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           onProgress: () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason })) });
       } catch (error) {
         const code = error instanceof ManagedAzureContainerAppError ? error.code : "WORKER_READBACK_AMBIGUOUS";
-        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code, reason: input.reason })).catch(() => undefined);
+        await recordRecoveryOrFail(deps, handle, { stage: "READBACK", code, reason: input.reason });
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code });
       }
       const webAfter = await classifyForwardRole(deps, status, rollback, "web", baseline, incoming, forwardSuffixes.web);
       if (webAfter.kind !== "FORWARD") {
-        await deps.lease("mark_recovery", leaseArgs(handle, { stage: "READBACK", code: "WEB_READBACK_MISMATCH", reason: input.reason })).catch(() => undefined);
+        await recordRecoveryOrFail(deps, handle, { stage: "READBACK", code: "WEB_READBACK_MISMATCH", reason: input.reason });
         return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: "WEB_READBACK_MISMATCH" });
       }
       await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,

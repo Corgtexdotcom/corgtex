@@ -568,6 +568,19 @@ describe("managed release lease CAS", () => {
     await expect(finalizeManagedReleaseRollback(currentHandle)).resolves.toMatchObject({ status: "ROLLED_BACK" });
     await expectCode(claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: stale.leaseId, expectedFence: stale.fence, owner: "recovery:test" }), "MANAGED_RELEASE_LEASE_CONFLICT");
   });
+  it.each(["AUTH", "DIAGNOSTIC"] as const)("persists %s recovery evidence without clearing the fence", async (stage) => {
+    const target = await deployment(); const handle = await acquire(target.id);
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayload()); await beginManagedReleaseMutation(handle);
+    await expect(markManagedReleaseRecoveryRequired(handle, { stage, code: `${stage}_ACCEPTANCE_FAILED` })).resolves.toMatchObject({
+      phase: "RECOVERY_REQUIRED", recovery: { stage, code: `${stage}_ACCEPTANCE_FAILED` },
+    });
+    const retained = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
+    expect(retained).toMatchObject({ releaseLeaseId: handle.leaseId, releaseLeasePhase: "RECOVERY_REQUIRED",
+      releaseLeaseRecoveryEvidence: { stage, code: `${stage}_ACCEPTANCE_FAILED` } });
+    await expect(prisma.customerDeploymentEvent.findFirstOrThrow({ where: {
+      deploymentId: target.id, action: "control_plane.release_lease.recovery_required",
+    } })).resolves.toMatchObject({ meta: expect.objectContaining({ leaseId: handle.leaseId, fence: handle.fence }) });
+  });
 });
 
 describe("selected hosted Azure release lifecycle", () => {
@@ -591,7 +604,7 @@ describe("selected hosted Azure release lifecycle", () => {
     expect(final.releaseLeaseId).toBeNull();
     expect(final.providerPostgresServiceId).toBe(row.providerPostgresServiceId);
   });
-  it("requires exact authenticated baseline acceptance before finalizing an exclusive rollback", async () => {
+  it("requires compatible recovery and never finalizes a V2 exclusive baseline rollback", async () => {
     const row = await hosted(); const handle = await acquire(row.id); const rollback = rollbackPayloadV2();
     await recordManagedReleaseRollbackRecord(handle, rollback); await beginManagedReleaseMutation(handle);
     await expectCode(finalizeManagedReleaseRollback(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
@@ -600,11 +613,13 @@ describe("selected hosted Azure release lifecycle", () => {
       webDigest: DIGESTS[0], workerDigest: DIGESTS[1], operationId,
       acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}` };
     await expectCode(finalizeManagedReleaseRollback(handle, { ...evidence, operationId: randomUUID() }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
-    await expect(finalizeManagedReleaseRollback(handle, evidence)).resolves.toMatchObject({ status: "ROLLED_BACK" });
-    const event = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: {
-      deploymentId: row.id, action: "control_plane.release_lease.rolled_back" } });
-    expect(event.meta).toMatchObject({ originatingLeaseId: handle.leaseId, diagnosticOperationId: operationId,
-      acceptanceEvidenceDigest: evidence.acceptanceEvidenceDigest, webDigest: DIGESTS[0], workerDigest: DIGESTS[1] });
+    await expectCode(finalizeManagedReleaseRollback(handle, evidence), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      releaseLeaseId: handle.leaseId, releaseLeasePhase: "MUTATING",
+    });
+    await expect(prisma.customerDeploymentEvent.findFirst({ where: {
+      deploymentId: row.id, action: "control_plane.release_lease.rolled_back",
+    } })).resolves.toBeNull();
   });
   it.each([false, true])("selection removal before mutation blocks forward work and permits abort (envelope=%s)", async (recorded) => {
     const row = await hosted(); const handle = await acquire(row.id);

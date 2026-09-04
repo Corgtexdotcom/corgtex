@@ -28,7 +28,7 @@ jobs:
   clear-recovery:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 150
     environment: managed-azure-release-production
     steps:
       - uses: actions/checkout@v5

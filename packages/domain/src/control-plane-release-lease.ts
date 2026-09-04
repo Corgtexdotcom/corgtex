@@ -14,7 +14,7 @@ const POSTGRES_UNSAFE_STRING = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(^|[^\
 const MAX_INT = 2_147_483_647;
 const TTL_MS = 5 * 60 * 1000;
 const ACTIVE_PHASES = ["RESERVED", "MUTATING", "RECOVERY_REQUIRED"] as const;
-const RECOVERY_STAGES = ["INVENTORY", "PREFLIGHT", "IMPORT", "WEB", "WORKER", "READBACK", "OBSERVATION", "ROLLBACK", "FENCING"] as const;
+const RECOVERY_STAGES = ["INVENTORY", "PREFLIGHT", "IMPORT", "WEB", "WORKER", "READBACK", "AUTH", "DIAGNOSTIC", "OBSERVATION", "ROLLBACK", "FENCING"] as const;
 const ROLLBACK_ENVELOPE_KEYS = new Set(["version", "deploymentId", "leaseId", "fence", "expectedImageTag", "incomingImageTag", "incomingVersion", "payload"]);
 const ORIGINATING_LEASE_EVENT_ACTION = "control_plane.release_lease.rollback_recorded";
 type LockedDeployment = CustomerDeployment & { databaseNow: Date; rollbackRecordPresent: boolean };
@@ -660,10 +660,9 @@ export async function finalizeManagedReleaseRollback(handle: LeaseHandle, eviden
     await requireAdmission(tx, row, true);
     if (row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const envelope = await originatingRollbackEnvelope(tx, row);
-    const acceptanceRequired = envelope.payload.schemaVersion === 2
-      && envelope.payload.compatibleRecovery.activationPolicy === "EXCLUSIVE";
+    if (envelope.payload.schemaVersion === 2
+      && envelope.payload.compatibleRecovery.activationPolicy === "EXCLUSIVE") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const accepted = evidence === undefined ? null : validateRollbackAcceptanceEvidence(evidence, row, envelope);
-    if (acceptanceRequired && !accepted) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     await tx.customerDeployment.update({ where: { id: row.id }, data: clearLeaseData() });
     if (accepted) {
       await tx.customerDeploymentEvent.create({ data: { deploymentId: row.id, action: "control_plane.release_lease.rolled_back",
