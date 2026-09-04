@@ -158,6 +158,8 @@ import {
   workItemMemberDisplayName,
   getWorkspacePermanentPathForEntity,
   MCP_TOOL_CAPABILITIES,
+  listBrainSourceRecovery,
+  reconcileBrainSource,
   requireWorkspaceMembership,
   duplicateGuardErrorPayload,
   isDuplicateGuardMatchError,
@@ -2264,6 +2266,26 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       requireSupportCredential();
       const budget = await updateModelUsageBudget(actor, { workspaceId, ...params });
       return jsonResult({ budget });
+    },
+  );
+
+  tool(
+    "list_brain_source_recovery",
+    "Inspect metadata-only evidence for missing Brain absorption. No source text or model output is returned.",
+    { sourceId: z.string().uuid().optional(), take: z.number().int().min(1).max(25).optional(), skip: z.number().int().min(0).optional() },
+    async (params: { sourceId?: string; take?: number; skip?: number }) => {
+      requireSupportCredential();
+      return jsonResult(await listBrainSourceRecovery(actor, { ...params, workspaceId }));
+    },
+  );
+
+  tool(
+    "reconcile_brain_source",
+    "Reconcile one eligible existing Brain source into its missing absorption job. Requires a quiet, operator-controlled runtime and provider budget; normal article/indexing effects incur cost. Does not replay source events or digests.",
+    { sourceId: z.string().uuid(), expectedSourceIdentity: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(1000) },
+    async (params: { sourceId: string; expectedSourceIdentity: string; reason: string }) => {
+      requireSupportCredential();
+      return jsonResult(await reconcileBrainSource(actor, { ...params, workspaceId }));
     },
   );
 

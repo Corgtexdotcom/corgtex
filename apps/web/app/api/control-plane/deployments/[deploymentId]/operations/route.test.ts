@@ -97,4 +97,12 @@ describe("control-plane deployment operations API", () => {
     expect(response.status).toBe(400);
     expect(runCustomerSupportOperation).not.toHaveBeenCalled();
   });
+
+  it.each(["brain.source_recovery", "brain.reconcile_source"])("exposes %s through the existing Ops route", async (action) => {
+    const { POST } = await import("./route");
+    runCustomerSupportOperation.mockResolvedValue({ id: "op", status: "COMPLETED" });
+    const response = await POST(request({ action, reason: "Approved recovery", arguments: { sourceId: "source", expectedSourceIdentity: "a".repeat(64) } }) as never, { params: Promise.resolve({ deploymentId: "inst-1" }) });
+    expect(response.status).toBe(201);
+    expect(runCustomerSupportOperation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action, deploymentId: "inst-1", reason: "Approved recovery" }));
+  });
 });

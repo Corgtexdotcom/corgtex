@@ -153,6 +153,7 @@ const MUTATING_SUPPORT_ACTIONS = new Set([
   "meeting_recorders.set_auto_recording",
   "meeting_recorders.ensure_coverage",
   "runtime.retry_failed_job",
+  "brain.reconcile_source",
   "runtime.discard_failed_job",
   "agent_credentials.update_scopes",
   "agent_credentials.revoke",
@@ -178,6 +179,8 @@ const SUPPORT_ACTION_TO_MCP_TOOL = {
   "tool_links.archive": "archive_tool_link",
   "agents.list_runs": "list_agent_runs",
   "runtime.list_jobs": "list_runtime_jobs",
+  "brain.source_recovery": "list_brain_source_recovery",
+  "brain.reconcile_source": "reconcile_brain_source",
   "runtime.list_failed_jobs": "list_failed_jobs",
   "runtime.retry_failed_job": "retry_failed_job",
   "runtime.discard_failed_job": "discard_failed_job",
@@ -10735,9 +10738,9 @@ export async function runCustomerSupportOperation(actor: AppActor, params: {
   invariant(toolName, 400, "INVALID_INPUT", "Unsupported support action.");
   const reason = normalizeReason(params.reason, params.action);
   const providedArgs = params.arguments ?? {};
-  const args = params.action === "proposals.reopen_resolved" && typeof providedArgs.reason !== "string"
-    ? { ...providedArgs, reason }
-    : providedArgs;
+  const args = params.action === "brain.reconcile_source"
+    || (params.action === "proposals.reopen_resolved" && typeof providedArgs.reason !== "string")
+    ? { ...providedArgs, reason } : providedArgs;
   const guardedFinanceConfig = isGuardedFinanceConfigArguments(params.action, args);
   const inputSummary = guardedFinanceConfig ? {
     flag: FINANCE_PARENT_FLAG,

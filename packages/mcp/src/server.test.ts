@@ -27,6 +27,8 @@ const getAppConnectionInstructionsMock = vi.fn();
 const invokeInstalledAppToolMock = vi.fn();
 const requestAppInstallMock = vi.fn();
 const supportReopenResolvedProposalsMock = vi.fn();
+const listBrainSourceRecoveryMock = vi.fn();
+const reconcileBrainSourceMock = vi.fn();
 const listAgentCredentialsMock = vi.fn();
 const updateAgentCredentialScopesMock = vi.fn();
 const revokeAgentCredentialMock = vi.fn();
@@ -133,6 +135,8 @@ vi.mock("@corgtex/domain", async () => {
   normalizeTensionWorkItem,
   workItemMemberDisplayName,
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
+  listBrainSourceRecovery: listBrainSourceRecoveryMock,
+  reconcileBrainSource: reconcileBrainSourceMock,
   loadAdviceRequestCountSummaries: loadAdviceRequestCountSummariesMock,
   listProposals: listProposalsMock,
   createProposal: createProposalMock,
@@ -302,6 +306,8 @@ describe("createCorgtexMcpServer", () => {
     vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
     vi.stubEnv("MICROSOFT_CLIENT_SECRET", "microsoft-client-secret");
     compareAndSetFinanceConfigMock.mockReset();
+    listBrainSourceRecoveryMock.mockReset();
+    reconcileBrainSourceMock.mockReset();
     financeConfigIdentityMock.mockReset().mockReturnValue("d".repeat(64));
     createActionMock.mockReset().mockResolvedValue({
       id: "action-1",
@@ -2207,6 +2213,33 @@ describe("createCorgtexMcpServer", () => {
     );
     expect(updateResponse.content[0].text).not.toContain("sha256-secret");
     expect(revokeResponse.content[0].text).not.toContain("sha256-secret");
+  });
+
+  it("binds source recovery to the authenticated workspace and requires all support scopes", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const { requireScope } = await import("./auth");
+    const server = createCorgtexMcpServer({ actor: { kind: "agent", authProvider: "credential" } as any, workspaceId: "ws-1", authKind: "agent" });
+    reconcileBrainSourceMock.mockResolvedValue({ id: "job-1", created: true });
+    const input = { sourceId: "source-1", expectedSourceIdentity: "a".repeat(64), reason: "Approved recovery", workspaceId: "attacker-ws" };
+    const repair = (server as any)._registeredTools.reconcile_brain_source;
+    await repair.handler(input);
+    expect(repair.annotations).toMatchObject({ readOnlyHint: false, sensitiveHint: true });
+    for (const scope of ["support:write", "brain:read", "runtime:read", "runtime:write"]) {
+      expect(requireScope).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), scope);
+    }
+    expect(reconcileBrainSourceMock).toHaveBeenCalledWith(expect.anything(), { ...input, workspaceId: "ws-1" });
+    const read = (server as any)._registeredTools.list_brain_source_recovery;
+    listBrainSourceRecoveryMock.mockResolvedValue({ items: [] });
+    await read.handler({ sourceId: "source-1", workspaceId: "attacker-ws" });
+    expect(read.annotations.readOnlyHint).toBe(true);
+    expect(listBrainSourceRecoveryMock).toHaveBeenCalledWith(expect.anything(), { sourceId: "source-1", workspaceId: "ws-1" });
+  });
+
+  it("rejects a non-agent session for source recovery", async () => {
+    const { createCorgtexMcpServer } = await import("./server");
+    const server = createCorgtexMcpServer({ actor: { kind: "user", user: { id: "user-1" } } as any, workspaceId: "ws-1", authKind: "oauth" } as any);
+    await expect((server as any)._registeredTools.reconcile_brain_source.handler({ sourceId: "source", expectedSourceIdentity: "a".repeat(64), reason: "test" })).rejects.toThrow("Support MCP tools require support connector credentials");
+    expect(reconcileBrainSourceMock).not.toHaveBeenCalled();
   });
 
   it("runs the support proposal repair tool with support and proposal scopes", async () => {

@@ -1,6 +1,7 @@
 import { runInboxTriageAgent, runDailyCheckInAgent, runMeetingSummaryAgent, runActionExtractionAgent, runProposalDraftingAgent, runConstitutionUpdateTriggerAgent, runConstitutionSynthesisAgent, runCrmDripFollowupAgent, runCrmEmailExtractionAgent, runCrmLeadEnrichmentAgent, runCompanyUnderstandingAgent } from "@corgtex/agents";
 import { executeAgentRun } from "@corgtex/agents";
 import { runBrainMaintenance, absorbSource } from "@corgtex/agents";
+import { assertBrainSourceRecoveryJob } from "@corgtex/domain";
 
 function asString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -107,6 +108,13 @@ export async function runAgentWorkflowJob(job: {
   if (job.type === "agent.brain-absorb") {
     const sourceId = asString(payload.sourceId);
     if (!sourceId) return null;
+    const expectedSourceIdentity = payload.supportRecovery === true ? asString(payload.expectedSourceIdentity) : undefined;
+    if (payload.supportRecovery === true && !/^[a-f0-9]{64}$/.test(expectedSourceIdentity ?? "")) {
+      throw new Error("Invalid source recovery identity.");
+    }
+    if (expectedSourceIdentity) {
+      await assertBrainSourceRecoveryJob({ workspaceId: job.workspaceId, sourceId, workflowJobId: job.id, expectedSourceIdentity });
+    }
     return executeAgentRun({
       agentKey: "brain-absorb",
       workspaceId: job.workspaceId,
@@ -124,6 +132,7 @@ export async function runAgentWorkflowJob(job: {
             sourceId,
             agentRunId: runId,
             model,
+            ...(expectedSourceIdentity ? { expectedSourceIdentity } : {}),
           });
           return { resultJson: result };
         }),

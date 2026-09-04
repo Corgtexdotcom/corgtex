@@ -21,6 +21,8 @@ const operationSchema = z.object({
     "tool_links.archive",
     "agents.list_runs",
     "runtime.list_jobs",
+    "brain.source_recovery",
+    "brain.reconcile_source",
     "runtime.list_failed_jobs",
     "runtime.retry_failed_job",
     "runtime.discard_failed_job",

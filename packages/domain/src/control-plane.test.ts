@@ -8277,6 +8277,26 @@ describe("control plane domain", () => {
     }));
   });
 
+  it.each([
+    ["brain.source_recovery", "list_brain_source_recovery", 1],
+    ["brain.reconcile_source", "reconcile_brain_source", 3],
+  ] as const)("routes %s with the correct mutation audit and reason", async (action, tool, calls) => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    prismaMock.supportOperation.create.mockResolvedValue({ id: "op-source", action });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({ id: "inst-1", label: "Acme", url: "https://customer.test", supportMcpUrl: "https://customer.test/api/mcp", supportCredentialEnc: "encrypted-token", supportConnectorStatus: "connected" });
+    prismaMock.supportOperation.update.mockResolvedValue({ id: "op-source", status: "COMPLETED" });
+    await runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action, reason: "Approved recovery", arguments: { sourceId: "source", expectedSourceIdentity: "a".repeat(64) } });
+    expect(fetch).toHaveBeenCalledTimes(calls);
+    const call = vi.mocked(fetch).mock.calls[calls === 3 ? 1 : 0]?.[1] as RequestInit;
+    expect(JSON.parse(String(call.body)).params).toMatchObject({ name: tool, arguments: { sourceId: "source", ...(calls === 3 ? { reason: "Approved recovery" } : {}) } });
+  });
+
+  it("requires a support reason before source reconciliation dispatch", async () => {
+    const { runCustomerSupportOperation } = await import("./control-plane");
+    await expect(runCustomerSupportOperation(operatorActor, { deploymentId: "inst-1", action: "brain.reconcile_source" })).rejects.toMatchObject({ code: "SUPPORT_REASON_REQUIRED" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("runs the support proposal reopen repair through the audited connector", async () => {
     const { runCustomerSupportOperation } = await import("./control-plane");
     prismaMock.supportOperation.create.mockResolvedValueOnce({
