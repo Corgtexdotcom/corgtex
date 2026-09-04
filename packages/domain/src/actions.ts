@@ -186,6 +186,7 @@ async function lockEditableActionForChecklistMutation(
   workspaceId: string,
   actionId: string,
 ) {
+  await acquireWorkItemAdvisoryLock(tx, "Action", actionId);
   const action = await requireEditableActionForChecklist(tx, actor, membership, workspaceId, actionId);
   const updateWhere: Record<string, unknown> = {
     id: action.id,
@@ -862,18 +863,35 @@ export async function publishAction(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant(!action.archivedAt, 400, "INVALID_STATE", "Archived actions cannot be opened.");
     invariant(action.status === "DRAFT", 400, "INVALID_STATE", "Only draft actions can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
-    const updated = await tx.action.update({
-      where: { id: params.actionId },
-      data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
-    });
+    let updated;
+    try {
+      updated = await tx.action.update({
+        where: {
+          id: params.actionId,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: action.status,
+          isPrivate: action.isPrivate ?? false,
+          version: action.version,
+        } as Prisma.ActionWhereUniqueInput,
+        data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Action changed while publishing. Refresh and try again.");
+      }
+      throw error;
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,
@@ -909,23 +927,40 @@ export async function returnActionToDraft(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant(!action.archivedAt, 400, "INVALID_STATE", "Archived actions cannot be returned to draft.");
     invariant(action.status === "OPEN" || action.status === "IN_PROGRESS" || action.status === "COMPLETED", 400, "INVALID_STATE", "Only open, in-progress, or completed actions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
-    const updated = await tx.action.update({
-      where: { id: params.actionId },
-      data: {
-        status: "DRAFT",
-        isPrivate: true,
-        publishedAt: null,
-        completedVia: null,
-      },
-    });
+    let updated;
+    try {
+      updated = await tx.action.update({
+        where: {
+          id: params.actionId,
+          workspaceId: params.workspaceId,
+          archivedAt: null,
+          status: action.status,
+          isPrivate: action.isPrivate ?? false,
+          version: action.version,
+        } as Prisma.ActionWhereUniqueInput,
+        data: {
+          status: "DRAFT",
+          isPrivate: true,
+          publishedAt: null,
+          completedVia: null,
+        },
+      });
+    } catch (error) {
+      if (isPrismaNotFoundError(error)) {
+        invariant(false, 409, "CONFLICT", "Action changed while returning to draft. Refresh and try again.");
+      }
+      throw error;
+    }
 
     await recordAudit(tx, actor, {
       workspaceId: params.workspaceId,

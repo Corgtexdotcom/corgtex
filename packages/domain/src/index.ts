@@ -106,6 +106,7 @@ export * from "./context-graph";
 export * from "./sso";
 export * from "./cost-budget";
 export * from "./procurement-trials";
+export * from "./production-validation";
 export * from "./self-serve-ops";
 export * from "./trial-entitlements";
 export * from "./meeting-intelligence";

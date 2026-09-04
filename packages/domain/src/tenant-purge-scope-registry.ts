@@ -23,7 +23,7 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
     "MeetingFollowUpReview", "MeetingInsight", "MeetingRecorderSmokeRun", "MeetingRecording", "MeetingSeries", "MeetingTranscriptImportBatch", "MeetingTranscriptProcessingProgress",
     "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "Member", "MemberEmailAlias", "MemberExpertise", "MemberInviteRequest", "ModelUsage", "ModelUsageBudget",
     "NewspaperDelivery", "NewspaperEdition", "NewspaperTrackedLink", "Notification", "NotificationDelivery", "OAuthApp", "OAuthConnection", "Objection", "PolicyCorpus",
-    "ProcurementBillingHandoff", "ProcurementSetupSession", "ProductAnalyticsEvent", "Proposal", "Recognition", "Role", "RoleAssignment", "RoleHolderHistory", "RoleOnboardingSession",
+    "ProcurementBillingHandoff", "ProcurementSetupSession", "ProductAnalyticsEvent", "ProductionValidationReceipt", "Proposal", "Recognition", "Role", "RoleAssignment", "RoleHolderHistory", "RoleOnboardingSession",
     "RoleVersion", "Tension", "TensionUpvote", "UserWorkspaceOnboardingState", "WebhookDelivery", "WebhookEndpoint", "WorkItemEvidence", "WorkItemVersion", "WorkspaceAgentConfig",
     "WorkspaceArchiveRecord", "WorkspaceBillingProfile", "WorkspaceBriefing", "WorkspaceEnterpriseService", "WorkspaceExternalResource", "WorkspaceExternalResourceAttachment",
     "WorkspaceExternalResourceMention", "WorkspaceFeatureFlag", "WorkspaceIntegrationBinding", "WorkspaceMeetingRecorderConfig", "WorkspaceModuleAccessRequest", "WorkspaceModuleGrant",
@@ -87,7 +87,7 @@ Event|workspace|Workspace||workspaceId|id|1|1|SetNull|Cascade;WorkflowJob|worksp
 NewspaperDelivery|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;NewspaperTrackedLink|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;KnowledgeChunk|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ContextGraphObject|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 ContextGraphRelationship|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ContextGraphEvidenceRef|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ContextMapView|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ContextGraphProposedDiff|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 ModelUsage|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentCredential|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentRun|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;Notification|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
-NotificationDelivery|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationSession|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationPendingOperation|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentMemory|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
+NotificationDelivery|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationSession|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ConversationPendingOperation|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AgentMemory|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ProductionValidationReceipt|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 BrainArticle|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;BrainSource|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;BrainBacklink|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;WebhookEndpoint|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 InboundWebhook|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;OAuthConnection|workspace|Workspace||workspaceId|id|1|1|Cascade|Cascade;ExpertiseTag|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;AdviceProcess|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 AdviceRequest|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ImpactFootprint|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;DemoLead|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;CrmAccount|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
@@ -121,7 +121,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(155)}${"11".repeat(3)}`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

@@ -79,6 +79,19 @@ describe("handleContextGraphSync", () => {
     }));
   });
 
+  it("does not recreate graph objects for archived Actions", async () => {
+    const { handleContextGraphSync } = await import("./context-graph-sync");
+    prismaMock.action.findFirst.mockResolvedValueOnce(null);
+
+    await handleContextGraphSync("job-1", { sourceType: "ACTION", sourceId: "action-1" }, "ws-1");
+
+    expect(prismaMock.action.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "action-1", workspaceId: "ws-1", archivedAt: null },
+    }));
+    expect(upsertContextGraphObjectMock).not.toHaveBeenCalled();
+    expect(upsertContextGraphRelationshipMock).not.toHaveBeenCalled();
+  });
+
   it("maps Brain process articles to process graph objects", async () => {
     const { handleContextGraphSync } = await import("./context-graph-sync");
     prismaMock.brainArticle.findFirst.mockResolvedValueOnce({

@@ -19,6 +19,9 @@ const {
   materializeCrmEmailTouchpointsMock: vi.fn(),
   syncExternalContentSourceMock: vi.fn(),
   prismaMock: {
+    action: {
+      findUnique: vi.fn(),
+    },
     communicationMessage: {
       findUnique: vi.fn(),
     },
@@ -175,6 +178,60 @@ describe("handleSlackMessageKnowledgeSync", () => {
     const { handleSlackMessageKnowledgeSync } = await import("./knowledge-sync");
 
     await handleSlackMessageKnowledgeSync("job-1", { messageId: "message-1" }, "workspace-1");
+
+    expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleActionKnowledgeSync", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    syncKnowledgeForSourceMock.mockResolvedValue(undefined);
+  });
+
+  it("indexes active Actions", async () => {
+    const { handleActionKnowledgeSync } = await import("./knowledge-sync");
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      bodyMd: "Send the update.",
+      status: "OPEN",
+      dueAt: null,
+      createdAt: new Date("2026-08-26T00:00:00.000Z"),
+      archivedAt: null,
+      author: { displayName: "Admin" },
+      assigneeMember: null,
+      circle: null,
+    });
+
+    await handleActionKnowledgeSync("job-1", { actionId: "action-1" }, "workspace-1");
+
+    expect(syncKnowledgeForSourceMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      sourceType: "ACTION",
+      sourceId: "action-1",
+      workflowJobId: "job-1",
+    }));
+  });
+
+  it("does not recreate knowledge for archived Actions", async () => {
+    const { handleActionKnowledgeSync } = await import("./knowledge-sync");
+    prismaMock.action.findUnique.mockResolvedValueOnce({
+      id: "action-1",
+      workspaceId: "workspace-1",
+      title: "Follow up",
+      bodyMd: "Send the update.",
+      status: "OPEN",
+      dueAt: null,
+      createdAt: new Date("2026-08-26T00:00:00.000Z"),
+      archivedAt: new Date("2026-08-26T01:00:00.000Z"),
+      author: { displayName: "Admin" },
+      assigneeMember: null,
+      circle: null,
+    });
+
+    await handleActionKnowledgeSync("job-1", { actionId: "action-1" }, "workspace-1");
 
     expect(syncKnowledgeForSourceMock).not.toHaveBeenCalled();
   });
