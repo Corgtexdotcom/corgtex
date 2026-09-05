@@ -36,6 +36,7 @@ const {
   prismaMock: {
     $transaction: vi.fn(),
     workflowJob: {
+      updateMany: vi.fn(),
       update: vi.fn(),
       upsert: vi.fn(),
       createMany: vi.fn(),
@@ -153,6 +154,7 @@ vi.mock("@corgtex/domain", () => ({
   CONTROL_PLANE_FLEET_SNAPSHOT_JOB_TYPE: "control-plane.fleet-snapshot",
   runControlPlaneFleetSnapshotJob: runControlPlaneFleetSnapshotJobMock,
   CONTROL_PLANE_RELEASE_DEPLOY_JOB_TYPE: "control-plane.release.deploy-latest",
+  RELEASE_DIAGNOSTIC_JOB_TYPE: "runtime.release-diagnostic.v1",
   runControlPlaneReleaseDeployJob: runControlPlaneReleaseDeployJobMock,
   ENTERPRISE_APP_HEALTH_CHECK_JOB_TYPE: "enterprise-app.health.check",
   runEnterpriseAppHealthCheckJob: runEnterpriseAppHealthCheckJobMock,

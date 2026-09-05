@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrismaClient, sha256 } from "@corgtex/shared";
@@ -9,6 +9,7 @@ import {
   acquireManagedReleaseLease,
   beginManagedReleaseMutation,
   claimManagedReleaseRecovery,
+  finalizeManagedReleaseCompatibleRecovery,
   finalizeManagedReleaseRollback,
   finalizeManagedReleaseSuccess,
   getManagedReleaseBootstrapTarget,
@@ -20,6 +21,7 @@ import {
   markManagedReleaseRecoveryRequired,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
+import { managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, managedAzureTargets } from "./managed-azure-targets";
 const prisma = getPrismaClient();
 const BASE = `sha-${"a".repeat(40)}`; const NEXT = `sha-${"b".repeat(40)}`;
 const SYNTHETIC_CANARY_PREFLIGHT_DEPLOYMENT_ID = "123e4567-e89b-42d3-a456-426614174099";
@@ -38,6 +40,22 @@ function rollbackPayload() {
     incoming: { webDigest: DIGESTS[2], workerDigest: DIGESTS[3] },
   };
 }
+function rollbackPayloadV2(activationPolicy: "EXCLUSIVE" | "STANDARD" = "EXCLUSIVE") {
+  const base = rollbackPayload(); const recoveryGitSha = "c".repeat(40);
+  return { ...base, schemaVersion: 2 as const,
+    incoming: { ...base.incoming, schemaApprovalDigest: `sha256:${"d".repeat(64)}` },
+    compatibleRecovery: { gitSha: recoveryGitSha, imageTag: `sha-${recoveryGitSha}`, releaseVersion: "recovery-1",
+      web: { image: `${ACR}/corgtex/web@${DIGESTS[0]}`, digest: DIGESTS[0] },
+      worker: { image: `${ACR}/corgtex/worker@${DIGESTS[1]}`, digest: DIGESTS[1] },
+      schemaCompatibilityApprovalDigest: `sha256:${"f".repeat(64)}`,
+      acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1" as const,
+      activationPolicy } };
+}
+function diagnosticOperationId(leaseId: string, gitSha: string, purpose: string) {
+  const value = createHash("sha256").update(`${purpose}:${leaseId}:${gitSha}`).digest("hex").slice(0, 32).split("");
+  value[12] = "5"; value[16] = (8 + (Number.parseInt(value[16]!, 16) % 4)).toString(16); const hex = value.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 function reverseKeys(value: unknown): unknown { if (!value || typeof value !== "object" || Array.isArray(value)) return value; return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reverseKeys(item)])); }
 async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput> = {}) {
   const suffix = randomUUID();
@@ -49,8 +67,38 @@ async function deployment(overrides: Partial<Prisma.CustomerDeploymentUncheckedC
     providerResourceGroup: RG, providerWebServiceId: WEB, providerWorkerServiceId: WORKER, ...overrides,
   } });
 }
+async function authorizeHosted(row: Awaited<ReturnType<typeof deployment>>, activationPolicy: "EXCLUSIVE" | "STANDARD" = "EXCLUSIVE") {
+  await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: row.id } });
+  vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+  vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({
+    schemaVersion: 1,
+    targets: [{
+      deploymentId: row.id,
+      customerAccountId: row.customerAccountId,
+      deploymentKind: "HOSTED_DEDICATED",
+      origin: row.url.replace(/\/$/, ""),
+      subscriptionId: row.providerSubscriptionId,
+      resourceGroup: row.providerResourceGroup,
+      webAppName: row.providerWebServiceId,
+      workerAppName: row.providerWorkerServiceId,
+      acrName: ACR_IDENTITY.acrName,
+      acrServer: ACR_IDENTITY.acrServer,
+      acrResourceGroup: RG,
+      evidenceSha256: "e".repeat(64),
+      activationPolicy,
+      releaseApproval: { gitSha: "b".repeat(40), schemaApprovalDigest: "d".repeat(64) },
+      recovery: {
+        gitSha: "c".repeat(40),
+        releaseVersion: "recovery-1",
+        schemaCompatibilityApprovalDigest: "f".repeat(64),
+      },
+    }],
+  }));
+}
 async function acquire(deploymentId: string, overrides = {}) {
-  const result = await acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test", ...overrides });
+  const protectedTarget = managedAzureTargets().find((target) => target.deploymentId === deploymentId && target.deploymentKind === "HOSTED_DEDICATED");
+  const result = await acquireManagedReleaseLease({ deploymentId, expectedImageTag: BASE, incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:test",
+    ...(protectedTarget ? { expectedTargetDigest: managedAzureTargetDigest(protectedTarget) } : {}), ...overrides });
   return { deploymentId: result.deploymentId, leaseId: result.leaseId, capability: result.capability, fence: result.fence };
 }
 async function seededLease(overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput> = {}) {
@@ -282,7 +330,6 @@ describe("managed release lease CAS", () => {
     await truncateAllTables();
     const unsafeCases: Array<{ overrides: Partial<Prisma.CustomerDeploymentUncheckedCreateInput>; incomingVersion?: string; acquireCode?: string; acquireStatus?: number }> = [
       { overrides: { url: "https://Upper.example.test" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { url: "https://path.example.test/private" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
-      { overrides: { providerSubscriptionId: SUBSCRIPTION.toUpperCase() }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerResourceGroup: "bad." }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" },
       { overrides: { providerWebServiceId: "Web-app" }, acquireCode: "MANAGED_RELEASE_LEASE_STATE_CONFLICT" }, { overrides: { providerWorkerServiceId: WEB } },
       { overrides: { releaseVersion: "bad/version" } }, { overrides: {}, incomingVersion: "bad/version" },
@@ -419,6 +466,32 @@ describe("managed release lease CAS", () => {
     await expectCode(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
     await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
   });
+  it("blocks a full resource-ID alias whose sibling scalar coordinates are stale", async () => {
+    const target = await deployment();
+    await deployment({ providerSubscriptionId: randomUUID(), providerResourceGroup: "rg-stale",
+      providerWebServiceId: "different-web", providerWorkerServiceId: ARM_WEB_UPPER_RG });
+    await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(getManagedReleaseBootstrapTarget(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
+  });
+  it("blocks a scalar Azure coordinate alias with differently cased subscription metadata", async () => {
+    const target = await deployment();
+    await deployment({ providerSubscriptionId: SUBSCRIPTION.toUpperCase(), providerResourceGroup: RG.toLowerCase(),
+      providerWebServiceId: WEB, providerWorkerServiceId: "different-worker" });
+    await expectCode(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY), "MANAGED_RELEASE_TARGET_OVERLAP");
+    await expectCode(acquire(target.id), "MANAGED_RELEASE_TARGET_OVERLAP");
+  });
+  it("normalizes a mixed-case Azure subscription UUID in lease projections", async () => {
+    const target = await deployment({ providerSubscriptionId: SUBSCRIPTION.toUpperCase() });
+    await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toMatchObject({
+      target: { subscriptionId: SUBSCRIPTION },
+    });
+    const handle = await acquire(target.id);
+    await expect(getManagedReleaseLeaseTarget(handle, ACR_IDENTITY)).resolves.toMatchObject({
+      target: { subscriptionId: SUBSCRIPTION },
+    });
+    await abortManagedReleaseLease(handle);
+  });
   it("rejects Azure resource IDs whose embedded target does not match the deployment row", async () => {
     const wrongSubscription = `/subscriptions/${randomUUID()}/resourceGroups/${RG}/providers/Microsoft.App/containerApps/${WEB}`;
     const wrongResourceGroup = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-other/providers/Microsoft.App/containerApps/${WEB}`;
@@ -500,20 +573,83 @@ describe("managed release lease CAS", () => {
     await expect(finalizeManagedReleaseRollback(currentHandle)).resolves.toMatchObject({ status: "ROLLED_BACK" });
     await expectCode(claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: stale.leaseId, expectedFence: stale.fence, owner: "recovery:test" }), "MANAGED_RELEASE_LEASE_CONFLICT");
   });
+  it.each(["AUTH", "DIAGNOSTIC"] as const)("persists %s recovery evidence without clearing the fence", async (stage) => {
+    const target = await deployment(); const handle = await acquire(target.id);
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayload()); await beginManagedReleaseMutation(handle);
+    await expect(markManagedReleaseRecoveryRequired(handle, { stage, code: `${stage}_ACCEPTANCE_FAILED` })).resolves.toMatchObject({
+      phase: "RECOVERY_REQUIRED", recovery: { stage, code: `${stage}_ACCEPTANCE_FAILED` },
+    });
+    const retained = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
+    expect(retained).toMatchObject({ releaseLeaseId: handle.leaseId, releaseLeasePhase: "RECOVERY_REQUIRED",
+      releaseLeaseRecoveryEvidence: { stage, code: `${stage}_ACCEPTANCE_FAILED` } });
+    await expect(prisma.customerDeploymentEvent.findFirstOrThrow({ where: {
+      deploymentId: target.id, action: "control_plane.release_lease.recovery_required",
+    } })).resolves.toMatchObject({ meta: expect.objectContaining({ leaseId: handle.leaseId, fence: handle.fence }) });
+  });
 });
 
 describe("selected hosted Azure release lifecycle", () => {
-  async function hosted() {
+  async function hosted(activationPolicy: "EXCLUSIVE" | "STANDARD" = "EXCLUSIVE") {
     const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
-    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    await authorizeHosted(row, activationPolicy);
     return row;
   }
+  it("admits a selected CORGTEX-owned onboarding primary without changing its lifecycle state", async () => {
+    const row = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
+    await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { status: "ONBOARDING" } });
+    await authorizeHosted(row);
+    await expect(getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY)).resolves.toMatchObject({
+      deployment: { deploymentId: row.id, releaseEligible: true },
+    });
+    const handle = await acquire(row.id);
+    expect(await prisma.customerAccount.findUniqueOrThrow({ where: { id: row.customerAccountId! } })).toMatchObject({
+      status: "ONBOARDING", primaryDeploymentId: row.id, managementAuthority: "CORGTEX",
+    });
+    await abortManagedReleaseLease(handle);
+  });
+  it("binds the exact protected approval digest before acquisition and every later lifecycle step", async () => {
+    const row = await hosted();
+    await expectCode(acquireManagedReleaseLease({ deploymentId: row.id, expectedImageTag: BASE, incomingImageTag: NEXT,
+      incomingVersion: "release-2", owner: "fleet:test", expectedTargetDigest: "0".repeat(64) }), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
+    expect((await releaseState(row.id)).deployment.releaseLeaseId).toBeNull();
+    const handle = await acquire(row.id);
+    const config = JSON.parse(process.env.MANAGED_RELEASE_TARGETS_JSON!);
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ ...config, targets: config.targets.map((target: Record<string, unknown>) => ({
+      ...target, releaseApproval: { ...(target.releaseApproval as Record<string, unknown>), schemaApprovalDigest: "0".repeat(64) },
+    })) }));
+    await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify(config));
+    const forged = rollbackPayloadV2();
+    forged.incoming.schemaApprovalDigest = `sha256:${"0".repeat(64)}`;
+    await expectCode(recordManagedReleaseRollbackRecord(handle, forged), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
+    const forgedRecovery = rollbackPayloadV2();
+    forgedRecovery.compatibleRecovery.schemaCompatibilityApprovalDigest = `sha256:${"0".repeat(64)}`;
+    await expectCode(recordManagedReleaseRollbackRecord(handle, forgedRecovery), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
+    expect((await releaseState(row.id)).deployment.releaseLeaseRollbackRecord).toBeNull();
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());
+    await beginManagedReleaseMutation(handle);
+    await markManagedReleaseRecoveryRequired(handle, { stage: "WORKER", code: "SYNTHETIC_RECOVERY" });
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify({ ...config, targets: config.targets.map((target: Record<string, unknown>) => ({
+      ...target, recovery: { ...(target.recovery as Record<string, unknown>), schemaCompatibilityApprovalDigest: "0".repeat(64) },
+    })) }));
+    await expectCode(finalizeManagedReleaseCompatibleRecovery(handle, {
+      gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}`,
+    }), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify(config));
+    await expire(row.id);
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", "");
+    await expectCode(claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: handle.leaseId,
+      expectedFence: handle.fence, owner: "recovery:test" }), "MANAGED_RELEASE_TARGET_CONFIG_REQUIRED", 409,
+    "An authoritative protected target is required.");
+    expect((await releaseState(row.id)).events.filter(({ action }) => action === "control_plane.release_lease.recovery_claimed")).toHaveLength(0);
+  });
   it("runs a selected hosted release through V2 recording and success without relabelling", async () => {
     const row = await hosted();
     const preflight = await getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY);
     expect(preflight.deployment).toMatchObject({ deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", releaseEligible: true });
     const handle = await acquire(row.id);
-    await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());
     expect((await releaseState(row.id)).deployment.releaseLeaseRollbackRecord).toMatchObject({ version: 2, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: row.customerAccountId } } });
     await beginManagedReleaseMutation(handle);
     await heartbeatManagedReleaseLease(handle);
@@ -523,31 +659,55 @@ describe("selected hosted Azure release lifecycle", () => {
     expect(final.releaseLeaseId).toBeNull();
     expect(final.providerPostgresServiceId).toBe(row.providerPostgresServiceId);
   });
+  it.each(["EXCLUSIVE", "STANDARD"] as const)("requires compatible recovery and never finalizes a V2 %s baseline rollback", async (activationPolicy) => {
+    const row = await hosted(activationPolicy); const handle = await acquire(row.id); const rollback = rollbackPayloadV2(activationPolicy);
+    await recordManagedReleaseRollbackRecord(handle, rollback); await beginManagedReleaseMutation(handle);
+    await expectCode(finalizeManagedReleaseRollback(handle), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const operationId = diagnosticOperationId(handle.leaseId, "a".repeat(40), "baseline-rollback");
+    const evidence = { gitSha: "a".repeat(40), imageTag: BASE, releaseVersion: "release-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], operationId,
+      acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}` };
+    await expectCode(finalizeManagedReleaseRollback(handle, { ...evidence, operationId: randomUUID() }), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    await expectCode(finalizeManagedReleaseRollback(handle, evidence), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      releaseLeaseId: handle.leaseId, releaseLeasePhase: "MUTATING",
+    });
+    await expect(prisma.customerDeploymentEvent.findFirst({ where: {
+      deploymentId: row.id, action: "control_plane.release_lease.rolled_back",
+    } })).resolves.toBeNull();
+  });
   it.each([false, true])("selection removal before mutation blocks forward work and permits abort (envelope=%s)", async (recorded) => {
     const row = await hosted(); const handle = await acquire(row.id);
-    if (recorded) await recordManagedReleaseRollbackRecord(handle, rollbackPayload());
+    if (recorded) await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());
     vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", "");
     await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
     await expectCode(beginManagedReleaseMutation(handle), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
-    await expectCode(recordManagedReleaseRollbackRecord(handle, rollbackPayload()), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
+    await expectCode(recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2()), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
     await expect(heartbeatManagedReleaseLease(handle, true)).resolves.toMatchObject({ phase: "RESERVED" });
     await expect(abortManagedReleaseLease(handle)).resolves.toMatchObject({ aborted: true });
     await expectCode(acquire(row.id), "MANAGED_RELEASE_TARGET_INELIGIBLE");
   });
   it("retains provenance and rollback through selection removal and repeated fenced recovery claims", async () => {
     const row = await hosted(); const original = await acquire(row.id);
-    await recordManagedReleaseRollbackRecord(original, rollbackPayload());
+    await recordManagedReleaseRollbackRecord(original, rollbackPayloadV2());
     await beginManagedReleaseMutation(original);
     const envelope = (await releaseState(row.id)).deployment.releaseLeaseRollbackRecord;
+    const originalConfig = JSON.parse(process.env.MANAGED_RELEASE_TARGETS_JSON!);
+    const rotatedConfig = { ...originalConfig, targets: originalConfig.targets.map((target: Record<string, unknown>) => ({
+      ...target, releaseApproval: { gitSha: "0".repeat(40), schemaApprovalDigest: "9".repeat(64) },
+    })) };
+    vi.stubEnv("MANAGED_RELEASE_TARGETS_JSON", JSON.stringify(rotatedConfig));
+    await expectCode(heartbeatManagedReleaseLease(original), "MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
     vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", "");
     await expectCode(finalizeManagedReleaseSuccess(original), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
     await expectCode(getManagedReleaseLeaseTarget(original, ACR_IDENTITY), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
     await markManagedReleaseRecoveryRequired(original, { stage: "WORKER", code: "SELECTION_REMOVED" });
-    await expect(getManagedReleaseRollbackRecord(original)).resolves.toEqual(rollbackPayload());
+    await expect(getManagedReleaseRollbackRecord(original)).resolves.toEqual(rollbackPayloadV2());
     let handle = original;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await expire(row.id);
       const status = await getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY);
+      if ("terminal" in status) throw new Error("Expected active recovery status.");
       expect(status.originatingLease).toEqual({ leaseId: original.leaseId, fence: original.fence });
       const claimed = await claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: handle.leaseId, expectedFence: handle.fence, owner: `recovery:${attempt}` });
       handle = { deploymentId: row.id, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
@@ -556,11 +716,53 @@ describe("selected hosted Azure release lifecycle", () => {
       await expectCode(heartbeatManagedReleaseLease(original, true), "MANAGED_RELEASE_LEASE_CONFLICT");
       await expectCode(finalizeManagedReleaseSuccess(handle), "MANAGED_RELEASE_FORWARD_NOT_ALLOWED");
     }
-    await expect(finalizeManagedReleaseRollback(handle)).resolves.toMatchObject({ status: "ROLLED_BACK", releaseImageTag: BASE });
+    await expect(finalizeManagedReleaseCompatibleRecovery(handle, {
+      gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}`,
+    })).resolves.toMatchObject({ status: "RECOVERED_COMPATIBLE", releaseImageTag: `sha-${"c".repeat(40)}` });
+    expect((await releaseState(row.id)).deployment).toMatchObject({ releaseLeaseId: null, releaseLeasePhase: null,
+      releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1" });
+    await expect(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY)).resolves.toMatchObject({
+      status: "RECOVERED_COMPATIBLE", terminal: true, leaseId: handle.leaseId, fence: handle.fence,
+      originatingLeaseId: original.leaseId, originatingFence: original.fence,
+      recoveryAuthorityDigest: managedAzureRecoveryAuthorityDigest(rotatedConfig.targets[0]),
+      releaseImageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}`,
+    });
+    const terminal = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: {
+      deploymentId: row.id, action: "control_plane.release_lease.compatible_recovery_succeeded",
+    } });
+    const terminalMeta = terminal.meta as Prisma.JsonObject;
+    expect(terminalMeta).toMatchObject({ schemaVersion: 1, recoveryAuthorityDigest: `sha256:${managedAzureRecoveryAuthorityDigest(rotatedConfig.targets[0])}`,
+      receiptDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) });
+    await prisma.customerDeploymentEvent.update({ where: { id: terminal.id }, data: { meta: { ...terminalMeta, webDigest: DIGESTS[2] } } });
+    await expectCode(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    const currentTarget = managedAzureTargets()[0]!;
+    const later = await acquireManagedReleaseLease({ deploymentId: row.id, expectedImageTag: `sha-${"c".repeat(40)}`,
+      incomingImageTag: NEXT, incomingVersion: "release-2", owner: "fleet:later",
+      expectedTargetDigest: managedAzureTargetDigest(currentTarget) });
+    await abortManagedReleaseLease({ deploymentId: row.id, leaseId: later.leaseId, capability: later.capability, fence: later.fence });
+    await expectCode(getManagedReleaseRecoveryStatus(row.id, ACR_IDENTITY), "MANAGED_RELEASE_RECOVERY_REQUIRED");
+  });
+  it("blocks forward and recovery lifecycle work after current-primary reassignment", async () => {
+    const row = await hosted(); const handle = await acquire(row.id);
+    await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());
+    await beginManagedReleaseMutation(handle);
+    await prisma.customerAccount.update({ where: { id: row.customerAccountId! }, data: { primaryDeploymentId: null } });
+    const message = "The hosted deployment must remain the account's current primary target.";
+    await expectCode(heartbeatManagedReleaseLease(handle), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    await expectCode(heartbeatManagedReleaseLease(handle, true), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    await expectCode(finalizeManagedReleaseSuccess(handle), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    await expectCode(getManagedReleaseRollbackRecord(handle), "MANAGED_RELEASE_ACCOUNT_AUTHORITY_REQUIRED", 409, message);
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      releaseLeaseId: handle.leaseId, releaseLeasePhase: "MUTATING",
+    });
   });
   it.each(["HOSTED_DEDICATED", "REMOTE_MANAGED"] as const)("keeps database metadata and delete guards for %s", async (deploymentKind) => {
     const row = await deployment({ deploymentKind });
     vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", row.id);
+    if (deploymentKind === "HOSTED_DEDICATED") await authorizeHosted(row);
     const handle = await acquire(row.id);
     for (const data of [{ deploymentStatus: "SUSPENDED" as const }, { deploymentKind: "SHARED_WORKSPACE" as const }, { customerAccountId: null }, { url: "https://reassigned.example.test" }, { providerWebServiceId: "other-web" }]) {
       await expect(prisma.customerDeployment.update({ where: { id: row.id }, data })).rejects.toThrow("MANAGED_RELEASE_LEASE_UPDATE_CONFLICT");
@@ -572,7 +774,7 @@ describe("selected hosted Azure release lifecycle", () => {
     const row = await hosted(); const handle = await acquire(row.id);
     const acquisition = await prisma.customerDeploymentEvent.findFirstOrThrow({ where: { deploymentId: row.id, action: "control_plane.release_lease.acquired" } });
     const meta = acquisition.meta as Prisma.JsonObject;
-    for (const change of [{ ...meta, provenance: null }, { ...meta, owner: "revoked-owner" }, { ...meta, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: "another-account" } } }]) {
+    for (const change of [{ ...meta, provenance: null }, { ...meta, recoveryAuthorityDigest: null }, { ...meta, owner: "revoked-owner" }, { ...meta, provenance: { deploymentKind: "HOSTED_DEDICATED", identity: { customerAccountId: "another-account" } } }]) {
       await prisma.customerDeploymentEvent.update({ where: { id: acquisition.id }, data: { meta: change } });
       await expectCode(abortManagedReleaseLease(handle), "MANAGED_RELEASE_PROVENANCE_CONFLICT");
       expect((await releaseState(row.id)).deployment.releaseLeaseId).toBe(handle.leaseId);
@@ -615,6 +817,7 @@ it("applies the exact hosted migration without changing retained remote leases, 
   }, { timeout: 15_000 });
   await abortManagedReleaseLease(handle);
   vi.stubEnv("MANAGED_RELEASE_PRIMARY_DEPLOYMENT_IDS", hosted.id);
+  await authorizeHosted(hosted);
   const hostedHandle = await acquire(hosted.id);
   await abortManagedReleaseLease(hostedHandle);
 });

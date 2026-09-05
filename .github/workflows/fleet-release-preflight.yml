@@ -47,7 +47,7 @@ jobs:
       FLEET_RELEASE_STABLE_GIT_SHA: ${{ vars.FLEET_RELEASE_STABLE_GIT_SHA }}
       FLEET_RELEASE_ACR_SERVER: ${{ vars.FLEET_RELEASE_ACR_SERVER || 'acrcorgtexssstgwus3.azurecr.io' }}
       MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: ${{ vars.MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID }}
-      GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME || github.actor }}
+      GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME }}
       GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -81,6 +81,13 @@ jobs:
         run: |
           node scripts/release/fleet-release-runner.mjs resolve \
             --release "$RELEASE_INPUT"
+
+      - name: Verify provider authority and settled Ops baseline
+        env:
+          TARGETS_INPUT: ${{ inputs.targets }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs preflight-provider \
+            --targets "$TARGETS_INPUT"
 
       - name: Plan release rings
         env:

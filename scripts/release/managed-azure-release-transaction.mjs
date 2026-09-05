@@ -41,6 +41,13 @@ function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
+function diagnosticOperationId(leaseId, gitSha, purpose) {
+  const value = createHash("sha256").update(`${purpose}:${leaseId}:${gitSha}`).digest("hex").slice(0, 32).split("");
+  value[12] = "5";
+  value[16] = (8 + (Number.parseInt(value[16], 16) % 4)).toString(16);
+  const hex = value.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 function preflightProjection(preflight) {
   return Object.freeze({
     deploymentId: preflight.deploymentId,
@@ -119,6 +126,22 @@ function leaseArgs(handle, extra = {}) {
   return { deploymentId: handle.deploymentId, leaseId: handle.leaseId, capability: handle.capability, fence: handle.fence, ...extra };
 }
 
+function compatibleRecoveryTerminal(status, input, handle, evidence, approvalDigest) {
+  return status?.status === "RECOVERED_COMPATIBLE"
+    && status.terminal === true
+    && status.deploymentId === input.deploymentId
+    && status.leaseId === handle.leaseId
+    && status.fence === handle.fence
+    && status.originatingLeaseId === handle.leaseId
+    && status.originatingFence === handle.fence
+    && status.releaseImageTag === evidence.imageTag
+    && status.releaseVersion === evidence.releaseVersion
+    && status.webDigest === evidence.webDigest
+    && status.workerDigest === evidence.workerDigest
+    && status.approvalDigest === approvalDigest
+    && status.acceptanceEvidenceDigest === evidence.acceptanceEvidenceDigest;
+}
+
 function safeResult(input, inventory, status, detail = {}) {
   return Object.freeze({
     status,
@@ -135,7 +158,7 @@ function safeResult(input, inventory, status, detail = {}) {
 }
 
 export function managedAzureCliResultAccepted(result, execute) {
-  return execute ? result?.status === "SUCCEEDED" : result?.status === "DRY_RUN_READY";
+  return result?.status === "ALREADY_CURRENT" || (execute ? result?.status === "SUCCEEDED" : result?.status === "DRY_RUN_READY");
 }
 
 export function writeManagedAzureCliResult(result, execute, writers = { stdout: process.stdout, stderr: process.stderr }) {
@@ -177,9 +200,17 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   const preflight = await deps.lease("preflight", { deploymentId: input.deploymentId, workloadClass: input.workloadClass, acrName: input.acrName, acrServer: input.acrServer });
   if (preflight.deploymentId !== input.deploymentId || preflight.target?.acrName !== input.acrName || preflight.target?.acrServer !== input.acrServer) fail("MANAGED_RELEASE_TARGET_INVALID");
   if (inventory.evaluation.preflightDigest !== preflightDigest(preflight)) fail("MANAGED_RELEASE_TARGET_INVALID");
-  if (!SHA256.test(preflight.authorityDigest) || preflight.deployment?.deploymentId !== input.deploymentId || preflight.deployment?.workloadClass !== input.workloadClass) fail("MANAGED_RELEASE_TARGET_INVALID");
+  if (!SHA256.test(preflight.authorityDigest) || preflight.deployment?.deploymentId !== input.deploymentId
+    || preflight.deployment?.workloadClass !== input.workloadClass
+    || !["HOSTED_DEDICATED", "REMOTE_MANAGED"].includes(preflight.deployment?.deploymentKind)) fail("MANAGED_RELEASE_TARGET_INVALID");
+  const protectedHosted = input.workloadClass === "ACTIVE_CLIENT_PRIMARY" && preflight.deployment.deploymentKind === "HOSTED_DEDICATED";
+  const configured = protectedHosted
+    ? await deps.targetConfig({ deploymentId: input.deploymentId, execute: false, reason: input.reason })
+    : { status: "RECONCILIATION_READY", effects: 0, target: { acrName: input.acrName, acrResourceGroup: input.acrResourceGroup, activationPolicy: "STANDARD" } };
+  if (configured?.status !== "RECONCILIATION_READY" || configured.effects !== 0 || configured.target?.acrName !== input.acrName
+    || configured.target?.acrResourceGroup !== input.acrResourceGroup || !["STANDARD", "EXCLUSIVE"].includes(configured.target?.activationPolicy)
+    || (protectedHosted && !SHA256.test(configured.targetDigest))) fail("MANAGED_RELEASE_TARGET_INVALID");
   const baselineRelease = releaseIdentity(preflight.release?.baselineImageTag, preflight.release?.baselineVersion);
-  if (baselineRelease.imageTag === `sha-${input.releaseSha}`) fail("MANAGED_RELEASE_ALREADY_CURRENT");
   const nextRelease = Object.freeze({ gitSha: input.releaseSha, imageTag: `sha-${input.releaseSha}`, version: input.releaseVersion });
   let releasePlan;
   try {
@@ -190,34 +221,95 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
   }
   if (!releasePlan || ROLES.some((role) => !/^sha256:[0-9a-f]{64}$/.test(releasePlan.roles?.[role]?.digest)
     || !["MATCH", "ABSENT"].includes(releasePlan.roles?.[role]?.destinationState))) fail("MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED");
+  const recoveryConfig = configured.target.recovery;
+  const releaseApproval = configured.target.releaseApproval;
+  if (protectedHosted && (!releaseApproval || releaseApproval.gitSha !== input.releaseSha
+    || !SHA256.test(releaseApproval.schemaApprovalDigest))) fail("MANAGED_RELEASE_SCHEMA_APPROVAL_REQUIRED");
+  if (protectedHosted && (!recoveryConfig || !SHA.test(recoveryConfig.gitSha) || typeof recoveryConfig.releaseVersion !== "string"
+    || !SHA256.test(recoveryConfig.schemaCompatibilityApprovalDigest) || recoveryConfig.gitSha === input.releaseSha)) fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED");
+  const recoveryRelease = protectedHosted
+    ? Object.freeze({ gitSha: recoveryConfig.gitSha, imageTag: `sha-${recoveryConfig.gitSha}`, version: recoveryConfig.releaseVersion }) : nextRelease;
+  let recoveryPlan = releasePlan;
+  try {
+    if (protectedHosted) recoveryPlan = await deps.resolveRelease({ deploymentId: input.deploymentId,
+      target: releaseTargetWithAcrGroup(preflight.target, input.acrResourceGroup), gitSha: recoveryRelease.gitSha,
+      workloadClass: input.workloadClass, deployment: preflight.deployment });
+  } catch { fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED"); }
+  if (protectedHosted && (!recoveryPlan || ROLES.some((role) => !/^sha256:[0-9a-f]{64}$/.test(recoveryPlan.roles?.[role]?.digest)
+    || !["MATCH", "ABSENT"].includes(recoveryPlan.roles?.[role]?.destinationState)))) fail("MANAGED_RELEASE_RECOVERY_PREFLIGHT_FAILED");
 
   const baselines = {};
   for (const role of ROLES) baselines[role] = await readBaselineApp(deps, preflight.target, role, baselineRelease);
-  const rollback = {
-    schemaVersion: 1,
-    target: preflight.target,
-    previous: {
-      releaseVersion: baselineRelease.version,
-      web: { containerName: baselines.web.containerName, image: baselines.web.image, readyRevision: baselines.web.revisionName, templateDigest: baselines.web.templateDigest },
-      worker: { containerName: baselines.worker.containerName, image: baselines.worker.image, readyRevision: baselines.worker.revisionName, templateDigest: baselines.worker.templateDigest },
-    },
-    incoming: { webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest },
+  const previous = {
+    releaseVersion: baselineRelease.version,
+    web: { containerName: baselines.web.containerName, image: baselines.web.image, readyRevision: baselines.web.revisionName, templateDigest: baselines.web.templateDigest },
+    worker: { containerName: baselines.worker.containerName, image: baselines.worker.image, readyRevision: baselines.worker.revisionName, templateDigest: baselines.worker.templateDigest },
   };
+  const rollback = protectedHosted ? {
+    schemaVersion: 2,
+    target: preflight.target,
+    previous,
+    incoming: { webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest,
+      schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` },
+    compatibleRecovery: { gitSha: recoveryRelease.gitSha, imageTag: recoveryRelease.imageTag, releaseVersion: recoveryRelease.version,
+      web: { image: recoveryPlan.roles.web.image, digest: recoveryPlan.roles.web.digest },
+      worker: { image: recoveryPlan.roles.worker.image, digest: recoveryPlan.roles.worker.digest },
+      schemaCompatibilityApprovalDigest: `sha256:${recoveryConfig.schemaCompatibilityApprovalDigest}`,
+      acceptancePolicy: "AUTHENTICATED_WEB_AND_WORKER_IDENTITY_SCHEMA_V1", activationPolicy: configured.target.activationPolicy },
+  } : { schemaVersion: 1, target: preflight.target, previous,
+    incoming: { webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest } };
   const baselineHealth = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
   if (!baselineHealth.ok) fail("MANAGED_RELEASE_BASELINE_HEALTH_FAILED");
+  if (protectedHosted) await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: baselineRelease });
+  if (baselineRelease.imageTag === nextRelease.imageTag) {
+    if (baselineRelease.version !== nextRelease.version
+      || ROLES.some((role) => baselines[role].imageDigest !== releasePlan.roles[role].digest)) fail("MANAGED_RELEASE_ALREADY_CURRENT_DRIFT");
+    if (!protectedHosted || !input.execute) return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 0 });
+    const operationId = diagnosticOperationId(input.inventoryRef, nextRelease.gitSha, "already-current");
+    const noProgress = async () => {};
+    const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
+      operationId, release: nextRelease, reason: input.reason, onProgress: noProgress });
+    if (!acceptance?.accepted || acceptance.webGitSha !== input.releaseSha || acceptance.receipt?.workerGitSha !== input.releaseSha
+      || acceptance.receipt?.operationId !== operationId) fail("MANAGED_RELEASE_ALREADY_CURRENT_DIAGNOSTIC_FAILED");
+    const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
+      release: nextRelease, imageDigests: { web: releasePlan.roles.web.digest, worker: releasePlan.roles.worker.digest },
+      durationMs: 15 * 60_000, onProgress: noProgress });
+    if (!observed?.verified) fail("MANAGED_RELEASE_ALREADY_CURRENT_OBSERVATION_FAILED");
+    const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ baselineHealth, acceptance, observed,
+      webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest })).digest("hex")}`;
+    return safeResult(input, inventory, "ALREADY_CURRENT", { effects: 1, providerEffects: 0,
+      verificationEffect: "AUTHENTICATED_DIAGNOSTIC_AND_OBSERVATION", acceptanceEvidenceDigest });
+  }
   if (!input.execute) {
     return safeResult(input, inventory, "DRY_RUN_READY", {
       effects: 0,
+      ...(protectedHosted ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}),
       importsRequired: ROLES.filter((role) => releasePlan.roles[role].destinationState === "ABSENT"),
+      ...(protectedHosted ? { recoveryImportsRequired: ROLES.filter((role) => recoveryPlan.roles[role].destinationState === "ABSENT") } : {}),
     });
   }
 
   let handle;
   let mutationBegun = false;
+  let exclusiveDrainStarted = false;
+  let firstForwardPatchAttempted = false;
+  const forwardTemplates = {};
   const heartbeat = () => deps.lease("heartbeat", leaseArgs(handle, { reason: input.reason }));
   const recoveryHeartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
   const markRecovery = async (stage, code, detail = {}) => {
-    if (handle) await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason: input.reason })).catch(() => undefined);
+    if (handle) {
+      try {
+        await deps.lease("mark_recovery", leaseArgs(handle, { stage, code, reason: input.reason }));
+      } catch {
+        return safeResult(input, inventory, "RECOVERY_REQUIRED", {
+          phase: "FENCING",
+          code: "RECOVERY_RECORDING_FAILED",
+          originatingPhase: stage,
+          originatingCode: code,
+          ...detail,
+        });
+      }
+    }
     return safeResult(input, inventory, "RECOVERY_REQUIRED", { phase: stage, code, ...detail });
   };
 
@@ -238,28 +330,130 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     for (const role of ROLES) classified[role] = await classifyRole(role, forwardTemplates[role]);
     if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code, detail);
     await recoveryHeartbeat();
-    for (const role of ["worker", "web"]) {
-      if (classified[role].kind !== "FORWARD") continue;
+    if (!protectedHosted) {
+      for (const role of ["worker", "web"]) {
+        if (classified[role].kind !== "FORWARD") continue;
+        const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "rollback" });
+        const template = buildManagedAzureReleaseTemplate({ baseline: classified[role].state, role, image: baselines[role].image,
+          release: baselineRelease, revisionSuffix: suffix });
+        assertManagedAzureTemplateDelta(classified[role].state, template,
+          { role, image: baselines[role].image, release: baselineRelease, revisionSuffix: suffix });
+        const patched = await deps.patchTemplate({ target: preflight.target, role, location: classified[role].state.location,
+          template, onProgress: recoveryHeartbeat });
+        const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
+        if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code, rollbackDetail);
+        await recoveryHeartbeat();
+        try {
+          await deps.waitForState({ target: preflight.target, role, release: baselineRelease,
+            imageDigest: baselines[role].imageDigest, expectedTemplate: template, onProgress: recoveryHeartbeat });
+        } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS", rollbackDetail); }
+        await recoveryHeartbeat();
+      }
+      await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
+      return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code, ...detail });
+    }
+    const recoveryTemplates = {};
+    for (const role of ["web", "worker"]) {
+      const current = classified[role].state;
+      if (!current) return markRecovery("ROLLBACK", "COMPATIBLE_RECOVERY_STATE_AMBIGUOUS", detail);
       const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "rollback" });
       const template = buildManagedAzureReleaseTemplate({
-        baseline: classified[role].state,
+        baseline: current,
         role,
-        image: baselines[role].image,
-        release: baselineRelease,
+        image: recoveryPlan.roles[role].image,
+        release: recoveryRelease,
         revisionSuffix: suffix,
       });
-      assertManagedAzureTemplateDelta(classified[role].state, template, { role, image: baselines[role].image, release: baselineRelease, revisionSuffix: suffix });
-      const patched = await deps.patchTemplate({ target: preflight.target, role, location: classified[role].state.location, template, onProgress: recoveryHeartbeat });
+      assertManagedAzureTemplateDelta(current, template, { role, image: recoveryPlan.roles[role].image, release: recoveryRelease, revisionSuffix: suffix });
+      recoveryTemplates[role] = template;
+      const patched = await deps.patchTemplate({ target: preflight.target, role, location: current.location, template, onProgress: recoveryHeartbeat });
       const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
       if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code, rollbackDetail);
       await recoveryHeartbeat();
       try {
-        await deps.waitForState({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest, expectedTemplate: template, onProgress: recoveryHeartbeat });
+        await deps.waitForState({ target: preflight.target, role, release: recoveryRelease, imageDigest: recoveryPlan.roles[role].digest, expectedTemplate: template, onProgress: recoveryHeartbeat });
       } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS", rollbackDetail); }
       await recoveryHeartbeat();
     }
-    await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
-    return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code, ...detail });
+    const health = await deps.healthProbe({ origin: preflight.origin, release: recoveryRelease });
+    if (!health.ok) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_HEALTH_FAILED", detail);
+    try { await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: recoveryRelease }); }
+    catch { return markRecovery("AUTH", "COMPATIBLE_RECOVERY_AUTH_FAILED", detail); }
+    const operationId = diagnosticOperationId(handle.leaseId, recoveryRelease.gitSha, "compatible-recovery");
+    const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
+      operationId, release: recoveryRelease, reason: input.reason, onProgress: recoveryHeartbeat });
+    if (!acceptance?.accepted || acceptance.webGitSha !== recoveryRelease.gitSha
+      || acceptance.receipt?.workerGitSha !== recoveryRelease.gitSha || acceptance.receipt?.operationId !== operationId) {
+      return markRecovery("DIAGNOSTIC", "COMPATIBLE_RECOVERY_DIAGNOSTIC_FAILED", detail);
+    }
+    const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
+      release: recoveryRelease, imageDigests: { web: recoveryPlan.roles.web.digest, worker: recoveryPlan.roles.worker.digest },
+      durationMs: 15 * 60_000, onProgress: recoveryHeartbeat });
+    if (!observed?.verified) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_OBSERVATION_FAILED", detail);
+    const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
+      webDigest: recoveryPlan.roles.web.digest, workerDigest: recoveryPlan.roles.worker.digest })).digest("hex")}`;
+    const evidence = {
+      gitSha: recoveryRelease.gitSha, imageTag: recoveryRelease.imageTag, releaseVersion: recoveryRelease.version,
+      webDigest: recoveryPlan.roles.web.digest, workerDigest: recoveryPlan.roles.worker.digest, acceptanceEvidenceDigest,
+    };
+    let finalized = null;
+    try {
+      finalized = await deps.lease("finalize_compatible_recovery", leaseArgs(handle, { reason: input.reason, evidence }));
+    } catch { /* Reconcile exactly once by readback; never replay an uncertain finalization. */ }
+    if (finalized?.status !== "RECOVERED_COMPATIBLE") {
+      let readback = null;
+      try {
+        readback = await deps.lease("get_recovery", {
+          deploymentId: input.deploymentId,
+          acrName: input.acrName,
+          acrServer: input.acrServer,
+        });
+      } catch { /* Missing or uncertain terminal proof retains the fence. */ }
+      const approvalDigest = `sha256:${recoveryConfig.schemaCompatibilityApprovalDigest}`;
+      if (!compatibleRecoveryTerminal(readback, input, handle, evidence, approvalDigest)) {
+        return safeResult(input, inventory, "RECOVERY_REQUIRED", {
+          phase: "FENCING",
+          code: "COMPATIBLE_RECOVERY_FINALIZE_AMBIGUOUS",
+          ...detail,
+        });
+      }
+      return safeResult(input, inventory, "RECOVERED_COMPATIBLE", {
+        phase: stage,
+        code,
+        recoveryReleaseImageTag: recoveryRelease.imageTag,
+        reconciled: true,
+        ...detail,
+      });
+    }
+    return safeResult(input, inventory, "RECOVERED_COMPATIBLE", { phase: stage, code, recoveryReleaseImageTag: recoveryRelease.imageTag, ...detail });
+  };
+
+  const restoreDrainedBaseline = async (stage, code, detail = {}) => {
+    const activations = {};
+    for (const role of ["worker", "web"]) {
+      try {
+        activations[role] = await deps.setRevisionActive({ target: preflight.target, role, revisionName: baselines[role].revisionName,
+          active: true, onProgress: recoveryHeartbeat });
+      } catch { activations[role] = null; }
+    }
+    if (ROLES.some((role) => !activations[role]?.terminal || !activations[role]?.succeeded)) {
+      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
+    }
+    for (const role of ROLES) {
+      try {
+        const restored = await deps.readApp({ target: preflight.target, role, release: baselineRelease, imageDigest: baselines[role].imageDigest });
+        if (restored.templateDigest !== baselines[role].templateDigest) return markRecovery("FENCING", "BASELINE_REACTIVATION_DRIFT", detail);
+      } catch {
+        return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
+      }
+    }
+    try {
+      const health = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
+      if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED", detail);
+      return compensate(stage, code, forwardTemplates, { ...detail, containment: "BASELINE_REACTIVATED" });
+    } catch {
+      return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
+    }
   };
 
   try {
@@ -270,9 +464,12 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       incomingVersion: nextRelease.version,
       owner: deps.owner,
       reason: input.reason,
+      ...(protectedHosted ? { expectedTargetDigest: configured.targetDigest } : {}),
     });
     const leasedTarget = await deps.lease("get_target", leaseArgs(handle, { acrName: input.acrName, acrServer: input.acrServer }));
-    if (!same(leasedTarget.target, preflight.target) || !same(leasedTarget.deployment, preflight.deployment) || leasedTarget.authorityDigest !== preflight.authorityDigest || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag) {
+    if (!same(leasedTarget.target, preflight.target) || !same(leasedTarget.deployment, preflight.deployment)
+      || leasedTarget.authorityDigest !== preflight.authorityDigest || leasedTarget.release?.baselineImageTag !== baselineRelease.imageTag
+      || (protectedHosted && leasedTarget.targetDigest !== configured.targetDigest)) {
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason }));
       fail("MANAGED_RELEASE_LEASE_TARGET_DRIFT");
     }
@@ -284,12 +481,12 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       }
     }
     await deps.lease("record_rollback", leaseArgs(handle, { rollback, reason: input.reason }));
-    for (const role of ROLES) {
-      if (releasePlan.roles[role].destinationState !== "ABSENT") continue;
+    for (const plan of protectedHosted ? [releasePlan, recoveryPlan] : [releasePlan]) for (const role of ROLES) {
+      if (plan.roles[role].destinationState !== "ABSENT") continue;
       await heartbeat();
-      let imported = await deps.importRole(releasePlan.roles[role]);
+      let imported = await deps.importRole(plan.roles[role]);
       if ((!imported.terminal || !imported.succeeded) && imported.ambiguous) {
-        const verified = await verifyImportedRole(deps, releasePlan.roles[role]);
+        const verified = await verifyImportedRole(deps, plan.roles[role]);
         imported = imported.confirmedProviderSuccess ? confirmedImportReadbackResult(verified) : verified;
       }
       if (!imported.terminal || !imported.succeeded) {
@@ -306,7 +503,14 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
     mutationBegun = true;
     await deps.lease("begin", leaseArgs(handle, { reason: input.reason }));
-    const forwardTemplates = {};
+    if (configured.target.activationPolicy === "EXCLUSIVE") {
+      await recoveryHeartbeat();
+      exclusiveDrainStarted = true;
+      const drained = await deps.drainBaseline({ target: preflight.target, baselines, handle, onProgress: recoveryHeartbeat });
+      if (!drained?.terminal || !drained?.succeeded) return restoreDrainedBaseline("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
+        drained?.code ? { providerCode: drained.code } : {});
+      await recoveryHeartbeat();
+    }
     for (const role of ROLES) {
       const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "forward" });
       forwardTemplates[role] = buildManagedAzureReleaseTemplate({
@@ -320,6 +524,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     }
 
     await heartbeat();
+    firstForwardPatchAttempted = true;
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
     if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS",
       webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
@@ -349,13 +554,30 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     const health = await deps.healthProbe({ origin: preflight.origin, release: nextRelease });
     if (!health.ok) return compensate("OBSERVATION", health.code ?? "HEALTH_PROBE_FAILED", forwardTemplates);
     await heartbeat();
+    if (protectedHosted) {
+      const operationId = handle.leaseId;
+      const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
+        operationId, release: nextRelease, reason: input.reason, onProgress: heartbeat });
+      if (!acceptance?.accepted || acceptance.webGitSha !== input.releaseSha || acceptance.receipt?.workerGitSha !== input.releaseSha
+        || acceptance.receipt?.operationId !== operationId) return compensate("DIAGNOSTIC", "AUTHENTICATED_RELEASE_DIAGNOSTIC_FAILED", forwardTemplates);
+      await heartbeat();
+      const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
+        release: nextRelease, imageDigests: { web: releasePlan.roles.web.digest, worker: releasePlan.roles.worker.digest },
+        durationMs: 15 * 60_000, onProgress: heartbeat });
+      if (!observed?.verified) return compensate("OBSERVATION", observed?.code ?? "INITIAL_OBSERVATION_FAILED", forwardTemplates);
+      await heartbeat();
+    }
     await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
-    return safeResult(input, inventory, "SUCCEEDED", { phase: "COMPLETE" });
+    return safeResult(input, inventory, "SUCCEEDED", { phase: "COMPLETE",
+      ...(protectedHosted ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}) });
   } catch (error) {
     if (!handle) throw error;
     if (!mutationBegun) {
       await deps.lease("abort", leaseArgs(handle, { reason: input.reason })).catch(() => undefined);
       throw error;
+    }
+    if (exclusiveDrainStarted && !firstForwardPatchAttempted) {
+      return restoreDrainedBaseline("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
     }
     return markRecovery("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
   }
@@ -449,10 +671,13 @@ function runtimeDependencies(env = process.env) {
       acrName: input.acrName,
       acrServer: input.acrServer,
     }, env),
+    targetConfig: ({ deploymentId, reason }) => callControlPlane("reconcile_managed_azure_target", { deploymentId, execute: false, reason }, env),
     lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
     readApp: apps.readApp,
     patchTemplate: apps.patchTemplate,
     waitForState: apps.waitForState,
+    drainBaseline: apps.drainBaseline,
+    setRevisionActive: apps.setRevisionActive,
     healthProbe: async ({ origin, release }) => {
       try {
         const response = await fetch(`${origin}/api/health`, { method: "GET", redirect: "error", signal: AbortSignal.timeout(20_000) });
@@ -461,6 +686,48 @@ function runtimeDependencies(env = process.env) {
         const body = JSON.parse(text);
         return { ok: managedAzureHealthReady(body, release), code: "HEALTH_RELEASE_MISMATCH" };
       } catch { return { ok: false, code: "HEALTH_PROBE_AMBIGUOUS" }; }
+    },
+    authPreflight: async ({ deploymentId, reason }) => {
+      const result = await callControlPlane("read_managed_release_auth", { deploymentId, mode: "preflight" }, env);
+      if (result?.status !== "READY" || result.effects !== 0) fail("MANAGED_RELEASE_AUTH_PREFLIGHT_FAILED");
+      return { ok: true };
+    },
+    acceptanceProbe: async ({ deploymentId, operationId, release, reason, onProgress }) => {
+      const start = await callControlPlane("dispatch_managed_release_diagnostic", {
+        deploymentId, operationId, expectedGitSha: release.gitSha, reason,
+      }, env);
+      if (start?.status !== "COMPLETED" || !UUID.test(start.workspaceId)) return { accepted: false };
+      let retryRequested = false;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await onProgress();
+        const value = await callControlPlane("read_managed_release_auth", { deploymentId, mode: "status",
+          operationId, expectedGitSha: release.gitSha }, env);
+        if (value?.accepted === true && value.workspaceId === start.workspaceId) return value;
+        if (value?.status === "FAILED") {
+          if (value.attempts !== 1 || retryRequested) return { accepted: false };
+          retryRequested = true;
+          try {
+            const retry = await callControlPlane("dispatch_managed_release_diagnostic", {
+              deploymentId, operationId, expectedGitSha: release.gitSha, reason, retryAttempt: 1,
+            }, env);
+            if (retry?.status !== "COMPLETED" || retry.workspaceId !== start.workspaceId) return { accepted: false };
+          } catch { /* Reconcile an uncertain retry response by status; never issue it twice in this run. */ }
+          continue;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+      }
+      return { accepted: false };
+    },
+    observeNewRelease: async ({ target, origin, release, imageDigests, durationMs, onProgress }) => {
+      const started = Date.now();
+      while (Date.now() - started < durationMs) {
+        await onProgress();
+        for (const role of ROLES) await apps.readApp({ target, role, release, imageDigest: imageDigests[role] });
+        const health = await runtime.healthProbe({ origin, release });
+        if (!health.ok) return { verified: false, code: health.code };
+        await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, durationMs - (Date.now() - started))));
+      }
+      return { verified: true, durationMs };
     },
     resolveRelease: async ({ deploymentId, target, gitSha, deployment }) => {
       const manifests = await sourceResolver.resolveManagedAzureSourceManifests({ gitSha });

@@ -83,7 +83,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/corgtex_ci?schema=public
       ADMIN_EMAIL: system+corgtex@corgtex.local
       ADMIN_PASSWORD: corgtex-test-agent-pw
-      GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME || github.actor }}
+      GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME }}
       GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -199,8 +199,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          username: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}
+          password: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}
 
       - name: Verify release images exist
         if: ${{ !inputs.dry_run }}

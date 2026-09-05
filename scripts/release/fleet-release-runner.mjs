@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -67,6 +68,20 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     const manifest = await resolveManifest(args, deps);
     const result = checkReleaseImages(manifest, deps);
     console.log(JSON.stringify({ stage: "image-check", ...result }, null, 2));
+    return result;
+  }
+  if (command === "preflight-provider") {
+    const env = deps.env ?? process.env;
+    const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default");
+    if (!selectedGroups.includes("ops")) {
+      const result = { status: "READY", effects: 0, targets: [] };
+      console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
+      return result;
+    }
+    const targets = filterTargetsByGroups(await discoverTargets(deps), ["ops"]);
+    if (targets.length !== 1) throw new Error("Ops provider preflight requires exactly one configured Ops target.");
+    const result = { status: "READY", effects: 0, targets: [await preflightOpsRailwayProvider(targets[0], deps)] };
+    console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
     return result;
   }
   if (command !== "deploy") {
@@ -244,13 +259,20 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget); const selectedProviders = new Set(providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0).map((target) => target.provider));
+    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget); const selectedTargets = providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0); const selectedProviders = new Set(selectedTargets.map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
+    const includesOpsRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && target.group === "ops");
     const includesAzureTarget = selectedProviders.has("azure");
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
       missing.push("RAILWAY_API_TOKEN");
     }
-    if (includesRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
+    if (includesOpsRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim()) {
+      missing.push("GHCR_IMPORT_TOKEN (durable Ops package-read credential)");
+    }
+    if (includesOpsRailwayTarget && !env.GHCR_IMPORT_USERNAME?.trim()) {
+      missing.push("GHCR_IMPORT_USERNAME (durable Ops package-read identity)");
+    }
+    if (includesRailwayTarget && !includesOpsRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
       missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
     }
     if (includesAzureTarget) {
@@ -491,7 +513,10 @@ function preflightTarget(target, env, options = {}) {
       if (!optionalText(env.POSTHOG_PROJECT_TOKEN)) blockers.push("POSTHOG_PROJECT_TOKEN is missing for Railway observability");
     }
     if (!env.RAILWAY_API_TOKEN) blockers.push("RAILWAY_API_TOKEN is missing");
-    if (!env.GHCR_IMPORT_TOKEN && !env.GITHUB_TOKEN) {
+    if (target.group === "ops") {
+      if (!env.GHCR_IMPORT_TOKEN?.trim()) blockers.push("durable GHCR import token is missing for Ops image pull");
+      if (!env.GHCR_IMPORT_USERNAME?.trim()) blockers.push("durable GHCR import username is missing for Ops image pull");
+    } else if (!env.GHCR_IMPORT_TOKEN && !env.GITHUB_TOKEN) {
       blockers.push("GHCR import token is missing for Railway image pull");
     }
     for (const key of ["projectId", "environmentId", "webServiceId", "workerServiceId"]) {
@@ -696,7 +721,7 @@ async function deployRailwayTarget(target, manifest, deps) {
     `, {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
-      input: railwayServiceUpdateInput(service.image, deps, { preserveCredentials: opsOnly }),
+      input: railwayServiceUpdateInput(service.image, deps, { requireDurableCredential: opsOnly }),
     }, deps);
     if (opsOnly) {
       expected.get(service.serviceId).image = service.image;
@@ -803,6 +828,10 @@ async function readOpsRailwayStage(target, service, deps) {
   if (!instance?.source?.image || instance.source.repo || !config?.source
     || config.source.image !== instance.source.image || config.source.repo
     || config.source.autoUpdates != null) fail("source configuration conflicts with a staged image release");
+  const expectedRepository = `ghcr.io/corgtexdotcom/corgtex/${service.key}:`;
+  if (!instance.source.image.startsWith(expectedRepository)
+    || !/^sha-[0-9a-f]{40}$/.test(instance.source.image.slice(expectedRepository.length))) fail("source image is not an immutable canonical release");
+  if (instance.startCommand != null || instance.preDeployCommand != null) fail("has an unexpected command override");
   if (!Array.isArray(data.pending?.edges) || data.pending.edges.length
     || data.pending.pageInfo?.hasNextPage !== false) fail("has an active or uncertain deployment");
   const latest = instance.latestDeployment;
@@ -836,6 +865,21 @@ async function readOpsRailwayStage(target, service, deps) {
     history,
     hasMoreHistory: data.deployments.pageInfo.hasNextPage,
   };
+}
+
+export async function preflightOpsRailwayProvider(target, deps = {}) {
+  if (target?.group !== "ops" || target?.provider !== "railway" || !target.railway?.projectId
+    || !target.railway.environmentId || !target.railway.webServiceId || !target.railway.workerServiceId) {
+    throw new Error("Ops provider preflight target is invalid.");
+  }
+  const services = [
+    { key: "web", serviceId: target.railway.webServiceId },
+    { key: "worker", serviceId: target.railway.workerServiceId },
+  ];
+  const stages = [];
+  for (const service of services) stages.push(await readOpsRailwayStage(target, service, deps));
+  const baselineDigest = createHash("sha256").update(JSON.stringify(stages)).digest("hex");
+  return { targetId: target.id, provider: "railway", status: "READY", effects: 0, serviceCount: stages.length, baselineDigest };
 }
 
 function optionalText(value) {
@@ -960,14 +1004,16 @@ function railwayServiceUpdateInput(image, deps, options = {}) {
   if (!image.startsWith("ghcr.io/")) return input;
 
   const env = deps.env ?? process.env;
-  // Ops already has private-registry authorization. Never replace it with the
-  // short-lived workflow token; an explicit durable import token is opt-in.
+  // Ops must refresh its saved private-registry authorization with the existing
+  // durable package-read credential. A workflow GITHUB_TOKEN expires and cannot
+  // make later Railway restarts or the next release repeatable.
   const password = env.GHCR_IMPORT_TOKEN?.trim()
-    || (options.preserveCredentials ? undefined : env.GITHUB_TOKEN?.trim());
-  if (options.preserveCredentials && !password) return input;
+    || (options.requireDurableCredential ? undefined : env.GITHUB_TOKEN?.trim());
   const username = env.GHCR_IMPORT_USERNAME?.trim() || env.GITHUB_ACTOR?.trim();
   if (!password || !username) {
-    throw new Error("GHCR_IMPORT_TOKEN or GITHUB_TOKEN is required for Railway to pull private GHCR images.");
+    throw new Error(options.requireDurableCredential
+      ? "GHCR_IMPORT_TOKEN and GHCR_IMPORT_USERNAME are required as the durable Ops package-read credential."
+      : "GHCR_IMPORT_TOKEN or GITHUB_TOKEN is required for Railway to pull private GHCR images.");
   }
   return {
     ...input,

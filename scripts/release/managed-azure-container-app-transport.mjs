@@ -210,6 +210,11 @@ export function assertManagedAzureTemplateDelta(baseline, candidate, expected) {
 function resourceUrl(target, appName) {
   return `${MANAGEMENT_ORIGIN}/subscriptions/${target.subscriptionId}/resourceGroups/${encodeURIComponent(target.resourceGroup)}/providers/Microsoft.App/containerApps/${appName}?api-version=${API_VERSION}`;
 }
+function revisionUrl(target, appName, revisionName, suffix = "") {
+  if (!revisionName.startsWith(`${appName}--`)
+    || !/^[a-z][a-z0-9-]*[a-z0-9]--[a-z0-9][a-z0-9-]*$/.test(revisionName)) fail("AZURE_REVISION_INVALID");
+  return `${MANAGEMENT_ORIGIN}/subscriptions/${target.subscriptionId}/resourceGroups/${encodeURIComponent(target.resourceGroup)}/providers/Microsoft.App/containerApps/${appName}/revisions/${revisionName}${suffix}?api-version=${API_VERSION}`;
+}
 
 function validOperationSearch(url) {
   const entries = [...url.searchParams.entries()];
@@ -417,5 +422,42 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     fail(lastCode, true);
   }
 
-  return Object.freeze({ readApp, patchTemplate, waitForState });
+  async function setRevisionActive({ target: rawTarget, role, revisionName, active, onProgress }) {
+    const target = targetValue(rawTarget); const appName = appNameFor(target, role);
+    if (typeof active !== "boolean") fail("AZURE_REVISION_INVALID");
+    const action = active ? "/activate" : "/deactivate";
+    try {
+      const response = await request(revisionUrl(target, appName, revisionName, action), { method: "POST" }, true);
+      if (![200, 202, 204].includes(response.status)) return Object.freeze({ terminal: response.status >= 400 && response.status < 500, succeeded: false, code: "AZURE_REVISION_ACTION_REJECTED" });
+      await responseBody(response);
+    } catch { /* A lost action response is reconciled by exact revision/replica reads below. */ }
+    const startedAt = clock();
+    while (clock() - startedAt < OPERATION_TIMEOUT_MS) {
+      if (typeof onProgress === "function") await onProgress();
+      try {
+        const revisionResponse = await request(revisionUrl(target, appName, revisionName), { method: "GET" }, true);
+        const replicasResponse = await request(revisionUrl(target, appName, revisionName, "/replicas"), { method: "GET" }, true);
+        const revision = revisionResponse.status === 200 ? await responseBody(revisionResponse) : null;
+        const replicas = replicasResponse.status === 200 ? await responseBody(replicasResponse) : null;
+        if (!Array.isArray(replicas?.value) || replicas.value.length > 256) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+        if (revision?.properties?.active === active && (active || replicas.value.length === 0)) {
+          return Object.freeze({ terminal: true, succeeded: true, code: active ? "AZURE_REVISION_ACTIVE" : "AZURE_REVISION_DRAINED", replicaCount: replicas.value.length });
+        }
+      } catch { /* Continue bounded reconciliation. */ }
+      await sleep(1_000);
+    }
+    return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" });
+  }
+
+  async function drainBaseline({ target, baselines, onProgress }) {
+    for (const role of ["worker", "web"]) {
+      const baseline = baselines?.[role];
+      if (!baseline?.revisionName) return Object.freeze({ terminal: true, succeeded: false, code: "AZURE_BASELINE_REVISION_INVALID" });
+      const result = await setRevisionActive({ target, role, revisionName: baseline.revisionName, active: false, onProgress });
+      if (!result.terminal || !result.succeeded || result.replicaCount !== 0) return result;
+    }
+    return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_BASELINE_PAIR_DRAINED" });
+  }
+
+  return Object.freeze({ readApp, patchTemplate, waitForState, setRevisionActive, drainBaseline });
 }

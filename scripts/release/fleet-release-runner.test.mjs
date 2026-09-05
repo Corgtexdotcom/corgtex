@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { azureReleaseVariables, latestRailwayStatus, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { azureReleaseVariables, latestRailwayStatus, preflightOpsRailwayProvider, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
 import { MCP_CONNECTOR_DEFAULT_SCOPES } from "./fleet-release-core.mjs";
 import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-release-alerts.mjs";
 import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
@@ -13,6 +13,10 @@ const SHA = "c9077ff031e8e672923c84d52eeef862368f3493";
 const railwayObservabilityEnv = {
   POSTHOG_ENABLED: "true",
   POSTHOG_PROJECT_TOKEN: "posthog-project-token",
+};
+const durableOpsRegistryEnv = {
+  GHCR_IMPORT_USERNAME: "github-user",
+  GHCR_IMPORT_TOKEN: "synthetic-durable-import-token",
 };
 const azureObservabilityEnv = {
   APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.monitor.azure.com/",
@@ -85,15 +89,17 @@ beforeEach(() => { railwayStages = new Map(); });
 function railwayStage(serviceId) {
   if (!railwayStages.has(serviceId)) {
     const prior = { id: `prior-${serviceId}`, status: "SUCCESS" };
+    const role = serviceId === "web-1" ? "web" : "worker";
+    const image = `ghcr.io/corgtexdotcom/corgtex/${role}:sha-${"a".repeat(40)}`;
     railwayStages.set(serviceId, {
       instance: {
-        source: { image: `ghcr.io/example/${serviceId}:prior`, repo: null },
+        source: { image, repo: null },
         startCommand: null, preDeployCommand: null,
         latestDeployment: prior, activeDeployments: [prior],
       },
       variables: { CORGTEX_STARTUP_MODE: "combined", UNRELATED_SECRET: "synthetic-private-value" },
       environment: { config: { services: { [serviceId]: {
-        source: { image: `ghcr.io/example/${serviceId}:prior` },
+        source: { image },
         deploy: { registryCredentials: { username: "***", password: "***" } },
       } } } },
       deployments: { edges: [{ node: prior }], pageInfo: { hasNextPage: true } },
@@ -221,6 +227,20 @@ function controlPlaneResult(value) {
 }
 
 describe("fleet release runner", () => {
+  it("authenticates immutable GHCR images with the durable credential before promotion", () => {
+    const workflow = readFileSync(new URL("../../.github/workflows/fleet-release.yml", import.meta.url), "utf8");
+    const login = workflow.indexOf("- name: Log in to GHCR");
+    const imageCheck = workflow.indexOf("- name: Verify release images exist");
+    const promotion = workflow.indexOf("- name: Promote release through rings");
+
+    expect(login).toBeGreaterThan(-1);
+    expect(imageCheck).toBeGreaterThan(login);
+    expect(promotion).toBeGreaterThan(imageCheck);
+    expect(workflow).toContain("GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME }}");
+    expect(workflow).toContain("username: ${{ secrets.GHCR_IMPORT_TOKEN && vars.GHCR_IMPORT_USERNAME || github.actor }}");
+    expect(workflow).toContain("password: ${{ secrets.GHCR_IMPORT_TOKEN || github.token }}");
+  });
+
   it("resolves latest-stable from the explicit stable release marker", async () => {
     const outputs = {};
     const runCommand = vi.fn();
@@ -775,6 +795,15 @@ describe("fleet release runner", () => {
     expect(output).not.toContain("ph-project-secret");
   });
 
+  it("passes immutable release identity into standalone production worker builds", () => {
+    const source = readFileSync(new URL("../azure-selfserve-production-release.mjs", import.meta.url), "utf8");
+    const workerBuild = source.split("`${workerRepository}:${imageTag}`,")[1]?.split("  ]);")[0] ?? "";
+    expect(workerBuild).toContain('"deploy/Dockerfile.worker"');
+    expect(workerBuild).toContain('"--build-arg"');
+    expect(workerBuild).toContain("`CORGTEX_RELEASE_GIT_SHA=${releaseGitSha}`");
+    expect(workerBuild).toContain("`GITHUB_SHA=${releaseGitSha}`");
+  });
+
   it("prints a dry-run plan without mutating providers", async () => {
     const outputs = {};
     const runCommand = vi.fn();
@@ -1067,7 +1096,9 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Railway workerServiceId is missing");
   });
 
-  it("requires GHCR pull credentials before Railway mutation", async () => {
+  it("rejects an ephemeral workflow token for Ops before Railway mutation", async () => {
+    const runCommand = vi.fn();
+    const fetchImpl = vi.fn();
     await expect(runFleetRelease([
       "deploy",
       "--release",
@@ -1080,11 +1111,15 @@ describe("fleet release runner", () => {
       env: {
         FLEET_RELEASE_TARGETS_JSON: targetJson(),
         RAILWAY_API_TOKEN: "railway-token",
+        GITHUB_TOKEN: "ephemeral-workflow-token",
+        ...railwayObservabilityEnv,
       },
-      runCommand: vi.fn(),
-      fetchImpl: vi.fn(),
+      runCommand,
+      fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("GHCR import token is missing for Railway image pull");
+    })).rejects.toThrow("durable GHCR import token is missing for Ops image pull");
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("does not infer provider from workload or URL", async () => {
@@ -1253,6 +1288,32 @@ describe("fleet release runner", () => {
     ]);
   });
 
+  it("runs an Ops-only provider preflight without staging a deployment or exposing credentials", async () => {
+    const calls = [];
+    const fetchImpl = vi.fn(async (url, options) => {
+      expect(String(url)).toContain("backboard.railway.com");
+      const body = JSON.parse(options.body); calls.push(body);
+      return successfulRailwayResponse(body);
+    });
+    const result = await runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve,ops"], {
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "synthetic-token" }, fetchImpl,
+    });
+    expect(result).toMatchObject({ status: "READY", effects: 0, targets: [{ targetId: "ops", provider: "railway", status: "READY", effects: 0, serviceCount: 2,
+      baselineDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }] });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.query.includes("OpsStageReadback"))).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/token|password|username|deploymentId/i);
+  });
+
+  it.each(["startCommand", "preDeployCommand"])("rejects an Ops %s override during provider preflight", async (field) => {
+    railwayStage("web-1").instance[field] = "unsafe override";
+    const target = JSON.parse(targetJson())[0];
+    await expect(preflightOpsRailwayProvider(target, {
+      env: { RAILWAY_API_TOKEN: "synthetic-token" },
+      fetchImpl: async (_url, options) => successfulRailwayResponse(JSON.parse(options.body)),
+    })).rejects.toThrow("unexpected command override");
+  });
+
   it("fails clearly when canonical GHCR images are missing", async () => {
     const runCommand = vi.fn()
       .mockReturnValueOnce({ stdout: "", stderr: "" })
@@ -1270,19 +1331,19 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("Release Images workflow before fleet promotion");
   });
 
-  it.each([SHA, "a".repeat(40)].flatMap((releaseSha) => [
-    { releaseSha, durableCredential: false },
-    { releaseSha, durableCredential: true },
-  ]).concat(["FAILED", "CRASHED", "REMOVED", "SKIPPED"].map((failedCandidate) => ({
-    releaseSha: "a".repeat(40), durableCredential: false, failedCandidate,
-  }))))("updates and rolls back Ops without seeding or changing unrelated configuration: $releaseSha, durable=$durableCredential, failed=$failedCandidate", async ({ releaseSha, durableCredential, failedCandidate }) => {
+  it.each([SHA, "a".repeat(40)].map((releaseSha) => ({ releaseSha })).concat(
+    ["FAILED", "CRASHED", "REMOVED", "SKIPPED"].map((failedCandidate) => ({
+      releaseSha: "a".repeat(40), failedCandidate,
+    })),
+  ))("updates and rolls back Ops with durable registry authorization without seeding or changing unrelated configuration: $releaseSha, failed=$failedCandidate", async ({ releaseSha, failedCandidate }) => {
     if (failedCandidate) {
       for (const serviceId of ["web-1", "worker-1"]) {
         const stage = railwayStage(serviceId);
         const attempt = { id: `failed-candidate-${serviceId}`, status: failedCandidate };
         stage.instance.latestDeployment = attempt;
         stage.deployments.edges.unshift({ node: attempt });
-        stage.instance.source.image = `ghcr.io/example/${serviceId}:sha-${SHA}`;
+        const role = serviceId === "web-1" ? "web" : "worker";
+        stage.instance.source.image = `ghcr.io/corgtexdotcom/corgtex/${role}:sha-${SHA}`;
         stage.environment.config.services[serviceId].source.image = stage.instance.source.image;
         stage.variables.CORGTEX_RELEASE_GIT_SHA = SHA;
       }
@@ -1362,8 +1423,7 @@ describe("fleet release runner", () => {
         CONTROL_PLANE_AGENT_API_KEY: "synthetic-control-plane-token",
         SEED_SCRIPTS: "scripts/existing-private-seed.mjs",
         RAILWAY_API_TOKEN: "railway-token",
-        GHCR_IMPORT_USERNAME: "github-user",
-        ...(durableCredential ? { GHCR_IMPORT_TOKEN: "synthetic-durable-import-token" } : {}),
+        ...durableOpsRegistryEnv,
         GITHUB_TOKEN: "github-token",
         APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000",
         POSTHOG_ENABLED: "true",
@@ -1379,9 +1439,9 @@ describe("fleet release runner", () => {
     expect(result.results[0].status).toBe("succeeded");
     const updateCalls = railwayCalls.filter((call) => call.query.includes("serviceInstanceUpdate"));
     expect(updateCalls).toHaveLength(2);
-    const credentials = durableCredential ? {
+    const credentials = {
       registryCredentials: { username: "github-user", password: "synthetic-durable-import-token" },
-    } : {};
+    };
     expect(updateCalls[0].variables.input).toEqual({
       source: {
         image: `ghcr.io/corgtexdotcom/corgtex/web:sha-${releaseSha}`,
@@ -1459,7 +1519,7 @@ describe("fleet release runner", () => {
         env: {
           FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
           RAILWAY_API_TOKEN: "railway-token",
-          GITHUB_TOKEN: "ephemeral-workflow-token",
+          ...durableOpsRegistryEnv,
           FLEET_RELEASE_HEALTH_TIMEOUT_MS: "1000",
           ...railwayObservabilityEnv,
         },
@@ -1528,7 +1588,7 @@ describe("fleet release runner", () => {
         return response;
       });
       await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Verify staged stop."], {
-        env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+        env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", ...durableOpsRegistryEnv, ...railwayObservabilityEnv },
         fetchImpl, runCommand: vi.fn(), sleep: vi.fn(),
       })).rejects.toThrow("Ring 3 failed");
       expect(mutations).toHaveLength(1);
@@ -1547,7 +1607,7 @@ describe("fleet release runner", () => {
     delete railwayStage("worker-1").environment.config.services["worker-1"].deploy.registryCredentials;
     const calls = [];
     await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Require saved authorization."], {
-      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", ...durableOpsRegistryEnv, ...railwayObservabilityEnv },
       fetchImpl: async (_url, options) => {
         const body = JSON.parse(options.body);
         calls.push(body);
@@ -1567,7 +1627,7 @@ describe("fleet release runner", () => {
     if (failure === "repository") source.repo = "example/repository";
     const calls = [];
     await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Reject contradictory source evidence."], {
-      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", ...durableOpsRegistryEnv, ...railwayObservabilityEnv },
       fetchImpl: async (_url, options) => {
         const body = JSON.parse(options.body);
         calls.push(body);
@@ -1582,7 +1642,7 @@ describe("fleet release runner", () => {
   it("rechecks the untouched Ops worker after web health and stops on drift", async () => {
     const deploys = [];
     await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Require unchanged worker."], {
-      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", GITHUB_TOKEN: "ephemeral-token", ...railwayObservabilityEnv },
+      env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), RAILWAY_API_TOKEN: "railway-token", ...durableOpsRegistryEnv, ...railwayObservabilityEnv },
       fetchImpl: async (url, options) => {
         if (String(url).includes("backboard.railway.com")) {
           const body = JSON.parse(options.body);
@@ -1767,8 +1827,7 @@ describe("fleet release runner", () => {
         FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1" }),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
         RAILWAY_API_TOKEN: "railway-token",
-        GHCR_IMPORT_USERNAME: "github-user",
-        GITHUB_TOKEN: "github-token",
+        ...durableOpsRegistryEnv,
         ...railwayObservabilityEnv,
       },
       runCommand: vi.fn(),
@@ -1829,8 +1888,7 @@ describe("fleet release runner", () => {
         FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1", label: "Customer A" }),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
         RAILWAY_API_TOKEN: "railway-token",
-        GHCR_IMPORT_USERNAME: "github-user",
-        GITHUB_TOKEN: "github-token",
+        ...durableOpsRegistryEnv,
         OPS_SLACK_WEBHOOK_URL: "https://hooks.slack.test/fleet",
         ...railwayObservabilityEnv,
       },
@@ -1888,7 +1946,7 @@ describe("fleet release runner", () => {
         FLEET_RELEASE_TARGETS_JSON: targetJson({ deploymentId: "deployment-1", label: "Customer A" }),
         CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
         RAILWAY_API_TOKEN: "railway-token",
-        GHCR_IMPORT_USERNAME: "github-user",
+        ...durableOpsRegistryEnv,
         GITHUB_REPOSITORY: "Corgtexdotcom/corgtex",
         GITHUB_TOKEN: "github-token",
         ...railwayObservabilityEnv,

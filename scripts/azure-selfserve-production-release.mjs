@@ -94,6 +94,10 @@ if (!skipBuild) {
     `${workerRepository}:${imageTag}`,
     "--file",
     "deploy/Dockerfile.worker",
+    "--build-arg",
+    `CORGTEX_RELEASE_GIT_SHA=${releaseGitSha}`,
+    "--build-arg",
+    `GITHUB_SHA=${releaseGitSha}`,
     sourceDir,
   ]);
 }

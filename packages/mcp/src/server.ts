@@ -109,6 +109,10 @@ import {
   revealWorkspaceToolLinkCredential,
   upsertWorkspaceToolLink,
   listRuntimeJobs,
+  dispatchReleaseDiagnostic,
+  getReleaseDiagnostic,
+  releaseDiagnosticDispatchSchema,
+  releaseDiagnosticRequestSchema,
   listFailedJobs,
   replayWorkflowJob,
   discardFailedJob,
@@ -2286,6 +2290,26 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
     async (params: { sourceId: string; expectedSourceIdentity: string; reason: string }) => {
       requireSupportCredential();
       return jsonResult(await reconcileBrainSource(actor, { ...params, workspaceId }));
+    },
+  );
+
+  tool(
+    "dispatch_release_diagnostic",
+    "Verify this authenticated web build and enqueue one idempotent no-content worker diagnostic. No inference, delivery or business processing.",
+    releaseDiagnosticDispatchSchema.shape,
+    async (params: { operationId: string; expectedGitSha: string; retryAttempt?: 1 }) => {
+      requireScope(sessionCtx, "runtime:write");
+      return jsonResult(await dispatchReleaseDiagnostic(actor, workspaceId, params));
+    },
+  );
+
+  tool(
+    "get_release_diagnostic",
+    "Read the exact release diagnostic and its durable handler-specific worker receipt. Generic job completion is not acceptance.",
+    releaseDiagnosticRequestSchema.shape,
+    async (params: { operationId: string; expectedGitSha: string }) => {
+      requireScope(sessionCtx, "runtime:read");
+      return jsonResult(await getReleaseDiagnostic(actor, workspaceId, params));
     },
   );
 

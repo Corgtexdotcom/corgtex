@@ -58,6 +58,7 @@ export * from "./proposals";
 export * from "./roles";
 export * from "./role-onboarding";
 export * from "./runtime";
+export * from "./release-diagnostics";
 export * from "./tensions";
 export * from "./webhooks";
 export * from "./workspaces";
