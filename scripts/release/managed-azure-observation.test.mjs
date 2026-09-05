@@ -39,6 +39,15 @@ describe("managed Azure observation verifier", () => {
     expect(Object.keys(first)).toEqual(["status", "targetClass", "deploymentId", "expectedSha", "expectedImageTag", "windowStartUnixMs", "windowEndUnixMs", "web", "worker", "ignoredSiblingCount"]); expect(Object.isFrozen(first)).toBe(true); expect(Object.isFrozen(first.web)).toBe(true); expect(Object.isFrozen(first.worker)).toBe(true); expect(second).not.toBe(first); expect(second.web).not.toBe(first.web); expect(Object.isFrozen(input)).toBe(false); for (const key of ["target", "subscriptionId", "rows", "pageCount", "window", "timestamp", "url", "message", "siblings"]) expect(first).not.toHaveProperty(key);
   });
 
+  it("accepts Azure's exact 32-character app-name maximum and rejects 33 characters", async () => {
+    const webAppName = `w${"a".repeat(31)}`; const workerAppName = `x${"b".repeat(31)}`; const queries = [];
+    await expect(verifyWith((query) => { queries.push(query); return page(query); }, makeRequest({ target: { webAppName, workerAppName } }))).resolves.toMatchObject({ status: "VERIFIED" });
+    expect(queries.map((query) => query.appName)).toEqual([webAppName, workerAppName]);
+    const query = vi.fn();
+    await expect(verifyWith(query, makeRequest({ target: { workerAppName: `x${"b".repeat(32)}` } }))).rejects.toThrow(FAILURE);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("deduplicates disjoint siblings across roles and accepts only the exact 0-through-126 bound", async () => {
     const sharedId = uuidAt(500); const one = await verifyWith((query) => page(query, [selected(query), sibling(query, sharedId)])); expect(one.ignoredSiblingCount).toBe(1);
     const maximum = await verifyWith((query) => { const offset = query.role === "WEB" ? 1 : 64; return page(query, [selected(query), ...Array.from({ length: 63 }, (_, index) => sibling(query, uuidAt(offset + index)))]); });

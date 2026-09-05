@@ -66,7 +66,7 @@ export function createManagedReleaseProofReader(invalid: () => never): Reader {
   const parseGitSha = (value: unknown) => pattern(value, 40, 40, /^[0-9a-f]{40}$/);
   const parseAcrName = (value: unknown) => pattern(value, 5, 50, /^[a-z0-9]+$/);
   const parseAppName = (value: unknown) => {
-    const name = pattern(value, 2, 31, /^[a-z][a-z0-9-]*[a-z0-9]$/);
+    const name = pattern(value, 2, 32, /^[a-z][a-z0-9-]*[a-z0-9]$/);
     if (name.includes("--")) fail();
     return name;
   };

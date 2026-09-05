@@ -5,8 +5,9 @@ import { z } from "zod";
 import { invariant } from "./errors";
 
 const uuid = z.string().uuid().transform((value) => value.toLowerCase());
+const databaseId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const group = z.string().min(1).max(90).regex(/^[A-Za-z0-9][A-Za-z0-9_.()-]*$/);
-const app = z.string().min(2).max(31).regex(/^[a-z][a-z0-9-]*[a-z0-9]$/).refine((value) => !value.includes("--"));
+const app = z.string().min(2).max(32).regex(/^[a-z][a-z0-9-]*[a-z0-9]$/).refine((value) => !value.includes("--"));
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const gitSha = z.string().regex(/^[a-f0-9]{40}$/);
 const origin = z.string().url().max(2048).refine((value) => {
@@ -14,7 +15,7 @@ const origin = z.string().url().max(2048).refine((value) => {
   return url.protocol === "https:" && !url.username && !url.password && !url.port && url.origin === value;
 });
 export const managedAzureTargetSchema = z.object({
-  deploymentId: uuid, customerAccountId: uuid, deploymentKind: z.enum(["HOSTED_DEDICATED", "REMOTE_MANAGED"]),
+  deploymentId: uuid, customerAccountId: databaseId, deploymentKind: z.enum(["HOSTED_DEDICATED", "REMOTE_MANAGED"]),
   origin, subscriptionId: uuid, resourceGroup: group, webAppName: app, workerAppName: app,
   acrName: z.string().min(5).max(50).regex(/^[a-z0-9]+$/), acrServer: z.string(), acrResourceGroup: group,
   evidenceSha256: digest, activationPolicy: z.enum(["STANDARD", "EXCLUSIVE"]),

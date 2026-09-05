@@ -75,17 +75,17 @@ describe("managed release proof reader support", () => {
   });
 
   it("enforces exact Azure resource, app, container, revision, and immutable-image subsets", () => {
-    const reader = makeReader(); const acr = "acr12"; const acr50 = "a".repeat(50); const app31 = `a${"b".repeat(30)}`; const container63 = "c".repeat(63);
+    const reader = makeReader(); const acr = "acr12"; const acr50 = "a".repeat(50); const app32 = `a${"b".repeat(31)}`; const container63 = "c".repeat(63);
     expect(reader.azureResourceGroup(`R${"g".repeat(89)}`)).toBe(`R${"g".repeat(89)}`); expect(reader.azureAcrName(acr)).toBe(acr); expect(reader.azureAcrName(acr50)).toBe(acr50);
     expect(reader.azureAcrServer(`${acr}.azurecr.io`, acr)).toBe(`${acr}.azurecr.io`);
-    expect(reader.azureAppName("a1")).toBe("a1"); expect(reader.azureAppName(app31)).toBe(app31);
+    expect(reader.azureAppName("a1")).toBe("a1"); expect(reader.azureAppName(app32)).toBe(app32);
     expect(reader.azureContainerName("a")).toBe("a"); expect(reader.azureContainerName(container63)).toBe(container63); expect(reader.azureContainerName("a--b")).toBe("a--b");
     expect(reader.azureRevision(`a1--${"c".repeat(64)}`, "a1")).toBe(`a1--${"c".repeat(64)}`);
     const image = `${acr}.azurecr.io/corgtex/web@${DIGEST}`; const parts = reader.azureImage(image, "web");
     expect(parts).toEqual({ image, acrName: acr, acrServer: `${acr}.azurecr.io`, digest: DIGEST }); expect(Object.isFrozen(parts)).toBe(true); expect(reader.azureImage(image, "web")).not.toBe(parts);
     rejects([() => reader.azureResourceGroup(".bad"), () => reader.azureResourceGroup("bad."), () => reader.azureResourceGroup(`a${"b".repeat(90)}`),
       () => reader.azureAcrName("acr1"), () => reader.azureAcrName("a".repeat(51)), () => reader.azureAcrName("ACR12"), () => reader.azureAcrServer(`https://${acr}.azurecr.io`, acr), () => reader.azureAcrServer(`${acr}.azurecr.io:443`, acr),
-      () => reader.azureAppName("a"), () => reader.azureAppName(`a${"b".repeat(31)}`), () => reader.azureAppName("1a"), () => reader.azureAppName("a--b"), () => reader.azureAppName("ab-"),
+      () => reader.azureAppName("a"), () => reader.azureAppName(`a${"b".repeat(32)}`), () => reader.azureAppName("1a"), () => reader.azureAppName("a--b"), () => reader.azureAppName("ab-"),
       () => reader.azureContainerName("-a"), () => reader.azureContainerName("a-"), () => reader.azureContainerName("A"), () => reader.azureContainerName("a".repeat(64)),
       () => reader.azureRevision("b1--rev", "a1"), () => reader.azureRevision("a1---rev", "a1"), () => reader.azureRevision("a1--rev--two", "a1"), () => reader.azureRevision(`a1--${"c".repeat(65)}`, "a1"),
       () => reader.azureImage(`${acr}.azurecr.io/corgtex/worker@${DIGEST}`, "web"), () => reader.azureImage(`${acr}.azurecr.io/corgtex/web:${DIGEST}`, "web"),
