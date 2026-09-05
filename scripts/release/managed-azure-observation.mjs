@@ -52,7 +52,7 @@ const uuid = (value) => pattern(value, 36, 36, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f
 const gitSha = (value) => pattern(value, 40, 40, /^[0-9a-f]{40}$/);
 const unixMs = (value) => { if (!Number.isSafeInteger(value) || value <= 0) fail(); return value; };
 const resourceGroup = (value) => { const result = pattern(value, 1, 90, /^[A-Za-z0-9][A-Za-z0-9_.()-]*$/); if (result.endsWith(".")) fail(); return result; };
-const appName = (value) => { const result = pattern(value, 2, 31, /^[a-z][a-z0-9-]*[a-z0-9]$/); if (result.includes("--")) fail(); return result; };
+const appName = (value) => { const result = pattern(value, 2, 32, /^[a-z][a-z0-9-]*[a-z0-9]$/); if (result.includes("--")) fail(); return result; };
 const token = (value) => pattern(value, 1, 32, /^[a-z][a-z0-9-]*$/);
 const role = (value) => { if (value !== "WEB" && value !== "WORKER") fail(); return value; };
 const status = (value) => pattern(value, 1, 32, /^[A-Z][A-Z0-9_]*$/);

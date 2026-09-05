@@ -20,7 +20,7 @@ const recoverySha = "c".repeat(40);
 const inventoryBytesBase64 = "e30=";
 const inventorySha256 = createHash("sha256").update(Buffer.from(inventoryBytesBase64, "base64")).digest("hex");
 const input = Object.freeze({ inventoryRef, inventorySha256, deploymentId, workloadClass: "ACTIVE_CLIENT_PRIMARY", releaseSha: nextSha, releaseVersion: "release-2", reason: "Approved exact target release.", execute: false, acrName: "acr12", acrResourceGroup: "rg-acr" });
-const target = Object.freeze({ subscriptionId: "123e4567-e89b-42d3-a456-426614174000", resourceGroup: "rg.Safe_1", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-app", workerAppName: "worker-app" });
+const target = Object.freeze({ subscriptionId: "123e4567-e89b-42d3-a456-426614174000", resourceGroup: "rg.Safe_1", acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-app", workerAppName: `w${"o".repeat(31)}` });
 const digests = { web: `sha256:${"1".repeat(64)}`, worker: `sha256:${"2".repeat(64)}`, nextWeb: `sha256:${"3".repeat(64)}`, nextWorker: `sha256:${"4".repeat(64)}` };
 const transportBaseRelease = Object.freeze({ gitSha: baseSha, imageTag: `sha-${baseSha}`, version: "release-1" });
 const transportNextRelease = Object.freeze({ gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" });
@@ -400,7 +400,7 @@ describe("managed Azure single-target transaction", () => {
     expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS",
       containment: "BASELINE_REACTIVATED", recoveryReleaseImageTag: `sha-${recoverySha}` });
     expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
-      .toEqual([["worker", "worker-app--base-worker", true], ["web", "web-app--base-web", true]]);
+      .toEqual([["worker", `${target.workerAppName}--base-worker`, true], ["web", "web-app--base-web", true]]);
     expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web", "worker"]);
     expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }) }));
     expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }), operationId: expect.any(String) }));
@@ -816,6 +816,12 @@ describe("managed Azure Container Apps transport", () => {
     const baseline = canonicalizeManagedAzureContainerAppState(raw, { target, role: "web", imageDigest: digests.web, release: transportBaseRelease });
     expect(baseline).toMatchObject({ appName: "web-app", revisionName: "web-app--base", containerName: "web", image: `${target.acrServer}/corgtex/web@${digests.web}` });
     expect(baseline.templateDigest).toBe(managedAzureTemplateDigest(raw.properties.template));
+    const workerRaw = rawApp("worker", transportBaseRelease, digests.worker, "base");
+    expect(canonicalizeManagedAzureContainerAppState(workerRaw, { target, role: "worker", imageDigest: digests.worker, release: transportBaseRelease })).toMatchObject({ appName: target.workerAppName });
+    for (const role of ["webAppName", "workerAppName"]) {
+      const invalidTarget = { ...target, [role]: `${role === "webAppName" ? "w" : "x"}${"a".repeat(32)}` };
+      expect(() => canonicalizeManagedAzureContainerAppState(raw, { target: invalidTarget, role: "web", imageDigest: digests.web, release: transportBaseRelease })).toThrow("AZURE_TARGET_INVALID");
+    }
 
     const multiple = rawApp(); multiple.properties.configuration.activeRevisionsMode = "Multiple";
     expect(() => canonicalizeManagedAzureContainerAppState(multiple, { target, role: "web", imageDigest: digests.web, release: transportBaseRelease })).toThrow("AZURE_BASELINE_NOT_READY");

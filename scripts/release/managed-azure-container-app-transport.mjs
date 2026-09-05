@@ -78,8 +78,8 @@ function targetValue(value) {
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.subscriptionId)
     || !/^[A-Za-z0-9][A-Za-z0-9_.()-]{0,89}$/.test(value.resourceGroup) || value.resourceGroup.endsWith(".")
     || !/^[a-z0-9]{5,50}$/.test(value.acrName) || value.acrServer !== `${value.acrName}.azurecr.io`
-    || !/^[a-z][a-z0-9-]{0,29}[a-z0-9]$/.test(value.webAppName) || value.webAppName.includes("--")
-    || !/^[a-z][a-z0-9-]{0,29}[a-z0-9]$/.test(value.workerAppName) || value.workerAppName.includes("--")
+    || !/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(value.webAppName) || value.webAppName.includes("--")
+    || !/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(value.workerAppName) || value.workerAppName.includes("--")
     || value.webAppName === value.workerAppName) fail("AZURE_TARGET_INVALID");
   return Object.freeze({ ...value });
 }

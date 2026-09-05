@@ -34,6 +34,20 @@ describe("protected Azure target configuration", () => {
       JSON.stringify({ schemaVersion: 1, targets: [{ ...target, releaseEligible: true }] }),
       JSON.stringify({ schemaVersion: 1, targets: [target, { ...target, deploymentId: randomUUID() }] })]) expect(() => managedAzureTargets(value)).toThrow();
   });
+  it("accepts authoritative database IDs and Azure's exact app-name maximum", () => {
+    const customerAccountId = "f7ecc52e-dc45-5aa2-2397-2046099e331e";
+    const app32 = `a${"b".repeat(31)}`;
+    const parsed = managedAzureTargets(JSON.stringify({ schemaVersion: 1, targets: [{ ...target, customerAccountId, workerAppName: app32 }] }));
+    expect(parsed[0]).toMatchObject({ customerAccountId, workerAppName: app32 });
+    for (const invalid of [
+      { ...target, customerAccountId: customerAccountId.toUpperCase() },
+      { ...target, customerAccountId: customerAccountId.replace("-", "") },
+      { ...target, customerAccountId: customerAccountId.replace("f", "g") },
+      { ...target, workerAppName: `a${"b".repeat(32)}` },
+      { ...target, deploymentId: customerAccountId },
+      { ...target, subscriptionId: customerAccountId },
+    ]) expect(() => managedAzureTargets(JSON.stringify({ schemaVersion: 1, targets: [invalid] }))).toThrow();
+  });
   it("canonicalizes subscription UUIDs and rejects case-only target aliases", () => {
     const upper = { ...target, subscriptionId: target.subscriptionId.toUpperCase() };
     const parsed = managedAzureTargets(JSON.stringify({ schemaVersion: 1, targets: [upper] }));
