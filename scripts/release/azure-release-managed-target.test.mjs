@@ -61,6 +61,15 @@ describe("managed Azure release intent primitives", () => {
       expect(copy.target).not.toBe(request.target);
     }
   });
+  test("accepts Azure's exact 32-character app-name maximum and rejects 33 characters", () => {
+    const webAppName = `w${"a".repeat(31)}`; const workerAppName = `x${"b".repeat(31)}`;
+    const candidate = input(); Object.assign(candidate.deployments[0].azure, { webAppName, workerAppName });
+    expect(releaseModule.canonicalizeManagedAzureReleaseIntentV1(candidate).target).toMatchObject({ webAppName, workerAppName });
+    for (const role of ["webAppName", "workerAppName"]) {
+      const invalid = input(); invalid.deployments[0].azure[role] = `${role === "webAppName" ? "w" : "x"}${"c".repeat(32)}`;
+      expectInvalid(() => releaseModule.canonicalizeManagedAzureReleaseIntentV1(invalid));
+    }
+  });
   test("accepts null-prototype records and opposite caller key order", () => {
     const ordinary = input(); const nullRoot = Object.assign(Object.create(null), ordinary);
     const intent = releaseModule.canonicalizeManagedAzureReleaseIntentV1(nullRoot);
