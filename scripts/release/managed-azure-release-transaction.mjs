@@ -508,7 +508,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       exclusiveDrainStarted = true;
       const drained = await deps.drainBaseline({ target: preflight.target, baselines, handle, onProgress: recoveryHeartbeat });
       if (!drained?.terminal || !drained?.succeeded) return restoreDrainedBaseline("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
-        drained?.code ? { providerCode: drained.code } : {});
+        { ...(drained?.code ? { providerCode: drained.providerCode ?? drained.code } : {}),
+          ...(Number.isInteger(drained?.providerStatus) ? { providerStatus: drained.providerStatus } : {}) });
       await recoveryHeartbeat();
     }
     for (const role of ROLES) {

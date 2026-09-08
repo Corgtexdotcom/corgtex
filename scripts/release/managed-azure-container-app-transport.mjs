@@ -426,27 +426,48 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     const target = targetValue(rawTarget); const appName = appNameFor(target, role);
     if (typeof active !== "boolean") fail("AZURE_REVISION_INVALID");
     const action = active ? "/activate" : "/deactivate";
+    const success = (replicaCount) => Object.freeze({ terminal: true, succeeded: true,
+      code: active ? "AZURE_REVISION_ACTIVE" : "AZURE_REVISION_DRAINED", replicaCount });
+    async function readRevision() {
+      const revisionResponse = await request(revisionUrl(target, appName, revisionName), { method: "GET" }, true);
+      const replicasResponse = await request(revisionUrl(target, appName, revisionName, "/replicas"), { method: "GET" }, true);
+      const revision = revisionResponse.status === 200 ? await responseBody(revisionResponse) : null;
+      const replicas = replicasResponse.status === 200 ? await responseBody(replicasResponse) : null;
+      if (typeof revision?.properties?.active !== "boolean"
+        || !Array.isArray(replicas?.value) || replicas.value.length > 256) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+      return { satisfied: revision.properties.active === active && (active || replicas.value.length === 0),
+        replicaCount: replicas.value.length };
+    }
+    if (typeof onProgress === "function") await onProgress();
+    try {
+      const current = await readRevision();
+      // Recovery often finds the exact baseline still active. Avoid an
+      // unnecessary provider action when its postcondition already holds.
+      if (current.satisfied) return success(current.replicaCount);
+    } catch { /* A failed read cannot establish a no-op; reconcile after the action. */ }
+    let rejected;
     try {
       const response = await request(revisionUrl(target, appName, revisionName, action), { method: "POST" }, true);
-      if (![200, 202, 204].includes(response.status)) return Object.freeze({ terminal: response.status >= 400 && response.status < 500, succeeded: false, code: "AZURE_REVISION_ACTION_REJECTED" });
-      await responseBody(response);
+      if (![200, 202, 204].includes(response.status)) {
+        rejected = { providerStatus: response.status, terminal: response.status >= 400 && response.status < 500 };
+        const body = await responseBody(response);
+        const providerCode = providerErrorCode(body);
+        if (providerCode) rejected.providerCode = providerCode;
+      } else {
+        await responseBody(response);
+      }
     } catch { /* A lost action response is reconciled by exact revision/replica reads below. */ }
     const startedAt = clock();
     while (clock() - startedAt < OPERATION_TIMEOUT_MS) {
       if (typeof onProgress === "function") await onProgress();
       try {
-        const revisionResponse = await request(revisionUrl(target, appName, revisionName), { method: "GET" }, true);
-        const replicasResponse = await request(revisionUrl(target, appName, revisionName, "/replicas"), { method: "GET" }, true);
-        const revision = revisionResponse.status === 200 ? await responseBody(revisionResponse) : null;
-        const replicas = replicasResponse.status === 200 ? await responseBody(replicasResponse) : null;
-        if (!Array.isArray(replicas?.value) || replicas.value.length > 256) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
-        if (revision?.properties?.active === active && (active || replicas.value.length === 0)) {
-          return Object.freeze({ terminal: true, succeeded: true, code: active ? "AZURE_REVISION_ACTIVE" : "AZURE_REVISION_DRAINED", replicaCount: replicas.value.length });
-        }
-      } catch { /* Continue bounded reconciliation. */ }
+        const current = await readRevision();
+        if (current.satisfied) return success(current.replicaCount);
+        if (rejected?.terminal) return Object.freeze({ ...rejected, succeeded: false, code: "AZURE_REVISION_ACTION_REJECTED" });
+      } catch { /* Continue bounded reconciliation; failed reads do not prove rejection is harmless. */ }
       await sleep(1_000);
     }
-    return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" });
+    return Object.freeze({ ...rejected, terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" });
   }
 
   async function drainBaseline({ target, baselines, onProgress }) {

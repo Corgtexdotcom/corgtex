@@ -73,14 +73,21 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   if (command === "preflight-provider") {
     const env = deps.env ?? process.env;
     const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default");
-    if (!selectedGroups.includes("ops")) {
+    const protectedGroups = selectedGroups.filter((group) => ["ops", "backup-app"].includes(group));
+    if (!protectedGroups.length) {
       const result = { status: "READY", effects: 0, targets: [] };
       console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
       return result;
     }
-    const targets = filterTargetsByGroups(await discoverTargets(deps), ["ops"]);
-    if (targets.length !== 1) throw new Error("Ops provider preflight requires exactly one configured Ops target.");
-    const result = { status: "READY", effects: 0, targets: [await preflightOpsRailwayProvider(targets[0], deps)] };
+    const targets = filterTargetsByGroups(await discoverTargets(deps), protectedGroups);
+    for (const group of protectedGroups) {
+      if (targets.filter((target) => target.group === group).length !== 1) {
+        throw new Error(`${group} provider preflight requires exactly one configured target.`);
+      }
+    }
+    const verified = [];
+    for (const target of targets) verified.push(await preflightOpsRailwayProvider(target, deps));
+    const result = { status: "READY", effects: 0, targets: verified };
     console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
     return result;
   }
@@ -520,8 +527,8 @@ function preflightTarget(target, env, options = {}) {
     if (!env.RAILWAY_API_TOKEN) blockers.push("RAILWAY_API_TOKEN is missing");
     if (["ops", "backup-app"].includes(target.group)) {
       const label = target.group === "ops" ? "Ops" : "backup-app";
-      if (!env.GHCR_IMPORT_TOKEN?.trim()) blockers.push(`durable GHCR import token is missing for ${label} image pull`);
-      if (!env.GHCR_IMPORT_USERNAME?.trim()) blockers.push(`durable GHCR import username is missing for ${label} image pull`);
+      if (!env.GHCR_IMPORT_TOKEN?.trim()) blockers.push(`durable GHCR package-read token is missing for ${label} image pull`);
+      if (!env.GHCR_IMPORT_USERNAME?.trim()) blockers.push(`durable GHCR package-read username is missing for ${label} image pull`);
     } else if (!env.GHCR_IMPORT_TOKEN && !env.GITHUB_TOKEN) {
       blockers.push("GHCR import token is missing for Railway image pull");
     }
@@ -845,7 +852,13 @@ async function readOpsRailwayStage(target, service, deps) {
   const expectedRepository = `ghcr.io/corgtexdotcom/corgtex/${service.key}:`;
   if (!instance.source.image.startsWith(expectedRepository)
     || !/^sha-[0-9a-f]{40}$/.test(instance.source.image.slice(expectedRepository.length))) fail("source image is not an immutable canonical release");
-  if (instance.startCommand != null || instance.preDeployCommand != null) fail("has an unexpected command override");
+  // The backup services use the canonical workspace scripts. These exact
+  // role-bound commands honor the web startup mode and worker entry point.
+  const allowedBackupCommand = target.group === "backup-app"
+    && instance.startCommand === `npm run start --workspace=@corgtex/${service.key}`;
+  if ((instance.startCommand != null && !allowedBackupCommand) || instance.preDeployCommand != null) {
+    fail("has an unexpected command override");
+  }
   if (!Array.isArray(data.pending?.edges) || data.pending.edges.length
     || data.pending.pageInfo?.hasNextPage !== false) fail("has an active or uncertain deployment");
   const latest = instance.latestDeployment;
@@ -882,9 +895,9 @@ async function readOpsRailwayStage(target, service, deps) {
 }
 
 export async function preflightOpsRailwayProvider(target, deps = {}) {
-  if (target?.group !== "ops" || target?.provider !== "railway" || !target.railway?.projectId
+  if (!["ops", "backup-app"].includes(target?.group) || target?.provider !== "railway" || !target.railway?.projectId
     || !target.railway.environmentId || !target.railway.webServiceId || !target.railway.workerServiceId) {
-    throw new Error("Ops provider preflight target is invalid.");
+    throw new Error("Protected Railway provider preflight target is invalid.");
   }
   const services = [
     { key: "web", serviceId: target.railway.webServiceId },

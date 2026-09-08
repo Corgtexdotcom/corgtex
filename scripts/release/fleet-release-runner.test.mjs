@@ -1168,7 +1168,7 @@ describe("fleet release runner", () => {
       runCommand,
       fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("durable GHCR import token is missing for Ops image pull");
+    })).rejects.toThrow("durable GHCR package-read token is missing for Ops image pull");
     expect(runCommand).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -1356,6 +1356,72 @@ describe("fleet release runner", () => {
     expect(JSON.stringify(result)).not.toMatch(/token|password|username|deploymentId/i);
   });
 
+  it("preflights both protected groups, including the real backup workspace commands, without writes", async () => {
+    for (const serviceId of [backupAppRailway.webServiceId, backupAppRailway.workerServiceId]) {
+      railwayStage(serviceId).instance.startCommand = `npm run start --workspace=@corgtex/${railwayServiceRole(serviceId)}`;
+    }
+    const calls = [];
+    const result = await runFleetRelease(["preflight-provider", "--targets", "backup-app,ops"], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup-app", railway: backupAppRailway }),
+        RAILWAY_API_TOKEN: "synthetic-token",
+      },
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body); calls.push(body);
+        return successfulRailwayResponse(body);
+      },
+    });
+    expect(result.targets.map((target) => target.targetId).sort()).toEqual(["backup-app", "ops"]);
+    expect(calls).toHaveLength(4);
+    expect(calls.every((call) => call.query.includes("query OpsStageReadback") && !call.query.includes("mutation"))).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/synthetic|password|username|startCommand/);
+  });
+
+  it.each([
+    ["wrong role command", (stage) => { stage.instance.startCommand = "npm run start --workspace=@corgtex/worker"; }],
+    ["extra shell command", (stage) => { stage.instance.startCommand = "npm run start --workspace=@corgtex/web && npm run seed"; }],
+    ["pre-deploy command", (stage) => { stage.instance.preDeployCommand = "npm run seed"; }],
+    ["pending deployment", (stage) => { stage.pending.edges.push({ node: { id: "pending", status: "BUILDING" } }); }],
+    ["missing registry authorization", (stage) => { stage.environment.config.services[backupAppRailway.webServiceId].deploy.registryCredentials = null; }],
+  ])("blocks backup-only provider preflight on %s before any mutation", async (_name, mutate) => {
+    const stage = railwayStage(backupAppRailway.webServiceId);
+    stage.instance.startCommand = "npm run start --workspace=@corgtex/web";
+    mutate(stage);
+    const calls = [];
+    await expect(runFleetRelease(["preflight-provider", "--targets", "backup-app"], {
+      env: {
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup-app", railway: backupAppRailway }),
+        RAILWAY_API_TOKEN: "synthetic-token",
+      },
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body); calls.push(body);
+        return successfulRailwayResponse(body);
+      },
+    })).rejects.toThrow("Railway staging");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].query).not.toContain("mutation");
+  });
+
+  it("rejects missing or duplicate protected target groups before provider calls", async () => {
+    for (const configured of [[], [JSON.parse(targetJson())[0], { ...JSON.parse(targetJson())[0], id: "other-backup" }]]) {
+      const fetchImpl = vi.fn();
+      await expect(runFleetRelease(["preflight-provider", "--targets", "backup-app"], {
+        env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), FLEET_RELEASE_BACKUP_APP_TARGET_JSON: JSON.stringify(configured) }, fetchImpl,
+      })).rejects.toThrow("backup-app provider preflight requires exactly one configured target");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("runs provider preflight in dry and actual protected workflows", () => {
+    for (const name of ["fleet-release", "fleet-release-preflight"]) {
+      const workflow = readFileSync(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+      const step = workflow.split("- name: Verify provider authority and settled protected Railway baselines")[1]?.split("\n      - ")[0];
+      expect(step).toContain("fleet-release-runner.mjs preflight-provider");
+      expect(step).not.toContain("if:");
+    }
+  });
+
   it.each(["startCommand", "preDeployCommand"])("rejects an Ops %s override during provider preflight", async (field) => {
     railwayStage("web-1").instance[field] = "unsafe override";
     const target = JSON.parse(targetJson())[0];
@@ -1537,6 +1603,9 @@ describe("fleet release runner", () => {
   });
 
   it("stages backup-app with durable GHCR, web startup, and web health before worker deployment", async () => {
+    for (const serviceId of [backupAppRailway.webServiceId, backupAppRailway.workerServiceId]) {
+      railwayStage(serviceId).instance.startCommand = `npm run start --workspace=@corgtex/${railwayServiceRole(serviceId)}`;
+    }
     const railwayCalls = [];
     const operations = [];
     const fetchImpl = vi.fn(async (url, options) => {
