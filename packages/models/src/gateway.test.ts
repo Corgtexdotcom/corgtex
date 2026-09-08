@@ -2154,6 +2154,34 @@ describe("provider retry windows and operation deadlines", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([429, 503])("retains retry hints when an HTTP %s error body fails", async (status) => {
+    const { gateway, recordModelUsage } = await setup();
+    const broken = new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("fixture body failed")); } }), {
+      status, headers: { "Retry-After": "30" },
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(broken).mockResolvedValueOnce(success());
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ content: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([400, 429])("does not retry an unreadable HTTP %s response with a forbidden wait", async (status) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("fixture body failed")); } }), {
+      status, headers: { "retry-after-ms": status === 400 ? "30000" : "61000" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(gateway.chat(request)).rejects.toThrow("fixture body failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("uses exponential fallback for network failures", async () => {
     const { gateway } = await setup();
     const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError("offline")).mockRejectedValueOnce(new TypeError("offline")).mockResolvedValueOnce(success());

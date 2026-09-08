@@ -574,20 +574,23 @@ async function requestWithRetries<T>(
   for (let attempt = 0; ; attempt += 1) {
     let retryError: unknown;
     let retryHeaders: Headers | undefined;
+    let responseStatus: number | undefined;
     try {
       operation.check();
       const init = await abortable(options(), operation.signal);
       operation.check();
       const response = await abortable(fetch(url, { ...init, signal: operation.signal }), operation.signal);
       if (response.ok) return await abortable(read(response), operation.signal);
+      responseStatus = response.status;
+      retryHeaders = response.headers;
       const errorText = await abortable(response.text(), operation.signal);
       const error = new Error(`${errorPrefix} (${response.status}): ${errorText}`);
       if (attempt >= MAX_REQUEST_RETRIES || !isRetryableStatus(response.status)) throw error;
       retryError = error;
-      retryHeaders = response.headers;
     } catch (error) {
       throwIfAborted(operation.signal);
-      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) throw error;
+      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)
+        || (responseStatus !== undefined && !isRetryableStatus(responseStatus))) throw error;
       retryError = error;
     }
     await waitToRetry(operation, attempt, retryError, retryHeaders);
