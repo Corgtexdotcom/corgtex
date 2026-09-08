@@ -486,8 +486,112 @@ function chatCompletionBody(model: string, body: Record<string, unknown>) {
   return withoutTemperature;
 }
 
-function retryDelayMs(attempt: number) {
-  return 250 * 2 ** attempt;
+const MAX_RETRY_DELAY_MS = 60_000;
+
+type RequestOperation = ReturnType<typeof requestOperation>;
+
+function requestOperation(parentSignal?: AbortSignal, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  const expire = () => controller.abort(new DOMException("Model request timed out.", "TimeoutError"));
+  const abortFromParent = () => controller.abort(parentSignal?.reason);
+  parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  const timer = setTimeout(expire, timeoutMs);
+  if (parentSignal?.aborted) abortFromParent();
+  return {
+    deadline,
+    signal: controller.signal,
+    check() {
+      if (Date.now() >= deadline && !controller.signal.aborted) expire();
+      throwIfAborted(controller.signal);
+    },
+    cleanup() {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
+function parseHttpDate(value: string) {
+  const milliseconds = Date.parse(/ \d{4}$/.test(value) ? `${value} GMT` : value);
+  if (!Number.isFinite(milliseconds)) return null;
+  const date = new Date(milliseconds);
+  const canonical = date.toUTCString();
+  // HTTP permits IMF-fixdate and the two obsolete date forms. Comparing the
+  // parsed fields rejects permissive Date.parse inputs and normalized bad dates.
+  const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const obsolete = `${weekdays[date.getUTCDay()]}, ${canonical.slice(5, 7)}-${canonical.slice(8, 11)}-${canonical.slice(14, 16)} ${canonical.slice(17)}`;
+  const asctime = `${canonical.slice(0, 3)} ${canonical.slice(8, 11)} ${String(date.getUTCDate()).padStart(2, " ")} ${canonical.slice(17, 25)} ${date.getUTCFullYear()}`;
+  return value === canonical || value === obsolete || value === asctime ? milliseconds : null;
+}
+
+function retryDelayMs(attempt: number, headers?: Headers) {
+  const hints: number[] = [250 * 2 ** attempt];
+  const milliseconds = headers?.get("retry-after-ms")?.trim();
+  if (milliseconds && /^\d+$/.test(milliseconds) && Number.isSafeInteger(Number(milliseconds))) {
+    hints.push(Number(milliseconds));
+  }
+  const retryAfter = headers?.get("retry-after")?.trim();
+  if (retryAfter) {
+    if (/^\d+$/.test(retryAfter)) {
+      const secondsMs = Number(retryAfter) * 1000;
+      if (Number.isSafeInteger(secondsMs)) hints.push(secondsMs);
+    } else {
+      const date = parseHttpDate(retryAfter);
+      if (date !== null) hints.push(Math.max(0, date - Date.now()));
+    }
+  }
+  const floor = Math.max(...hints);
+  if (floor > MAX_RETRY_DELAY_MS) return null;
+  return floor + Math.floor(Math.random() * (Math.min(250, MAX_RETRY_DELAY_MS - floor) + 1));
+}
+
+async function waitToRetry(operation: RequestOperation, attempt: number, error: unknown, headers?: Headers) {
+  operation.check();
+  const delay = retryDelayMs(attempt, headers);
+  if (delay === null || delay >= operation.deadline - Date.now()) throw error;
+  await sleep(delay, operation.signal);
+}
+
+// Fetch aborts real HTTP bodies; this also releases pending reads promptly for
+// stream adapters whose promises do not directly observe the fetch signal.
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(abortedError(signal));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    if (signal.aborted) abort();
+  });
+}
+
+async function requestWithRetries<T>(
+  url: string,
+  options: () => Promise<RequestInit>,
+  operation: RequestOperation,
+  errorPrefix: string,
+  read: (response: Response) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    let retryError: unknown;
+    let retryHeaders: Headers | undefined;
+    try {
+      operation.check();
+      const init = await abortable(options(), operation.signal);
+      operation.check();
+      const response = await abortable(fetch(url, { ...init, signal: operation.signal }), operation.signal);
+      if (response.ok) return await abortable(read(response), operation.signal);
+      const errorText = await abortable(response.text(), operation.signal);
+      const error = new Error(`${errorPrefix} (${response.status}): ${errorText}`);
+      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableStatus(response.status)) throw error;
+      retryError = error;
+      retryHeaders = response.headers;
+    } catch (error) {
+      throwIfAborted(operation.signal);
+      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) throw error;
+      retryError = error;
+    }
+    await waitToRetry(operation, attempt, retryError, retryHeaders);
+  }
 }
 
 function isRetryableStatus(status: number) {
@@ -507,7 +611,7 @@ function isRetryableRequestError(error: unknown) {
 }
 
 function abortedError(signal?: AbortSignal) {
-  if (signal?.reason instanceof Error) {
+  if (signal?.aborted) {
     return signal.reason;
   }
   return new DOMException("The operation was aborted.", "AbortError");
@@ -517,39 +621,6 @@ function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw abortedError(signal);
   }
-}
-
-function timeoutSignal(parentSignal: AbortSignal | undefined, timeoutMs: number) {
-  const timerSignal = AbortSignal.timeout(timeoutMs);
-  if (!parentSignal) {
-    return {
-      signal: timerSignal,
-      cleanup() {},
-    };
-  }
-
-  const controller = new AbortController();
-  const abortFromParent = () => {
-    if (!controller.signal.aborted) controller.abort(parentSignal.reason);
-  };
-  const abortFromTimer = () => {
-    if (!controller.signal.aborted) controller.abort(timerSignal.reason);
-  };
-  parentSignal.addEventListener("abort", abortFromParent, { once: true });
-  timerSignal.addEventListener("abort", abortFromTimer, { once: true });
-  if (parentSignal.aborted) {
-    abortFromParent();
-  } else if (timerSignal.aborted) {
-    abortFromTimer();
-  }
-
-  return {
-    signal: controller.signal,
-    cleanup() {
-      parentSignal.removeEventListener("abort", abortFromParent);
-      timerSignal.removeEventListener("abort", abortFromTimer);
-    },
-  };
 }
 
 async function sleep(ms: number, signal?: AbortSignal) {
@@ -585,51 +656,15 @@ async function sleep(ms: number, signal?: AbortSignal) {
   throwIfAborted(signal);
 }
 
-async function postJson<TResponse>(path: string, body: Record<string, unknown>, route?: ModelProviderRoute, signal?: AbortSignal) {
-  const provider = providerForRoute(route);
-  const payload = JSON.stringify(withProviderOptions(provider, body));
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
-    try {
-      throwIfAborted(signal);
-      const fetchSignal = timeoutSignal(signal, REQUEST_TIMEOUT_MS);
-      try {
-        const response = await fetch(`${baseUrl(route)}${path}`, {
-          method: "POST",
-          headers: await requestHeaders(route),
-          body: payload,
-          signal: fetchSignal.signal,
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
-          if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
-            lastError = error;
-            await sleep(retryDelayMs(attempt), signal);
-            continue;
-          }
-          throw error;
-        }
-
-        const parsed = await response.json() as TResponse;
-        throwIfAborted(fetchSignal.signal);
-        return parsed;
-      } finally {
-        fetchSignal.cleanup();
-      }
-    } catch (error) {
-      if (signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
-        throw error;
-      }
-
-      lastError = error;
-      await sleep(retryDelayMs(attempt), signal);
-    }
-  }
-
-  throw lastError ?? new Error("OpenAI-compatible request failed after retries.");
+async function postJson<TResponse>(path: string, body: Record<string, unknown>, route: ModelProviderRoute | undefined, operation: RequestOperation) {
+  const payload = JSON.stringify(withProviderOptions(providerForRoute(route), body));
+  return requestWithRetries(
+    `${baseUrl(route)}${path}`,
+    async () => ({ method: "POST", headers: await requestHeaders(route), body: payload }),
+    operation,
+    "OpenAI-compatible request failed",
+    (response) => response.json() as Promise<TResponse>,
+  );
 }
 
 function normalizeContent(content: string | Array<{ type?: string; text?: string }> | undefined) {
@@ -743,46 +778,52 @@ async function completeChat(
   taskType: ModelUsageInput["taskType"],
   modelOverride?: string,
   bodyExtras?: Record<string, unknown>,
+  sharedOperation?: RequestOperation,
 ) {
-  const startedAt = Date.now();
-  const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
-  const route = providerRouteForModel(model);
-  const provider = providerForRoute(route);
-  assertKnownModelPrice(provider, model);
-  await assertWorkspaceModelBudget(request.workspaceId);
-  await assertCatalogModelBudget({
-    workspaceId: request.workspaceId,
-    ...usageContext(request),
-  });
-  const body = chatCompletionBody(model, {
-    model,
-    temperature: 0.2,
-    messages: request.messages,
-    ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
-    ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
-    ...(bodyExtras ?? {}),
-  });
-  const response = await postJson<ChatCompletionApiResponse>("/chat/completions", body, route, request.signal);
-  const latencyMs = Date.now() - startedAt;
-  const content = normalizeContent(response.choices?.[0]?.message?.content);
-  const tool_calls = response.choices?.[0]?.message?.tool_calls;
-  const inputTokens = response.usage?.prompt_tokens ?? estimateSerializedTokens(withProviderOptions(provider, body));
-  const outputTokens = response.usage?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
-  const usage = await recordUsage({
-    workspaceId: request.workspaceId,
-    workflowJobId: request.workflowJobId,
-    agentRunId: request.agentRunId,
-    ...usageContext(request),
-    provider,
-    model,
-    taskType,
-    inputTokens,
-    outputTokens,
-    latencyMs,
-    ...costFields(provider, model, inputTokens, outputTokens),
-  });
+  const operation = sharedOperation ?? requestOperation(request.signal);
+  try {
+    const startedAt = Date.now();
+    const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+    const route = providerRouteForModel(model);
+    const provider = providerForRoute(route);
+    assertKnownModelPrice(provider, model);
+    await assertWorkspaceModelBudget(request.workspaceId);
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
+    const body = chatCompletionBody(model, {
+      model,
+      temperature: 0.2,
+      messages: request.messages,
+      ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
+      ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
+      ...(bodyExtras ?? {}),
+    });
+    const response = await postJson<ChatCompletionApiResponse>("/chat/completions", body, route, operation);
+    const latencyMs = Date.now() - startedAt;
+    const content = normalizeContent(response.choices?.[0]?.message?.content);
+    const tool_calls = response.choices?.[0]?.message?.tool_calls;
+    const inputTokens = response.usage?.prompt_tokens ?? estimateSerializedTokens(withProviderOptions(provider, body));
+    const outputTokens = response.usage?.completion_tokens ?? estimateChatOutputTokens(content, tool_calls);
+    const usage = await recordUsage({
+      workspaceId: request.workspaceId,
+      workflowJobId: request.workflowJobId,
+      agentRunId: request.agentRunId,
+      ...usageContext(request),
+      provider,
+      model,
+      taskType,
+      inputTokens,
+      outputTokens,
+      latencyMs,
+      ...costFields(provider, model, inputTokens, outputTokens),
+    });
 
-  return { content, tool_calls, usage };
+    return { content, tool_calls, usage };
+  } finally {
+    if (!sharedOperation) operation.cleanup();
+  }
 }
 
 class ChatStreamProtocolError extends Error {
@@ -841,177 +882,142 @@ async function* completeChatEventStream(
   modelOverride?: string,
   bodyExtras?: Record<string, unknown>,
 ): AsyncGenerator<ChatStreamEvent, ChatCompletionResponse> {
-  const startedAt = Date.now();
-  const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
-  const route = providerRouteForModel(model);
-  const provider = providerForRoute(route);
-  assertKnownModelPrice(provider, model);
-  await assertWorkspaceModelBudget(request.workspaceId);
-  await assertCatalogModelBudget({
-    workspaceId: request.workspaceId,
-    ...usageContext(request),
-  });
-  const payload = JSON.stringify(withProviderOptions(provider, chatCompletionBody(model, {
-    model,
-    temperature: 0.2,
-    messages: request.messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
-    ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
-    ...(bodyExtras ?? {}),
-  })));
+  const operation = requestOperation(request.signal, STREAM_TIMEOUT_MS);
+  try {
+    const startedAt = Date.now();
+    const model = modelOverride ?? request.model ?? env.MODEL_CHAT_DEFAULT;
+    const route = providerRouteForModel(model);
+    const provider = providerForRoute(route);
+    assertKnownModelPrice(provider, model);
+    await assertWorkspaceModelBudget(request.workspaceId);
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
+    const payload = JSON.stringify(withProviderOptions(provider, chatCompletionBody(model, {
+      model,
+      temperature: 0.2,
+      messages: request.messages,
+      stream: true,
+      stream_options: { include_usage: true },
+      ...(request.tools && request.tools.length > 0 ? { tools: request.tools } : {}),
+      ...(request.tool_choice ? { tool_choice: request.tool_choice } : {}),
+      ...(bodyExtras ?? {}),
+    })));
 
-  let response: Response | null = null;
-  let lastError: unknown = null;
-  let streamSignalCleanup = () => {};
-  let streamSignal: AbortSignal | undefined;
+    const response = await requestWithRetries(
+      `${baseUrl(route)}/chat/completions`,
+      async () => ({ method: "POST", headers: await requestHeaders(route), body: payload }),
+      operation,
+      "OpenAI-compatible request failed",
+      async (result) => result,
+    );
+    const streamSignal = operation.signal;
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let content = "";
+    let toolCallParts = new Map<number, PartialToolCall>();
+    let usageDetailsObj: StreamUsage | null = null;
+    let buffer = ""; let eventData: string[] = []; let lineScanOffset = 0;
+    let streamCompleted = false;
+    let usage: UsageDetails | undefined;
+    let usageRecorded = false; let choiceFinished = false;
 
-  for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
-    let keepSignalForStream = false;
-    const fetchSignal = timeoutSignal(request.signal, STREAM_TIMEOUT_MS);
-    try {
-      throwIfAborted(request.signal);
-      response = await fetch(`${baseUrl(route)}/chat/completions`, {
-        method: "POST",
-        headers: await requestHeaders(route),
-        body: payload,
-        signal: fetchSignal.signal,
+    async function finalizeUsage() {
+      if (usageRecorded && usage) {
+        return usage;
+      }
+
+      const latencyMs = Date.now() - startedAt;
+      const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateTextTokens(payload);
+      const estimatedToolCalls = [...toolCallParts.values()].map((tool) => ({
+        id: tool.id,
+        type: "function" as const,
+        function: { name: tool.name, arguments: tool.arguments },
+      }));
+      const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, estimatedToolCalls);
+      usage = await recordUsage({
+        workspaceId: request.workspaceId,
+        workflowJobId: request.workflowJobId,
+        agentRunId: request.agentRunId,
+        ...usageContext(request),
+        provider,
+        model,
+        taskType,
+        inputTokens,
+        outputTokens,
+        latencyMs,
+        ...costFields(provider, model, inputTokens, outputTokens),
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        const error = new Error(`OpenAI-compatible request failed (${response.status}): ${errorText}`);
-        if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
-          lastError = error;
-          await sleep(retryDelayMs(attempt), request.signal);
-          continue;
-        }
-        throw error;
-      }
-      keepSignalForStream = true;
-      streamSignalCleanup = fetchSignal.cleanup;
-      streamSignal = fetchSignal.signal;
-      break;
-    } catch (error) {
-      if (request.signal?.aborted || attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
-        throw error;
-      }
-      lastError = error;
-      await sleep(retryDelayMs(attempt), request.signal);
-    } finally {
-      if (!keepSignalForStream) {
-        fetchSignal.cleanup();
-      }
-    }
-  }
-
-  if (!response) throw lastError ?? new Error("OpenAI-compatible request failed after retries.");
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let content = "";
-  let toolCallParts = new Map<number, PartialToolCall>();
-  let usageDetailsObj: StreamUsage | null = null;
-  let buffer = ""; let eventData: string[] = []; let lineScanOffset = 0;
-  let streamCompleted = false;
-  let usage: UsageDetails | undefined;
-  let usageRecorded = false; let choiceFinished = false;
-
-  async function finalizeUsage() {
-    if (usageRecorded && usage) {
+      usageRecorded = true;
       return usage;
     }
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
+    try { if (!response.body) throw new Error(); reader = response.body.getReader(); }
+    catch { throw new ChatStreamProtocolError("Streamed provider response body is not readable."); }
 
-    const latencyMs = Date.now() - startedAt;
-    const inputTokens = usageDetailsObj?.prompt_tokens ?? estimateTextTokens(payload);
-    const estimatedToolCalls = [...toolCallParts.values()].map((tool) => ({
-      id: tool.id,
-      type: "function" as const,
-      function: { name: tool.name, arguments: tool.arguments },
-    }));
-    const outputTokens = usageDetailsObj?.completion_tokens ?? estimateChatOutputTokens(content, estimatedToolCalls);
-    usage = await recordUsage({
-      workspaceId: request.workspaceId,
-      workflowJobId: request.workflowJobId,
-      agentRunId: request.agentRunId,
-      ...usageContext(request),
-      provider,
-      model,
-      taskType,
-      inputTokens,
-      outputTokens,
-      latencyMs,
-      ...costFields(provider, model, inputTokens, outputTokens),
-    });
-    usageRecorded = true;
-    return usage;
-  }
-  let reader: ReadableStreamDefaultReader<Uint8Array>;
-  try { if (!response.body) throw new Error(); reader = response.body.getReader(); }
-  catch { streamSignalCleanup(); throw new ChatStreamProtocolError("Streamed provider response body is not readable."); }
-
-  let primaryFailure: unknown;
-  try {
-    try { while (true) {
-      const { done, value } = await reader.read();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      while (true) {
-        let lineEnd = -1; for (; lineScanOffset < buffer.length; lineScanOffset += 1) { const character = buffer[lineScanOffset]; if (character === "\n") { lineEnd = lineScanOffset; break; } if (character === "\r") { if (lineScanOffset + 1 === buffer.length && !done) break; lineEnd = lineScanOffset; break; } }
-        if (lineEnd < 0) break; const terminatorLength = buffer[lineEnd] === "\r" && buffer[lineEnd + 1] === "\n" ? 2 : 1; const line = buffer.slice(0, lineEnd); buffer = buffer.slice(lineEnd + terminatorLength); lineScanOffset = 0;
-        if (line !== "") { const colon = line.indexOf(":"); const field = colon < 0 ? line : line.slice(0, colon); if (field === "data") { const fieldValue = colon < 0 ? "" : line.slice(colon + 1); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
-        if (eventData.length === 0) continue; const dataValue = eventData.join("\n"); eventData = []; if (dataValue === "[DONE]") {
-          streamCompleted = true;
-          await reader.cancel().catch(() => undefined);
-          break;
-        }
-          let data: unknown;
-          try {
-            data = JSON.parse(dataValue);
-          } catch {
-            throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
-          }
-          if (!data || typeof data !== "object" || Array.isArray(data)) throw new ChatStreamProtocolError("Streamed provider data must be an object.");
-          const record = data as Record<string, unknown>; const choices = record.choices;
-          if (record.error != null) throw new ChatStreamProtocolError("Streamed provider reported an error.");
-          if (!Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array.");
-          if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
-          const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
-          if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present."); if (candidate && choiceFinished) throw new ChatStreamProtocolError("Streamed choice continued after finish_reason.");
-          if (candidate?.finish_reason != null && typeof candidate.finish_reason !== "string") throw new ChatStreamProtocolError("Streamed finish_reason must be a string or null.");
-          if (candidate?.finish_reason === "error") throw new ChatStreamProtocolError("Streamed provider reported an error.");
-          const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
-          if (candidate?.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
-          const delta = candidate?.delta as Record<string, unknown> | undefined;
-          if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
-          const contentDelta = typeof delta?.content === "string" ? delta.content : "";
-          const toolCalls = delta?.tool_calls;
-          if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
-          const nextToolCallParts = new Map([...toolCallParts].map(([index, tool]) => [index, { ...tool }]));
-          const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(nextToolCallParts, tool)) : [];
-          const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents]; choiceFinished ||= candidate?.finish_reason != null;
-          content += contentDelta; toolCallParts = nextToolCallParts;
-          if (nextUsage) usageDetailsObj = nextUsage;
-          for (const event of events) yield event;
-      }
-      if (done || streamCompleted) break;
-    } if (!streamCompleted) primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE].");
-    } catch (error) { primaryFailure = streamSignal?.aborted ? abortedError(streamSignal) : error instanceof ChatStreamProtocolError ? error : new ChatStreamProtocolError("Streamed provider response could not be read safely."); }
-  } finally {
+    let primaryFailure: unknown;
     try {
+      try { while (true) {
+        const { done, value } = await abortable(reader.read(), streamSignal);
+        buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+        while (true) {
+          throwIfAborted(streamSignal);
+          let lineEnd = -1; for (; lineScanOffset < buffer.length; lineScanOffset += 1) { const character = buffer[lineScanOffset]; if (character === "\n") { lineEnd = lineScanOffset; break; } if (character === "\r") { if (lineScanOffset + 1 === buffer.length && !done) break; lineEnd = lineScanOffset; break; } }
+          if (lineEnd < 0) break; const terminatorLength = buffer[lineEnd] === "\r" && buffer[lineEnd + 1] === "\n" ? 2 : 1; const line = buffer.slice(0, lineEnd); buffer = buffer.slice(lineEnd + terminatorLength); lineScanOffset = 0;
+          if (line !== "") { const colon = line.indexOf(":"); const field = colon < 0 ? line : line.slice(0, colon); if (field === "data") { const fieldValue = colon < 0 ? "" : line.slice(colon + 1); const dataValue = fieldValue.startsWith(" ") ? fieldValue.slice(1) : fieldValue; if (/^\s/.test(dataValue)) throw new ChatStreamProtocolError("Streamed data payload must not start with whitespace."); eventData.push(dataValue); } continue; }
+          if (eventData.length === 0) continue; const dataValue = eventData.join("\n"); eventData = []; if (dataValue === "[DONE]") {
+            streamCompleted = true;
+            await reader.cancel().catch(() => undefined);
+            break;
+          }
+            let data: unknown;
+            try {
+              data = JSON.parse(dataValue);
+            } catch {
+              throw new ChatStreamProtocolError("Streamed provider data must be valid JSON.");
+            }
+            if (!data || typeof data !== "object" || Array.isArray(data)) throw new ChatStreamProtocolError("Streamed provider data must be an object.");
+            const record = data as Record<string, unknown>; const choices = record.choices;
+            if (record.error != null) throw new ChatStreamProtocolError("Streamed provider reported an error.");
+            if (!Array.isArray(choices)) throw new ChatStreamProtocolError("Streamed choices must be an array.");
+            if (Array.isArray(choices) && choices.length > 1) throw new ChatStreamProtocolError("Streamed choices must contain exactly one choice.");
+            const choice = Array.isArray(choices) ? choices[0] : undefined; const candidate = choice as Record<string, unknown> | undefined;
+            if (choice !== undefined && (!choice || typeof choice !== "object" || Array.isArray(choice))) throw new ChatStreamProtocolError("Streamed choices must contain objects."); if (candidate?.index !== undefined && (!Number.isSafeInteger(candidate.index) || candidate.index !== 0)) throw new ChatStreamProtocolError("Streamed choice index must be zero when present."); if (candidate && choiceFinished) throw new ChatStreamProtocolError("Streamed choice continued after finish_reason.");
+            if (candidate?.finish_reason != null && typeof candidate.finish_reason !== "string") throw new ChatStreamProtocolError("Streamed finish_reason must be a string or null.");
+            if (candidate?.finish_reason === "error") throw new ChatStreamProtocolError("Streamed provider reported an error.");
+            const nextUsage = validateStreamUsage(record.usage, Array.isArray(choices) && choices.length === 0);
+            if (candidate?.delta !== undefined && (!candidate.delta || typeof candidate.delta !== "object" || Array.isArray(candidate.delta))) throw new ChatStreamProtocolError("Streamed delta must be an object when present.");
+            const delta = candidate?.delta as Record<string, unknown> | undefined;
+            if (delta?.content != null && typeof delta.content !== "string") throw new ChatStreamProtocolError("Streamed content must be a string or null.");
+            const contentDelta = typeof delta?.content === "string" ? delta.content : "";
+            const toolCalls = delta?.tool_calls;
+            if (toolCalls != null && !Array.isArray(toolCalls)) throw new ChatStreamProtocolError("Streamed tool_calls must be an array or null.");
+            const nextToolCallParts = new Map([...toolCallParts].map(([index, tool]) => [index, { ...tool }]));
+            const toolEvents = Array.isArray(toolCalls) ? toolCalls.map((tool) => appendToolCallDelta(nextToolCallParts, tool)) : [];
+            const events: ChatStreamEvent[] = [...(contentDelta ? [{ type: "content_delta" as const, content: contentDelta }] : []), ...toolEvents]; choiceFinished ||= candidate?.finish_reason != null;
+            content += contentDelta; toolCallParts = nextToolCallParts;
+            if (nextUsage) usageDetailsObj = nextUsage;
+            for (const event of events) yield event;
+        }
+        if (done || streamCompleted) break;
+      } if (!streamCompleted) primaryFailure = new ChatStreamProtocolError("Streamed provider response ended before [DONE].");
+      } catch (error) { primaryFailure = streamSignal?.aborted ? abortedError(streamSignal) : error instanceof ChatStreamProtocolError ? error : new ChatStreamProtocolError("Streamed provider response could not be read safely."); }
+    } finally {
       if (!streamCompleted && !usageRecorded) {
         await reader.cancel().catch(() => undefined);
         try { await finalizeUsage(); } catch (error) { if (primaryFailure === undefined) throw error; }
       }
-    } finally {
-      streamSignalCleanup();
     }
-  }
 
-  if (primaryFailure) throw primaryFailure;
+    if (primaryFailure !== undefined) throw primaryFailure;
   
-  const finalUsage = await finalizeUsage();
-  const finalTools = completeToolCalls(toolCallParts);
+    const finalUsage = await finalizeUsage();
+    const finalTools = completeToolCalls(toolCallParts);
 
-  return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage: finalUsage };
+    return { content, tool_calls: finalTools.length > 0 ? finalTools : undefined, usage: finalUsage };
+  } finally {
+    operation.cleanup();
+  }
 }
 
 async function* completeChatStream(
@@ -1038,7 +1044,7 @@ async function* completeChatStream(
   }
 }
 
-async function repairExtractionObject(request: ExtractionRequest, raw: string) {
+async function repairExtractionObject(request: ExtractionRequest, raw: string, operation: RequestOperation) {
   const repaired = await completeChat({
     workspaceId: request.workspaceId,
     workflowJobId: request.workflowJobId,
@@ -1061,7 +1067,7 @@ async function repairExtractionObject(request: ExtractionRequest, raw: string) {
     response_format: {
       type: "json_object",
     },
-  });
+  }, operation);
 
   return {
     raw: repaired.content,
@@ -1071,115 +1077,100 @@ async function repairExtractionObject(request: ExtractionRequest, raw: string) {
 }
 
 async function embedTexts(request: EmbeddingRequest) {
-  const startedAt = Date.now();
-  const inputs = Array.isArray(request.input) ? request.input : [request.input];
-  const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
-  const route = providerRouteForModel(model);
-  const provider = providerForRoute(route);
-  assertKnownModelPrice(provider, model);
-  await assertWorkspaceModelBudget(request.workspaceId);
-  await assertCatalogModelBudget({
-    workspaceId: request.workspaceId,
-    ...usageContext(request),
-  });
-  const response = await postJson<EmbeddingApiResponse>("/embeddings", {
-    model,
-    input: inputs,
-  }, route);
-  const latencyMs = Date.now() - startedAt;
-  const embeddings = (response.data ?? []).map((entry) => entry.embedding ?? []);
-  const inputTokens = response.usage?.prompt_tokens ?? inputs.reduce((sum, value) => sum + value.length, 0);
+  const operation = requestOperation();
+  try {
+    const startedAt = Date.now();
+    const inputs = Array.isArray(request.input) ? request.input : [request.input];
+    const model = request.model ?? env.MODEL_EMBEDDING_DEFAULT;
+    const route = providerRouteForModel(model);
+    const provider = providerForRoute(route);
+    assertKnownModelPrice(provider, model);
+    await assertWorkspaceModelBudget(request.workspaceId);
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
+    const response = await postJson<EmbeddingApiResponse>("/embeddings", {
+      model,
+      input: inputs,
+    }, route, operation);
+    const latencyMs = Date.now() - startedAt;
+    const embeddings = (response.data ?? []).map((entry) => entry.embedding ?? []);
+    const inputTokens = response.usage?.prompt_tokens ?? inputs.reduce((sum, value) => sum + value.length, 0);
 
-  return {
-    provider,
-    model,
-    embeddings,
-    inputTokens,
-    latencyMs,
-  };
+    return {
+      provider,
+      model,
+      embeddings,
+      inputTokens,
+      latencyMs,
+    };
+  } finally {
+    operation.cleanup();
+  }
 }
 
 async function transcribeAudioFile(request: AudioTranscriptionRequest) {
-  const startedAt = Date.now();
-  const model = request.model ?? env.MODEL_TRANSCRIPTION_DEFAULT;
-  if (!model) {
-    throw new Error("MODEL_TRANSCRIPTION_DEFAULT is required for audio transcription.");
-  }
-  const route = providerRouteForModel(model);
-  const provider = providerForRoute(route);
-  assertKnownModelPrice(provider, model);
-  await assertWorkspaceModelBudget(request.workspaceId);
-  await assertCatalogModelBudget({
-    workspaceId: request.workspaceId,
-    ...usageContext(request),
-  });
-
-  const form = new FormData();
-  const fileName = request.fileName.trim() || "meeting-audio";
-  form.set("model", model);
-  form.set("response_format", "json");
-  form.set("file", new Blob([new Uint8Array(request.data)], {
-    type: request.mimeType?.trim() || "application/octet-stream",
-  }), fileName);
-  if (request.prompt?.trim()) {
-    form.set("prompt", request.prompt.trim());
-  }
-  if (request.language?.trim()) {
-    form.set("language", request.language.trim());
-  }
-
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt <= MAX_REQUEST_RETRIES; attempt += 1) {
-    try {
-      const response = await fetch(`${baseUrl(route)}/audio/transcriptions`, {
-        method: "POST",
-        headers: await authHeaders(route),
-        body: form,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        const error = new Error(`OpenAI-compatible audio transcription failed (${response.status}): ${errorText}`);
-        if (attempt < MAX_REQUEST_RETRIES && isRetryableStatus(response.status)) {
-          lastError = error;
-          await sleep(retryDelayMs(attempt));
-          continue;
-        }
-        throw error;
-      }
-
-      const output = await response.json() as AudioTranscriptionApiResponse;
-      const text = output.text?.trim() ?? "";
-      if (!text) {
-        throw new Error("Audio transcription returned no text.");
-      }
-      const latencyMs = Date.now() - startedAt;
-      const usage = await recordUsage({
-        workspaceId: request.workspaceId,
-        workflowJobId: request.workflowJobId,
-        agentRunId: request.agentRunId,
-        ...usageContext(request),
-        provider,
-        model,
-        taskType: "TRANSCRIPTION",
-        inputTokens: 0,
-        outputTokens: Math.ceil(text.length / 4),
-        latencyMs,
-        ...costFields(provider, model, 0, Math.ceil(text.length / 4)),
-      });
-
-      return { text, usage };
-    } catch (error) {
-      if (attempt >= MAX_REQUEST_RETRIES || !isRetryableRequestError(error)) {
-        throw error;
-      }
-      lastError = error;
-      await sleep(retryDelayMs(attempt));
+  const operation = requestOperation();
+  try {
+    const startedAt = Date.now();
+    const model = request.model ?? env.MODEL_TRANSCRIPTION_DEFAULT;
+    if (!model) {
+      throw new Error("MODEL_TRANSCRIPTION_DEFAULT is required for audio transcription.");
     }
-  }
+    const route = providerRouteForModel(model);
+    const provider = providerForRoute(route);
+    assertKnownModelPrice(provider, model);
+    await assertWorkspaceModelBudget(request.workspaceId);
+    await assertCatalogModelBudget({
+      workspaceId: request.workspaceId,
+      ...usageContext(request),
+    });
 
-  throw lastError ?? new Error("OpenAI-compatible audio transcription failed after retries.");
+    const form = new FormData();
+    const fileName = request.fileName.trim() || "meeting-audio";
+    form.set("model", model);
+    form.set("response_format", "json");
+    form.set("file", new Blob([new Uint8Array(request.data)], {
+      type: request.mimeType?.trim() || "application/octet-stream",
+    }), fileName);
+    if (request.prompt?.trim()) {
+      form.set("prompt", request.prompt.trim());
+    }
+    if (request.language?.trim()) {
+      form.set("language", request.language.trim());
+    }
+
+    const output = await requestWithRetries(
+      `${baseUrl(route)}/audio/transcriptions`,
+      async () => ({ method: "POST", headers: await authHeaders(route), body: form }),
+      operation,
+      "OpenAI-compatible audio transcription failed",
+      (response) => response.json() as Promise<AudioTranscriptionApiResponse>,
+    );
+    const text = output.text?.trim() ?? "";
+    if (!text) {
+      throw new Error("Audio transcription returned no text.");
+    }
+    const latencyMs = Date.now() - startedAt;
+    const usage = await recordUsage({
+      workspaceId: request.workspaceId,
+      workflowJobId: request.workflowJobId,
+      agentRunId: request.agentRunId,
+      ...usageContext(request),
+      provider,
+      model,
+      taskType: "TRANSCRIPTION",
+      inputTokens: 0,
+      outputTokens: Math.ceil(text.length / 4),
+      latencyMs,
+      ...costFields(provider, model, 0, Math.ceil(text.length / 4)),
+    });
+
+    return { text, usage };
+  } finally {
+    operation.cleanup();
+  }
 }
 
 export const openAICompatibleModelGateway: ModelGateway = {
@@ -1196,52 +1187,57 @@ export const openAICompatibleModelGateway: ModelGateway = {
   },
 
   async extract(request: ExtractionRequest) {
-    const response = await completeChat({
-      workspaceId: request.workspaceId,
-      workflowJobId: request.workflowJobId,
-      agentRunId: request.agentRunId,
-      ...usageContext(request),
-      taskType: "EXTRACTION",
-      model: request.model,
-      messages: [
-        {
-          role: "system",
-          content: `Return a valid JSON object only. Follow this schema hint: ${request.schemaHint}`,
+    const operation = requestOperation();
+    try {
+      const response = await completeChat({
+        workspaceId: request.workspaceId,
+        workflowJobId: request.workflowJobId,
+        agentRunId: request.agentRunId,
+        ...usageContext(request),
+        taskType: "EXTRACTION",
+        model: request.model,
+        messages: [
+          {
+            role: "system",
+            content: `Return a valid JSON object only. Follow this schema hint: ${request.schemaHint}`,
+          },
+          {
+            role: "user",
+            content: `${request.instruction}\n\nINPUT:\n${request.input}`,
+          },
+        ],
+      }, "EXTRACTION", request.model, {
+        temperature: 0,
+        response_format: {
+          type: "json_object",
         },
-        {
-          role: "user",
-          content: `${request.instruction}\n\nINPUT:\n${request.input}`,
-        },
-      ],
-    }, "EXTRACTION", request.model, {
-      temperature: 0,
-      response_format: {
-        type: "json_object",
-      },
-    });
+      }, operation);
 
-    const parsed = parseExtractionObject(response.content);
-    if (parsed) {
-      return {
-        output: parsed,
+      const parsed = parseExtractionObject(response.content);
+      if (parsed) {
+        return {
+          output: parsed,
+          raw: response.content,
+          usage: response.usage,
+        };
+      }
+
+      const repaired = await repairExtractionObject(request, response.content, operation);
+      if (repaired.output) {
+        return {
+          output: repaired.output,
+          raw: repaired.raw,
+          usage: repaired.usage,
+        };
+      }
+
+      throw new ExtractionParseError("Failed to parse extraction output after repair attempt.", {
         raw: response.content,
-        usage: response.usage,
-      };
+        repairedRaw: repaired.raw,
+      });
+    } finally {
+      operation.cleanup();
     }
-
-    const repaired = await repairExtractionObject(request, response.content);
-    if (repaired.output) {
-      return {
-        output: repaired.output,
-        raw: repaired.raw,
-        usage: repaired.usage,
-      };
-    }
-
-    throw new ExtractionParseError("Failed to parse extraction output after repair attempt.", {
-      raw: response.content,
-      repairedRaw: repaired.raw,
-    });
   },
 
   async embed(request: EmbeddingRequest) {
