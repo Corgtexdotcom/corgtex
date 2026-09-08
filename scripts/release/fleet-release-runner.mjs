@@ -262,17 +262,22 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
     const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }) : configuredTargets(env).map(normalizeTarget); const selectedTargets = providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0); const selectedProviders = new Set(selectedTargets.map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
     const includesOpsRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && target.group === "ops");
+    const includesDurableRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && ["ops", "backup-app"].includes(target.group));
     const includesAzureTarget = selectedProviders.has("azure");
     if (includesRailwayTarget && !env.RAILWAY_API_TOKEN?.trim()) {
       missing.push("RAILWAY_API_TOKEN");
     }
-    if (includesOpsRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim()) {
-      missing.push("GHCR_IMPORT_TOKEN (durable Ops package-read credential)");
+    if (includesDurableRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim()) {
+      missing.push(includesOpsRailwayTarget
+        ? "GHCR_IMPORT_TOKEN (durable Ops package-read credential)"
+        : "GHCR_IMPORT_TOKEN (durable backup-app package-read credential)");
     }
-    if (includesOpsRailwayTarget && !env.GHCR_IMPORT_USERNAME?.trim()) {
-      missing.push("GHCR_IMPORT_USERNAME (durable Ops package-read identity)");
+    if (includesDurableRailwayTarget && !env.GHCR_IMPORT_USERNAME?.trim()) {
+      missing.push(includesOpsRailwayTarget
+        ? "GHCR_IMPORT_USERNAME (durable Ops package-read identity)"
+        : "GHCR_IMPORT_USERNAME (durable backup-app package-read identity)");
     }
-    if (includesRailwayTarget && !includesOpsRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
+    if (includesRailwayTarget && !includesDurableRailwayTarget && !env.GHCR_IMPORT_TOKEN?.trim() && !env.GITHUB_TOKEN?.trim()) {
       missing.push("GHCR_IMPORT_TOKEN or GITHUB_TOKEN");
     }
     if (includesAzureTarget) {
@@ -513,9 +518,10 @@ function preflightTarget(target, env, options = {}) {
       if (!optionalText(env.POSTHOG_PROJECT_TOKEN)) blockers.push("POSTHOG_PROJECT_TOKEN is missing for Railway observability");
     }
     if (!env.RAILWAY_API_TOKEN) blockers.push("RAILWAY_API_TOKEN is missing");
-    if (target.group === "ops") {
-      if (!env.GHCR_IMPORT_TOKEN?.trim()) blockers.push("durable GHCR import token is missing for Ops image pull");
-      if (!env.GHCR_IMPORT_USERNAME?.trim()) blockers.push("durable GHCR import username is missing for Ops image pull");
+    if (["ops", "backup-app"].includes(target.group)) {
+      const label = target.group === "ops" ? "Ops" : "backup-app";
+      if (!env.GHCR_IMPORT_TOKEN?.trim()) blockers.push(`durable GHCR import token is missing for ${label} image pull`);
+      if (!env.GHCR_IMPORT_USERNAME?.trim()) blockers.push(`durable GHCR import username is missing for ${label} image pull`);
     } else if (!env.GHCR_IMPORT_TOKEN && !env.GITHUB_TOKEN) {
       blockers.push("GHCR import token is missing for Railway image pull");
     }
@@ -700,16 +706,17 @@ async function deployRailwayTarget(target, manifest, deps) {
     { key: "web", serviceId: target.railway.webServiceId, image: manifest.ghcrWebImage },
     { key: "worker", serviceId: target.railway.workerServiceId, image: manifest.ghcrWorkerImage },
   ].filter((service) => service.serviceId);
-  const opsOnly = target.group === "ops";
+  const protectedStagedRailway = ["ops", "backup-app"].includes(target.group);
+  const startupMode = railwayStartupModeForTarget(target);
   const expected = new Map();
-  if (opsOnly) {
+  if (protectedStagedRailway) {
     for (const service of services) expected.set(service.serviceId, await readOpsRailwayStage(target, service, deps));
   }
   async function verifyStaging(selected = services) {
     for (const service of selected) {
       const current = await readOpsRailwayStage(target, service, deps);
       if (JSON.stringify(current) !== JSON.stringify(expected.get(service.serviceId))) {
-        throw new Error(`${target.label} ${service.key} Ops staging drift; reconcile before retrying`);
+        throw new Error(`${target.label} ${service.key} Railway staging drift; reconcile before retrying`);
       }
     }
   }
@@ -721,18 +728,19 @@ async function deployRailwayTarget(target, manifest, deps) {
     `, {
       environmentId: target.railway.environmentId,
       serviceId: service.serviceId,
-      input: railwayServiceUpdateInput(service.image, deps, { requireDurableCredential: opsOnly }),
+      input: railwayServiceUpdateInput(service.image, deps, { requireDurableCredential: protectedStagedRailway }),
     }, deps);
-    if (opsOnly) {
+    if (protectedStagedRailway) {
       expected.get(service.serviceId).image = service.image;
       await verifyStaging();
     }
   }
   async function updateVariables(service) {
     const variables = releaseVariables(manifest, deps.env ?? process.env, {
-      opsRuntimeOnly: opsOnly,
+      startupMode: protectedStagedRailway ? startupMode : undefined,
+      opsRuntimeOnly: target.group === "ops",
       includePostHogInstanceId: target.group !== "managed-customers",
-      includeCanaryPreflightDeploymentId: opsOnly,
+      includeCanaryPreflightDeploymentId: target.group === "ops",
     });
     await railwayGraphql(`
       mutation UpsertVariables($projectId: String!, $environmentId: String!, $serviceId: String!, $variables: EnvironmentVariables!) {
@@ -742,7 +750,7 @@ async function deployRailwayTarget(target, manifest, deps) {
           serviceId: $serviceId
           variables: $variables
           replace: false
-          ${opsOnly ? "skipDeploys: true" : ""}
+          ${protectedStagedRailway ? "skipDeploys: true" : ""}
         })
       }
     `, {
@@ -751,12 +759,12 @@ async function deployRailwayTarget(target, manifest, deps) {
       serviceId: service.serviceId,
       variables,
     }, deps);
-    if (opsOnly) {
+    if (protectedStagedRailway) {
       expected.get(service.serviceId).releaseVariables = variables;
       await verifyStaging();
     }
   }
-  if (opsOnly) {
+  if (protectedStagedRailway) {
     // No-seed startup settings must precede any image change. Both services are
     // fully staged and read back before the first explicit deployment.
     for (const service of services) await updateVariables(service);
@@ -780,13 +788,19 @@ async function deployRailwayTarget(target, manifest, deps) {
     const deployment = { ...service, deploymentId: result.deploymentId };
     deployments.push(deployment);
     await waitForRailwayDeployment(target, deployment, deps);
-    if (opsOnly && service.key === "web") {
+    if (protectedStagedRailway && service.key === "web") {
       const health = await pollHealth(target.url, manifest, deps);
       assertHealthProof(health, manifest, target.label);
       await verifyStaging(services.filter((item) => item.key === "worker"));
     }
   }
   return { deployments };
+}
+
+function railwayStartupModeForTarget(target) {
+  if (target.group === "ops") return "migrate-and-web";
+  if (target.group === "backup-app") return "web";
+  return "combined";
 }
 
 async function readOpsRailwayStage(target, service, deps) {
@@ -814,7 +828,7 @@ async function readOpsRailwayStage(target, service, deps) {
     environmentId: target.railway.environmentId,
     serviceId: service.serviceId,
   }, deps);
-  const fail = (reason) => { throw new Error(`${target.label} ${service.key} Ops staging ${reason}; reconcile before retrying`); };
+  const fail = (reason) => { throw new Error(`${target.label} ${service.key} Railway staging ${reason}; reconcile before retrying`); };
   const instance = data.instance;
   const config = data.environment?.config?.services?.[service.serviceId];
   // Railway exposes these as JSON scalars, not field-selectable objects. Retain
@@ -948,12 +962,12 @@ function clearPostHogInstanceId(variables, env, options) {
 }
 
 export function releaseVariables(manifest, env = process.env, options = {}) {
-  if (options.opsRuntimeOnly === true) {
+  if (options.opsRuntimeOnly === true || options.startupMode) {
     return {
       CORGTEX_RELEASE_VERSION: manifest.releaseVersion,
       CORGTEX_RELEASE_IMAGE_TAG: manifest.imageTag,
       CORGTEX_RELEASE_GIT_SHA: manifest.gitSha,
-      CORGTEX_STARTUP_MODE: "migrate-and-web",
+      CORGTEX_STARTUP_MODE: options.startupMode ?? "migrate-and-web",
     };
   }
   const variables = {
