@@ -25,8 +25,11 @@ realistic risk, and evidence.
 5. **Independent exact-head review.** A separate read-only identity reviews the
    complete current diff. Native GitHub rules invalidate stale approvals and gate
    merge on checks, conversations, latest-push approval, and merge queue.
-6. **Short feedback loops.** After two unsuccessful corrections, reassess. A second
-   replan or more implementation PRs requires explicit user approval.
+6. **Short feedback loops.** After the first unsuccessful correction cycle, stop
+   editing and reassess with the read-only GPT-6 planner. The second unsuccessful
+   cycle or additional implementation PRs requires explicit user approval. A cycle
+   is a bounded corrective change followed by relevant validation, not a tool call
+   or an infrastructure wait.
 
 ## Delivery owner
 
@@ -42,8 +45,20 @@ The delivery owner:
 - publishes with the builder identity and responds to objective review findings;
 - never self-approves or bypasses protection without an explicit human directive.
 
-The same capable agent may perform planning and implementation. External workers are
-optional accelerators, not ownership or review boundaries.
+GPT-6 Astra is the default owner for planning, implementation, integration, and
+validation. Routine work needs no separate planner handoff. Material ambiguity,
+architecture, trust boundaries, migrations, production risk, or a failed correction
+cycle uses a read-only GPT-6 planning pass. Protected review remains independent.
+
+Optional subscription CLI helpers may be called without repeated permission:
+Composer 2.5 for mechanical work, Gemini 3.8 Flash for bounded implementation with
+settled behavior, and Opus for read-only advice on a concrete artifact. GPT-6
+verifies their output and owns delivery. Helpers receive no secrets or private/client
+data and cannot perform GitHub or production writes or incur paid overages.
+
+Exact model identifiers, helper boundaries, and fallback behavior live in
+[`AGENTS.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md#model-routing-and-delegation).
+Follow current task-specific model instructions without expanding task authority.
 
 ## Risk tiers
 

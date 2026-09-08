@@ -9,8 +9,11 @@ PR path.
   default. Do not turn a repair into a reusable subsystem or PR train.
 - Put the proportional contract in the PR body, implement it, run targeted tests and
   `npm run check`, then push and enable normal auto-merge/queueing.
-- After two unsuccessful corrections, add `needs-replan`, report evidence, and
-  stop. Do not create replacement PRs without explicit direction.
+- Follow the model routing and correction policy in `AGENTS.md`: GPT-6 owns
+  delivery and verifies optional bounded helper output. The first unsuccessful
+  correction cycle triggers read-only GPT-6 reassessment. After the second, add
+  `needs-replan`, report evidence, and stop for user approval. Do not create
+  replacement or additional implementation PRs without explicit direction.
 - Never push to `main`, self-approve, use `--admin` or `--no-verify`, run
   `prisma db push`, expose secrets, or mutate production data outside exact
   authorization.

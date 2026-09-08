@@ -21,9 +21,44 @@ as the risk permits.
    updates do not need repeated approval. Ask before material scope expansion,
    unapproved irreversible production/customer-data operations, paid spend,
    external communication, or protection bypass.
-6. **Stop loops early.** After two unsuccessful correction cycles, reassess and
-   report the evidence. A second replan or more implementation PRs needs explicit
-   user approval.
+6. **Stop loops early.** After the first unsuccessful correction cycle, stop
+   editing and reassess with the read-only GPT-6 planner. After the second
+   unsuccessful cycle, or before adding implementation PRs, get explicit user
+   approval. A cycle is a bounded corrective change followed by relevant
+   validation, not an individual tool call or a wait for infrastructure.
+
+## Model routing and delegation
+
+- GPT-6 Astra (`gpt-6-astra`) is the default delivery owner and model for Codex
+  planning, execution, subagents, and review. Preserve configured reasoning.
+  Protected review uses a separate identity and a fresh assessment of the complete
+  current diff; the delivery owner never approves its own work.
+- Routine settled work stays with the delivery owner without a separate planning
+  handoff. Use the read-only GPT-6 `sol_planner` agent (legacy name) for material
+  ambiguity, cross-cutting architecture, security/privacy/auth, tenant isolation,
+  migrations, production risk, or a failed correction cycle. It returns a compact
+  contract covering outcome, non-goals, surfaces, behavior, acceptance, tests,
+  risks, rollback, and stop conditions. It does not edit or perform delivery.
+- Optional external helpers are authorized within these lanes without a separate
+  request for each call. Delegate when the benefit exceeds setup and verification
+  cost; keep trivial or tightly coupled work in GPT-6. Announce the bounded purpose
+  and use the corresponding CLI skill for authentication and model preflight.
+- **Composer 2.5** (`composer-2.5`): boilerplate, scaffolding, fixtures, repetitive
+  edits, and mechanical refactors following established patterns.
+- **Gemini 3.8 Flash** (`gemini-3.8-flash-medium` through `agy`): bounded small
+  features, tests, refactors, and deterministic build fixes with settled behavior.
+  Do not use Gemini Pro or silently substitute another Gemini model.
+- **Claude Opus** (`opus` through the Claude CLI): bounded read-only advice on a
+  concrete plan, decision, or diff. Advisory output is not protected review.
+- External helpers use subscription CLIs and the skill's privacy checks, with no
+  secrets, private/client data, paid overages, or external writes. Editing workers
+  receive bounded files/tests and sole edit ownership in a clean isolated worktree.
+  They never commit, push, review, merge, or deploy. GPT-6 inspects the complete
+  output and runs relevant validation before integrating it.
+- If an optional helper is unavailable, report why and continue in GPT-6. If the
+  user mandates a model, stop that delegation on model, identity, access, quota,
+  or billing failure. Follow current task-specific model instructions; model
+  selection never grants additional data, spend, merge, or production authority.
 
 ## Risk and review
 
