@@ -240,7 +240,9 @@ async function applyTensionDuplicateUpdate(actor: AppActor, params: CreateTensio
   if (!existing.raisedByMemberId && params.raisedByMemberId) updateParams.raisedByMemberId = params.raisedByMemberId;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
-  return Object.keys(updateParams).length > 2 ? updateTension(actor, updateParams) : existing;
+  if (Object.keys(updateParams).length <= 2) return existing;
+  updateParams.expectedVersion = existing.version;
+  return updateTension(actor, updateParams);
 }
 
 export async function createTension(actor: AppActor, params: CreateTensionParams) {
@@ -459,6 +461,9 @@ export async function updateTension(actor: AppActor, params: {
     if (params.priority !== undefined) data.priority = params.priority;
     if (params.isPrivate !== undefined) data.isPrivate = params.isPrivate;
 
+    if (editsContent) {
+      invariant(params.expectedVersion !== undefined, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+    }
     if (params.expectedVersion !== undefined) {
       invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
       invariant(params.expectedVersion === tension.version, 409, "VERSION_CONFLICT", "The record changed before this update could be applied. Please refresh and try again.");

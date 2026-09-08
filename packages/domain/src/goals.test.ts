@@ -759,6 +759,7 @@ describe("Goals Domain", () => {
         ownerMemberId: "member-1",
         status: "ACTIVE",
         isPrivate: false,
+        version: 1,
       } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({
         id: "goal-1",
@@ -772,6 +773,7 @@ describe("Goals Domain", () => {
         goalId: "goal-1",
         status: "ON_TRACK",
         progressPercent: 65,
+        expectedVersion: 1,
       })).resolves.toMatchObject({
         id: "goal-1",
         status: "ON_TRACK",
@@ -895,6 +897,7 @@ describe("Goals Domain", () => {
         workspaceId: "ws-1",
         goalId: "goal-1",
         title: "Updated goal",
+        expectedVersion: 1,
       })).resolves.toMatchObject({
         id: "goal-1",
         version: 2,
@@ -1027,6 +1030,41 @@ describe("Goals Domain", () => {
       expect(appendEvents).toHaveBeenCalledTimes(1);
     });
 
+    it("rejects omitted expectedVersion for content intent before side effects, including same-value no-ops", async () => {
+      vi.mocked(prisma.goal.findUnique).mockResolvedValue({
+        id: "goal-1",
+        workspaceId: "ws-1",
+        archivedAt: null,
+        authorUserId: "user-1",
+        isPrivate: false,
+        status: "ACTIVE",
+        title: "Current goal",
+        progressPercent: 10,
+        version: 1,
+        parentGoalId: null,
+      } as any);
+
+      const { recordAudit } = await import("./audit-trail");
+      const { appendEvents } = await import("./events");
+      for (const params of [
+        { title: "Versionless edit" },
+        { title: "Current goal" },
+        { progressPercent: 20 },
+        { progressPercent: 20, status: "ON_TRACK" as const },
+      ]) {
+        await expect(updateGoal(actor, {
+          workspaceId: "ws-1",
+          goalId: "goal-1",
+          ...params,
+        })).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+      }
+
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+      expect(appendEvents).not.toHaveBeenCalled();
+    });
+
     it("honors expectedVersion and rejects early if it does not match current version without side effects", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({
         id: "goal-1",
@@ -1102,6 +1140,7 @@ describe("Goals Domain", () => {
         isPrivate: false,
         status: "ACTIVE",
         parentGoalId: null,
+        version: 1,
       } as any);
       vi.mocked(prisma.goalUpdate.create).mockResolvedValueOnce({
         id: "update-1",
@@ -1127,6 +1166,7 @@ describe("Goals Domain", () => {
         goalId: "goal-1",
         bodyMd: " Progress update ",
         newProgress: 55,
+        expectedVersion: 1,
       })).resolves.toMatchObject({
         id: "update-1",
       });
@@ -1173,6 +1213,7 @@ describe("Goals Domain", () => {
         isPrivate: false,
         status: "ACTIVE",
         parentGoalId: null,
+        version: 1,
       } as any);
       vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
 
@@ -1184,6 +1225,7 @@ describe("Goals Domain", () => {
         goalId: "goal-1",
         bodyMd: "Progress update",
         newProgress: 55,
+        expectedVersion: 1,
       })).rejects.toMatchObject({
         status: 409,
         code: "CONFLICT",
@@ -2115,7 +2157,7 @@ describe("Goals Domain", () => {
       vi.mocked(prisma.goal.update).mockClear();
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, title: "Updated" } as any);
-      await updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-order-test", title: "Updated" });
+      await updateGoal(actor, { workspaceId: "ws-1", goalId: "goal-order-test", title: "Updated", expectedVersion: 1 });
       const lockOrder1 = vi.mocked(prisma.$executeRaw).mock.invocationCallOrder[0];
       const updateOrder1 = vi.mocked(prisma.goal.update).mock.invocationCallOrder[0];
       expect(lockOrder1).toBeLessThan(updateOrder1);
