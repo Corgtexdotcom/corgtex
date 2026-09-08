@@ -23,8 +23,8 @@ as the risk permits.
    external communication, or protection bypass.
 6. **Stop loops early.** After the first unsuccessful correction cycle, stop
    editing and reassess with the read-only GPT-6 planner. After the second
-   unsuccessful cycle, or before adding implementation PRs, get explicit user
-   approval. A cycle is a bounded corrective change followed by relevant
+   unsuccessful cycle, or before adding additional implementation PRs, get explicit
+   user approval. A cycle is a bounded corrective change followed by relevant
    validation, not an individual tool call or a wait for infrastructure.
 
 ## Model routing and delegation
