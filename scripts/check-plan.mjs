@@ -3,7 +3,7 @@
 //
 // Modes:
 //   --mode=present   — verify the PR body contains the plan contract.
-//   --mode=scope     — verify changed files ⊆ plan's "Files to touch" allowlist.
+//   --mode=scope     — verify protected changes have an explicit risk justification.
 //   --mode=policy    — verify mechanical review blockers.
 //
 // Reads branch/base/labels from env (GitHub Actions) or from git/flags locally.
@@ -12,6 +12,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap((a) => {
@@ -21,13 +22,9 @@ const args = Object.fromEntries(
 );
 
 const mode = args.mode;
-if (!["present", "scope", "policy"].includes(mode)) {
-  console.error("usage: check-plan.mjs --mode=<present|scope|policy>");
-  process.exit(2);
-}
 
 const LOCAL_PLAN_DIR = path.join(".agents", "plans");
-const PROTECTED_PATHS = [
+export const PROTECTED_PATHS = [
   /^AGENTS\.md$/,
   /^\.agents\/plan-template\.md$/,
   /^\.codex\/review\.md$/,
@@ -41,13 +38,6 @@ const PROTECTED_PATHS = [
   /^packages\/domain\/src\/auth.*\.ts$/,
   /^apps\/web\/lib\/auth\.ts$/,
 ];
-const UI_PATHS = [
-  /^apps\/web\/app\//,
-  /^apps\/web\/components\//,
-  /^apps\/web\/lib\/components\//,
-];
-const DOMAIN_SOURCE = /^packages\/domain\/src\/.*\.ts$/;
-const DOMAIN_TEST = /^packages\/domain\/.*\.test\.ts$/;
 const PLAN_SECRET_PATTERNS = [
   { name: "private key block", pattern: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/ },
   { name: "OpenSSH private key", pattern: /-----BEGIN OPENSSH PRIVATE KEY-----/ },
@@ -153,25 +143,6 @@ function changedFiles(base) {
   }
 }
 
-function parseAllowlist(planText) {
-  // Walk the file line by line. Entries are list items under a
-  // "## Files to touch" (or "### Files to touch") heading, until the
-  // next heading of equal or higher level.
-  const entries = [];
-  let inSection = false;
-  for (const line of planText.split("\n")) {
-    if (/^#{2,3}\s+Files to touch\s*$/.test(line)) {
-      inSection = true;
-      continue;
-    }
-    if (inSection && /^#{1,3}\s+\S/.test(line)) break;
-    if (!inSection) continue;
-    const m = line.match(/^\s*[-*]\s+`?([^`\s]+)`?\s*$/);
-    if (m) entries.push(m[1]);
-  }
-  return entries;
-}
-
 function parseRiskTier(planText) {
   const lines = planText.split("\n");
   for (const line of lines) {
@@ -228,9 +199,9 @@ function extractSection(planText, title) {
   return body.join("\n").trim();
 }
 
-function hasSubstantiveScopeJustification(planText) {
+export function hasSubstantiveScopeJustification(planText) {
   const section = extractSection(planText, "Scope");
-  if (!section) return false;
+  if (!section || /^\[[\s\S]*\]$/.test(section.trim())) return false;
 
   const normalized = section
     .replace(/<!--[\s\S]*?-->/g, "")
@@ -257,24 +228,6 @@ function hasSubstantiveScopeJustification(planText) {
   return words.length >= 4 && alphanumericLength >= 20;
 }
 
-function hasVisualProof(planText) {
-  const section = extractSection(planText, "Visual Proof");
-  if (!section) return false;
-  const normalized = section
-    .replace(/\[[^\]]*\]\([^)]*\)/g, "")
-    .replace(/`[^`]*`/g, "")
-    .trim()
-    .toLowerCase();
-  if (!normalized) return true;
-  if (/required for frontend|delete this section|link actual proof|do not commit screenshots|do not commit generated proof/.test(normalized)) {
-    return false;
-  }
-  if (/^(n\/a|none|not applicable|delete this section if no ui paths changed)\.?$/.test(normalized)) {
-    return false;
-  }
-  return true;
-}
-
 function planSecretFindings(planText) {
   const findings = [];
   const lines = planText.split("\n");
@@ -290,38 +243,6 @@ function assertPlanHasNoCredentialMaterial(planText) {
   if (secretFindings.length > 0) {
     fail(`plan contract appears to contain credential material:\n  - ${secretFindings.join("\n  - ")}`);
   }
-}
-
-function matchesAllowlist(file, allowlist) {
-  for (const pattern of allowlist) {
-    if (pattern === file) return true;
-    if (pattern.endsWith("/**")) {
-      const prefix = pattern.slice(0, -2); // keep trailing `/`
-      if (file.startsWith(prefix)) return true;
-    }
-    if (pattern.endsWith("/*")) {
-      const prefix = pattern.slice(0, -1);
-      if (
-        file.startsWith(prefix) &&
-        !file.slice(prefix.length).includes("/")
-      ) {
-        return true;
-      }
-    }
-    if (pattern.endsWith("*")) {
-      const prefix = pattern.slice(0, -1);
-      if (file.startsWith(prefix)) return true;
-    }
-  }
-  return false;
-}
-
-function isUiFile(file) {
-  return UI_PATHS.some((re) => re.test(file));
-}
-
-function isDomainSourceFile(file) {
-  return DOMAIN_SOURCE.test(file) && !DOMAIN_TEST.test(file);
 }
 
 function isEnvFile(file) {
@@ -386,149 +307,131 @@ function readPlanText(branch) {
   );
 }
 
-const branch = branchName();
-const labels = prLabels();
-
-if (branch === "main" || branch === "HEAD") {
-  ok(`skipped on ${branch}`);
-}
-
-const blockingLabels = ["halt-agents", "needs-replan"].filter((label) =>
-  labels.has(label),
-);
-if (blockingLabels.length > 0) {
-  fail(`blocking label(s) present: ${blockingLabels.join(", ")}`);
-}
-
-const autoRevert = labels.has("auto-revert");
-if (autoRevert && !/^auto-revert\/[0-9a-f]{7,40}$/.test(branch)) {
-  fail("auto-revert label is valid only on an auto-revert/<sha> branch");
-}
-
-if (autoRevert && mode === "present") {
-  ok("auto-revert label present, plan presence skipped");
-}
-
-if (mode === "present") {
-  const planText = readPlanText(branch);
-  assertPlanHasNoCredentialMaterial(planText);
-  if (!parseRiskTier(planText)) {
-    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
+function main() {
+  if (!["present", "scope", "policy"].includes(mode)) {
+    console.error("usage: check-plan.mjs --mode=<present|scope|policy>");
+    process.exit(2);
   }
-  const allowlist = parseAllowlist(planText);
-  if (!allowlist || allowlist.length === 0) {
-    fail('plan contract has no "Files to touch" entries');
-  }
-  for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
-    if (!extractSection(planText, section)) {
-      fail(`plan contract has no non-empty "${section}" section`);
-    }
-  }
-  if (parseAcceptanceCriteria(planText).length === 0) {
-    fail("plan contract has no acceptance criteria checklist");
-  }
-  ok("plan contract present in PR body or ignored local plan file");
-}
+  const branch = branchName();
+  const labels = prLabels();
 
-const base = baseRef();
+  if (branch === "main" || branch === "HEAD") {
+    ok(`skipped on ${branch}`);
+  }
 
-if (mode === "scope") {
-  const files = changedFiles(base);
-  if (!autoRevert) {
+  const blockingLabels = ["halt-agents", "needs-replan"].filter((label) =>
+    labels.has(label),
+  );
+  if (blockingLabels.length > 0) {
+    fail(`blocking label(s) present: ${blockingLabels.join(", ")}`);
+  }
+
+  const autoRevert = labels.has("auto-revert");
+  if (autoRevert && !/^auto-revert\/[0-9a-f]{7,40}$/.test(branch)) {
+    fail("auto-revert label is valid only on an auto-revert/<sha> branch");
+  }
+
+  if (autoRevert && mode === "present") {
+    ok("auto-revert label present, plan presence skipped");
+  }
+
+  if (mode === "present") {
     const planText = readPlanText(branch);
     assertPlanHasNoCredentialMaterial(planText);
-    const allowlist = parseAllowlist(planText);
-    if (!allowlist || allowlist.length === 0) {
-      fail('plan contract has no "Files to touch" entries');
+    if (!parseRiskTier(planText)) {
+      fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
     }
-    const outOfScope = files.filter(
-      (f) => f && !matchesAllowlist(f, allowlist),
-    );
-    if (outOfScope.length > 0) {
-      fail(
-        `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
-      );
-    }
-    const protectedFiles = files.filter((file) =>
-      PROTECTED_PATHS.some((pattern) => pattern.test(file)),
-    );
-    if (protectedFiles.length > 0) {
-      if (parseRiskTier(planText) !== "critical") {
-        fail(
-          `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
-        );
-      }
-      if (!hasSubstantiveScopeJustification(planText)) {
-        fail(
-          `protected paths require a substantive "Scope" justification:\n  - ${protectedFiles.join("\n  - ")}`,
-        );
+    for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
+      if (!extractSection(planText, section)) {
+        fail(`plan contract has no non-empty "${section}" section`);
       }
     }
-  }
-
-  ok(`${files.length} file(s) all within scope`);
-}
-
-if (mode === "policy") {
-  if (autoRevert) {
-    ok("auto-revert label present, policy skipped");
-  }
-
-  const files = changedFiles(base);
-  const planText = readPlanText(branch);
-  assertPlanHasNoCredentialMaterial(planText);
-  const riskTier = parseRiskTier(planText);
-  if (!riskTier) {
-    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
-  }
-
-  const envFiles = files.filter(isEnvFile);
-  if (envFiles.length > 0) {
-    fail(`environment file changes are forbidden:\n  - ${envFiles.join("\n  - ")}`);
-  }
-
-  const domainSourceChanged = files.some(isDomainSourceFile);
-  const domainTestChanged = files.some((f) => DOMAIN_TEST.test(f));
-  if (domainSourceChanged && !domainTestChanged) {
-    fail("packages/domain source changed without a packages/domain *.test.ts change");
-  }
-
-  const uiChanged = files.some(isUiFile);
-  if (uiChanged && !hasVisualProof(planText)) {
-    fail('UI files changed; add a non-empty "Visual Proof" section to the PR body with proof links or CI artifact references');
-  }
-
-  if (process.env.PR_DRAFT !== "true") {
-    const criteria = parseAcceptanceCriteria(planText);
-    if (criteria.length === 0) {
+    if (parseAcceptanceCriteria(planText).length === 0) {
       fail("plan contract has no acceptance criteria checklist");
     }
-    const unticked = criteria.filter((criterion) => !criterion.checked);
-    if (unticked.length > 0) {
-      fail(
-        `ready PR has unticked acceptance criteria:\n  - ${unticked
-          .map((criterion) => criterion.text)
-          .join("\n  - ")}`,
+    ok("plan contract present in PR body or ignored local plan file");
+  }
+
+  const base = baseRef();
+
+  if (mode === "scope") {
+    const files = changedFiles(base);
+    if (!autoRevert) {
+      const planText = readPlanText(branch);
+      assertPlanHasNoCredentialMaterial(planText);
+      const protectedFiles = files.filter((file) =>
+        PROTECTED_PATHS.some((pattern) => pattern.test(file)),
       );
+      if (protectedFiles.length > 0) {
+        if (parseRiskTier(planText) !== "critical") {
+          fail(
+            `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
+          );
+        }
+        if (!hasSubstantiveScopeJustification(planText)) {
+          fail(
+            `protected paths require a substantive "Scope" justification:\n  - ${protectedFiles.join("\n  - ")}`,
+          );
+        }
+      }
     }
+
+    ok(`${files.length} file(s) checked for protected scope; behavioral scope is reviewed by QA`);
   }
 
-  const patternHits = [];
-  for (const { file, text } of addedDiffLines(base)) {
-    if (file === "scripts/check-plan.mjs") continue;
-    if (/--no-verify/.test(text) && isExecutablePolicyFile(file)) {
-      patternHits.push(`${file}: added --no-verify`);
+  if (mode === "policy") {
+    if (autoRevert) {
+      ok("auto-revert label present, policy skipped");
     }
-    if (/prisma\s+db\s+push/.test(text) && isExecutablePolicyFile(file)) {
-      patternHits.push(`${file}: added prisma db push`);
+
+    const files = changedFiles(base);
+    const planText = readPlanText(branch);
+    assertPlanHasNoCredentialMaterial(planText);
+    const riskTier = parseRiskTier(planText);
+    if (!riskTier) {
+      fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
     }
-    if (/--admin/.test(text) && isExecutablePolicyFile(file) && !labels.has("force-merge")) {
-      patternHits.push(`${file}: added --admin without force-merge label`);
+
+    const envFiles = files.filter(isEnvFile);
+    if (envFiles.length > 0) {
+      fail(`environment file changes are forbidden:\n  - ${envFiles.join("\n  - ")}`);
     }
-  }
-  if (patternHits.length > 0) {
-    fail(`forbidden diff pattern(s):\n  - ${patternHits.join("\n  - ")}`);
+
+    if (process.env.PR_DRAFT !== "true") {
+      const criteria = parseAcceptanceCriteria(planText);
+      if (criteria.length === 0) {
+        fail("plan contract has no acceptance criteria checklist");
+      }
+      const unticked = criteria.filter((criterion) => !criterion.checked);
+      if (unticked.length > 0) {
+        fail(
+          `ready PR has unticked acceptance criteria:\n  - ${unticked
+            .map((criterion) => criterion.text)
+            .join("\n  - ")}`,
+        );
+      }
+    }
+
+    const patternHits = [];
+    for (const { file, text } of addedDiffLines(base)) {
+      if (file === "scripts/check-plan.mjs") continue;
+      if (/--no-verify/.test(text) && isExecutablePolicyFile(file)) {
+        patternHits.push(`${file}: added --no-verify`);
+      }
+      if (/prisma\s+db\s+push/.test(text) && isExecutablePolicyFile(file)) {
+        patternHits.push(`${file}: added prisma db push`);
+      }
+      if (/--admin/.test(text) && isExecutablePolicyFile(file) && !labels.has("force-merge")) {
+        patternHits.push(`${file}: added --admin without force-merge label`);
+      }
+    }
+    if (patternHits.length > 0) {
+      fail(`forbidden diff pattern(s):\n  - ${patternHits.join("\n  - ")}`);
+    }
+
+    ok(`${riskTier} risk policy checks passed`);
   }
 
-  ok(`${riskTier} risk policy checks passed`);
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();

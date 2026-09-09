@@ -174,9 +174,8 @@ jobs:
       pull-requests: read
       statuses: write
     steps:
-      # The evaluator comes from the immutable pre-merge base. During the staged
-      # transition it also powers RSI; a later cleanup keeps the live-member
-      # validation while removing the attestation/status protocol.
+      # Evaluate live queue members from the immutable trusted base. Native
+      # approval protects the code; no custom reviewer attestation is required.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.merge_group.base_sha }}

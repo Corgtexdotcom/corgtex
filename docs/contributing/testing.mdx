@@ -31,19 +31,16 @@ Unit tests live next to source (`packages/**/*.test.ts`,
 `apps/**/*.test.ts`). Integration tests live under the Vitest
 `integration` project and require the test Postgres container.
 
-## What the Reviewer expects
+## What QA expects
 
-The Reviewer (Codex) rejects a PR if:
+A separate agent assesses the integrated outcome against acceptance criteria.
+Run relevant checks and reuse sufficient existing coverage and CI results. Add tests
+for meaningful uncovered behavior or regressions; source changes do not require a
+new test-file edit. Ordinary copy and nonvisual refactors need proportionate checks.
 
-- Domain code under `packages/domain/**` changed without a
-  corresponding test update.
-- A frontend path changes without actual visual proof linked from the
-  PR body's **Visual Proof** section.
-- The plan's "Test plan" section lists commands that were neither run
-  locally nor covered by CI.
-
-Write tests for new domain logic. Write them alongside the code, not as
-a follow-up PR.
+QA blocks concrete behavioral defects or meaningful gaps in evidence. It does not
+require repeated suites, speculative edge-case tests, or screenshot proof for APIs.
+After fixes, rerun affected checks and reuse the evidence that remains valid.
 
 ## Agent API (E2E)
 
@@ -65,8 +62,7 @@ Summary:
 
 ## Frontend E2E via browser agent
 
-When a PR touches `apps/web/app/**`, `apps/web/components/**`, or
-`apps/web/lib/components/**`, the delivery owner logs into the UI using
+When a PR changes visible UI behavior, the delivery owner or QA agent uses
 seeded credentials and links a screen recording, screenshot, or CI
 artifact from the PR body's **Visual Proof** section. Preferred proof
 storage is Corgtex Build Artifacts: capture browser output under

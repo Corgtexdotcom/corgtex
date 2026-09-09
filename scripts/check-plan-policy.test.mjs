@@ -222,6 +222,7 @@ describe("agent policy workflow invariants", () => {
     "none",
     "not applicable",
     "[What changes, what intentionally does not, and why this is one coherent PR.]",
+    "[Related behavior included; explain protected changes when applicable. No file allowlist needed.]",
   ])("rejects a protected-path placeholder Scope: %s", (scope) => {
     const cwd = initRepository();
     try {
@@ -263,7 +264,7 @@ describe("agent policy workflow invariants", () => {
           }),
           PR_DRAFT: "false",
         }),
-      ).toContain("all within scope");
+      ).toContain("checked for protected scope");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -290,4 +291,69 @@ describe("agent policy workflow invariants", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+  it("accepts a cohesive multi-surface change using existing coverage without file or screenshot bookkeeping", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      for (const file of ["packages/domain/src/feature.ts", "apps/web/app/api/feature/route.ts", "apps/web/components/Feature.tsx"]) {
+        mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+        writeFileSync(path.join(cwd, file), "export const feature = true;\n");
+      }
+      commitAll(cwd, "deliver integrated feature");
+      const body = "## Outcome\nDeliver the integrated feature.\n## Risk tier\nstandard\n## Acceptance criteria\n- [x] Complete feature works.\n## Test plan\nExisting behavioral coverage passed; separate QA verified nonvisual changes.\n## Risk and rollback\nRevert this feature.\n";
+      for (const mode of ["present", "scope", "policy"]) {
+        expect(runPolicy(cwd, mode, { BASE: "HEAD^", BRANCH: "codex/feature", PR_BODY: body, PR_DRAFT: "false" })).toContain(`check-plan(${mode}):`);
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["present", "## Outcome", "## Removed", /no non-empty "Outcome"/],
+    ["present", "## Test plan", "## Removed", /no non-empty "Test plan"/],
+    ["policy", "[x]", "[ ]", /unticked acceptance/],
+  ])("still rejects missing delivery evidence (%s %s)", (mode, from, to, error) => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      const body = "## Outcome\nComplete outcome\n## Risk tier\nlow\n## Acceptance criteria\n- [x] Works\n## Test plan\nRelevant checks passed\n## Risk and rollback\nRevert\n";
+      expect(() => runPolicy(cwd, mode, { BASE: "HEAD", BRANCH: "codex/feature", PR_BODY: body.replace(from, to), PR_DRAFT: "false" })).toThrow(error);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["halt-agents", "needs-replan"])("still respects an explicit %s hold", (label) => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      expect(() => runPolicy(cwd, "present", { BRANCH: "codex/feature", PR_LABELS: label, PR_BODY: "" })).toThrow(/blocking label/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [".env", "LOCAL_SETTING=value", /environment file changes/],
+    ["scripts/unsafe.sh", ["prisma", "db", "push"].join(" "), /forbidden diff pattern/],
+    ["scripts/unsafe.sh", ["git commit", "--no", "verify"].join("-").replace("commit-", "commit "), /forbidden diff pattern/],
+  ])("preserves executable and credential-file boundaries for %s", (file, source, error) => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });
+      writeFileSync(path.join(cwd, file), source + "\n");
+      commitAll(cwd, "add forbidden change");
+      const body = "## Outcome\nComplete outcome\n## Risk tier\nlow\n## Acceptance criteria\n- [x] Works\n## Test plan\nRelevant checks passed\n## Risk and rollback\nRevert\n";
+      expect(() => runPolicy(cwd, "policy", { BASE: "HEAD^", BRANCH: "codex/feature", PR_BODY: body, PR_DRAFT: "false" })).toThrow(error);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
 });

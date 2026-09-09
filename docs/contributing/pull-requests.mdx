@@ -1,71 +1,40 @@
 ---
 title: "Branching and Pull Requests"
-description: "The concise contract and protected path for Corgtex changes."
+description: "Deliver complete capabilities in cohesive pull requests."
 ---
 
-## Branching
+## One cohesive delivery
 
-- New work starts from current `origin/main` in a clean task branch/worktree.
-- Continue an existing branch only when the task explicitly names that work.
-- Never reset, stash, overwrite, or mix unrelated work.
-- Default to one branch and PR for one complete outcome. Split only at independently
-  useful, safe, testable, deployable, and rollbackable boundaries.
+Start new work in a clean task branch from current `origin/main`; preserve unrelated
+work. Build the complete related capability, including integration, tests, and QA,
+in one PR. Split only when separate releases have a concrete operational benefit.
 
-## PR contract
+Use the [PR template](https://github.com/Corgtexdotcom/corgtex/blob/main/.github/pull_request_template.md):
+outcome, risk tier, scope, acceptance, validation, and rollback. Keep it brief and
+accurate. Scope describes behavior; there is no file allowlist or diff-size limit.
+Protected changes require `critical` risk and a reason in Scope. PR metadata is
+public, so exclude secrets and private client facts.
 
-Copy [`/.agents/plan-template.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/.agents/plan-template.md)
-into the PR body and keep these sections current:
+## Validation and review
 
-- outcome;
-- `low`, `standard`, `high`, or `critical` risk;
-- scope and file allowlist;
-- concrete acceptance checklist;
-- executable tests;
-- actual visual proof for frontend paths; and
-- realistic risk and rollback.
+Use focused tests while building, then assess the integrated result with a separate
+QA agent. Reuse sufficient existing coverage and hosted CI rather than repeating
+it locally. New tests cover meaningful gaps; a source edit does not require a
+matching test-file edit. Visible UI changes need proof from the running application;
+API-only and nonvisual changes do not require screenshots.
 
-Before a PR exists, an ignored local copy may live at `.agents/plans/<branch>.md`.
-The PR body is public metadata: never include secrets, credentials, or private client
-facts.
+The reviewer assesses completeness, correctness, integration, and realistic risk.
+The owner resolves concrete findings in the same PR. New code needs current-head
+approval; unchanged tests and findings can be reused. Valid metadata edits alone
+need no repeat code review or custom attestation.
 
-## CI and review
+Required CI and live metadata checks run automatically. Native GitHub protection
+requires independent approval, resolved conversations, and passing checks before
+merge queue delivery. The authoritative configuration and check names are in the
+[live protection setup](https://github.com/Corgtexdotcom/corgtex/blob/main/.codex/ops/github-setup.md).
 
-Every PR runs:
+## Holds and recovery
 
-- `Lint, Typecheck & Test`;
-- `Database Sync`;
-- database-independent `Build`;
-- `Docs Validation`;
-- `PR Policy`;
-- `PR Metadata Policy`;
-- `Secret Scan`; and
-- `Client Data Scan`.
-
-`PR Policy` checks the contract, declared files, critical handling of protected
-paths, acceptance completion, domain tests, frontend proof, environment files, and
-forbidden executable patterns. It does not enforce arbitrary line or file limits.
-Head, PR-body, label, draft-state, and merge-group changes refresh the distinct
-trusted metadata policy status without rerunning expensive code checks. Invalid
-metadata removes the PR from the queue. The legacy snapshot gate remains required
-during staged activation and is removed only after the replacement is proven.
-
-The independent reviewer reads the complete current diff and requests changes only
-for objective blockers. Native GitHub rules dismiss stale approvals, require the
-latest push to be approved, require conversations and status checks to pass, and
-send the result through the merge queue.
-
-## Frontend proof
-
-Run the application and capture the actual changed behavior. Keep captures under
-ignored `.artifacts/`, upload with `node scripts/upload-build-artifacts.mjs`, and
-paste the link into the PR. Use a private artifact when the proof contains private
-data. Never commit generated screenshots or recordings.
-
-## Labels
-
-- `halt-agents`: stop work and review.
-- `needs-replan`: the bounded correction loop reached a genuine impasse.
-- `auto-revert`: a protected recovery PR.
-- `force-merge`: rare explicit human bypass with a public audit comment.
-
-Labels do not waive secrets, tests, data safety, `prisma db push`, or `--no-verify`.
+Respect `halt-agents` and `needs-replan`. Use them for an explicit hold or real
+impasse, not an ordinary failed test. Recovery uses the existing `auto-revert` path.
+A protection bypass requires an explicit instruction for the named operation.

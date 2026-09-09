@@ -1,8 +1,6 @@
-# Pull request
-
 ## Outcome
 
-[What complete result does this PR deliver?]
+[The substantive feature or workflow delivered.]
 
 ## Risk tier
 
@@ -10,27 +8,17 @@
 
 ## Scope
 
-[Why these changes belong together and what is intentionally excluded.]
-
-### Files to touch
-
-- `path/to/file.ts`
+[Related behavior included; explain protected changes when applicable. No file allowlist needed.]
 
 ## Acceptance criteria
 
-- [ ] [Concrete, verifiable result]
+- [ ] [The complete result users or operators can use.]
 
 ## Test plan
 
-```text
-npm run check
-[relevant targeted command]
-```
-
-## Visual proof
-
-[Required for frontend paths. Link actual running proof; delete when not applicable.]
+[Relevant checks and results, including existing coverage and separate-agent QA.
+Link running proof for visible UI changes. Reuse CI evidence where sufficient.]
 
 ## Risk and rollback
 
-[Realistic failure modes and the safe revert/recovery path.]
+[Material risks and how to revert/recover; keep brief for ordinary changes.]
