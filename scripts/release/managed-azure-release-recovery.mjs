@@ -152,7 +152,7 @@ function baselineRevisionSuffixes(role, state, rollback) {
 function reconstructBaselineTemplate(role, state, rollback, baseline) {
   const candidates = [state];
   const startup = state.template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE");
-  if (role === "web" && startup?.value === "migrate-and-web") {
+  if (rollback.schemaVersion === 2 && role === "web" && startup?.value === "migrate-and-web") {
     const historical = structuredClone(state);
     historical.template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE").value = "web";
     candidates.push(historical);
@@ -182,7 +182,7 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
     image: `${status.target.acrServer}/corgtex/${role}@${digest}`,
     release: incoming,
     revisionSuffix,
-    migrateWeb: state.template.containers[0].env.some((entry) => entry.name === "CORGTEX_STARTUP_MODE" && entry.value === "migrate-and-web"),
+    migrateWeb: rollback.schemaVersion === 2 && state.template.containers[0].env.some((entry) => entry.name === "CORGTEX_STARTUP_MODE" && entry.value === "migrate-and-web"),
   });
 }
 
@@ -391,6 +391,21 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           const template = current[role].expectedTemplate ?? buildManagedAzureReleaseTemplate({
             baseline: current[role].state, role, image, release: recoveryRelease, revisionSuffix, migrateWeb: true });
           assertManagedAzureTemplateDelta(current[role].state, template, { role, image, release: recoveryRelease, revisionSuffix, migrateWeb: true });
+          const onProgress = async () => {
+            const alternateAttempt = ["COMPATIBLE_PENDING", "LEGACY_RETRY"].includes(current[role].kind);
+            try {
+              await heartbeat();
+              if (alternateAttempt) {
+                const observed = await classifyLegacyWebRecovery(deps, status, rollback, baseline, recoveryRelease,
+                  managedAzureRevisionSuffix({ ...originatingLease, role, phase: "rollback" }), alternateWebSuffix);
+                const allowed = ["COMPATIBLE_PENDING", "COMPATIBLE_RECOVERY", ...(current[role].kind === "LEGACY_RETRY" ? ["LEGACY_RETRY"] : [])];
+                if (!allowed.includes(observed.kind)) fail("MANAGED_RELEASE_RECOVERY_ALTERNATE_FAILED");
+              }
+            } catch (error) {
+              fail(alternateAttempt ? "MANAGED_RELEASE_RECOVERY_ALTERNATE_READBACK_AMBIGUOUS"
+                : "MANAGED_RELEASE_RECOVERY_PROGRESS_FAILED", error);
+            }
+          };
           await heartbeat();
           let patched = { terminal: true, succeeded: true };
           if (current[role].kind !== "COMPATIBLE_PENDING") {
@@ -407,8 +422,11 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
                 || marker.recovery?.code !== "MANAGED_RELEASE_RECOVERY_ALTERNATE_PATCH_STARTED") fail("MANAGED_RELEASE_RECOVERY_RECORDING_FAILED");
             }
             try {
-              patched = await deps.patchTemplate({ target: status.target, role, location: current[role].state.location, template, onProgress: heartbeat });
+              patched = await deps.patchTemplate({ target: status.target, role, location: current[role].state.location, template, onProgress });
             } catch (error) {
+              // Local health/lease/provenance rejection is a stop condition,
+              // not a lost provider response that may be reconciled away.
+              if (error instanceof ManagedAzureRecoveryError) throw error;
               patched = { terminal: false, succeeded: false, code: error?.code };
             }
             if (patched.terminal && !patched.succeeded) await block("ROLLBACK", current[role].kind === "LEGACY_RETRY"
@@ -418,14 +436,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           // exact ready-template readback can reconcile an accepted update.
           try {
             await deps.waitForState({ target: status.target, role, release: recoveryRelease, imageDigest: recovery[role].digest,
-              expectedTemplate: template, onProgress: async () => {
-                await heartbeat();
-                if (current[role].kind === "COMPATIBLE_PENDING" || current[role].kind === "LEGACY_RETRY") {
-                  const observed = await classifyLegacyWebRecovery(deps, status, rollback, baseline, recoveryRelease,
-                    managedAzureRevisionSuffix({ ...originatingLease, role, phase: "rollback" }), alternateWebSuffix);
-                  if (!["COMPATIBLE_PENDING", "COMPATIBLE_RECOVERY", ...(current[role].kind === "LEGACY_RETRY" ? ["LEGACY_RETRY"] : [])].includes(observed.kind)) fail("MANAGED_RELEASE_RECOVERY_ALTERNATE_FAILED");
-                }
-              } });
+              expectedTemplate: template, onProgress });
           } catch {
             const alternateAttempt = ["COMPATIBLE_PENDING", "LEGACY_RETRY"].includes(current[role].kind);
             await block("READBACK", alternateAttempt

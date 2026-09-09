@@ -950,11 +950,13 @@ function legacyPartialRecovery(options = {}) {
     if (managedAzureTemplateDigest(expectedTemplate) !== managedAzureTemplateDigest(selected) || options.projectionDrift) throw new Error("projection drift");
     return { kind: old ? (options.oldState ?? "READY") : isPrimary ? (options.primaryState ?? "FAILED") : live.alternate };
   });
-  const patchTemplate = vi.fn(async ({ role, template: candidate }) => {
+  const patchTemplate = vi.fn(async ({ role, template: candidate, onProgress }) => {
     if (role === "web") {
       expect(candidate).toEqual(candidates.alternate);
       expect(live.alternate).toBe("ABSENT");
       live.latest = "alternate"; live.alternate = "PROVISIONING";
+      if (options.failDuringLro) { live.alternate = "FAILED"; await onProgress(); }
+      if (options.pollLro) await onProgress();
       if (options.lostPatch) return { terminal: false, succeeded: false, code: "AZURE_OPERATION_LOCATION_INVALID", stage: "OPERATION_LOCATION", providerStatus: 202 };
     } else {
       expect(live.alternate).toBe("READY");
@@ -976,10 +978,29 @@ function legacyPartialRecovery(options = {}) {
   return { ...fixture, live, candidates, rollbackPayload };
 }
 
+describe("historical v1 startup invariants", () => {
+  it("rejects an unrecorded web to migrate-and-web delta in a v1 forward revision", async () => {
+    const release = { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" };
+    const suffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role: "web", phase: "forward" });
+    const image = `${target.acrServer}/corgtex/web@${rollback.incoming.webDigest}`;
+    const candidate = buildManagedAzureReleaseTemplate({ baseline: state("web"), role: "web", image, release, revisionSuffix: suffix, migrateWeb: true });
+    const { deps } = rig({ readApp: vi.fn(async ({ role, release: requested }) => {
+      if (role === "worker") return state(role);
+      if (requested.gitSha !== nextSha) throw new Error("not baseline");
+      return state(role, { image, imageDigest: rollback.incoming.webDigest, revisionSuffix: suffix,
+        revisionName: `${target.webAppName}--${suffix}`, template: candidate, templateDigest: managedAzureTemplateDigest(candidate) });
+    }) });
+    expect(await runManagedAzureReleaseRecovery({ deploymentId, reason: "Preserve strict legacy startup drift checks.", acrName: "acr12" }, deps))
+      .toMatchObject({ status: "RECOVERY_BLOCKED", code: "MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+});
+
 describe("legacy v2 migration-startup recovery", () => {
   const request = { deploymentId, reason: "Resume the exact legacy startup failure.", acrName: "acr12" };
   it.each([false, true])("uses one deterministic corrected web revision and reconciles a lost PATCH response: %s", async (lostPatch) => {
-    const { deps, rollbackPayload } = legacyPartialRecovery({ lostPatch });
+    const { deps, rollbackPayload } = legacyPartialRecovery({ lostPatch, pollLro: true });
     const retained = JSON.stringify(rollbackPayload);
     expect(await runManagedAzureReleaseRecovery(request, deps)).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY" });
     expect(deps.patchTemplate.mock.calls.map(([input]) => input.role)).toEqual(["web", "worker"]);
@@ -1009,6 +1030,14 @@ describe("legacy v2 migration-startup recovery", () => {
     expect(await runManagedAzureReleaseRecovery(request, deps)).toMatchObject({ status: "RECOVERY_BLOCKED",
       code: "MANAGED_RELEASE_RECOVERY_ALTERNATE_PATCH_AMBIGUOUS", transportCode: "AZURE_OPERATION_LOCATION_INVALID",
       patchStage: "OPERATION_LOCATION", providerStatus: 202 });
+    expect(deps.patchTemplate.mock.calls.map(([input]) => input.role)).toEqual(["web"]);
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+  it("monitors an accepted LRO and stops when its alternate fails before PATCH polling completes", async () => {
+    const { deps } = legacyPartialRecovery({ failDuringLro: true });
+    expect(await runManagedAzureReleaseRecovery(request, deps)).toMatchObject({ status: "RECOVERY_BLOCKED",
+      code: "MANAGED_RELEASE_RECOVERY_ALTERNATE_READBACK_AMBIGUOUS" });
+    expect(deps.waitForState).not.toHaveBeenCalled();
     expect(deps.patchTemplate.mock.calls.map(([input]) => input.role)).toEqual(["web"]);
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
   });
