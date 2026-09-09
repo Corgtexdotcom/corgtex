@@ -248,6 +248,21 @@ function compatibleTerminalReceipt({
 }
 
 describe("managed Azure release recovery", () => {
+  it("preserves the actual revision read failure and the sanitized provider context", async () => {
+    const rollbackPayload = compatibleRollbackPayload();
+    const live = resumableSchemaV2State(rollbackPayload);
+    const { deps } = rig({ rollbackPayload, readApp: live.readApp,
+      patchTemplate: vi.fn(async () => ({ terminal: false, succeeded: false,
+        code: "AZURE_OPERATION_LOCATION_INVALID", stage: "OPERATION_LOCATION", providerStatus: 202 })) });
+    deps.readRevisionState.mockRejectedValue(Object.assign(new Error("private provider detail"), { code: "AZURE_READ_FAILED" }));
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Retain the actual readback failure.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId, code: "RECOVERY_INTENT_REVISION_READ_FAILED",
+      transportCode: "AZURE_READ_FAILED", patchStage: "OPERATION_LOCATION", providerStatus: 202 });
+    expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web"]);
+    expect(JSON.stringify(result)).not.toContain("private provider detail");
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+
   it("returns an exact compatible terminal receipt without claiming a lease or touching Azure", async () => {
     const { deps, calls } = rig({ recoveryStatus: compatibleTerminalReceipt() });
     const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Reconcile completed recovery.", acrName: "acr12" }, deps);

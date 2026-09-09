@@ -29,8 +29,10 @@ class ManagedAzureRecoveryError extends Error {
     this.name = "ManagedAzureRecoveryError";
     this.code = code;
     this.providerDetail = {};
-    if (typeof detail.stage === "string" && /^(PATCH_REQUEST|PATCH_RESPONSE|OPERATION_LOCATION|OPERATION_POLL|OPERATION_RESPONSE|OPERATION_TIMEOUT)$/.test(detail.stage)) this.providerDetail.patchStage = detail.stage;
-    if (typeof detail.code === "string" && /^AZURE_[A-Z0-9_]{1,100}$/.test(detail.code)) this.providerDetail.transportCode = detail.code;
+    const providerStage = detail.providerStage ?? detail.stage;
+    const dependencyCode = detail.dependencyCode ?? detail.code;
+    if (typeof providerStage === "string" && /^(PATCH_REQUEST|PATCH_RESPONSE|OPERATION_LOCATION|OPERATION_POLL|OPERATION_RESPONSE|OPERATION_TIMEOUT)$/.test(providerStage)) this.providerDetail.patchStage = providerStage;
+    if (typeof dependencyCode === "string" && /^AZURE_[A-Z0-9_]{1,100}$/.test(dependencyCode)) this.providerDetail.transportCode = dependencyCode;
     if (Number.isInteger(detail.providerStatus) && detail.providerStatus >= 100 && detail.providerStatus <= 599) {
       this.providerDetail.providerStatus = detail.providerStatus;
     }
