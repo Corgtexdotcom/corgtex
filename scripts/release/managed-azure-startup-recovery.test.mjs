@@ -116,4 +116,27 @@ describe("exact immutable revision projection", () => {
     const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-token" });
     expect((await transport.readRevisionState({ target, role: "web", revisionName: "web-app--old", expectedTemplate: expected })).kind).not.toBe("READY");
   });
+  it.each(["ready", "unready", "missing replicas", "wrong container", "inactive", "unhealthy", "unprovisioned", "unknown running state", "replica at max", "template drift"])("checks max-scale revision readiness with %s evidence", async (condition) => {
+    const expected = template("worker");
+    const properties = { template: revisionProjection(expected), active: true, provisioningState: "Provisioned",
+      healthState: "Healthy", runningState: "RunningAtMaxScale" };
+    const replicas = { value: [{ properties: { runningState: "Running", containers: [{ name: "worker", ready: true }] } }] };
+    if (condition === "unready") replicas.value[0].properties.containers[0].ready = false;
+    if (condition === "missing replicas") replicas.value = [];
+    if (condition === "wrong container") replicas.value[0].properties.containers[0].name = "other";
+    if (condition === "inactive") properties.active = false;
+    if (condition === "unhealthy") properties.healthState = "Unhealthy";
+    if (condition === "unprovisioned") properties.provisioningState = "Provisioning";
+    if (condition === "unknown running state") properties.runningState = "Unknown";
+    if (condition === "replica at max") replicas.value[0].properties.runningState = "RunningAtMaxScale";
+    if (condition === "template drift") properties.template.containers[0].image = image;
+    const fetchImpl = vi.fn(async (url) => String(url).includes("/replicas?")
+      ? Response.json(replicas) : Response.json({ name: "worker-app--old", properties }));
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-token" });
+    const result = transport.readRevisionState({ target, role: "worker", revisionName: "worker-app--old", expectedTemplate: expected });
+    if (condition === "template drift") await expect(result).rejects.toThrow("AZURE_REVISION_TEMPLATE_DRIFT");
+    else if (condition === "ready") await expect(result).resolves.toEqual({ kind: "READY" });
+    else expect((await result).kind).not.toBe("READY");
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
 });

@@ -442,7 +442,7 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
       && replica.properties.containers[0].runningState === "Waiting"
       && /^(?:CrashLoopBackOff|Container is waiting with reason: CrashLoopBackOff on [A-Za-z0-9.-]+\.)$/.test(replica.properties.containers[0].runningStateDetails));
     const kind = p.active === true && p.provisioningState === "Provisioned"
-      && p.healthState === "Healthy" && p.runningState === "Running" && ready ? "READY"
+      && p.healthState === "Healthy" && ["Running", "RunningAtMaxScale"].includes(p.runningState) && ready ? "READY"
       : !ready && (p.provisioningState === "Failed" || ["Failed", "ActivationFailed"].includes(p.runningState) || crashLoop) ? "FAILED"
         : p.active === true && ["Provisioning", "Provisioned"].includes(p.provisioningState)
           && ["Activating", "Processing", "Running"].includes(p.runningState) ? "PROVISIONING" : "UNKNOWN";

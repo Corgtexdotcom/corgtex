@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createManagedAzureContainerAppTransport,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
 import {
@@ -118,6 +119,24 @@ function rig({ plan = planFor(), created = true, revisionKinds = ["READY"], appS
 }
 
 describe("managed Azure recovery intent", () => {
+  it("reconciles an existing max-scale worker intent through real revision reads without recording or patching again", async () => {
+    const { deps, plan } = rig({ plan: planFor("worker") });
+    const fetchImpl = vi.fn(async (url) => String(url).includes("/replicas?")
+      ? Response.json({ value: [{ properties: { runningState: "Running", containers: [{ name: "worker-container", ready: true }] } }] })
+      : Response.json({ name: `${plan.intent.appName}--${plan.intent.revisionSuffix}`, properties: {
+        template: plan.template, active: true, provisioningState: "Provisioned", healthState: "Healthy", runningState: "RunningAtMaxScale",
+      } }));
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-token" });
+    deps.readRevisionState = transport.readRevisionState;
+    await expect(runManagedAzureRecoveryIntent(deps, { handle, reason: "Reconcile recorded compatible worker recovery.",
+      target, release, intent: plan.intent, template: plan.template, location: "West US", existing: true,
+    })).resolves.toStrictEqual({ intent: plan.intent, state: convergedState(plan), patched: false });
+    expect(deps.lease.mock.calls.some(([operation]) => operation === "record_recovery_intent")).toBe(false);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
+
   it("builds a stable canonical intent vector and binds the worker root contract gitSha", () => {
     const { intent, template } = planFor("worker");
 
