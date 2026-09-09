@@ -119,6 +119,13 @@ jobs:
             --targets "$TARGETS_INPUT" \
             --dry-run "$DRY_RUN_INPUT"
 
+      - name: Verify provider authority and settled protected Railway baselines
+        env:
+          TARGETS_INPUT: ${{ inputs.targets }}
+        run: |
+          node scripts/release/fleet-release-runner.mjs preflight-provider \
+            --targets "$TARGETS_INPUT"
+
       - name: Resolve release manifest
         id: manifest
         env:

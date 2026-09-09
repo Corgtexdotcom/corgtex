@@ -17,14 +17,21 @@ const DIGEST_REF = /@(sha256:[0-9a-f]{64})$/;
 const MAX_INT = 2_147_483_647;
 
 class ManagedAzureRecoveryError extends Error {
-  constructor(code) {
+  constructor(code, detail = {}) {
     super(code);
     this.name = "ManagedAzureRecoveryError";
     this.code = code;
+    this.providerDetail = {};
+    if (Number.isInteger(detail.providerStatus) && detail.providerStatus >= 100 && detail.providerStatus <= 599) {
+      this.providerDetail.providerStatus = detail.providerStatus;
+    }
+    if (typeof detail.providerCode === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(detail.providerCode)) {
+      this.providerDetail.providerCode = detail.providerCode;
+    }
   }
 }
 
-function fail(code) { throw new ManagedAzureRecoveryError(code); }
+function fail(code, detail) { throw new ManagedAzureRecoveryError(code, detail); }
 function same(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 
 function canonicalInput(value) {
@@ -292,9 +299,9 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
   });
   const handle = { deploymentId: input.deploymentId, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
   try {
-    const block = async (stage, code) => {
+    const block = async (stage, code, detail) => {
       await recordRecoveryOrFail(deps, handle, { stage, code, reason: input.reason });
-      fail(code);
+      fail(code, detail);
     };
     const rollback = await deps.lease("get_rollback", leaseArgs(handle));
     const baseline = releaseIdentity(status.release?.baselineImageTag, rollback?.previous?.releaseVersion);
@@ -326,7 +333,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       for (const role of ["web", "worker"]) {
         const activated = await deps.setRevisionActive({ target: status.target, role, revisionName: rollback.previous[role].readyRevision,
           active: true, onProgress: heartbeat });
-        if (!activated.terminal || !activated.succeeded) await block("FENCING", "MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS");
+        if (!activated.terminal || !activated.succeeded) await block("FENCING", "MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS", activated);
       }
       web = await classifyBaselineRole(deps, status, rollback, "web", baseline, rollbackSuffixes.web);
       worker = await classifyBaselineRole(deps, status, rollback, "worker", baseline, rollbackSuffixes.worker);
@@ -516,7 +523,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     fail("MANAGED_RELEASE_RECOVERY_MIXED_STATE_UNSUPPORTED");
   } catch (error) {
     if (error instanceof ManagedAzureRecoveryError) {
-      return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: error.code });
+      return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: error.code, ...error.providerDetail });
     }
     if (error instanceof ManagedAzureContainerAppError) {
       return Object.freeze({ status: "RECOVERY_BLOCKED", deploymentId: input.deploymentId, code: error.code });

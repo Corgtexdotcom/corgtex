@@ -21,6 +21,12 @@ const durableOpsRegistryEnv = {
 const azureObservabilityEnv = {
   APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.monitor.azure.com/",
 };
+const backupAppRailway = {
+  projectId: "0c843902-611a-4141-be91-b049a36d9617",
+  environmentId: "03856ec6-a881-47de-bd71-44207a266ac7",
+  webServiceId: "dafd9062-3f96-4a42-813a-c194ac867858",
+  workerServiceId: "42de000e-f64d-4700-9a07-05d0ca42873e",
+};
 
 function targetJson(overrides = {}) {
   return JSON.stringify([{
@@ -86,10 +92,15 @@ function selfServeRegistry(overrides = {}) {
 let railwayStages;
 beforeEach(() => { railwayStages = new Map(); });
 
+function railwayServiceRole(serviceId) {
+  if (serviceId === "web-1" || serviceId === "web-customer" || serviceId === backupAppRailway.webServiceId) return "web";
+  return "worker";
+}
+
 function railwayStage(serviceId) {
   if (!railwayStages.has(serviceId)) {
     const prior = { id: `prior-${serviceId}`, status: "SUCCESS" };
-    const role = serviceId === "web-1" ? "web" : "worker";
+    const role = railwayServiceRole(serviceId);
     const image = `ghcr.io/corgtexdotcom/corgtex/${role}:sha-${"a".repeat(40)}`;
     railwayStages.set(serviceId, {
       instance: {
@@ -118,7 +129,7 @@ function successfulRailwayResponse(body) {
   }
   if (body.query.includes("variableCollectionUpsert")) Object.assign(stage.variables, body.variables.variables);
   if (body.query.includes("serviceInstanceDeployV2")) {
-    const deployment = { id: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker", status: "SUCCESS" };
+    const deployment = { id: railwayServiceRole(body.variables.serviceId) === "web" ? "deploy-web" : "deploy-worker", status: "SUCCESS" };
     stage.instance.latestDeployment = deployment;
     stage.instance.activeDeployments = [deployment];
     stage.deployments.edges.unshift({ node: deployment });
@@ -126,7 +137,7 @@ function successfulRailwayResponse(body) {
       ok: true,
       json: async () => ({
         data: {
-          deploymentId: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker",
+          deploymentId: railwayServiceRole(body.variables.serviceId) === "web" ? "deploy-web" : "deploy-worker",
         },
       }),
     };
@@ -139,7 +150,7 @@ function successfulRailwayResponse(body) {
           deployments: {
             edges: [{
               node: {
-                id: body.variables.serviceId === "web-1" ? "deploy-web" : "deploy-worker",
+                id: railwayServiceRole(body.variables.serviceId) === "web" ? "deploy-web" : "deploy-worker",
                 status: "SUCCESS",
               },
             }],
@@ -475,6 +486,31 @@ describe("fleet release runner", () => {
     })).rejects.toThrow("SEED_SCRIPTS");
   });
 
+  it("requires durable GHCR credentials for non-dry-run backup-app releases", async () => {
+    await expect(runFleetRelease([
+      "validate-config",
+      "--release",
+      SHA,
+      "--targets",
+      "backup-app",
+    ], {
+      env: {
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({
+          id: "backup-app",
+          label: "Backup App",
+          group: "backup-app",
+          url: "https://app.corgtex.com",
+          railway: backupAppRailway,
+        }),
+        CONTROL_PLANE_AGENT_API_KEY: "control-plane-token",
+        RAILWAY_API_TOKEN: "railway-token",
+        GITHUB_TOKEN: "ephemeral-workflow-token",
+        ...railwayObservabilityEnv,
+      },
+      runCommand: vi.fn(),
+    })).rejects.toThrow("GHCR_IMPORT_TOKEN (durable backup-app package-read credential)");
+  });
+
   it("forces Railway release services into combined startup without validation seeds", async () => {
     expect(releaseVariables({
       releaseVersion: "main-c9077ff031e",
@@ -488,6 +524,21 @@ describe("fleet release runner", () => {
       CORGTEX_AUTO_SEED_JNJ_DEMO: "false",
       CORGTEX_AUTO_SEED_INTERNAL_VALIDATION: "false",
       SEED_SCRIPTS: "",
+    });
+  });
+
+  it("uses existing web startup mode for backup-app Railway releases", async () => {
+    expect(releaseVariables({
+      releaseVersion: "main-c9077ff031e",
+      imageTag: `sha-${SHA}`,
+      gitSha: SHA,
+    }, {}, {
+      startupMode: "web",
+    })).toEqual({
+      CORGTEX_RELEASE_VERSION: "main-c9077ff031e",
+      CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
+      CORGTEX_RELEASE_GIT_SHA: SHA,
+      CORGTEX_STARTUP_MODE: "web",
     });
   });
 
@@ -1117,7 +1168,7 @@ describe("fleet release runner", () => {
       runCommand,
       fetchImpl,
       sleep: vi.fn(),
-    })).rejects.toThrow("durable GHCR import token is missing for Ops image pull");
+    })).rejects.toThrow("durable GHCR package-read token is missing for Ops image pull");
     expect(runCommand).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -1305,6 +1356,72 @@ describe("fleet release runner", () => {
     expect(JSON.stringify(result)).not.toMatch(/token|password|username|deploymentId/i);
   });
 
+  it("preflights both protected groups, including the real backup workspace commands, without writes", async () => {
+    for (const serviceId of [backupAppRailway.webServiceId, backupAppRailway.workerServiceId]) {
+      railwayStage(serviceId).instance.startCommand = `npm run start --workspace=@corgtex/${railwayServiceRole(serviceId)}`;
+    }
+    const calls = [];
+    const result = await runFleetRelease(["preflight-provider", "--targets", "backup-app,ops"], {
+      env: {
+        FLEET_RELEASE_OPS_TARGET_JSON: targetJson(),
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup-app", railway: backupAppRailway }),
+        RAILWAY_API_TOKEN: "synthetic-token",
+      },
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body); calls.push(body);
+        return successfulRailwayResponse(body);
+      },
+    });
+    expect(result.targets.map((target) => target.targetId).sort()).toEqual(["backup-app", "ops"]);
+    expect(calls).toHaveLength(4);
+    expect(calls.every((call) => call.query.includes("query OpsStageReadback") && !call.query.includes("mutation"))).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/synthetic|password|username|startCommand/);
+  });
+
+  it.each([
+    ["wrong role command", (stage) => { stage.instance.startCommand = "npm run start --workspace=@corgtex/worker"; }],
+    ["extra shell command", (stage) => { stage.instance.startCommand = "npm run start --workspace=@corgtex/web && npm run seed"; }],
+    ["pre-deploy command", (stage) => { stage.instance.preDeployCommand = "npm run seed"; }],
+    ["pending deployment", (stage) => { stage.pending.edges.push({ node: { id: "pending", status: "BUILDING" } }); }],
+    ["missing registry authorization", (stage) => { stage.environment.config.services[backupAppRailway.webServiceId].deploy.registryCredentials = null; }],
+  ])("blocks backup-only provider preflight on %s before any mutation", async (_name, mutate) => {
+    const stage = railwayStage(backupAppRailway.webServiceId);
+    stage.instance.startCommand = "npm run start --workspace=@corgtex/web";
+    mutate(stage);
+    const calls = [];
+    await expect(runFleetRelease(["preflight-provider", "--targets", "backup-app"], {
+      env: {
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({ id: "backup-app", railway: backupAppRailway }),
+        RAILWAY_API_TOKEN: "synthetic-token",
+      },
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body); calls.push(body);
+        return successfulRailwayResponse(body);
+      },
+    })).rejects.toThrow("Railway staging");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].query).not.toContain("mutation");
+  });
+
+  it("rejects missing or duplicate protected target groups before provider calls", async () => {
+    for (const configured of [[], [JSON.parse(targetJson())[0], { ...JSON.parse(targetJson())[0], id: "other-backup" }]]) {
+      const fetchImpl = vi.fn();
+      await expect(runFleetRelease(["preflight-provider", "--targets", "backup-app"], {
+        env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), FLEET_RELEASE_BACKUP_APP_TARGET_JSON: JSON.stringify(configured) }, fetchImpl,
+      })).rejects.toThrow("backup-app provider preflight requires exactly one configured target");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("runs provider preflight in dry and actual protected workflows", () => {
+    for (const name of ["fleet-release", "fleet-release-preflight"]) {
+      const workflow = readFileSync(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+      const step = workflow.split("- name: Verify provider authority and settled protected Railway baselines")[1]?.split("\n      - ")[0];
+      expect(step).toContain("fleet-release-runner.mjs preflight-provider");
+      expect(step).not.toContain("if:");
+    }
+  });
+
   it.each(["startCommand", "preDeployCommand"])("rejects an Ops %s override during provider preflight", async (field) => {
     railwayStage("web-1").instance[field] = "unsafe override";
     const target = JSON.parse(targetJson())[0];
@@ -1482,6 +1599,105 @@ describe("fleet release runner", () => {
       "source:web-1", "read:web-1", "read:worker-1",
       "source:worker-1", "read:web-1", "read:worker-1",
       "deploy:web-1", "wait:web-1", "health", "read:worker-1", "deploy:worker-1", "wait:worker-1", "health",
+    ]);
+  });
+
+  it("stages backup-app with durable GHCR, web startup, and web health before worker deployment", async () => {
+    for (const serviceId of [backupAppRailway.webServiceId, backupAppRailway.workerServiceId]) {
+      railwayStage(serviceId).instance.startCommand = `npm run start --workspace=@corgtex/${railwayServiceRole(serviceId)}`;
+    }
+    const railwayCalls = [];
+    const operations = [];
+    const fetchImpl = vi.fn(async (url, options) => {
+      if (String(url).includes("backboard.railway.com")) {
+        const body = JSON.parse(options.body);
+        railwayCalls.push(body);
+        if (body.query.includes("OpsStageReadback")) {
+          operations.push(`read:${body.variables.serviceId}`);
+          return successfulRailwayResponse(body);
+        }
+        const response = successfulRailwayResponse(body);
+        const operation = body.query.includes("serviceInstanceUpdate") ? "source"
+          : body.query.includes("variableCollectionUpsert") ? "variables"
+            : body.query.includes("serviceInstanceDeployV2") ? "deploy" : "wait";
+        operations.push(`${operation}:${body.variables.serviceId}`);
+        return response;
+      }
+      operations.push("health");
+      return healthResponse();
+    });
+
+    const result = await runFleetRelease([
+      "deploy",
+      "--release",
+      SHA,
+      "--targets",
+      "backup-app",
+      "--reason",
+      "Release backup app for exact-main CI.",
+    ], {
+      env: {
+        FLEET_RELEASE_BACKUP_APP_TARGET_JSON: targetJson({
+          id: "backup-app",
+          deploymentId: null,
+          label: "Backup App",
+          group: "backup-app",
+          url: "https://app.corgtex.com",
+          railway: backupAppRailway,
+        }),
+        RAILWAY_API_TOKEN: "railway-token",
+        ...durableOpsRegistryEnv,
+        ...railwayObservabilityEnv,
+      },
+      runCommand: vi.fn(),
+      fetchImpl,
+      sleep: vi.fn(),
+    });
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].status).toBe("succeeded");
+
+    const updateCalls = railwayCalls.filter((call) => call.query.includes("serviceInstanceUpdate"));
+    expect(updateCalls.map((call) => [call.variables.serviceId, call.variables.input])).toEqual([
+      [backupAppRailway.webServiceId, {
+        source: { image: `ghcr.io/corgtexdotcom/corgtex/web:sha-${SHA}` },
+        registryCredentials: { username: "github-user", password: "synthetic-durable-import-token" },
+      }],
+      [backupAppRailway.workerServiceId, {
+        source: { image: `ghcr.io/corgtexdotcom/corgtex/worker:sha-${SHA}` },
+        registryCredentials: { username: "github-user", password: "synthetic-durable-import-token" },
+      }],
+    ]);
+
+    const variableCalls = railwayCalls.filter((call) => call.query.includes("variableCollectionUpsert"));
+    expect(variableCalls).toHaveLength(2);
+    for (const call of variableCalls) {
+      expect(call.query).toContain("replace: false");
+      expect(call.query).toContain("skipDeploys: true");
+      expect(call.variables.variables).toEqual({
+        CORGTEX_RELEASE_VERSION: `main-${SHA.slice(0, 12)}`,
+        CORGTEX_RELEASE_IMAGE_TAG: `sha-${SHA}`,
+        CORGTEX_RELEASE_GIT_SHA: SHA,
+        CORGTEX_STARTUP_MODE: "web",
+      });
+      expect(call.variables.variables).not.toHaveProperty("MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID");
+    }
+
+    const webDeploy = operations.indexOf(`deploy:${backupAppRailway.webServiceId}`);
+    const firstHealth = operations.indexOf("health");
+    const workerDeploy = operations.indexOf(`deploy:${backupAppRailway.workerServiceId}`);
+    expect(webDeploy).toBeGreaterThan(-1);
+    expect(firstHealth).toBeGreaterThan(webDeploy);
+    expect(workerDeploy).toBeGreaterThan(firstHealth);
+    expect(operations).toEqual([
+      `read:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.workerServiceId}`,
+      `variables:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.workerServiceId}`,
+      `variables:${backupAppRailway.workerServiceId}`, `read:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.workerServiceId}`,
+      `source:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.workerServiceId}`,
+      `source:${backupAppRailway.workerServiceId}`, `read:${backupAppRailway.webServiceId}`, `read:${backupAppRailway.workerServiceId}`,
+      `deploy:${backupAppRailway.webServiceId}`, `wait:${backupAppRailway.webServiceId}`, "health",
+      `read:${backupAppRailway.workerServiceId}`,
+      `deploy:${backupAppRailway.workerServiceId}`, `wait:${backupAppRailway.workerServiceId}`, "health",
     ]);
   });
 

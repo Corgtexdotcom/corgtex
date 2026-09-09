@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { buildManagedAzureReleaseTemplate, managedAzureRevisionSuffix, managedAzureTemplateDigest } from "./managed-azure-container-app-transport.mjs";
+import { createManagedAzureContainerAppTransport, buildManagedAzureReleaseTemplate, managedAzureRevisionSuffix, managedAzureTemplateDigest } from "./managed-azure-container-app-transport.mjs";
 import {
   managedAzureRecoveryCliResultAccepted,
   runManagedAzureReleaseRecovery,
@@ -318,7 +318,16 @@ describe("managed Azure release recovery", () => {
       origin: "https://selfserve.example", target, originatingLease: { leaseId: previousLeaseId, fence: 7 },
       recovery: { stage: "FENCING", code: "TRANSACTION_AMBIGUOUS" },
     } });
-    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Restore drained baseline revisions.", acrName: "acr12" }, deps);
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (init.method !== "GET") throw new Error("Already-active baseline must not receive an activation POST");
+      return String(url).includes("/replicas?") ? Response.json({ value: [{ name: "old" }] })
+        : Response.json({ properties: { active: true } });
+    });
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough" });
+    deps.setRevisionActive = vi.fn(transport.setRevisionActive);
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Reconcile already-active baseline revisions.", acrName: "acr12" }, deps);
+    expect(fetchImpl.mock.calls).toHaveLength(4);
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
     expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY",
       releaseImageTag: rollbackPayload.compatibleRecovery.imageTag });
     expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
@@ -334,6 +343,21 @@ describe("managed Azure release recovery", () => {
       acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/),
     }) }));
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+  });
+
+  it("retains sanitized activation rejection evidence without patching or clearing recovery", async () => {
+    const rollbackPayload = compatibleRollbackPayload();
+    const live = resumableSchemaV2State(rollbackPayload, { web: "BASELINE", worker: "BASELINE" });
+    const { deps } = rig({ rollbackPayload, readApp: live.readApp, patchTemplate: live.patchTemplate });
+    deps.setRevisionActive.mockResolvedValue({ terminal: true, succeeded: false, providerStatus: 403,
+      providerCode: "AuthorizationFailed", message: "private provider detail" });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Reconcile rejected activation safely.", acrName: "acr12" }, deps);
+    expect(result).toEqual({ status: "RECOVERY_BLOCKED", deploymentId,
+      code: "MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS", providerStatus: 403, providerCode: "AuthorizationFailed" });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ code: "MANAGED_RELEASE_RECOVERY_REACTIVATION_AMBIGUOUS" }));
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
   });
 
   it("routes a standard-policy V2 baseline through the approved compatible recovery", async () => {

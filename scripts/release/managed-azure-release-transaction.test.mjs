@@ -959,23 +959,82 @@ describe("managed Azure Container Apps transport", () => {
     expect(readback.revisionName).toBe("web-app--next"); expect(readback.templateDigest).toBe(managedAzureTemplateDigest(raw.properties.template));
   });
 
-  it("deactivates each exact baseline revision and proves zero replicas, reconciling a lost action reply", async () => {
-    const calls = [];
+  it.each([true, false])("skips a revision action when active=%s is already satisfied", async (active) => {
+    const fetchImpl = vi.fn(async (url) => String(url).includes("/replicas?")
+      ? Response.json({ value: active ? [{ name: "replica" }] : [] })
+      : Response.json({ properties: { active } }));
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough" });
+    await expect(transport.setRevisionActive({ target, role: "web", revisionName: "web-app--baseline", active })).resolves.toMatchObject({ terminal: true, succeeded: true, replicaCount: active ? 1 : 0 });
+    expect(fetchImpl.mock.calls).toHaveLength(2);
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
+
+  it.each(["lost", "rejected"])("reconciles a %s action response only after the exact desired state is observed", async (kind) => {
+    let changed = false;
     const fetchImpl = vi.fn(async (url, init) => {
-      calls.push({ url, method: init.method });
-      if (init.method === "POST" && calls.filter((call) => call.method === "POST").length === 1) throw new Error("lost reply");
-      if (init.method === "POST") return new Response(null, { status: 204 });
+      if (init.method === "POST") {
+        changed = true;
+        if (kind === "lost") throw new Error("private response lost");
+        return Response.json({ error: { code: "Conflict", message: "private provider detail" } }, { status: 409 });
+      }
       if (String(url).includes("/replicas?")) return Response.json({ value: [] });
+      return Response.json({ properties: { active: changed } });
+    });
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough" });
+    await expect(transport.setRevisionActive({ target, role: "web", revisionName: "web-app--baseline", active: true })).resolves.toEqual({ terminal: true, succeeded: true, code: "AZURE_REVISION_ACTIVE", replicaCount: 0 });
+    expect(fetchImpl.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
+    expect(fetchImpl.mock.calls.at(-1)[0]).toContain("/web-app--baseline/replicas?");
+  });
+
+  it("retains sanitized rejection evidence when readback confirms the action did not take effect", async () => {
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (init.method === "POST") return Response.json({ error: { code: "AuthorizationFailed", message: "private provider detail" } }, { status: 403 });
+      if (String(url).includes("/replicas?")) return Response.json({ value: [{ name: "old-worker" }] });
+      return Response.json({ properties: { active: true } });
+    });
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough" });
+    const result = await transport.setRevisionActive({ target, role: "worker", revisionName: `${target.workerAppName}--baseline`, active: false });
+    expect(result).toEqual({ terminal: true, succeeded: false, code: "AZURE_REVISION_ACTION_REJECTED", providerStatus: 403, providerCode: "AuthorizationFailed" });
+    expect(JSON.stringify(result)).not.toMatch(/private|old-worker/);
+    expect(fetchImpl.mock.calls.filter(([, init]) => init.method === "GET")).toHaveLength(4);
+  });
+
+  it.each(["replicas remain", "readback unavailable"])("retains ambiguity when %s after an accepted action", async (scenario) => {
+    let now = 0;
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (init.method === "POST") return new Response(null, { status: 204 });
+      if (scenario === "readback unavailable") return Response.json({}, { status: 503 });
+      if (String(url).includes("/replicas?")) return Response.json({ value: [{ name: "still-running" }] });
       return Response.json({ properties: { active: false } });
     });
-    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough", sleep: async () => {}, clock: (() => { let now = 0; return () => ++now; })() });
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough", clock: () => now, sleep: async () => { now += 60_000; } });
+    await expect(transport.setRevisionActive({ target, role: "worker", revisionName: `${target.workerAppName}--baseline`, active: false })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" });
+    expect(now).toBe(180_000);
+    expect(fetchImpl.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
+  });
+
+  it("deactivates each exact baseline revision and proves zero replicas, reconciling a lost action reply", async () => {
+    const calls = [];
+    const deactivated = new Set();
+    const fetchImpl = vi.fn(async (url, init) => {
+      calls.push({ url, method: init.method });
+      const revision = String(url).split("/revisions/")[1].split(/[/?]/)[0];
+      if (init.method === "POST") {
+        deactivated.add(revision);
+        if (deactivated.size === 1) throw new Error("lost reply");
+        return new Response(null, { status: 204 });
+      }
+      if (String(url).includes("/replicas?")) return Response.json({ value: deactivated.has(revision) ? [] : [{ name: "old" }] });
+      return Response.json({ properties: { active: !deactivated.has(revision) } });
+    });
+    const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: async () => "synthetic-access-token-long-enough" });
     const baselines = { worker: { revisionName: `${target.workerAppName}--worker-old` }, web: { revisionName: `${target.webAppName}--web-old` } };
     await expect(transport.drainBaseline({ target, baselines, onProgress: vi.fn() })).resolves.toEqual({ terminal: true, succeeded: true, code: "AZURE_BASELINE_PAIR_DRAINED" });
     expect(calls.filter((call) => call.method === "POST").map((call) => call.url)).toEqual([
       expect.stringContaining(`/containerApps/${target.workerAppName}/revisions/${target.workerAppName}--worker-old/deactivate?`),
       expect.stringContaining(`/containerApps/${target.webAppName}/revisions/${target.webAppName}--web-old/deactivate?`),
     ]);
-    expect(calls.filter((call) => String(call.url).includes("/replicas?")).length).toBe(2);
+    expect(calls.filter((call) => String(call.url).includes("/replicas?")).length).toBe(4);
   });
 
   it("uses bounded non-disclosing errors", () => {

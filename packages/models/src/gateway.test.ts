@@ -1899,3 +1899,297 @@ describe("openAICompatibleModelGateway", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); expect(vi.mocked(usageModule.recordModelUsage)).toHaveBeenCalledOnce(); expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 });
+
+describe("provider retry windows and operation deadlines", () => {
+  const request = { workspaceId: "ws-1", taskType: "CHAT" as const, messages: [{ role: "user" as const, content: "Hello" }] };
+  const extraction = { workspaceId: "ws-1", instruction: "Extract", input: "Fixture", schemaHint: "{ summary: string }" };
+  const success = (content = "ok") => new Response(JSON.stringify({
+    choices: [{ message: { content } }], usage: { prompt_tokens: 8, completion_tokens: 2 },
+  }));
+
+  async function setup(timeout = 180_000) {
+    Object.assign(process.env, {
+      MODEL_PROVIDER: "openai", MODEL_API_KEY: "fixture-key", MODEL_BASE_URL: "https://models.example.test/v1",
+      MODEL_CHAT_DEFAULT: "gpt-test", MODEL_TRANSCRIPTION_DEFAULT: "gpt-test", MODEL_REQUEST_TIMEOUT_MS: String(timeout),
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T00:00:00Z"));
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { openAICompatibleModelGateway: gateway } = await import("./openai-compatible-gateway");
+    const { recordModelUsage } = await import("./usage");
+    vi.mocked(recordModelUsage).mockClear();
+    return { gateway, recordModelUsage };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    [{ "Retry-After": "30" }, 30_000],
+    [{ "Retry-After": "Mon, 07 Sep 2026 00:00:30 GMT" }, 30_000],
+    [{ "Retry-After": "Monday, 07-Sep-26 00:00:30 GMT" }, 30_000],
+    [{ "retry-after-ms": "1500" }, 1500],
+    [{ "retry-after-ms": "1500", "Retry-After": "30" }, 30_000],
+    [{ "retry-after-ms": "40000", "Retry-After": "30" }, 40_000],
+    [{ "Retry-After": "-1", "retry-after-ms": "1.5" }, 250],
+    [{ "Retry-After": "Infinity", "retry-after-ms": "9007199254740992" }, 250],
+    [{ "Retry-After": "2026-09-07", "retry-after-ms": "-30" }, 250],
+    [{ "Retry-After": "0.5" }, 250],
+    [{ "Retry-After": "Tue, 31 Feb 2026 00:00:30 GMT" }, 250],
+    [{ "Retry-After": "Mon Sep  7 00:00:30 2026" }, 30_000],
+    [{}, 250],
+  ] satisfies Array<[Record<string, string>, number]>)("honors the longest valid hint %j", async (headers, delay) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("throttled", { status: 429, headers })).mockResolvedValueOnce(success());
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request);
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ content: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["61", "3600"])("surfaces an excessive %s-second hint without retrying", async (hint) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockResolvedValue(new Response("throttled", { status: 429, headers: { "Retry-After": hint } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(gateway.chat(request)).rejects.toThrow("request failed (429)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("adds only bounded nonnegative jitter and caps the final delay at 60 seconds", async () => {
+    const { gateway } = await setup();
+    vi.mocked(Math.random).mockReturnValue(0.99999);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("busy", { status: 503, headers: { "retry-after-ms": "59999" } })).mockResolvedValueOnce(success());
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ content: "ok" });
+  });
+
+  it("keeps two 30-second waits within the original deadline", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const times: number[] = [];
+    const start = Date.now();
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      times.push(Date.now() - start);
+      return times.length < 3 ? new Response("busy", { status: 429, headers: { "Retry-After": "30" } }) : success();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(result).resolves.toMatchObject({ content: "ok" });
+    expect(times).toEqual([0, 30_000, 60_000]);
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not partly wait when a provider delay exceeds the remaining deadline", async () => {
+    const { gateway, recordModelUsage } = await setup(45_000);
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("busy", { status: 429, headers: { "Retry-After": "30" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await result).toMatchObject({ message: expect.stringContaining("request failed (429)") });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves a caller's abort reason during a hinted wait and never fetches again", async () => {
+    const { gateway } = await setup();
+    const controller = new AbortController();
+    const reason = "caller cancelled";
+    const fetchMock = vi.fn().mockResolvedValue(new Response("busy", { status: 429, headers: { "Retry-After": "30" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat({ ...request, signal: controller.signal }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort(reason);
+    expect(await result).toBe(reason);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("expires a stalled response body at the original deadline without retrying", async () => {
+    const { gateway, recordModelUsage } = await setup(1000);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream()));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await result).toMatchObject({ name: "TimeoutError" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("uses the original 120-second stream deadline after a 30-second retry", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("busy", { status: 429, headers: { "Retry-After": "30" } }))
+      .mockResolvedValueOnce(new Response(new ReadableStream()));
+    vi.stubGlobal("fetch", fetchMock);
+    let settled = false;
+    const result = gateway.chatEventStream(request).next().catch((error: unknown) => { settled = true; return error; });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({ name: "TimeoutError" });
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves transcription fields and shares its deadline across retries", async () => {
+    const { gateway, recordModelUsage } = await setup(45_000);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("busy", { status: 429, headers: { "Retry-After": "30" } }))
+      .mockImplementationOnce(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.transcribeAudio({ workspaceId: "ws-1", fileName: "fixture.wav", data: Buffer.from("audio"), prompt: "Fixture", language: "en" }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const form = (fetchMock.mock.calls[1]?.[1] as RequestInit).body as FormData;
+    expect(form.get("prompt")).toBe("Fixture");
+    expect(form.get("language")).toBe("en");
+    expect(form.get("response_format")).toBe("json");
+    expect((form.get("file") as File).name).toBe("fixture.wav");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await result).toMatchObject({ name: "TimeoutError" });
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the extraction deadline and initial usage when repair stalls", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => setTimeout(() => resolve(success("malformed")), 179_000)))
+      .mockImplementationOnce(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.extract(extraction).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(179_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await result).toMatchObject({ name: "TimeoutError" });
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("records both completed extraction responses separately", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockResolvedValueOnce(success("malformed")).mockResolvedValueOnce(success('{"summary":"ok"}'));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(gateway.extract(extraction)).resolves.toMatchObject({ output: { summary: "ok" } });
+    expect(recordModelUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([429, 503, 400])("preserves retry count and omits usage on HTTP %s exhaustion", async (status) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("failed", { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await result).toBeInstanceOf(Error);
+    expect(fetchMock).toHaveBeenCalledTimes(status === 400 ? 1 : 3);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("completes a hinted stream retry within the remaining deadline", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("busy", { status: 429, headers: { "Retry-After": "30" } }))
+      .mockImplementationOnce(() => Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          setTimeout(() => {
+            controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
+            controller.close();
+          }, 89_000);
+        },
+      }))));
+    vi.stubGlobal("fetch", fetchMock);
+    const stream = gateway.chatEventStream(request);
+    const first = stream.next();
+    await vi.advanceTimersByTimeAsync(119_000);
+    await expect(first).resolves.toMatchObject({ done: false, value: { content: "ok" } });
+    await expect(stream.next()).resolves.toMatchObject({ done: true, value: { content: "ok" } });
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).signal).toBe((fetchMock.mock.calls[1]?.[1] as RequestInit).signal);
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels a pre-stream hinted wait without another fetch or usage", async () => {
+    const { gateway, recordModelUsage } = await setup();
+    const controller = new AbortController();
+    const reason = new Error("consumer cancelled");
+    const fetchMock = vi.fn().mockResolvedValue(new Response("busy", { status: 429, headers: { "Retry-After": "30" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chatEventStream({ ...request, signal: controller.signal }).next().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort(reason);
+    expect(await result).toBe(reason);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["caller", "deadline"])("stops buffered stream frames after %s cancellation", async (cause) => {
+    const { gateway, recordModelUsage } = await setup();
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('data: {"choices":[{"delta":{"content":"first"}}]}\n\ndata: {"choices":[{"delta":{"content":"second"}}]}\n\ndata: [DONE]\n\n')));
+    const stream = gateway.chatEventStream({ ...request, signal: controller.signal });
+    await expect(stream.next()).resolves.toMatchObject({ value: { content: "first" } });
+    if (cause === "caller") controller.abort("cancelled");
+    else await vi.advanceTimersByTimeAsync(120_000);
+    const error = await stream.next().catch((reason: unknown) => reason);
+    if (cause === "caller") expect(error).toBe("cancelled");
+    else expect(error).toMatchObject({ name: "TimeoutError" });
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([429, 503])("retains retry hints when an HTTP %s error body fails", async (status) => {
+    const { gateway, recordModelUsage } = await setup();
+    const broken = new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("fixture body failed")); } }), {
+      status, headers: { "Retry-After": "30" },
+    });
+    const fetchMock = vi.fn().mockResolvedValueOnce(broken).mockResolvedValueOnce(success());
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ content: "ok" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordModelUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([400, 429])("does not retry an unreadable HTTP %s response with a forbidden wait", async (status) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new ReadableStream({ start(controller) { controller.error(new TypeError("fixture body failed")); } }), {
+      status, headers: { "retry-after-ms": status === 400 ? "30000" : "61000" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(gateway.chat(request)).rejects.toThrow("fixture body failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("uses exponential fallback for network failures", async () => {
+    const { gateway } = await setup();
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError("offline")).mockRejectedValueOnce(new TypeError("offline")).mockResolvedValueOnce(success());
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.chat(request);
+    await vi.advanceTimersByTimeAsync(749);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ content: "ok" });
+  });
+});
