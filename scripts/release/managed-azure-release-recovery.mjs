@@ -234,7 +234,7 @@ async function classifyCompatibleRecoveryRole(deps, status, rollback, role, base
   return { kind: "UNKNOWN", state: null };
 }
 
-async function classifyLegacyWebRecovery(deps, status, rollback, baseline, recoveryRelease, primarySuffix, alternateSuffix) {
+async function classifyLegacyWebRecovery(deps, status, rollback, baseline, recoveryRelease, primarySuffix, alternateSuffix, consistencyFloor = null) {
   if (rollback.schemaVersion !== 2 || rollback.compatibleRecovery.activationPolicy !== "EXCLUSIVE") return { kind: "UNKNOWN", state: null };
   const recovery = rollback.compatibleRecovery;
   const latest = await deps.readAppTemplate({ target: status.target, role: "web", release: recoveryRelease, imageDigest: recovery.web.digest });
@@ -256,8 +256,24 @@ async function classifyLegacyWebRecovery(deps, status, rollback, baseline, recov
   const primaryRevision = await read(`${old.appName}--${primarySuffix}`, primaryTemplate);
   const alternateRevision = await read(`${old.appName}--${alternateSuffix}`, alternateTemplate);
   if (oldRevision.kind === "ABSENT" || primaryRevision.kind === "ABSENT") fail("MANAGED_RELEASE_RECOVERY_WEB_DRIFT");
+  if (consistencyFloor && (!isAlternate
+    || !["PROVISIONING", "READY"].includes(alternateRevision.kind)
+    || (consistencyFloor === "READY" && alternateRevision.kind !== "READY"))) {
+    fail("MANAGED_RELEASE_RECOVERY_SNAPSHOT_INCONSISTENT");
+  }
   if (isAlternate && latest.latestReadyRevisionName === latest.state.revisionName && alternateRevision.kind === "READY") {
     return { kind: "COMPATIBLE_RECOVERY", state: latest.state, revisionSuffix: alternateSuffix };
+  }
+  // Single mode can advance between the app and exact revision reads. Re-read
+  // the complete projection once, only for the approved forward transition;
+  // this path cannot reopen initial PATCH eligibility or hide a failed alternate.
+  const advancingSnapshot = latest.latestReadyRevisionName === rollback.previous.web.readyRevision
+    && ((alternateRevision.kind === "READY" && ["READY", "UNKNOWN"].includes(oldRevision.kind))
+      || (!isAlternate && alternateRevision.kind === "PROVISIONING" && oldRevision.kind === "READY"));
+  if (advancingSnapshot) {
+    if (consistencyFloor) fail("MANAGED_RELEASE_RECOVERY_SNAPSHOT_INCONSISTENT");
+    return classifyLegacyWebRecovery(deps, status, rollback, baseline, recoveryRelease,
+      primarySuffix, alternateSuffix, alternateRevision.kind);
   }
   if (oldRevision.kind !== "READY" || latest.latestReadyRevisionName !== rollback.previous.web.readyRevision) fail("MANAGED_RELEASE_RECOVERY_BASELINE_NOT_READY");
   const health = await deps.healthProbe({ origin: status.origin, release: baseline });

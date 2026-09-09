@@ -1014,6 +1014,47 @@ describe("legacy v2 migration-startup recovery", () => {
     expect(deps.patchTemplate.mock.calls.map(([input]) => input.role)).toEqual(["worker"]);
   });
   it.each([
+    { latest: "primary", alternate: "PROVISIONING", oldState: "READY" },
+    { latest: "primary", alternate: "READY", oldState: "UNKNOWN" },
+    { latest: "alternate", alternate: "READY", oldState: "UNKNOWN", primaryState: "UNKNOWN" },
+  ])("reconciles one complete advancing snapshot without replaying web PATCH: %j", async ({ latest, alternate, oldState, primaryState }) => {
+    const { deps, live } = legacyPartialRecovery({ latest, oldState, primaryState });
+    const readAppTemplate = deps.readAppTemplate.getMockImplementation();
+    deps.readAppTemplate.mockImplementationOnce(async () => {
+      const snapshot = await readAppTemplate();
+      live.latest = "alternate";
+      live.alternate = alternate;
+      return snapshot;
+    });
+    expect(await runManagedAzureReleaseRecovery(request, deps)).toMatchObject({ status: "RECOVERY_CLEARED" });
+    expect(deps.readAppTemplate.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(deps.readRevisionState.mock.calls.slice(0, 3)).toEqual(deps.readRevisionState.mock.calls.slice(3, 6));
+    expect(deps.patchTemplate.mock.calls.map(([input]) => input.role)).toEqual(["worker"]);
+  });
+  it.each(["persistent", "still-mixed", "backward", "regressed", "failed", "unknown", "drift"])("blocks a second inconsistent snapshot without mutation: %s", async (change) => {
+    const { deps, live } = legacyPartialRecovery();
+    const readAppTemplate = deps.readAppTemplate.getMockImplementation();
+    deps.readAppTemplate.mockImplementationOnce(async () => {
+      const snapshot = await readAppTemplate();
+      live.alternate = "READY";
+      return snapshot;
+    }).mockImplementationOnce(async () => {
+      if (change !== "persistent") live.latest = "alternate";
+      if (change === "backward") live.alternate = "ABSENT";
+      if (change === "regressed") live.alternate = "PROVISIONING";
+      if (change === "failed") live.alternate = "FAILED";
+      if (change === "unknown") live.alternate = "UNKNOWN";
+      const snapshot = await readAppTemplate();
+      if (change === "still-mixed") snapshot.latestReadyRevisionName = rollback.previous.web.readyRevision;
+      if (change === "drift") snapshot.state.templateDigest = `sha256:${"0".repeat(64)}`;
+      return snapshot;
+    });
+    expect(await runManagedAzureReleaseRecovery(request, deps)).toMatchObject({ status: "RECOVERY_BLOCKED" });
+    expect(deps.readAppTemplate).toHaveBeenCalledTimes(2);
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+  it.each([
     { oldState: "UNKNOWN" }, { primaryState: "PROVISIONING" }, { primaryState: "UNKNOWN" },
     { projectionDrift: true }, { unhealthyBaseline: true },
     { latest: "alternate", alternate: "FAILED" }, { latest: "alternate", alternate: "UNKNOWN" },
