@@ -14,6 +14,8 @@ const RELEASE_ENV = Object.freeze([
   "CORGTEX_RELEASE_IMAGE_TAG",
   "CORGTEX_RELEASE_VERSION",
 ]);
+const RUNTIME_GITHUB_SHA_ENV = "GITHUB_SHA";
+const LOWERCASE_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 export class ManagedAzureContainerAppError extends Error {
   constructor(code, ambiguous = false) {
@@ -120,6 +122,13 @@ function assertReleaseEnvironment(container, release) {
   }
 }
 
+function applyRuntimeGithubShaIdentity(entries, release, preserveRuntimeIdentity) {
+  const entry = entries.get(RUNTIME_GITHUB_SHA_ENV);
+  if (!entry) return;
+  if (Object.keys(entry).some((key) => !["name", "value"].includes(key)) || typeof entry.value !== "string" || !LOWERCASE_GIT_SHA_PATTERN.test(entry.value)) fail("AZURE_TEMPLATE_INVALID");
+  if (!preserveRuntimeIdentity) entry.value = release.gitSha;
+}
+
 function appNameFor(target, role) {
   return role === "web" ? target.webAppName : target.workerAppName;
 }
@@ -192,10 +201,10 @@ export function managedAzureRevisionSuffix({ leaseId, fence, role, phase, genera
   return suffix;
 }
 
-export function buildManagedAzureReleaseTemplate({ baseline, role, image, release, revisionSuffix, migrateWeb = false }) {
+export function buildManagedAzureReleaseTemplate({ baseline, role, image, release, revisionSuffix, migrateWeb = false, preserveRuntimeIdentity = false }) {
   const canonicalRelease = releaseValue(release);
   if (!baseline?.template || baseline.role !== role || typeof image !== "string" || !/^[a-z0-9]+\.azurecr\.io\/corgtex\/(web|worker)@sha256:[0-9a-f]{64}$/.test(image)
-    || !(revisionSuffix === "" || /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(revisionSuffix))) fail("AZURE_TEMPLATE_INVALID");
+    || !(revisionSuffix === "" || /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(revisionSuffix)) || typeof preserveRuntimeIdentity !== "boolean") fail("AZURE_TEMPLATE_INVALID");
   const template = safeJsonClone(baseline.template);
   template.revisionSuffix = revisionSuffix;
   const container = template.containers[0];
@@ -217,6 +226,7 @@ export function buildManagedAzureReleaseTemplate({ baseline, role, image, releas
     if (!entry || Object.keys(entry).some((key) => !["name", "value"].includes(key))) fail("AZURE_TEMPLATE_INVALID");
     entry.value = expected[name];
   }
+  applyRuntimeGithubShaIdentity(entries, canonicalRelease, preserveRuntimeIdentity);
   return template;
 }
 

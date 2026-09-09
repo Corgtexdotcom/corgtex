@@ -382,6 +382,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
     getManagedReleaseTargetPreflight: vi.fn(),
     heartbeatManagedReleaseLease: vi.fn(),
     markManagedReleaseRecoveryRequired: vi.fn(),
+    recordManagedReleaseRecoveryIntent: vi.fn(),
     recordManagedReleaseRollbackRecord: vi.fn(),
   },
 }));
@@ -9397,6 +9398,20 @@ describe("managed Azure release control-plane boundary", () => {
       reason: "Approved exact-target release.",
     })).resolves.toMatchObject({ fence: 1 });
     expect(leaseMocks.acquireManagedReleaseLease).toHaveBeenCalledWith(expect.objectContaining({ expectedTargetDigest: "c".repeat(64) }));
+    leaseMocks.recordManagedReleaseRecoveryIntent.mockResolvedValue({ deploymentId, phase: "RECOVERY_REQUIRED", created: true });
+    await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
+      operation: "record_recovery_intent",
+      deploymentId,
+      leaseId: "lease-1",
+      capability: "capability",
+      fence: 1,
+      intent: { role: "web" },
+      reason: "Record durable compatible recovery write intent.",
+    })).resolves.toMatchObject({ created: true });
+    expect(leaseMocks.recordManagedReleaseRecoveryIntent).toHaveBeenCalledWith(
+      { deploymentId, leaseId: "lease-1", capability: "capability", fence: 1 },
+      { role: "web" },
+    );
     await expect(runControlPlaneManagedReleaseLeaseOperation(actor, {
       operation: "acquire",
       deploymentId,

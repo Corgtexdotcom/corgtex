@@ -74,6 +74,7 @@ import {
   getManagedReleaseTargetPreflight,
   heartbeatManagedReleaseLease,
   markManagedReleaseRecoveryRequired,
+  recordManagedReleaseRecoveryIntent,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
 import { assertCustomerAssignableWorkspaceSlug, MANAGED_RELEASE_OPERATIONAL_WORKSPACE_SLUG } from "./workspace-slugs";
@@ -11681,6 +11682,8 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
       return getManagedReleaseRecoveryStatus(params.deploymentId as string, managedReleaseAcr(params));
     case "record_rollback":
       return recordManagedReleaseRollbackRecord(managedReleaseHandle(params), params.rollback);
+    case "record_recovery_intent":
+      return recordManagedReleaseRecoveryIntent(managedReleaseHandle(params), params.intent);
     case "begin":
       return beginManagedReleaseMutation(managedReleaseHandle(params));
     case "abort":
