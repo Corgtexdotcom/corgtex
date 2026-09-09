@@ -69,7 +69,7 @@ function state(role, kind, expectedTemplate = null) {
     revisionSuffix: selected.revisionSuffix,
     containerName: role,
     image: selected.containers[0].image,
-    imageDigest: kind === "BASELINE" ? baseDigest : nextDigest,
+    imageDigest: selected.containers[0].image.split("@")[1],
     template: selected,
     templateDigest: managedAzureTemplateDigest(selected),
   };
@@ -123,12 +123,17 @@ function dependencies(options = {}) {
   const current = { web: "BASELINE", worker: "BASELINE" };
   const currentTemplates = { web: null, worker: null };
   let patchCount = 0;
+  const intents = new Map();
+  const pendingRoles = new Set();
+  const releaseKind = (sha) => sha === baseSha ? "BASELINE" : sha === recoverySha ? "RECOVERY" : "FORWARD";
   const hosted = options.hosted !== false;
   const targetDigest = "7".repeat(64);
   const deployment = { deploymentId, deploymentKind: hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: hosted ? "hosted-dedicated" : "managed-customers", workload: hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
-  const preflight = { deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 1 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
   const deps = {
     owner: "github:42:1",
+    intentClock: () => 0,
+    intentSleep: async () => {},
     templateDigest: managedAzureTemplateDigest,
     loadInventory: vi.fn(async (request) => { if (request.workloadClass === "ACTIVE_CLIENT_CANARY") Object.assign(deployment, { workloadClass: request.workloadClass, deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", workload: "active-client-canary", releaseEligible: false }); return ({ inventoryRef, sha256: input.inventorySha256, bytesBase64: inventoryBytesBase64, evaluation: {
       workloadClass: request.workloadClass,
@@ -145,6 +150,13 @@ function dependencies(options = {}) {
       if (operation === "preflight") return preflight;
       if (operation === "acquire") return { deploymentId, leaseId, capability: "private-capability", fence: 7 };
       if (operation === "get_target") return { deploymentId, deployment: options.leasedDeployment ?? deployment, authorityDigest: options.leasedAuthorityDigest ?? "e".repeat(64), targetDigest: options.leasedTargetDigest ?? targetDigest, target: options.leasedTarget ?? target, release: { baselineImageTag: `sha-${baseSha}` } };
+      if (operation === "record_recovery_intent") {
+        const prior = intents.get(args.intent.role);
+        if (prior && canonicalJson(prior) !== canonicalJson(args.intent)) throw new Error("intent conflict");
+        intents.set(args.intent.role, structuredClone(args.intent));
+        if (options.lostIntentReceipt) throw new Error("lost receipt");
+        return { deploymentId, leaseId, fence: 7, phase: "RECOVERY_REQUIRED", created: !prior, intent: args.intent };
+      }
       if (operation === "finalize_compatible_recovery") return { status: "RECOVERED_COMPATIBLE", fence: 7 };
       if (operation === "finalize_rollback") return { status: "ROLLED_BACK", fence: 7 };
       return { deploymentId, operation, args };
@@ -161,7 +173,7 @@ function dependencies(options = {}) {
     readApp: vi.fn(async ({ role, release }) => {
       events.push(`read:${role}:${release.imageTag === `sha-${baseSha}` ? "base" : "next"}`);
       if (current[role] === "UNKNOWN") throw new Error("private-provider-state");
-      const wanted = release.imageTag === `sha-${baseSha}` ? "BASELINE" : "FORWARD";
+      const wanted = releaseKind(release.gitSha);
       if (current[role] !== wanted) throw new Error("state-mismatch");
       return state(role, wanted, currentTemplates[role]);
     }),
@@ -173,16 +185,26 @@ function dependencies(options = {}) {
       const configured = options.patchResults?.[patchCount - 1];
       if (configured) {
         if (configured.state) current[role] = configured.state;
+        if (configured.materializes) currentTemplates[role] = candidate;
+        if (!configured.result.terminal && !configured.materializes) pendingRoles.add(role);
         return configured.result;
       }
-      current[role] = phase === "forward" ? "FORWARD" : "BASELINE";
+      current[role] = releaseKind(releaseEntry.value);
       currentTemplates[role] = candidate;
       return { terminal: true, succeeded: true, code: "AZURE_PATCH_SUCCEEDED" };
     }),
+    readRevisionState: vi.fn(async ({ role, revisionName, expectedTemplate }) => {
+      if (options.rollbackReadbackFails) throw new ManagedAzureContainerAppError("AZURE_READ_FAILED");
+      const actual = currentTemplates[role];
+      if (!actual || revisionName !== `${role === "web" ? target.webAppName : target.workerAppName}--${actual.revisionSuffix}`) return { kind: "ABSENT" };
+      if (managedAzureTemplateDigest(actual) !== managedAzureTemplateDigest(expectedTemplate)) return { kind: "UNKNOWN" };
+      return { kind: "READY" };
+    }),
     waitForState: vi.fn(async ({ role, release, expectedTemplate }) => {
       events.push(`wait:${role}:${release.imageTag === `sha-${baseSha}` ? "base" : "next"}`);
+      if (pendingRoles.has(role)) throw new Error("readback timeout");
       if (options.rollbackReadbackFails && release.imageTag === `sha-${baseSha}`) throw new Error("rollback readback failed");
-      current[role] = release.imageTag === `sha-${baseSha}` ? "BASELINE" : "FORWARD";
+      current[role] = releaseKind(release.gitSha);
       currentTemplates[role] = expectedTemplate;
       return state(role, current[role], expectedTemplate);
     }),
@@ -195,6 +217,35 @@ function dependencies(options = {}) {
 }
 
 describe("managed Azure single-target transaction", () => {
+  it("stops against an older control plane before acquisition or provider effects", async () => {
+    const { deps } = dependencies({ protocolVersion: undefined });
+    await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps))
+      .rejects.toMatchObject({ code: "RECOVERY_INTENT_PROTOCOL_UNAVAILABLE" });
+    expect(deps.lease.mock.calls.map(([operation]) => operation)).toEqual(["preflight"]);
+    expect(deps.resolveRelease).not.toHaveBeenCalled();
+    expect(deps.readApp).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+
+  it("verifies an accepted pending forward write through its known app without replay", async () => {
+    const { deps } = dependencies({ patchResults: [{ state: "FORWARD", materializes: true,
+      result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_LOCATION_INVALID", providerStatus: 202 } }] });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result.status).toBe("SUCCEEDED");
+    expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web", "worker"]);
+    expect(deps.waitForState).toHaveBeenCalledWith(expect.objectContaining({ role: "web", release: transportNextRelease }));
+  });
+
+  it("does not issue a recovery PATCH when recording its intent has an uncertain acknowledgement", async () => {
+    const { deps, events } = dependencies({ lostIntentReceipt: true,
+      patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED" } }] });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "RECOVERY_INTENT_RECORDING_UNCERTAIN" });
+    expect(events.filter((event) => event.startsWith("patch:"))).toEqual(["patch:web:forward", "patch:worker:forward"]);
+    expect(deps.lease).toHaveBeenCalledWith("record_recovery_intent", expect.objectContaining({ intent: expect.objectContaining({ role: "web" }) }));
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+  });
+
   it("rejects a seeding web startup mode before EXCLUSIVE drain or any app PATCH", async () => {
     const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
     const read = deps.readApp.getMockImplementation();
@@ -695,8 +746,8 @@ describe("managed Azure single-target transaction", () => {
       patchResults: [{ state: "UNKNOWN", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
-    expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ stage: "WEB", code: "AZURE_OPERATION_TIMEOUT" }));
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "WEB_READBACK_AMBIGUOUS", providerCode: "OperationTimedOut" });
+    expect(deps.lease).toHaveBeenCalledWith("mark_recovery", expect.objectContaining({ stage: "WEB", code: "WEB_READBACK_AMBIGUOUS" }));
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
@@ -705,17 +756,17 @@ describe("managed Azure single-target transaction", () => {
       patchResults: [{ state: "BASELINE", result: { terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "AZURE_OPERATION_TIMEOUT", providerCode: "OperationTimedOut" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "WEB", code: "WEB_READBACK_AMBIGUOUS", providerCode: "OperationTimedOut" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
   });
 
-  it("retains the forward provider diagnostic when rollback readback is ambiguous", async () => {
+  it("reports the actual recovery read failure without masking it with prior PATCH metadata", async () => {
     const { deps } = dependencies({
       rollbackReadbackFails: true,
       patchResults: [null, { state: "BASELINE", result: { terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" } }],
     });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "WORKER", code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "READBACK", code: "RECOVERY_INTENT_REVISION_READ_FAILED", dependencyCode: "AZURE_READ_FAILED" });
   });
 
   it("aborts a pre-mutation reservation when the leased target differs from preflight", async () => {

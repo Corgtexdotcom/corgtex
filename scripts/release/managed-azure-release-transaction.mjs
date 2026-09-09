@@ -15,6 +15,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
+import { ManagedAzureRecoveryIntentError, buildManagedAzureRecoveryIntent, runManagedAzureRecoveryIntent } from "./managed-azure-recovery-intent.mjs";
 import { createManagedAzureProviderObservation } from "./managed-azure-provider-runtime.mjs";
 import { createManagedAzureSourceManifestResolver } from "./managed-azure-source-manifest-resolver.mjs";
 
@@ -51,6 +52,7 @@ function diagnosticOperationId(leaseId, gitSha, purpose) {
 function preflightProjection(preflight) {
   return Object.freeze({
     deploymentId: preflight.deploymentId,
+    ...(preflight.writeIntentProtocolVersion === undefined ? {} : { writeIntentProtocolVersion: preflight.writeIntentProtocolVersion }),
     ...(preflight.deployment ? { deployment: preflight.deployment } : {}),
     authorityDigest: preflight.authorityDigest,
     origin: preflight.origin,
@@ -204,6 +206,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     || preflight.deployment?.workloadClass !== input.workloadClass
     || !["HOSTED_DEDICATED", "REMOTE_MANAGED"].includes(preflight.deployment?.deploymentKind)) fail("MANAGED_RELEASE_TARGET_INVALID");
   const protectedHosted = input.workloadClass === "ACTIVE_CLIENT_PRIMARY" && preflight.deployment.deploymentKind === "HOSTED_DEDICATED";
+  if (protectedHosted && preflight.writeIntentProtocolVersion !== 1) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
   const configured = protectedHosted
     ? await deps.targetConfig({ deploymentId: input.deploymentId, execute: false, reason: input.reason })
     : { status: "RECONCILIATION_READY", effects: 0, target: { acrName: input.acrName, acrResourceGroup: input.acrResourceGroup, activationPolicy: "STANDARD" } };
@@ -356,25 +359,28 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     for (const role of ["web", "worker"]) {
       const current = classified[role].state;
       if (!current) return markRecovery("ROLLBACK", "COMPATIBLE_RECOVERY_STATE_AMBIGUOUS", detail);
-      const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "rollback" });
-      const template = buildManagedAzureReleaseTemplate({
-        baseline: current,
-        role,
-        image: recoveryPlan.roles[role].image,
-        release: recoveryRelease,
-        revisionSuffix: suffix,
-        migrateWeb: true,
-      });
-      assertManagedAzureTemplateDelta(current, template, { role, image: recoveryPlan.roles[role].image, release: recoveryRelease, revisionSuffix: suffix, migrateWeb: true });
-      recoveryTemplates[role] = template;
-      const patched = await deps.patchTemplate({ target: preflight.target, role, location: current.location, template, onProgress: recoveryHeartbeat });
-      const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
-      if (!patched.terminal || !patched.succeeded) return markRecovery("ROLLBACK", patched.code ?? code, rollbackDetail);
-      await recoveryHeartbeat();
       try {
-        await deps.waitForState({ target: preflight.target, role, release: recoveryRelease, imageDigest: recoveryPlan.roles[role].digest, expectedTemplate: template, onProgress: recoveryHeartbeat });
-      } catch { return markRecovery("ROLLBACK", "ROLLBACK_READBACK_AMBIGUOUS", rollbackDetail); }
-      await recoveryHeartbeat();
+        const plan = buildManagedAzureRecoveryIntent({ originatingLease: handle, target: preflight.target, role,
+          predecessor: current, release: recoveryRelease, image: recoveryPlan.roles[role].image,
+          imageDigest: recoveryPlan.roles[role].digest });
+        recoveryTemplates[role] = plan.template;
+        await runManagedAzureRecoveryIntent(deps, { handle, reason: input.reason, target: preflight.target,
+          release: recoveryRelease, ...plan, location: current.location });
+        if (role === "web") {
+          const health = await deps.healthProbe({ origin: preflight.origin, release: recoveryRelease });
+          if (!health.ok) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_HEALTH_FAILED", detail);
+        }
+      } catch (error) {
+        if (error instanceof ManagedAzureRecoveryIntentError) return markRecovery("READBACK", error.code, error.detail);
+        return markRecovery("ROLLBACK", "COMPATIBLE_RECOVERY_STATE_AMBIGUOUS", detail);
+      }
+    }
+    for (const role of ROLES) {
+      const current = await deps.readApp({ target: preflight.target, role, release: recoveryRelease,
+        imageDigest: recoveryPlan.roles[role].digest });
+      if (current.templateDigest !== managedAzureTemplateDigest(recoveryTemplates[role])) {
+        return markRecovery("READBACK", "RECOVERY_INTENT_FINAL_READBACK_DRIFT", detail);
+      }
     }
     const health = await deps.healthProbe({ origin: preflight.origin, release: recoveryRelease });
     if (!health.ok) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_HEALTH_FAILED", detail);
@@ -530,13 +536,17 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await heartbeat();
     firstForwardPatchAttempted = true;
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
-    if (!webPatch.terminal) return markRecovery("WEB", webPatch.code ?? "WEB_PATCH_AMBIGUOUS",
-      webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
-    if (!webPatch.succeeded) return compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates,
+    // The rollback record and mutation fence already bind this exact forward
+    // write. An accepted/pending response proceeds to known-resource readback.
+    if (webPatch.terminal && !webPatch.succeeded) return compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates,
       webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
     await heartbeat();
     try { await deps.waitForState({ target: preflight.target, role: "web", release: nextRelease, imageDigest: releasePlan.roles.web.digest, expectedTemplate: forwardTemplates.web, onProgress: heartbeat }); }
-    catch { return compensate("WEB", "WEB_READBACK_AMBIGUOUS", forwardTemplates); }
+    catch {
+      const detail = webPatch.providerCode ? { providerCode: webPatch.providerCode } : {};
+      if (!webPatch.terminal) return markRecovery("WEB", "WEB_READBACK_AMBIGUOUS", detail);
+      return compensate("WEB", "WEB_READBACK_AMBIGUOUS", forwardTemplates, detail);
+    }
     await heartbeat();
     const workerBefore = await classifyRole("worker", forwardTemplates.worker);
     const webBefore = await classifyRole("web", forwardTemplates.web);
@@ -544,16 +554,18 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     await heartbeat();
 
     const workerPatch = await deps.patchTemplate({ target: preflight.target, role: "worker", location: baselines.worker.location, template: forwardTemplates.worker, onProgress: heartbeat });
-    if (!workerPatch.terminal) return markRecovery("WORKER", workerPatch.code ?? "WORKER_PATCH_AMBIGUOUS",
-      workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
-    if (!workerPatch.succeeded) return compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates,
+    if (workerPatch.terminal && !workerPatch.succeeded) return compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates,
       workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
     await heartbeat();
     try {
       await deps.waitForState({ target: preflight.target, role: "worker", release: nextRelease, imageDigest: releasePlan.roles.worker.digest, expectedTemplate: forwardTemplates.worker, onProgress: heartbeat });
       await heartbeat();
       await deps.waitForState({ target: preflight.target, role: "web", release: nextRelease, imageDigest: releasePlan.roles.web.digest, expectedTemplate: forwardTemplates.web, onProgress: heartbeat });
-    } catch { return compensate("READBACK", "FINAL_READBACK_AMBIGUOUS", forwardTemplates); }
+    } catch {
+      const detail = workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {};
+      if (!workerPatch.terminal) return markRecovery("READBACK", "FINAL_READBACK_AMBIGUOUS", detail);
+      return compensate("READBACK", "FINAL_READBACK_AMBIGUOUS", forwardTemplates, detail);
+    }
     await heartbeat();
     const health = await deps.healthProbe({ origin: preflight.origin, release: nextRelease });
     if (!health.ok) return compensate("OBSERVATION", health.code ?? "HEALTH_PROBE_FAILED", forwardTemplates);
@@ -678,6 +690,8 @@ function runtimeDependencies(env = process.env) {
     targetConfig: ({ deploymentId, reason }) => callControlPlane("reconcile_managed_azure_target", { deploymentId, execute: false, reason }, env),
     lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
     readApp: apps.readApp,
+    readRevisionState: apps.readRevisionState,
+    readAppTemplate: apps.readAppTemplate,
     patchTemplate: apps.patchTemplate,
     waitForState: apps.waitForState,
     drainBaseline: apps.drainBaseline,

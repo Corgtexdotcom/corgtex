@@ -5,6 +5,11 @@ import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import { AppError } from "./errors";
 import { activeManagedAzureDeployment, managedAzureReleaseDeployment, managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { canonicalizeManagedAzureRollbackPayload, type ManagedAzureRollbackPayload } from "./managed-azure-recovery-payload";
+import {
+  canonicalizeManagedReleaseRecoveryIntent,
+  MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
+  type ManagedReleaseRecoveryIntent,
+} from "./managed-azure-recovery-intent";
 import { createManagedReleaseProofReader } from "./managed-release-proof-support";
 import { assertManagedAzureTargetBinding, managedAzureRecoveryAuthorityDigest, managedAzureTargetDigest, requireManagedAzureAccountAuthority } from "./managed-azure-targets";
 const IMAGE_TAG = /^sha-[0-9a-f]{40}$/;
@@ -22,6 +27,8 @@ type LockedDeployment = CustomerDeployment & { databaseNow: Date; rollbackRecord
 type LeaseHandle = { deploymentId: string; leaseId: string; capability: string; fence: number };
 type AcrIdentity = { acrName: string; acrServer: string };
 type RecoveryEvidence = { stage: typeof RECOVERY_STAGES[number]; code: string };
+type RecoveryEvidenceV2 = RecoveryEvidence & { schemaVersion: 2; intents: readonly ManagedReleaseRecoveryIntent[] };
+type StoredRecoveryEvidence = RecoveryEvidence | RecoveryEvidenceV2;
 type ReleaseProvenance = ReturnType<typeof releaseProvenance>;
 type AcquisitionProof = Readonly<{ provenance: ReleaseProvenance | null; targetDigest: string | null; recoveryAuthorityDigest: string | null }>;
 type RollbackEnvelope = Readonly<{ provenance: ReleaseProvenance | null; leaseId: string; fence: number; payload: Readonly<ManagedAzureRollbackPayload> }>;
@@ -59,12 +66,78 @@ function validateHandle(handle: LeaseHandle) {
   requireInput(typeof handle.capability === "string" && handle.capability.length > 0 && handle.capability.length <= 512);
   requireInput(Number.isSafeInteger(handle.fence) && handle.fence > 0 && handle.fence <= MAX_INT);
 }
-function validateRecoveryEvidence(value: RecoveryEvidence) {
+function validateRecoveryStageCode(value: RecoveryEvidence) {
   const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_INVALID_INPUT", 400));
   const raw = reader.exactRecord(value, ["stage", "code"] as const);
   const stage = reader.enumString(raw.stage, RECOVERY_STAGES);
   requireInput(typeof raw.code === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(raw.code));
   return Object.freeze({ stage, code: raw.code });
+}
+function validateStoredRecoveryStageCode(value: unknown) {
+  const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
+  const raw = reader.exactRecord(value, ["stage", "code"] as const);
+  const stage = reader.enumString(raw.stage, RECOVERY_STAGES);
+  if (typeof raw.code !== "string" || !/^[A-Z][A-Z0-9_]{2,63}$/.test(raw.code)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  return Object.freeze({ stage, code: raw.code });
+}
+function recoveryEvidenceIsV2(evidence: StoredRecoveryEvidence): evidence is RecoveryEvidenceV2 {
+  return Object.hasOwn(evidence, "schemaVersion");
+}
+function validateStoredRecoveryEvidence(value: unknown, envelope: RollbackEnvelope): StoredRecoveryEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  if (!Object.hasOwn(value, "schemaVersion")) return validateStoredRecoveryStageCode(value);
+  const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"));
+  const raw = reader.exactRecord(value, ["schemaVersion", "stage", "code", "intents"] as const);
+  reader.literal(raw.schemaVersion, 2);
+  const stage = reader.enumString(raw.stage, RECOVERY_STAGES);
+  if (typeof raw.code !== "string" || !/^[A-Z][A-Z0-9_]{2,63}$/.test(raw.code)) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  if (!Array.isArray(raw.intents) || raw.intents.length > 2) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  const intents = raw.intents.map((intent) => canonicalizeManagedReleaseRecoveryIntent(intent, envelope, {
+    invalid: () => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"),
+    conflict: () => reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT"),
+  }));
+  if (intents.length > 1 && (intents[0]!.role !== "web" || intents[1]!.role !== "worker")) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  if (new Set(intents.map((intent) => intent.role)).size !== intents.length) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+  return Object.freeze({ schemaVersion: 2 as const, stage, code: raw.code, intents: Object.freeze(intents) });
+}
+function recoveryEvidenceForStageCode(row: CustomerDeployment, envelope: RollbackEnvelope, evidence: RecoveryEvidence): StoredRecoveryEvidence {
+  const current = row.releaseLeaseRecoveryEvidence && typeof row.releaseLeaseRecoveryEvidence === "object" && !Array.isArray(row.releaseLeaseRecoveryEvidence)
+    ? validateStoredRecoveryEvidence(row.releaseLeaseRecoveryEvidence, envelope)
+    : null;
+  if (current && recoveryEvidenceIsV2(current)) {
+    return Object.freeze({ schemaVersion: 2 as const, stage: evidence.stage, code: evidence.code, intents: current.intents });
+  }
+  return evidence;
+}
+function recoveryEvidenceWithRecordedIntent(
+  current: StoredRecoveryEvidence | null,
+  intent: ManagedReleaseRecoveryIntent,
+) {
+  const intents = current && recoveryEvidenceIsV2(current) ? current.intents : [];
+  const existing = intents.find((candidate) => candidate.role === intent.role);
+  if (existing) {
+    if (!isDeepStrictEqual(existing, intent)) reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT");
+    return {
+      created: false,
+      evidence: Object.freeze({
+        schemaVersion: 2 as const,
+        stage: "ROLLBACK" as const,
+        code: "RECOVERY_WRITE_INTENT_RECORDED",
+        intents,
+      }),
+    };
+  }
+  const updatedIntents = Object.freeze(intent.role === "web" ? [intent, ...intents] : [...intents, intent]);
+  if (updatedIntents.length > 2) reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT");
+  return {
+    created: true,
+    evidence: Object.freeze({
+      schemaVersion: 2 as const,
+      stage: "ROLLBACK" as const,
+      code: "RECOVERY_WRITE_INTENT_RECORDED",
+      intents: updatedIntents,
+    }),
+  };
 }
 function diagnosticOperationId(leaseId: string, gitSha: string, purpose: string) {
   const value = createHash("sha256").update(`${purpose}:${leaseId}:${gitSha}`).digest("hex").slice(0, 32).split("");
@@ -461,8 +534,15 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
       baselineImageTag: row.releaseImageTag,
       baselineVersion: row.releaseVersion === null ? null : reader.version(row.releaseVersion),
     }, ["baselineImageTag", "baselineVersion"] as const);
-    return reader.deepFreeze(reader.exactRecord({ deploymentId: row.id, deployment: deploymentView(reader, row, workloadClass), authorityDigest: sha256(JSON.stringify(releaseProvenance(row))), origin: canonicalOrigin(row.url), release, target },
-      ["deploymentId", "deployment", "authorityDigest", "origin", "release", "target"] as const));
+    return reader.deepFreeze(reader.exactRecord({
+      deploymentId: row.id,
+      writeIntentProtocolVersion: MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
+      deployment: deploymentView(reader, row, workloadClass),
+      authorityDigest: sha256(JSON.stringify(releaseProvenance(row))),
+      origin: canonicalOrigin(row.url),
+      release,
+      target,
+    }, ["deploymentId", "writeIntentProtocolVersion", "deployment", "authorityDigest", "origin", "release", "target"] as const));
   });
 }
 
@@ -628,6 +708,7 @@ async function completedCompatibleRecoveryReceipt(
     || approvalDigest !== `sha256:${target!.recovery.schemaCompatibilityApprovalDigest}`) reject("MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
   assertProvenance(row, raw.provenance as ReleaseProvenance, true);
   return Object.freeze({ status: "RECOVERED_COMPATIBLE" as const, terminal: true as const, deploymentId: row.id,
+    writeIntentProtocolVersion: MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
     leaseId, fence, originatingLeaseId, originatingFence, targetDigest, recoveryAuthorityDigest,
     releaseImageTag: imageTag, releaseVersion, webDigest, workerDigest, approvalDigest, acceptanceEvidenceDigest });
 }
@@ -646,10 +727,11 @@ export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrI
     const target = targetView(row, input.acrIdentity);
     const rollbackRecord = await originatingRollbackEnvelope(tx, row);
     const recovery = row.releaseLeaseRecoveryEvidence && typeof row.releaseLeaseRecoveryEvidence === "object" && !Array.isArray(row.releaseLeaseRecoveryEvidence)
-      ? validateRecoveryEvidence(row.releaseLeaseRecoveryEvidence as RecoveryEvidence)
+      ? validateStoredRecoveryEvidence(row.releaseLeaseRecoveryEvidence, rollbackRecord)
       : null;
     return {
       deploymentId: row.id,
+      writeIntentProtocolVersion: MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
       leaseId: row.releaseLeaseId!,
       fence: row.releaseLeaseFence,
       phase: row.releaseLeasePhase,
@@ -793,23 +875,59 @@ export async function finalizeManagedReleaseRollback(handle: LeaseHandle, eviden
   });
 }
 
-export async function markManagedReleaseRecoveryRequired(handle: LeaseHandle, evidence: RecoveryEvidence) {
-  const canonicalEvidence = validateRecoveryEvidence(evidence);
+export async function recordManagedReleaseRecoveryIntent(handle: LeaseHandle, intentInput: unknown) {
   return transact(async (tx) => {
-    const row = await owned(tx, handle, true);
+    const row = await owned(tx, handle);
     await requireAdmission(tx, row, true);
-    if (!row.releaseLeasePhase || !ACTIVE_PHASES.includes(row.releaseLeasePhase) || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
-    storedRollbackPayload(row);
+    if ((row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const envelope = await originatingRollbackEnvelope(tx, row);
+    if (envelope.payload.schemaVersion !== 2) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    assertProtectedApprovalBinding(row, envelope.payload);
+    const intent = canonicalizeManagedReleaseRecoveryIntent(intentInput, envelope, {
+      invalid: () => reject("MANAGED_RELEASE_INVALID_INPUT", 400),
+      conflict: () => reject("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT"),
+    });
+    const current = row.releaseLeaseRecoveryEvidence && typeof row.releaseLeaseRecoveryEvidence === "object" && !Array.isArray(row.releaseLeaseRecoveryEvidence)
+      ? validateStoredRecoveryEvidence(row.releaseLeaseRecoveryEvidence, envelope)
+      : null;
+    const { created, evidence } = recoveryEvidenceWithRecordedIntent(current, intent);
     const expiresAt = new Date(row.databaseNow.getTime() + TTL_MS);
     const updated = await tx.customerDeployment.update({ where: { id: row.id }, data: {
       releaseLeasePhase: "RECOVERY_REQUIRED",
       releaseLeaseHeartbeatAt: row.databaseNow,
       releaseLeaseExpiresAt: expiresAt,
-      releaseLeaseRecoveryEvidence: canonicalEvidence,
+      releaseLeaseRecoveryEvidence: evidence as unknown as Prisma.InputJsonValue,
+      releaseLeaseError: evidence.code,
+    } }) as LockedDeployment;
+    await event(tx, updated, "control_plane.release_lease.recovery_intent_recorded", {
+      created,
+      role: intent.role,
+      revisionSuffix: intent.revisionSuffix,
+      intentDigest: intent.intentDigest,
+    });
+    return { ...view({ ...updated, databaseNow: row.databaseNow }), expiresAt, created, intent };
+  });
+}
+
+export async function markManagedReleaseRecoveryRequired(handle: LeaseHandle, evidence: RecoveryEvidence) {
+  const canonicalEvidence = validateRecoveryStageCode(evidence);
+  return transact(async (tx) => {
+    const row = await owned(tx, handle, true);
+    await requireAdmission(tx, row, true);
+    if (!row.releaseLeasePhase || !ACTIVE_PHASES.includes(row.releaseLeasePhase) || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    const envelope = await originatingRollbackEnvelope(tx, row);
+    storedRollbackPayload(row);
+    const updatedEvidence = recoveryEvidenceForStageCode(row, envelope, canonicalEvidence);
+    const expiresAt = new Date(row.databaseNow.getTime() + TTL_MS);
+    const updated = await tx.customerDeployment.update({ where: { id: row.id }, data: {
+      releaseLeasePhase: "RECOVERY_REQUIRED",
+      releaseLeaseHeartbeatAt: row.databaseNow,
+      releaseLeaseExpiresAt: expiresAt,
+      releaseLeaseRecoveryEvidence: updatedEvidence as unknown as Prisma.InputJsonValue,
       releaseLeaseError: canonicalEvidence.code,
     } }) as LockedDeployment;
     await event(tx, updated, "control_plane.release_lease.recovery_required");
-    return { ...view({ ...updated, databaseNow: row.databaseNow }), expiresAt, recovery: canonicalEvidence };
+    return { ...view({ ...updated, databaseNow: row.databaseNow }), expiresAt, recovery: updatedEvidence };
   });
 }
 

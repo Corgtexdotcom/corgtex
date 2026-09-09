@@ -74,6 +74,7 @@ import {
   getManagedReleaseTargetPreflight,
   heartbeatManagedReleaseLease,
   markManagedReleaseRecoveryRequired,
+  recordManagedReleaseRecoveryIntent,
   recordManagedReleaseRollbackRecord,
 } from "./control-plane-release-lease";
 import { assertCustomerAssignableWorkspaceSlug, MANAGED_RELEASE_OPERATIONAL_WORKSPACE_SLUG } from "./workspace-slugs";
@@ -11149,6 +11150,7 @@ const MANAGED_RELEASE_OPERATIONAL_WORKSPACE = {
   description: "Internal workspace for private managed-release operational artifacts.",
 } as const;
 type ManagedReleasePreflightProjection = {
+  writeIntentProtocolVersion?: number;
   deployment?: Record<string, unknown>;
   authorityDigest?: string;
   deploymentId: string;
@@ -11191,6 +11193,8 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
     && record.release && typeof record.release === "object" && !Array.isArray(record.release)
     && record.target && typeof record.target === "object" && !Array.isArray(record.target),
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
+  invariant(record.writeIntentProtocolVersion === undefined || record.writeIntentProtocolVersion === 1,
+    409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   const release = record.release as Record<string, unknown>;
   const target = record.target as Record<string, unknown>;
   invariant(typeof release.baselineImageTag === "string"
@@ -11204,6 +11208,7 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   return {
     deploymentId: record.deploymentId,
+    ...(record.writeIntentProtocolVersion === undefined ? {} : { writeIntentProtocolVersion: record.writeIntentProtocolVersion }),
     ...(record.deployment ? { deployment: record.deployment as Record<string, unknown> } : {}),
     ...(typeof record.authorityDigest === "string" ? { authorityDigest: record.authorityDigest } : {}),
     origin: record.origin,
@@ -11681,6 +11686,8 @@ export async function runControlPlaneManagedReleaseLeaseOperation(
       return getManagedReleaseRecoveryStatus(params.deploymentId as string, managedReleaseAcr(params));
     case "record_rollback":
       return recordManagedReleaseRollbackRecord(managedReleaseHandle(params), params.rollback);
+    case "record_recovery_intent":
+      return recordManagedReleaseRecoveryIntent(managedReleaseHandle(params), params.intent);
     case "begin":
       return beginManagedReleaseMutation(managedReleaseHandle(params));
     case "abort":
