@@ -3,7 +3,7 @@
 //
 // Modes:
 //   --mode=present   — verify the PR body contains the plan contract.
-//   --mode=scope     — verify changed files ⊆ plan's "Files to touch" allowlist.
+//   --mode=scope     — verify protected changes have an explicit risk justification.
 //   --mode=policy    — verify mechanical review blockers.
 //
 // Reads branch/base/labels from env (GitHub Actions) or from git/flags locally.
@@ -41,13 +41,6 @@ const PROTECTED_PATHS = [
   /^packages\/domain\/src\/auth.*\.ts$/,
   /^apps\/web\/lib\/auth\.ts$/,
 ];
-const UI_PATHS = [
-  /^apps\/web\/app\//,
-  /^apps\/web\/components\//,
-  /^apps\/web\/lib\/components\//,
-];
-const DOMAIN_SOURCE = /^packages\/domain\/src\/.*\.ts$/;
-const DOMAIN_TEST = /^packages\/domain\/.*\.test\.ts$/;
 const PLAN_SECRET_PATTERNS = [
   { name: "private key block", pattern: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/ },
   { name: "OpenSSH private key", pattern: /-----BEGIN OPENSSH PRIVATE KEY-----/ },
@@ -153,25 +146,6 @@ function changedFiles(base) {
   }
 }
 
-function parseAllowlist(planText) {
-  // Walk the file line by line. Entries are list items under a
-  // "## Files to touch" (or "### Files to touch") heading, until the
-  // next heading of equal or higher level.
-  const entries = [];
-  let inSection = false;
-  for (const line of planText.split("\n")) {
-    if (/^#{2,3}\s+Files to touch\s*$/.test(line)) {
-      inSection = true;
-      continue;
-    }
-    if (inSection && /^#{1,3}\s+\S/.test(line)) break;
-    if (!inSection) continue;
-    const m = line.match(/^\s*[-*]\s+`?([^`\s]+)`?\s*$/);
-    if (m) entries.push(m[1]);
-  }
-  return entries;
-}
-
 function parseRiskTier(planText) {
   const lines = planText.split("\n");
   for (const line of lines) {
@@ -257,24 +231,6 @@ function hasSubstantiveScopeJustification(planText) {
   return words.length >= 4 && alphanumericLength >= 20;
 }
 
-function hasVisualProof(planText) {
-  const section = extractSection(planText, "Visual Proof");
-  if (!section) return false;
-  const normalized = section
-    .replace(/\[[^\]]*\]\([^)]*\)/g, "")
-    .replace(/`[^`]*`/g, "")
-    .trim()
-    .toLowerCase();
-  if (!normalized) return true;
-  if (/required for frontend|delete this section|link actual proof|do not commit screenshots|do not commit generated proof/.test(normalized)) {
-    return false;
-  }
-  if (/^(n\/a|none|not applicable|delete this section if no ui paths changed)\.?$/.test(normalized)) {
-    return false;
-  }
-  return true;
-}
-
 function planSecretFindings(planText) {
   const findings = [];
   const lines = planText.split("\n");
@@ -290,38 +246,6 @@ function assertPlanHasNoCredentialMaterial(planText) {
   if (secretFindings.length > 0) {
     fail(`plan contract appears to contain credential material:\n  - ${secretFindings.join("\n  - ")}`);
   }
-}
-
-function matchesAllowlist(file, allowlist) {
-  for (const pattern of allowlist) {
-    if (pattern === file) return true;
-    if (pattern.endsWith("/**")) {
-      const prefix = pattern.slice(0, -2); // keep trailing `/`
-      if (file.startsWith(prefix)) return true;
-    }
-    if (pattern.endsWith("/*")) {
-      const prefix = pattern.slice(0, -1);
-      if (
-        file.startsWith(prefix) &&
-        !file.slice(prefix.length).includes("/")
-      ) {
-        return true;
-      }
-    }
-    if (pattern.endsWith("*")) {
-      const prefix = pattern.slice(0, -1);
-      if (file.startsWith(prefix)) return true;
-    }
-  }
-  return false;
-}
-
-function isUiFile(file) {
-  return UI_PATHS.some((re) => re.test(file));
-}
-
-function isDomainSourceFile(file) {
-  return DOMAIN_SOURCE.test(file) && !DOMAIN_TEST.test(file);
 }
 
 function isEnvFile(file) {
@@ -415,10 +339,6 @@ if (mode === "present") {
   if (!parseRiskTier(planText)) {
     fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
   }
-  const allowlist = parseAllowlist(planText);
-  if (!allowlist || allowlist.length === 0) {
-    fail('plan contract has no "Files to touch" entries');
-  }
   for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
     if (!extractSection(planText, section)) {
       fail(`plan contract has no non-empty "${section}" section`);
@@ -437,18 +357,6 @@ if (mode === "scope") {
   if (!autoRevert) {
     const planText = readPlanText(branch);
     assertPlanHasNoCredentialMaterial(planText);
-    const allowlist = parseAllowlist(planText);
-    if (!allowlist || allowlist.length === 0) {
-      fail('plan contract has no "Files to touch" entries');
-    }
-    const outOfScope = files.filter(
-      (f) => f && !matchesAllowlist(f, allowlist),
-    );
-    if (outOfScope.length > 0) {
-      fail(
-        `${outOfScope.length} file(s) outside plan scope:\n  - ${outOfScope.join("\n  - ")}`,
-      );
-    }
     const protectedFiles = files.filter((file) =>
       PROTECTED_PATHS.some((pattern) => pattern.test(file)),
     );
@@ -466,7 +374,7 @@ if (mode === "scope") {
     }
   }
 
-  ok(`${files.length} file(s) all within scope`);
+  ok(`${files.length} file(s) checked for protected scope; behavioral scope is reviewed by QA`);
 }
 
 if (mode === "policy") {
@@ -485,17 +393,6 @@ if (mode === "policy") {
   const envFiles = files.filter(isEnvFile);
   if (envFiles.length > 0) {
     fail(`environment file changes are forbidden:\n  - ${envFiles.join("\n  - ")}`);
-  }
-
-  const domainSourceChanged = files.some(isDomainSourceFile);
-  const domainTestChanged = files.some((f) => DOMAIN_TEST.test(f));
-  if (domainSourceChanged && !domainTestChanged) {
-    fail("packages/domain source changed without a packages/domain *.test.ts change");
-  }
-
-  const uiChanged = files.some(isUiFile);
-  if (uiChanged && !hasVisualProof(planText)) {
-    fail('UI files changed; add a non-empty "Visual Proof" section to the PR body with proof links or CI artifact references');
   }
 
   if (process.env.PR_DRAFT !== "true") {

@@ -1,127 +1,38 @@
 ---
 title: "Agent Delivery"
-description: "How Corgtex agents deliver coherent changes safely and efficiently."
+description: "Substantive outcomes, autonomous ownership, and independent QA."
 ---
 
-Corgtex uses a simple accountability model: one delivery owner takes a task from
-plan through tested pull request, and an independent reviewer protects the merge.
-Automation handles mechanical gates; agents spend their effort on product behavior,
-realistic risk, and evidence.
+Corgtex agents build substantial, cohesive features and workflows in one PR.
+One GPT-6 Astra owner implements and integrates the outcome, then a separate agent
+performs QA. The owner fixes concrete findings and delivers through protected merge.
 
-## Principles
+## Direction
 
-1. **Outcome first.** Deliver the smallest complete result that solves the stated
-   problem. Do not expand an exact task into a platform or PR program without
-   explicit approval.
-2. **One coherent PR by default.** Split only when every part is independently
-   useful, safe, testable, deployable, and rollbackable. Size alone is not a split
-   criterion.
-3. **Proportional process.** A PR contract contains outcome, risk, file scope,
-   acceptance, tests, proof where relevant, and rollback. It is not a separate role
-   or a second implementation project.
-4. **Autonomy inside scope.** The owner may edit, test, commit, push, and update the
-   PR. New approval is needed only for material scope, access, spend, external
-   communication, unapproved irreversible production/customer-data work, or bypass.
-5. **Independent exact-head review.** A separate read-only identity reviews the
-   complete current diff. Native GitHub rules invalidate stale approvals and gate
-   merge on checks, conversations, latest-push approval, and merge queue.
-6. **Short feedback loops.** After the first unsuccessful correction cycle, stop
-   editing and reassess with the read-only GPT-6 planner. The second unsuccessful
-   cycle or additional implementation PRs requires explicit user approval. A cycle
-   is a bounded corrective change followed by relevant validation, not a tool call
-   or an infrastructure wait.
+- Optimize for delivered value and elapsed time. Accept manageable, reversible risk.
+- Keep related work together; split only for a concrete independent-release benefit.
+- Make reasonable assumptions and act autonomously within the requested outcome.
+- Use planning help for consequential uncertainty, not as a mandatory stage.
+- Test meaningful behavior and integration. Existing coverage and CI can be sufficient.
+- Stop expanding checks when acceptance and required evidence pass.
+- If attempts stop producing progress, change approach or report the real blocker.
 
-## Delivery owner
+The canonical [delivery guide](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md)
+contains repository commands and product boundaries. Keep process there instead of
+maintaining competing instruction copies.
 
-The delivery owner:
+## Independent QA
 
-- verifies the current goal, repository state, branch, and any existing PR;
-- creates a clean task worktree from current `origin/main` for new work;
-- writes the proportional PR contract and keeps its file scope current;
-- implements the complete acceptance criteria without unrelated cleanup;
-- runs targeted tests while iterating and the required broad checks on the stable
-  diff;
-- captures actual running proof for frontend changes;
-- publishes with the builder identity and responds to objective review findings;
-- never self-approves or bypasses protection without an explicit human directive.
+A separate agent reviews the complete integrated diff and acceptance evidence,
+exercises relevant behavior, and reports concrete blockers together. QA covers
+correctness, usability, integration, and affected security/data boundaries. The
+owner fixes findings in the same PR; QA rechecks affected behavior using prior
+unchanged evidence. Minor imperfections and speculative hardening do not block delivery.
 
-### Finish the agreed outcome
+QA can also perform formal review with the independent reviewer identity. Native
+GitHub checks, latest-push approval, conversations, and merge queue govern delivery.
+There is no custom approval attestation. Valid metadata-only edits do not require
+another complete code review.
 
-State the acceptance evidence and completion condition before substantial work.
-When those and required checks pass, finish delivery; put optional polish in later
-work. The canonical [execution and completion rules](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md#execution-and-completion)
-cover evidence reuse, early runtime/provider regression proof, sanitized failure
-diagnostics, and one current outcome/blocker/next-action checkpoint.
-
-Local validation matches the change. Prose-only changes use documentation and
-policy validators; behavior changes use relevant regression and applicable static,
-integration and build checks. This avoids unnecessary local application suites
-without waiving any required hosted CI or independent exact-head review. After a
-real deployment failure, test the observed boundary using representative runtime
-inputs before another attempt, rather than relying on unrelated passing tests.
-
-GPT-6 Astra is the default owner for planning, implementation, integration, and
-validation. Routine work needs no separate planner handoff. Material ambiguity,
-architecture, trust boundaries, migrations, production risk, or a failed correction
-cycle uses a read-only GPT-6 planning pass. Protected review remains independent.
-
-Optional subscription CLI helpers may be called without repeated permission:
-Composer 2.5 for mechanical work, Gemini 3.8 Flash for bounded implementation with
-settled behavior, and Opus for read-only advice on a concrete artifact. GPT-6
-verifies their output and owns delivery. Helpers receive no secrets or private/client
-data and cannot perform GitHub or production writes or incur paid overages.
-
-Exact model identifiers, helper boundaries, and fallback behavior live in
-[`AGENTS.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md#model-routing-and-delegation).
-Follow current task-specific model instructions without expanding task authority.
-
-## Risk tiers
-
-| Tier | Use when | Evidence focus |
-| --- | --- | --- |
-| `low` | Docs, copy, styles, tightly scoped non-security work | Scope and targeted checks |
-| `standard` | Ordinary product or domain behavior | Behavior, regression tests, integration |
-| `high` | Shared workflows, external effects, operational risk | Failure paths, integration, rollback |
-| `critical` | Auth, tenant boundaries, secrets, migrations, deploy, destructive data, agent/CI policy | Trust boundaries, exact state, recovery, independent review |
-
-Risk controls review depth; it does not impose line or file caps. Protected paths
-listed in `AGENTS.md` require `critical` risk and justification.
-
-## Independent review
-
-The reviewer uses [`.codex/review.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/.codex/review.md)
-and blocks only objective failures: incomplete acceptance, scope mismatch, incorrect
-behavior, realistic security/privacy/data defects, missing tests or proof, red CI,
-unresolved conversations, or stale live state. Style, taste, speculative hardening,
-and diff size alone are not blockers.
-
-Any new push or base change requires a fresh review of the new exact snapshot.
-
-## Mechanical controls
-
-`scripts/check-plan.mjs` verifies the PR contract, file allowlist, protected-path risk,
-acceptance checklist, domain-test coverage, frontend proof, environment-file ban, and
-forbidden executable patterns. CI also runs tests, database sync, a database-free
-build, docs checks, secret scanning, and client-data scanning.
-
-Head, PR-body, label, draft-state, and merge-group changes refresh the distinct
-trusted metadata policy status only; they do not waste another full build and test
-cycle. Invalid metadata removes the PR from the merge queue. The legacy snapshot
-gate remains during activation and is removed only after the replacement is required
-and proven on both PR and merge-group SHAs.
-
-GitHub must enforce pull requests, one independent approval, stale-review dismissal,
-approval of the latest push, conversation resolution, required checks, merge queue,
-and blocked direct/force pushes. The live ruleset—not documentation—is authoritative.
-
-## Production and rollback
-
-A merge is only code integration. Release proof requires current-main CI, deployment,
-serving SHA/no drift, a named smoke, appropriate observation, and rollback readiness.
-If production remains red, use the protected auto-revert path. If production has
-already recovered on the same SHA, rerun the trusted smoke before deciding to revert.
-
-Human controls remain simple: `halt-agents` stops work, `needs-replan` records a real
-impasse, `auto-revert` identifies recovery PRs, and `force-merge` is a rare, explicit,
-publicly logged bypass. No label substitutes for correctness, secret hygiene, or the
-`prisma db push` and `--no-verify` bans.
+See [pull requests](/contributing/pull-requests) and
+[testing](/contributing/testing) for the short delivery forms and available tools.

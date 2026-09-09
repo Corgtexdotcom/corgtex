@@ -1,23 +1,10 @@
-# GitHub protection setup
+# GitHub protection
 
-The repository policy assumes an active ruleset for `main` with:
+Use native protection for `main`: one independent approval, stale-approval dismissal,
+latest-push approval, resolved conversations, required checks, and merge queue.
+Agents cannot push directly to main, force-push, or bypass these controls.
 
-- pull requests required;
-- one independent approval;
-- stale approvals dismissed on push;
-- approval of the most recent reviewable push;
-- conversations resolved;
-- required status checks;
-- merge queue enabled;
-- direct pushes and force pushes blocked; and
-- no agent bypass of these protections.
-
-`.github/workflows/pr-policy-metadata.yml` must remain enabled. It revalidates live
-PR metadata from trusted default-branch code, publishes the distinct
-`PR Metadata Policy` status on PR and merge-group SHAs, and removes invalid PRs from
-the merge queue without rerunning build and test jobs.
-
-Target required checks after staged activation:
+Required checks:
 
 - `Lint, Typecheck & Test`
 - `Database Sync`
@@ -28,20 +15,19 @@ Target required checks after staged activation:
 - `Secret Scan`
 - `Client Data Scan`
 
-Builder: `Corgtex-builder`. Reviewer: `beepto-codex`. Verify the selected
-account before every write and grant only the permissions each role needs. Ruleset
-administration requires a repository administrator; do not claim these controls are
-active until the live ruleset API confirms them.
+The metadata workflow executes trusted base code, validates live PR metadata, and
+removes invalid PRs from the queue. Its merge-group evaluator validates actual queue
+membership, current heads/bases, approvals, and metadata drift. The evaluator retains
+its historical filename `scripts/review-snapshot-integrity.mjs`; there is no custom
+attestation or separate snapshot publisher. Valid metadata changes do not dismiss
+code approvals. The independent reviewer still assesses substantive scope changes.
 
-Activation order is mandatory:
+When updating required contexts, verify the replacement already succeeds on PR and
+merge-group SHAs, save current settings, update only the intended contexts, and read
+back the result. Preserve existing review and queue controls. Compatibility aliases
+may remain during rollout; they are inexpensive wrappers, not extra review stages.
+Restore saved settings if activation fails. Never bypass protection to repair it.
 
-1. Land and observe the replacement PR and merge-group publishers while Review
-   Snapshot Integrity remains a temporary reviewer-policy gate.
-2. Replace the legacy `Plan Present`, `Scope Check`, and `Diff Size` requirements
-   with `PR Policy`; add `PR Metadata Policy`; then read back the live settings.
-3. Prove a valid PR can enter the queue and an invalid metadata edit fails and
-   dequeues it.
-4. Remove Review Snapshot Integrity in a later protected cleanup PR.
-
-Merge-queue builds rerun integration, database, build, documentation, and metadata
-checks on the synthetic merge commit.
+Builder: `Corgtex-builder`; reviewer: `beepto-codex`. Verify the selected identity
+immediately before each GitHub write. The owner queues the approved PR; the reviewer
+never edits or merges. Live GitHub configuration is authoritative.
