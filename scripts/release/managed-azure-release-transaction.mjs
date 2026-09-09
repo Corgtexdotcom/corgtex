@@ -1,3 +1,4 @@
+import { createManagedAzureExclusiveActivation, snapshotManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,25 @@ class ManagedAzureReleaseError extends Error {
     this.name = "ManagedAzureReleaseError";
     this.code = code;
   }
+}
+
+export function managedAzureFailureDetail(error) {
+  const result = { failureClass: "UNCLASSIFIED" };
+  if (error instanceof ManagedAzureContainerAppError) result.failureClass = "AZURE_TRANSPORT";
+  else if (error instanceof ManagedAzureReleaseError) result.failureClass = "RELEASE_CONTRACT";
+  else if (error?.name === "TimeoutError") result.failureClass = "TIMEOUT";
+  else if (error?.name === "AbortError") result.failureClass = "ABORTED";
+  else if (error instanceof TypeError) result.failureClass = "TYPE_ERROR";
+  if ((error instanceof ManagedAzureContainerAppError || error instanceof ManagedAzureReleaseError)
+    && /^[A-Z][A-Z0-9_]{1,127}$/.test(error.code)) result.failureCode = error.code;
+  if (error instanceof ManagedAzureContainerAppError && ["ACCESS_TOKEN", "FETCH"].includes(error.requestStage)
+    && Number.isInteger(error.requestAttempts) && error.requestAttempts >= 0 && error.requestAttempts <= 3
+    && typeof error.requestDeadlineExceeded === "boolean") {
+    result.requestStage = error.requestStage;
+    result.requestAttempts = error.requestAttempts;
+    result.requestDeadlineExceeded = error.requestDeadlineExceeded;
+  }
+  return result;
 }
 
 function fail(code) { throw new ManagedAzureReleaseError(code); }
@@ -196,7 +216,9 @@ export function managedAzureHealthReady(body, release) {
 
 export async function runManagedAzureReleaseTransaction(rawInput, dependencies) {
   const input = canonicalInput(rawInput);
-  const deps = dependencies;
+  let deps = dependencies;
+  const originalDeps = dependencies;
+  let exclusive = null;
   if (input.execute && input.workloadClass === "ACTIVE_CLIENT_CANARY") fail("MANAGED_RELEASE_EXECUTION_NOT_ALLOWED");
   const inventory = verifyInventoryResponse(await deps.loadInventory(input), input);
   const preflight = await deps.lease("preflight", { deploymentId: input.deploymentId, workloadClass: input.workloadClass, acrName: input.acrName, acrServer: input.acrServer });
@@ -206,7 +228,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     || preflight.deployment?.workloadClass !== input.workloadClass
     || !["HOSTED_DEDICATED", "REMOTE_MANAGED"].includes(preflight.deployment?.deploymentKind)) fail("MANAGED_RELEASE_TARGET_INVALID");
   const protectedHosted = input.workloadClass === "ACTIVE_CLIENT_PRIMARY" && preflight.deployment.deploymentKind === "HOSTED_DEDICATED";
-  if (protectedHosted && preflight.writeIntentProtocolVersion !== 1) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
+  if (protectedHosted && ![1, 2].includes(preflight.writeIntentProtocolVersion)) fail("RECOVERY_INTENT_PROTOCOL_UNAVAILABLE");
   const configured = protectedHosted
     ? await deps.targetConfig({ deploymentId: input.deploymentId, execute: false, reason: input.reason })
     : { status: "RECONCILIATION_READY", effects: 0, target: { acrName: input.acrName, acrResourceGroup: input.acrResourceGroup, activationPolicy: "STANDARD" } };
@@ -248,8 +270,12 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     web: { containerName: baselines.web.containerName, image: baselines.web.image, readyRevision: baselines.web.revisionName, templateDigest: baselines.web.templateDigest },
     worker: { containerName: baselines.worker.containerName, image: baselines.worker.image, readyRevision: baselines.worker.revisionName, templateDigest: baselines.worker.templateDigest },
   };
+  const exclusiveActivation = protectedHosted && configured.target.activationPolicy === "EXCLUSIVE"
+    ? await snapshotManagedAzureExclusiveActivation(deps, preflight.target, baselines) : null;
+  if (exclusiveActivation && preflight.writeIntentProtocolVersion !== 2) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
   const rollback = protectedHosted ? {
-    schemaVersion: 2,
+    schemaVersion: exclusiveActivation ? 3 : 2,
+    ...(exclusiveActivation ? { exclusiveActivation } : {}),
     target: preflight.target,
     previous,
     incoming: { webDigest: releasePlan.roles.web.digest, workerDigest: releasePlan.roles.worker.digest,
@@ -328,7 +354,9 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     return { kind: "UNKNOWN", state: null };
   };
 
+  let originatingFailure = null;
   const compensate = async (stage, code, forwardTemplates, detail = {}) => {
+    originatingFailure = { originatingPhase: stage, originatingCode: code };
     const classified = {};
     for (const role of ROLES) classified[role] = await classifyRole(role, forwardTemplates[role]);
     if (ROLES.some((role) => classified[role].kind === "UNKNOWN")) return markRecovery(stage, code, detail);
@@ -354,6 +382,13 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       }
       await deps.lease("finalize_rollback", leaseArgs(handle, { reason: input.reason }));
       return safeResult(input, inventory, "ROLLED_BACK", { phase: stage, code, ...detail });
+    }
+    if (exclusiveActivation) {
+      exclusive = createManagedAzureExclusiveActivation(originalDeps, { target: preflight.target, ownership: exclusiveActivation,
+        knownRevisions: Object.fromEntries(ROLES.map((role) => [role, [baselines[role].revisionName, classified[role].state.revisionName]])),
+        onProgress: recoveryHeartbeat });
+      deps = exclusive.deps;
+      await exclusive.enter();
     }
     const recoveryTemplates = {};
     for (const role of ["web", "worker"]) {
@@ -382,6 +417,8 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
         return markRecovery("READBACK", "RECOVERY_INTENT_FINAL_READBACK_DRIFT", detail);
       }
     }
+    if (exclusive) await exclusive.finish(Object.fromEntries(ROLES.map((role) => [role,
+      `${role === "web" ? preflight.target.webAppName : preflight.target.workerAppName}--${recoveryTemplates[role].revisionSuffix}`])));
     const health = await deps.healthProbe({ origin: preflight.origin, release: recoveryRelease });
     if (!health.ok) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_HEALTH_FAILED", detail);
     try { await deps.authPreflight({ deploymentId: input.deploymentId, reason: input.reason, release: recoveryRelease }); }
@@ -397,6 +434,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       release: recoveryRelease, imageDigests: { web: recoveryPlan.roles.web.digest, worker: recoveryPlan.roles.worker.digest },
       durationMs: 15 * 60_000, onProgress: recoveryHeartbeat });
     if (!observed?.verified) return markRecovery("OBSERVATION", "COMPATIBLE_RECOVERY_OBSERVATION_FAILED", detail);
+    if (exclusive) await exclusive.guard("Single");
     const acceptanceEvidenceDigest = `sha256:${createHash("sha256").update(canonicalJson({ health, acceptance, observed,
       webDigest: recoveryPlan.roles.web.digest, workerDigest: recoveryPlan.roles.worker.digest })).digest("hex")}`;
     const evidence = {
@@ -457,7 +495,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     try {
       const health = await deps.healthProbe({ origin: preflight.origin, release: baselineRelease });
       if (!health.ok) return markRecovery("FENCING", health.code ?? "BASELINE_REACTIVATION_HEALTH_FAILED", detail);
-      return compensate(stage, code, forwardTemplates, { ...detail, containment: "BASELINE_REACTIVATED" });
+      return await compensate(stage, code, forwardTemplates, { ...detail, containment: "BASELINE_REACTIVATED" });
     } catch {
       return markRecovery("FENCING", "BASELINE_REACTIVATION_AMBIGUOUS", detail);
     }
@@ -525,8 +563,19 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     if (configured.target.activationPolicy === "EXCLUSIVE") {
       await recoveryHeartbeat();
       exclusiveDrainStarted = true;
-      const drained = await deps.drainBaseline({ target: preflight.target, baselines, handle, onProgress: recoveryHeartbeat });
-      if (!drained?.terminal || !drained?.succeeded) return restoreDrainedBaseline("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
+      let drained;
+      if (exclusiveActivation) {
+        exclusive = createManagedAzureExclusiveActivation(originalDeps, { target: preflight.target, ownership: exclusiveActivation,
+          knownRevisions: Object.fromEntries(ROLES.map((role) => [role, [baselines[role].revisionName,
+            `${role === "web" ? preflight.target.webAppName : preflight.target.workerAppName}--${forwardTemplates[role].revisionSuffix}`]])),
+          onProgress: recoveryHeartbeat });
+        deps = exclusive.deps;
+        await exclusive.enter();
+        drained = { terminal: true, succeeded: true };
+      } else {
+        drained = await deps.drainBaseline({ target: preflight.target, baselines, handle, onProgress: recoveryHeartbeat });
+      }
+      if (!drained?.terminal || !drained?.succeeded) return await restoreDrainedBaseline("FENCING", "BASELINE_DRAIN_AMBIGUOUS",
         { ...(drained?.code ? { providerCode: drained.providerCode ?? drained.code } : {}),
           ...(Number.isInteger(drained?.providerStatus) ? { providerStatus: drained.providerStatus } : {}) });
       await recoveryHeartbeat();
@@ -538,23 +587,23 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     const webPatch = await deps.patchTemplate({ target: preflight.target, role: "web", location: baselines.web.location, template: forwardTemplates.web, onProgress: heartbeat });
     // The rollback record and mutation fence already bind this exact forward
     // write. An accepted/pending response proceeds to known-resource readback.
-    if (webPatch.terminal && !webPatch.succeeded) return compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates,
+    if (webPatch.terminal && !webPatch.succeeded) return await compensate("WEB", webPatch.code ?? "WEB_PATCH_FAILED", forwardTemplates,
       webPatch.providerCode ? { providerCode: webPatch.providerCode } : {});
     await heartbeat();
     try { await deps.waitForState({ target: preflight.target, role: "web", release: nextRelease, imageDigest: releasePlan.roles.web.digest, expectedTemplate: forwardTemplates.web, onProgress: heartbeat }); }
     catch {
       const detail = webPatch.providerCode ? { providerCode: webPatch.providerCode } : {};
       if (!webPatch.terminal) return markRecovery("WEB", "WEB_READBACK_AMBIGUOUS", detail);
-      return compensate("WEB", "WEB_READBACK_AMBIGUOUS", forwardTemplates, detail);
+      return await compensate("WEB", "WEB_READBACK_AMBIGUOUS", forwardTemplates, detail);
     }
     await heartbeat();
     const workerBefore = await classifyRole("worker", forwardTemplates.worker);
     const webBefore = await classifyRole("web", forwardTemplates.web);
-    if (workerBefore.kind !== "BASELINE" || webBefore.kind !== "FORWARD") return compensate("WORKER", "PRE_WORKER_DRIFT", forwardTemplates);
+    if (workerBefore.kind !== "BASELINE" || webBefore.kind !== "FORWARD") return await compensate("WORKER", "PRE_WORKER_DRIFT", forwardTemplates);
     await heartbeat();
 
     const workerPatch = await deps.patchTemplate({ target: preflight.target, role: "worker", location: baselines.worker.location, template: forwardTemplates.worker, onProgress: heartbeat });
-    if (workerPatch.terminal && !workerPatch.succeeded) return compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates,
+    if (workerPatch.terminal && !workerPatch.succeeded) return await compensate("WORKER", workerPatch.code ?? "WORKER_PATCH_FAILED", forwardTemplates,
       workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {});
     await heartbeat();
     try {
@@ -564,25 +613,28 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
     } catch {
       const detail = workerPatch.providerCode ? { providerCode: workerPatch.providerCode } : {};
       if (!workerPatch.terminal) return markRecovery("READBACK", "FINAL_READBACK_AMBIGUOUS", detail);
-      return compensate("READBACK", "FINAL_READBACK_AMBIGUOUS", forwardTemplates, detail);
+      return await compensate("READBACK", "FINAL_READBACK_AMBIGUOUS", forwardTemplates, detail);
     }
     await heartbeat();
+    if (exclusive) await exclusive.finish(Object.fromEntries(ROLES.map((role) => [role,
+      `${role === "web" ? preflight.target.webAppName : preflight.target.workerAppName}--${forwardTemplates[role].revisionSuffix}`])));
     const health = await deps.healthProbe({ origin: preflight.origin, release: nextRelease });
-    if (!health.ok) return compensate("OBSERVATION", health.code ?? "HEALTH_PROBE_FAILED", forwardTemplates);
+    if (!health.ok) return await compensate("OBSERVATION", health.code ?? "HEALTH_PROBE_FAILED", forwardTemplates);
     await heartbeat();
     if (protectedHosted) {
       const operationId = handle.leaseId;
       const acceptance = await deps.acceptanceProbe({ deploymentId: input.deploymentId, origin: preflight.origin,
         operationId, release: nextRelease, reason: input.reason, onProgress: heartbeat });
       if (!acceptance?.accepted || acceptance.webGitSha !== input.releaseSha || acceptance.receipt?.workerGitSha !== input.releaseSha
-        || acceptance.receipt?.operationId !== operationId) return compensate("DIAGNOSTIC", "AUTHENTICATED_RELEASE_DIAGNOSTIC_FAILED", forwardTemplates);
+        || acceptance.receipt?.operationId !== operationId) return await compensate("DIAGNOSTIC", "AUTHENTICATED_RELEASE_DIAGNOSTIC_FAILED", forwardTemplates);
       await heartbeat();
       const observed = await deps.observeNewRelease({ deploymentId: input.deploymentId, target: preflight.target, origin: preflight.origin,
         release: nextRelease, imageDigests: { web: releasePlan.roles.web.digest, worker: releasePlan.roles.worker.digest },
         durationMs: 15 * 60_000, onProgress: heartbeat });
-      if (!observed?.verified) return compensate("OBSERVATION", observed?.code ?? "INITIAL_OBSERVATION_FAILED", forwardTemplates);
+      if (!observed?.verified) return await compensate("OBSERVATION", observed?.code ?? "INITIAL_OBSERVATION_FAILED", forwardTemplates);
       await heartbeat();
     }
+    if (exclusive) await exclusive.guard("Single");
     await deps.lease("finalize_success", leaseArgs(handle, { reason: input.reason }));
     return safeResult(input, inventory, "SUCCEEDED", { phase: "COMPLETE",
       ...(protectedHosted ? { schemaApprovalDigest: `sha256:${releaseApproval.schemaApprovalDigest}` } : {}) });
@@ -593,9 +645,10 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       throw error;
     }
     if (exclusiveDrainStarted && !firstForwardPatchAttempted) {
-      return restoreDrainedBaseline("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
+      return await restoreDrainedBaseline("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
     }
-    return markRecovery("FENCING", error instanceof ManagedAzureReleaseError ? error.code : "TRANSACTION_AMBIGUOUS");
+    return markRecovery("FENCING", error instanceof ManagedAzureReleaseError || error instanceof ManagedAzureContainerAppError ? error.code : "TRANSACTION_AMBIGUOUS",
+      { ...(originatingFailure ?? {}), ...managedAzureFailureDetail(error) });
   }
 }
 
@@ -679,6 +732,8 @@ function runtimeDependencies(env = process.env) {
   const runtime = {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}`,
     templateDigest: managedAzureTemplateDigest,
+    readExclusiveState: apps.readExclusiveState,
+    setRevisionMode: apps.setRevisionMode,
     loadInventory: (input) => callControlPlane("get_managed_release_inventory", {
       inventoryRef: input.inventoryRef,
       expectedSha256: input.inventorySha256,
@@ -814,7 +869,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
       process.exitCode = writeManagedAzureCliResult(result, input.execute);
     })
     .catch((error) => {
-      process.stderr.write(`${error instanceof ManagedAzureReleaseError ? error.code : "MANAGED_RELEASE_FAILED"}\n`);
+      process.stderr.write(`${JSON.stringify({ status: "MANAGED_RELEASE_FAILED", ...managedAzureFailureDetail(error) })}\n`);
       process.exitCode = 1;
     });
 }

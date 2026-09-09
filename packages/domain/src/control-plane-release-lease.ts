@@ -7,7 +7,7 @@ import { activeManagedAzureDeployment, managedAzureReleaseDeployment, managedAzu
 import { canonicalizeManagedAzureRollbackPayload, type ManagedAzureRollbackPayload } from "./managed-azure-recovery-payload";
 import {
   canonicalizeManagedReleaseRecoveryIntent,
-  MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
+  MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
   type ManagedReleaseRecoveryIntent,
 } from "./managed-azure-recovery-intent";
 import { createManagedReleaseProofReader } from "./managed-release-proof-support";
@@ -271,7 +271,7 @@ function rollbackTargetMatches(row: CustomerDeployment, payload: Readonly<Manage
 function assertProtectedApprovalBinding(row: CustomerDeployment, payload: Readonly<ManagedAzureRollbackPayload>) {
   if (row.deploymentKind !== "HOSTED_DEDICATED") return;
   const target = assertManagedAzureTargetBinding(row, payload.target);
-  if (payload.schemaVersion !== 2 || row.releaseLeaseIncomingImageTag !== `sha-${target!.releaseApproval.gitSha}`
+  if (payload.schemaVersion === 1 || row.releaseLeaseIncomingImageTag !== `sha-${target!.releaseApproval.gitSha}`
     || payload.incoming.schemaApprovalDigest !== `sha256:${target!.releaseApproval.schemaApprovalDigest}`
     || payload.compatibleRecovery.gitSha !== target!.recovery.gitSha
     || payload.compatibleRecovery.imageTag !== `sha-${target!.recovery.gitSha}`
@@ -536,7 +536,7 @@ export async function getManagedReleaseTargetPreflight(deploymentId: string, acr
     }, ["baselineImageTag", "baselineVersion"] as const);
     return reader.deepFreeze(reader.exactRecord({
       deploymentId: row.id,
-      writeIntentProtocolVersion: MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
+      writeIntentProtocolVersion: MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
       deployment: deploymentView(reader, row, workloadClass),
       authorityDigest: sha256(JSON.stringify(releaseProvenance(row))),
       origin: canonicalOrigin(row.url),
@@ -708,7 +708,7 @@ async function completedCompatibleRecoveryReceipt(
     || approvalDigest !== `sha256:${target!.recovery.schemaCompatibilityApprovalDigest}`) reject("MANAGED_RELEASE_TARGET_CONFIG_CONFLICT");
   assertProvenance(row, raw.provenance as ReleaseProvenance, true);
   return Object.freeze({ status: "RECOVERED_COMPATIBLE" as const, terminal: true as const, deploymentId: row.id,
-    writeIntentProtocolVersion: MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
+    writeIntentProtocolVersion: MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
     leaseId, fence, originatingLeaseId, originatingFence, targetDigest, recoveryAuthorityDigest,
     releaseImageTag: imageTag, releaseVersion, webDigest, workerDigest, approvalDigest, acceptanceEvidenceDigest });
 }
@@ -731,7 +731,7 @@ export async function getManagedReleaseRecoveryStatus(deploymentId: string, acrI
       : null;
     return {
       deploymentId: row.id,
-      writeIntentProtocolVersion: MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION,
+      writeIntentProtocolVersion: MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION,
       leaseId: row.releaseLeaseId!,
       fence: row.releaseLeaseFence,
       phase: row.releaseLeasePhase,
@@ -823,7 +823,7 @@ export async function finalizeManagedReleaseCompatibleRecovery(handle: LeaseHand
     if (row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const envelope = await originatingRollbackEnvelope(tx, row);
     const payload = envelope.payload;
-    if (payload.schemaVersion !== 2) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (payload.schemaVersion === 1) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const reader = createManagedReleaseProofReader(() => reject("MANAGED_RELEASE_INVALID_INPUT", 400));
     const raw = reader.exactRecord(evidence, ["gitSha", "imageTag", "releaseVersion", "webDigest", "workerDigest", "acceptanceEvidenceDigest"] as const);
     const accepted = { gitSha: reader.gitSha(raw.gitSha), imageTag: raw.imageTag, releaseVersion: raw.releaseVersion,
@@ -856,7 +856,7 @@ export async function finalizeManagedReleaseRollback(handle: LeaseHandle, eviden
     await requireAdmission(tx, row, true);
     if (row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const envelope = await originatingRollbackEnvelope(tx, row);
-    if (envelope.payload.schemaVersion === 2) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (envelope.payload.schemaVersion !== 1) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const accepted = evidence === undefined ? null : validateRollbackAcceptanceEvidence(evidence, row, envelope);
     await tx.customerDeployment.update({ where: { id: row.id }, data: clearLeaseData() });
     if (accepted) {
@@ -881,7 +881,7 @@ export async function recordManagedReleaseRecoveryIntent(handle: LeaseHandle, in
     await requireAdmission(tx, row, true);
     if ((row.releaseLeasePhase !== "MUTATING" && row.releaseLeasePhase !== "RECOVERY_REQUIRED") || !row.rollbackRecordPresent) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     const envelope = await originatingRollbackEnvelope(tx, row);
-    if (envelope.payload.schemaVersion !== 2) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    if (envelope.payload.schemaVersion === 1) reject("MANAGED_RELEASE_LEASE_STATE_CONFLICT");
     assertProtectedApprovalBinding(row, envelope.payload);
     const intent = canonicalizeManagedReleaseRecoveryIntent(intentInput, envelope, {
       invalid: () => reject("MANAGED_RELEASE_INVALID_INPUT", 400),

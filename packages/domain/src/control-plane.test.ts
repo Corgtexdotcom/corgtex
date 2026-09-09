@@ -9008,9 +9008,10 @@ describe("managed Azure release control-plane boundary", () => {
     });
   }
 
-  it("freezes a private Ops build-artifact inventory for an exact managed-release canary without requiring a target workspace", async () => {
+  it.each([1, 2])("freezes a private Ops inventory using runner protocol %i without requiring a target workspace", async (writeIntentProtocolVersion) => {
+    const preflight = { ...canaryPreflight, writeIntentProtocolVersion };
     const canaryOpaqueTargetId = createHash("sha256").update(`ACTIVE_CLIENT_CANARY:${deploymentId}`).digest("hex").slice(0, 32);
-    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(canaryPreflight);
+    leaseMocks.getManagedReleaseTargetPreflight.mockResolvedValueOnce(preflight);
     mockOperationalInventoryWorkspace();
     inventoryEvaluatorMock.mockReturnValueOnce({
       ok: true,
@@ -9071,7 +9072,7 @@ describe("managed Azure release control-plane boundary", () => {
         meta: expect.objectContaining({
           reason: "Freeze exact canary inventory.",
           actorLabel: "managed-release",
-          preflightDigest: `sha256:${createHash("sha256").update(canonicalJson(canaryPreflight)).digest("hex")}`,
+          preflightDigest: `sha256:${createHash("sha256").update(canonicalJson(preflight)).digest("hex")}`,
           baselineImageTag: canaryPreflight.release.baselineImageTag,
           baselineVersion: canaryPreflight.release.baselineVersion,
         }),

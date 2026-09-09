@@ -11193,7 +11193,7 @@ function managedReleasePreflightProjection(value: unknown): ManagedReleasePrefli
     && record.release && typeof record.release === "object" && !Array.isArray(record.release)
     && record.target && typeof record.target === "object" && !Array.isArray(record.target),
   409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
-  invariant(record.writeIntentProtocolVersion === undefined || record.writeIntentProtocolVersion === 1,
+  invariant(record.writeIntentProtocolVersion === undefined || record.writeIntentProtocolVersion === 1 || record.writeIntentProtocolVersion === 2,
     409, "MANAGED_RELEASE_INVENTORY_REJECTED", "Managed release inventory was rejected.");
   const release = record.release as Record<string, unknown>;
   const target = record.target as Record<string, unknown>;

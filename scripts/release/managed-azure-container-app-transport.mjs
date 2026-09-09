@@ -138,6 +138,26 @@ function revisionNameMatches(appName, template, revisionName) {
   return revisionName === `${appName}--${template.revisionSuffix}`;
 }
 
+export function managedAzureConfigurationDigest(configuration) {
+  const value = safeJsonClone(configuration);
+  delete value.activeRevisionsMode;
+  return managedAzureTemplateDigest(value);
+}
+
+function assertRevisionMode(configuration, input) {
+  const ownership = input.exclusiveActivation;
+  if (ownership === undefined) {
+    if (configuration?.activeRevisionsMode !== "Single") fail("AZURE_BASELINE_NOT_READY");
+    return;
+  }
+  if (ownership.originalMode !== "Single" || ownership.temporaryMode !== "Multiple"
+    || !/^sha256:[0-9a-f]{64}$/.test(ownership.configurationDigests?.[input.role])
+    || !["Single", "Multiple"].includes(configuration?.activeRevisionsMode)
+    || managedAzureConfigurationDigest(configuration) !== ownership.configurationDigests[input.role]) {
+    fail("AZURE_EXCLUSIVE_CONFIGURATION_DRIFT", true);
+  }
+}
+
 export function canonicalizeManagedAzureContainerAppState(raw, input) {
   const target = targetValue(input.target);
   const release = releaseValue(input.release);
@@ -146,8 +166,9 @@ export function canonicalizeManagedAzureContainerAppState(raw, input) {
   const value = safeJsonClone(raw);
   const properties = value?.properties;
   const template = properties?.template;
+  assertRevisionMode(properties?.configuration, input);
   if (typeof value?.location !== "string" || !/^[A-Za-z0-9 ._-]{1,128}$/.test(value.location)
-    || !properties || !template || properties.configuration?.activeRevisionsMode !== "Single"
+    || !properties || !template
     || properties.provisioningState !== "Succeeded"
     || typeof properties.latestRevisionName !== "string"
     || properties.latestRevisionName !== properties.latestReadyRevisionName
@@ -380,16 +401,39 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
   async function request(url, init, ambiguous) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let requestStage = "ACCESS_TOKEN";
+    let requestAttempts = 0;
     try {
       const token = await getAccessToken();
-      return await fetchImpl(url, {
-        ...init,
-        headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
-        redirect: "error",
-        signal: controller.signal,
-      });
+      if (controller.signal.aborted) throw new Error("REQUEST_DEADLINE");
+      requestStage = "FETCH";
+      const attempts = init.method === "GET" ? 3 : 1;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (controller.signal.aborted) break;
+        requestAttempts += 1;
+        try {
+          // Only transport rejection of an idempotent GET may be retried.
+          // Responses, parsing and identity checks stay outside this loop.
+          return await fetchImpl(url, {
+            ...init,
+            headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+            redirect: "error",
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (attempt + 1 === attempts || controller.signal.aborted) throw error;
+          await sleep(attempt === 0 ? 250 : 750);
+        }
+      }
+      throw new Error("REQUEST_DEADLINE");
     } catch {
-      fail(ambiguous ? "AZURE_REQUEST_AMBIGUOUS" : "AZURE_READ_FAILED", ambiguous);
+      const failure = requestStage === "ACCESS_TOKEN"
+        ? new ManagedAzureContainerAppError("AZURE_ACCESS_TOKEN_UNAVAILABLE", ambiguous)
+        : new ManagedAzureContainerAppError(ambiguous ? "AZURE_REQUEST_AMBIGUOUS" : "AZURE_READ_FAILED", ambiguous);
+      failure.requestStage = requestStage;
+      failure.requestAttempts = requestAttempts;
+      failure.requestDeadlineExceeded = controller.signal.aborted;
+      throw failure;
     } finally {
       clearTimeout(timer);
     }
@@ -409,8 +453,8 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     const response = await request(resourceUrl(target, appNameFor(target, input.role)), { method: "GET" }, true);
     if (response.status !== 200) fail("AZURE_READBACK_AMBIGUOUS", true);
     const app = await responseBody(response);
-    if (app?.properties?.configuration?.activeRevisionsMode !== "Single"
-      || typeof app.properties.latestRevisionName !== "string"
+    assertRevisionMode(app?.properties?.configuration, input);
+    if (typeof app?.properties?.latestRevisionName !== "string"
       || typeof app.properties.latestReadyRevisionName !== "string") fail("AZURE_BASELINE_NOT_READY", true);
     return Object.freeze({ state: canonicalizeTemplateIdentity(app.properties.template, app.location, app.properties.latestRevisionName, input),
       latestReadyRevisionName: app.properties.latestReadyRevisionName, provisioningState: app.properties.provisioningState });
@@ -423,14 +467,14 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     const appName = appNameFor(target, input.role);
     const response = await request(revisionUrl(target, appName, input.revisionName), { method: "GET" }, true);
     if (response.status === 404) return Object.freeze({ kind: "ABSENT" });
-    if (response.status !== 200) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    if (response.status !== 200) fail(`AZURE_REVISION_HTTP_${response.status}`, true);
     const revision = await responseBody(response);
     if (revision?.name !== input.revisionName) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
     assertManagedAzureRevisionProjection(input.expectedTemplate, revision.properties?.template, appName, input.revisionName);
     const replicasResponse = await request(revisionUrl(target, appName, input.revisionName, "/replicas"), { method: "GET" }, true);
-    if (replicasResponse.status !== 200) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    if (replicasResponse.status !== 200) fail(`AZURE_REVISION_REPLICAS_HTTP_${replicasResponse.status}`, true);
     const replicas = await responseBody(replicasResponse);
-    if (!Array.isArray(replicas?.value) || replicas.value.length > 256 || replicas.nextLink) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    if (!Array.isArray(replicas?.value) || replicas.value.length > 256 || replicas.nextLink) fail("AZURE_REVISION_REPLICA_INVENTORY_INVALID", true);
     const p = revision.properties;
     const containerName = input.expectedTemplate.containers[0].name;
     const ready = replicas.value.length > 0 && replicas.value.every((replica) =>
@@ -450,14 +494,17 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
   }
 
   async function patchTemplate(input) {
+    return patchProperties(input, { template: safeJsonClone(input.template) });
+  }
+
+  async function patchProperties(input, properties) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
     const url = resourceUrl(target, appName);
-    const template = safeJsonClone(input.template);
     if (typeof input.location !== "string" || !/^[A-Za-z0-9 ._-]{1,128}$/.test(input.location)) fail("AZURE_TARGET_INVALID");
     let response;
     try {
-      response = await request(url, { method: "PATCH", headers: { "content-type": PATCH_CONTENT_TYPE }, body: JSON.stringify({ location: input.location, properties: { template } }) }, true);
+      response = await request(url, { method: "PATCH", headers: { "content-type": PATCH_CONTENT_TYPE }, body: JSON.stringify({ location: input.location, properties }) }, true);
     } catch {
       return patchResult(false, false, "AZURE_PATCH_AMBIGUOUS", null, "PATCH_REQUEST");
     }
@@ -578,6 +625,62 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     return Object.freeze({ ...rejected, terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" });
   }
 
+  async function readExclusiveState(input) {
+    const target = targetValue(input.target);
+    const appName = appNameFor(target, input.role);
+    const url = resourceUrl(target, appName);
+    const response = await request(url, { method: "GET" }, true);
+    if (response.status !== 200) fail("AZURE_EXCLUSIVE_READ_FAILED", true);
+    const app = await responseBody(response);
+    const configuration = app?.properties?.configuration;
+    assertRevisionMode(configuration, input);
+    // Preserve the existing destination. Pinned revisions, labels and split
+    // traffic require a different release contract.
+    const traffic = configuration?.ingress?.traffic;
+    if (!Array.isArray(traffic) || traffic.length !== 1 || traffic[0]?.latestRevision !== true
+      || traffic[0].weight !== 100 || Object.keys(traffic[0]).some((key) => !["latestRevision", "weight"].includes(key))) {
+      fail("AZURE_EXCLUSIVE_ROUTING_UNSUPPORTED");
+    }
+    const revisionResponse = await request(url.replace("?", "/revisions?"), { method: "GET" }, true);
+    if (revisionResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REVISION_LIST_HTTP_${revisionResponse.status}`, true);
+    const revisions = await responseBody(revisionResponse);
+    if (!Array.isArray(revisions?.value) || revisions.nextLink || revisions.value.length > 256) fail("AZURE_EXCLUSIVE_REVISION_LIST_INVALID", true);
+    const inventory = [];
+    for (const revision of revisions.value) {
+      const name = revision?.name;
+      const replicasResponse = await request(revisionUrl(target, appName, name, "/replicas"), { method: "GET" }, true);
+      if (replicasResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_${replicasResponse.status}`, true);
+      const replicas = await responseBody(replicasResponse);
+      if (typeof revision.properties?.active !== "boolean") fail("AZURE_EXCLUSIVE_REVISION_METADATA_INVALID", true);
+      if (!Array.isArray(replicas?.value) || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_REPLICA_LIST_INVALID", true);
+      inventory.push({ revisionName: name, active: revision.properties.active, replicaCount: replicas.value.length });
+    }
+    return Object.freeze({ mode: configuration.activeRevisionsMode,
+      configurationDigest: managedAzureConfigurationDigest(configuration), location: app.location,
+      provisioningState: app.properties.provisioningState, latestRevisionName: app.properties.latestRevisionName,
+      latestReadyRevisionName: app.properties.latestReadyRevisionName, revisions: Object.freeze(inventory) });
+  }
+
+  async function setRevisionMode(input) {
+    if (!input.exclusiveActivation || !["Single", "Multiple"].includes(input.mode)) fail("AZURE_EXCLUSIVE_OWNERSHIP_REQUIRED");
+    const before = await readExclusiveState(input);
+    if (before.mode === input.mode && before.provisioningState === "Succeeded") return before;
+    if (before.provisioningState !== "Succeeded") fail("AZURE_EXCLUSIVE_MODE_AMBIGUOUS", true);
+    if (typeof input.onProgress === "function") await input.onProgress();
+    // Record ownership before calling this function. A lost response is resolved
+    // by GET only; the mode PATCH is never blindly repeated.
+    const result = await patchProperties({ ...input, location: before.location }, { configuration: { activeRevisionsMode: input.mode } });
+    const started = clock();
+    while (clock() - started < OPERATION_TIMEOUT_MS) {
+      if (typeof input.onProgress === "function") await input.onProgress();
+      const current = await readExclusiveState(input);
+      if (current.mode === input.mode && current.provisioningState === "Succeeded") return current;
+      if (result.terminal && !result.succeeded) fail("AZURE_EXCLUSIVE_MODE_REJECTED", true);
+      await sleep(1_000);
+    }
+    fail("AZURE_EXCLUSIVE_MODE_AMBIGUOUS", true);
+  }
+
   async function drainBaseline({ target, baselines, onProgress }) {
     for (const role of ["worker", "web"]) {
       const baseline = baselines?.[role];
@@ -588,5 +691,5 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_BASELINE_PAIR_DRAINED" });
   }
 
-  return Object.freeze({ readApp, readAppTemplate, readRevisionState, patchTemplate, waitForState, setRevisionActive, drainBaseline });
+  return Object.freeze({ readApp, readAppTemplate, readRevisionState, patchTemplate, waitForState, setRevisionActive, drainBaseline, readExclusiveState, setRevisionMode });
 }

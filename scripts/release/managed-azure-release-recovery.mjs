@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createManagedAzureExclusiveActivation } from "./managed-azure-exclusive-activation.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
 import {
   ManagedAzureContainerAppError,
@@ -156,7 +157,7 @@ function baselineRevisionSuffixes(role, state, rollback) {
 function reconstructBaselineTemplate(role, state, rollback, baseline) {
   const candidates = [state];
   const startup = state.template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE");
-  if (rollback.schemaVersion === 2 && role === "web" && startup?.value === "migrate-and-web") {
+  if (rollback.schemaVersion !== 1 && role === "web" && startup?.value === "migrate-and-web") {
     const historical = structuredClone(state);
     historical.template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE").value = "web";
     candidates.push(historical);
@@ -186,7 +187,7 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
     image: `${status.target.acrServer}/corgtex/${role}@${digest}`,
     release: incoming,
     revisionSuffix,
-    migrateWeb: rollback.schemaVersion === 2 && state.template.containers[0].env.some((entry) => entry.name === "CORGTEX_STARTUP_MODE" && entry.value === "migrate-and-web"),
+    migrateWeb: rollback.schemaVersion !== 1 && state.template.containers[0].env.some((entry) => entry.name === "CORGTEX_STARTUP_MODE" && entry.value === "migrate-and-web"),
   };
   const verifiedBaseline = { ...state, template: reconstructedBaseline };
   try {
@@ -194,7 +195,7 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
   } catch (error) {
     // Only schema v2 can replace an exact historical predecessor through a
     // journaled recovery intent. Schema v1 cannot repair inherited identity.
-    if (rollback.schemaVersion !== 2) throw error;
+    if (rollback.schemaVersion === 1) throw error;
     assertManagedAzureTemplateDelta(verifiedBaseline, state.template, { ...expected, preserveRuntimeIdentity: true });
   }
 }
@@ -244,7 +245,7 @@ async function classifyCompatibleRecoveryRole(deps, status, rollback, role, base
       imageDigest: recovery[role].digest, ambiguous: true });
     // Preserve the old runner's already-ready primary without granting any new
     // legacy-mode write or allowing that mode on the corrected second revision.
-    const allowLegacyReadyWeb = rollback.schemaVersion === 2 && role === "web"
+    const allowLegacyReadyWeb = rollback.schemaVersion !== 1 && role === "web"
       && expectedRevisionSuffix === managedAzureRevisionSuffix({ ...originatingReleaseLease(status), role, phase: "rollback" });
     verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix, allowLegacyReadyWeb);
     return { kind: "COMPATIBLE_RECOVERY", state };
@@ -253,7 +254,7 @@ async function classifyCompatibleRecoveryRole(deps, status, rollback, role, base
 }
 
 async function classifyLegacyWebRecovery(deps, status, rollback, baseline, recoveryRelease, primarySuffix, alternateSuffix, consistencyFloor = null) {
-  if (rollback.schemaVersion !== 2 || rollback.compatibleRecovery.activationPolicy !== "EXCLUSIVE") return { kind: "UNKNOWN", state: null };
+  if (rollback.schemaVersion === 1 || rollback.compatibleRecovery.activationPolicy !== "EXCLUSIVE") return { kind: "UNKNOWN", state: null };
   const recovery = rollback.compatibleRecovery;
   const latest = await deps.readAppTemplate({ target: status.target, role: "web", release: recoveryRelease, imageDigest: recovery.web.digest });
   if (![primarySuffix, alternateSuffix].includes(latest.state.revisionSuffix)) fail("MANAGED_RELEASE_RECOVERY_WEB_DRIFT");
@@ -349,14 +350,15 @@ export function writeManagedAzureRecoveryCliResult(result, writers = { stdout: p
 
 export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
   const input = canonicalInput(rawInput);
-  const deps = dependencies;
+  let deps = dependencies;
+  let exclusive = null;
   const status = await deps.lease("get_recovery", { deploymentId: input.deploymentId, acrName: input.acrName, acrServer: input.acrServer });
   const alreadyCompleted = compatibleRecoveryTerminal(status, input);
   if (alreadyCompleted) return compatibleRecoveryResult(input, alreadyCompleted, true);
   if (status.deploymentId !== input.deploymentId || (status.phase !== "MUTATING" && status.phase !== "RECOVERY_REQUIRED")
     || !UUID.test(status.leaseId) || !Number.isSafeInteger(status.fence) || status.fence < 1 || status.fence > MAX_INT
     || !recoveryTargetMatchesInput(status.target, input)) fail("MANAGED_RELEASE_RECOVERY_STATUS_INVALID");
-  if (status.writeIntentProtocolVersion !== 1) return Object.freeze({ status: "RECOVERY_BLOCKED",
+  if (![1, 2].includes(status.writeIntentProtocolVersion)) return Object.freeze({ status: "RECOVERY_BLOCKED",
     deploymentId: input.deploymentId, code: "RECOVERY_INTENT_PROTOCOL_UNAVAILABLE" });
   const claimed = await deps.lease("claim_recovery", {
     deploymentId: input.deploymentId,
@@ -386,9 +388,19 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
     const alternateWebSuffix = managedAzureRevisionSuffix({ ...originatingLease, role: "web", phase: "rollback", generation: 2 });
     const intents = managedAzureRecoveryIntents(status);
     const recorded = Object.fromEntries(intents.map((intent) => [intent.role, intent]));
+    if (rollback.schemaVersion === 3) {
+      if (status.writeIntentProtocolVersion !== 2) fail("EXCLUSIVE_ACTIVATION_PROTOCOL_UNAVAILABLE");
+      exclusive = createManagedAzureExclusiveActivation(deps, { target: status.target, ownership: rollback.exclusiveActivation,
+        knownRevisions: Object.fromEntries(["web", "worker"].map((role) => [role, [rollback.previous[role].readyRevision,
+          `${role === "web" ? status.target.webAppName : status.target.workerAppName}--${forwardSuffixes[role]}`,
+          ...(recorded[role] ? [`${recorded[role].appName}--${recorded[role].revisionSuffix}`] : [])]])),
+        onProgress: () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason })) });
+      deps = exclusive.deps;
+    }
+
     let web = recorded.web ? { kind: "RECOVERY_INTENT", state: null } : await classifyBaselineRole(deps, status, rollback, "web", baseline, rollbackSuffixes.web);
     let worker = recorded.worker ? { kind: "RECOVERY_INTENT", state: null } : await classifyBaselineRole(deps, status, rollback, "worker", baseline, rollbackSuffixes.worker);
-    if (rollback.schemaVersion === 2) {
+    if (rollback.schemaVersion !== 1) {
       const pendingIncoming = incomingReleaseIdentity(status);
       if (!recorded.web && web.kind !== "BASELINE") web = await classifyForwardRole(deps, status, rollback, "web", baseline, pendingIncoming, forwardSuffixes.web);
       if (!recorded.worker && worker.kind !== "BASELINE") worker = await classifyForwardRole(deps, status, rollback, "worker", baseline, pendingIncoming, forwardSuffixes.worker);
@@ -401,7 +413,7 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       }
       if (web.revisionSuffix) rollbackSuffixes.web = web.revisionSuffix;
     }
-    const exclusiveCompatibleRecovery = rollback.schemaVersion === 2
+    const exclusiveCompatibleRecovery = rollback.schemaVersion !== 1
       && rollback.compatibleRecovery.activationPolicy === "EXCLUSIVE";
     if (exclusiveCompatibleRecovery && web.kind === "BASELINE" && worker.kind === "BASELINE") {
       const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
@@ -416,12 +428,33 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
       const health = await deps.healthProbe({ origin: status.origin, release: baseline });
       if (!health.ok) await block("OBSERVATION", health.code ?? "MANAGED_RELEASE_RECOVERY_REACTIVATION_HEALTH_FAILED");
     }
-    if (rollback.schemaVersion === 2) {
+    if (rollback.schemaVersion !== 1) {
       const recovery = rollback.compatibleRecovery;
       const heartbeat = () => deps.lease("heartbeat_recovery", leaseArgs(handle, { reason: input.reason }));
       const recoveryRelease = releaseIdentity(recovery.imageTag, recovery.releaseVersion);
       const current = { web, worker };
       const completedIntents = {};
+      if (exclusive) {
+        const keep = {};
+        let allReady = true;
+        for (const role of ["web", "worker"]) {
+          if (!recorded[role]) { allReady = false; continue; }
+          const plan = await readManagedAzureRecoveryIntentPlan(deps, { intent: recorded[role], originatingLease,
+            target: status.target, release: recoveryRelease, image: recovery[role].image,
+            releases: [{ release: recoveryRelease, imageDigest: recovery[role].digest },
+              { release: baseline, imageDigest: digestFromImage(rollback.previous[role].image) },
+              { release: incomingReleaseIdentity(status), imageDigest: rollback.incoming[role === "web" ? "webDigest" : "workerDigest"] }] });
+          const revisionName = `${recorded[role].appName}--${recorded[role].revisionSuffix}`;
+          const state = await deps.readRevisionState({ target: status.target, role, revisionName, expectedTemplate: plan.template });
+          if (state.kind !== "READY" && state.kind !== "PROVISIONING") await block("READBACK", "RECOVERY_INTENT_RECORDED_STATE_UNPROVEN");
+          keep[role] = revisionName;
+          if (state.kind !== "READY") allReady = false;
+        }
+        // A completed pair can have crashed during Single restoration. Resume
+        // that exact restoration without draining or creating another revision.
+        if (allReady) await exclusive.finish(keep);
+        else await exclusive.enter(keep);
+      }
       for (const role of ["web", "worker"]) {
         try {
           let plan;
@@ -486,10 +519,13 @@ export async function runManagedAzureReleaseRecovery(rawInput, dependencies) {
           if (verified.kind !== "COMPATIBLE_RECOVERY") await block("READBACK", "MANAGED_RELEASE_RECOVERY_COMPATIBLE_READBACK_AMBIGUOUS");
         }
       }
+      if (exclusive) await exclusive.finish(Object.fromEntries(["web", "worker"].map((role) => [role,
+        `${role === "web" ? status.target.webAppName : status.target.workerAppName}--${rollbackSuffixes[role]}`])));
       const operationId = diagnosticOperationId(originatingLease.leaseId, recoveryRelease.gitSha, "compatible-recovery");
       const proof = await verifyRecoveryReleaseAcceptance(deps, { deploymentId: input.deploymentId, target: status.target,
         origin: status.origin, release: recoveryRelease, imageDigests: { web: recovery.web.digest, worker: recovery.worker.digest },
         operationId, reason: input.reason, heartbeat, failurePrefix: "MANAGED_RELEASE_RECOVERY_COMPATIBLE", handle });
+      if (exclusive) await exclusive.guard("Single");
       const evidence = {
         gitSha: recovery.gitSha, imageTag: recovery.imageTag, releaseVersion: recovery.releaseVersion,
         webDigest: recovery.web.digest, workerDigest: recovery.worker.digest, acceptanceEvidenceDigest: proof.acceptanceEvidenceDigest,
@@ -720,6 +756,8 @@ function runtimeDependencies(env = process.env) {
     owner: `github:${env.GITHUB_RUN_ID || "manual"}:${env.GITHUB_RUN_ATTEMPT || "1"}:recovery`,
     lease: (operation, args) => callControlPlane("managed_release_lease", { operation, ...args }, env),
     readApp: apps.readApp,
+    readExclusiveState: apps.readExclusiveState,
+    setRevisionMode: apps.setRevisionMode,
     readRevisionState: apps.readRevisionState,
     readAppTemplate: apps.readAppTemplate,
     patchTemplate: apps.patchTemplate,
