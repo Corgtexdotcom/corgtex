@@ -10,7 +10,7 @@ import {
   managedAzureRevisionSuffix,
   managedAzureTemplateDigest,
 } from "./managed-azure-container-app-transport.mjs";
-import { managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
+import { managedAzureFailureDetail, managedAzureCliResultAccepted, managedAzureHealthReady, runManagedAzureReleaseTransaction, writeManagedAzureCliResult } from "./managed-azure-release-transaction.mjs";
 
 const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
 const inventoryRef = "123e4567-e89b-42d3-a456-426614174002";
@@ -129,8 +129,17 @@ function dependencies(options = {}) {
   const hosted = options.hosted !== false;
   const targetDigest = "7".repeat(64);
   const deployment = { deploymentId, deploymentKind: hosted ? "HOSTED_DEDICATED" : "REMOTE_MANAGED", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseEligible: true, provider: "azure", group: hosted ? "hosted-dedicated" : "managed-customers", workload: hosted ? "hosted-dedicated" : "managed-customers", workloadClass: "ACTIVE_CLIENT_PRIMARY" };
-  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 1 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+  const preflight = { ...(Object.hasOwn(options, "protocolVersion") && options.protocolVersion === undefined ? {} : { writeIntentProtocolVersion: options.protocolVersion ?? 2 }), deploymentId, deployment, authorityDigest: "e".repeat(64), origin: "https://customer.example", release: { baselineImageTag: `sha-${baseSha}`, baselineVersion: "release-1" }, target };
+  const modes = { web: "Single", worker: "Single" };
+  const inactive = new Set();
   const deps = {
+    readExclusiveState: vi.fn(async ({ role }) => {
+      const selected = state(role, current[role], currentTemplates[role]).revisionName;
+      return { mode: modes[role], configurationDigest: `sha256:${"f".repeat(64)}`, provisioningState: "Succeeded",
+        latestRevisionName: selected, latestReadyRevisionName: selected,
+        revisions: [{ revisionName: selected, active: !inactive.has(selected), replicaCount: inactive.has(selected) ? 0 : 1 }] };
+    }),
+    setRevisionMode: vi.fn(async ({ role, mode }) => { events.push(`mode:${role}:${mode}`); modes[role] = mode; }),
     owner: "github:42:1",
     intentClock: () => 0,
     intentSleep: async () => {},
@@ -144,7 +153,11 @@ function dependencies(options = {}) {
       releaseApproval: options.releaseApproval ?? { gitSha: nextSha, schemaApprovalDigest: "8".repeat(64) },
       recovery: { gitSha: recoverySha, releaseVersion: "recovery-1", schemaCompatibilityApprovalDigest: "9".repeat(64) } } })),
     drainBaseline: vi.fn(async () => options.drain ?? { terminal: true, succeeded: true }),
-    setRevisionActive: vi.fn(async () => ({ terminal: true, succeeded: true })),
+    setRevisionActive: vi.fn(async ({ revisionName, active }) => {
+      if (options.drain && !active) return options.drain;
+      if (active) inactive.delete(revisionName); else inactive.add(revisionName);
+      return { terminal: true, succeeded: true, replicaCount: active ? 1 : 0 };
+    }),
     lease: vi.fn(async (operation, args) => {
       events.push(`lease:${operation}`);
       if (operation === "preflight") return preflight;
@@ -217,6 +230,19 @@ function dependencies(options = {}) {
 }
 
 describe("managed Azure single-target transaction", () => {
+  it("retains a structured failure when compensation observation throws, without disclosing its message", async () => {
+    const { deps } = dependencies();
+    deps.acceptanceProbe.mockResolvedValueOnce({ accepted: false }).mockImplementation(async ({ operationId, release }) => ({
+      accepted: true, webGitSha: release.gitSha, receipt: { workerGitSha: release.gitSha, operationId } }));
+    deps.observeNewRelease.mockRejectedValue(new TypeError("Bearer private-secret database URL"));
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "TRANSACTION_AMBIGUOUS",
+      originatingPhase: "DIAGNOSTIC", originatingCode: "AUTHENTICATED_RELEASE_DIAGNOSTIC_FAILED", failureClass: "TYPE_ERROR" });
+    expect(JSON.stringify(result)).not.toContain("private-secret");
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
+    expect(managedAzureFailureDetail(Object.assign(new Error("secret"), { code: "ATTACKER_CONTROLLED" }))).toEqual({ failureClass: "UNCLASSIFIED" });
+  });
+
   it("stops against an older control plane before acquisition or provider effects", async () => {
     const { deps } = dependencies({ protocolVersion: undefined });
     await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps))
@@ -343,142 +369,73 @@ describe("managed Azure single-target transaction", () => {
     expect(JSON.stringify(recorded)).not.toContain("private-capability");
   });
 
-  it("drains exact old worker and web consumers after mutation fencing and before an exclusive schema activation", async () => {
+  it("records ownership and enters Multiple before draining or starting migrations", async () => {
     const { deps, events } = dependencies({ activationPolicy: "EXCLUSIVE" });
-    deps.drainBaseline.mockImplementation(async () => { events.push("drain:baseline-pair"); return { terminal: true, succeeded: true }; });
+    const deactivate = deps.setRevisionActive.getMockImplementation();
+    deps.setRevisionActive.mockImplementation(async (request) => { events.push(`active:${request.role}:${request.active}`); return deactivate(request); });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
     expect(result.status).toBe("SUCCEEDED");
-    expect(events.indexOf("lease:begin")).toBeLessThan(events.indexOf("drain:baseline-pair"));
-    expect(events.indexOf("drain:baseline-pair")).toBeLessThan(events.indexOf("patch:web:forward"));
-    expect(deps.drainBaseline).toHaveBeenCalledWith(expect.objectContaining({ baselines: expect.objectContaining({ web: expect.anything(), worker: expect.anything() }) }));
+    expect(events.indexOf("lease:record_rollback")).toBeLessThan(events.indexOf("mode:web:Multiple"));
+    expect(events.indexOf("mode:worker:Multiple")).toBeLessThan(events.indexOf("active:worker:false"));
+    expect(events.indexOf("active:web:false")).toBeLessThan(events.indexOf("patch:web:forward"));
+    expect(events.indexOf("patch:worker:forward")).toBeLessThan(events.indexOf("mode:web:Single"));
+    expect(deps.lease.mock.calls.find(([op]) => op === "record_rollback")[1].rollback).toMatchObject({ schemaVersion: 3,
+      exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple" } });
   });
 
-  it("restores both exact baselines and converges to compatible recovery when an exclusive drain is ambiguous", async () => {
-    const { deps, events, current } = dependencies({ activationPolicy: "EXCLUSIVE" });
-    deps.drainBaseline.mockImplementation(async () => {
-      current.worker = "UNKNOWN";
-      return { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" };
-    });
-    deps.setRevisionActive.mockImplementation(async ({ role }) => {
-      events.push(`activate:${role}`);
-      current[role] = "BASELINE";
-      return { terminal: true, succeeded: true };
-    });
+  it("contains a partial mode change and completes compatible recovery without a forward patch", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.setRevisionMode.mockRejectedValueOnce(new Error("lost mode reply"));
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "BASELINE_DRAIN_AMBIGUOUS",
-      providerCode: "AZURE_REVISION_READBACK_AMBIGUOUS", containment: "BASELINE_REACTIVATED" });
-    expect(events.filter((event) => event.startsWith("activate:"))).toEqual(["activate:worker", "activate:web"]);
-    expect(events.filter((event) => event.includes(":forward"))).toEqual([]);
-    expect(events.filter((event) => event.includes(":rollback"))).toEqual(["patch:web:rollback", "patch:worker:rollback"]);
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", containment: "BASELINE_REACTIVATED" });
+    expect(deps.setRevisionActive.mock.calls.filter(([r]) => r.active).map(([r]) => r.role)).toEqual(["worker", "web"]);
+    expect(deps.patchTemplate.mock.calls.every(([r]) => r.template.containers[0].env.find(e => e.name === "CORGTEX_RELEASE_GIT_SHA").value === recoverySha)).toBe(true);
+  });
+
+  it("recovers after one ambiguous drain while retaining the original failure", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.setRevisionActive.mockResolvedValueOnce({ terminal: false, succeeded: false });
+    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
+    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", containment: "BASELINE_REACTIVATED" });
     expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
   });
 
-  it("contains a thrown partial drain before any candidate patch", async () => {
-    const { deps, events, current } = dependencies({ activationPolicy: "EXCLUSIVE" });
-    deps.drainBaseline.mockImplementation(async () => {
-      current.worker = "UNKNOWN";
-      throw new Error("web drain response lost");
-    });
-    deps.setRevisionActive.mockImplementation(async ({ role }) => {
-      events.push(`activate:${role}`);
-      current[role] = "BASELINE";
-      return { terminal: true, succeeded: true };
-    });
+  it("attempts both exact baseline activations when containment is uncertain", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    deps.setRevisionMode.mockRejectedValueOnce(new Error("partial mode change"));
+    deps.setRevisionActive.mockRejectedValueOnce(new Error("lost activation reply"));
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS",
-      containment: "BASELINE_REACTIVATED" });
-    expect(events.filter((event) => event.startsWith("activate:"))).toEqual(["activate:worker", "activate:web"]);
-    expect(events.filter((event) => event.includes(":forward"))).toEqual([]);
-  });
-
-  it("attempts both baseline activations before retaining the fence for an uncertain activation", async () => {
-    const { deps, events, current } = dependencies({ activationPolicy: "EXCLUSIVE",
-      drain: { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" } });
-    deps.setRevisionActive.mockImplementation(async ({ role }) => {
-      events.push(`activate:${role}`);
-      current[role] = "BASELINE";
-      if (role === "worker") throw new Error("activation response lost");
-      return { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" };
-    });
-    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "BASELINE_REACTIVATION_AMBIGUOUS" });
-    expect(events.filter((event) => event.startsWith("activate:"))).toEqual(["activate:worker", "activate:web"]);
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "BASELINE_REACTIVATION_AMBIGUOUS" });
+    expect(deps.setRevisionActive.mock.calls.map(([r]) => [r.role, r.active])).toEqual([["worker", true], ["web", true]]);
     expect(deps.patchTemplate).not.toHaveBeenCalled();
-    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
   });
 
-  it("retains the fence when exact baseline readback is missing or drifted", async () => {
+  it("retains recovery when the exact baseline is missing or drifted after partial mode entry", async () => {
     for (const scenario of ["missing", "drifted"]) {
       const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
-      let drainAttempted = false;
-      deps.drainBaseline.mockImplementation(async () => {
-        drainAttempted = true;
-        return { terminal: false, succeeded: false, code: "AZURE_REVISION_READBACK_AMBIGUOUS" };
-      });
-      const baseReadApp = deps.readApp.getMockImplementation();
+      let entered = false;
+      deps.setRevisionMode.mockImplementationOnce(async () => { entered = true; throw new Error("lost mode reply"); });
+      const read = deps.readApp.getMockImplementation();
       deps.readApp.mockImplementation(async (request) => {
-        if (drainAttempted && request.release.gitSha === baseSha) {
-          if (scenario === "missing") throw new Error("baseline read unavailable");
-          return { ...state(request.role, "BASELINE"), templateDigest: `sha256:${"0".repeat(64)}` };
-        }
-        return baseReadApp(request);
+        if (!entered) return read(request);
+        if (scenario === "missing") throw new Error("read unavailable");
+        return { ...state(request.role, "BASELINE"), templateDigest: `sha256:${"0".repeat(64)}` };
       });
       const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-      expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING",
-        code: scenario === "missing" ? "BASELINE_REACTIVATION_AMBIGUOUS" : "BASELINE_REACTIVATION_DRIFT" });
+      expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: scenario === "missing" ? "BASELINE_REACTIVATION_AMBIGUOUS" : "BASELINE_REACTIVATION_DRIFT" });
       expect(deps.patchTemplate).not.toHaveBeenCalled();
-      expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
     }
   });
 
-  it("reports recovery recording failure without clearing or finalizing the fenced transaction", async () => {
-    const { deps, current } = dependencies({ activationPolicy: "EXCLUSIVE" });
-    deps.drainBaseline.mockImplementation(async () => {
-      current.web = "UNKNOWN";
-      return { terminal: false, succeeded: false };
-    });
-    const lease = deps.lease.getMockImplementation();
-    deps.lease.mockImplementation(async (operation, args) => {
-      if (operation === "mark_recovery") throw new Error("control plane unavailable");
-      return lease(operation, args);
-    });
-    const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", phase: "FENCING", code: "RECOVERY_RECORDING_FAILED",
-      originatingPhase: "FENCING", originatingCode: "BASELINE_REACTIVATION_AMBIGUOUS" });
-    expect(deps.lease).not.toHaveBeenCalledWith("abort", expect.anything());
-    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
-    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
-    expect(deps.lease).not.toHaveBeenCalledWith("finalize_compatible_recovery", expect.anything());
-  });
-
-  it("uses exact baselines only for containment before compatible recovery after an exclusive drain", async () => {
+  it("reports a failed recovery recording without clearing the fenced transaction", async () => {
     const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
-    const baseLease = deps.lease.getMockImplementation();
-    let drained = false;
-    let failed = false;
-    deps.drainBaseline.mockImplementation(async () => { drained = true; return { terminal: true, succeeded: true }; });
-    deps.lease.mockImplementation(async (operation, args) => {
-      if (drained && !failed && operation === "heartbeat_recovery") {
-        failed = true;
-        throw new Error("lost heartbeat response");
-      }
-      return baseLease(operation, args);
-    });
+    deps.setRevisionMode.mockRejectedValueOnce(new Error("mode reply lost"));
+    deps.setRevisionActive.mockRejectedValueOnce(new Error("activation reply lost"));
+    const lease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (op, args) => { if (op === "mark_recovery") throw new Error("unavailable"); return lease(op, args); });
     const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
-    expect(result).toMatchObject({ status: "RECOVERED_COMPATIBLE", phase: "FENCING", code: "TRANSACTION_AMBIGUOUS",
-      containment: "BASELINE_REACTIVATED", recoveryReleaseImageTag: `sha-${recoverySha}` });
-    expect(deps.setRevisionActive.mock.calls.map(([request]) => [request.role, request.revisionName, request.active]))
-      .toEqual([["worker", `${target.workerAppName}--base-worker`, true], ["web", "web-app--base-web", true]]);
-    expect(deps.patchTemplate.mock.calls.map(([request]) => request.role)).toEqual(["web", "worker"]);
-    expect(deps.authPreflight).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }) }));
-    expect(deps.acceptanceProbe).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }), operationId: expect.any(String) }));
-    expect(deps.observeNewRelease).toHaveBeenCalledWith(expect.objectContaining({ release: expect.objectContaining({ gitSha: recoverySha }),
-      imageDigests: { web: digests.web, worker: digests.worker }, durationMs: 15 * 60_000 }));
-    expect(deps.lease).toHaveBeenCalledWith("finalize_compatible_recovery", expect.objectContaining({ evidence: expect.objectContaining({
-      gitSha: recoverySha, webDigest: digests.web, workerDigest: digests.worker,
-      acceptanceEvidenceDigest: expect.stringMatching(/^sha256:/),
-    }) }));
-    expect(deps.lease).not.toHaveBeenCalledWith("finalize_rollback", expect.anything());
+    expect(result).toMatchObject({ status: "RECOVERY_REQUIRED", code: "RECOVERY_RECORDING_FAILED", originatingCode: "BASELINE_REACTIVATION_AMBIGUOUS" });
+    expect(deps.lease.mock.calls.some(([op]) => ["abort", "finalize_success", "finalize_compatible_recovery"].includes(op))).toBe(false);
   });
 
   it("reconciles one lost compatible-finalization response through the exact terminal receipt", async () => {
@@ -595,12 +552,7 @@ describe("managed Azure single-target transaction", () => {
       const options = scenario === "diagnostic" ? { acceptance: { accepted: false } }
         : scenario === "observation" ? { observation: { verified: false } } : {};
       const { deps } = dependencies({ activationPolicy: "EXCLUSIVE", ...options });
-      const baseLease = deps.lease.getMockImplementation(); let drained = false; let failed = false;
-      deps.drainBaseline.mockImplementation(async () => { drained = true; return { terminal: true, succeeded: true }; });
-      deps.lease.mockImplementation(async (operation, args) => {
-        if (drained && !failed && operation === "heartbeat_recovery") { failed = true; throw new Error("lost heartbeat response"); }
-        return baseLease(operation, args);
-      });
+      deps.setRevisionMode.mockRejectedValueOnce(new Error("mode reply lost"));
       if (scenario === "auth") deps.authPreflight.mockResolvedValueOnce({ ok: true }).mockRejectedValueOnce(new Error("revoked"));
       const result = await runManagedAzureReleaseTransaction({ ...input, execute: true }, deps);
       expect(result).toMatchObject({ status: "RECOVERY_REQUIRED",

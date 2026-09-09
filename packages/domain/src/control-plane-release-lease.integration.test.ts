@@ -421,7 +421,7 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
-      writeIntentProtocolVersion: 1,
+      writeIntentProtocolVersion: 2,
       deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
       authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
@@ -442,7 +442,7 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(canary.id);
     await expect(getManagedReleaseTargetPreflight(canary.id, ACR_IDENTITY, "ACTIVE_CLIENT_CANARY")).resolves.toEqual({
       deploymentId: canary.id,
-      writeIntentProtocolVersion: 1,
+      writeIntentProtocolVersion: 2,
       deployment: expect.objectContaining({ deploymentKind: "HOSTED_DEDICATED", workloadClass: "ACTIVE_CLIENT_CANARY", releaseEligible: false }),
       authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: canary.url,
@@ -465,7 +465,7 @@ describe("managed release lease CAS", () => {
     const before = await releaseState(target.id);
     await expect(getManagedReleaseTargetPreflight(target.id, ACR_IDENTITY)).resolves.toEqual({
       deploymentId: target.id,
-      writeIntentProtocolVersion: 1,
+      writeIntentProtocolVersion: 2,
       deployment: expect.objectContaining({ deploymentKind: "REMOTE_MANAGED", workloadClass: "ACTIVE_CLIENT_PRIMARY" }),
       authorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       origin: target.url,
@@ -660,7 +660,7 @@ describe("managed release lease CAS", () => {
       intents: [webIntent, workerIntent],
     });
     await expect(getManagedReleaseRecoveryStatus(target.id, ACR_IDENTITY)).resolves.toMatchObject({
-      writeIntentProtocolVersion: 1,
+      writeIntentProtocolVersion: 2,
       recovery: { schemaVersion: 2, stage: "ROLLBACK", code: "RECOVERY_WRITE_INTENT_RECORDED", intents: [webIntent, workerIntent] },
     });
     await markManagedReleaseRecoveryRequired(original, { stage: "AUTH", code: "AUTH_ACCEPTANCE_FAILED" });
@@ -784,7 +784,7 @@ describe("selected hosted Azure release lifecycle", () => {
   it("runs a selected hosted release through V2 recording and success without relabelling", async () => {
     const row = await hosted();
     const preflight = await getManagedReleaseTargetPreflight(row.id, ACR_IDENTITY);
-    expect(preflight).toMatchObject({ writeIntentProtocolVersion: 1 });
+    expect(preflight).toMatchObject({ writeIntentProtocolVersion: 2 });
     expect(preflight.deployment).toMatchObject({ deploymentKind: "HOSTED_DEDICATED", group: "hosted-dedicated", releaseEligible: true });
     const handle = await acquire(row.id);
     await recordManagedReleaseRollbackRecord(handle, rollbackPayloadV2());
@@ -796,6 +796,28 @@ describe("selected hosted Azure release lifecycle", () => {
     expect(final.deploymentKind).toBe("HOSTED_DEDICATED");
     expect(final.releaseLeaseId).toBeNull();
     expect(final.providerPostgresServiceId).toBe(row.providerPostgresServiceId);
+  });
+  it("persists exclusive mode ownership through a fenced recovery claim and forbids V3 baseline rollback", async () => {
+    const row = await hosted(); const original = await acquire(row.id);
+    const payload = { ...rollbackPayloadV2(), schemaVersion: 3 as const,
+      exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple",
+        configurationDigests: { web: `sha256:${"8".repeat(64)}`, worker: `sha256:${"9".repeat(64)}` } } };
+    await recordManagedReleaseRollbackRecord(original, payload);
+    await beginManagedReleaseMutation(original);
+    await expect(getManagedReleaseRollbackRecord(original)).resolves.toEqual(payload);
+    await expectCode(finalizeManagedReleaseRollback(original), "MANAGED_RELEASE_LEASE_STATE_CONFLICT");
+    await markManagedReleaseRecoveryRequired(original, { stage: "FENCING", code: "AZURE_EXCLUSIVE_MODE_AMBIGUOUS" });
+    await expire(row.id);
+    const claimed = await claimManagedReleaseRecovery({ deploymentId: row.id, expectedLeaseId: original.leaseId,
+      expectedFence: original.fence, owner: "recovery:exclusive-test" });
+    const handle = { deploymentId: row.id, leaseId: claimed.leaseId, capability: claimed.capability, fence: claimed.fence };
+    await expect(getManagedReleaseRollbackRecord(handle)).resolves.toEqual(payload);
+    await expectCode(heartbeatManagedReleaseLease(original, true), "MANAGED_RELEASE_LEASE_CONFLICT");
+    await expect(finalizeManagedReleaseCompatibleRecovery(handle, {
+      gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, releaseVersion: "recovery-1",
+      webDigest: DIGESTS[0], workerDigest: DIGESTS[1], acceptanceEvidenceDigest: `sha256:${"7".repeat(64)}`,
+    })).resolves.toMatchObject({ status: "RECOVERED_COMPATIBLE" });
+    expect((await releaseState(row.id)).deployment.releaseLeaseId).toBeNull();
   });
   it.each(["EXCLUSIVE", "STANDARD"] as const)("requires compatible recovery and never finalizes a V2 %s baseline rollback", async (activationPolicy) => {
     const row = await hosted(activationPolicy); const handle = await acquire(row.id); const rollback = rollbackPayloadV2(activationPolicy);

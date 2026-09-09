@@ -124,7 +124,7 @@ describe("managed Azure recovery intent canonicalization", () => {
     expect(() => canonicalizeManagedReleaseRecoveryIntent({ ...intent("web"), intentDigest: DIGESTS[0] }, authority)).toThrow("MANAGED_RELEASE_RECOVERY_INTENT_CONFLICT");
   });
 
-  it("parses the real script recovery-intent builder output", async () => {
+  it.each([2, 3] as const)("parses the real script intent format under rollback schema %i", async (schemaVersion) => {
     const [{ buildManagedAzureRecoveryIntent }, { managedAzureTemplateDigest }] = await Promise.all([
       import(new URL("../../../scripts/release/managed-azure-recovery-intent.mjs", import.meta.url).href),
       import(new URL("../../../scripts/release/managed-azure-container-app-transport.mjs", import.meta.url).href),
@@ -166,6 +166,14 @@ describe("managed Azure recovery intent canonicalization", () => {
       image: authority.payload.compatibleRecovery.worker.image,
       imageDigest: authority.payload.compatibleRecovery.worker.digest,
     });
-    expect(canonicalizeManagedReleaseRecoveryIntent(built, authority)).toEqual(built);
+    const currentAuthority = schemaVersion === 2 ? authority : {
+      ...authority,
+      payload: { ...authority.payload, schemaVersion, exclusiveActivation: {
+        originalMode: "Single" as const, temporaryMode: "Multiple" as const,
+        configurationDigests: { web: DIGESTS[0]!, worker: DIGESTS[1]! },
+      } },
+    };
+    expect(canonicalizeManagedReleaseRecoveryIntent(built, currentAuthority)).toEqual(built);
+    expect(built.protocolVersion).toBe(1);
   });
 });

@@ -15,7 +15,16 @@ export type ManagedAzureRollbackPayloadV2 = Omit<ManagedAzureRollbackPayloadV1, 
     readonly activationPolicy: "STANDARD" | "EXCLUSIVE";
   };
 };
-export type ManagedAzureRollbackPayload = ManagedAzureRollbackPayloadV1 | ManagedAzureRollbackPayloadV2;
+export type ManagedAzureExclusiveActivation = {
+  readonly originalMode: "Single";
+  readonly temporaryMode: "Multiple";
+  readonly configurationDigests: { readonly web: string; readonly worker: string };
+};
+export type ManagedAzureRollbackPayloadV3 = Omit<ManagedAzureRollbackPayloadV2, "schemaVersion"> & {
+  readonly schemaVersion: 3;
+  readonly exclusiveActivation: ManagedAzureExclusiveActivation;
+};
+export type ManagedAzureRollbackPayload = ManagedAzureRollbackPayloadV1 | ManagedAzureRollbackPayloadV2 | ManagedAzureRollbackPayloadV3;
 const invalid = (): never => { throw new AppError(400, "MANAGED_RELEASE_INVALID_INPUT", "Managed release rollback payload is invalid."); };
 
 export function canonicalizeManagedAzureRollbackPayload(value: unknown): Readonly<ManagedAzureRollbackPayload> {
@@ -29,8 +38,10 @@ export function canonicalizeManagedAzureRollbackPayload(value: unknown): Readonl
   } catch { invalid(); }
   if (version === 1) return canonicalizeManagedAzureRollbackPayloadV1(value);
   const reader = createManagedReleaseProofReader(invalid);
-  const root = reader.exactRecord(value, ["schemaVersion", "target", "previous", "incoming", "compatibleRecovery"] as const);
-  reader.literal(root.schemaVersion, 2);
+  const exclusiveRoot = version === 3
+    ? reader.exactRecord(value, ["schemaVersion", "target", "previous", "incoming", "compatibleRecovery", "exclusiveActivation"] as const) : null;
+  const root = exclusiveRoot ?? reader.exactRecord(value, ["schemaVersion", "target", "previous", "incoming", "compatibleRecovery"] as const);
+  reader.literal(root.schemaVersion, version === 3 ? 3 : 2);
   const rawIncoming = reader.exactRecord(root.incoming, ["webDigest", "workerDigest", "schemaApprovalDigest"] as const);
   const base = canonicalizeManagedAzureRollbackPayloadV1({ schemaVersion: 1, target: root.target, previous: root.previous,
     incoming: { webDigest: rawIncoming.webDigest, workerDigest: rawIncoming.workerDigest } });
@@ -49,6 +60,18 @@ export function canonicalizeManagedAzureRollbackPayload(value: unknown): Readonl
   reader.canonicalJsonBytes(compatibleRecovery);
   const incoming = reader.deepFreeze(reader.exactRecord({ ...base.incoming, schemaApprovalDigest: reader.digest(rawIncoming.schemaApprovalDigest) },
     ["webDigest", "workerDigest", "schemaApprovalDigest"] as const));
+  if (exclusiveRoot) {
+    if (compatibleRecovery.activationPolicy !== "EXCLUSIVE") invalid();
+    const rawActivation = reader.exactRecord(exclusiveRoot.exclusiveActivation, ["originalMode", "temporaryMode", "configurationDigests"] as const);
+    const digests = reader.exactRecord(rawActivation.configurationDigests, ["web", "worker"] as const);
+    const exclusiveActivation = reader.deepFreeze(reader.exactRecord({
+      originalMode: reader.literal(rawActivation.originalMode, "Single"),
+      temporaryMode: reader.literal(rawActivation.temporaryMode, "Multiple"),
+      configurationDigests: reader.exactRecord({ web: reader.digest(digests.web), worker: reader.digest(digests.worker) }, ["web", "worker"] as const),
+    }, ["originalMode", "temporaryMode", "configurationDigests"] as const));
+    return Object.freeze({ schemaVersion: 3 as const, target: base.target, previous: base.previous,
+      incoming, compatibleRecovery, exclusiveActivation }) as Readonly<ManagedAzureRollbackPayloadV3>;
+  }
   const canonical = Object.freeze({ schemaVersion: 2 as const, target: base.target, previous: base.previous, incoming, compatibleRecovery });
   return canonical as Readonly<ManagedAzureRollbackPayloadV2>;
 }

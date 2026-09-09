@@ -3,6 +3,8 @@ import type { ManagedAzureRollbackPayload } from "./managed-azure-recovery-paylo
 import { createManagedReleaseProofReader } from "./managed-release-proof-support";
 
 export const MANAGED_RELEASE_WRITE_INTENT_PROTOCOL_VERSION = 1;
+// Runner capability is distinct from immutable revision intent format.
+export const MANAGED_RELEASE_RUNNER_PROTOCOL_VERSION = 2;
 
 export type ManagedReleaseRecoveryIntentRole = "web" | "worker";
 
@@ -87,7 +89,7 @@ export function canonicalizeManagedReleaseRecoveryIntent(
 ): ManagedReleaseRecoveryIntent {
   const reader = createManagedReleaseProofReader(rejectors.invalid);
   const payload = authority.payload;
-  if (payload.schemaVersion !== 2) rejectors.conflict();
+  if (payload.schemaVersion === 1) rejectors.conflict();
   const raw = reader.exactRecord(value, INTENT_KEYS);
   const role = reader.enumString(raw.role, ["web", "worker"] as const);
   const appName = reader.azureAppName(raw.appName);

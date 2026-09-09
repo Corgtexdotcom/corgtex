@@ -27,3 +27,23 @@ describe("managed Azure compatible recovery manifest", () => {
     expect(() => canonicalizeManagedAzureRollbackPayload(new Proxy(v2(), {}))).toThrow();
   });
 });
+
+describe("durable exclusive activation ownership", () => {
+  const v3 = () => ({ ...v2(), schemaVersion: 3, exclusiveActivation: { originalMode: "Single", temporaryMode: "Multiple",
+    configurationDigests: { web: `sha256:${hex("a")}`, worker: `sha256:${hex("b")}` } } });
+  it("binds both configuration digests and preserves historical formats", () => {
+    const parsed = canonicalizeManagedAzureRollbackPayload(v3());
+    expect(parsed).toEqual(v3());
+    expect(parsed.schemaVersion).toBe(3);
+    if (parsed.schemaVersion === 3) expect(Object.isFrozen(parsed.exclusiveActivation.configurationDigests)).toBe(true);
+  });
+  it("rejects unowned modes, missing role bindings, unsupported policies and unknown fields", () => {
+    for (const mutate of [
+      (x: ReturnType<typeof v3>) => { x.exclusiveActivation.originalMode = "Multiple"; },
+      (x: ReturnType<typeof v3>) => { x.exclusiveActivation.temporaryMode = "Single"; },
+      (x: ReturnType<typeof v3>) => { x.exclusiveActivation.configurationDigests.worker = "missing"; },
+      (x: ReturnType<typeof v3>) => { x.compatibleRecovery.activationPolicy = "STANDARD"; },
+      (x: ReturnType<typeof v3>) => { Object.assign(x.exclusiveActivation, { bypass: true }); },
+    ]) { const value = v3(); mutate(value); expect(() => canonicalizeManagedAzureRollbackPayload(value)).toThrow(); }
+  });
+});
