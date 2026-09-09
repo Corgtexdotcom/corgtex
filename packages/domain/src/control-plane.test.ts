@@ -8975,6 +8975,7 @@ describe("managed Azure release control-plane boundary", () => {
   const inventoryRef = "123e4567-e89b-42d3-a456-426614174000";
   const deploymentId = "123e4567-e89b-42d3-a456-426614174001";
   const canaryPreflight = {
+    writeIntentProtocolVersion: 1,
     deploymentId,
     authorityDigest: "d".repeat(64),
     deployment: { deploymentId, deploymentKind: "HOSTED_DEDICATED", workloadClass: "ACTIVE_CLIENT_CANARY", releaseEligible: false, group: "hosted-dedicated" },
@@ -9070,7 +9071,7 @@ describe("managed Azure release control-plane boundary", () => {
         meta: expect.objectContaining({
           reason: "Freeze exact canary inventory.",
           actorLabel: "managed-release",
-          preflightDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+          preflightDigest: `sha256:${createHash("sha256").update(canonicalJson(canaryPreflight)).digest("hex")}`,
           baselineImageTag: canaryPreflight.release.baselineImageTag,
           baselineVersion: canaryPreflight.release.baselineVersion,
         }),
@@ -9291,14 +9292,15 @@ describe("managed Azure release control-plane boundary", () => {
     });
     const { getControlPlaneManagedReleaseInventory } = await import("./control-plane");
 
-    await expect(getControlPlaneManagedReleaseInventory(actor, {
+    const inventory = await getControlPlaneManagedReleaseInventory(actor, {
       inventoryRef,
       expectedSha256: digest,
       deploymentId,
       workloadClass: "ACTIVE_CLIENT_CANARY",
       acrName: "acr12",
       acrServer: "acr12.azurecr.io",
-    })).resolves.toEqual({
+    });
+    expect(inventory).toEqual({
       inventoryRef,
       sha256: digest,
       bytesBase64: bytes.toString("base64"),
@@ -9357,6 +9359,16 @@ describe("managed Azure release control-plane boundary", () => {
     })).rejects.toMatchObject({
       code: "MANAGED_RELEASE_INVENTORY_REJECTED",
     });
+    const { runManagedAzureReleaseTransaction } = await import(new URL("../../../scripts/release/managed-azure-release-transaction.mjs", import.meta.url).href);
+    const resolveRelease = vi.fn(async () => { throw new Error("stop after real inventory boundary"); });
+    await expect(runManagedAzureReleaseTransaction({ inventoryRef, inventorySha256: digest, deploymentId,
+      workloadClass: "ACTIVE_CLIENT_CANARY", releaseSha: "b".repeat(40), releaseVersion: "release-2",
+      reason: "Verify producer and consumer inventory projection.", execute: false, acrName: "acr12", acrResourceGroup: "rg-acr" }, {
+      loadInventory: async () => inventory,
+      lease: async () => canaryPreflight,
+      resolveRelease,
+    })).rejects.toMatchObject({ code: "MANAGED_RELEASE_IMAGE_PREFLIGHT_FAILED" });
+    expect(resolveRelease).toHaveBeenCalledTimes(1);
   });
 
   it("routes read and mutation operations while requiring an audited reason for writes", async () => {
