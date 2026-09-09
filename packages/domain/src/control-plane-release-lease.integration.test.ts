@@ -573,6 +573,32 @@ describe("managed release lease CAS", () => {
     await expect(finalizeManagedReleaseRollback(currentHandle)).resolves.toMatchObject({ status: "ROLLED_BACK" });
     await expectCode(claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: stale.leaseId, expectedFence: stale.fence, owner: "recovery:test" }), "MANAGED_RELEASE_LEASE_CONFLICT");
   });
+  it.each([
+    "MANAGED_RELEASE_RECOVERY_ALTERNATE_PATCH_STARTED",
+    "MANAGED_RELEASE_RECOVERY_ALTERNATE_PATCH_AMBIGUOUS",
+    "MANAGED_RELEASE_RECOVERY_ALTERNATE_READBACK_AMBIGUOUS",
+  ])("retains alternate write intent %s and immutable v2 provenance across recovery claims", async (code) => {
+    const target = await deployment({ deploymentKind: "HOSTED_DEDICATED" });
+    await authorizeHosted(target);
+    const handle = await acquire(target.id);
+    const payload = rollbackPayloadV2();
+    await recordManagedReleaseRollbackRecord(handle, payload);
+    await beginManagedReleaseMutation(handle);
+    const before = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
+    await markManagedReleaseRecoveryRequired(handle, { stage: "ROLLBACK", code });
+    await expire(target.id);
+    const claimed = await claimManagedReleaseRecovery({ deploymentId: target.id, expectedLeaseId: handle.leaseId,
+      expectedFence: handle.fence, owner: "recovery:alternate-test" });
+    const after = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: target.id } });
+    expect(after.releaseLeaseRollbackRecord).toEqual(before.releaseLeaseRollbackRecord);
+    expect(after.releaseLeaseRecoveryEvidence).toEqual({ stage: "ROLLBACK", code });
+    expect(await getManagedReleaseRecoveryStatus(target.id, ACR_IDENTITY)).toMatchObject({
+      leaseId: claimed.leaseId, fence: claimed.fence, recovery: { stage: "ROLLBACK", code },
+      originatingLease: { leaseId: handle.leaseId, fence: handle.fence },
+    });
+    expect(await getManagedReleaseRollbackRecord({ deploymentId: target.id, leaseId: claimed.leaseId,
+      capability: claimed.capability, fence: claimed.fence })).toEqual(payload);
+  });
   it.each(["AUTH", "DIAGNOSTIC"] as const)("persists %s recovery evidence without clearing the fence", async (stage) => {
     const target = await deployment(); const handle = await acquire(target.id);
     await recordManagedReleaseRollbackRecord(handle, rollbackPayload()); await beginManagedReleaseMutation(handle);

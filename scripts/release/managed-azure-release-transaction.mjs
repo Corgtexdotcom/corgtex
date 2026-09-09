@@ -363,8 +363,9 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
         image: recoveryPlan.roles[role].image,
         release: recoveryRelease,
         revisionSuffix: suffix,
+        migrateWeb: true,
       });
-      assertManagedAzureTemplateDelta(current, template, { role, image: recoveryPlan.roles[role].image, release: recoveryRelease, revisionSuffix: suffix });
+      assertManagedAzureTemplateDelta(current, template, { role, image: recoveryPlan.roles[role].image, release: recoveryRelease, revisionSuffix: suffix, migrateWeb: true });
       recoveryTemplates[role] = template;
       const patched = await deps.patchTemplate({ target: preflight.target, role, location: current.location, template, onProgress: recoveryHeartbeat });
       const rollbackDetail = patched.providerCode ? { providerCode: patched.providerCode } : detail;
@@ -501,6 +502,18 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
       }
       await heartbeat();
     }
+    for (const role of ROLES) {
+      const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "forward" });
+      forwardTemplates[role] = buildManagedAzureReleaseTemplate({
+        baseline: baselines[role],
+        role,
+        image: releasePlan.roles[role].image,
+        release: nextRelease,
+        revisionSuffix: suffix,
+        migrateWeb: protectedHosted,
+      });
+      assertManagedAzureTemplateDelta(baselines[role], forwardTemplates[role], { role, image: releasePlan.roles[role].image, release: nextRelease, revisionSuffix: suffix, migrateWeb: protectedHosted });
+    }
     mutationBegun = true;
     await deps.lease("begin", leaseArgs(handle, { reason: input.reason }));
     if (configured.target.activationPolicy === "EXCLUSIVE") {
@@ -512,17 +525,7 @@ export async function runManagedAzureReleaseTransaction(rawInput, dependencies) 
           ...(Number.isInteger(drained?.providerStatus) ? { providerStatus: drained.providerStatus } : {}) });
       await recoveryHeartbeat();
     }
-    for (const role of ROLES) {
-      const suffix = managedAzureRevisionSuffix({ leaseId: handle.leaseId, fence: handle.fence, role, phase: "forward" });
-      forwardTemplates[role] = buildManagedAzureReleaseTemplate({
-        baseline: baselines[role],
-        role,
-        image: releasePlan.roles[role].image,
-        release: nextRelease,
-        revisionSuffix: suffix,
-      });
-      assertManagedAzureTemplateDelta(baselines[role], forwardTemplates[role], { role, image: releasePlan.roles[role].image, release: nextRelease, revisionSuffix: suffix });
-    }
+
 
     await heartbeat();
     firstForwardPatchAttempted = true;
