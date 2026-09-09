@@ -1359,3 +1359,74 @@ describe("legacy v2 migration-startup recovery", () => {
     expect(deps.healthProbe.mock.invocationCallOrder[1]).toBeGreaterThan(deps.patchTemplate.mock.invocationCallOrder[0]);
   });
 });
+
+
+describe("historical forward runtime identity", () => {
+  function runtimeRig({ schemaVersion = 2, runtime = baseSha, drift = null } = {}) {
+    const payload = schemaVersion === 2 ? compatibleRollbackPayload() : structuredClone(rollback);
+    const current = {};
+    for (const role of ["web", "worker"]) {
+      const baseline = structuredClone(templates[role]);
+      if (runtime !== null) baseline.containers[0].env.push({ name: "GITHUB_SHA", value: baseSha });
+      payload.previous[role].templateDigest = managedAzureTemplateDigest(baseline);
+      const suffix = managedAzureRevisionSuffix({ leaseId: previousLeaseId, fence: 7, role, phase: "forward" });
+      const selected = buildManagedAzureReleaseTemplate({ baseline: state(role, { template: baseline }), role,
+        image: `${target.acrServer}/corgtex/${role}@${payload.incoming[`${role}Digest`]}`,
+        release: { gitSha: nextSha, imageTag: `sha-${nextSha}`, version: "release-2" }, revisionSuffix: suffix });
+      const entry = selected.containers[0].env.find((item) => item.name === "GITHUB_SHA");
+      if (entry) entry.value = runtime;
+      if (role === "web" && drift === "env") selected.containers[0].env.push({ name: "UNRELATED", value: "changed" });
+      if (role === "web" && drift === "suffix") selected.revisionSuffix = "foreign-forward";
+      if (role === "web" && drift === "secret") { delete entry.value; entry.secretRef = "private-runtime"; }
+      current[role] = selected;
+    }
+    const events = [];
+    const { deps, calls } = rig({ rollbackPayload: payload, readApp: vi.fn(async ({ role, release }) => {
+      const selected = current[role];
+      const sha = selected.containers[0].env.find((item) => item.name === "CORGTEX_RELEASE_GIT_SHA").value;
+      if (release.gitSha !== sha) throw new Error("identity mismatch");
+      return state(role, { template: selected, templateDigest: managedAzureTemplateDigest(selected),
+        image: selected.containers[0].image, imageDigest: selected.containers[0].image.split("@")[1],
+        revisionSuffix: selected.revisionSuffix, revisionName: `${target[`${role}AppName`]}--${selected.revisionSuffix}` });
+    }), patchTemplate: async ({ role, template: selected }) => {
+      events.push(`patch:${role}`); current[role] = selected; return { terminal: true, succeeded: true };
+    } });
+    const lease = deps.lease.getMockImplementation();
+    deps.lease.mockImplementation(async (operation, args) => {
+      if (operation === "record_recovery_intent") events.push(`record:${args.intent.role}`);
+      return lease(operation, args);
+    });
+    return { deps, calls, events, payload };
+  }
+
+  it.each([baseSha, nextSha, null])("recovers exact v2 forward projections through intents (runtime=%s)", async (runtime) => {
+    const { deps, events, payload } = runtimeRig({ runtime });
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Recover verified forward predecessor.", acrName: "acr12" }, deps);
+    expect(result).toMatchObject({ status: "RECOVERY_CLEARED", resolution: "COMPATIBLE_RECOVERY" });
+    expect(events).toEqual(["record:web", "patch:web", "record:worker", "patch:worker"]);
+    for (const [{ template: selected }] of deps.patchTemplate.mock.calls) {
+      expect(selected.containers[0].env.find((entry) => entry.name === "GITHUB_SHA")?.value)
+        .toBe(runtime === null ? undefined : payload.compatibleRecovery.gitSha);
+    }
+  });
+
+  it.each([
+    { runtime: "d".repeat(40) }, { runtime: "malformed" }, { drift: "env" },
+    { drift: "suffix" }, { drift: "secret" }, { schemaVersion: 1 },
+  ])("blocks unproven or nonrepairable forward identity without provider writes (%j)", async (options) => {
+    const { deps } = runtimeRig(options);
+    const result = await runManagedAzureReleaseRecovery({ deploymentId, reason: "Reject unproven forward predecessor.", acrName: "acr12" }, deps);
+    expect(result.status).toBe("RECOVERY_BLOCKED");
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.setRevisionActive).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("record_recovery_intent", expect.anything());
+    expect(deps.lease).not.toHaveBeenCalledWith("finalize_success", expect.anything());
+  });
+
+  it("retains v1 completion for current runtime identity without provider writes", async () => {
+    const { deps } = runtimeRig({ schemaVersion: 1, runtime: nextSha });
+    expect(await runManagedAzureReleaseRecovery({ deploymentId, reason: "Finalize exact current forward identity.", acrName: "acr12" }, deps))
+      .toMatchObject({ status: "RECOVERY_CLEARED", resolution: "FORWARD_ALREADY_COMPLETE" });
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+  });
+});

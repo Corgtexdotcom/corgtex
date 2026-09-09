@@ -181,13 +181,22 @@ function verifyForwardRole(role, state, status, rollback, baseline, incoming, ex
     || state.revisionSuffix !== revisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
   const reconstructedBaseline = reconstructBaselineTemplate(role, state, rollback, baseline);
   if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
-  assertManagedAzureTemplateDelta({ ...state, template: reconstructedBaseline }, state.template, {
+  const expected = {
     role,
     image: `${status.target.acrServer}/corgtex/${role}@${digest}`,
     release: incoming,
     revisionSuffix,
     migrateWeb: rollback.schemaVersion === 2 && state.template.containers[0].env.some((entry) => entry.name === "CORGTEX_STARTUP_MODE" && entry.value === "migrate-and-web"),
-  });
+  };
+  const verifiedBaseline = { ...state, template: reconstructedBaseline };
+  try {
+    assertManagedAzureTemplateDelta(verifiedBaseline, state.template, expected);
+  } catch (error) {
+    // Only schema v2 can replace an exact historical predecessor through a
+    // journaled recovery intent. Schema v1 cannot repair inherited identity.
+    if (rollback.schemaVersion !== 2) throw error;
+    assertManagedAzureTemplateDelta(verifiedBaseline, state.template, { ...expected, preserveRuntimeIdentity: true });
+  }
 }
 
 async function classifyBaselineRole(deps, status, rollback, role, baseline, expectedRollbackRevisionSuffix) {
