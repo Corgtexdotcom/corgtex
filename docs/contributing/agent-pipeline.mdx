@@ -45,6 +45,21 @@ The delivery owner:
 - publishes with the builder identity and responds to objective review findings;
 - never self-approves or bypasses protection without an explicit human directive.
 
+### Finish the agreed outcome
+
+State the acceptance evidence and completion condition before substantial work.
+When those and required checks pass, finish delivery; put optional polish in later
+work. The canonical [execution and completion rules](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md#execution-and-completion)
+cover evidence reuse, early runtime/provider regression proof, sanitized failure
+diagnostics, and one current outcome/blocker/next-action checkpoint.
+
+Local validation matches the change. Prose-only changes use documentation and
+policy validators; behavior changes use relevant regression and applicable static,
+integration and build checks. This avoids unnecessary local application suites
+without waiving any required hosted CI or independent exact-head review. After a
+real deployment failure, test the observed boundary using representative runtime
+inputs before another attempt, rather than relying on unrelated passing tests.
+
 GPT-6 Astra is the default owner for planning, implementation, integration, and
 validation. Routine work needs no separate planner handoff. Material ambiguity,
 architecture, trust boundaries, migrations, production risk, or a failed correction

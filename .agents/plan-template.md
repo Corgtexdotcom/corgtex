@@ -2,7 +2,8 @@
 
 ## Outcome
 
-[What user-visible or operational result will exist when this is done?]
+[What user-visible or operational result will exist when this is done? State the
+completion condition; keep optional polish outside the current task.]
 
 ## Risk tier
 
@@ -23,9 +24,15 @@
 ## Test plan
 
 ```text
-npm run check
-[relevant targeted command]
+[commands that verify this change's concrete acceptance criteria]
 ```
+
+[Choose proportionate local checks: documentation/policy validators for prose-only
+work; focused regression and applicable static/integration/build checks for code.
+For an observed runtime/provider failure, name the representative boundary test
+that catches it before another live attempt. Reuse evidence only while its relevant
+inputs and assumptions are unchanged. All required hosted CI and independent
+exact-head review remain mandatory. Do not add a new harness solely for this plan.]
 
 ## Visual proof
 
