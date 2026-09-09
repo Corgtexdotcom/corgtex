@@ -43,6 +43,13 @@ export function managedAzureFailureDetail(error) {
   else if (error instanceof TypeError) result.failureClass = "TYPE_ERROR";
   if ((error instanceof ManagedAzureContainerAppError || error instanceof ManagedAzureReleaseError)
     && /^[A-Z][A-Z0-9_]{1,127}$/.test(error.code)) result.failureCode = error.code;
+  if (error instanceof ManagedAzureContainerAppError && ["ACCESS_TOKEN", "FETCH"].includes(error.requestStage)
+    && Number.isInteger(error.requestAttempts) && error.requestAttempts >= 0 && error.requestAttempts <= 3
+    && typeof error.requestDeadlineExceeded === "boolean") {
+    result.requestStage = error.requestStage;
+    result.requestAttempts = error.requestAttempts;
+    result.requestDeadlineExceeded = error.requestDeadlineExceeded;
+  }
   return result;
 }
 

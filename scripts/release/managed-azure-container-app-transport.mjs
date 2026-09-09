@@ -401,16 +401,39 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
   async function request(url, init, ambiguous) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let requestStage = "ACCESS_TOKEN";
+    let requestAttempts = 0;
     try {
       const token = await getAccessToken();
-      return await fetchImpl(url, {
-        ...init,
-        headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
-        redirect: "error",
-        signal: controller.signal,
-      });
+      if (controller.signal.aborted) throw new Error("REQUEST_DEADLINE");
+      requestStage = "FETCH";
+      const attempts = init.method === "GET" ? 3 : 1;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (controller.signal.aborted) break;
+        requestAttempts += 1;
+        try {
+          // Only transport rejection of an idempotent GET may be retried.
+          // Responses, parsing and identity checks stay outside this loop.
+          return await fetchImpl(url, {
+            ...init,
+            headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+            redirect: "error",
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (attempt + 1 === attempts || controller.signal.aborted) throw error;
+          await sleep(attempt === 0 ? 250 : 750);
+        }
+      }
+      throw new Error("REQUEST_DEADLINE");
     } catch {
-      fail(ambiguous ? "AZURE_REQUEST_AMBIGUOUS" : "AZURE_READ_FAILED", ambiguous);
+      const failure = requestStage === "ACCESS_TOKEN"
+        ? new ManagedAzureContainerAppError("AZURE_ACCESS_TOKEN_UNAVAILABLE", ambiguous)
+        : new ManagedAzureContainerAppError(ambiguous ? "AZURE_REQUEST_AMBIGUOUS" : "AZURE_READ_FAILED", ambiguous);
+      failure.requestStage = requestStage;
+      failure.requestAttempts = requestAttempts;
+      failure.requestDeadlineExceeded = controller.signal.aborted;
+      throw failure;
     } finally {
       clearTimeout(timer);
     }
@@ -444,14 +467,14 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     const appName = appNameFor(target, input.role);
     const response = await request(revisionUrl(target, appName, input.revisionName), { method: "GET" }, true);
     if (response.status === 404) return Object.freeze({ kind: "ABSENT" });
-    if (response.status !== 200) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    if (response.status !== 200) fail(`AZURE_REVISION_HTTP_${response.status}`, true);
     const revision = await responseBody(response);
     if (revision?.name !== input.revisionName) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
     assertManagedAzureRevisionProjection(input.expectedTemplate, revision.properties?.template, appName, input.revisionName);
     const replicasResponse = await request(revisionUrl(target, appName, input.revisionName, "/replicas"), { method: "GET" }, true);
-    if (replicasResponse.status !== 200) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    if (replicasResponse.status !== 200) fail(`AZURE_REVISION_REPLICAS_HTTP_${replicasResponse.status}`, true);
     const replicas = await responseBody(replicasResponse);
-    if (!Array.isArray(replicas?.value) || replicas.value.length > 256 || replicas.nextLink) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    if (!Array.isArray(replicas?.value) || replicas.value.length > 256 || replicas.nextLink) fail("AZURE_REVISION_REPLICA_INVENTORY_INVALID", true);
     const p = revision.properties;
     const containerName = input.expectedTemplate.containers[0].name;
     const ready = replicas.value.length > 0 && replicas.value.every((replica) =>
@@ -619,15 +642,17 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
       fail("AZURE_EXCLUSIVE_ROUTING_UNSUPPORTED");
     }
     const revisionResponse = await request(url.replace("?", "/revisions?"), { method: "GET" }, true);
-    const revisions = revisionResponse.status === 200 ? await responseBody(revisionResponse) : null;
-    if (!Array.isArray(revisions?.value) || revisions.nextLink || revisions.value.length > 256) fail("AZURE_EXCLUSIVE_INVENTORY_INVALID", true);
+    if (revisionResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REVISION_LIST_HTTP_${revisionResponse.status}`, true);
+    const revisions = await responseBody(revisionResponse);
+    if (!Array.isArray(revisions?.value) || revisions.nextLink || revisions.value.length > 256) fail("AZURE_EXCLUSIVE_REVISION_LIST_INVALID", true);
     const inventory = [];
     for (const revision of revisions.value) {
       const name = revision?.name;
       const replicasResponse = await request(revisionUrl(target, appName, name, "/replicas"), { method: "GET" }, true);
-      const replicas = replicasResponse.status === 200 ? await responseBody(replicasResponse) : null;
-      if (typeof revision.properties?.active !== "boolean" || !Array.isArray(replicas?.value)
-        || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_INVENTORY_INVALID", true);
+      if (replicasResponse.status !== 200) fail(`AZURE_EXCLUSIVE_REPLICA_LIST_HTTP_${replicasResponse.status}`, true);
+      const replicas = await responseBody(replicasResponse);
+      if (typeof revision.properties?.active !== "boolean") fail("AZURE_EXCLUSIVE_REVISION_METADATA_INVALID", true);
+      if (!Array.isArray(replicas?.value) || replicas.nextLink || replicas.value.length > 256) fail("AZURE_EXCLUSIVE_REPLICA_LIST_INVALID", true);
       inventory.push({ revisionName: name, active: revision.properties.active, replicaCount: replicas.value.length });
     }
     return Object.freeze({ mode: configuration.activeRevisionsMode,
