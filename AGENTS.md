@@ -102,6 +102,34 @@ Run targeted checks while iterating, then the PR's required broad checks once th
 diff is stable. Domain source changes under `packages/domain/**` need corresponding
 same-package `*.test.ts` coverage. Do not rerun expensive unchanged evidence.
 
+Choose local validation for the changed behavior: prose-only work uses the relevant
+documentation and policy validators, not an application build or new unit tests.
+Code changes use focused regression tests plus the applicable static, integration
+and build checks. The PR contract names the commands and why they are sufficient;
+all required hosted CI and independent exact-head review still apply.
+
+## Execution and completion
+
+- Define the acceptance evidence and completion condition before substantial work.
+  Once they and required checks pass, finish delivery. Record optional polish
+  separately rather than extending the current task.
+- Each discretionary check answers an unresolved question. Reuse evidence only
+  while relevant code, dependencies, configuration, images and tested assumptions
+  remain unchanged. Metadata-only edits do not require another local code suite.
+  Refresh the live target, writer/lease and authorization before relevant mutations.
+- For an observed runtime/provider failure, reproduce the failing boundary early
+  with the actual candidate image and sanitized configuration or representative
+  existing fixtures. Test the producer/consumer interaction and applicable failure
+  path before another live attempt; passing unrelated unit tests is not that proof.
+  Use existing test and artifact paths rather than creating a new framework.
+- Retain a bounded sanitized failure receipt through the existing diagnostic path:
+  failed stage/code, relevant non-secret identity and the original cause when safe.
+  Never emit credentials or raw client content. Record missing evidence explicitly.
+- Keep one current checkpoint with the working outcome, missing acceptance, exact
+  blocker and next action. Older snapshots remain historical, not competing current
+  instructions. During waits, continue independent authorized work and use bounded
+  backoff rather than repeated unchanged checks or duplicate handoffs.
+
 ## Architecture and code
 
 - Next.js 15 App Router, React 19, strict TypeScript, Tailwind CSS 3.
