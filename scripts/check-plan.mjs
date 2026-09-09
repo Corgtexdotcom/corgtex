@@ -12,6 +12,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const args = Object.fromEntries(
   process.argv.slice(2).flatMap((a) => {
@@ -21,13 +22,9 @@ const args = Object.fromEntries(
 );
 
 const mode = args.mode;
-if (!["present", "scope", "policy"].includes(mode)) {
-  console.error("usage: check-plan.mjs --mode=<present|scope|policy>");
-  process.exit(2);
-}
 
 const LOCAL_PLAN_DIR = path.join(".agents", "plans");
-const PROTECTED_PATHS = [
+export const PROTECTED_PATHS = [
   /^AGENTS\.md$/,
   /^\.agents\/plan-template\.md$/,
   /^\.codex\/review\.md$/,
@@ -202,9 +199,9 @@ function extractSection(planText, title) {
   return body.join("\n").trim();
 }
 
-function hasSubstantiveScopeJustification(planText) {
+export function hasSubstantiveScopeJustification(planText) {
   const section = extractSection(planText, "Scope");
-  if (!section) return false;
+  if (!section || /^\[[\s\S]*\]$/.test(section.trim())) return false;
 
   const normalized = section
     .replace(/<!--[\s\S]*?-->/g, "")
@@ -310,122 +307,131 @@ function readPlanText(branch) {
   );
 }
 
-const branch = branchName();
-const labels = prLabels();
-
-if (branch === "main" || branch === "HEAD") {
-  ok(`skipped on ${branch}`);
-}
-
-const blockingLabels = ["halt-agents", "needs-replan"].filter((label) =>
-  labels.has(label),
-);
-if (blockingLabels.length > 0) {
-  fail(`blocking label(s) present: ${blockingLabels.join(", ")}`);
-}
-
-const autoRevert = labels.has("auto-revert");
-if (autoRevert && !/^auto-revert\/[0-9a-f]{7,40}$/.test(branch)) {
-  fail("auto-revert label is valid only on an auto-revert/<sha> branch");
-}
-
-if (autoRevert && mode === "present") {
-  ok("auto-revert label present, plan presence skipped");
-}
-
-if (mode === "present") {
-  const planText = readPlanText(branch);
-  assertPlanHasNoCredentialMaterial(planText);
-  if (!parseRiskTier(planText)) {
-    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
+function main() {
+  if (!["present", "scope", "policy"].includes(mode)) {
+    console.error("usage: check-plan.mjs --mode=<present|scope|policy>");
+    process.exit(2);
   }
-  for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
-    if (!extractSection(planText, section)) {
-      fail(`plan contract has no non-empty "${section}" section`);
-    }
-  }
-  if (parseAcceptanceCriteria(planText).length === 0) {
-    fail("plan contract has no acceptance criteria checklist");
-  }
-  ok("plan contract present in PR body or ignored local plan file");
-}
+  const branch = branchName();
+  const labels = prLabels();
 
-const base = baseRef();
+  if (branch === "main" || branch === "HEAD") {
+    ok(`skipped on ${branch}`);
+  }
 
-if (mode === "scope") {
-  const files = changedFiles(base);
-  if (!autoRevert) {
+  const blockingLabels = ["halt-agents", "needs-replan"].filter((label) =>
+    labels.has(label),
+  );
+  if (blockingLabels.length > 0) {
+    fail(`blocking label(s) present: ${blockingLabels.join(", ")}`);
+  }
+
+  const autoRevert = labels.has("auto-revert");
+  if (autoRevert && !/^auto-revert\/[0-9a-f]{7,40}$/.test(branch)) {
+    fail("auto-revert label is valid only on an auto-revert/<sha> branch");
+  }
+
+  if (autoRevert && mode === "present") {
+    ok("auto-revert label present, plan presence skipped");
+  }
+
+  if (mode === "present") {
     const planText = readPlanText(branch);
     assertPlanHasNoCredentialMaterial(planText);
-    const protectedFiles = files.filter((file) =>
-      PROTECTED_PATHS.some((pattern) => pattern.test(file)),
-    );
-    if (protectedFiles.length > 0) {
-      if (parseRiskTier(planText) !== "critical") {
-        fail(
-          `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
-        );
-      }
-      if (!hasSubstantiveScopeJustification(planText)) {
-        fail(
-          `protected paths require a substantive "Scope" justification:\n  - ${protectedFiles.join("\n  - ")}`,
-        );
+    if (!parseRiskTier(planText)) {
+      fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
+    }
+    for (const section of ["Outcome", "Test plan", "Risk and rollback"]) {
+      if (!extractSection(planText, section)) {
+        fail(`plan contract has no non-empty "${section}" section`);
       }
     }
-  }
-
-  ok(`${files.length} file(s) checked for protected scope; behavioral scope is reviewed by QA`);
-}
-
-if (mode === "policy") {
-  if (autoRevert) {
-    ok("auto-revert label present, policy skipped");
-  }
-
-  const files = changedFiles(base);
-  const planText = readPlanText(branch);
-  assertPlanHasNoCredentialMaterial(planText);
-  const riskTier = parseRiskTier(planText);
-  if (!riskTier) {
-    fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
-  }
-
-  const envFiles = files.filter(isEnvFile);
-  if (envFiles.length > 0) {
-    fail(`environment file changes are forbidden:\n  - ${envFiles.join("\n  - ")}`);
-  }
-
-  if (process.env.PR_DRAFT !== "true") {
-    const criteria = parseAcceptanceCriteria(planText);
-    if (criteria.length === 0) {
+    if (parseAcceptanceCriteria(planText).length === 0) {
       fail("plan contract has no acceptance criteria checklist");
     }
-    const unticked = criteria.filter((criterion) => !criterion.checked);
-    if (unticked.length > 0) {
-      fail(
-        `ready PR has unticked acceptance criteria:\n  - ${unticked
-          .map((criterion) => criterion.text)
-          .join("\n  - ")}`,
+    ok("plan contract present in PR body or ignored local plan file");
+  }
+
+  const base = baseRef();
+
+  if (mode === "scope") {
+    const files = changedFiles(base);
+    if (!autoRevert) {
+      const planText = readPlanText(branch);
+      assertPlanHasNoCredentialMaterial(planText);
+      const protectedFiles = files.filter((file) =>
+        PROTECTED_PATHS.some((pattern) => pattern.test(file)),
       );
+      if (protectedFiles.length > 0) {
+        if (parseRiskTier(planText) !== "critical") {
+          fail(
+            `protected paths require critical risk:\n  - ${protectedFiles.join("\n  - ")}`,
+          );
+        }
+        if (!hasSubstantiveScopeJustification(planText)) {
+          fail(
+            `protected paths require a substantive "Scope" justification:\n  - ${protectedFiles.join("\n  - ")}`,
+          );
+        }
+      }
     }
+
+    ok(`${files.length} file(s) checked for protected scope; behavioral scope is reviewed by QA`);
   }
 
-  const patternHits = [];
-  for (const { file, text } of addedDiffLines(base)) {
-    if (file === "scripts/check-plan.mjs") continue;
-    if (/--no-verify/.test(text) && isExecutablePolicyFile(file)) {
-      patternHits.push(`${file}: added --no-verify`);
+  if (mode === "policy") {
+    if (autoRevert) {
+      ok("auto-revert label present, policy skipped");
     }
-    if (/prisma\s+db\s+push/.test(text) && isExecutablePolicyFile(file)) {
-      patternHits.push(`${file}: added prisma db push`);
+
+    const files = changedFiles(base);
+    const planText = readPlanText(branch);
+    assertPlanHasNoCredentialMaterial(planText);
+    const riskTier = parseRiskTier(planText);
+    if (!riskTier) {
+      fail("plan contract is missing a valid risk tier of low, standard, high, or critical");
     }
-    if (/--admin/.test(text) && isExecutablePolicyFile(file) && !labels.has("force-merge")) {
-      patternHits.push(`${file}: added --admin without force-merge label`);
+
+    const envFiles = files.filter(isEnvFile);
+    if (envFiles.length > 0) {
+      fail(`environment file changes are forbidden:\n  - ${envFiles.join("\n  - ")}`);
     }
-  }
-  if (patternHits.length > 0) {
-    fail(`forbidden diff pattern(s):\n  - ${patternHits.join("\n  - ")}`);
+
+    if (process.env.PR_DRAFT !== "true") {
+      const criteria = parseAcceptanceCriteria(planText);
+      if (criteria.length === 0) {
+        fail("plan contract has no acceptance criteria checklist");
+      }
+      const unticked = criteria.filter((criterion) => !criterion.checked);
+      if (unticked.length > 0) {
+        fail(
+          `ready PR has unticked acceptance criteria:\n  - ${unticked
+            .map((criterion) => criterion.text)
+            .join("\n  - ")}`,
+        );
+      }
+    }
+
+    const patternHits = [];
+    for (const { file, text } of addedDiffLines(base)) {
+      if (file === "scripts/check-plan.mjs") continue;
+      if (/--no-verify/.test(text) && isExecutablePolicyFile(file)) {
+        patternHits.push(`${file}: added --no-verify`);
+      }
+      if (/prisma\s+db\s+push/.test(text) && isExecutablePolicyFile(file)) {
+        patternHits.push(`${file}: added prisma db push`);
+      }
+      if (/--admin/.test(text) && isExecutablePolicyFile(file) && !labels.has("force-merge")) {
+        patternHits.push(`${file}: added --admin without force-merge label`);
+      }
+    }
+    if (patternHits.length > 0) {
+      fail(`forbidden diff pattern(s):\n  - ${patternHits.join("\n  - ")}`);
+    }
+
+    ok(`${riskTier} risk policy checks passed`);
   }
 
-  ok(`${riskTier} risk policy checks passed`);
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();

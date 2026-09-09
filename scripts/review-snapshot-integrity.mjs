@@ -1,3 +1,4 @@
+import { PROTECTED_PATHS, hasSubstantiveScopeJustification } from "./check-plan.mjs";
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import process from "node:process";
@@ -69,49 +70,6 @@ export function parseRiskTier(planText) {
 export function parseAcceptanceCriteria(planText) {
   return planSection(planText, "Acceptance criteria").map((l) => l.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/)).filter(Boolean).map((m) => ({ checked: m[1].toLowerCase() === "x", text: m[2] }));
 }
-const PROTECTED_PATHS = [
-  /^AGENTS\.md$/,
-  /^\.agents\/plan-template\.md$/,
-  /^\.codex\/review\.md$/,
-  /^\.codex\/ops\//,
-  /^\.github\/pull_request_template\.md$/,
-  /^deploy\//,
-  /^\.github\/workflows\//,
-  /^prisma\/migrations\//,
-  /^scripts\/check-plan\.mjs$/,
-  /^scripts\/review-snapshot-integrity\.mjs$/,
-  /^packages\/domain\/src\/auth.*\.ts$/,
-  /^apps\/web\/lib\/auth\.ts$/,
-];
-function hasSubstantiveScopeJustification(planText) {
-  const section = planSection(planText, "Scope").join("\n").trim();
-  if (!section) return false;
-
-  const normalized = section
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/^\s*[-*>]\s*/gm, "")
-    .replace(/[`*_]/g, "")
-    .trim();
-  if (!normalized) return false;
-
-  const placeholder = normalized
-    .replace(/^\[|\]$/g, "")
-    .trim()
-    .toLowerCase();
-  if (
-    /^(?:tbd|todo|n\/?a|none|not applicable)(?:[.!])?$/.test(placeholder) ||
-    /^what changes,? what intentionally does not,? and why this is one coherent pr\.?$/.test(
-      placeholder,
-    )
-  ) {
-    return false;
-  }
-
-  const words = normalized.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) ?? [];
-  const alphanumericLength = normalized.replace(/[^A-Za-z0-9]/g, "").length;
-  return words.length >= 4 && alphanumericLength >= 20;
-}
-
 export function evaluatePolicy({ body, labels, files, draft }) {
   invariant(typeof body === "string" && Array.isArray(labels) && labels.every((l) => typeof l === "string"), "unexpected policy input");
   invariant(Array.isArray(files) && files.every((f) => typeof f?.filename === "string" && Number.isInteger(f.additions) && f.additions >= 0 && Number.isInteger(f.deletions) && f.deletions >= 0), "unexpected Files API response");
@@ -124,7 +82,7 @@ export function evaluatePolicy({ body, labels, files, draft }) {
     for (const title of ["Outcome", "Test plan", "Risk and rollback"]) {
       if (!planSection(body, title).join("\n").trim()) failures.push(`plan has no "${title}" section`);
     }
-    const protectedFiles = files.filter((file) => PROTECTED_PATHS.some((pattern) => pattern.test(file.filename)));
+    const protectedFiles = files.filter((file) => PROTECTED_PATHS.some((pattern) => pattern.test(file.filename) || (typeof file.previous_filename === "string" && pattern.test(file.previous_filename))));
     if (protectedFiles.length > 0) {
       if (tier !== "critical") failures.push("protected paths require critical risk");
       if (!hasSubstantiveScopeJustification(body)) failures.push('protected paths require a substantive "Scope" justification');
@@ -206,7 +164,7 @@ async function evaluatePullRequest(repo, number) {
   const pr = await api(`/repos/${repo}/pulls/${number}`);
   const files = await apiAll(`/repos/${repo}/pulls/${number}/files`);
   const reviews = await apiAll(`/repos/${repo}/pulls/${number}/reviews`);
-  const verdict = decide({ pr, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
+  const verdict = decide({ pr, reviews: reviews.items, files: files.items.map((f) => ({ filename: f.filename, previous_filename: f.previous_filename, additions: f.additions, deletions: f.deletions })), filesTruncated: files.truncated || reviews.truncated });
   return { pr, verdict, reviewerReview: selectLatestReviewerReview(reviews.items) };
 }
 async function readMergeGroupMembers(repo, group) {

@@ -55,8 +55,9 @@ accept manageable, reversible risk and ordinary follow-up fixes.
 - Policy/docs changes: relevant script tests, `node scripts/check-public-docs.mjs`,
   and `node scripts/check-private-boundary.mjs`; no local application build needed.
 - `apps/web/`: Next.js App Router UI/routes; `apps/worker/`: background processing.
-  `packages/domain/`: business logic; `shared/`: env/db/types; `workflows/`: jobs;
-  `knowledge/`: retrieval; `models/`: gateways; `agents/`: agent execution.
+  `packages/domain/`: business logic; `packages/shared/`: env/db/types; `packages/workflows/`: jobs;
+  `packages/knowledge/`: retrieval; `packages/models/`: gateways;
+  `packages/agents/`: agent execution.
 - Follow existing TypeScript, shared UI primitives, and tokenized styles. Use type
   imports, double quotes, semicolons, two-space indentation, and no emoji UI icons.
   Route handlers convert domain `AppError` with `handleRouteError()`.

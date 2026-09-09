@@ -46,7 +46,7 @@ describe("merge-group delivery policy", () => {
     expect(evaluatePolicy({ ...base, files: protectedFiles })).toContain("protected paths require critical risk");
     const critical = PLAN.replace("`low`", "`critical`");
     expect(evaluatePolicy({ ...base, body: critical, files: protectedFiles })).toContain('protected paths require a substantive "Scope" justification');
-    for (const scope of ["TBD", "<!-- explanation -->", "What changes, what intentionally does not, and why this is one coherent PR."]) {
+    for (const scope of ["TBD", "<!-- explanation -->", "[Related behavior included; explain protected changes when applicable. No file allowlist needed.]", "What changes, what intentionally does not, and why this is one coherent PR."]) {
       expect(evaluatePolicy({ ...base, body: `${critical}\n## Scope\n\n${scope}`, files: protectedFiles })).toContain('protected paths require a substantive "Scope" justification');
     }
     expect(evaluatePolicy({ ...base, body: `${critical}\n## Scope\n\nReplace the workflow checks to implement the delivery policy.`, files: protectedFiles })).toEqual([]);
@@ -154,7 +154,7 @@ describe("merge-group live validation", () => {
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
   const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, baseCommit: { oid: String(number + 100).padStart(40, "0") }, headCommit: { oid: String(number + 200).padStart(40, "0") }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
   const queuePr = (number) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
-  const stub = (entries, { truncateFiles = false, paginatedProtectedFile = false, reviewOverrides = {}, finalLabelDriftPr = null, finalHeadDriftPr = null, finalBaseDrift = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
+  const stub = (entries, { truncateFiles = false, fileOverride = null, paginatedProtectedFile = false, reviewOverrides = {}, finalLabelDriftPr = null, finalHeadDriftPr = null, finalBaseDrift = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
     const seen = [];
     const pullReads = new Map();
     const groupCommits = new Map(); let base = group.base_sha;
@@ -177,6 +177,7 @@ describe("merge-group live validation", () => {
       const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number);
       if (u.endsWith(`/pulls/${number}`)) { const reads = (pullReads.get(number) ?? 0) + 1; pullReads.set(number, reads); return reply(number === driftPr && reads > 1 ? { ...pr, body: `${pr.body}drift` } : pr); }
       if (u.includes(`/pulls/${number}/files`)) {
+        if (fileOverride) return reply(fileOverride);
         if (paginatedProtectedFile) return reply(new URL(u).searchParams.get("page") === "1" ? Array.from({ length: 100 }, (_, index) => ({ ...FILES[0], filename: `scripts/file${index}.mjs` })) : [{ filename: ".github/workflows/ci.yml", additions: 1, deletions: 0 }]);
         return reply(truncateFiles ? Array.from({ length: 100 }, () => FILES[0]) : FILES);
       }
@@ -201,6 +202,11 @@ describe("merge-group live validation", () => {
     expect(seen.filter((r) => r.u.includes("/pulls/") && !r.u.includes("/files") && !r.u.includes("/reviews")).map((r) => r.u)).toEqual(["https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2", "https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2"]);
     expect(seen.every((r) => r.method === "GET" || (r.u.endsWith("/graphql") && r.method === "POST" && JSON.parse(r.body).query.startsWith("query(")))).toBe(true);
     expect(seen.some((r) => /statuses|dismissals/.test(r.u) || /mutation/i.test(r.body ?? ""))).toBe(false);
+    vi.unstubAllGlobals();
+  });
+  it("classifies a protected rename source returned by the live Files API", async () => {
+    stub(queueEntries([1]), { fileOverride: [{ filename: "notes/guide.md", previous_filename: "AGENTS.md", additions: 0, deletions: 0 }] });
+    expect(await evaluateMergeGroup(repo, event, group.head_sha)).toMatchObject({ failed: true });
     vi.unstubAllGlobals();
   });
   it("fails if same-SHA PR metadata drifts before native success", async () => {

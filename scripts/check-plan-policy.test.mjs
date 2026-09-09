@@ -222,6 +222,7 @@ describe("agent policy workflow invariants", () => {
     "none",
     "not applicable",
     "[What changes, what intentionally does not, and why this is one coherent PR.]",
+    "[Related behavior included; explain protected changes when applicable. No file allowlist needed.]",
   ])("rejects a protected-path placeholder Scope: %s", (scope) => {
     const cwd = initRepository();
     try {
