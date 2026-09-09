@@ -212,14 +212,14 @@ async function classifyForwardRole(deps, status, rollback, role, baseline, incom
   return { kind: "UNKNOWN", state: null };
 }
 
-function verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix) {
+function verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix, allowLegacyReadyWeb = false) {
   if (state.imageDigest !== recovery[role].digest || state.image !== recovery[role].image
     || state.revisionSuffix !== expectedRevisionSuffix) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
   const reconstructedBaseline = reconstructBaselineTemplate(role, state, rollback, baseline);
   if (managedAzureTemplateDigest(reconstructedBaseline) !== rollback.previous[role].templateDigest) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
   assertManagedAzureTemplateDelta({ ...state, template: reconstructedBaseline }, state.template, {
     role, image: recovery[role].image, release: recoveryRelease, revisionSuffix: expectedRevisionSuffix,
-    migrateWeb: true,
+    migrateWeb: !(allowLegacyReadyWeb && state.template.containers[0].env.some((entry) => entry.name === "CORGTEX_STARTUP_MODE" && entry.value === "web")),
   });
   if (state.appName !== status.target[role === "web" ? "webAppName" : "workerAppName"]) fail(`MANAGED_RELEASE_RECOVERY_${role.toUpperCase()}_DRIFT`);
 }
@@ -228,7 +228,11 @@ async function classifyCompatibleRecoveryRole(deps, status, rollback, role, base
   try {
     const state = await deps.readApp({ target: status.target, role, release: recoveryRelease,
       imageDigest: recovery[role].digest, ambiguous: true });
-    verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix);
+    // Preserve the old runner's already-ready primary without granting any new
+    // legacy-mode write or allowing that mode on the corrected second revision.
+    const allowLegacyReadyWeb = rollback.schemaVersion === 2 && role === "web"
+      && expectedRevisionSuffix === managedAzureRevisionSuffix({ ...originatingReleaseLease(status), role, phase: "rollback" });
+    verifyCompatibleRecoveryRole(role, state, status, rollback, baseline, recovery, recoveryRelease, expectedRevisionSuffix, allowLegacyReadyWeb);
     return { kind: "COMPATIBLE_RECOVERY", state };
   } catch { /* Unknown live state remains blocked for manual investigation. */ }
   return { kind: "UNKNOWN", state: null };
