@@ -145,6 +145,18 @@ export function canonicalizeManagedAzureContainerAppState(raw, input) {
     || !Array.isArray(template.containers) || template.containers.length !== 1
     || typeof template.revisionSuffix !== "string"
     || !revisionNameMatches(appName, template, properties.latestRevisionName)) fail("AZURE_BASELINE_NOT_READY");
+  return canonicalizeTemplateIdentity(template, value.location, properties.latestRevisionName, input);
+}
+
+function canonicalizeTemplateIdentity(template, location, revisionName, input) {
+  const target = targetValue(input.target);
+  const release = releaseValue(input.release);
+  const role = input.role;
+  const appName = appNameFor(target, role);
+  if (typeof location !== "string" || !/^[A-Za-z0-9 ._-]{1,128}$/.test(location)
+    || !Array.isArray(template?.containers) || template.containers.length !== 1
+    || typeof template.revisionSuffix !== "string"
+    || !revisionNameMatches(appName, template, revisionName)) fail("AZURE_TEMPLATE_INVALID");
   const container = template.containers[0];
   let imageDigest = input.imageDigest;
   if (imageDigest === undefined) {
@@ -158,9 +170,9 @@ export function canonicalizeManagedAzureContainerAppState(raw, input) {
   assertReleaseEnvironment(container, release);
   return Object.freeze({
     appName,
-    location: value.location,
+    location,
     role,
-    revisionName: properties.latestRevisionName,
+    revisionName,
     revisionSuffix: template.revisionSuffix,
     containerName: container.name,
     image: container.image,
@@ -170,16 +182,17 @@ export function canonicalizeManagedAzureContainerAppState(raw, input) {
   });
 }
 
-export function managedAzureRevisionSuffix({ leaseId, fence, role, phase }) {
+export function managedAzureRevisionSuffix({ leaseId, fence, role, phase, generation = 1 }) {
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(leaseId)
     || !Number.isSafeInteger(fence) || fence < 1 || (role !== "web" && role !== "worker")
-    || (phase !== "forward" && phase !== "rollback")) fail("AZURE_REVISION_SUFFIX_INVALID");
-  const suffix = `mr-${fence.toString(36)}-${leaseId.replaceAll("-", "").slice(0, 16)}-${role[0]}-${phase[0]}`;
+    || (phase !== "forward" && phase !== "rollback")
+    || (generation !== 1 && !(generation === 2 && phase === "rollback" && role === "web"))) fail("AZURE_REVISION_SUFFIX_INVALID");
+  const suffix = `mr-${fence.toString(36)}-${leaseId.replaceAll("-", "").slice(0, 16)}-${role[0]}-${phase[0]}${generation === 2 ? "-2" : ""}`;
   if (suffix.length > 64) fail("AZURE_REVISION_SUFFIX_INVALID");
   return suffix;
 }
 
-export function buildManagedAzureReleaseTemplate({ baseline, role, image, release, revisionSuffix }) {
+export function buildManagedAzureReleaseTemplate({ baseline, role, image, release, revisionSuffix, migrateWeb = false }) {
   const canonicalRelease = releaseValue(release);
   if (!baseline?.template || baseline.role !== role || typeof image !== "string" || !/^[a-z0-9]+\.azurecr\.io\/corgtex\/(web|worker)@sha256:[0-9a-f]{64}$/.test(image)
     || !(revisionSuffix === "" || /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(revisionSuffix))) fail("AZURE_TEMPLATE_INVALID");
@@ -188,6 +201,12 @@ export function buildManagedAzureReleaseTemplate({ baseline, role, image, releas
   const container = template.containers[0];
   container.image = image;
   const entries = releaseEnvironment(container);
+  if (migrateWeb && role === "web") {
+    const startup = entries.get("CORGTEX_STARTUP_MODE");
+    if (!startup || Object.keys(startup).some((key) => !["name", "value"].includes(key))
+      || !["web", "migrate-and-web"].includes(startup.value)) fail("AZURE_STARTUP_MODE_INVALID");
+    startup.value = "migrate-and-web";
+  }
   const expected = {
     CORGTEX_RELEASE_GIT_SHA: canonicalRelease.gitSha,
     CORGTEX_RELEASE_IMAGE_TAG: canonicalRelease.imageTag,
@@ -204,6 +223,37 @@ export function buildManagedAzureReleaseTemplate({ baseline, role, image, releas
 export function assertManagedAzureTemplateDelta(baseline, candidate, expected) {
   const rebuilt = buildManagedAzureReleaseTemplate({ baseline, ...expected });
   if (managedAzureTemplateDigest(rebuilt) !== managedAzureTemplateDigest(candidate)) fail("AZURE_TEMPLATE_DRIFT");
+  return true;
+}
+
+export function assertManagedAzureRevisionProjection(expectedTemplate, revisionTemplate, appName, revisionName) {
+  const expected = safeJsonClone(expectedTemplate);
+  const actual = safeJsonClone(revisionTemplate);
+  if (!revisionNameMatches(appName, expected, revisionName)
+    || expected.containers?.length !== 1 || actual?.containers?.length !== 1) fail("AZURE_REVISION_TEMPLATE_DRIFT", true);
+  // API 2025-01-01 omits these specific defaults in immutable revisions.
+  // No other omission, nondefault value, or additional field is normalized.
+  if (actual.revisionSuffix == null) {
+    delete expected.revisionSuffix;
+    delete actual.revisionSuffix;
+  }
+  const expectedContainer = expected.containers[0]; const actualContainer = actual.containers[0];
+  if (expectedContainer.resources?.ephemeralStorage === "2Gi" && actualContainer.resources?.ephemeralStorage == null) {
+    delete expectedContainer.resources.ephemeralStorage;
+    if (actualContainer.resources) delete actualContainer.resources.ephemeralStorage;
+  }
+  const emptyProbes = (value) => value == null || (Array.isArray(value) && value.length === 0);
+  if (emptyProbes(expectedContainer.probes) && emptyProbes(actualContainer.probes)) {
+    delete expectedContainer.probes;
+    delete actualContainer.probes;
+  }
+  for (const [key, value] of [["cooldownPeriod", 300], ["pollingInterval", 30]]) {
+    if (expected.scale?.[key] === value && actual.scale?.[key] == null) {
+      delete expected.scale[key];
+      if (actual.scale) delete actual.scale[key];
+    }
+  }
+  if (managedAzureTemplateDigest(expected) !== managedAzureTemplateDigest(actual)) fail("AZURE_REVISION_TEMPLATE_DRIFT", true);
   return true;
 }
 
@@ -305,9 +355,10 @@ function providerErrorCode(body) {
   return codes.find((code) => typeof code === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(code));
 }
 
-function patchResult(terminal, succeeded, code, body = null) {
+function patchResult(terminal, succeeded, code, body = null, stage, providerStatus) {
   const providerCode = providerErrorCode(body);
-  return Object.freeze({ terminal, succeeded, code, ...(providerCode ? { providerCode } : {}) });
+  return Object.freeze({ terminal, succeeded, code, ...(providerCode ? { providerCode } : {}),
+    ...(stage ? { stage } : {}), ...(Number.isInteger(providerStatus) ? { providerStatus } : {}) });
 }
 
 export function createManagedAzureContainerAppTransport(dependencies = {}) {
@@ -343,6 +394,51 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     return canonicalizeManagedAzureContainerAppState(await responseBody(response), input);
   }
 
+  async function readAppTemplate(input) {
+    const target = targetValue(input.target);
+    const response = await request(resourceUrl(target, appNameFor(target, input.role)), { method: "GET" }, true);
+    if (response.status !== 200) fail("AZURE_READBACK_AMBIGUOUS", true);
+    const app = await responseBody(response);
+    if (app?.properties?.configuration?.activeRevisionsMode !== "Single"
+      || typeof app.properties.latestRevisionName !== "string"
+      || typeof app.properties.latestReadyRevisionName !== "string") fail("AZURE_BASELINE_NOT_READY", true);
+    return Object.freeze({ state: canonicalizeTemplateIdentity(app.properties.template, app.location, app.properties.latestRevisionName, input),
+      latestReadyRevisionName: app.properties.latestReadyRevisionName, provisioningState: app.properties.provisioningState });
+  }
+
+  // This verifies a revision projection against a separately proven app-shaped
+  // template. Actual revision/replica health remains separate from identity.
+  async function readRevisionState(input) {
+    const target = targetValue(input.target);
+    const appName = appNameFor(target, input.role);
+    const response = await request(revisionUrl(target, appName, input.revisionName), { method: "GET" }, true);
+    if (response.status === 404) return Object.freeze({ kind: "ABSENT" });
+    if (response.status !== 200) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    const revision = await responseBody(response);
+    if (revision?.name !== input.revisionName) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    assertManagedAzureRevisionProjection(input.expectedTemplate, revision.properties?.template, appName, input.revisionName);
+    const replicasResponse = await request(revisionUrl(target, appName, input.revisionName, "/replicas"), { method: "GET" }, true);
+    if (replicasResponse.status !== 200) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    const replicas = await responseBody(replicasResponse);
+    if (!Array.isArray(replicas?.value) || replicas.value.length > 256 || replicas.nextLink) fail("AZURE_REVISION_READBACK_AMBIGUOUS", true);
+    const p = revision.properties;
+    const containerName = input.expectedTemplate.containers[0].name;
+    const ready = replicas.value.length > 0 && replicas.value.every((replica) =>
+      replica?.properties?.runningState === "Running" && replica.properties.containers?.length === 1
+      && replica.properties.containers[0].name === containerName && replica.properties.containers[0].ready === true);
+    const crashLoop = replicas.value.length > 0 && replicas.value.every((replica) =>
+      replica?.properties?.containers?.length === 1 && replica.properties.containers[0].name === containerName
+      && replica.properties.containers[0].ready === false
+      && replica.properties.containers[0].runningState === "Waiting"
+      && /^(?:CrashLoopBackOff|Container is waiting with reason: CrashLoopBackOff on [A-Za-z0-9.-]+\.)$/.test(replica.properties.containers[0].runningStateDetails));
+    const kind = p.active === true && p.provisioningState === "Provisioned"
+      && p.healthState === "Healthy" && p.runningState === "Running" && ready ? "READY"
+      : !ready && (p.provisioningState === "Failed" || ["Failed", "ActivationFailed"].includes(p.runningState) || crashLoop) ? "FAILED"
+        : p.active === true && ["Provisioning", "Provisioned"].includes(p.provisioningState)
+          && ["Activating", "Processing", "Running"].includes(p.runningState) ? "PROVISIONING" : "UNKNOWN";
+    return Object.freeze({ kind });
+  }
+
   async function patchTemplate(input) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
@@ -353,23 +449,25 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     try {
       response = await request(url, { method: "PATCH", headers: { "content-type": PATCH_CONTENT_TYPE }, body: JSON.stringify({ location: input.location, properties: { template } }) }, true);
     } catch {
-      return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_PATCH_AMBIGUOUS" });
+      return patchResult(false, false, "AZURE_PATCH_AMBIGUOUS", null, "PATCH_REQUEST");
     }
     if (response.status === 200) {
-      await responseBody(response);
+      try { await responseBody(response); } catch {
+        return patchResult(false, false, "AZURE_PATCH_AMBIGUOUS", null, "PATCH_RESPONSE", response.status);
+      }
       return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
     }
     if (response.status !== 202) {
       const body = await responseBody(response).catch(() => null);
       return patchResult(response.status >= 400 && response.status < 500, false,
-        response.status >= 400 && response.status < 500 ? "AZURE_PATCH_REJECTED" : "AZURE_PATCH_AMBIGUOUS", body);
+        response.status >= 400 && response.status < 500 ? "AZURE_PATCH_REJECTED" : "AZURE_PATCH_AMBIGUOUS", body, "PATCH_RESPONSE", response.status);
     }
     try { await responseBody(response); } catch {
-      return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
+      return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", null, "PATCH_RESPONSE", response.status);
     }
     let location;
     try { location = operationUrl(response.headers.get("azure-asyncoperation") ?? response.headers.get("location"), target); } catch {
-      return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_LOCATION_INVALID" });
+      return patchResult(false, false, "AZURE_OPERATION_LOCATION_INVALID", null, "OPERATION_LOCATION", response.status);
     }
     let retryAfter = response.headers.get("retry-after");
     const startedAt = clock();
@@ -382,23 +480,23 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
       }
       let polled;
       try { polled = await request(location, { method: "GET" }, true); } catch {
-        return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
+        return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", null, "OPERATION_POLL");
       }
       retryAfter = polled.headers.get("retry-after");
       let body;
       try { body = await responseBody(polled); } catch {
-        return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_AMBIGUOUS" });
+        return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", null, "OPERATION_RESPONSE", polled.status);
       }
       if (polled.status === 202) continue;
       if (polled.status === 204) return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
-      if (polled.status !== 200) return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", body);
+      if (polled.status !== 200) return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", body, "OPERATION_RESPONSE", polled.status);
       const status = body?.status ?? body?.properties?.provisioningState;
       if (status === "Succeeded") return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
-      if (["Failed", "Canceled", "Cancelled"].includes(status)) return patchResult(true, false, "AZURE_PATCH_FAILED", body);
+      if (["Failed", "Canceled", "Cancelled"].includes(status)) return patchResult(true, false, "AZURE_PATCH_FAILED", body, "OPERATION_RESPONSE", polled.status);
       if (status === undefined) return patchResult(true, true, "AZURE_PATCH_SUCCEEDED");
-      if (!["InProgress", "Running", "Accepted"].includes(status)) return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", body);
+      if (!["InProgress", "Running", "Accepted"].includes(status)) return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", body, "OPERATION_RESPONSE", polled.status);
     }
-    return Object.freeze({ terminal: false, succeeded: false, code: "AZURE_OPERATION_TIMEOUT" });
+    return patchResult(false, false, "AZURE_OPERATION_TIMEOUT", null, "OPERATION_TIMEOUT");
   }
 
   async function waitForState(input) {
@@ -480,5 +578,5 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_BASELINE_PAIR_DRAINED" });
   }
 
-  return Object.freeze({ readApp, patchTemplate, waitForState, setRevisionActive, drainBaseline });
+  return Object.freeze({ readApp, readAppTemplate, readRevisionState, patchTemplate, waitForState, setRevisionActive, drainBaseline });
 }

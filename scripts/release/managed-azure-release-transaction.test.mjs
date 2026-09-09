@@ -42,6 +42,7 @@ function template(role, releaseSha, version, imageDigest, suffix) {
       name: role,
       image: `${target.acrServer}/corgtex/${role}@${imageDigest}`,
       env: [
+        { name: "CORGTEX_STARTUP_MODE", value: role === "web" ? "web" : "worker" },
         { name: "PRIVATE_CONFIG", secretRef: "private-config" },
         { name: "CORGTEX_RELEASE_GIT_SHA", value: releaseSha },
         { name: "CORGTEX_RELEASE_IMAGE_TAG", value: `sha-${releaseSha}` },
@@ -94,6 +95,7 @@ function rawApp(role = "web", release = transportBaseRelease, digest = digests.w
           command: ["node"],
           args: [role === "web" ? "server.js" : "worker.js"],
           env: [
+        { name: "CORGTEX_STARTUP_MODE", value: role === "web" ? "web" : "worker" },
             { name: "DATABASE_URL", secretRef: "database-url" },
             { name: "CORGTEX_RELEASE_GIT_SHA", value: release.gitSha },
             { name: "CORGTEX_RELEASE_IMAGE_TAG", value: release.imageTag },
@@ -193,6 +195,21 @@ function dependencies(options = {}) {
 }
 
 describe("managed Azure single-target transaction", () => {
+  it("rejects a seeding web startup mode before EXCLUSIVE drain or any app PATCH", async () => {
+    const { deps } = dependencies({ activationPolicy: "EXCLUSIVE" });
+    const read = deps.readApp.getMockImplementation();
+    deps.readApp.mockImplementation(async (input) => {
+      const value = structuredClone(await read(input));
+      if (input.role === "web") value.template.containers[0].env.find((entry) => entry.name === "CORGTEX_STARTUP_MODE").value = "migrate-and-seed";
+      value.templateDigest = managedAzureTemplateDigest(value.template);
+      return value;
+    });
+    await expect(runManagedAzureReleaseTransaction({ ...input, execute: true }, deps)).rejects.toMatchObject({ code: "AZURE_STARTUP_MODE_INVALID" });
+    expect(deps.lease).toHaveBeenCalledWith("abort", expect.anything());
+    expect(deps.drainBaseline).not.toHaveBeenCalled();
+    expect(deps.patchTemplate).not.toHaveBeenCalled();
+    expect(deps.lease).not.toHaveBeenCalledWith("begin", expect.anything());
+  });
   it("keeps dry-run read-only while proving inventory, target, images, and both baselines", async () => {
     const { deps, events } = dependencies({ hosted: false, webDestination: "ABSENT" });
     const result = await runManagedAzureReleaseTransaction(input, deps);
@@ -935,7 +952,7 @@ describe("managed Azure Container Apps transport", () => {
     for (const location of unsafeLocations) {
       const fetchImpl = vi.fn().mockResolvedValueOnce(transportResponse(202, null, { location, "retry-after": "0" }));
       const transport = createManagedAzureContainerAppTransport({ fetchImpl, getAccessToken: vi.fn().mockResolvedValue("token-value-with-enough-length") });
-      await expect(transport.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_OPERATION_LOCATION_INVALID" });
+      await expect(transport.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_OPERATION_LOCATION_INVALID", stage: "OPERATION_LOCATION", providerStatus: 202 });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     }
   });
@@ -943,11 +960,11 @@ describe("managed Azure Container Apps transport", () => {
   it("classifies confirmed rejection separately from operation ambiguity", async () => {
     const candidate = rawApp().properties.template;
     const rejected = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockResolvedValue(transportResponse(412, { error: { code: "BadRequest", details: [{ code: "InvalidParameterValueInContainerTemplate", message: "private-provider-message" }] } })), getAccessToken: async () => "token-value-with-enough-length" });
-    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate" });
+    await expect(rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: true, succeeded: false, code: "AZURE_PATCH_REJECTED", providerCode: "InvalidParameterValueInContainerTemplate", stage: "PATCH_RESPONSE", providerStatus: 412 });
     const rejectedResult = await rejected.patchTemplate({ target, role: "web", location: "West US", template: candidate });
     expect(JSON.stringify(rejectedResult)).not.toContain("private-provider-message");
     const ambiguous = createManagedAzureContainerAppTransport({ fetchImpl: vi.fn().mockRejectedValue(new Error("private-provider-error")), getAccessToken: async () => "token-value-with-enough-length" });
-    await expect(ambiguous.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_PATCH_AMBIGUOUS" });
+    await expect(ambiguous.patchTemplate({ target, role: "web", location: "West US", template: candidate })).resolves.toEqual({ terminal: false, succeeded: false, code: "AZURE_PATCH_AMBIGUOUS", stage: "PATCH_REQUEST" });
   });
 
   it("reads back only the expected ready revision and complete template", async () => {
