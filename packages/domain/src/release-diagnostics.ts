@@ -73,6 +73,15 @@ export async function dispatchReleaseDiagnostic(actor: AppActor, workspaceId: st
     : await prisma.workflowJob.upsert({
       where: { dedupeKey }, update: {},
       create: { id, workspaceId, type: RELEASE_DIAGNOSTIC_JOB_TYPE, payload, dedupeKey }, select,
+    }).catch(async (error: unknown) => {
+      // Prisma can implement an empty-update upsert as a read followed by an insert.
+      // A concurrent dispatch may win that insert; retain its durable identity.
+      const conflict = error as { code?: string; meta?: { target?: unknown } } | null;
+      if (conflict?.code !== "P2002" || !Array.isArray(conflict.meta?.target)
+        || conflict.meta.target.length !== 1 || conflict.meta.target[0] !== "dedupeKey") throw error;
+      const existing = await prisma.workflowJob.findUnique({ where: { dedupeKey }, select });
+      if (!existing) throw error;
+      return existing;
     });
   invariant(job, 409, "RELEASE_DIAGNOSTIC_CONFLICT", "The original diagnostic does not exist.");
   diagnosticView(job, request);
