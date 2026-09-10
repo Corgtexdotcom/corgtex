@@ -490,6 +490,24 @@ describe("/api/control-plane/mcp", () => {
     );
   });
 
+  it("passes remote shared destination registration through the existing migration planning tool", async () => {
+    mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({ kind: "agent", authProvider: "control-plane",
+      label: "control-plane-agent", scopes: ["control-plane:migrations:write"] });
+    const domain = await import("@corgtex/domain");
+    vi.mocked(domain.planControlPlaneClientMigration).mockResolvedValue({ id: "migration-1", status: "planned" } as never);
+    const remoteSharedWorkspace = { infrastructureDeploymentId: "infra-1",
+      remoteWorkspaceId: "00000000-0000-4000-8000-000000000001", remoteWorkspaceSlug: "acme",
+      workspaceUrl: "https://selfserve.test/workspaces/00000000-0000-4000-8000-000000000001", supportMcpUrl: "https://selfserve.test/api/mcp" };
+    const { POST } = await import("./route");
+    const response = await POST(request({ jsonrpc: "2.0", id: 20, method: "tools/call", params: {
+      name: "plan_client_migration", arguments: { sourceDeploymentId: "source-1", targetMode: "shared_workspace",
+        reason: "Prepare remote destination.", remoteSharedWorkspace },
+    } }) as never);
+    expect(response.status).toBe(200);
+    expect(domain.planControlPlaneClientMigration).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ remoteSharedWorkspace }));
+    expect(domain.executeControlPlaneClientMigration).not.toHaveBeenCalled();
+  });
+
   it("approves self-serve trial requests with the client write-scoped actor", async () => {
     mocks.resolveControlPlaneRequestActor.mockResolvedValueOnce({
       kind: "agent",

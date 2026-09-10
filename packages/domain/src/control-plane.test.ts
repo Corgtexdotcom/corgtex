@@ -91,6 +91,7 @@ const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communica
       findMany: vi.fn(),
     },
     customerDeployment: {
+      create: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
@@ -1325,6 +1326,116 @@ describe("control plane domain", () => {
     expect(prismaMock.clientMigrationRun.create).not.toHaveBeenCalled();
   });
 
+  it("plans hosted-to-remote-shared migration with a same-account draft and leaves routing unchanged", async () => {
+    const { planControlPlaneClientMigration } = await import("./control-plane");
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const account = { id: "acct_1", slug: "acme", displayName: "Acme", primaryDeploymentId: "dep-source" };
+    const source = { id: "dep-source", customerAccountId: account.id, customerAccount: account,
+      deploymentKind: "HOSTED_DEDICATED", deploymentStatus: "ACTIVE" };
+    const infrastructure = { id: "infra-1", cloudProvider: "AZURE", deploymentKind: "REMOTE_MANAGED",
+      managedWorkspaceId: null, remoteWorkspaceId: null, url: "https://selfserve.test",
+      providerSubscriptionId: "sub-1", providerResourceGroup: "rg", providerEnvironmentId: "env",
+      providerWebServiceId: "web", providerWorkerServiceId: "worker" };
+    let destination: Record<string, unknown> | null = null;
+    prismaMock.customerAccount.findUnique.mockResolvedValue(account);
+    prismaMock.customerDeployment.findUnique.mockImplementation(async ({ where }: any) => where.id === "dep-source" ? source
+      : where.id === "infra-1" ? infrastructure : where.id === "dep-destination" ? destination : null);
+    prismaMock.customerDeployment.create.mockImplementation(async ({ data }: any) => {
+      destination = { id: "dep-destination", ...data };
+      return destination;
+    });
+    prismaMock.clientMigrationRun.create.mockImplementation(async ({ data }: any) => ({ id: "mig-1", ...data }));
+    const result = await planControlPlaneClientMigration(operatorActor, {
+      sourceDeploymentId: "dep-source", targetMode: "shared_workspace", reason: "Prepare shared destination.",
+      remoteSharedWorkspace: { infrastructureDeploymentId: "infra-1", remoteWorkspaceId: workspaceId, remoteWorkspaceSlug: "acme",
+        workspaceUrl: `https://selfserve.test/workspaces/${workspaceId}`, supportMcpUrl: "https://selfserve.test/api/mcp" },
+    });
+    expect(result).toMatchObject({ customerAccountId: account.id, destinationDeploymentId: "dep-destination", status: "planned",
+      planSummary: { remoteDestination: { workspaceId, sharedInfrastructureDeploymentId: "infra-1", verificationStatus: "pending_trusted_receipt" } } });
+    expect(destination).toMatchObject({ customerAccountId: account.id, deploymentStatus: "DRAFT", managedWorkspaceId: null });
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+    expect(prismaMock.workspace.create).not.toHaveBeenCalled();
+    expect(prismaMock.customerReleaseTarget.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["execute", "rollback", "finalize", "dryRun", "verify", "enqueue"] as const)("blocks metadata-only %s of a remote shared destination even with verified metadata", async (operation) => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED", "true");
+    const domain = await import("./control-plane");
+    const operations = { execute: domain.executeControlPlaneClientMigration, rollback: domain.rollbackControlPlaneClientMigration,
+      finalize: domain.finalizeControlPlaneClientMigration, dryRun: domain.runControlPlaneClientMigrationDryRun,
+      verify: domain.recordControlPlaneClientMigrationWorkerVerification, enqueue: domain.enqueueControlPlaneClientMigrationWorkerVerification };
+    const destination = { id: "dep-destination", customerAccountId: "acct_1", deploymentKind: "SHARED_WORKSPACE",
+      managedWorkspaceId: null, remoteWorkspaceId: "00000000-0000-4000-8000-000000000001", deploymentStatus: "ACTIVE" };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValue({
+      id: "mig-1", customerAccountId: "acct_1", sourceDeploymentId: "dep-source", destinationDeploymentId: destination.id,
+      direction: "hosted_to_shared", status: operation === "execute" ? "import_verified" : "executed", destinationDeployment: destination,
+      customerAccount: { id: "acct_1", primaryDeploymentId: operation === "execute" ? "dep-source" : destination.id },
+      verificationSummary: { worker: { verified: true, evidence: { importJobId: "claimed-import", healthStatus: "ok" } } },
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(destination);
+    await expect(operations[operation](operatorActor, {
+      migrationRunId: "mig-1", reason: "Attempt metadata operation.",
+    })).rejects.toMatchObject({ code: "REMOTE_SHARED_MIGRATION_RECEIPT_REQUIRED" });
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.clientMigrationRun.update).not.toHaveBeenCalled();
+    expect(prismaMock.clientMigrationIdMap.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["execute", "rollback", "finalize", "dryRun", "verify", "enqueue"] as const)("preserves the mover authority ledger against legacy %s even if destination metadata changes", async (operation) => {
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_EXECUTE_ENABLED", "true");
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_READ_ONLY_ENFORCED", "true");
+    const domain = await import("./control-plane");
+    const operations = { execute: domain.executeControlPlaneClientMigration, rollback: domain.rollbackControlPlaneClientMigration,
+      finalize: domain.finalizeControlPlaneClientMigration, dryRun: domain.runControlPlaneClientMigrationDryRun,
+      verify: domain.recordControlPlaneClientMigrationWorkerVerification, enqueue: domain.enqueueControlPlaneClientMigrationWorkerVerification };
+    const summary = { sharedTenantTransfer: { phase: "TARGET_ACTIVE", receiptSha256: "trusted-receipt" } };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValue({
+      id: "mig-1", customerAccountId: "acct_1", sourceDeploymentId: "dep-source", destinationDeploymentId: "dep-destination",
+      direction: "hosted_to_shared", status: "executed", verificationSummary: summary,
+      destinationDeployment: { id: "dep-destination", customerAccountId: "acct_1", deploymentKind: "SHARED_WORKSPACE", managedWorkspaceId: "local-workspace" },
+    });
+    await expect(operations[operation](operatorActor, {
+      migrationRunId: "mig-1", reason: "Attempt legacy operation.",
+    })).rejects.toMatchObject({ code: "REMOTE_SHARED_MIGRATION_RECEIPT_REQUIRED" });
+    expect(summary.sharedTenantTransfer.phase).toBe("TARGET_ACTIVE");
+    expect(prismaMock.clientMigrationRun.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["dryRun", "verify", "enqueue"] as const)("refuses a newly supplied remote destination for legacy %s", async (operation) => {
+    const domain = await import("./control-plane");
+    const operations = { dryRun: domain.runControlPlaneClientMigrationDryRun,
+      verify: domain.recordControlPlaneClientMigrationWorkerVerification, enqueue: domain.enqueueControlPlaneClientMigrationWorkerVerification };
+    const destination = { id: "dep-remote", customerAccountId: "acct_1", deploymentKind: "SHARED_WORKSPACE", managedWorkspaceId: null };
+    prismaMock.clientMigrationRun.findUnique.mockResolvedValue({
+      id: "mig-1", customerAccountId: "acct_1", sourceDeploymentId: "dep-source", destinationDeploymentId: null,
+      direction: "hosted_to_shared", status: "dry_run_passed",
+      sourceDeployment: { id: "dep-source", managedWorkspaceId: "workspace-source" },
+    });
+    prismaMock.customerDeployment.findUnique.mockResolvedValue(destination);
+    await expect(operations[operation](operatorActor, {
+      migrationRunId: "mig-1", destinationDeploymentId: destination.id, reason: "Attempt legacy operation.",
+    })).rejects.toMatchObject({ code: "REMOTE_SHARED_MIGRATION_RECEIPT_REQUIRED" });
+    expect(prismaMock.clientMigrationRun.update).not.toHaveBeenCalled();
+    expect(prismaMock.clientMigrationIdMap.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses a remote shared dry-run before creating a legacy migration record", async () => {
+    const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({ deploymentKind: "SHARED_WORKSPACE", managedWorkspaceId: null });
+    await expect(runControlPlaneClientMigrationDryRun(operatorActor, {
+      sourceDeploymentId: "dep-source", destinationDeploymentId: "dep-remote", targetMode: "shared_workspace", reason: "Attempt legacy dry-run.",
+    })).rejects.toMatchObject({ code: "REMOTE_SHARED_MIGRATION_RECEIPT_REQUIRED" });
+    expect(prismaMock.clientMigrationRun.create).not.toHaveBeenCalled();
+    expect(prismaMock.clientMigrationRun.update).not.toHaveBeenCalled();
+  });
+
   it("rejects hosted-source migration dry-run until remote inventory is available", async () => {
     const { runControlPlaneClientMigrationDryRun } = await import("./control-plane");
     const sourceDeployment = {
@@ -1627,6 +1738,30 @@ describe("control plane domain", () => {
       }),
     }));
     expect(result.supportCredentialEnc).toBeUndefined();
+  });
+
+  it.each([true, false])("verifies remote shared support belongs to the selected workspace (matching=%s)", async (matching) => {
+    const { configureSupportConnector } = await import("./control-plane");
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "tenant-1", deploymentKind: "SHARED_WORKSPACE", managedWorkspaceId: null, remoteWorkspaceId: workspaceId,
+      remoteWorkspaceSlug: "acme", supportCredentialEnc: null,
+      supportBaseUrl: "https://selfserve.test", supportMcpUrl: "https://selfserve.test/api/mcp", updatedAt: new Date("2026-01-01"),
+    });
+    vi.mocked(fetch).mockResolvedValue(mcpToolResult({ workspace: { id: matching ? workspaceId : "00000000-0000-4000-8000-000000000002", slug: "acme" },
+      scopes: ["workspace:read"] }) as any);
+    prismaMock.customerDeployment.update.mockResolvedValue({ id: "tenant-1" });
+    const call = configureSupportConnector(operatorActor, { deploymentId: "tenant-1", supportCredential: "new-support-token" });
+    if (matching) {
+      await call;
+      expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ supportAccessMode: "workspace", supportMcpUrl: "https://selfserve.test/api/mcp" }),
+      }));
+    } else {
+      await expect(call).rejects.toMatchObject({ code: "REMOTE_SUPPORT_WORKSPACE_MISMATCH" });
+      expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    }
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("https://selfserve.test/api/mcp");
   });
 
   it("lists customers with managed workspace summaries and redacted credentials", async () => {

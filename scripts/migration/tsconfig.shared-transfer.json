@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "allowJs": true, "checkJs": false, "incremental": false },
+  "include": ["shared-tenant-transfer.ts", "shared-tenant-publication.ts", "shared-tenant-source-copy.ts", "shared-tenant-import.ts", "shared-tenant-export.ts", "shared-tenant-objects.ts", "workspace-ownership.ts"]
+}

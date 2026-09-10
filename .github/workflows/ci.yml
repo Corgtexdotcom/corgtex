@@ -59,6 +59,12 @@ jobs:
 
       - run: npx vitest run --project unit --project integration
 
+      - name: Install PostgreSQL capture client
+        run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client-16
+
+      - name: Test isolated tenant transfer
+        run: npm run test:tenant-transfer
+
   db-sync:
     name: Database Sync
     runs-on: ubuntu-latest

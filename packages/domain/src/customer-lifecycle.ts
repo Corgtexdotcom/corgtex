@@ -1,4 +1,6 @@
 import type {
+  CustomerAccount,
+  CustomerDeployment,
   CustomerAccountStatus,
   CustomerDeploymentCloudProvider,
   CustomerDeploymentKind,
@@ -354,6 +356,81 @@ export async function registerCustomerDeployment(params: {
     forcePrimary: params.primary,
   });
 
+  return { account, deployment };
+}
+
+export type RemoteSharedWorkspaceRegistration = {
+  infrastructureDeploymentId: string;
+  remoteWorkspaceId: string;
+  remoteWorkspaceSlug: string;
+  workspaceUrl: string;
+  supportMcpUrl: string;
+};
+
+function explicitHttpsUrl(value: string) {
+  let url: URL;
+  try { url = new URL(value); } catch { invariant(false, 400, "INVALID_INPUT", "An explicit HTTPS URL is required."); }
+  invariant(url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash,
+    400, "INVALID_INPUT", "An explicit HTTPS URL without credentials, query or fragment is required.");
+  return url;
+}
+
+// Registers a destination claim only. Runtime identity, held import and cutover require separate evidence.
+export async function registerRemoteSharedWorkspaceDeployment(params: RemoteSharedWorkspaceRegistration & {
+  customerAccountId: string;
+}, tx?: Prisma.TransactionClient): Promise<{ account: CustomerAccount; deployment: CustomerDeployment }> {
+  if (!tx) return prisma.$transaction((transaction) => registerRemoteSharedWorkspaceDeployment(params, transaction));
+  const account = await tx.customerAccount.findUnique({ where: { id: params.customerAccountId } });
+  invariant(account, 404, "NOT_FOUND", "Customer account not found.");
+  const infrastructure = await tx.customerDeployment.findUnique({ where: { id: params.infrastructureDeploymentId } });
+  invariant(infrastructure && infrastructure.cloudProvider === "AZURE" && ["SHARED_WORKSPACE", "REMOTE_MANAGED"].includes(infrastructure.deploymentKind)
+    && !infrastructure.managedWorkspaceId && !infrastructure.remoteWorkspaceId
+    && infrastructure.providerSubscriptionId && infrastructure.providerResourceGroup
+    && infrastructure.providerEnvironmentId && infrastructure.providerWebServiceId && infrastructure.providerWorkerServiceId,
+  400, "SHARED_INFRASTRUCTURE_REQUIRED", "Select the existing Azure shared infrastructure deployment with its web and worker identities.");
+  const origin = explicitHttpsUrl(infrastructure.url);
+  invariant(origin.pathname === "/", 400, "SHARED_INFRASTRUCTURE_REQUIRED", "Shared infrastructure must have a root deployment URL.");
+  invariant(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(params.remoteWorkspaceId),
+    400, "INVALID_INPUT", "The destination workspace UUID is required.");
+  invariant(normalizeCustomerSlug(params.remoteWorkspaceSlug) === params.remoteWorkspaceSlug,
+    400, "INVALID_INPUT", "The exact destination workspace slug is required.");
+  const workspaceUrl = explicitHttpsUrl(params.workspaceUrl);
+  const supportMcpUrl = explicitHttpsUrl(params.supportMcpUrl);
+  invariant(workspaceUrl.href === `${origin.origin}/workspaces/${params.remoteWorkspaceId}`,
+    400, "REMOTE_WORKSPACE_URL_MISMATCH", "Workspace URL must identify this workspace on the selected shared infrastructure.");
+  invariant(supportMcpUrl.href === `${origin.origin}/api/mcp`,
+    400, "REMOTE_SUPPORT_URL_MISMATCH", "Support MCP URL must be the shared infrastructure root /api/mcp endpoint.");
+  const existing = await tx.customerDeployment.findUnique({ where: { url: workspaceUrl.href } });
+  if (existing) {
+    const metadata = existing.providerMetadata as Record<string, unknown> | null;
+    invariant(existing.customerAccountId === account.id && existing.deploymentKind === "SHARED_WORKSPACE"
+      && existing.cloudProvider === "AZURE" && existing.managedWorkspaceId === null
+      && existing.remoteWorkspaceId === params.remoteWorkspaceId && existing.remoteWorkspaceSlug === params.remoteWorkspaceSlug
+      && existing.supportMcpUrl === supportMcpUrl.href
+      && metadata?.sharedInfrastructureDeploymentId === infrastructure.id,
+    409, "REMOTE_SHARED_REGISTRATION_CONFLICT", "This remote workspace already has a different registration. Reconcile it before continuing.");
+    return { account, deployment: existing };
+  }
+  const deployment = await tx.customerDeployment.create({
+    data: {
+      customerAccountId: account.id,
+      customerSlug: account.slug,
+      label: account.displayName,
+      url: workspaceUrl.href,
+      environment: "production",
+      deploymentKind: "SHARED_WORKSPACE",
+      deploymentStatus: "DRAFT",
+      cloudProvider: "AZURE",
+      managedWorkspaceId: null,
+      remoteWorkspaceId: params.remoteWorkspaceId,
+      remoteWorkspaceSlug: params.remoteWorkspaceSlug,
+      supportBaseUrl: origin.origin,
+      supportMcpUrl: supportMcpUrl.href,
+      supportAccessMode: "workspace",
+      provisioningStatus: "migration_pending_verification",
+      providerMetadata: { sharedInfrastructureDeploymentId: infrastructure.id },
+    },
+  });
   return { account, deployment };
 }
 

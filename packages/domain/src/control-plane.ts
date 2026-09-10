@@ -39,7 +39,7 @@ import {
   type RailwayClient,
 } from "./railway-client";
 import { buildCustomerDeploymentProviderReadModel, buildCustomerDeploymentReadiness, provisionCustomerDeployment } from "./admin";
-import { registerCustomerDeployment } from "./customer-lifecycle";
+import { registerCustomerDeployment, registerRemoteSharedWorkspaceDeployment, type RemoteSharedWorkspaceRegistration } from "./customer-lifecycle";
 import { AGENT_REGISTRY } from "./agent-registry";
 import { isKnownScope, type AgentScope } from "./agent-auth";
 import { compareAndSetFinanceConfig, financeConfigIdentity, FINANCE_PARENT_FLAG } from "./finance";
@@ -1746,6 +1746,21 @@ function assertMigrationRuntimeReadOnlyEnforced() {
   );
 }
 
+function assertRemoteSharedMigrationUsesMover(destination: { deploymentKind?: string | null; managedWorkspaceId?: string | null }) {
+  invariant(destination.deploymentKind !== "SHARED_WORKSPACE" || Boolean(destination.managedWorkspaceId),
+    409, "REMOTE_SHARED_MIGRATION_RECEIPT_REQUIRED",
+    "Remote shared cutover and recovery require the tenant mover's trusted data-authority receipt. Legacy metadata-only migration mutations are unavailable.");
+}
+
+function assertLegacyMigrationMutationAllowed(run: unknown) {
+  const summary = (run as { verificationSummary?: unknown }).verificationSummary;
+  invariant(!summary || typeof summary !== "object" || !("sharedTenantTransfer" in summary),
+    409, "REMOTE_SHARED_MIGRATION_RECEIPT_REQUIRED",
+    "The tenant mover owns this migration authority record. Legacy migration mutations are unavailable.");
+  const destination = runDestinationDeployment(run);
+  if (destination) assertRemoteSharedMigrationUsesMover(destination);
+}
+
 function assertMigrationDestinationReadyForCutover(destination: {
   deploymentKind?: string | null;
   deploymentStatus?: string | null;
@@ -1764,7 +1779,7 @@ async function createClientMigrationRun(actor: AppActor, params: {
   reason: string;
 }) {
   const source = await loadMigrationSourceDeployment(actor, params.sourceDeploymentId);
-  await assertMigrationDestination({
+  const destination = await assertMigrationDestination({
     destinationDeploymentId: params.destinationDeploymentId,
     targetMode: params.targetMode,
     sourceDeploymentId: params.sourceDeploymentId,
@@ -1777,6 +1792,7 @@ async function createClientMigrationRun(actor: AppActor, params: {
     direction,
     targetMode: params.targetMode,
   });
+  const destinationMetadata = jsonRecord(destination?.providerMetadata);
   const run = await migrationRunModel().create({
     data: {
       customerAccountId: source.customerAccountId,
@@ -1787,7 +1803,16 @@ async function createClientMigrationRun(actor: AppActor, params: {
       actorUserId: actorUserId(actor),
       actorLabel: actorLabel(actor),
       reason: params.reason,
-      planSummary: toInputJson(planSummary),
+      planSummary: toInputJson({
+        ...planSummary,
+        ...(destination?.remoteWorkspaceId ? { remoteDestination: {
+          workspaceId: destination.remoteWorkspaceId,
+          workspaceSlug: destination.remoteWorkspaceSlug,
+          workspaceUrl: destination.url,
+          sharedInfrastructureDeploymentId: destinationMetadata?.sharedInfrastructureDeploymentId ?? null,
+          verificationStatus: "pending_trusted_receipt",
+        } } : {}),
+      }),
     },
   });
   await recordCustomerDeploymentEvent(actor, source.id, "control_plane.client_migration.planned", {
@@ -1837,7 +1862,7 @@ function runCustomerAccount(run: unknown) {
 }
 
 function runDestinationDeployment(run: unknown) {
-  return (run as { destinationDeployment?: { id: string; customerAccountId?: string | null; deploymentKind?: string; deploymentStatus?: string; lastHealthStatus?: string | null } | null }).destinationDeployment ?? null;
+  return (run as { destinationDeployment?: { id: string; customerAccountId?: string | null; deploymentKind?: string; deploymentStatus?: string; managedWorkspaceId?: string | null; lastHealthStatus?: string | null } | null }).destinationDeployment ?? null;
 }
 
 function assertRunDestinationBelongsToAccount(run: unknown) {
@@ -1868,6 +1893,7 @@ export async function planControlPlaneClientMigration(actor: AppActor, params: {
   sourceDeploymentId: string;
   targetMode: string;
   destinationDeploymentId?: string | null;
+  remoteSharedWorkspace?: RemoteSharedWorkspaceRegistration;
   reason?: string | null;
 }) {
   await requireControlPlaneAccess(actor);
@@ -1880,10 +1906,23 @@ export async function planControlPlaneClientMigration(actor: AppActor, params: {
   );
   const reason = requireMutationReason(params.reason);
   const targetMode = normalizeClientMode(params.targetMode);
+  let destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId);
+  if (params.remoteSharedWorkspace) {
+    invariant(targetMode === "shared_workspace" && !destinationDeploymentId, 400, "INVALID_INPUT",
+      "Remote shared registration requires a shared target and no existing destination deployment ID.");
+    const source = await loadMigrationSourceDeployment(actor, params.sourceDeploymentId);
+    normalizeMigrationDirection(source.deploymentKind, targetMode);
+    await requireControlPlaneAccess(actor, { deploymentId: params.remoteSharedWorkspace.infrastructureDeploymentId });
+    const registered = await registerRemoteSharedWorkspaceDeployment({
+      ...params.remoteSharedWorkspace,
+      customerAccountId: source.customerAccountId!,
+    });
+    destinationDeploymentId = registered.deployment.id;
+  }
   const run = await createClientMigrationRun(actor, {
     sourceDeploymentId: normalizeRequiredText(params.sourceDeploymentId, "Source deployment ID"),
     targetMode,
-    destinationDeploymentId: normalizeOptionalControlPlaneText(params.destinationDeploymentId),
+    destinationDeploymentId,
     reason,
   });
   return migrationRunSummary(run);
@@ -2170,6 +2209,14 @@ export async function runControlPlaneClientMigrationDryRun(actor: AppActor, para
   let run: unknown = params.migrationRunId
     ? await loadClientMigrationRun(actor, params.migrationRunId)
     : null;
+  if (run) assertLegacyMigrationMutationAllowed(run);
+  if (!run && params.destinationDeploymentId) {
+    const destination = await prisma.customerDeployment.findUnique({
+      where: { id: params.destinationDeploymentId },
+      select: { deploymentKind: true, managedWorkspaceId: true },
+    });
+    if (destination) assertRemoteSharedMigrationUsesMover(destination);
+  }
   if (!run) {
     run = await createClientMigrationRun(actor, {
       sourceDeploymentId: normalizeRequiredText(params.sourceDeploymentId, "Source deployment ID"),
@@ -2207,6 +2254,7 @@ export async function runControlPlaneClientMigrationDryRun(actor: AppActor, para
       customerAccountId: (run as { customerAccountId: string }).customerAccountId,
     })
     : null;
+  if (destinationDeployment) assertRemoteSharedMigrationUsesMover(destinationDeployment);
   const inventory = await buildMigrationInventory({
     id: runRecord.sourceDeploymentId,
     managedWorkspaceId: sourceDeployment.managedWorkspaceId,
@@ -2405,6 +2453,7 @@ export async function recordControlPlaneClientMigrationWorkerVerification(actor:
   requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
   const reason = requireMutationReason(params.reason);
   const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  assertLegacyMigrationMutationAllowed(run);
   const runRecord = run as {
     id: string;
     status: string;
@@ -2424,12 +2473,13 @@ export async function recordControlPlaneClientMigrationWorkerVerification(actor:
   const targetMode = runRecord.direction === "shared_to_hosted" ? "hosted_dedicated" : "shared_workspace";
   const destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId) ?? runRecord.destinationDeploymentId;
   invariant(destinationDeploymentId, 400, "MIGRATION_DESTINATION_REQUIRED", "A destination deployment is required before worker verification.");
-  await assertMigrationDestination({
+  const destination = await assertMigrationDestination({
     destinationDeploymentId,
     targetMode,
     sourceDeploymentId: runRecord.sourceDeploymentId,
     customerAccountId: runRecord.customerAccountId,
   });
+  if (destination) assertRemoteSharedMigrationUsesMover(destination);
   const expectedInventory = dryRunInventoryFromSummary(runRecord.verificationSummary);
   const evidence = requireMigrationVerification(params.verificationSummary, expectedInventory);
   const idMaps = sanitizeMigrationWorkerIdMaps(params.idMaps);
@@ -2479,6 +2529,7 @@ export async function enqueueControlPlaneClientMigrationWorkerVerification(actor
   requireControlPlaneScope(actor, CONTROL_PLANE_MIGRATIONS_WRITE_SCOPE);
   const reason = requireMutationReason(params.reason);
   const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  assertLegacyMigrationMutationAllowed(run);
   const runRecord = run as {
     id: string;
     status: string;
@@ -2493,12 +2544,13 @@ export async function enqueueControlPlaneClientMigrationWorkerVerification(actor
   const targetMode = runRecord.direction === "shared_to_hosted" ? "hosted_dedicated" : "shared_workspace";
   const destinationDeploymentId = normalizeOptionalControlPlaneText(params.destinationDeploymentId) ?? runRecord.destinationDeploymentId;
   invariant(destinationDeploymentId, 400, "MIGRATION_DESTINATION_REQUIRED", "A destination deployment is required before migration worker verification.");
-  await assertMigrationDestination({
+  const destination = await assertMigrationDestination({
     destinationDeploymentId,
     targetMode,
     sourceDeploymentId: runRecord.sourceDeploymentId,
     customerAccountId: runRecord.customerAccountId,
   });
+  if (destination) assertRemoteSharedMigrationUsesMover(destination);
   const expectedInventory = dryRunInventoryFromSummary(runRecord.verificationSummary);
   requireMigrationVerification(params.verificationSummary, expectedInventory);
   sanitizeMigrationWorkerIdMaps(params.idMaps);
@@ -2579,6 +2631,7 @@ export async function executeControlPlaneClientMigration(actor: AppActor, params
   assertMigrationRuntimeReadOnlyEnforced();
   const reason = requireMutationReason(params.reason);
   const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  assertLegacyMigrationMutationAllowed(run);
   const runRecord = run as {
     id: string;
     status: string;
@@ -2600,6 +2653,7 @@ export async function executeControlPlaneClientMigration(actor: AppActor, params
     customerAccountId: (run as { customerAccountId: string }).customerAccountId,
   });
   invariant(destination, 404, "NOT_FOUND", "Destination deployment not found.");
+  assertRemoteSharedMigrationUsesMover(destination);
   assertMigrationDestinationReadyForCutover(destination);
   const account = runCustomerAccount(run);
   invariant(!account?.primaryDeploymentId || account.primaryDeploymentId === runRecord.sourceDeploymentId, 409, "MIGRATION_ROUTING_CHANGED", "Customer primary deployment changed after migration planning; re-plan before executing.");
@@ -2663,6 +2717,7 @@ export async function finalizeControlPlaneClientMigration(actor: AppActor, param
   assertMigrationExecutionAvailable("finalize");
   const reason = requireMutationReason(params.reason);
   const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  assertLegacyMigrationMutationAllowed(run);
   const runRecord = run as {
     id: string;
     status: string;
@@ -2730,6 +2785,7 @@ export async function rollbackControlPlaneClientMigration(actor: AppActor, param
   assertMigrationExecutionAvailable("rollback");
   const reason = requireMutationReason(params.reason);
   const run = await loadClientMigrationRun(actor, params.migrationRunId);
+  assertLegacyMigrationMutationAllowed(run);
   const runRecord = run as {
     id: string;
     status: string;
@@ -2739,6 +2795,8 @@ export async function rollbackControlPlaneClientMigration(actor: AppActor, param
   };
   assertRunDestinationBelongsToAccount(run);
   invariant(runRecord.status === "executed", 400, "MIGRATION_ROLLBACK_NOT_AVAILABLE", "Rollback is available only after execution and before finalization.");
+  const destination = runDestinationDeployment(run);
+  if (destination) assertRemoteSharedMigrationUsesMover(destination);
   const account = runCustomerAccount(run);
   invariant(
     !account?.primaryDeploymentId
@@ -10008,21 +10066,40 @@ export async function configureSupportConnector(actor: AppActor, params: {
   await requireControlPlaneAccess(actor, { deploymentId: params.deploymentId });
   const existing = await prisma.customerDeployment.findUnique({
     where: { id: params.deploymentId },
-    select: { supportCredentialEnc: true },
+    select: { supportCredentialEnc: true, deploymentKind: true, managedWorkspaceId: true, remoteWorkspaceId: true,
+      remoteWorkspaceSlug: true, url: true, supportBaseUrl: true, supportMcpUrl: true, updatedAt: true },
   });
   invariant(existing, 404, "NOT_FOUND", "Customer deployment not found.");
   const credential = params.supportCredential?.trim();
   invariant(Boolean(credential) || Boolean(existing.supportCredentialEnc), 400, "INVALID_INPUT", "Support credential is required.");
 
+  const remoteShared = existing.deploymentKind === "SHARED_WORKSPACE" && !existing.managedWorkspaceId;
+  const supportBaseUrl = params.supportBaseUrl?.trim() || (remoteShared ? existing.supportBaseUrl : null);
+  const supportMcpUrl = params.supportMcpUrl?.trim() || (remoteShared ? existing.supportMcpUrl : null);
+  if (remoteShared) {
+    invariant(existing.remoteWorkspaceId && supportBaseUrl && supportMcpUrl
+      && supportBaseUrl === existing.supportBaseUrl && supportMcpUrl === existing.supportMcpUrl,
+      400, "REMOTE_SUPPORT_URL_MISMATCH", "Remote shared support must use the registered infrastructure endpoint and workspace.");
+    const connection = await callMcpTool({
+      mcpUrl: supportMcpUrl!, bearerToken: credential || decryptSecret(existing.supportCredentialEnc!),
+      toolName: "get_current_connection", arguments: {},
+    });
+    const summary = jsonRecord(summarizeMcpResponse(connection));
+    const workspace = jsonRecord(summary?.workspace);
+    invariant(!mcpToolMarkedErrorMessage(connection) && workspace?.id === existing.remoteWorkspaceId
+      && workspace?.slug === existing.remoteWorkspaceSlug
+      && summarizeSupportConnectorReadiness(summary, ["workspace:read"]).status === "ready",
+    409, "REMOTE_SUPPORT_WORKSPACE_MISMATCH", "Support credentials must be bound to the registered customer's workspace.");
+  }
   const deployment = await prisma.customerDeployment.update({
-    where: { id: params.deploymentId },
+    where: { id: params.deploymentId, ...(remoteShared ? { updatedAt: existing.updatedAt, remoteWorkspaceId: existing.remoteWorkspaceId } : {}) },
     data: {
-      supportBaseUrl: params.supportBaseUrl?.trim() || null,
-      supportMcpUrl: params.supportMcpUrl?.trim() || null,
+      supportBaseUrl,
+      supportMcpUrl,
       ...(credential ? { supportCredentialEnc: encryptSecret(credential) } : {}),
       supportCredentialLabel: params.supportCredentialLabel?.trim() || SUPPORT_ACTOR_LABEL,
       supportConnectorStatus: "configured",
-      supportAccessMode: "broad",
+      supportAccessMode: remoteShared ? "workspace" : "broad",
       ...(credential ? { supportLastConnectedAt: new Date() } : {}),
       supportLastSyncError: null,
       supportNotes: params.supportNotes?.trim() || null,

@@ -1421,6 +1421,12 @@ describe("scheduleDailyJobs", () => {
   it("reads digest settings and members in batched queries, not per workspace", async () => {
     await scheduleDailyJobs();
 
+    expect(prismaMock.workspace.findMany).toHaveBeenCalledWith({
+      where: {
+        featureFlags: { none: { flag: "operator_import_inactive", enabled: true } },
+      },
+      select: { id: true },
+    });
     expect(getWorkspaceDigestSettingsMock).toHaveBeenCalledTimes(1);
     expect(getWorkspaceDigestSettingsMock).toHaveBeenCalledWith(["ws-1", "ws-2"]);
     expect(prismaMock.member.findMany).toHaveBeenCalledTimes(1);

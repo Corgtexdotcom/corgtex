@@ -1062,6 +1062,12 @@ export async function finalizeExpiredApprovalFlows(batchSize = EXPIRING_FLOW_BAT
         AND flow."subjectType" <> 'PROPOSAL'
         AND flow."closesAt" IS NOT NULL
         AND flow."closesAt" <= NOW()
+        AND NOT EXISTS (
+          SELECT 1 FROM "WorkspaceFeatureFlag" AS flag
+          WHERE flag."workspaceId" = flow."workspaceId"
+            AND flag.flag = 'operator_import_inactive'
+            AND flag.enabled = true
+        )
       ORDER BY flow."closesAt" ASC
       LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED

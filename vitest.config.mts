@@ -32,7 +32,7 @@ export default defineConfig({
         test: {
           name: "unit",
           include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "scripts/**/*.test.mjs"],
-          exclude: ["**/node_modules/**", "**/*.integration.test.ts"],
+          exclude: ["**/node_modules/**", "**/*.integration.test.ts", "**/*.integration.test.mjs"],
         },
       },
       {
