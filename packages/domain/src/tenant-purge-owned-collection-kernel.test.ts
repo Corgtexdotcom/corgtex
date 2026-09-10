@@ -73,6 +73,8 @@ describe("tenant purge owned collection kernel", () => {
     expect(caught(() => copy({}, date))).not.toBe(caught(() => copy({}, date)));
   });
 
+  // Multiple maximum-size captures use the suite timeout; this proves slot bounds,
+  // not a wall-clock performance threshold on shared CI runners.
   it("bounds depth and all returned slots before proportional nested capture", () => {
     let deep = schema("boolean"); for (let index = 1; index < 32; index += 1) deep = schema("nullable", deep); expect(copy(true, deep)).toBe(true); caught(() => schema("nullable", deep));
     const integer = schema("integer", 0, 100_000); const hundredThousand = vector(Array.from({ length: 100_000 }, (_, index) => index), 100_000);
@@ -80,7 +82,7 @@ describe("tenant purge owned collection kernel", () => {
     caught(() => copy(vector([1, 2]), schema("array", integer, 1, false)));
     const nearLimit = vector(Array.from({ length: 99_963 }, () => 1), 99_963); const bytes = vector(Array(32).fill(1)); const spec = recordSchema([["items", schema("array", integer, 99_963, false)], ["key", schema("redactionKey")]]);
     caught(() => copy(recordValue([["items", nearLimit], ["key", bytes]]), spec)); for (const forged of [Object.freeze({ previous: null }), Object.create(null)]) caught(() => copy(forged, schema("array", integer, 1, false)));
-  }, 20_000);
+  });
 
   it("deduplicates primitive results linearly with captured SameValueZero Set semantics", () => {
     const integer = schema("integer", -1, 100_000); const unique = schema("array", integer, 100_000, true); const values = Array.from({ length: 100_000 }, (_, index) => index);

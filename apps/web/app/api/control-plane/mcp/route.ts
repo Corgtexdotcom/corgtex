@@ -196,6 +196,18 @@ const tools = [
         sourceDeploymentId: { type: "string" },
         targetMode: { type: "string" },
         destinationDeploymentId: { type: "string" },
+        remoteSharedWorkspace: {
+          type: "object",
+          description: "Register a remote shared destination claim. Does not import data, change primary routing or verify runtime identity.",
+          properties: {
+            infrastructureDeploymentId: { type: "string" },
+            remoteWorkspaceId: { type: "string" },
+            remoteWorkspaceSlug: { type: "string" },
+            workspaceUrl: { type: "string" },
+            supportMcpUrl: { type: "string" },
+          },
+          required: ["infrastructureDeploymentId", "remoteWorkspaceId", "remoteWorkspaceSlug", "workspaceUrl", "supportMcpUrl"],
+        },
         reason: { type: "string" },
       },
       required: ["sourceDeploymentId", "targetMode", "reason"],
@@ -1036,10 +1048,18 @@ export async function POST(request: NextRequest) {
       })));
     }
     if (name === "plan_client_migration") {
+      const remoteSharedWorkspace = argObject(args, "remoteSharedWorkspace");
       return rpcResult(id, textContent(await planControlPlaneClientMigration(actor, {
         sourceDeploymentId: argString(args, "sourceDeploymentId"),
         targetMode: argString(args, "targetMode"),
         destinationDeploymentId: argOptionalString(args, "destinationDeploymentId"),
+        ...(remoteSharedWorkspace ? { remoteSharedWorkspace: {
+          infrastructureDeploymentId: argString(remoteSharedWorkspace, "infrastructureDeploymentId"),
+          remoteWorkspaceId: argString(remoteSharedWorkspace, "remoteWorkspaceId"),
+          remoteWorkspaceSlug: argString(remoteSharedWorkspace, "remoteWorkspaceSlug"),
+          workspaceUrl: argString(remoteSharedWorkspace, "workspaceUrl"),
+          supportMcpUrl: argString(remoteSharedWorkspace, "supportMcpUrl"),
+        } } : {}),
         reason: argString(args, "reason"),
       })));
     }

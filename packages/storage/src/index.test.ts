@@ -348,3 +348,45 @@ describe("storage providers", () => {
     );
   });
 });
+
+
+describe("bounded storage reads", () => {
+  beforeEach(() => {
+    blobMocks.containerClient.getBlobClient.mockReturnValue(blobMocks.blobClient);
+    blobMocks.serviceClient.getContainerClient.mockReturnValue(blobMocks.containerClient);
+  });
+  for (const provider of ["s3", "azure"] as const) {
+    async function fixture(body: Readable, size?: number) {
+      const { S3StorageProvider, AzureBlobStorageProvider } = await import("./index");
+      if (provider === "s3") {
+        s3ClientMock.mockImplementation(function () { return { send: vi.fn().mockResolvedValue({ Body: body, ContentLength: size }) }; });
+        return new S3StorageProvider({ bucket: "synthetic", region: "auto", forcePathStyle: false, configured: true, missing: [] });
+      }
+      blobMocks.blobClient.download.mockResolvedValue({ readableStreamBody: body, contentLength: size });
+      return new AzureBlobStorageProvider({ containerName: "synthetic", endpoint: "https://synthetic.invalid", authMode: "managed_identity", configured: true, missing: [] });
+    }
+
+    it(`${provider} rejects oversized metadata without reading and destroys the stream`, async () => {
+      const stream = new Readable({ read() { throw new Error("must not consume oversized body"); } });
+      const storage = await fixture(stream, 6);
+      await expect(storage.get("synthetic", { maxBytes: 5 })).rejects.toMatchObject({ name: "StorageReadLimitError" });
+      expect(stream.destroyed).toBe(true);
+    });
+
+    it.each([undefined, 1])(`${provider} enforces streamed bytes with content length %s`, async (length) => {
+      let consumed = 0;
+      const stream = Readable.from((async function* () {
+        for (let i = 0; i < 100; i++) { consumed++; yield Buffer.from("abc"); }
+      })(), { highWaterMark: 1 });
+      const storage = await fixture(stream, length);
+      await expect(storage.get("synthetic", { maxBytes: 5 })).rejects.toMatchObject({ name: "StorageReadLimitError" });
+      expect(stream.destroyed).toBe(true);
+      expect(consumed).toBeLessThan(5);
+    });
+
+    it(`${provider} accepts exact-limit chunked bytes`, async () => {
+      const storage = await fixture(Readable.from([Buffer.from("ab"), Buffer.from("cde")]), 5);
+      await expect(storage.get("synthetic", { maxBytes: 5 })).resolves.toMatchObject({ data: Buffer.from("abcde") });
+    });
+  }
+});

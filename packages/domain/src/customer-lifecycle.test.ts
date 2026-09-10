@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
     customerAccount: {
       upsert: vi.fn(),
       findUnique: vi.fn(),
@@ -9,6 +10,7 @@ const { prismaMock } = vi.hoisted(() => ({
       update: vi.fn(),
     },
     customerDeployment: {
+      create: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
@@ -28,6 +30,7 @@ vi.mock("@corgtex/shared", () => ({
 describe("customer lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(async (callback) => callback(prismaMock));
     prismaMock.customerAccount.upsert.mockResolvedValue({
       id: "cust-1",
       slug: "acme",
@@ -295,4 +298,91 @@ describe("customer lifecycle", () => {
       where: { slug: "acme" },
     }));
   });
+  describe("remote shared registration", () => {
+    const infrastructure = {
+      id: "infra-1", customerAccountId: "selfserve-account", deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE",
+      url: "https://selfserve.test", managedWorkspaceId: null, remoteWorkspaceId: null,
+      providerSubscriptionId: "sub-1", providerResourceGroup: "shared-rg", providerEnvironmentId: "shared-env",
+      providerWebServiceId: "shared-web", providerWorkerServiceId: "shared-worker", releaseLeaseId: "infra-lease",
+    };
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const input = { customerAccountId: "cust-1", infrastructureDeploymentId: infrastructure.id,
+      remoteWorkspaceId: workspaceId, remoteWorkspaceSlug: "acme", workspaceUrl: `https://selfserve.test/workspaces/${workspaceId}`,
+      supportMcpUrl: "https://selfserve.test/api/mcp" };
+    beforeEach(() => {
+      prismaMock.customerAccount.findUnique.mockImplementation(async ({ where }) => ({
+        id: where.id, slug: where.id === "cust-1" ? "acme" : "beta", displayName: where.id,
+        primaryDeploymentId: `source-${where.id}`,
+      }));
+      prismaMock.customerDeployment.findUnique.mockImplementation(async ({ where }) => where.id === infrastructure.id ? infrastructure : null);
+      prismaMock.customerDeployment.create.mockImplementation(async ({ data }) => ({ id: `destination-${data.customerAccountId}`, ...data }));
+    });
+
+    it("registers two account-owned destinations on one infrastructure without primary, lease or local-workspace writes", async () => {
+      const { registerRemoteSharedWorkspaceDeployment } = await import("./customer-lifecycle");
+      const first = await registerRemoteSharedWorkspaceDeployment(input);
+      const secondId = "00000000-0000-4000-8000-000000000002";
+      const second = await registerRemoteSharedWorkspaceDeployment({ ...input, customerAccountId: "cust-2",
+        remoteWorkspaceId: secondId, remoteWorkspaceSlug: "beta", workspaceUrl: `https://selfserve.test/workspaces/${secondId}` });
+      expect(first.deployment).toMatchObject({ customerAccountId: "cust-1", managedWorkspaceId: null, remoteWorkspaceId: workspaceId,
+        deploymentKind: "SHARED_WORKSPACE", cloudProvider: "AZURE", deploymentStatus: "DRAFT",
+        supportMcpUrl: "https://selfserve.test/api/mcp", providerMetadata: { sharedInfrastructureDeploymentId: "infra-1" } });
+      expect(second.deployment).toMatchObject({ customerAccountId: "cust-2", remoteWorkspaceId: secondId,
+        url: `https://selfserve.test/workspaces/${secondId}`, providerMetadata: { sharedInfrastructureDeploymentId: "infra-1" } });
+      for (const { data } of prismaMock.customerDeployment.create.mock.calls.map(([args]) => args)) {
+        expect(data).not.toHaveProperty("releaseLeaseId");
+        expect(data).not.toHaveProperty("providerWebServiceId");
+        expect(data).not.toHaveProperty("releaseImageTag");
+      }
+      expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+      expect(prismaMock.customerAccount.upsert).not.toHaveBeenCalled();
+      expect(prismaMock.workspace.findFirst).not.toHaveBeenCalled();
+      expect(prismaMock.customerDeployment.upsert).not.toHaveBeenCalled();
+    });
+
+    it("reuses an identical destination without changing its status or support credentials", async () => {
+      const { registerRemoteSharedWorkspaceDeployment } = await import("./customer-lifecycle");
+      const { deployment } = await registerRemoteSharedWorkspaceDeployment(input);
+      prismaMock.customerDeployment.create.mockClear();
+      prismaMock.customerDeployment.findUnique.mockImplementation(async ({ where }) => where.id === infrastructure.id
+        ? infrastructure : { ...deployment, deploymentStatus: "ACTIVE", supportCredentialEnc: "existing-secret" });
+      const result = await registerRemoteSharedWorkspaceDeployment(input);
+      expect(result.deployment.deploymentStatus).toBe("ACTIVE");
+      expect(prismaMock.customerDeployment.create).not.toHaveBeenCalled();
+      expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects another account claiming an already registered remote workspace", async () => {
+      const { registerRemoteSharedWorkspaceDeployment } = await import("./customer-lifecycle");
+      const { deployment } = await registerRemoteSharedWorkspaceDeployment(input);
+      prismaMock.customerDeployment.create.mockClear();
+      prismaMock.customerDeployment.findUnique.mockImplementation(async ({ where }) => where.id === infrastructure.id ? infrastructure : deployment);
+      await expect(registerRemoteSharedWorkspaceDeployment({ ...input, customerAccountId: "cust-2" })).rejects.toMatchObject({
+        code: "REMOTE_SHARED_REGISTRATION_CONFLICT",
+      });
+      expect(prismaMock.customerDeployment.create).not.toHaveBeenCalled();
+      expect(prismaMock.customerAccount.update).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { workspaceUrl: `https://ops.test/workspaces/${workspaceId}` },
+      { workspaceUrl: "https://selfserve.test/workspaces/00000000-0000-4000-8000-000000000002" },
+      { supportMcpUrl: `https://selfserve.test/workspaces/${workspaceId}/api/mcp` },
+      { supportMcpUrl: "https://other.test/api/mcp" },
+      { workspaceUrl: `http://selfserve.test/workspaces/${workspaceId}` },
+      { remoteWorkspaceId: "not-a-uuid" },
+    ])("rejects mismatched destination or support identity %j", async (override) => {
+      const { registerRemoteSharedWorkspaceDeployment } = await import("./customer-lifecycle");
+      await expect(registerRemoteSharedWorkspaceDeployment({ ...input, ...override })).rejects.toMatchObject({ status: 400 });
+      expect(prismaMock.customerDeployment.create).not.toHaveBeenCalled();
+    });
+
+    it("requires the actual Azure infrastructure web and worker identities", async () => {
+      const { registerRemoteSharedWorkspaceDeployment } = await import("./customer-lifecycle");
+      prismaMock.customerDeployment.findUnique.mockResolvedValue({ ...infrastructure, providerWorkerServiceId: null });
+      await expect(registerRemoteSharedWorkspaceDeployment(input)).rejects.toMatchObject({ code: "SHARED_INFRASTRUCTURE_REQUIRED" });
+      expect(prismaMock.customerDeployment.create).not.toHaveBeenCalled();
+    });
+  });
+
 });

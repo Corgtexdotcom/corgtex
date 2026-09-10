@@ -21,7 +21,7 @@ describe("release diagnostics", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.read.mockReturnValue(JSON.stringify({ schemaVersion: 1, role: "web", gitSha: expectedGitSha }));
-    mocks.upsert.mockImplementation(({ create }) => ({ ...create, status: "PENDING", attempts: 0,
+    mocks.upsert.mockImplementation(async ({ create }) => ({ ...create, status: "PENDING", attempts: 0,
       lockedAt: null, lockedBy: null, startedAt: null, completedAt: null, error: null }));
     mocks.updateMany.mockResolvedValue({ count: 1 });
   });
@@ -58,6 +58,37 @@ describe("release diagnostics", () => {
     const input = request(), job = stored(input);
     mocks.upsert.mockResolvedValue(job);
     expect(await dispatchReleaseDiagnostic(actor, workspaceId, input)).toEqual(await dispatchReleaseDiagnostic(actor, workspaceId, input));
+  });
+  it("returns the winning dispatch identity after a concurrent dedupe insert", async () => {
+    const input = request(), job = stored(input);
+    mocks.upsert.mockRejectedValue({ code: "P2002", meta: { target: ["dedupeKey"] } });
+    mocks.find.mockResolvedValue(job);
+    await expect(dispatchReleaseDiagnostic(actor, workspaceId, input)).resolves.toMatchObject({
+      jobId: job.id, nonce: job.payload.nonce, status: "PENDING", accepted: false,
+    });
+    expect(mocks.find).toHaveBeenCalledWith(expect.objectContaining({
+      where: { dedupeKey: `${RELEASE_DIAGNOSTIC_JOB_TYPE}:${workspaceId}:${input.operationId}` },
+    }));
+    expect(mocks.updateMany).not.toHaveBeenCalled();
+  });
+  it("propagates unrelated insert errors and a missing concurrent winner", async () => {
+    for (const error of [new Error("connection lost"), { code: "P2002", meta: { target: ["id"] } },
+      { code: "P2002", meta: { target: ["dedupeKey", "id"] } }]) {
+      mocks.upsert.mockRejectedValueOnce(error);
+      await expect(dispatchReleaseDiagnostic(actor, workspaceId, request())).rejects.toBe(error);
+    }
+    expect(mocks.find).not.toHaveBeenCalled();
+    const conflict = { code: "P2002", meta: { target: ["dedupeKey"] } };
+    mocks.upsert.mockRejectedValueOnce(conflict);
+    mocks.find.mockResolvedValueOnce(null);
+    await expect(dispatchReleaseDiagnostic(actor, workspaceId, request())).rejects.toBe(conflict);
+  });
+  it("validates the release identity of the concurrent winner", async () => {
+    const input = request();
+    mocks.upsert.mockRejectedValue({ code: "P2002", meta: { target: ["dedupeKey"] } });
+    mocks.find.mockResolvedValue(stored({ ...input, expectedGitSha: "b".repeat(40) }));
+    await expect(dispatchReleaseDiagnostic(actor, workspaceId, input))
+      .rejects.toMatchObject({ code: "RELEASE_DIAGNOSTIC_CONFLICT" });
   });
   it("rearms only the first terminal failure with the same job and a fresh nonce", async () => {
     const input = request(); const job = stored(input, { status: "FAILED", attempts: 1, completedAt: new Date(), error: "failed" });

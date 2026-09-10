@@ -1378,14 +1378,25 @@ export async function schedulePeriodicJobs() {
   return jobs.length;
 }
 
+// Internal operator import marker, written atomically with a new workspace.
+// This suppresses all-workspace and recurrence scheduling; integrations and
+// pending work must be staged separately before an import is published.
+const OPERATOR_IMPORT_INACTIVE_FLAG = "operator_import_inactive";
+
 export async function scheduleDailyJobs() {
   const now = new Date();
   const todayISO = now.toISOString().split("T")[0];
-  const workspaces = await prisma.workspace.findMany({ select: { id: true } });
+  const workspaces = await prisma.workspace.findMany({
+    where: {
+      featureFlags: { none: { flag: OPERATOR_IMPORT_INACTIVE_FLAG, enabled: true } },
+    },
+    select: { id: true },
+  });
   const recurringSeriesWorkspaces = await prisma.meetingSeries.findMany({
     where: {
       archivedAt: null,
       recurrenceRule: { not: null },
+      workspace: { featureFlags: { none: { flag: OPERATOR_IMPORT_INACTIVE_FLAG, enabled: true } } },
     },
     distinct: ["workspaceId"],
     select: { workspaceId: true },

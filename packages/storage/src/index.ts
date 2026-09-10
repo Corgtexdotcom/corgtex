@@ -19,7 +19,7 @@ export interface StorageProvider {
     data: Buffer,
     opts?: { contentType?: string }
   ): Promise<{ key: string; size: number }>;
-  get(key: string): Promise<{ data: Buffer; contentType?: string } | null>;
+  get(key: string, opts?: { maxBytes: number }): Promise<{ data: Buffer; contentType?: string } | null>;
   getSignedUrl(key: string, expiresInSec?: number): Promise<string>;
   delete(key: string): Promise<void>;
 }
@@ -193,13 +193,34 @@ function ensureConfigured(configured: boolean, missing: string[], operation: str
   }
 }
 
-async function streamToBuffer(stream: NodeJS.ReadableStream | null | undefined) {
+export class StorageReadLimitError extends Error {
+  constructor() { super("Storage read exceeds the configured byte limit."); this.name = "StorageReadLimitError"; }
+}
+
+function validateReadLimit(maxBytes?: number) {
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)) {
+    throw new RangeError("Storage read byte limit must be a positive safe integer.");
+  }
+}
+
+async function streamToBuffer(stream: NodeJS.ReadableStream | null | undefined, maxBytes?: number, contentLength?: number) {
   if (!stream) return null;
   const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let bytes = 0;
+  try {
+    if (maxBytes !== undefined && contentLength !== undefined && contentLength > maxBytes) throw new StorageReadLimitError();
+    for await (const chunk of stream) {
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += data.length;
+      if (maxBytes !== undefined && bytes > maxBytes) throw new StorageReadLimitError();
+      chunks.push(data);
+    }
+    return Buffer.concat(chunks, bytes);
+  } catch (error) {
+    // Stop the provider download, including when its advertised size was wrong.
+    (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+    throw error;
   }
-  return Buffer.concat(chunks);
 }
 
 export class S3StorageProvider implements StorageProvider {
@@ -239,8 +260,9 @@ export class S3StorageProvider implements StorageProvider {
     return { key, size: data.byteLength };
   }
 
-  async get(key: string) {
+  async get(key: string, opts?: { maxBytes: number }) {
     this.ensureConfigured("read");
+    validateReadLimit(opts?.maxBytes);
 
     try {
       const result = await this.client.send(
@@ -250,14 +272,17 @@ export class S3StorageProvider implements StorageProvider {
         })
       );
 
-      const arrayBuffer = await result.Body?.transformToByteArray();
-      if (!arrayBuffer) return null;
+      const data = opts
+        ? await streamToBuffer(result.Body as NodeJS.ReadableStream | undefined, opts.maxBytes, result.ContentLength)
+        : result.Body ? Buffer.from(await result.Body.transformToByteArray()) : null;
+      if (!data) return null;
 
       return {
-        data: Buffer.from(arrayBuffer),
+        data,
         contentType: result.ContentType,
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof StorageReadLimitError) throw error;
       return null;
     }
   }
@@ -333,19 +358,21 @@ export class AzureBlobStorageProvider implements StorageProvider {
     return { key, size: data.byteLength };
   }
 
-  async get(key: string) {
+  async get(key: string, opts?: { maxBytes: number }) {
     this.ensureConfigured("read");
+    validateReadLimit(opts?.maxBytes);
 
     try {
       const result = await this.containerClient().getBlobClient(key).download();
-      const data = await streamToBuffer(result.readableStreamBody);
+      const data = await streamToBuffer(result.readableStreamBody, opts?.maxBytes, result.contentLength);
       if (!data) return null;
 
       return {
         data,
         contentType: result.contentType,
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof StorageReadLimitError) throw error;
       return null;
     }
   }
