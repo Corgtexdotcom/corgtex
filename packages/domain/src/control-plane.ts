@@ -9731,17 +9731,37 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
     }
   }
 
-  await prisma.customerDeployment.update({
-    where: { id: params.deploymentId },
-    data: {
-      lastHealthCheck: new Date(),
-      lastHealthStatus: status,
-      lastHealthError: error,
-      lastReleaseCheck: new Date(),
-      provisioningStatus: status === "ok" ? "active" : "degraded",
-      ...(deploymentHealthStatus(status) ? { deploymentStatus: deploymentHealthStatus(status) } : {}),
-    },
-  });
+  const healthData = {
+    lastHealthCheck: new Date(),
+    lastHealthStatus: status,
+    lastHealthError: error,
+    lastReleaseCheck: new Date(),
+  };
+  const lifecycleData = {
+    provisioningStatus: status === "ok" ? "active" : "degraded",
+    ...(deploymentHealthStatus(status) ? { deploymentStatus: deploymentHealthStatus(status) } : {}),
+  };
+  if (deployment.cloudProvider === "AZURE" && deployment.deploymentKind === "REMOTE_MANAGED") {
+    await prisma.$transaction(async (tx) => {
+      const current = await lockManagedAzureDeployment(tx, params.deploymentId);
+      invariant(current && current.deploymentKind === "REMOTE_MANAGED" && current.cloudProvider === "AZURE"
+        && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
+      409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed during the health probe.");
+      // Health may refresh an operational lifecycle, but cannot activate a draft,
+      // suspended or retired deployment, including changes made during the probe.
+      const operational = ["ACTIVE", "DEGRADED"].includes(current.deploymentStatus)
+        && ["active", "degraded"].includes(current.provisioningStatus);
+      await tx.customerDeployment.update({
+        where: { id: params.deploymentId },
+        data: { ...healthData, ...(operational ? lifecycleData : {}) },
+      });
+    });
+  } else {
+    await prisma.customerDeployment.update({
+      where: { id: params.deploymentId },
+      data: { ...healthData, ...lifecycleData },
+    });
+  }
   await Promise.all([
     recordFleetHealthSnapshot({
       customerAccountId: deployment.customerAccountId,
@@ -9901,7 +9921,7 @@ function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecor
     && target.acrServer === `${target.acrName}.azurecr.io`;
 }
 
-async function lockManagedAzureRecordDeployment(tx: Prisma.TransactionClient, deploymentId: string) {
+async function lockManagedAzureDeployment(tx: Prisma.TransactionClient, deploymentId: string) {
   const [deployment] = await tx.$queryRaw<LockedManagedAzureRecordDeployment[]>`
     SELECT "id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
       "provisioningStatus", "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId",
@@ -9973,7 +9993,7 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
 
   await prisma.$transaction(async (tx) => {
     if (params.managedAzureTarget || deployment.cloudProvider === "AZURE") {
-      const current = await lockManagedAzureRecordDeployment(tx, params.deploymentId);
+      const current = await lockManagedAzureDeployment(tx, params.deploymentId);
       invariant(current && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
         409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed before the release baseline could be recorded.");
       if (current.deploymentKind === "HOSTED_DEDICATED") {

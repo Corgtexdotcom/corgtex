@@ -145,6 +145,39 @@ beforeEach(async () => truncateAllTables());
 afterEach(() => vi.unstubAllGlobals());
 
 describe("CustomerDeployment retained-lease update guard", () => {
+  it.each((["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "SUSPENDED", "RETIRED"] as const)
+    .flatMap((deploymentStatus) => [false, true].map((duringHealth) => ({ deploymentStatus, duringHealth }))))
+  ("preserves $deploymentStatus through probe and record (changed during health=$duringHealth)", async ({ deploymentStatus, duringHealth }) => {
+    const deployment = await createManaged();
+    const lifecycle = { deploymentStatus, provisioningStatus: deploymentStatus.toLowerCase() };
+    if (!duringHealth) await prisma.customerDeployment.update({ where: { id: deployment.id }, data: lifecycle });
+    let changed = false;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (duringHealth && !changed) {
+        changed = true;
+        await prisma.customerDeployment.update({ where: { id: deployment.id }, data: lifecycle });
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ database: "up", schema: "ready", runtime: { redis: "configured", storage: "configured" },
+          release: { imageTag: NEXT, gitSha: NEXT.slice(4), version: "release-2" } }),
+      };
+    }));
+    await probeControlPlaneDeploymentHealth(actor, { deploymentId: deployment.id, reason: "Preserve synthetic lifecycle during health proof." });
+    const beforeRecord = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
+    expect(beforeRecord).toMatchObject({ ...lifecycle, releaseImageTag: BASE, lastHealthStatus: "degraded",
+      lastHealthError: `Release drift: expected ${BASE}, got ${NEXT} / ${NEXT.slice(4)}` });
+    expect(managedAzureReleaseEligible(beforeRecord)).toBe(false);
+    const error = await rejected(recordVerifiedControlPlaneRelease(actor, {
+      deploymentId: deployment.id, releaseImageTag: NEXT, releaseVersion: "release-2",
+      reason: "Reject recording after a synthetic nonactive lifecycle health probe.",
+    }));
+    expect(error).toMatchObject({ status: 409, code: "MANAGED_AZURE_TARGET_DRIFT" });
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } })).toEqual(beforeRecord);
+    expect(await prisma.customerReleaseTarget.count({ where: { deploymentId: deployment.id } })).toBe(0);
+    expect(await prisma.customerDeploymentEvent.count({ where: { deploymentId: deployment.id, action: "control_plane.release.verified_recorded" } })).toBe(0);
+  });
+
   it.each([false, true])("records a freshly verified release after a health probe detects only baseline drift (supplied target=%s)", async (suppliedTarget) => {
     const deployment = await createManaged();
     const canary = await createManaged();
