@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrismaClient } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
-import { recordVerifiedControlPlaneRelease } from "./control-plane";
+import { probeControlPlaneDeploymentHealth, recordVerifiedControlPlaneRelease } from "./control-plane";
+import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import {
   abortManagedReleaseLease,
   acquireManagedReleaseLease,
@@ -144,6 +145,56 @@ beforeEach(async () => truncateAllTables());
 afterEach(() => vi.unstubAllGlobals());
 
 describe("CustomerDeployment retained-lease update guard", () => {
+  it.each([false, true])("records a freshly verified release after a health probe detects only baseline drift (supplied target=%s)", async (suppliedTarget) => {
+    const deployment = await createManaged();
+    const canary = await createManaged();
+    const beforeCanary = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: canary.id } });
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        database: "up",
+        schema: "ready",
+        runtime: { redis: "configured", storage: "configured" },
+        release: { imageTag: NEXT, gitSha: NEXT.slice(4), version: "release-2" },
+      }),
+    })));
+    await probeControlPlaneDeploymentHealth(actor, {
+      deploymentId: deployment.id,
+      reason: "Synthetic new runtime is serving before baseline recording.",
+    });
+    const drifted = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
+    expect(drifted).toMatchObject({
+      deploymentStatus: "DEGRADED",
+      provisioningStatus: "degraded",
+      releaseImageTag: BASE,
+      lastHealthStatus: "degraded",
+      lastHealthError: `Release drift: expected ${BASE}, got ${NEXT} / ${NEXT.slice(4)}`,
+    });
+    expect(managedAzureReleaseEligible(drifted)).toBe(false);
+
+    const result = await recordVerifiedControlPlaneRelease(actor, {
+      deploymentId: deployment.id,
+      releaseImageTag: NEXT,
+      releaseVersion: "release-2",
+      reason: "Synthetic verified drift recovery.",
+      managedAzureTarget: suppliedTarget ? {
+        subscriptionId: SUBSCRIPTION, resourceGroup: RESOURCE_GROUP, acrName: "acr12", acrServer: ACR,
+        webAppName: WEB, workerAppName: WORKER, workloadClass: "ACTIVE_CLIENT_PRIMARY",
+      } : undefined,
+    });
+    expect(result.recorded).toBe(true);
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } })).toMatchObject({
+      deploymentStatus: "ACTIVE", provisioningStatus: "active", releaseImageTag: NEXT,
+      releaseVersion: "release-2", lastHealthStatus: "ok", lastHealthError: null,
+    });
+    expect(await prisma.customerReleaseTarget.findFirstOrThrow({ where: { deploymentId: deployment.id } }))
+      .toMatchObject({ status: "APPLIED", targetReleaseImageTag: NEXT, targetReleaseVersion: "release-2" });
+    expect(await prisma.customerDeploymentEvent.count({ where: { deploymentId: deployment.id, action: "control_plane.release.verified_recorded" } })).toBe(1);
+    expect(await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id, status: "ok" } })).toBe(2);
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: canary.id } })).toEqual(beforeCanary);
+  });
+
   it("installs one exact collision-intolerant ALWAYS trigger", async () => {
     const functions = await prisma.$queryRaw<Array<Record<string, unknown>>>`
       SELECT p.pronargs::text AS "argumentCount", pg_get_function_result(p.oid) AS "resultType",
