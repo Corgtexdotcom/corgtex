@@ -346,12 +346,27 @@ export function providerBoundaryErrors(target) {
   return errors;
 }
 
+function azureContainerAppName(value, resourceGroup, subscriptionId) {
+  if (value == null || !String(value).includes("/")) return value ?? null;
+  const match = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.App\/containerApps\/([^/]+)$/i.exec(String(value));
+  if (!match || !resourceGroup || !subscriptionId
+    || match[1].toLowerCase() !== String(subscriptionId).toLowerCase()
+    || match[2].toLowerCase() !== String(resourceGroup).toLowerCase()) {
+    throw new Error("Azure Container App resource ID does not match the authoritative subscription and resource group");
+  }
+  return match[3];
+}
+
 export function targetFromControlPlaneRow(row) {
   const cloudProvider = String(row.cloudProvider ?? row.provider?.cloudProvider ?? row.provider ?? "").toUpperCase();
   const label = row.label ?? row.customerName ?? row.name ?? row.customerSlug ?? row.id;
   const url = row.url ?? row.runtimeUrl ?? row.supportBaseUrl;
   const provider = cloudProvider === "AZURE" ? "azure" : cloudProvider === "RAILWAY" ? "railway" : null;
   const workload = normalizeTargetGroup(row.workload ?? (row.deploymentKind === "INTERNAL" ? "backup-app" : "managed-customers"));
+  const resourceGroup = row.providerResourceGroup ?? row.azureResourceGroup ?? null;
+  const subscriptionId = row.providerSubscriptionId ?? null;
+  const webAppName = row.providerWebServiceId ?? row.azureWebAppName ?? null;
+  const workerAppName = row.providerWorkerServiceId ?? row.azureWorkerAppName ?? null;
   return {
     id: row.id ?? row.deploymentId ?? label,
     deploymentId: row.id ?? row.deploymentId ?? null,
@@ -370,9 +385,10 @@ export function targetFromControlPlaneRow(row) {
       workerServiceId: row.railwayWorkerServiceId ?? row.providerWorkerServiceId ?? null,
     },
     azure: {
-      resourceGroup: row.providerResourceGroup ?? row.azureResourceGroup ?? null,
-      webAppName: row.providerWebServiceId ?? row.azureWebAppName ?? null,
-      workerAppName: row.providerWorkerServiceId ?? row.azureWorkerAppName ?? null,
+      subscriptionId,
+      resourceGroup,
+      webAppName: provider === "azure" ? azureContainerAppName(webAppName, resourceGroup, subscriptionId) : webAppName,
+      workerAppName: provider === "azure" ? azureContainerAppName(workerAppName, resourceGroup, subscriptionId) : workerAppName,
     },
   };
 }

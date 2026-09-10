@@ -209,3 +209,32 @@ describe("fleet release core", () => {
     expect(targetEligibilityErrors(optedOut)).toEqual(["Target explicitly sets releaseEligible=false"]); expect(targetEligibilityErrors(cutoverSource)).toEqual(["Target lifecycle status READ_ONLY_PENDING_FINALIZE is not release-eligible"]);
   });
 });
+
+
+describe("Azure authoritative resource IDs", () => {
+  const row = {
+    cloudProvider: "AZURE",
+    providerSubscriptionId: "subscription-a",
+    providerResourceGroup: "rg-a",
+    providerWebServiceId: "/subscriptions/subscription-a/resourceGroups/rg-a/providers/Microsoft.App/containerApps/web-a",
+    providerWorkerServiceId: "/subscriptions/subscription-a/resourceGroups/rg-a/providers/Microsoft.App/containerApps/worker-a",
+  };
+
+  it("preserves subscription identity and converts full app IDs to CLI names", () => {
+    expect(targetFromControlPlaneRow(row).azure).toEqual({
+      subscriptionId: "subscription-a", resourceGroup: "rg-a", webAppName: "web-a", workerAppName: "worker-a",
+    });
+    expect(targetFromControlPlaneRow({ ...row, providerWebServiceId: row.providerWebServiceId.toUpperCase() }).azure.webAppName).toBe("WEB-A");
+  });
+
+  it.each([
+    ["web subscription", { providerWebServiceId: row.providerWebServiceId.replace("subscription-a", "subscription-b") }],
+    ["worker group", { providerWorkerServiceId: row.providerWorkerServiceId.replace("rg-a", "rg-b") }],
+    ["resource type", { providerWebServiceId: row.providerWebServiceId.replace("containerApps", "sites") }],
+    ["missing subscription", { providerSubscriptionId: null }],
+    ["missing group", { providerResourceGroup: null }],
+    ["child resource", { providerWebServiceId: `${row.providerWebServiceId}/revisions/revision-a` }],
+  ])("rejects inconsistent %s before using a shortened name", (_name, override) => {
+    expect(() => targetFromControlPlaneRow({ ...row, ...override })).toThrow("authoritative subscription and resource group");
+  });
+});
