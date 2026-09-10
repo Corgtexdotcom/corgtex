@@ -939,6 +939,58 @@ describe("fleet release runner", () => {
     expect({ ...outputs, selected_targets: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })) }).toMatchObject({ observation_targets: "railway-customers,azure-selfserve,ops", selected_targets: JSON.parse(JSON.stringify(result.targets)) });
   });
 
+  it("does not parse unrelated Azure identities for an Ops-only release", async () => {
+    const badAzure = { id: "unrelated-azure", environment: "production", cloudProvider: "AZURE",
+      providerResourceGroup: "rg-1", providerWebServiceId: "/subscriptions/sub/resourceGroups/rg-1/providers/Microsoft.Web/sites/old-app" };
+    const runCommand = vi.fn();
+    const deps = { env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), CONTROL_PLANE_AGENT_API_KEY: "key" },
+      fetchImpl: vi.fn(async () => controlPlaneResult([badAzure])), runCommand };
+    const result = await runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--dry-run", "--reason", "Select Ops only."], deps);
+    expect(result.targets.map((target) => target.id)).toEqual(["ops"]);
+    const managed = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--reason", "Respect configured selfserve group."], {
+      ...deps, env: { ...deps.env, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ deploymentId: "unrelated-azure" }) },
+      fetchImpl: vi.fn(async () => controlPlaneResult([badAzure, { id: "railway-customer", environment: "production", cloudProvider: "RAILWAY" }])),
+    });
+    expect(managed.targets.map((target) => target.id)).toEqual(["railway-customer"]);
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--reason", "Select malformed Azure."], deps))
+      .rejects.toThrow("authoritative subscription and resource group");
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--dry-run", "--reason", "Select configured malformed Azure."], {
+      ...deps, env: { ...deps.env, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ deploymentId: "unrelated-azure" }) },
+    })).rejects.toThrow("authoritative subscription and resource group");
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["matching full IDs", {}, null],
+    ["lean list full IDs", { providerSubscriptionId: undefined }, null],
+    ["other subscription", { providerSubscriptionId: "other-subscription" }, "subscription"],
+    ["other app", { providerWebServiceId: "replacement-web" }, "provider or resource identity changed"],
+    ["other group", { providerResourceGroup: "rg-other" }, "resource group"],
+  ])("revalidates Azure names against authoritative %s", async (_name, overrides, error) => {
+    const current = {
+      id: "dep-azure", cloudProvider: "AZURE", environment: "production", deploymentStatus: "ACTIVE",
+      providerSubscriptionId: "azure-subscription", providerResourceGroup: "rg-1",
+      providerWebServiceId: "/subscriptions/azure-subscription/resourceGroups/rg-1/providers/Microsoft.App/containerApps/web-app",
+      providerWorkerServiceId: "/subscriptions/azure-subscription/resourceGroups/rg-1/providers/Microsoft.App/containerApps/worker-app",
+      ...overrides,
+    };
+    if (_name === "other subscription") {
+      current.providerWebServiceId = current.providerWebServiceId.replace("azure-subscription", "other-subscription");
+      current.providerWorkerServiceId = current.providerWorkerServiceId.replace("azure-subscription", "other-subscription");
+    }
+    const runCommand = vi.fn();
+    const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-azure-identity-")), "targets.json");
+    if (_name !== "lean list full IDs") writeFileSync(targetFile, azureTargetJson());
+    const result = runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--dry-run", "--reason", "Verify Azure identity."], {
+      env: { FLEET_RELEASE_TARGETS_FILE: targetFile, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(), CONTROL_PLANE_AGENT_API_KEY: "key",
+        AZURE_SUBSCRIPTION_ID: "azure-subscription", AZURE_CLIENT_ID: "client", AZURE_TENANT_ID: "tenant", GITHUB_TOKEN: "token" },
+      fetchImpl: vi.fn(async (_url, init) => controlPlaneResult(JSON.parse(init.body).params.name === "list_customers" ? [current] : current)), runCommand, sleep: vi.fn(),
+    });
+    if (error) await expect(result).rejects.toThrow(error);
+    else expect((await result).targets[0].azure).toMatchObject({ webAppName: "web-app", workerAppName: "worker-app", resourceGroup: "rg-1" });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it("revalidates frozen targets with bounded concurrency before mutation", async () => { const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-snapshot-")), "targets.json"), runCommand = vi.fn(), outputs = {}, snapshots = Array.from({ length: 9 }, (_, index) => JSON.parse(targetJson({ id: `target-${index}`, deploymentId: `dep-${index}`, label: `Target ${index}`, group: "managed-customers", url: `https://target-${index}.corgtex.com` }))[0]);
     let active = 0, peak = 0; writeFileSync(targetFile, JSON.stringify(snapshots)); const broad = await runFleetRelease(["deploy", "--release", SHA, "--dry-run", "--reason", "Revalidate fleet."], {
       env: { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "control-plane-key" }, runCommand, sleep: vi.fn(), emitGithubOutput: (key, value) => { outputs[key] = value; },
