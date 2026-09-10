@@ -1311,6 +1311,7 @@ describe("scheduleDailyJobs", () => {
       where: {
         archivedAt: null,
         recurrenceRule: { not: null },
+        workspace: { featureFlags: { none: { flag: "operator_import_inactive", enabled: true } } },
       },
       distinct: ["workspaceId"],
       select: { workspaceId: true },
