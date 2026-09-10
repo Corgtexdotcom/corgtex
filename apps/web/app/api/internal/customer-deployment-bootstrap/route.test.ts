@@ -144,6 +144,25 @@ describe("POST /api/internal/customer-deployment-bootstrap", () => {
     expect(updateMany).not.toHaveBeenCalled();
   });
 
+  it("does not fetch or seed when another request wins token consumption", async () => {
+    const { POST } = await import("./route");
+    global.fetch = vi.fn();
+    updateMany.mockResolvedValue({ count: 0 });
+
+    const response = await POST(request(signedBody({
+      customerSlug: "acme-prod",
+      bundleUri: "https://private.example/bundle.json",
+      checksum: "a".repeat(64),
+      schemaVersion: "stable-client-v1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })));
+
+    expect(response.status).toBe(409);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(runStableClientSeed).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("rejects a bundle when the checksum does not match", async () => {
     const { POST } = await import("./route");
     global.fetch = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));

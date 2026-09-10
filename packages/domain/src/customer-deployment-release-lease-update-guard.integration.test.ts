@@ -6,7 +6,7 @@ import type { AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { probeControlPlaneDeploymentHealth, recordVerifiedControlPlaneRelease } from "./control-plane";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
-import { probeCustomerDeploymentHealth, triggerCustomerDeploymentBootstrap } from "./admin";
+import { probeCustomerDeploymentHealth, suspendCustomerDeployment, triggerCustomerDeploymentBootstrap } from "./admin";
 import {
   abortManagedReleaseLease,
   acquireManagedReleaseLease,
@@ -175,9 +175,9 @@ describe("CustomerDeployment retained-lease update guard", () => {
     await probeManagedDeployment(deployment.id, "control-plane");
     return deployment;
   }
-  function triggerBootstrap(deploymentId: string) {
+  function triggerBootstrap(deploymentId: string, expiresAt = new Date(Date.now() + 60_000)) {
     return triggerCustomerDeploymentBootstrap(bootstrapActor, { deploymentId,
-      token: "synthetic-test-bootstrap-token", expiresAt: new Date(Date.now() + 60_000) });
+      token: "synthetic-test-bootstrap-token", expiresAt });
   }
   function recordRelease(deploymentId: string) {
     return recordVerifiedControlPlaneRelease(actor, { deploymentId, releaseImageTag: NEXT,
@@ -223,7 +223,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
     await expectNoRecordEffects(deployment.id, beforeSnapshots);
   });
 
-  it("claims bootstrap intent before POST and rejects recording and a duplicate while POST is pending", async () => {
+  it("claims bootstrap intent before POST and permits explicit same-token retry while recording stays blocked", async () => {
     const deployment = await bootstrapReadyDrift();
     const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
     let startPost!: () => void;
@@ -231,22 +231,105 @@ describe("CustomerDeployment retained-lease update guard", () => {
     const started = new Promise<void>((resolve) => { startPost = resolve; });
     const pending = new Promise<{ ok: boolean; status: number }>((resolve) => { finishPost = resolve; });
     let posts = 0;
+    const requests: unknown[] = [];
+    const expiresAt = new Date(Date.now() + 60_000);
     vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
-      if (init?.method === "POST") { posts++; startPost(); return pending; }
+      if (init?.method === "POST") {
+        requests.push({ headers: init.headers, body: init.body });
+        posts++;
+        if (posts === 1) { startPost(); return pending; }
+        return { ok: false, status: 409 };
+      }
       return healthyResponse();
     }));
-    const bootstrap = triggerBootstrap(deployment.id);
+    const bootstrap = triggerBootstrap(deployment.id, expiresAt);
     try {
       await started;
       expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
         .toMatchObject({ bootstrapStatus: "bootstrapping", provisioningStatus: "bootstrapping", deploymentStatus: "DEGRADED" });
       await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
-      await expect(triggerBootstrap(deployment.id)).rejects.toMatchObject({ status: 409 });
-      expect(posts).toBe(1);
+      await expect(triggerBootstrap(deployment.id, expiresAt)).resolves.toMatchObject({ bootstrapStatus: "failed" });
+      expect(posts).toBe(2);
+      expect(requests[1]).toEqual(requests[0]);
+      await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
       await expectNoRecordEffects(deployment.id, beforeSnapshots);
     } finally { finishPost({ ok: false, status: 503 }); await bootstrap; }
     expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
       .toMatchObject({ bootstrapStatus: "failed", provisioningStatus: "degraded", lastProvisioningError: "Bootstrap endpoint returned 503." });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
+  it("allows explicit bootstrap retry after a crash before dispatch with durable intent", async () => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    await prisma.customerDeployment.update({ where: { id: deployment.id }, data: {
+      bootstrapStatus: "bootstrapping", provisioningStatus: "bootstrapping",
+    } });
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (init?.method === "POST") { posts++; return { ok: false, status: 503 }; }
+      return healthyResponse();
+    }));
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    await expect(triggerBootstrap(deployment.id)).resolves.toMatchObject({ bootstrapStatus: "failed",
+      provisioningStatus: "degraded", lastProvisioningError: "Bootstrap endpoint returned 503." });
+    expect(posts).toBe(1);
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
+  it("preserves an initially suspended deployment through an explicit bootstrap retry", async () => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    await suspendCustomerDeployment(bootstrapActor, deployment.id);
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (init?.method === "POST") {
+        posts++;
+        expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
+          .toMatchObject({ deploymentStatus: "SUSPENDED", provisioningStatus: "suspended", bootstrapStatus: "bootstrapping" });
+        return { ok: false, status: 503 };
+      }
+      return healthyResponse();
+    }));
+    await expect(triggerBootstrap(deployment.id)).resolves.toMatchObject({ bootstrapStatus: "failed",
+      deploymentStatus: "SUSPENDED", provisioningStatus: "suspended", lastProvisioningError: "Bootstrap endpoint returned 503." });
+    expect(posts).toBe(1);
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
+  it.each(["http503", "transport"])("preserves an actual suspension during pending bootstrap POST after %s failure", async (failure) => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    let startPost!: () => void;
+    let finishPost!: (value: { ok: boolean; status: number }) => void;
+    let failPost!: (error: Error) => void;
+    const started = new Promise<void>((resolve) => { startPost = resolve; });
+    const pending = new Promise<{ ok: boolean; status: number }>((resolve, reject) => { finishPost = resolve; failPost = reject; });
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (init?.method === "POST") { startPost(); return pending; }
+      return healthyResponse();
+    }));
+    const bootstrap = triggerBootstrap(deployment.id).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await started;
+      await suspendCustomerDeployment(bootstrapActor, deployment.id);
+      expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
+        .toMatchObject({ deploymentStatus: "SUSPENDED", provisioningStatus: "suspended" });
+      await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    } finally {
+      if (failure === "transport") failPost(new Error("Synthetic suspended bootstrap transport failure"));
+      else finishPost({ ok: false, status: 503 });
+    }
+    const result = await bootstrap;
+    if (failure === "transport") expect(result.error).toBeTruthy();
+    else expect(result.error).toBeNull();
+    const failed = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
+    expect(failed).toMatchObject({ deploymentStatus: "SUSPENDED", provisioningStatus: "suspended", bootstrapStatus: "failed" });
+    expect(failed.lastProvisioningError).toBeTruthy();
+    expect(await prisma.customerDeploymentEvent.count({ where: { deploymentId: deployment.id, action: "customer_deployment.suspended" } })).toBe(1);
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
     await expectNoRecordEffects(deployment.id, beforeSnapshots);
   });
 
