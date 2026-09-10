@@ -10073,7 +10073,7 @@ export async function configureSupportConnector(actor: AppActor, params: {
   const credential = params.supportCredential?.trim();
   invariant(Boolean(credential) || Boolean(existing.supportCredentialEnc), 400, "INVALID_INPUT", "Support credential is required.");
 
-  const remoteShared = existing.deploymentKind === "SHARED_WORKSPACE" && !existing.managedWorkspaceId;
+  const remoteShared = existing.deploymentKind === "SHARED_WORKSPACE" && !existing.managedWorkspaceId && Boolean(existing.remoteWorkspaceId);
   const supportBaseUrl = params.supportBaseUrl?.trim() || (remoteShared ? existing.supportBaseUrl : null);
   const supportMcpUrl = params.supportMcpUrl?.trim() || (remoteShared ? existing.supportMcpUrl : null);
   if (remoteShared) {

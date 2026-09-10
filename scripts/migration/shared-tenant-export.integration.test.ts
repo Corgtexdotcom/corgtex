@@ -57,7 +57,9 @@ async function fixtureManifest(): Promise<TenantTransferManifest> {
     formatVersion: 1, transferId: "synthetic-transfer", workspaceId: tenantA, workspaceSlug: tenantA, schemaSha256: inventory.schemaSha256,
     tables: Object.fromEntries(inventory.tables.filter((table: { rows: string }) => BigInt(table.rows) > 0n).map((table: { name: string }) => [table.name, {
       disposition: table.name === "_prisma_migrations" ? "operator-control" : "copy", reason: "Explicit synthetic fixture classification",
-      fields: { ...(table.name === "EmailDelivery" ? { userId: { kind: "reference", reason: "Explicit synthetic scalar actor", references: { table: "User", column: "id" } } } : {}), ...Object.fromEntries(inventory.schema.columns.filter((column: { table: string; type: string }) => column.table === table.name && (/^jsonb?$/.test(column.type) || column.type.endsWith("[]")))
+      fields: { ...(table.name === "User" ? { passwordHash: { kind: "secret", reason: "Source password is replaced for new target identities" } } : {}),
+        ...(table.name === "KnowledgeChunk" ? { sourceId: { kind: "reference", reason: "Explicit polymorphic historical source identifier" } } : {}),
+        ...(table.name === "EmailDelivery" ? { providerMessageId: { kind: "reference", reason: "Provider receipt identity" }, workspaceId: { kind: "reference", reason: "Scalar tenant ownership" }, userId: { kind: "reference", reason: "Explicit synthetic scalar actor", references: { table: "User", column: "id" } } } : {}), ...Object.fromEntries(inventory.schema.columns.filter((column: { table: string; type: string }) => column.table === table.name && (/^jsonb?$/.test(column.type) || column.type.endsWith("[]")))
         .map((column: { name: string }) => [column.name, { kind: "content", reason: "Synthetic content retained without number parsing" }])) },
     }])),
   };
@@ -174,4 +176,36 @@ test("declared scalar references require reference kind and actual unique target
   wrongKind.tables.EmailDelivery.fields!.userId.kind = "content";
   await assert.rejects(exportTenantSnapshot(db, wrongKind), /Only reference fields may declare scalar dependencies/);
   await assertIdle();
+});
+
+test("real populated scalar secrets cannot be omitted or relabeled as ordinary content", async () => {
+  const installation = randomUUID(), dataSource = randomUUID();
+  await db.query(`INSERT INTO "CommunicationInstallation"(id,"workspaceId",provider,"externalWorkspaceId","botTokenEnc","updatedAt") VALUES($1,$2,'SLACK','synthetic-external','synthetic-credential',now())`, [installation, tenantA]);
+  await db.query(`INSERT INTO "ExternalDataSource"(id,"workspaceId",label,"connectionStringEnc","updatedAt") VALUES($1,$2,'Synthetic datasource','synthetic-connection-secret',now())`, [dataSource, tenantA]);
+  try {
+    const value = await fixtureManifest();
+    value.tables.CommunicationInstallation.fields!.externalWorkspaceId = { kind: "reference", reason: "Explicit external provider identity" };
+    for (const kind of [undefined, "content"] as const) {
+      if (kind) value.tables.CommunicationInstallation.fields!.botTokenEnc = { kind, reason: "Incorrect credential classification" };
+      await assert.rejects(exportTenantSnapshot(db, value), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:CommunicationInstallation.botTokenEnc:secret/); await assertIdle();
+    }
+    value.tables.CommunicationInstallation.fields!.botTokenEnc = { kind: "secret", reason: "Credential must be staged, nulled or reencrypted on import" };
+    await assert.rejects(exportTenantSnapshot(db, value), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:ExternalDataSource.connectionStringEnc:secret/); await assertIdle();
+    value.tables.ExternalDataSource.fields!.connectionStringEnc = { kind: "secret", reason: "Datasource credential requires separate disposition" };
+    const exported = await exportTenantSnapshot(db, value);
+    assert.equal(exported.tables.find((table) => table.name === "CommunicationInstallation")!.rows.length, 1);
+  } finally {
+    await db.query('DELETE FROM "CommunicationInstallation" WHERE id=$1', [installation]);
+    await db.query('DELETE FROM "ExternalDataSource" WHERE id=$1', [dataSource]);
+  }
+});
+
+test("private export retains an existing source marker for explicit publication staging", async () => {
+  const id = randomUUID();
+  await db.query(`INSERT INTO "WorkspaceFeatureFlag"(id,"workspaceId",flag,enabled,config,"updatedAt") VALUES($1,$2,'operator_import_inactive',true,'{}',now())`, [id, tenantA]);
+  try {
+    const exported = await exportTenantSnapshot(db, await fixtureManifest());
+    const flags = exported.tables.find((table) => table.name === "WorkspaceFeatureFlag")!;
+    assert.equal(flags.rows[0][flags.columns.findIndex((column) => column.name === "flag")], "operator_import_inactive");
+  } finally { await db.query('DELETE FROM "WorkspaceFeatureFlag" WHERE id=$1', [id]); }
 });

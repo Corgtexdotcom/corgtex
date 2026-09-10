@@ -24,7 +24,8 @@ function fixture() {
   ];
   const manifest = { formatVersion: 1, transferId: "synthetic-publication", workspaceId: "ws", workspaceSlug: "ws", schemaSha256: "a".repeat(64),
     tables: Object.fromEntries(tables.map((table) => [table.name, { disposition: "copy", reason: "Synthetic explicit policy" }])) };
-  manifest.tables.EmailDelivery.fields = { userId: { kind: "reference", reason: "Historical scalar actor", references: { table: "User", column: "id" } } };
+  manifest.tables.WorkflowJob.fields = { payload: { kind: "content", reason: "Original pending and terminal payload" } };
+  manifest.tables.EmailDelivery.fields = { workspaceId: { kind: "reference", reason: "Scalar tenant ownership" }, userId: { kind: "reference", reason: "Historical scalar actor", references: { table: "User", column: "id" } } };
   const body = { formatVersion: 1, manifest, manifestSha256: hashCanonical(manifest), sourceSnapshot: "synthetic", sourceDatabase: "synthetic",
     schemaSha256: manifest.schemaSha256, tables,
     dispositions: tables.map((table) => ({ table: table.name, sourceRows: String(table.rows.length), selectedRows: String(table.rows.length), disposition: "copy", reason: "Synthetic explicit policy" })) };
@@ -75,7 +76,7 @@ describe("exact operator publication preparation", () => {
     const result = prepareTenantPublication(fixture(), requests);
     expect(result.staging.detachedReferences[0].originalValues).toEqual(["historical-user"]);
     const invalid = fixture(); delete invalid.manifest.tables.EmailDelivery.fields;
-    expect(() => prepareTenantPublication(rehash(invalid), requests)).toThrow("PUBLICATION_REFERENCE_DETACH_FORBIDDEN");
+    expect(() => prepareTenantPublication(rehash(invalid), requests)).toThrow("TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:EmailDelivery.workspaceId");
   });
 
   it.each(["id", "workspaceId", "title"])("refuses detaching key, ownership or business column %s", (column) => {
@@ -132,5 +133,45 @@ describe("exact operator publication preparation", () => {
     const tableTampered = fixture(); tableTampered.tables[0].sha256 = "0".repeat(64);
     const { sha256: _sha256, ...body } = tableTampered; tableTampered.sha256 = hashCanonical(body);
     expect(() => prepareTenantPublication(tableTampered, policy())).toThrow("PUBLICATION_TABLE_DIGEST_MISMATCH");
+  });
+});
+
+function appendFixtureTable(input, added, fields = {}) {
+  input.tables.push(added);
+  input.manifest.tables[added.name] = { disposition: "copy", reason: "Explicit synthetic classification", fields };
+  input.dispositions.push({ table: added.name, sourceRows: String(added.rows.length), selectedRows: String(added.rows.length), disposition: "copy", reason: "Synthetic source" });
+  return rehash(input);
+}
+
+describe("publication scalar policy and source marker validation", () => {
+  it.each([
+    ["CommunicationInstallation", "botTokenEnc"],
+    ["ExternalDataSource", "connectionStringEnc"],
+    ["AiWorkspaceConnection", "apiKeyEnc"],
+    ["DemoLead", "qualifyToken"],
+  ])("requires secret classification for populated %s.%s even when a snapshot was rehashed", (name, field) => {
+    const input = appendFixtureTable(fixture(), table(name, [["id"], [field]], [["credential-row", "synthetic-source-secret"]]));
+    expect(() => prepareTenantPublication(input, { stagedRows: [], detachReferences: [] })).toThrow(`TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:${name}.${field}:secret`);
+    input.manifest.tables[name].fields[field] = { kind: "content", reason: "Calling a credential content cannot authorize it" };
+    expect(() => prepareTenantPublication(rehash(input), { stagedRows: [], detachReferences: [] })).toThrow(`TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:${name}.${field}:secret`);
+    input.manifest.tables[name].fields[field] = { kind: "secret", reason: "Keep source credential private for separate disposition" };
+    const result = prepareTenantPublication(rehash(input), { stagedRows: [stage(name, "credential-row")], detachReferences: [] });
+    expect(result.staging.rows[0].rows).toEqual([["credential-row", "synthetic-source-secret"]]);
+  });
+
+  it("requires explicit opaque scalar reference policy without inventing a target relation", () => {
+    const input = appendFixtureTable(fixture(), table("KnowledgeChunk", [["id"], ["sourceId"]], [["chunk", "historical-polymorphic-id"]]));
+    expect(() => prepareTenantPublication(input, { stagedRows: [], detachReferences: [] })).toThrow("TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:KnowledgeChunk.sourceId:reference");
+    input.manifest.tables.KnowledgeChunk.fields.sourceId = { kind: "reference", reason: "Reviewed historical polymorphic identifier" };
+    expect(prepareTenantPublication(rehash(input), { stagedRows: [], detachReferences: [] }).publicationSnapshot.tables.at(-1).foreignKeys).toEqual([]);
+  });
+
+  it("rejects a surviving source import marker and preserves it only through exact staging", () => {
+    const input = appendFixtureTable(fixture(), table("WorkspaceFeatureFlag", [["id"], ["flag"], ["enabled"]], [["marker", "operator_import_inactive", "false"], ["ordinary", "synthetic-feature", "true"]]));
+    expect(() => prepareTenantPublication(input, { stagedRows: [], detachReferences: [] })).toThrow("TRANSFER_SOURCE_IMPORT_MARKER_MUST_BE_STAGED");
+    const result = prepareTenantPublication(input, { stagedRows: [stage("WorkspaceFeatureFlag", "marker")], detachReferences: [] });
+    expect(result.staging.rows[0].rows).toEqual([["marker", "operator_import_inactive", "false"]]);
+    expect(result.publicationSnapshot.tables.at(-1).rows).toEqual([["ordinary", "synthetic-feature", "true"]]);
+    expect(input.tables.at(-1).rows).toHaveLength(2);
   });
 });

@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { validateObjectReceipt, type ObjectCopyReceipt } from "./shared-tenant-objects";
 import { hashCanonical, hashFrames } from "./shared-tenant-export";
 import { readSharedTenantSchema, quoteIdentifier } from "./shared-tenant-inventory.mjs";
+import { assertNoSourceImportMarker, assertTransferTableFieldPolicies, isRetainedInlineValue } from "./shared-tenant-transfer-contract";
 import type { TenantTransferSnapshot, TransferSqlClient, TransferTableData } from "./shared-tenant-transfer-contract";
 
 type IdentityLink = {
@@ -13,6 +14,7 @@ type FieldTransform =
   | { kind: "null"; reason: string }
   | { kind: "map-values"; values: Record<string, string>; reason: string }
   | { kind: "reencrypt"; reason: string }
+  | { kind: "disable-tracking-token"; reason: string }
   | { kind: "json-user-references"; paths: string[][]; reason: string };
 export interface TenantImportOptions {
   identityLinks: IdentityLink[];
@@ -63,6 +65,8 @@ function validateSnapshot(snapshot: TenantTransferSnapshot, options: TenantImpor
   if (snapshot.formatVersion !== 1 || hashCanonical(body) !== sha256
     || hashCanonical(snapshot.manifest) !== snapshot.manifestSha256
     || snapshot.schemaSha256 !== snapshot.manifest.schemaSha256) fail("TRANSFER_SNAPSHOT_DIGEST_MISMATCH");
+  assertNoSourceImportMarker(snapshot.tables);
+  for (const table of snapshot.tables) assertTransferTableFieldPolicies(table, snapshot.manifest.tables[table.name]);
   validateObjectReceipt(options.objectReceipt);
   if (options.objectReceipt.transferId !== snapshot.manifest.transferId
     || options.objectReceipt.sourceSnapshotSha256 !== sha256 || !/^[a-f0-9]{64}$/.test(options.objectReceipt.sha256)) {
@@ -75,7 +79,8 @@ function validateSnapshot(snapshot: TenantTransferSnapshot, options: TenantImpor
     if (table.rows.length && forbiddenCredentialTables.has(table.name)) fail("TRANSFER_OLD_CREDENTIALS_MUST_BE_STAGED");
     for (const row of table.rows) for (let index = 0; index < table.columns.length; index++) {
       const column = table.columns[index];
-      if (row[index] === null || snapshot.manifest.tables[table.name]?.fields?.[column.name]?.kind !== "object") continue;
+      if (row[index] === null || snapshot.manifest.tables[table.name]?.fields?.[column.name]?.kind !== "object"
+        || isRetainedInlineValue(table.name, column.name, row[index]!, snapshot.manifest.tables[table.name])) continue;
       const binding = options.objectBindings?.find((binding) => binding.table === table.name
         && binding.column === column.name && binding.sourceValue === row[index]);
       if (!binding || !options.objectReceipt.entries.some((entry) => entry.sourceKey === binding.sourceKey
@@ -116,7 +121,13 @@ async function transformedRows(client: TransferSqlClient, snapshot: TenantTransf
         }
         const transform = options.transforms?.[table.name]?.[column.name];
         const classification = snapshot.manifest.tables[table.name]?.fields?.[column.name];
-        if (row[index] !== null && classification?.kind === "secret" && !(table.name === "User" && column.name === "passwordHash") && transform?.kind !== "reencrypt" && transform?.kind !== "null") {
+        const disablesTrackingToken = transform?.kind === "disable-tracking-token"
+          && table.name === "NewspaperTrackedLink" && column.name === "tokenHash";
+        if (transform?.kind === "disable-tracking-token" && !disablesTrackingToken) fail("TRANSFER_TRACKING_TOKEN_TRANSFORM_FORBIDDEN");
+        if (table.name === "DemoLead" && column.name === "qualifyToken" && row[index] !== null && transform?.kind !== "null") {
+          fail("TRANSFER_QUALIFICATION_TOKEN_MUST_BE_REMOVED");
+        }
+        if (row[index] !== null && classification?.kind === "secret" && !(table.name === "User" && column.name === "passwordHash") && transform?.kind !== "reencrypt" && transform?.kind !== "null" && !disablesTrackingToken) {
           fail("TRANSFER_SECRET_DISPOSITION_REQUIRED");
         }
         if (!transform || row[index] === null) continue;
@@ -132,6 +143,9 @@ async function transformedRows(client: TransferSqlClient, snapshot: TenantTransf
         } else if (transform.kind === "map-values") {
           if (!Object.hasOwn(transform.values, row[index]!)) fail("TRANSFER_VALUE_MAPPING_MISSING");
           row[index] = transform.values[row[index]!];
+        } else if (transform.kind === "disable-tracking-token") {
+          if (table.primaryKey.length !== 1 || table.primaryKey[0] !== "id" || !original.id) fail("TRANSFER_TRACKING_TOKEN_TRANSFORM_FORBIDDEN");
+          row[index] = `disabled:operator-import:${snapshot.manifest.transferId}:${original.id}`;
         } else if (transform.kind === "reencrypt") {
           row[index] = reencrypt(row[index]!, options);
         } else if (transform.kind === "json-user-references") {
@@ -154,6 +168,15 @@ async function transformedRows(client: TransferSqlClient, snapshot: TenantTransf
           row[index] = (await client.query(`SELECT ($1::${column.type})::text AS value`, [row[index]])).rows[0].value as string;
         }
       }
+      for (const [index, column] of table.columns.entries()) {
+        const value = original[column.name];
+        if (typeof value === "string" && isRetainedInlineValue(table.name, column.name, value, snapshot.manifest.tables[table.name])) {
+          if (row[index] !== value) fail("TRANSFER_INLINE_LOCATOR_MUST_REMAIN");
+          const contentName = table.name === "Document" ? "textContent" : "content";
+          const contentIndex = table.columns.findIndex((field) => field.name === contentName);
+          if (row[contentIndex] !== original[contentName]) fail("TRANSFER_INLINE_CONTENT_MUST_REMAIN");
+        }
+      }
       for (const binding of options.objectBindings?.filter((binding) => binding.table === table.name) ?? []) {
         const index = table.columns.findIndex((column) => column.name === binding.column);
         if (original[binding.column] === binding.sourceValue && row[index] !== binding.targetValue) {
@@ -167,6 +190,7 @@ async function transformedRows(client: TransferSqlClient, snapshot: TenantTransf
       }
     }
   }
+  for (const table of tables) assertTransferTableFieldPolicies(table, snapshot.manifest.tables[table.name]);
   return tables;
 }
 
@@ -290,6 +314,8 @@ export async function verifyImportedTenant(client: TransferSqlClient, snapshot: 
     || receipt.sourceSnapshotSha256 !== sha256 || receipt.workspaceId !== snapshot.manifest.workspaceId) {
     fail("TRANSFER_VERIFICATION_IDENTITY_MISMATCH");
   }
+  assertNoSourceImportMarker(snapshot.tables);
+  for (const table of snapshot.tables) assertTransferTableFieldPolicies(table, snapshot.manifest.tables[table.name]);
   const entries = receipt.tables as { name: string; count: number; sha256: string; primaryKeys: (string | null)[][] }[];
   if (!Array.isArray(entries) || entries.length !== snapshot.tables.length
     || new Set(entries.map((entry) => entry.name)).size !== snapshot.tables.length) fail("TRANSFER_RECEIPT_INVALID");

@@ -1740,6 +1740,22 @@ describe("control plane domain", () => {
     expect(result.supportCredentialEnc).toBeUndefined();
   });
 
+  it("configures shared infrastructure support without treating it as a remote tenant", async () => {
+    const { configureSupportConnector } = await import("./control-plane");
+    prismaMock.customerDeployment.findUnique.mockResolvedValue({
+      id: "shared-root", deploymentKind: "SHARED_WORKSPACE", managedWorkspaceId: null,
+      remoteWorkspaceId: null, remoteWorkspaceSlug: null, supportCredentialEnc: null,
+    });
+    prismaMock.customerDeployment.update.mockResolvedValue({ id: "shared-root" });
+    await configureSupportConnector(operatorActor, { deploymentId: "shared-root", supportCredential: "infrastructure-token",
+      supportBaseUrl: "https://selfserve.test", supportMcpUrl: "https://selfserve.test/api/mcp" });
+    expect(prismaMock.customerDeployment.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ supportAccessMode: "broad", supportBaseUrl: "https://selfserve.test",
+        supportMcpUrl: "https://selfserve.test/api/mcp" }),
+    }));
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("verifies remote shared support belongs to the selected workspace (matching=%s)", async (matching) => {
     const { configureSupportConnector } = await import("./control-plane");
     const workspaceId = "00000000-0000-4000-8000-000000000001";

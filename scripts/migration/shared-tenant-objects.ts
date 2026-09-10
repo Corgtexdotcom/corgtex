@@ -20,6 +20,16 @@ export interface ObjectCopyManifest extends ObjectSnapshotReferences {
   limits: { maxObjectBytes: number; maxTotalBytes: number };
 }
 
+export interface ObjectReconciliationManifest extends ObjectSnapshotReferences {
+  formatVersion: 1;
+  transferId: string;
+  sourceStoreId: string;
+  targetStoreId: string;
+  // Binds the final reference set to the exact preceding copy and snapshot.
+  previousReceiptSha256: string;
+  sha256: string;
+}
+
 export interface ObjectHead {
   etag: string;
   bytes: number;
@@ -209,16 +219,23 @@ export async function copyReferencedObjects(source: ObjectStore, target: ObjectS
 }
 
 /** A renamed/deleted reference is stale only when no final reference uses its key. */
-export function reconcileStalePrecopies(previousReceipt: ObjectCopyReceipt, finalRefs: ObjectSnapshotReferences): ObjectReceiptEntry[] {
+export function reconcileStalePrecopies(previousReceipt: ObjectCopyReceipt, finalRefs: ObjectReconciliationManifest): ObjectReceiptEntry[] {
   validateObjectReceipt(previousReceipt);
   validateReferences(finalRefs);
+  requireValue(finalRefs.formatVersion === 1 && Object.keys(finalRefs).every((key) =>
+    ["formatVersion", "transferId", "sourceStoreId", "targetStoreId", "previousReceiptSha256", "sourceSnapshotSha256", "objects", "sha256"].includes(key)), "INVALID_FINAL_MANIFEST");
+  const { sha256, ...body } = finalRefs;
+  requireValue(SHA256.test(sha256) && hashCanonical(body) === sha256, "FINAL_MANIFEST_DIGEST_MISMATCH");
+  requireValue(finalRefs.transferId === previousReceipt.transferId
+    && finalRefs.sourceStoreId === previousReceipt.sourceStoreId && finalRefs.targetStoreId === previousReceipt.targetStoreId
+    && finalRefs.previousReceiptSha256 === previousReceipt.sha256, "FINAL_MANIFEST_LINEAGE_MISMATCH");
   const referenced = new Set(finalRefs.objects.map((entry) => entry.targetKey));
   return previousReceipt.entries.filter((entry) => entry.ownership === "created" && !referenced.has(entry.targetKey))
     .map((entry) => ({ ...entry }));
 }
 
 /** Separate explicit mutation; never called by copy or reconciliation. */
-export async function removeStaleOwnedObjects(target: ObjectStore, previousReceipt: ObjectCopyReceipt, finalRefs: ObjectSnapshotReferences) {
+export async function removeStaleOwnedObjects(target: ObjectStore, previousReceipt: ObjectCopyReceipt, finalRefs: ObjectReconciliationManifest) {
   try {
     previousReceipt = structuredClone(previousReceipt);
     finalRefs = structuredClone(finalRefs);

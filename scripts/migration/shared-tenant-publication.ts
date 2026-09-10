@@ -1,4 +1,5 @@
 import { hashCanonical, hashFrames } from "./shared-tenant-export";
+import { assertNoSourceImportMarker, assertTransferTableFieldPolicies } from "./shared-tenant-transfer-contract";
 import type { TenantTransferSnapshot, TransferColumn, TransferForeignKey, TransferTableData } from "./shared-tenant-transfer-contract";
 
 type PrimaryKeys = (string | null)[][];
@@ -55,6 +56,7 @@ export function prepareTenantPublication(originalSnapshot: TenantTransferSnapsho
       if (index.has(key)) fail("DUPLICATE_SOURCE_KEY");
       index.set(key, row);
     }
+    assertTransferTableFieldPolicies(table, originalSnapshot.manifest.tables[table.name]);
     const disposition = originalSnapshot.dispositions.filter((entry) => entry.table === table.name);
     if (disposition.length !== 1 || disposition[0].selectedRows !== String(table.rows.length)) fail("SOURCE_COUNT_MISMATCH");
     tables.set(table.name, table); rowIndexes.set(table.name, index);
@@ -136,6 +138,7 @@ export function prepareTenantPublication(originalSnapshot: TenantTransferSnapsho
       if (!values.includes(null) && removedValues.has(JSON.stringify(values))) fail(`STAGED_REFERENCE_REMAINS:${table.name}`);
     }
   }
+  assertNoSourceImportMarker(publicationSnapshot.tables);
   const staging: TenantPublicationStaging = { ...stagingBody, sha256: hashCanonical(stagingBody) };
   publicationSnapshot.manifest.preparedFromSha256 = sha256;
   publicationSnapshot.manifest.stagingSha256 = staging.sha256;

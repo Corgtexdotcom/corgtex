@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { inventorySharedTenantSource, quoteIdentifier } from "./shared-tenant-inventory.mjs";
 import { getWorkspaceModelMetadata, getWorkspaceOwnershipRules, type WorkspaceOwnershipRule } from "./workspace-ownership";
+import { assertTransferTableFieldPolicies, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
 import type {
   TenantTransferManifest, TenantTransferSnapshot, TransferColumn, TransferForeignKey,
   TransferSqlClient, TransferTableData, TransferTablePolicy,
@@ -125,11 +126,14 @@ export async function exportTenantSnapshot(
           throw new Error("_prisma_migrations must remain operator-control metadata");
         }
         const structured = columns.filter((column) => /^jsonb?$/.test(column.type) || column.type.endsWith("[]"));
-        if (structured.length) {
-          const { rows: [populated] } = await client.query(`SELECT ${structured.map((column) => `bool_or(${q(column.name)} IS NOT NULL) AS ${q(column.name)}`).join(",")} FROM ${tableName(raw.name)}`);
+        const classified = columns.filter((column) => structured.includes(column) || transferScalarFieldKinds[raw.name]?.[column.name]);
+        if (classified.length) {
+          const { rows: [populated] } = await client.query(`SELECT ${classified.map((column) => `bool_or(${q(column.name)} IS NOT NULL) AS ${q(column.name)}`).join(",")} FROM ${tableName(raw.name)}`);
           for (const column of structured) if (populated[column.name] && !manifest.tables[raw.name].fields?.[column.name]) {
             throw new Error(`Unclassified populated JSON/array field: ${raw.name}.${column.name}`);
           }
+          assertTransferTableFieldPolicies({ name: raw.name, columns: classified,
+            rows: [classified.map((column) => populated[column.name] ? "" : null)] }, manifest.tables[raw.name]);
         }
       }
       const ownRules = ownership.get(models.get(raw.name)?.name ?? raw.name) ?? [];
@@ -239,6 +243,7 @@ export async function exportTenantSnapshot(
       tables.push({ name: table.name, columns: table.columns, primaryKey: table.primaryKey, foreignKeys: table.foreignKeys,
         rows: sorted, sha256: hashFrames(sorted) });
     }
+    for (const table of tables) assertTransferTableFieldPolicies(table, manifest.tables[table.name]);
     const snapshot: Omit<TenantTransferSnapshot, "sha256"> = {
       formatVersion: 1, manifest, manifestSha256: hashCanonical(manifest),
       sourceSnapshot: String(inventory.identity.snapshot), sourceDatabase: String(inventory.identity.database),

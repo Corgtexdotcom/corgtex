@@ -21,15 +21,24 @@ variables; never put them in command arguments or committed files.
 3. Review the manifest's table and field policies, then `export-copy` the selected
    workspace and its reference closure. Global identities are selected by their
    actual references. Matching email alone does not authorize account linking.
+   Known scalar secrets, objects and opaque references require their registered
+   classification. A reviewed missing-object exception is limited to exact
+   Document/BrainSource locators with preserved inline text and evidence hashes.
 4. `prepare-publication --snapshot /private/source.json --options
    /private/policy.json --output /private/prepared.json` stages exact selected rows
    with their original states and records any explicitly detached references.
    Stage old credentials and executable jobs/events. Retain business history.
+   Stage any source `operator_import_inactive` marker explicitly. To preserve
+   newspaper click history, `disable-tracking-token` replaces only tracked-link
+   token hashes with nonfunctional values while retaining their rows.
    The prepared wrapper can be passed directly to `import` and `verify-inactive`.
 5. Review disabled integration, agent and schedule settings and typed identity
    mappings. `copy-objects --execute` verifies referenced files between separately
    bound private containers. Its receipt must bind the exact publication snapshot;
    even an empty file set requires verified inventory and a receipt.
+   Separate stale-file removal requires a digest-verified final reconciliation
+   manifest bound to the same transfer, source/target stores and exact preceding
+   copy-receipt hash. An unbound list of final references cannot authorize deletion.
 6. Rehearse import against an isolated target-equivalent database containing an
    existing tenant. Check transformed digests, representative content/history,
    existing credentials, isolation, disabled effects and retry behavior.

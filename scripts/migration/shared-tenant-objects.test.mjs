@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { hashCanonical } from "./shared-tenant-export.ts";
 import {
   AzureBlobObjectStore, ObjectTransferError, copyReferencedObjects, reconcileStalePrecopies,
   removeStaleOwnedObjects, validateObjectReceipt,
@@ -69,6 +70,12 @@ function manifest(objects, overrides = {}) {
 function reference(sourceKey, data, targetKey = `import/${sourceKey}`) {
   return { sourceKey, targetKey, sha256: sha(data), bytes: Buffer.byteLength(data), contentType: "text/plain" };
 }
+function finalManifest(previous, objects = [], overrides = {}) {
+  const body = { formatVersion: 1, transferId: previous.transferId, sourceStoreId: previous.sourceStoreId,
+    targetStoreId: previous.targetStoreId, previousReceiptSha256: previous.sha256,
+    sourceSnapshotSha256: sha("final"), objects, ...overrides };
+  return { ...body, sha256: hashCanonical(body) };
+}
 function fixture(data = "synthetic content") {
   const source = new MemoryStore("source");
   const target = new MemoryStore("target");
@@ -108,7 +115,7 @@ describe("snapshot-referenced object copy", () => {
     const receipt = await copyReferencedObjects(source, target, input);
     expect(receipt.entries[0].ownership).toBe("linked");
     expect(target.generation).toBe(1);
-    const finalRefs = { sourceSnapshotSha256: sha("final"), objects: [] };
+    const finalRefs = finalManifest(receipt);
     expect(reconcileStalePrecopies(receipt, finalRefs)).toEqual([]);
     expect((await removeStaleOwnedObjects(target, receipt, finalRefs)).removed).toEqual([]);
     expect(target.objects.has("import/document")).toBe(true);
@@ -212,6 +219,23 @@ describe("snapshot-referenced object copy", () => {
 });
 
 describe("explicit stale precopy removal", () => {
+  it("rejects another transfer, snapshot lineage or store before any deletion", async () => {
+    const { source, target, input } = fixture();
+    const receipt = await copyReferencedObjects(source, target, input);
+    for (const override of [{ transferId: "different-workspace-transfer" }, { previousReceiptSha256: sha("another receipt") },
+      { sourceStoreId: "other-source" }, { targetStoreId: "other-target" }]) {
+      await expect(removeStaleOwnedObjects(target, receipt, finalManifest(receipt, [], override)))
+        .rejects.toMatchObject({ code: "FINAL_MANIFEST_LINEAGE_MISMATCH" });
+    }
+    const tampered = finalManifest(receipt, input.objects);
+    tampered.objects = [];
+    await expect(removeStaleOwnedObjects(target, receipt, tampered))
+      .rejects.toMatchObject({ code: "FINAL_MANIFEST_DIGEST_MISMATCH" });
+    await expect(removeStaleOwnedObjects(target, receipt, { sourceSnapshotSha256: sha("unbound"), objects: [] }))
+      .rejects.toMatchObject({ code: "INVALID_FINAL_MANIFEST" });
+    expect(target.deleteCalls).toBe(0);
+    expect(target.objects.has("import/document")).toBe(true);
+  });
   it("uses final references for deletes and renames and preserves shared or still-referenced objects", async () => {
     const source = new MemoryStore("source");
     const target = new MemoryStore("target");
@@ -219,10 +243,11 @@ describe("explicit stale precopy removal", () => {
     target.put("import/shared", "shared");
     const original = manifest(["keep", "rename", "delete", "shared"].map((key) => reference(key, key)));
     const prior = await copyReferencedObjects(source, target, original);
-    const finalRefs = manifest([reference("keep", "keep"), reference("rename", "rename", "import/renamed"), reference("shared", "shared")], { sourceSnapshotSha256: sha("final snapshot") });
+    const finalCopy = manifest([reference("keep", "keep"), reference("rename", "rename", "import/renamed"), reference("shared", "shared")], { sourceSnapshotSha256: sha("final snapshot") });
+    const finalRefs = finalManifest(prior, finalCopy.objects, { sourceSnapshotSha256: finalCopy.sourceSnapshotSha256 });
     expect(reconcileStalePrecopies(prior, finalRefs).map((entry) => entry.targetKey)).toEqual(["import/rename", "import/delete"]);
     expect(target.deleteCalls).toBe(0);
-    await copyReferencedObjects(source, target, finalRefs);
+    await copyReferencedObjects(source, target, finalCopy);
     const removed = await removeStaleOwnedObjects(target, prior, finalRefs);
     expect(removed.removed.map((entry) => entry.targetKey)).toEqual(["import/rename", "import/delete"]);
     expect([...target.objects.keys()].sort()).toEqual(["import/keep", "import/renamed", "import/shared"]);
@@ -232,7 +257,7 @@ describe("explicit stale precopy removal", () => {
   it("rejects changed ETags, ownership and wrong containers", async () => {
     const { source, target, input } = fixture();
     const receipt = await copyReferencedObjects(source, target, input);
-    const finalRefs = { sourceSnapshotSha256: sha("final"), objects: [] };
+    const finalRefs = finalManifest(receipt);
     await expect(removeStaleOwnedObjects(new MemoryStore("wrong-target"), receipt, finalRefs)).rejects.toMatchObject({ code: "TARGET_IDENTITY_MISMATCH" });
     const object = target.objects.get("import/document");
     object.metadata.transferid = "other";
@@ -247,7 +272,7 @@ describe("explicit stale precopy removal", () => {
     const { source, target, input } = fixture();
     const receipt = await copyReferencedObjects(source, target, input);
     target.onDelete = (key) => { target.put(key, "later work", {}); };
-    await expect(removeStaleOwnedObjects(target, receipt, { sourceSnapshotSha256: sha("final"), objects: [] }))
+    await expect(removeStaleOwnedObjects(target, receipt, finalManifest(receipt)))
       .rejects.toMatchObject({ code: "STALE_REMOVAL_FAILED" });
     expect(target.objects.get("import/document").data.toString()).toBe("later work");
   });

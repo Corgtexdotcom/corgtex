@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID, createCipheriv, createDecipheriv } from "node:crypto";
+import { randomUUID, createCipheriv, createDecipheriv, createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import pg from "pg";
@@ -69,7 +69,9 @@ before(async () => {
     formatVersion: 1, transferId: "synthetic-import", workspaceId, workspaceSlug: workspaceId, schemaSha256: inventory.schemaSha256,
     tables: Object.fromEntries(inventory.tables.filter((table: { rows: string }) => BigInt(table.rows) > 0n).map((table: { name: string }) => [table.name, {
       disposition: table.name === "_prisma_migrations" ? "operator-control" : "copy", reason: "Explicit synthetic importer fixture",
-      fields: { ...(table.name === "EmailDelivery" ? { userId: { kind: "reference", reason: "Explicit scalar user binding", references: { table: "User", column: "id" } } } : {}),
+      fields: { ...(table.name === "User" ? { passwordHash: { kind: "secret", reason: "Source password is replaced for new target identities" } } : {}),
+        ...(table.name === "KnowledgeChunk" ? { sourceId: { kind: "reference", reason: "Explicit polymorphic historical source identifier" } } : {}),
+        ...(table.name === "EmailDelivery" ? { providerMessageId: { kind: "reference", reason: "Provider receipt identity" }, workspaceId: { kind: "reference", reason: "Scalar tenant ownership" }, userId: { kind: "reference", reason: "Explicit scalar user binding", references: { table: "User", column: "id" } } } : {}),
         ...Object.fromEntries(inventory.schema.columns.filter((column: { table: string; type: string }) => column.table === table.name && (/^jsonb?$/.test(column.type) || column.type.endsWith("[]")))
           .map((column: { name: string }) => [column.name, { kind: "content", reason: "Synthetic content remains in PostgreSQL text format" }])) },
     }])),
@@ -230,7 +232,7 @@ test("an old session cannot be published with imported identities", async () => 
     const projection = columns.map((column: { name: string }) => `"${column.name.replaceAll('"', '""')}"::text`).join(",");
     const rows = (await source.query(`SELECT json_build_array(${projection})::text AS row FROM "Session" WHERE id=$1`, [sessionId])).rows.map((entry) => JSON.parse(entry.row));
     const value = changedSnapshot((copy) => {
-      copy.manifest.tables.Session = { disposition: "copy", reason: "Synthetic forbidden credential import" };
+      copy.manifest.tables.Session = { disposition: "copy", reason: "Synthetic forbidden credential import", fields: { tokenHash: { kind: "secret", reason: "Source session capability cannot transfer" } } };
       copy.tables.push({ name: "Session", columns, primaryKey: ["id"], foreignKeys: [{ columns: ["userId"], referencedTable: "User", referencedColumns: ["id"] }], rows, sha256: hashFrames(rows) });
       copy.dispositions.push({ table: "Session", sourceRows: "1", selectedRows: "1", disposition: "copy", reason: "Synthetic forbidden credential import" });
     });
@@ -342,4 +344,133 @@ test("JSON replacement canonicalizes through PostgreSQL without rounding", async
   input.transforms = { KnowledgeChunk: { metadata: { kind: "map-values", values: { [original]: '{"replacement":9007199254740993}' }, reason: "Explicit reviewed metadata replacement" } } };
   await importTenantSnapshot(target, snapshot, input);
   assert.equal((await target.query('SELECT metadata->>\'replacement\' AS value FROM "KnowledgeChunk" WHERE id=$1', [knowledgeId])).rows[0].value, "9007199254740993");
+}));
+
+test("rehashed snapshots cannot omit or misclassify a known credential before opening a transaction", async () => withTarget(async (target) => {
+  const id = randomUUID();
+  await source.query(`INSERT INTO "CommunicationInstallation"(id,"workspaceId",provider,"externalWorkspaceId","botTokenEnc",status,"updatedAt") VALUES($1,$2,'SLACK','synthetic-provider','synthetic-source-credential','DISCONNECTED',now())`, [id, workspaceId]);
+  let value: TenantTransferSnapshot;
+  try {
+    const manifest = structuredClone(snapshot.manifest);
+    manifest.tables.CommunicationInstallation = { disposition: "copy", reason: "Synthetic disabled historical installation", fields: {
+      externalWorkspaceId: { kind: "reference", reason: "Provider identity preserved as explicit opaque reference" },
+      botTokenEnc: { kind: "secret", reason: "Source credential must be removed before publication" },
+      scopes: { kind: "content", reason: "Original scopes" }, optionalScopes: { kind: "content", reason: "Original optional scopes" },
+    } };
+    value = await exportTenantSnapshot(source, manifest);
+  } finally { await source.query('DELETE FROM "CommunicationInstallation" WHERE id=$1', [id]); }
+  for (const kind of [undefined, "content"] as const) {
+    const bad = structuredClone(value);
+    if (kind) bad.manifest.tables.CommunicationInstallation.fields!.botTokenEnc.kind = kind;
+    else delete bad.manifest.tables.CommunicationInstallation.fields!.botTokenEnc;
+    bad.manifestSha256 = hashCanonical(bad.manifest); const { sha256: _digest, ...body } = bad; bad.sha256 = hashCanonical(body);
+    let queries = 0;
+    await assert.rejects(importTenantSnapshot({ query: async (sql, parameters) => { queries++; return target.query(sql, parameters); } }, bad, options(bad)), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:CommunicationInstallation.botTokenEnc:secret/);
+    assert.equal(queries, 0); await assertAbsent(target);
+  }
+  await assert.rejects(importTenantSnapshot(target, value, options(value)), /TRANSFER_SECRET_DISPOSITION_REQUIRED/); await assertAbsent(target);
+  const input = options(value); input.transforms = { CommunicationInstallation: { botTokenEnc: { kind: "null", reason: "Remove source installation credential" } } };
+  await importTenantSnapshot(target, value, input);
+  assert.equal((await target.query('SELECT "botTokenEnc" FROM "CommunicationInstallation" WHERE id=$1', [id])).rows[0].botTokenEnc, null);
+}));
+
+test("exact reviewed inline locator exception leaves every other real object subject to receipt verification", async () => withTarget(async (target) => {
+  const inline = randomUUID(), blob = randomUUID();
+  const inlineLocator = "synthetic/retained-inline.txt", blobLocator = "synthetic/real-blob.bin";
+  await source.query(`INSERT INTO "Document"(id,"workspaceId",title,source,"storageKey","textContent","updatedAt") VALUES($1,$3,'Inline','synthetic',$4,'Complete retained inline content',now()),($2,$3,'Blob','synthetic',$5,NULL,now())`, [inline, blob, workspaceId, inlineLocator, blobLocator]);
+  let value: TenantTransferSnapshot;
+  try {
+    const manifest = structuredClone(snapshot.manifest);
+    manifest.tables.Document = { disposition: "copy", reason: "Reviewed historical mixed source locators", fields: {
+      storageKey: { kind: "object", reason: "Each locator requires a verified object or exact absence/inline evidence", retainedInlineValues: [{ valueSha256: createHash("sha256").update(inlineLocator).digest("hex"), evidenceSha256: "a".repeat(64), reason: "Synthetic source object absence and complete retained text verified" }] },
+    } };
+    value = await exportTenantSnapshot(source, manifest);
+  } finally { await source.query('DELETE FROM "Document" WHERE id=ANY($1::text[])', [[inline, blob]]); }
+  const input = options(value);
+  await assert.rejects(importTenantSnapshot(target, value, input), /TRANSFER_OBJECT_REFERENCE_UNVERIFIED/); await assertAbsent(target);
+  const misclassified = structuredClone(value); misclassified.manifest.tables.Document.fields!.storageKey = { kind: "content", reason: "Mixed column content cannot exempt blob rows" };
+  misclassified.manifestSha256 = hashCanonical(misclassified.manifest); const { sha256: _hash, ...badBody } = misclassified; misclassified.sha256 = hashCanonical(badBody);
+  await assert.rejects(importTenantSnapshot(target, misclassified, options(misclassified)), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:Document.storageKey:object/);
+  const emptyInline = structuredClone(value); setColumn(emptyInline, "Document", inline, "textContent", null);
+  for (const table of emptyInline.tables) table.sha256 = hashFrames(table.rows);
+  const { sha256: _old, ...emptyBody } = emptyInline; emptyInline.sha256 = hashCanonical(emptyBody);
+  await assert.rejects(importTenantSnapshot(target, emptyInline, options(emptyInline)), /TRANSFER_INLINE_CONTENT_REQUIRED/);
+  input.objectReceipt = objectReceipt(value, [{ sourceKey: blobLocator, targetKey: "target/real-blob.bin", sha256: "b".repeat(64), bytes: 3, ownership: "created", etag: "synthetic-etag" }]);
+  input.objectBindings = [{ table: "Document", column: "storageKey", sourceValue: blobLocator, targetValue: "target/real-blob.bin", sourceKey: blobLocator, targetKey: "target/real-blob.bin", sha256: "b".repeat(64) }];
+  input.transforms = { Document: { storageKey: { kind: "map-values", values: { [inlineLocator]: inlineLocator, [blobLocator]: "target/real-blob.bin" }, reason: "Exact verified object mapping, retained inline locator unchanged" } } };
+  const alteredInline = structuredClone(input);
+  (alteredInline.transforms!.Document.storageKey as { values: Record<string, string> }).values[inlineLocator] = "unverified/other-location";
+  await assert.rejects(importTenantSnapshot(target, value, alteredInline), /TRANSFER_INLINE_LOCATOR_MUST_REMAIN/); await assertAbsent(target);
+  const removedContent = structuredClone(input);
+  removedContent.transforms!.Document.textContent = { kind: "null", reason: "Cannot remove content that justifies the inline exception" };
+  await assert.rejects(importTenantSnapshot(target, value, removedContent), /TRANSFER_INLINE_CONTENT_MUST_REMAIN/); await assertAbsent(target);
+  const replacedContent = structuredClone(input);
+  replacedContent.transforms!.Document.textContent = { kind: "map-values", values: { "Complete retained inline content": "Different nonempty text has no matching original evidence" }, reason: "Original inline evidence cannot authorize a replacement" };
+  await assert.rejects(importTenantSnapshot(target, value, replacedContent), /TRANSFER_INLINE_CONTENT_MUST_REMAIN/); await assertAbsent(target);
+  await importTenantSnapshot(target, value, input);
+  assert.equal((await target.query('SELECT "storageKey" FROM "Document" WHERE id=$1', [inline])).rows[0].storageKey, inlineLocator);
+  assert.equal((await target.query('SELECT "storageKey" FROM "Document" WHERE id=$1', [blob])).rows[0].storageKey, "target/real-blob.bin");
+}));
+
+test("source reserved marker is rejected before BEGIN rather than colliding late or being discarded", async () => withTarget(async (target) => {
+  const value = changedSnapshot((copy) => {
+    const flags = copy.tables.find((table) => table.name === "WorkspaceFeatureFlag")!;
+    flags.rows[0][flags.columns.findIndex((column) => column.name === "flag")] = "operator_import_inactive";
+  });
+  let queries = 0;
+  await assert.rejects(importTenantSnapshot({ query: async (sql, parameters) => { queries++; return target.query(sql, parameters); } }, value, options(value)), /TRANSFER_SOURCE_IMPORT_MARKER_MUST_BE_STAGED/);
+  assert.equal(queries, 0); await assertAbsent(target);
+}));
+
+test("explicit tracking token disable preserves link identities and click history without retaining source capability", async () => withTarget(async (target) => {
+  const first = randomUUID(), second = randomUUID();
+  await source.query(`INSERT INTO "NewspaperTrackedLink"(id,"workspaceId","runKey","targetUrl","targetUrlHash","tokenHash","clickCount","firstClickedAt","lastClickedAt","updatedAt")
+    VALUES($1,$3,'synthetic-run','https://example.invalid/first','first',$4,7,'2026-09-01','2026-09-02',now()),
+          ($2,$3,'synthetic-run','https://example.invalid/second','second',$5,3,'2026-09-03','2026-09-04',now())`, [first, second, workspaceId, "a".repeat(64), "b".repeat(64)]);
+  let value: TenantTransferSnapshot;
+  try {
+    const manifest = structuredClone(snapshot.manifest);
+    manifest.tables.NewspaperTrackedLink = { disposition: "copy", reason: "Preserve click history with source token capability disabled", fields: { tokenHash: { kind: "secret", reason: "Old tracking capability must not work on target" } } };
+    value = await exportTenantSnapshot(source, manifest);
+  } finally { await source.query('DELETE FROM "NewspaperTrackedLink" WHERE id=ANY($1::text[])', [[first, second]]); }
+  const input = options(value);
+  await assert.rejects(importTenantSnapshot(target, value, input), /TRANSFER_SECRET_DISPOSITION_REQUIRED/); await assertAbsent(target);
+  const wrong = options(value); wrong.transforms = { NewspaperTrackedLink: { tokenHash: { kind: "disable-tracking-token", reason: "Disable source tracking capability" } }, Workspace: { name: { kind: "disable-tracking-token", reason: "This transform cannot affect arbitrary fields" } } };
+  await assert.rejects(importTenantSnapshot(target, value, wrong), /TRANSFER_TRACKING_TOKEN_TRANSFORM_FORBIDDEN/); await assertAbsent(target);
+  input.transforms = { NewspaperTrackedLink: { tokenHash: { kind: "disable-tracking-token", reason: "Keep click history while making old lookup hashes unreachable" } } };
+  await importTenantSnapshot(target, value, input);
+  const rows = (await target.query('SELECT id,"tokenHash","clickCount","firstClickedAt"::text,"lastClickedAt"::text FROM "NewspaperTrackedLink" ORDER BY "clickCount" DESC')).rows;
+  assert.deepEqual(rows.map((row) => row.id), [first, second]);
+  assert.deepEqual(rows.map((row) => row.clickCount), [7, 3]);
+  assert.equal(new Set(rows.map((row) => row.tokenHash)).size, 2);
+  for (const row of rows) {
+    assert.equal(row.tokenHash, `disabled:operator-import:${value.manifest.transferId}:${row.id}`);
+    assert.equal(/^[a-f0-9]{64}$/.test(row.tokenHash), false);
+  }
+  assert.equal((await target.query('SELECT count(*) FROM "NewspaperTrackedLink" WHERE "tokenHash"=ANY($1::text[])', [["a".repeat(64), "b".repeat(64)]])).rows[0].count, "0");
+  const original = value.tables.find((table) => table.name === "NewspaperTrackedLink")!;
+  for (const row of rows) for (const field of ["firstClickedAt", "lastClickedAt"]) {
+    const sourceRow = original.rows.find((candidate) => candidate[original.columns.findIndex((column) => column.name === "id")] === row.id)!;
+    assert.equal(row[field], sourceRow[original.columns.findIndex((column) => column.name === field)]);
+  }
+}));
+
+test("demo qualification bearer token requires explicit secret classification and null removal", async () => withTarget(async (target) => {
+  const id = randomUUID();
+  await source.query('INSERT INTO "DemoLead"(id,"workspaceId",email,"qualifyToken","visitCount") VALUES($1,$2,\'synthetic-lead@example.invalid\',\'synthetic-bearer-token\',9)', [id, workspaceId]);
+  let value: TenantTransferSnapshot;
+  try {
+    const manifest = structuredClone(snapshot.manifest);
+    manifest.tables.DemoLead = { disposition: "copy", reason: "Preserve lead history while removing source bearer capability", fields: { qualifyToken: { kind: "secret", reason: "Public qualification capability must not transfer" } } };
+    value = await exportTenantSnapshot(source, manifest);
+  } finally { await source.query('DELETE FROM "DemoLead" WHERE id=$1', [id]); }
+  const bad = structuredClone(value); bad.manifest.tables.DemoLead.fields!.qualifyToken.kind = "content";
+  bad.manifestSha256 = hashCanonical(bad.manifest); const { sha256: _hash, ...body } = bad; bad.sha256 = hashCanonical(body);
+  let queries = 0;
+  await assert.rejects(importTenantSnapshot({ query: async (sql, parameters) => { queries++; return target.query(sql, parameters); } }, bad, options(bad)), /TRANSFER_SCALAR_FIELD_POLICY_REQUIRED:DemoLead.qualifyToken:secret/);
+  assert.equal(queries, 0);
+  await assert.rejects(importTenantSnapshot(target, value, options(value)), /TRANSFER_QUALIFICATION_TOKEN_MUST_BE_REMOVED/); await assertAbsent(target);
+  const input = options(value); input.transforms = { DemoLead: { qualifyToken: { kind: "null", reason: "Disable unauthenticated source qualification lookup" } } };
+  await importTenantSnapshot(target, value, input);
+  assert.deepEqual((await target.query('SELECT "qualifyToken","visitCount" FROM "DemoLead" WHERE id=$1', [id])).rows[0], { qualifyToken: null, visitCount: 9 });
 }));
