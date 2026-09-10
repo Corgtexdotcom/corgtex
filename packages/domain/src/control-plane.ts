@@ -9862,6 +9862,9 @@ type LockedManagedAzureRecordDeployment = {
   releaseVersion: string | null;
   lastHealthStatus: string | null;
   lastHealthError: string | null;
+  bootstrapStatus: string;
+  lastProvisioningError: string | null;
+  updatedAt: Date;
 };
 
 function managedAzureRecordEligible(deployment: LockedManagedAzureRecordDeployment, workloadClass: string) {
@@ -9880,6 +9883,8 @@ function verifiedManagedAzureBaselineDrift(
     || current.environment !== "production" || !current.customerAccountId
     || initial.releaseLeaseId || current.releaseLeaseId
     || current.deploymentStatus !== "DEGRADED" || current.provisioningStatus !== "degraded"
+    || current.lastProvisioningError !== null
+    || !["not_started", "completed", "applied"].includes(current.bootstrapStatus)
     || current.lastHealthStatus !== "degraded" || !current.releaseImageTag?.trim()
     || current.releaseImageTag === incomingImageTag
     || current.lastHealthError !== `Release drift: expected ${current.releaseImageTag}, got ${observedReleaseLabel(health)}`) return false;
@@ -9887,8 +9892,9 @@ function verifiedManagedAzureBaselineDrift(
     || !current.providerWebServiceId || !current.providerWorkerServiceId) return false;
   const unchanged = ["id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "environment",
     "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId", "providerWorkerServiceId",
-    "releaseImageTag", "releaseVersion"] as const;
-  return unchanged.every((field) => initial[field] === current[field]);
+    "releaseImageTag", "releaseVersion", "bootstrapStatus", "lastProvisioningError"] as const;
+  return unchanged.every((field) => initial[field] === current[field])
+    && initial.updatedAt.getTime() === current.updatedAt.getTime();
 }
 
 function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecordDeployment, target: ManagedAzureRecordTarget) {
@@ -9906,7 +9912,8 @@ async function lockManagedAzureDeployment(tx: Prisma.TransactionClient, deployme
   const [deployment] = await tx.$queryRaw<LockedManagedAzureRecordDeployment[]>`
     SELECT "id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
       "provisioningStatus", "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId",
-      "providerWorkerServiceId", "releaseLeaseId", "releaseImageTag", "releaseVersion", "lastHealthStatus", "lastHealthError"
+      "providerWorkerServiceId", "releaseLeaseId", "releaseImageTag", "releaseVersion", "lastHealthStatus", "lastHealthError",
+      "bootstrapStatus", "lastProvisioningError", "updatedAt"
     FROM "CustomerDeployment"
     WHERE "id" = ${deploymentId}
     FOR UPDATE

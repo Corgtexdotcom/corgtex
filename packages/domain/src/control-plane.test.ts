@@ -7353,6 +7353,13 @@ describe("control plane domain", () => {
   });
 
   it.each([
+    { name: "provisioning error", current: { lastProvisioningError: "Bootstrap endpoint returned 503." } },
+    { name: "failed bootstrap", current: { bootstrapStatus: "failed" } },
+    { name: "pending bootstrap", current: { bootstrapStatus: "pending" } },
+    { name: "in-flight bootstrap", current: { bootstrapStatus: "bootstrapping" } },
+    { name: "changed valid bootstrap", current: { bootstrapStatus: "applied" } },
+    { name: "cleared provisioning error during health", initial: { lastProvisioningError: "Prior bootstrap failure" } },
+    { name: "changed row timestamp", current: { updatedAt: new Date("2026-09-10T00:00:01Z") } },
     { name: "mixed health errors", current: { lastHealthError: "__MIXED__" } },
     { name: "stale observed release", current: { lastHealthError: "Release drift: expected old, got stale" } },
     { name: "noncanonical drift prefix", current: { lastHealthError: "Release drift." } },
@@ -7395,6 +7402,7 @@ describe("control plane domain", () => {
       environment: "production", deploymentStatus: "DEGRADED", provisioningStatus: "degraded",
       releaseImageTag: oldTag, releaseVersion: "release-1", lastHealthStatus: "degraded",
       lastHealthError: driftError, releaseLeaseId: null,
+      bootstrapStatus: "completed", lastProvisioningError: null, updatedAt: new Date("2026-09-10T00:00:00Z"),
       providerSubscriptionId: "123e4567-e89b-42d3-a456-426614174000", providerResourceGroup: "rg-managed",
       providerWebServiceId: "web-a", providerWorkerServiceId: "worker-b",
     };

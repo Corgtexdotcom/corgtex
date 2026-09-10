@@ -6,7 +6,7 @@ import type { AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { probeControlPlaneDeploymentHealth, recordVerifiedControlPlaneRelease } from "./control-plane";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
-import { probeCustomerDeploymentHealth } from "./admin";
+import { probeCustomerDeploymentHealth, triggerCustomerDeploymentBootstrap } from "./admin";
 import {
   abortManagedReleaseLease,
   acquireManagedReleaseLease,
@@ -156,6 +156,115 @@ beforeEach(async () => truncateAllTables());
 afterEach(() => vi.unstubAllGlobals());
 
 describe("CustomerDeployment retained-lease update guard", () => {
+  const bootstrapActor: AppActor = {
+    kind: "user",
+    user: { id: "synthetic-bootstrap-operator", email: "bootstrap@example.test", displayName: "Synthetic operator", globalRole: "OPERATOR" },
+  };
+  function healthyResponse() {
+    return { ok: true, status: 200, json: async () => ({ database: "up", schema: "ready",
+      runtime: { redis: "configured", storage: "configured" },
+      release: { imageTag: NEXT, gitSha: NEXT.slice(4), version: "release-2" } }) };
+  }
+  async function bootstrapReadyDrift() {
+    const deployment = await createManaged();
+    await prisma.customerDeployment.update({ where: { id: deployment.id }, data: {
+      bootstrapBundleUri: "https://fixture.example.test/synthetic-bootstrap.json",
+      bootstrapBundleChecksum: "5".repeat(64), bootstrapBundleSchemaVersion: "1", bootstrapStatus: "completed",
+    } });
+    vi.stubGlobal("fetch", vi.fn(async () => healthyResponse()));
+    await probeManagedDeployment(deployment.id, "control-plane");
+    return deployment;
+  }
+  function triggerBootstrap(deploymentId: string) {
+    return triggerCustomerDeploymentBootstrap(bootstrapActor, { deploymentId,
+      token: "synthetic-test-bootstrap-token", expiresAt: new Date(Date.now() + 60_000) });
+  }
+  function recordRelease(deploymentId: string) {
+    return recordVerifiedControlPlaneRelease(actor, { deploymentId, releaseImageTag: NEXT,
+      releaseVersion: "release-2", reason: "Synthetic bootstrap race recording rejection." });
+  }
+  async function expectNoRecordEffects(deploymentId: string, beforeSnapshots: number) {
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deploymentId } }))
+      .toMatchObject({ releaseImageTag: BASE, releaseVersion: "release-1" });
+    expect(await prisma.customerReleaseTarget.count({ where: { deploymentId } })).toBe(0);
+    expect(await prisma.customerDeploymentEvent.count({ where: { deploymentId, action: "control_plane.release.verified_recorded" } })).toBe(0);
+    expect(await prisma.fleetHealthSnapshot.count({ where: { deploymentId } })).toBe(beforeSnapshots);
+  }
+
+  it.each(["before", "during"])("rejects actual bootstrap HTTP503 failure %s fresh recording health", async (when) => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    let bootstrapDone = false;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (init?.method === "POST") return { ok: false, status: 503 };
+      if (when === "during" && !bootstrapDone) { bootstrapDone = true; await triggerBootstrap(deployment.id); }
+      return healthyResponse();
+    }));
+    if (when === "before") await triggerBootstrap(deployment.id);
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
+      .toMatchObject({ bootstrapStatus: "failed", provisioningStatus: "degraded", lastProvisioningError: "Bootstrap endpoint returned 503." });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
+  it("rejects a generic notes update during fresh recording health", async () => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    const original = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const changed = await prisma.customerDeployment.update({ where: { id: deployment.id }, data: { notes: "Concurrent synthetic operator edit" } });
+      expect(changed.updatedAt.getTime()).toBeGreaterThan(original.updatedAt.getTime());
+      return healthyResponse();
+    }));
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
+      .toMatchObject({ notes: "Concurrent synthetic operator edit", bootstrapStatus: "completed" });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
+  it("claims bootstrap intent before POST and rejects recording and a duplicate while POST is pending", async () => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    let startPost!: () => void;
+    let finishPost!: (value: { ok: boolean; status: number }) => void;
+    const started = new Promise<void>((resolve) => { startPost = resolve; });
+    const pending = new Promise<{ ok: boolean; status: number }>((resolve) => { finishPost = resolve; });
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (init?.method === "POST") { posts++; startPost(); return pending; }
+      return healthyResponse();
+    }));
+    const bootstrap = triggerBootstrap(deployment.id);
+    try {
+      await started;
+      expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
+        .toMatchObject({ bootstrapStatus: "bootstrapping", provisioningStatus: "bootstrapping", deploymentStatus: "DEGRADED" });
+      await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+      await expect(triggerBootstrap(deployment.id)).rejects.toMatchObject({ status: 409 });
+      expect(posts).toBe(1);
+      await expectNoRecordEffects(deployment.id, beforeSnapshots);
+    } finally { finishPost({ ok: false, status: 503 }); await bootstrap; }
+    expect(await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } }))
+      .toMatchObject({ bootstrapStatus: "failed", provisioningStatus: "degraded", lastProvisioningError: "Bootstrap endpoint returned 503." });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
+  it("persists blocked bootstrap failure after a transport exception", async () => {
+    const deployment = await bootstrapReadyDrift();
+    const beforeSnapshots = await prisma.fleetHealthSnapshot.count({ where: { deploymentId: deployment.id } });
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      if (init?.method === "POST") throw new Error("Synthetic bootstrap connection reset");
+      return healthyResponse();
+    }));
+    await expect(triggerBootstrap(deployment.id)).rejects.toBeTruthy();
+    const failed = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
+    expect(failed).toMatchObject({ bootstrapStatus: "failed", provisioningStatus: "degraded", deploymentStatus: "DEGRADED" });
+    expect(failed.lastProvisioningError).toBeTruthy();
+    await expect(recordRelease(deployment.id)).rejects.toMatchObject({ code: "MANAGED_AZURE_TARGET_DRIFT" });
+    await expectNoRecordEffects(deployment.id, beforeSnapshots);
+  });
+
   it.each((["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "SUSPENDED", "RETIRED"] as const)
     .flatMap((deploymentStatus) => ["control-plane", "admin"].flatMap((probeKind) =>
       [false, true].map((duringHealth) => ({ deploymentStatus, duringHealth, probeKind })))))
@@ -193,6 +302,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
   it.each([false, true].flatMap((suppliedTarget) => ["control-plane", "admin"].map((probeKind) => ({ suppliedTarget, probeKind }))))
   ("records a freshly verified release after a $probeKind probe detects only baseline drift (supplied target=$suppliedTarget)", async ({ suppliedTarget, probeKind }) => {
     const deployment = await createManaged();
+    if (suppliedTarget) await prisma.customerDeployment.update({ where: { id: deployment.id }, data: { bootstrapStatus: "completed" } });
     const canary = await createManaged();
     const beforeCanary = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: canary.id } });
     vi.stubGlobal("fetch", vi.fn(async () => ({

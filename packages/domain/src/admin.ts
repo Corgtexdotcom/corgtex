@@ -1345,22 +1345,59 @@ export async function triggerCustomerDeploymentBootstrap(actor: AppActor, params
     tokenHash,
   });
 
-  const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/internal/customer-deployment-bootstrap`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      customerSlug: deployment.customerSlug,
-      bundleUri: deployment.bootstrapBundleUri,
-      checksum: deployment.bootstrapBundleChecksum,
-      schemaVersion: deployment.bootstrapBundleSchemaVersion,
-      expiresAt,
-      tokenHash,
-      signature: hmacSha256Hex(token, signaturePayload),
-    }),
-  });
+  const managedAzure = deployment.deploymentKind === "REMOTE_MANAGED" && deployment.cloudProvider === "AZURE";
+  if (managedAzure) {
+    invariant(deployment.bootstrapStatus !== "bootstrapping" && deployment.provisioningStatus !== "bootstrapping",
+      409, "BOOTSTRAP_IN_PROGRESS", "Customer deployment bootstrap is already in progress.");
+    // Publish intent before the remote operation so release recording cannot
+    // mistake an in-flight bootstrap for recoverable baseline drift.
+    const claim = await prisma.customerDeployment.updateMany({
+      where: {
+        id: deployment.id,
+        updatedAt: deployment.updatedAt,
+        url: deployment.url,
+        customerAccountId: deployment.customerAccountId,
+        deploymentKind: deployment.deploymentKind,
+        cloudProvider: deployment.cloudProvider,
+        bootstrapStatus: deployment.bootstrapStatus,
+        provisioningStatus: deployment.provisioningStatus,
+      },
+      data: { bootstrapStatus: "bootstrapping", provisioningStatus: "bootstrapping", lastProvisioningError: null },
+    });
+    invariant(claim.count === 1, 409, "BOOTSTRAP_TARGET_CHANGED", "Customer deployment changed before bootstrap could start.");
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/internal/customer-deployment-bootstrap`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        customerSlug: deployment.customerSlug,
+        bundleUri: deployment.bootstrapBundleUri,
+        checksum: deployment.bootstrapBundleChecksum,
+        schemaVersion: deployment.bootstrapBundleSchemaVersion,
+        expiresAt,
+        tokenHash,
+        signature: hmacSha256Hex(token, signaturePayload),
+      }),
+    });
+  } catch (error) {
+    if (managedAzure) {
+      await prisma.customerDeployment.update({
+        where: { id: deployment.id },
+        data: {
+          bootstrapStatus: "failed",
+          provisioningStatus: "degraded",
+          lastProvisioningError: "Bootstrap request failed before a response was received.",
+        },
+      });
+    }
+    throw error;
+  }
 
   const bootstrapStatus = response.ok ? "bootstrapping" : "failed";
   const updated = await prisma.customerDeployment.update({
