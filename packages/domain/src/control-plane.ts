@@ -1,4 +1,5 @@
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
+import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { createHash, randomUUID } from "node:crypto";
 import { assertManagedAzureTargetBinding, reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema,
   requireManagedAzureAccountAuthority } from "./managed-azure-targets";
@@ -9731,17 +9732,17 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
     }
   }
 
-  await prisma.customerDeployment.update({
-    where: { id: params.deploymentId },
-    data: {
-      lastHealthCheck: new Date(),
-      lastHealthStatus: status,
-      lastHealthError: error,
-      lastReleaseCheck: new Date(),
-      provisioningStatus: status === "ok" ? "active" : "degraded",
-      ...(deploymentHealthStatus(status) ? { deploymentStatus: deploymentHealthStatus(status) } : {}),
-    },
-  });
+  const healthData = {
+    lastHealthCheck: new Date(),
+    lastHealthStatus: status,
+    lastHealthError: error,
+    lastReleaseCheck: new Date(),
+  };
+  const lifecycleData = {
+    provisioningStatus: status === "ok" ? "active" : "degraded",
+    ...(deploymentHealthStatus(status) ? { deploymentStatus: deploymentHealthStatus(status) } : {}),
+  };
+  await persistCustomerDeploymentHealth({ deployment, health: healthData, lifecycle: lifecycleData });
   await Promise.all([
     recordFleetHealthSnapshot({
       customerAccountId: deployment.customerAccountId,
@@ -9857,10 +9858,43 @@ type LockedManagedAzureRecordDeployment = {
   providerWebServiceId: string | null;
   providerWorkerServiceId: string | null;
   releaseLeaseId: string | null;
+  releaseImageTag: string | null;
+  releaseVersion: string | null;
+  lastHealthStatus: string | null;
+  lastHealthError: string | null;
+  bootstrapStatus: string;
+  lastProvisioningError: string | null;
+  updatedAt: Date;
 };
 
 function managedAzureRecordEligible(deployment: LockedManagedAzureRecordDeployment, workloadClass: string) {
   return !deployment.releaseLeaseId && managedAzureReleaseEligible(deployment, workloadClass);
+}
+
+function verifiedManagedAzureBaselineDrift(
+  initial: LockedManagedAzureRecordDeployment,
+  current: LockedManagedAzureRecordDeployment,
+  health: CustomerDeploymentHealthPayload | null,
+  incomingImageTag: string,
+) {
+  // A probe can mark an otherwise healthy new runtime degraded against its old
+  // baseline. Only release recording may recover that exact, freshly verified case.
+  if (current.deploymentKind !== "REMOTE_MANAGED" || current.cloudProvider !== "AZURE"
+    || current.environment !== "production" || !current.customerAccountId
+    || initial.releaseLeaseId || current.releaseLeaseId
+    || current.deploymentStatus !== "DEGRADED" || current.provisioningStatus !== "degraded"
+    || current.lastProvisioningError !== null
+    || !["not_started", "completed", "applied"].includes(current.bootstrapStatus)
+    || current.lastHealthStatus !== "degraded" || !current.releaseImageTag?.trim()
+    || current.releaseImageTag === incomingImageTag
+    || current.lastHealthError !== `Release drift: expected ${current.releaseImageTag}, got ${observedReleaseLabel(health)}`) return false;
+  if (!current.providerSubscriptionId || !current.providerResourceGroup
+    || !current.providerWebServiceId || !current.providerWorkerServiceId) return false;
+  const unchanged = ["id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "environment",
+    "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId", "providerWorkerServiceId",
+    "releaseImageTag", "releaseVersion", "bootstrapStatus", "lastProvisioningError"] as const;
+  return unchanged.every((field) => initial[field] === current[field])
+    && initial.updatedAt.getTime() === current.updatedAt.getTime();
 }
 
 function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecordDeployment, target: ManagedAzureRecordTarget) {
@@ -9874,11 +9908,12 @@ function managedAzureTargetMatchesDeployment(deployment: LockedManagedAzureRecor
     && target.acrServer === `${target.acrName}.azurecr.io`;
 }
 
-async function lockManagedAzureRecordDeployment(tx: Prisma.TransactionClient, deploymentId: string) {
+async function lockManagedAzureDeployment(tx: Prisma.TransactionClient, deploymentId: string) {
   const [deployment] = await tx.$queryRaw<LockedManagedAzureRecordDeployment[]>`
     SELECT "id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "environment", "deploymentStatus",
       "provisioningStatus", "providerSubscriptionId", "providerResourceGroup", "providerWebServiceId",
-      "providerWorkerServiceId", "releaseLeaseId"
+      "providerWorkerServiceId", "releaseLeaseId", "releaseImageTag", "releaseVersion", "lastHealthStatus", "lastHealthError",
+      "bootstrapStatus", "lastProvisioningError", "updatedAt"
     FROM "CustomerDeployment"
     WHERE "id" = ${deploymentId}
     FOR UPDATE
@@ -9946,7 +9981,7 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
 
   await prisma.$transaction(async (tx) => {
     if (params.managedAzureTarget || deployment.cloudProvider === "AZURE") {
-      const current = await lockManagedAzureRecordDeployment(tx, params.deploymentId);
+      const current = await lockManagedAzureDeployment(tx, params.deploymentId);
       invariant(current && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
         409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed before the release baseline could be recorded.");
       if (current.deploymentKind === "HOSTED_DEDICATED") {
@@ -9961,9 +9996,12 @@ export async function recordVerifiedControlPlaneRelease(actor: AppActor, params:
           && supplied.acrServer === protectedTarget.acrServer && managedAzureTargetMatchesDeployment(current, supplied),
         409, "MANAGED_AZURE_TARGET_DRIFT", "Protected hosted release target or selection changed before recording.");
       } else {
+        const recordDeployment = verifiedManagedAzureBaselineDrift(deployment, current, health, releaseImageTag)
+          ? { ...current, deploymentStatus: "ACTIVE" as const, provisioningStatus: "active" }
+          : current;
         invariant(current.deploymentKind === "REMOTE_MANAGED"
-          && (params.managedAzureTarget ? managedAzureTargetMatchesDeployment(current, params.managedAzureTarget)
-            : managedAzureRecordEligible(current, "ACTIVE_CLIENT_PRIMARY")),
+          && (params.managedAzureTarget ? managedAzureTargetMatchesDeployment(recordDeployment, params.managedAzureTarget)
+            : managedAzureRecordEligible(recordDeployment, "ACTIVE_CLIENT_PRIMARY")),
           409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure release authority changed before recording.");
       }
     }

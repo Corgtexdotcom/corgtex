@@ -7352,6 +7352,84 @@ describe("control plane domain", () => {
     }
   });
 
+  it.each([
+    { name: "provisioning error", current: { lastProvisioningError: "Bootstrap endpoint returned 503." } },
+    { name: "failed bootstrap", current: { bootstrapStatus: "failed" } },
+    { name: "pending bootstrap", current: { bootstrapStatus: "pending" } },
+    { name: "in-flight bootstrap", current: { bootstrapStatus: "bootstrapping" } },
+    { name: "changed valid bootstrap", current: { bootstrapStatus: "applied" } },
+    { name: "cleared provisioning error during health", initial: { lastProvisioningError: "Prior bootstrap failure" } },
+    { name: "changed row timestamp", current: { updatedAt: new Date("2026-09-10T00:00:01Z") } },
+    { name: "mixed health errors", current: { lastHealthError: "__MIXED__" } },
+    { name: "stale observed release", current: { lastHealthError: "Release drift: expected old, got stale" } },
+    { name: "noncanonical drift prefix", current: { lastHealthError: "Release drift." } },
+    { name: "missing baseline", current: { releaseImageTag: null } },
+    { name: "already recorded incoming baseline", current: { releaseImageTag: `sha-${"2".repeat(40)}` } },
+    { name: "changed baseline", current: { releaseImageTag: `sha-${"3".repeat(40)}` } },
+    { name: "changed baseline version", current: { releaseVersion: "changed" } },
+    { name: "nondegraded health", current: { lastHealthStatus: "down" } },
+    { name: "suspended lifecycle", current: { deploymentStatus: "SUSPENDED" } },
+    { name: "nondegraded provisioning", current: { provisioningStatus: "failed" } },
+    { name: "retained lease", current: { releaseLeaseId: "lease-current" } },
+    { name: "lease present before health", initial: { releaseLeaseId: "lease-before-health" } },
+    { name: "changed account", current: { customerAccountId: "other-account" } },
+    { name: "changed URL", current: { url: "https://other.example.test" } },
+    { name: "changed provider subscription", initial: { providerSubscriptionId: "other-subscription" } },
+    { name: "changed provider resource group", initial: { providerResourceGroup: "other-rg" } },
+    { name: "changed provider web app", initial: { providerWebServiceId: "other-web" } },
+    { name: "changed provider worker app", initial: { providerWorkerServiceId: "other-worker" } },
+    { name: "changed deployment kind", initial: { deploymentKind: "HOSTED_DEDICATED" } },
+    { name: "changed cloud", current: { cloudProvider: "RAILWAY" } },
+    { name: "nonproduction environment", current: { environment: "staging" } },
+    { name: "missing provider identity", current: { providerSubscriptionId: null } },
+    { name: "incorrect requested target", target: { workerAppName: "wrong-worker" } },
+    { name: "canary workload", target: { workloadClass: "ACTIVE_CLIENT_CANARY" } },
+    { name: "fresh unhealthy runtime", health: { database: "down" }, errorCode: "HEALTH_NOT_VERIFIED" },
+    { name: "fresh mismatched release", health: { release: { imageTag: "wrong", gitSha: "wrong", version: "release-2" } }, errorCode: "RELEASE_MISMATCH" },
+    { name: "fresh mismatched version", health: { release: { imageTag: `sha-${"2".repeat(40)}`, version: "wrong" } }, errorCode: "RELEASE_VERSION_MISMATCH" },
+  ] as Array<{ name: string; current?: Record<string, unknown>; initial?: Record<string, unknown>;
+    target?: Record<string, string>; health?: Record<string, unknown>; errorCode?: string }>)
+  ("rejects verified baseline drift recovery with $name", async (scenario) => {
+    const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
+    const oldTag = `sha-${"1".repeat(40)}`;
+    const newSha = "2".repeat(40);
+    const newTag = `sha-${newSha}`;
+    const driftError = `Release drift: expected ${oldTag}, got ${newTag} / ${newSha}`;
+    const deployment = {
+      id: "inst-1", label: "Synthetic drift recovery", customerAccountId: "cust-1",
+      url: "https://customer.test", managedWorkspaceId: null, managedWorkspace: null,
+      supportCredentialEnc: null, deploymentKind: "REMOTE_MANAGED", cloudProvider: "AZURE",
+      environment: "production", deploymentStatus: "DEGRADED", provisioningStatus: "degraded",
+      releaseImageTag: oldTag, releaseVersion: "release-1", lastHealthStatus: "degraded",
+      lastHealthError: driftError, releaseLeaseId: null,
+      bootstrapStatus: "completed", lastProvisioningError: null, updatedAt: new Date("2026-09-10T00:00:00Z"),
+      providerSubscriptionId: "123e4567-e89b-42d3-a456-426614174000", providerResourceGroup: "rg-managed",
+      providerWebServiceId: "web-a", providerWorkerServiceId: "worker-b",
+    };
+    const current = { ...deployment, ...scenario.current };
+    if (current.lastHealthError === "__MIXED__") current.lastHealthError = `${driftError}; Redis missing`;
+    prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({ ...deployment, ...scenario.initial });
+    prismaMock.$queryRaw.mockResolvedValueOnce([current]);
+    global.fetch = vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ database: "up", schema: "ready", runtime: { redis: "configured", storage: "configured" },
+        release: { imageTag: newTag, gitSha: newSha, version: "release-2" }, ...scenario.health }),
+    })) as any;
+    await expect(recordVerifiedControlPlaneRelease(operatorActor, {
+      deploymentId: deployment.id, releaseImageTag: newTag, releaseVersion: "release-2",
+      reason: "Reject unsafe synthetic drift recovery.",
+      managedAzureTarget: {
+        subscriptionId: deployment.providerSubscriptionId, resourceGroup: deployment.providerResourceGroup,
+        acrName: "acr12", acrServer: "acr12.azurecr.io", webAppName: "web-a", workerAppName: "worker-b",
+        workloadClass: "ACTIVE_CLIENT_PRIMARY", ...scenario.target,
+      },
+    })).rejects.toMatchObject({ code: scenario.errorCode ?? "MANAGED_AZURE_TARGET_DRIFT" });
+    expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+    expect(prismaMock.customerReleaseTarget.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.customerDeploymentEvent.create).not.toHaveBeenCalled();
+    expect(prismaMock.fleetHealthSnapshot.create).not.toHaveBeenCalled();
+  });
+
   it("rejects verified release records when the supplied version differs from live health", async () => {
     const { recordVerifiedControlPlaneRelease } = await import("./control-plane");
     const sha = "2".repeat(40);

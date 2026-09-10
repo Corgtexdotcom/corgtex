@@ -7,6 +7,7 @@ import { AppError, invariant } from "./errors";
 import { requestPasswordReset } from "./password-reset";
 import { createMember } from "./members";
 import { requireGlobalOperator } from "./auth";
+import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { createWorkspace } from "./workspaces";
 import {
   createRailwayClientFromEnv,
@@ -837,16 +838,18 @@ export async function probeCustomerDeploymentHealth(actor: AppActor, id: string)
     error = e.message;
   }
 
-  await prisma.customerDeployment.update({
-    where: { id },
-    data: {
+  await persistCustomerDeploymentHealth({
+    deployment,
+    health: {
       lastHealthCheck: new Date(),
       lastHealthStatus: status,
       lastHealthError: error,
       lastReleaseCheck: health?.release ? new Date() : null,
+    },
+    lifecycle: {
       provisioningStatus: status === "ok" ? "active" : "degraded",
       deploymentStatus: status === "ok" ? "ACTIVE" : "DEGRADED",
-    }
+    },
   });
   await recordCustomerDeploymentEvent(actor, id, "customer_deployment.health_probed", { status, error });
 }
@@ -1342,32 +1345,86 @@ export async function triggerCustomerDeploymentBootstrap(actor: AppActor, params
     tokenHash,
   });
 
-  const response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/internal/customer-deployment-bootstrap`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      customerSlug: deployment.customerSlug,
-      bundleUri: deployment.bootstrapBundleUri,
-      checksum: deployment.bootstrapBundleChecksum,
-      schemaVersion: deployment.bootstrapBundleSchemaVersion,
-      expiresAt,
-      tokenHash,
-      signature: hmacSha256Hex(token, signaturePayload),
-    }),
-  });
+  const managedAzure = deployment.deploymentKind === "REMOTE_MANAGED" && deployment.cloudProvider === "AZURE";
+  if (managedAzure) {
+    // Publish intent before the remote operation so release recording cannot
+    // mistake an in-flight bootstrap for recoverable baseline drift.
+    // Explicit operator retries remain available after an interrupted dispatch;
+    // the receiver's consumed-token guard prevents applying the same seed twice.
+    const claim = await prisma.customerDeployment.updateMany({
+      where: {
+        id: deployment.id,
+        updatedAt: deployment.updatedAt,
+        url: deployment.url,
+        customerAccountId: deployment.customerAccountId,
+        deploymentKind: deployment.deploymentKind,
+        cloudProvider: deployment.cloudProvider,
+        bootstrapStatus: deployment.bootstrapStatus,
+        provisioningStatus: deployment.provisioningStatus,
+      },
+      data: {
+        bootstrapStatus: "bootstrapping",
+        ...(["SUSPENDED", "RETIRED"].includes(deployment.deploymentStatus) ? {} : { provisioningStatus: "bootstrapping" }),
+        lastProvisioningError: null,
+      },
+    });
+    invariant(claim.count === 1, 409, "BOOTSTRAP_TARGET_CHANGED", "Customer deployment changed before bootstrap could start.");
+  }
 
-  const bootstrapStatus = response.ok ? "bootstrapping" : "failed";
-  const updated = await prisma.customerDeployment.update({
-    where: { id: deployment.id },
-    data: {
-      bootstrapStatus,
-      provisioningStatus: response.ok ? "bootstrapping" : "degraded",
-      lastProvisioningError: response.ok ? null : `Bootstrap endpoint returned ${response.status}.`,
-    },
-  });
+  async function persistBootstrapOutcome(ok: boolean, error: string | null) {
+    const data = {
+      bootstrapStatus: ok ? "bootstrapping" : "failed",
+      provisioningStatus: ok ? "bootstrapping" : "degraded",
+      lastProvisioningError: error,
+    };
+    if (!managedAzure) return prisma.customerDeployment.update({ where: { id: deployment.id }, data });
+
+    return prisma.$transaction(async (tx) => {
+      const [current] = await tx.$queryRaw<Array<Pick<typeof deployment,
+        "id" | "url" | "customerAccountId" | "deploymentKind" | "cloudProvider" | "deploymentStatus" | "provisioningStatus">>>`
+        SELECT "id", "url", "customerAccountId", "deploymentKind", "cloudProvider", "deploymentStatus", "provisioningStatus"
+        FROM "CustomerDeployment" WHERE "id" = ${deployment.id} FOR UPDATE
+      `;
+      invariant(current && current.deploymentKind === deployment.deploymentKind && current.cloudProvider === deployment.cloudProvider
+        && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
+      409, "BOOTSTRAP_TARGET_CHANGED", "Customer deployment changed during bootstrap.");
+      // Record the request outcome without undoing a lifecycle decision made
+      // while the remote request was running.
+      const retainLifecycle = current.deploymentStatus !== deployment.deploymentStatus
+        || current.provisioningStatus !== "bootstrapping";
+      return tx.customerDeployment.update({
+        where: { id: deployment.id },
+        data: { ...data, ...(retainLifecycle ? { provisioningStatus: current.provisioningStatus } : {}) },
+      });
+    });
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${deployment.url.replace(/\/$/, "")}/api/internal/customer-deployment-bootstrap`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        customerSlug: deployment.customerSlug,
+        bundleUri: deployment.bootstrapBundleUri,
+        checksum: deployment.bootstrapBundleChecksum,
+        schemaVersion: deployment.bootstrapBundleSchemaVersion,
+        expiresAt,
+        tokenHash,
+        signature: hmacSha256Hex(token, signaturePayload),
+      }),
+    });
+  } catch (error) {
+    if (managedAzure) {
+      await persistBootstrapOutcome(false, "Bootstrap request failed before a response was received.");
+    }
+    throw error;
+  }
+
+  const updated = await persistBootstrapOutcome(response.ok, response.ok ? null : `Bootstrap endpoint returned ${response.status}.`);
   await recordCustomerDeploymentEvent(actor, deployment.id, "customer_deployment.bootstrap_triggered", {
     status: response.status,
     ok: response.ok,
