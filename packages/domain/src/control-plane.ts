@@ -1,4 +1,5 @@
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
+import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { createHash, randomUUID } from "node:crypto";
 import { assertManagedAzureTargetBinding, reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema,
   requireManagedAzureAccountAuthority } from "./managed-azure-targets";
@@ -9741,27 +9742,7 @@ async function probeControlPlaneDeploymentHealthCore(actor: AppActor, params: {
     provisioningStatus: status === "ok" ? "active" : "degraded",
     ...(deploymentHealthStatus(status) ? { deploymentStatus: deploymentHealthStatus(status) } : {}),
   };
-  if (deployment.cloudProvider === "AZURE" && deployment.deploymentKind === "REMOTE_MANAGED") {
-    await prisma.$transaction(async (tx) => {
-      const current = await lockManagedAzureDeployment(tx, params.deploymentId);
-      invariant(current && current.deploymentKind === "REMOTE_MANAGED" && current.cloudProvider === "AZURE"
-        && current.customerAccountId === deployment.customerAccountId && current.url === deployment.url,
-      409, "MANAGED_AZURE_TARGET_DRIFT", "Managed Azure target changed during the health probe.");
-      // Health may refresh an operational lifecycle, but cannot activate a draft,
-      // suspended or retired deployment, including changes made during the probe.
-      const operational = ["ACTIVE", "DEGRADED"].includes(current.deploymentStatus)
-        && ["active", "degraded"].includes(current.provisioningStatus);
-      await tx.customerDeployment.update({
-        where: { id: params.deploymentId },
-        data: { ...healthData, ...(operational ? lifecycleData : {}) },
-      });
-    });
-  } else {
-    await prisma.customerDeployment.update({
-      where: { id: params.deploymentId },
-      data: { ...healthData, ...lifecycleData },
-    });
-  }
+  await persistCustomerDeploymentHealth({ deployment, health: healthData, lifecycle: lifecycleData });
   await Promise.all([
     recordFleetHealthSnapshot({
       customerAccountId: deployment.customerAccountId,

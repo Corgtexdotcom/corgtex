@@ -6,6 +6,7 @@ import type { AppActor } from "@corgtex/shared";
 import { truncateAllTables } from "../../shared/src/db-test-utils";
 import { probeControlPlaneDeploymentHealth, recordVerifiedControlPlaneRelease } from "./control-plane";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
+import { probeCustomerDeploymentHealth } from "./admin";
 import {
   abortManagedReleaseLease,
   acquireManagedReleaseLease,
@@ -27,6 +28,16 @@ const actor: AppActor = {
   label: "synthetic-release-guard",
   scopes: ["control-plane:read", "control-plane:releases:write"],
 };
+async function probeManagedDeployment(deploymentId: string, probeKind: string) {
+  if (probeKind === "admin") {
+    await probeCustomerDeploymentHealth({
+      kind: "user",
+      user: { id: "synthetic-operator", email: "operator@example.test", displayName: "Synthetic operator", globalRole: "OPERATOR" },
+    }, deploymentId);
+  } else {
+    await probeControlPlaneDeploymentHealth(actor, { deploymentId, reason: "Synthetic new runtime health proof." });
+  }
+}
 function rollbackPayload() {
   return {
     schemaVersion: 1,
@@ -146,8 +157,9 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("CustomerDeployment retained-lease update guard", () => {
   it.each((["DRAFT", "PROVISIONING", "BOOTSTRAPPING", "SUSPENDED", "RETIRED"] as const)
-    .flatMap((deploymentStatus) => [false, true].map((duringHealth) => ({ deploymentStatus, duringHealth }))))
-  ("preserves $deploymentStatus through probe and record (changed during health=$duringHealth)", async ({ deploymentStatus, duringHealth }) => {
+    .flatMap((deploymentStatus) => ["control-plane", "admin"].flatMap((probeKind) =>
+      [false, true].map((duringHealth) => ({ deploymentStatus, duringHealth, probeKind })))))
+  ("preserves $deploymentStatus through $probeKind probe and record (changed during health=$duringHealth)", async ({ deploymentStatus, duringHealth, probeKind }) => {
     const deployment = await createManaged();
     const lifecycle = { deploymentStatus, provisioningStatus: deploymentStatus.toLowerCase() };
     if (!duringHealth) await prisma.customerDeployment.update({ where: { id: deployment.id }, data: lifecycle });
@@ -163,7 +175,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
           release: { imageTag: NEXT, gitSha: NEXT.slice(4), version: "release-2" } }),
       };
     }));
-    await probeControlPlaneDeploymentHealth(actor, { deploymentId: deployment.id, reason: "Preserve synthetic lifecycle during health proof." });
+    await probeManagedDeployment(deployment.id, probeKind);
     const beforeRecord = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
     expect(beforeRecord).toMatchObject({ ...lifecycle, releaseImageTag: BASE, lastHealthStatus: "degraded",
       lastHealthError: `Release drift: expected ${BASE}, got ${NEXT} / ${NEXT.slice(4)}` });
@@ -178,7 +190,8 @@ describe("CustomerDeployment retained-lease update guard", () => {
     expect(await prisma.customerDeploymentEvent.count({ where: { deploymentId: deployment.id, action: "control_plane.release.verified_recorded" } })).toBe(0);
   });
 
-  it.each([false, true])("records a freshly verified release after a health probe detects only baseline drift (supplied target=%s)", async (suppliedTarget) => {
+  it.each([false, true].flatMap((suppliedTarget) => ["control-plane", "admin"].map((probeKind) => ({ suppliedTarget, probeKind }))))
+  ("records a freshly verified release after a $probeKind probe detects only baseline drift (supplied target=$suppliedTarget)", async ({ suppliedTarget, probeKind }) => {
     const deployment = await createManaged();
     const canary = await createManaged();
     const beforeCanary = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: canary.id } });
@@ -192,10 +205,7 @@ describe("CustomerDeployment retained-lease update guard", () => {
         release: { imageTag: NEXT, gitSha: NEXT.slice(4), version: "release-2" },
       }),
     })));
-    await probeControlPlaneDeploymentHealth(actor, {
-      deploymentId: deployment.id,
-      reason: "Synthetic new runtime is serving before baseline recording.",
-    });
+    await probeManagedDeployment(deployment.id, probeKind);
     const drifted = await prisma.customerDeployment.findUniqueOrThrow({ where: { id: deployment.id } });
     expect(drifted).toMatchObject({
       deploymentStatus: "DEGRADED",

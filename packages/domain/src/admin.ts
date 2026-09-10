@@ -7,6 +7,7 @@ import { AppError, invariant } from "./errors";
 import { requestPasswordReset } from "./password-reset";
 import { createMember } from "./members";
 import { requireGlobalOperator } from "./auth";
+import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { createWorkspace } from "./workspaces";
 import {
   createRailwayClientFromEnv,
@@ -837,16 +838,18 @@ export async function probeCustomerDeploymentHealth(actor: AppActor, id: string)
     error = e.message;
   }
 
-  await prisma.customerDeployment.update({
-    where: { id },
-    data: {
+  await persistCustomerDeploymentHealth({
+    deployment,
+    health: {
       lastHealthCheck: new Date(),
       lastHealthStatus: status,
       lastHealthError: error,
       lastReleaseCheck: health?.release ? new Date() : null,
+    },
+    lifecycle: {
       provisioningStatus: status === "ok" ? "active" : "degraded",
       deploymentStatus: status === "ok" ? "ACTIVE" : "DEGRADED",
-    }
+    },
   });
   await recordCustomerDeploymentEvent(actor, id, "customer_deployment.health_probed", { status, error });
 }
