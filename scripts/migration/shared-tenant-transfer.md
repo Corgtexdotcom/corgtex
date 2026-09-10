@@ -32,6 +32,9 @@ variables; never put them in command arguments or committed files.
    newspaper click history, `disable-tracking-token` replaces only tracked-link
    token hashes with nonfunctional values while retaining their rows.
    The prepared wrapper can be passed directly to `import` and `verify-inactive`.
+   The wrapper records explicit staging provenance; it does not automatically
+   select effect rows or disable recurrence and integrations. A standalone
+   publication snapshot receives the same importer validation.
 5. Review disabled integration, agent and schedule settings and typed identity
    mappings. `copy-objects --execute` verifies referenced files between separately
    bound private containers. Its receipt must bind the exact publication snapshot;
@@ -50,10 +53,14 @@ and file changes/deletions after the freeze; rehearsal snapshots are not final.
 Serialize shared runtime updates, database publication and client cutovers.
 
 `import --execute` requires an exact `targetBinding` (host, port, database, user)
-in its options and the final object receipt. The transaction publishes inactive
+in its options and the final object receipt. Its `objectStorageBinding` must name
+the independently reviewed `sourceStoreId` and `targetStoreId` from the transfer
+configuration; both must match the receipt before any database query. Do not
+derive these expected identities from the receipt being checked.
+The transaction publishes inactive
 members/agents and an `operator_import_inactive` feature flag with its receipt.
-The flag suppresses all-workspace scheduled jobs and approval expiry. It is not
-a universal write lock: integrations, recurring series and executable pending
+The flag suppresses all-workspace scheduled jobs, recurring-series materialization
+and approval expiry. It is not a universal write lock: integrations and executable pending
 work need their own reviewed disabled settings or staging. Deploy these runtime
 guards before publishing an inactive workspace.
 

@@ -34,11 +34,11 @@ describe("operator import scheduler exclusion", () => {
           id, name: "Synthetic scheduler fixture", slug: `scheduler-${id}`,
           featureFlags: { create: { flag: "operator_import_inactive", enabled: inactive } },
         } });
-        // The marker is deliberately limited to the all-workspace scan. These
-        // independent integration scans retain their existing disabled controls.
+        // Preserve a live recurrence, as in the actual imported source. The
+        // marker must exclude it from the independent recurrence scan too.
         await tx.meetingSeries.create({ data: {
           workspaceId: id, title: "Synthetic series", startsAt: new Date(),
-          recurrenceRule: "FREQ=WEEKLY", archivedAt: inactive ? new Date() : null,
+          recurrenceRule: "FREQ=WEEKLY", archivedAt: null,
         } });
         await tx.communicationInstallation.create({ data: {
           workspaceId: id, provider: "SLACK", externalWorkspaceId: `synthetic-${id}`,
@@ -74,7 +74,7 @@ describe("operator import scheduler exclusion", () => {
     await scheduleDailyJobs();
     const activatedJobs = await prisma.workflowJob.findMany({ where: { workspaceId: inertId } });
     expect(activatedJobs.map((job) => job.type).sort()).toEqual([
-      "brain.daily-digest", "communication.raw-retention", "context-graph.reconcile", "context-graph.staleness-sweep",
+      "brain.daily-digest", "communication.raw-retention", "context-graph.reconcile", "context-graph.staleness-sweep", "meeting.series.materialize",
     ].sort());
     expect(await prisma.workflowJob.count({ where: { workspaceId: activeId } })).toBe(activeJobs.length);
   });

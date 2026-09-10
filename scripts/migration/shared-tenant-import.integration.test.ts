@@ -89,7 +89,8 @@ function objectReceipt(value = snapshot, entries: ObjectCopyReceipt["entries"] =
 }
 function options(value = snapshot): TenantImportOptions {
   return { identityLinks: [{ sourceUserId: linkedSourceUser, targetUserId: targetLinkedUser,
-    evidence: { kind: "operator-reviewed-ownership", reference: "synthetic-fixture-ownership", sha256: "a".repeat(64) } }], objectReceipt: objectReceipt(value) };
+    evidence: { kind: "operator-reviewed-ownership", reference: "synthetic-fixture-ownership", sha256: "a".repeat(64) } }], objectReceipt: objectReceipt(value),
+    objectStorageBinding: { sourceStoreId: "synthetic-source", targetStoreId: "synthetic-target" } };
 }
 async function withTarget(run: (target: pg.Client, observer: pg.Client) => Promise<void>) {
   const database = `transfer_target_${randomUUID().replaceAll("-", "")}`;
@@ -125,6 +126,27 @@ function setColumn(value: TenantTransferSnapshot, tableName: string, id: string,
   const row = table.rows.find((row) => row[table.columns.findIndex((column) => column.name === "id")] === id)!;
   row[table.columns.findIndex((column) => column.name === columnName)] = content;
 }
+
+test("rejects missing or wrong object storage bindings before any database query", async () => {
+  for (const changed of [undefined, { sourceStoreId: "", targetStoreId: "synthetic-target" },
+    { sourceStoreId: "different-source", targetStoreId: "synthetic-target" },
+    { sourceStoreId: "synthetic-source", targetStoreId: "different-target" }]) {
+    const input = options();
+    input.objectStorageBinding = changed as TenantImportOptions["objectStorageBinding"];
+    let queries = 0;
+    await assert.rejects(importTenantSnapshot({ query: async () => { queries++; throw new Error("Unexpected database query"); } }, snapshot, input), /TRANSFER_OBJECT_STORAGE_BINDING_MISMATCH/);
+    assert.equal(queries, 0);
+  }
+  for (const column of ["sourceStoreId", "targetStoreId"] as const) {
+    const input = options();
+    const { sha256: _old, ...body } = input.objectReceipt;
+    body[column] = "other-container";
+    input.objectReceipt = validateObjectReceipt({ ...body, sha256: hashCanonical(body) });
+    let queries = 0;
+    await assert.rejects(importTenantSnapshot({ query: async () => { queries++; throw new Error("Unexpected database query"); } }, snapshot, input), /TRANSFER_OBJECT_STORAGE_BINDING_MISMATCH/);
+    assert.equal(queries, 0);
+  }
+});
 
 test("integrated inactive import preserves existing tenant, target identity, self references and SQL values", async () => withTarget(async (target) => {
   const before = (await target.query('SELECT row_to_json(c)::text AS row FROM "Circle" c WHERE id=$1', [otherCircle])).rows[0].row;
@@ -262,6 +284,8 @@ test("changed snapshot or object receipt cannot reuse a committed transfer", asy
   await assert.rejects(importTenantSnapshot(target, changed, options(changed)), /TRANSFER_WORKSPACE_COLLISION/);
   const altered = options(); const { sha256: _sha256, ...body } = altered.objectReceipt;
   altered.objectReceipt = { ...body, sourceStoreId: "different-source", sha256: hashCanonical({ ...body, sourceStoreId: "different-source" }) };
+  await assert.rejects(importTenantSnapshot(target, snapshot, altered), /TRANSFER_OBJECT_STORAGE_BINDING_MISMATCH/);
+  altered.objectStorageBinding.sourceStoreId = "different-source";
   await assert.rejects(importTenantSnapshot(target, snapshot, altered), /TRANSFER_WORKSPACE_COLLISION/);
   const tampered = structuredClone(snapshot); setColumn(tampered, "Workspace", workspaceId, "name", "Unhashed edit");
   await assert.rejects(importTenantSnapshot(target, tampered, options()), /TRANSFER_SNAPSHOT_DIGEST_MISMATCH/);

@@ -28,8 +28,8 @@ if (process.env.CLI_TEST_MODE === "copy") {
     child.stderr = new (require("node:stream").PassThrough)();
     child.kill = () => {};
     process.nextTick(() => {
-      const value = args[0] === "run" ? "a".repeat(64) : args[0] === "port" ? "127.0.0.1:54321" : args[0] === "inspect" ? "sha256:" + "b".repeat(64) : "";
-      const failed = args.includes("pg_restore");
+      const value = args[0] === "run" || (args[0] === "ps" && process.env.CLI_TEST_CLEANUP_FAILURE) ? "a".repeat(64) : args[0] === "port" ? "127.0.0.1:54321" : args[0] === "inspect" ? "sha256:" + "b".repeat(64) : "";
+      const failed = args.includes("pg_restore") || (process.env.CLI_TEST_CLEANUP_FAILURE && ["stop", "rm"].includes(args[0]));
       child.stdout.end(value);
       child.stderr.end(failed ? process.env.CLI_TEST_SECRET : "");
       child.emit("close", failed ? 1 : 0);
@@ -223,6 +223,19 @@ describe("tenant transfer CLI safety boundaries", () => {
     expect(result.operations.some(operation => operation.startsWith("spawn:") && operation.includes("pgvector/pgvector:pg18"))).toBe(true);
     expect(statSync(diagnostics).mode & 0o777).toBe(0o600);
     expect(readFileSync(diagnostics, "utf8")).toContain(secret);
+  });
+
+  it("reports only exact owned cleanup remediation and preserves the safe primary code", () => {
+    const archive = input("archive.dump", {});
+    const result = run(["convert-copy", "--archive", archive, "--archive-sha256", hashCanonical({}),
+      "--max-bytes", "10000", "--timeout-ms", "10000", "--output", output,
+      "--archive-output", join(directory, "converted.dump")], { CLI_TEST_MODE: "copy", CLI_TEST_CLEANUP_FAILURE: "1" });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr)).toEqual({ status: "FAILED", code: "TRANSFER_ISOLATED_CLEANUP_FAILED",
+      containerId: "a".repeat(64), primaryCode: "TRANSFER_COPY_RESTORE_FAILED", cleanupCommand: `docker rm --force ${"a".repeat(64)}` });
+    expect(result.stderr).not.toContain(secret);
+    expect(result.operations.some(operation => operation.includes('"rm","--force"'))).toBe(true);
+    expect(result.operations).not.toContain("network");
   });
 
   it("requires an absolute output path", () => {

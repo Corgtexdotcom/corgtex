@@ -1379,8 +1379,8 @@ export async function schedulePeriodicJobs() {
 }
 
 // Internal operator import marker, written atomically with a new workspace.
-// This only suppresses the all-workspace scheduler; integrations and pending
-// work must be staged separately before an import is published.
+// This suppresses all-workspace and recurrence scheduling; integrations and
+// pending work must be staged separately before an import is published.
 const OPERATOR_IMPORT_INACTIVE_FLAG = "operator_import_inactive";
 
 export async function scheduleDailyJobs() {
@@ -1396,6 +1396,7 @@ export async function scheduleDailyJobs() {
     where: {
       archivedAt: null,
       recurrenceRule: { not: null },
+      workspace: { featureFlags: { none: { flag: OPERATOR_IMPORT_INACTIVE_FLAG, enabled: true } } },
     },
     distinct: ["workspaceId"],
     select: { workspaceId: true },

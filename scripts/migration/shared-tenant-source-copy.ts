@@ -27,7 +27,12 @@ async function command(program: string, args: string[], options: { env?: NodeJS.
         writeSync(options.diagnostics, bounded); diagnosticBytes += bounded.length;
       }
     };
-    const stop = (code: string) => { failure ??= code; child.kill("SIGTERM"); };
+    let hardKill: ReturnType<typeof setTimeout> | undefined;
+    const stop = (code: string) => {
+      if (failure) return;
+      failure = code; child.kill("SIGTERM");
+      hardKill = setTimeout(() => child.kill("SIGKILL"), 1000);
+    };
     child.stdout.on("data", (chunk: Buffer) => { diagnostic(chunk); if (output.length + chunk.length > 2 ** 20) stop(`TRANSFER_COPY_${stage}_OUTPUT_LIMIT`); else output += chunk.toString(); });
     // SQL/provider output can contain customer rows. Only the private log receives it.
     child.stderr.on("data", diagnostic);
@@ -35,8 +40,8 @@ async function command(program: string, args: string[], options: { env?: NodeJS.
     const monitor = setInterval(() => {
       if (options.archive && existsSync(options.archive) && statSync(options.archive).size > options.maxBytes!) stop("TRANSFER_ARCHIVE_LIMIT_EXCEEDED");
     }, 100);
-    child.on("error", () => { clearTimeout(timeout); clearInterval(monitor); reject(new Error(`TRANSFER_COPY_${stage}_FAILED`)); });
-    child.on("close", (code) => { clearTimeout(timeout); clearInterval(monitor); if (failure || code !== 0) reject(new Error(failure ?? `TRANSFER_COPY_${stage}_FAILED`)); else resolveCommand(output.trim()); });
+    child.on("error", () => { clearTimeout(timeout); clearTimeout(hardKill); clearInterval(monitor); reject(new Error(`TRANSFER_COPY_${stage}_FAILED`)); });
+    child.on("close", (code) => { clearTimeout(timeout); clearTimeout(hardKill); clearInterval(monitor); if (failure || code !== 0) reject(new Error(failure ?? `TRANSFER_COPY_${stage}_FAILED`)); else resolveCommand(output.trim()); });
   });
 }
 export async function archiveDigest(path: string) {
@@ -146,7 +151,7 @@ async function isolatedCopy<T>(options: CopyConversionOptions, run: (client: Tra
   const diagnosticsFile = options.diagnosticsFile ?? `${options.archive}.${randomUUID()}.diagnostics.log`;
   const diagnostics = openSync(diagnosticsFile, "wx", 0o600);
   const commandOptions = { diagnostics, timeoutMs: options.timeoutMs };
-  let container: string | undefined; let client: InstanceType<typeof Client> | undefined;
+  let container: string | undefined; let client: InstanceType<typeof Client> | undefined; let primaryError: unknown;
   try {
     container = await command("docker", ["run", "--detach", "--rm", "--pull=missing", "--name", name,
       "-e", "POSTGRES_PASSWORD=synthetic-local-copy", "-e", "POSTGRES_DB=transfer_copy", "-p", "127.0.0.1::5432", `pgvector/pgvector:pg${postgresMajor}`], { ...commandOptions, stage: "CONTAINER_START" });
@@ -166,11 +171,36 @@ async function isolatedCopy<T>(options: CopyConversionOptions, run: (client: Tra
     await command("docker", ["exec", container, "chmod", "600", "/tmp/source.dump"], { ...commandOptions, stage: "ARCHIVE_PERMISSIONS" });
     await command("docker", ["exec", container, "pg_restore", "--exit-on-error", "--no-owner", "--no-privileges", "--username=postgres", "--dbname=transfer_copy", "/tmp/source.dump"], { ...commandOptions, stage: "RESTORE" });
     return await run(client, { databaseEnv, container, postgresMajor, converterImageId, diagnosticsFile, diagnostics });
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await client?.end().catch(() => {});
-    // Only the exact container created by this invocation. No shared volume cleanup.
-    if (container && /^[a-f0-9]{64}$/.test(container)) await command("docker", ["stop", container], { ...commandOptions, stage: "CONTAINER_STOP" }).catch(() => {});
-    closeSync(diagnostics);
+    try {
+      await client?.end().catch(() => {});
+      // Only the exact container created by this invocation. No shared volume cleanup.
+      if (container && /^[a-f0-9]{64}$/.test(container)) {
+        const cleanupOptions = { diagnostics, timeoutMs: Math.min(options.timeoutMs, 15_000) };
+        try {
+          await command("docker", ["stop", "--time", "10", container], { ...cleanupOptions, stage: "CONTAINER_STOP" });
+        } catch {
+          try {
+            await command("docker", ["rm", "--force", container], { ...cleanupOptions, stage: "CONTAINER_REMOVE" });
+          } catch {
+            // A timeout can race successful auto-removal. Confirm absence explicitly.
+            let absent = false;
+            try {
+              absent = await command("docker", ["ps", "--all", "--no-trunc", "--filter", `id=${container}`, "--format", "{{.ID}}"],
+                { diagnostics, timeoutMs: Math.min(options.timeoutMs, 5000), stage: "CONTAINER_CLEANUP_VERIFY" }) === "";
+            } catch { /* Absence is unproven; report the exact remediation handle. */ }
+            if (!absent) {
+              const primary = primaryError instanceof Error && /^TRANSFER_[A-Z0-9_]+$/.test(primaryError.message)
+                ? primaryError.message : primaryError === undefined ? "NONE" : "UNCLASSIFIED_FAILURE";
+              throw new Error(`TRANSFER_ISOLATED_CLEANUP_FAILED container=${container} primary=${primary}; remove the exact owned container with docker rm --force ${container}`);
+            }
+          }
+        }
+      }
+    } finally { closeSync(diagnostics); }
   }
 }
 

@@ -250,9 +250,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const message = error instanceof Error ? error.message : "";
     // Publication failures may append a private table name. Preserve only the
     // stable code; never echo SQL, provider text or that identifying suffix.
-    const code = /^TRANSFER_[A-Z_]+$/.test(message) ? message
+    const cleanup = /^TRANSFER_ISOLATED_CLEANUP_FAILED container=([a-f0-9]{64}) primary=(TRANSFER_[A-Z0-9_]+|NONE|UNCLASSIFIED_FAILURE); remove the exact owned container with docker rm --force \1$/.exec(message);
+    const code = cleanup ? "TRANSFER_ISOLATED_CLEANUP_FAILED" : /^TRANSFER_[A-Z_]+$/.test(message) ? message
       : /^PUBLICATION_[A-Z_]+(?::|$)/.exec(message)?.[0].replace(/:$/, "") ?? "TRANSFER_FAILED";
-    console.error(JSON.stringify({ status: "FAILED", code }));
+    console.error(JSON.stringify({ status: "FAILED", code, ...(cleanup ? {
+      containerId: cleanup[1], primaryCode: cleanup[2], cleanupCommand: `docker rm --force ${cleanup[1]}`,
+    } : {}) }));
     process.exitCode = 1;
   });
 }

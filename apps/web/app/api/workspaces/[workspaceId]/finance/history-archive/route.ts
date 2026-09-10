@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { AppError, requireWorkspaceMembership } from "@corgtex/domain";
 import { prisma } from "@corgtex/shared";
-import { defaultStorage } from "@corgtex/storage";
+import { defaultStorage, StorageReadLimitError } from "@corgtex/storage";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 
@@ -34,7 +34,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
     // Derive the key from the authorized workspace, never an arbitrary flag URL
     // or a request-supplied storage key. Proxy bytes rather than sharing a SAS.
-    const file = await defaultStorage.get(`imports/${workspaceId}/history/${config.sha256}.json.gz`);
+    const file = await defaultStorage.get(`imports/${workspaceId}/history/${config.sha256}.json.gz`, { maxBytes: config.bytes }).catch((error: unknown) => {
+      if (error instanceof StorageReadLimitError) throw new AppError(409, "ARCHIVE_INTEGRITY_MISMATCH", "Financial history archive verification failed.");
+      throw error;
+    });
     if (!file) throw new AppError(404, "NOT_FOUND", "Financial history archive not found.");
     if (file.data.length !== config.bytes || createHash("sha256").update(file.data).digest("hex") !== config.sha256) {
       throw new AppError(409, "ARCHIVE_INTEGRITY_MISMATCH", "Financial history archive verification failed.");

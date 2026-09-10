@@ -26,6 +26,9 @@ export interface TenantImportOptions {
   // Produced by the object verifier for precisely this final snapshot. Empty
   // object sets also require a receipt; absence never means no objects exist.
   objectReceipt: ObjectCopyReceipt;
+  // Independently reviewed source and destination storage identities, from the
+  // transfer configuration rather than inferred from the receipt being checked.
+  objectStorageBinding: { sourceStoreId: string; targetStoreId: string };
   objectBindings?: { table: string; column: string; sourceValue: string; targetValue: string; sourceKey: string; targetKey: string; sha256: string }[];
 }
 
@@ -72,6 +75,11 @@ function validateSnapshot(snapshot: TenantTransferSnapshot, options: TenantImpor
     || options.objectReceipt.sourceSnapshotSha256 !== sha256 || !/^[a-f0-9]{64}$/.test(options.objectReceipt.sha256)) {
     fail("TRANSFER_FINAL_OBJECT_RECEIPT_REQUIRED");
   }
+  const stores = options.objectStorageBinding;
+  if (!stores || typeof stores.sourceStoreId !== "string" || !stores.sourceStoreId.trim()
+    || typeof stores.targetStoreId !== "string" || !stores.targetStoreId.trim()
+    || stores.sourceStoreId !== options.objectReceipt.sourceStoreId
+    || stores.targetStoreId !== options.objectReceipt.targetStoreId) fail("TRANSFER_OBJECT_STORAGE_BINDING_MISMATCH");
   const names = new Set<string>();
   for (const table of snapshot.tables) {
     if (names.has(table.name) || hashFrames(table.rows) !== table.sha256) fail("TRANSFER_TABLE_DIGEST_MISMATCH");

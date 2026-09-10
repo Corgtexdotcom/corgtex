@@ -12,11 +12,12 @@ vi.mock("@corgtex/domain", () => ({
 vi.mock("@corgtex/shared", () => ({ prisma: {
   member: { findFirst: mocks.member }, workspaceFeatureFlag: { findUnique: mocks.archive },
 } }));
-vi.mock("@corgtex/storage", () => ({ defaultStorage: { get: mocks.get } }));
+vi.mock("@corgtex/storage", () => ({ defaultStorage: { get: mocks.get }, StorageReadLimitError: class StorageReadLimitError extends Error {} }));
 vi.mock("@/lib/http", () => ({ handleRouteError: (error: { status?: number; code?: string }) =>
   Response.json({ code: error.code ?? "INTERNAL_ERROR" }, { status: error.status ?? 500 }) }));
 
 import { GET } from "./route";
+import { StorageReadLimitError } from "@corgtex/storage";
 const data = Buffer.from("synthetic preserved history");
 const sha256 = createHash("sha256").update(data).digest("hex");
 const run = (workspaceId = "workspace-1") => GET(new Request("https://example.invalid/archive") as never, { params: Promise.resolve({ workspaceId }) });
@@ -40,7 +41,7 @@ describe("financial history archive", () => {
     expect(mocks.member).toHaveBeenCalledWith(expect.objectContaining({ where: {
       workspaceId: "workspace-1", userId: "user-1", isActive: true, kind: "HUMAN", role: "ADMIN",
     } }));
-    expect(mocks.get).toHaveBeenCalledWith(`imports/workspace-1/history/${sha256}.json.gz`);
+    expect(mocks.get).toHaveBeenCalledWith(`imports/workspace-1/history/${sha256}.json.gz`, { maxBytes: data.length });
   });
 
   it("denies agents even with support scopes", async () => {
@@ -66,6 +67,19 @@ describe("financial history archive", () => {
 
   it.each([null, { enabled: false }, { enabled: true, config: { sha256: "../other", bytes: 1 } }])("rejects unavailable or invalid archive metadata", async (archive) => {
     mocks.archive.mockResolvedValue(archive);
+    expect((await run()).status).toBe(404);
+    expect(mocks.get).not.toHaveBeenCalled();
+  });
+
+  it("maps bounded storage overflow to integrity failure", async () => {
+    mocks.get.mockRejectedValue(new StorageReadLimitError());
+    const response = await run();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "ARCHIVE_INTEGRITY_MISMATCH" });
+  });
+
+  it("rejects configured archives above the absolute limit without reading", async () => {
+    mocks.archive.mockResolvedValue({ enabled: true, config: { sha256, bytes: 16 * 1024 * 1024 + 1 } });
     expect((await run()).status).toBe(404);
     expect(mocks.get).not.toHaveBeenCalled();
   });
