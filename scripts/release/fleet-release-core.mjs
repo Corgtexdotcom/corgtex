@@ -346,15 +346,11 @@ export function providerBoundaryErrors(target) {
   return errors;
 }
 
-function azureContainerAppName(value, resourceGroup, subscriptionId) {
-  if (value == null || !String(value).includes("/")) return value ?? null;
+function azureContainerAppIdentity(value) {
+  if (value == null || !String(value).includes("/")) return { name: value ?? null };
   const match = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.App\/containerApps\/([^/]+)$/i.exec(String(value));
-  if (!match || !resourceGroup || !subscriptionId
-    || match[1].toLowerCase() !== String(subscriptionId).toLowerCase()
-    || match[2].toLowerCase() !== String(resourceGroup).toLowerCase()) {
-    throw new Error("Azure Container App resource ID does not match the authoritative subscription and resource group");
-  }
-  return match[3];
+  if (!match) throw new Error("Azure Container App resource ID does not match the authoritative subscription and resource group");
+  return { subscriptionId: match[1], resourceGroup: match[2], name: match[3] };
 }
 
 export function targetFromControlPlaneRow(row) {
@@ -364,9 +360,21 @@ export function targetFromControlPlaneRow(row) {
   const provider = cloudProvider === "AZURE" ? "azure" : cloudProvider === "RAILWAY" ? "railway" : null;
   const workload = normalizeTargetGroup(row.workload ?? (row.deploymentKind === "INTERNAL" ? "backup-app" : "managed-customers"));
   const resourceGroup = row.providerResourceGroup ?? row.azureResourceGroup ?? null;
-  const subscriptionId = row.providerSubscriptionId ?? null;
-  const webAppName = row.providerWebServiceId ?? row.azureWebAppName ?? null;
-  const workerAppName = row.providerWorkerServiceId ?? row.azureWorkerAppName ?? null;
+  const webApp = provider === "azure"
+    ? azureContainerAppIdentity(row.providerWebServiceId ?? row.azureWebAppName)
+    : { name: row.providerWebServiceId ?? row.azureWebAppName ?? null };
+  const workerApp = provider === "azure"
+    ? azureContainerAppIdentity(row.providerWorkerServiceId ?? row.azureWorkerAppName)
+    : { name: row.providerWorkerServiceId ?? row.azureWorkerAppName ?? null };
+  // Lean list_customers rows carry the subscription only inside their ARM IDs.
+  const subscriptionId = row.providerSubscriptionId ?? webApp.subscriptionId ?? workerApp.subscriptionId ?? null;
+  for (const app of [webApp, workerApp]) {
+    if (app.subscriptionId && (!resourceGroup
+      || app.subscriptionId.toLowerCase() !== String(subscriptionId).toLowerCase()
+      || app.resourceGroup.toLowerCase() !== String(resourceGroup).toLowerCase())) {
+      throw new Error("Azure Container App resource ID does not match the authoritative subscription and resource group");
+    }
+  }
   return {
     id: row.id ?? row.deploymentId ?? label,
     deploymentId: row.id ?? row.deploymentId ?? null,
@@ -387,8 +395,8 @@ export function targetFromControlPlaneRow(row) {
     azure: {
       subscriptionId,
       resourceGroup,
-      webAppName: provider === "azure" ? azureContainerAppName(webAppName, resourceGroup, subscriptionId) : webAppName,
-      workerAppName: provider === "azure" ? azureContainerAppName(workerAppName, resourceGroup, subscriptionId) : workerAppName,
+      webAppName: webApp.name,
+      workerAppName: workerApp.name,
     },
   };
 }

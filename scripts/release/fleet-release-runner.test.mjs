@@ -941,6 +941,7 @@ describe("fleet release runner", () => {
 
   it.each([
     ["matching full IDs", {}, null],
+    ["lean list full IDs", { providerSubscriptionId: undefined }, null],
     ["other subscription", { providerSubscriptionId: "other-subscription" }, "subscription"],
     ["other app", { providerWebServiceId: "replacement-web" }, "provider or resource identity changed"],
     ["other group", { providerResourceGroup: "rg-other" }, "resource group"],
@@ -958,11 +959,11 @@ describe("fleet release runner", () => {
     }
     const runCommand = vi.fn();
     const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-azure-identity-")), "targets.json");
-    writeFileSync(targetFile, azureTargetJson());
+    if (_name !== "lean list full IDs") writeFileSync(targetFile, azureTargetJson());
     const result = runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--dry-run", "--reason", "Verify Azure identity."], {
-      env: { FLEET_RELEASE_TARGETS_FILE: targetFile, CONTROL_PLANE_AGENT_API_KEY: "key",
+      env: { FLEET_RELEASE_TARGETS_FILE: targetFile, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson(), CONTROL_PLANE_AGENT_API_KEY: "key",
         AZURE_SUBSCRIPTION_ID: "azure-subscription", AZURE_CLIENT_ID: "client", AZURE_TENANT_ID: "tenant", GITHUB_TOKEN: "token" },
-      fetchImpl: vi.fn(async (_url, init) => controlPlaneResult(JSON.parse(init.body).params.name === "list_customers" ? [] : current)), runCommand, sleep: vi.fn(),
+      fetchImpl: vi.fn(async (_url, init) => controlPlaneResult(JSON.parse(init.body).params.name === "list_customers" ? [current] : current)), runCommand, sleep: vi.fn(),
     });
     if (error) await expect(result).rejects.toThrow(error);
     else expect((await result).targets[0].azure).toMatchObject({ webAppName: "web-app", workerAppName: "worker-app", resourceGroup: "rg-1" });

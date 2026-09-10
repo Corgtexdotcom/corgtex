@@ -227,11 +227,19 @@ describe("Azure authoritative resource IDs", () => {
     expect(targetFromControlPlaneRow({ ...row, providerWebServiceId: row.providerWebServiceId.toUpperCase() }).azure.webAppName).toBe("WEB-A");
   });
 
+  it("retains the common ARM subscription from lean customer-list rows", () => {
+    expect(targetFromControlPlaneRow({ ...row, providerSubscriptionId: undefined }).azure).toEqual({
+      subscriptionId: "subscription-a", resourceGroup: "rg-a", webAppName: "web-a", workerAppName: "worker-a",
+    });
+    expect(() => targetFromControlPlaneRow({ ...row, providerSubscriptionId: undefined,
+      providerWorkerServiceId: row.providerWorkerServiceId.replace("subscription-a", "subscription-b"),
+    })).toThrow("authoritative subscription and resource group");
+  });
+
   it.each([
     ["web subscription", { providerWebServiceId: row.providerWebServiceId.replace("subscription-a", "subscription-b") }],
     ["worker group", { providerWorkerServiceId: row.providerWorkerServiceId.replace("rg-a", "rg-b") }],
     ["resource type", { providerWebServiceId: row.providerWebServiceId.replace("containerApps", "sites") }],
-    ["missing subscription", { providerSubscriptionId: null }],
     ["missing group", { providerResourceGroup: null }],
     ["child resource", { providerWebServiceId: `${row.providerWebServiceId}/revisions/revision-a` }],
   ])("rejects inconsistent %s before using a shortened name", (_name, override) => {
