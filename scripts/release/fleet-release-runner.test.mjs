@@ -939,6 +939,27 @@ describe("fleet release runner", () => {
     expect({ ...outputs, selected_targets: JSON.parse(execFileSync("cat", [targetFile], { encoding: "utf8" })) }).toMatchObject({ observation_targets: "railway-customers,azure-selfserve,ops", selected_targets: JSON.parse(JSON.stringify(result.targets)) });
   });
 
+  it("does not parse unrelated Azure identities for an Ops-only release", async () => {
+    const badAzure = { id: "unrelated-azure", environment: "production", cloudProvider: "AZURE",
+      providerResourceGroup: "rg-1", providerWebServiceId: "/subscriptions/sub/resourceGroups/rg-1/providers/Microsoft.Web/sites/old-app" };
+    const runCommand = vi.fn();
+    const deps = { env: { FLEET_RELEASE_OPS_TARGET_JSON: targetJson(), CONTROL_PLANE_AGENT_API_KEY: "key" },
+      fetchImpl: vi.fn(async () => controlPlaneResult([badAzure])), runCommand };
+    const result = await runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--dry-run", "--reason", "Select Ops only."], deps);
+    expect(result.targets.map((target) => target.id)).toEqual(["ops"]);
+    const managed = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--reason", "Respect configured selfserve group."], {
+      ...deps, env: { ...deps.env, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ deploymentId: "unrelated-azure" }) },
+      fetchImpl: vi.fn(async () => controlPlaneResult([badAzure, { id: "railway-customer", environment: "production", cloudProvider: "RAILWAY" }])),
+    });
+    expect(managed.targets.map((target) => target.id)).toEqual(["railway-customer"]);
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--reason", "Select malformed Azure."], deps))
+      .rejects.toThrow("authoritative subscription and resource group");
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "selfserve", "--dry-run", "--reason", "Select configured malformed Azure."], {
+      ...deps, env: { ...deps.env, FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ deploymentId: "unrelated-azure" }) },
+    })).rejects.toThrow("authoritative subscription and resource group");
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["matching full IDs", {}, null],
     ["lean list full IDs", { providerSubscriptionId: undefined }, null],
