@@ -7,7 +7,7 @@ import { AppError, invariant } from "./errors";
 import { defaultModelGateway } from "@corgtex/models";
 import { createAction, updateAction } from "./actions";
 import { createTension, updateTension } from "./tensions";
-import { createProposal, createProposalFromTension, resolveProposal, submitProposal } from "./proposals";
+import { createProposal, createProposalFromTension, resolveProposal } from "./proposals";
 import { postDeliberationEntry } from "./deliberation";
 import { createActivity, createContact, createDeal } from "./crm";
 import { createCrmMeetingReviewInsights, crmInsightPayload, requireCrmInsightEmail } from "./crm-information-gathering";
@@ -1125,10 +1125,6 @@ export async function applyInsight(
           meetingId: insight.meetingId,
           isPrivate: false,
         });
-      await submitProposal(actor, {
-        workspaceId: params.workspaceId,
-        proposalId: proposal.id,
-      });
       appliedEntityType = "Proposal";
       appliedEntityId = proposal.id;
     }
