@@ -701,6 +701,19 @@ describe("meeting-intelligence", () => {
         operation: "CREATE", type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
         OR: [{ status: { in: ["CONFIRMED", "APPLIED", "DISMISSED"] } }, { status: "SUGGESTED", reviewedAt: { not: null } }],
       } });
+      (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mockClear();
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [
+        { ...legacy, body: "Milan owns preparing the report.", confidence: 0.99, dedupeKey: "variant-only" },
+      ] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      const variantRows = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap(([call]) => call.data);
+      expect(variantRows).toHaveLength(1);
+      expect(variantRows[0].metadataJson.requiresCommitmentReview).toBe(true);
+      expect(JSON.stringify(legacy)).toBe(baseline);
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(variantRows);
+      await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+        .resolves.toMatchObject({ applied: 0, skipped: 1 });
+      expect(createActionMock).not.toHaveBeenCalled();
     });
 
     it("treats action items and follow-ups as one commitment family", async () => {

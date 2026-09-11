@@ -741,7 +741,9 @@ Be conservative — only extract items you're confident about.
         },
       });
       for (const existing of reviewedLegacyCommitments) {
-        const identity = commitmentIdentity(withCommitmentContext({ ...existing, body: existing.bodyMd }), true);
+        const item = withCommitmentContext({ ...existing, body: existing.bodyMd });
+        addCommitment(item);
+        const identity = commitmentIdentity(item, true);
         if (identity) sourceCommitmentIdentities.add(identity);
       }
     }
