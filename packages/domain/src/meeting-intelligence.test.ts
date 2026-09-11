@@ -589,6 +589,28 @@ describe("meeting-intelligence", () => {
       expect(createActionMock).not.toHaveBeenCalled();
     });
 
+    it("does not recreate an exact pending commitment when its legacy key and block decoration differ", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
+      const pending = {
+        id: "existing", type: "ACTION_ITEM", operation: "CREATE", title: "Prepare report", assigneeHint: "Milan",
+        bodyMd: "**MEETING BLOCK:** Previous block label\n**BLOCK KIND:** update\n\nMILAN WILL PREPARE THE REPORT.",
+        sourceQuote: "I will prepare it.", dueAt: null, status: "SUGGESTED", metadataJson: {}, dedupeKey: "old-model-key",
+      };
+      const baseline = JSON.stringify(pending);
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([pending]);
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [{
+        type: "ACTION_ITEM", operation: "CREATE", title: "#12 > Prepare report", assigneeHint: "Milan",
+        body: "Milan will prepare the report.", sourceQuote: "I will prepare it.", confidence: 0.9, dedupeKey: "new-model-key",
+      }] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: pending.id }),
+      }));
+      expect(JSON.stringify(pending)).toBe(baseline);
+    });
+
     it("extracts named, collective, and coordinator team actions without awareness-only items", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const action = (title: string, body: string, assigneeHint: string, dedupeKey: string) => ({

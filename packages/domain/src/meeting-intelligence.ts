@@ -699,7 +699,13 @@ Be conservative — only extract items you're confident about.
         type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
       },
     });
-    for (const pending of pendingCommitments) addCommitment({ ...pending, body: pending.bodyMd });
+    const pendingCommitmentIdentities = new Set<string>();
+    for (const pending of pendingCommitments) {
+      const item = { ...pending, body: pending.bodyMd };
+      addCommitment(item);
+      const identity = commitmentIdentity(item, true);
+      if (identity) pendingCommitmentIdentities.add(identity);
+    }
     for (const pending of pendingCommitments) {
       const group = commitmentIdentity({ ...pending, body: pending.bodyMd }, false);
       if ((commitmentGroups.get(group ?? "")?.size ?? 0) < 2) continue;
@@ -764,6 +770,7 @@ Be conservative — only extract items you're confident about.
         ? normalizeMeetingProductTerminology(item.dedupeKey).trim().toLowerCase().replace(/\s+/g, "-").slice(0, 160)
         : "";
       const commitment = commitmentIdentity(item, true);
+      if (commitment && pendingCommitmentIdentities.has(commitment)) continue;
       const dedupeKey = commitment
         ? `commitment:${createHash("sha256").update(commitment).digest("hex")}`
         : modelDedupeKey || deterministicInsightDedupeKey({
