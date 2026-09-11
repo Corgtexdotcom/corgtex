@@ -638,6 +638,71 @@ describe("meeting-intelligence", () => {
       expect(createActionMock).not.toHaveBeenCalled();
     });
 
+    it("preserves same-title blocks of different kinds and reconstructs their identities on replay", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const context = await buildMeetingIntelligenceContextMock();
+      context.meeting.blocksJson = { version: 1, blocks: [
+        { sequence: 1, title: "Customer review", kind: "update", summaryMd: "Customer update." },
+        { sequence: 2, title: "Customer review", kind: "proposal_discussion", summaryMd: "Customer proposal." },
+      ] };
+      buildMeetingIntelligenceContextMock.mockResolvedValue(context);
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
+      const shared = { type: "ACTION_ITEM", operation: "CREATE", title: "Send the report", body: "Milan will send the report.", assigneeHint: "Milan", sourceQuote: "I will send the report.", confidence: 0.99 };
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [
+        { ...shared, blockSequence: 1 },
+        { ...shared, blockSequence: 2 },
+        { ...shared, blockTitle: "Customer review", blockKind: "proposal discussion" },
+      ] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      const rows = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap(([call]) => call.data);
+      expect(rows).toHaveLength(2);
+      expect(rows[0].bodyMd).toContain("**BLOCK KIND:** update");
+      expect(rows[1].bodyMd).toContain("**BLOCK KIND:** proposal discussion");
+      expect(new Set(rows.map((row) => row.dedupeKey)).size).toBe(2);
+      expect(rows.every((row) => row.metadataJson.requiresCommitmentReview)).toBe(true);
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+      await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+        .resolves.toMatchObject({ applied: 0, skipped: 2 });
+      expect(createActionMock).not.toHaveBeenCalled();
+      (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mockClear();
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+    });
+
+    it.each(["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"])("preserves an exact reviewed legacy %s commitment when a source record is introduced", async (status) => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const legacy = {
+        id: "legacy", workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: null,
+        type: "ACTION_ITEM", operation: "CREATE", title: "Prepare report", assigneeHint: "Milan",
+        bodyMd: "Milan will prepare the report.", sourceQuote: "I will prepare it.", dueAt: null,
+        status, reviewedAt: new Date("2026-09-01T12:00:00Z"), metadataJson: { retained: true }, dedupeKey: "legacy-key",
+      };
+      const baseline = JSON.stringify(legacy);
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockImplementation(({ where }) =>
+        where.workspaceId === legacy.workspaceId && where.meetingId === legacy.meetingId && where.sourceRecordId === null ? [legacy] : []);
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [
+        { ...legacy, body: legacy.bodyMd, dedupeKey: "new-key" },
+        { ...legacy, body: "Milan owns preparing the report.", dedupeKey: "variant" },
+      ] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      const rows = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap(([call]) => call.data);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].bodyMd).toBe("Milan owns preparing the report.");
+      expect(JSON.stringify(legacy)).toBe(baseline);
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: legacy.id }),
+      }));
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ sourceRecordId: null }),
+      }));
+      expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith({ where: {
+        workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: null, supersededAt: null,
+        operation: "CREATE", type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
+        OR: [{ status: { in: ["CONFIRMED", "APPLIED", "DISMISSED"] } }, { status: "SUGGESTED", reviewedAt: { not: null } }],
+      } });
+    });
+
     it("treats action items and follow-ups as one commitment family", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const shared = { operation: "CREATE", title: "Prepare report", body: "Milan will prepare the report.", assigneeHint: "Milan", confidence: 0.99 };

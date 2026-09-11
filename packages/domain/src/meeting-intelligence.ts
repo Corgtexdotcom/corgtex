@@ -15,6 +15,7 @@ import { createCrmMeetingReviewInsights, crmInsightPayload, requireCrmInsightEma
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 import { shouldBypassAutoApplyForSlackMeetingActionReview } from "./meeting-action-review";
 import {
+  normalizeMeetingBlocks,
   normalizeMeetingProductTerminology,
   prependMeetingBlockContext,
   resolveMeetingBlockReference,
@@ -113,6 +114,7 @@ function commitmentIdentity(item: Record<string, unknown>, includeEvidence: bool
   if (includeEvidence) {
     identity.push(
       normalizeDedupeText(item.blockTitle),
+      normalizeDedupeText(item.blockKind),
       normalizeDedupeText(stripMeetingBlockContext(normalizeInsightBody(typeof item.body === "string" ? item.body : "", type))),
       normalizeDedupeText(typeof item.sourceQuote === "string" ? normalizeMeetingProductTerminology(item.sourceQuote).slice(0, 200) : ""),
     );
@@ -661,14 +663,19 @@ Be conservative — only extract items you're confident about.
     .map((item: { id: string }) => item.id));
   const withCommitmentContext = (item: Record<string, unknown>) => {
     if (!commitmentIdentity(item, false)) return item;
-    const bodyBlockTitle = typeof item.body === "string"
-      ? item.body.match(/^\s*\*\*MEETING BLOCK:\*\*\s*([^\r\n]+)/)?.[1] : null;
+    const bodyBlock = typeof item.body === "string"
+      ? item.body.match(/^\s*\*\*MEETING BLOCK:\*\*[^\S\r\n]*([^\r\n]+)(?:\r?\n\*\*BLOCK KIND:\*\*[^\S\r\n]*([^\r\n]+))?/) : null;
+    const title = typeof item.blockTitle === "string" ? normalizeMeetingProductTerminology(item.blockTitle) : bodyBlock?.[1];
+    const kind = typeof item.blockKind === "string" ? item.blockKind : bodyBlock?.[2];
+    const preciseBlock = title && kind ? normalizeMeetingBlocks(meeting.blocksJson).blocks.find((block) =>
+      normalizeDedupeText(block.title) === normalizeDedupeText(title)
+      && block.kind === kind.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")) : null;
     const block = resolveMeetingBlockReference(meeting.blocksJson, {
-      sequence: typeof item.blockSequence === "number" ? item.blockSequence : null,
-      title: typeof item.blockTitle === "string" ? normalizeMeetingProductTerminology(item.blockTitle) : bodyBlockTitle,
-      kind: typeof item.blockKind === "string" ? item.blockKind : null,
+      sequence: typeof item.blockSequence === "number" ? item.blockSequence : preciseBlock?.sequence,
+      title,
+      kind,
     });
-    return { ...item, blockTitle: block?.title ?? null };
+    return { ...item, blockTitle: block?.title ?? null, blockKind: block?.kind ?? null, blockSequence: block?.sequence ?? null };
   };
   const insights = mergeExtractedInsightItems(extractedItems.filter((item) => {
     const type = normalizeTargetEntityType(item.targetEntityType);
@@ -717,6 +724,26 @@ Be conservative — only extract items you're confident about.
       addCommitment(item);
       const identity = commitmentIdentity(item, true);
       if (identity) sourceCommitmentIdentities.add(identity);
+    }
+    if (latestSourceRecord) {
+      const reviewedLegacyCommitments = await tx.meetingInsight.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          sourceRecordId: null,
+          supersededAt: null,
+          operation: "CREATE",
+          type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
+          OR: [
+            { status: { in: ["CONFIRMED", "APPLIED", "DISMISSED"] } },
+            { status: "SUGGESTED", reviewedAt: { not: null } },
+          ],
+        },
+      });
+      for (const existing of reviewedLegacyCommitments) {
+        const identity = commitmentIdentity(withCommitmentContext({ ...existing, body: existing.bodyMd }), true);
+        if (identity) sourceCommitmentIdentities.add(identity);
+      }
     }
     for (const pending of sourceCommitments) {
       if (pending.status !== "SUGGESTED" || pending.reviewedAt) continue;
