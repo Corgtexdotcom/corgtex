@@ -664,7 +664,7 @@ async function deleteScheduledRecallBot(externalBotId: string, workspaceId?: str
       Authorization: recallAuthorization(apiKey),
       accept: "application/json",
     },
-  }, { okStatuses: [404] });
+  }, { okStatuses: binding.source === "legacy" ? [404] : [] });
 }
 
 async function leaveRecallBot(externalBotId: string, workspaceId?: string) {
@@ -677,7 +677,7 @@ async function leaveRecallBot(externalBotId: string, workspaceId?: string) {
       accept: "application/json",
       "content-type": "application/json",
     },
-  }, { okStatuses: [404] });
+  }, { okStatuses: binding.source === "legacy" ? [404] : [] });
 }
 
 async function cancelRecallBot(externalBotId: string, context?: RecordingCancelContext) {

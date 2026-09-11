@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import process from "node:process";
+import { pathToFileURL } from "node:url";
+import { resolveRecallWorkspaceBinding, requireRecallWorkspaceBindingFromEnv, recallWorkspaceBindingsEnabledInEnv } from "../packages/shared/src/recall-workspace-bindings-core.mjs";
 import prismaPackage from "@prisma/client";
 
 const { Prisma, PrismaClient } = prismaPackage;
@@ -86,13 +88,18 @@ function baseUrlFromEnv() {
   return raw.replace(/\/$/, "");
 }
 
-function envStatus(defaultProvider, fallbackProvider) {
+export function envStatus(defaultProvider, fallbackProvider, workspaceId) {
+  const scoped = recallWorkspaceBindingsEnabledInEnv(process.env);
+  const usesRecall = [defaultProvider, fallbackProvider].includes("RECALL_AI");
+  const binding = scoped && usesRecall
+    ? requireRecallWorkspaceBindingFromEnv(process.env, workspaceId)
+    : resolveRecallWorkspaceBinding(process.env, workspaceId);
   const baseUrl = baseUrlFromEnv();
   const warnings = [];
   const status = {
     meetingRecorderPublicBaseUrl: Boolean(baseUrl),
-    recallApiKey: Boolean(process.env.RECALL_API_KEY),
-    recallWebhookSecret: Boolean(process.env.RECALL_WEBHOOK_SECRET),
+    recallApiKey: Boolean(binding?.apiKey),
+    recallWebhookSecret: Boolean(binding?.webhookSecret),
     meetingBaasApiKey: Boolean(process.env.MEETING_BAAS_API_KEY),
     meetingBaasWebhookSecret: Boolean(process.env.MEETING_BAAS_WEBHOOK_SECRET),
   };
@@ -107,7 +114,7 @@ function envStatus(defaultProvider, fallbackProvider) {
     status,
     webhookUrls: baseUrl
       ? {
-        recall: `${baseUrl}/api/integrations/meeting-recorders/recall/webhook`,
+        recall: `${baseUrl}/api/integrations/meeting-recorders/recall/${scoped ? `${workspaceId}/` : ""}webhook`,
         meetingBaas: `${baseUrl}/api/integrations/meeting-recorders/baas/webhook`,
       }
       : null,
@@ -135,8 +142,8 @@ async function resolveWorkspace(prisma, ref) {
   return workspace;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   if (args.help === true || args.h === true) usage(0);
 
   const workspaceRef = args.workspace ?? args._[0];
@@ -159,6 +166,7 @@ async function main() {
   const prisma = new PrismaClient();
   try {
     const workspace = await resolveWorkspace(prisma, workspaceRef);
+    const env = envStatus(defaultProvider, fallbackProvider, workspace.id);
     const [featureFlag, config] = await prisma.$transaction([
       prisma.workspaceFeatureFlag.upsert({
         where: {
@@ -218,7 +226,6 @@ async function main() {
       });
     }
 
-    const env = envStatus(defaultProvider, fallbackProvider);
     console.log(JSON.stringify({
       workspace,
       featureFlag: {
@@ -244,7 +251,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

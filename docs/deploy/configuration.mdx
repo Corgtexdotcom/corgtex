@@ -201,7 +201,11 @@ When the map is present, missing workspace entries and unscoped Recall webhooks
 fail closed; global Recall credentials are not used as a fallback. Deploy support
 for scoped routing before enabling the map. Preserve existing provider account
 bindings for scheduled bots, and verify callbacks and transcript processing before
-removing old endpoints. Reverting to a release without scoped routing requires
+removing old endpoints. The enable, smoke and cleanup commands use the same binding
+map. A scoped cancellation returning 404 is treated as unverified rather than
+successful, because an incorrect provider account can also return 404.
+
+Reverting to a release without scoped routing requires
 restoring the prior compatible credential and endpoint configuration as well.
 
 ## Example `.env` File

@@ -4452,6 +4452,16 @@ describe("meeting recorder domain", () => {
         expect.objectContaining({ method: "DELETE", headers: expect.objectContaining({ Authorization: `Token scoped-api-${index}` }) }));
     });
 
+    it.each(["SCHEDULED", "RECORDING"])("does not mark a scoped %s bot cancelled after a provider 404", async (status) => {
+      const { cancelMeetingRecording } = await import("./meeting-recorders");
+      installRecording({ ...recording(1), status });
+      fetchMock.mockResolvedValue(new Response("Not Found", { status: 404 }));
+      await expect(cancelMeetingRecording(operatorActor, { workspaceId: workspaceIds[1], meetingId: "meeting-1" }))
+        .rejects.toMatchObject({ status: 404 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+    });
+
     it("reconciliation reads the original bot through its workspace API key", async () => {
       const { reconcileMeetingRecorders } = await import("./meeting-recorders");
       const row = { ...recording(1), status: "COMPLETED", joinAt: new Date(Date.now() - 2 * 60 * 60 * 1000) };
