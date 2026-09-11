@@ -6,3 +6,4 @@ export * from "./usage";
 export * from "./model-routing";
 export * from "./pricing";
 export * from "./streaming-json";
+export * from "./provider-errors";

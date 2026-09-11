@@ -1,6 +1,6 @@
 import type { KnowledgeAccessDomain, KnowledgeSourceType, Prisma } from "@prisma/client";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, prisma, cosineSimilarity, logger, setCacheJson } from "@corgtex/shared";
-import { defaultModelGateway } from "@corgtex/models";
+import { defaultModelGateway, ModelProviderHttpError } from "@corgtex/models";
 import type { SensitivityLabel } from "./sensitivity";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, normalizeKnowledgeAccessDomains, searchAzureKnowledge } from "./azure-search";
 
@@ -327,20 +327,49 @@ async function searchIndexedKnowledgePostgres(params: {
       id: { in: lexicalCandidates.map((c) => c.chunk.id) },
       workspaceId: params.workspaceId,
       accessDomain: { in: params.accessDomains },
+      sourceType: params.sourceTypes?.length ? { in: params.sourceTypes } : undefined,
+      sensitivity: params.maxSensitivity
+        ? { in: levelsUpTo(params.maxSensitivity) }
+        : undefined,
     },
     select: { id: true, embedding: true },
   });
 
   const embeddingMap = new Map(chunkEmbeddings.map((c) => [c.id, c.embedding]));
   const authorizedLexicalCandidates = lexicalCandidates.filter((candidate) => embeddingMap.has(candidate.chunk.id));
-  const queryEmbedding = queryEmbeddingOverride
-    ? { embeddings: [queryEmbeddingOverride] }
-    : await defaultModelGateway.embed({
+  const resultLimit = Math.max(1, params.limit ?? DEFAULT_SEARCH_LIMIT);
+  const toResult = (chunk: typeof chunks[number], score: number): KnowledgeSearchResult => ({
+    chunkId: chunk.id,
+    sourceType: chunk.sourceType,
+    sourceId: chunk.sourceId,
+    title: chunk.sourceTitle,
+    chunkIndex: chunk.chunkIndex,
+    snippet: chunk.content.slice(0, 400),
+    score: Number(score.toFixed(6)),
+  });
+  let queryEmbedding;
+  try {
+    queryEmbedding = queryEmbeddingOverride
+      ? { embeddings: [queryEmbeddingOverride] }
+      : await defaultModelGateway.embed({
+        workspaceId: params.workspaceId,
+        workflowJobId: params.workflowJobId,
+        agentRunId: params.agentRunId,
+        input: query,
+        failFastOnRateLimit: true,
+      });
+  } catch (error) {
+    if (!(error instanceof ModelProviderHttpError) || error.status !== 429) throw error;
+    logger.warn("Knowledge search using lexical ranking after provider rate limit", {
       workspaceId: params.workspaceId,
-      workflowJobId: params.workflowJobId,
-      agentRunId: params.agentRunId,
-      input: query,
+      stage: "query_embedding",
+      httpStatus: error.status,
     });
+    return authorizedLexicalCandidates
+      .filter(({ lexical }) => lexical > 0)
+      .slice(0, resultLimit)
+      .map(({ chunk, lexical }) => toResult(chunk, lexical));
+  }
 
   const scored = authorizedLexicalCandidates
     .map(({ chunk, lexical }) => {
@@ -361,29 +390,26 @@ async function searchIndexedKnowledgePostgres(params: {
     return [] as KnowledgeSearchResult[];
   }
 
-  const reranked = await defaultModelGateway.rerank({
-    workspaceId: params.workspaceId,
-    workflowJobId: params.workflowJobId,
-    agentRunId: params.agentRunId,
-    query,
-    documents: scored.map((entry) => `${entry.chunk.sourceTitle ?? ""}\n${entry.chunk.content}`.trim()),
-    topK: Math.max(1, params.limit ?? DEFAULT_SEARCH_LIMIT),
-  });
-
-  const results = reranked.results.map((result) => {
-    const candidate = scored[result.index];
-    return {
-      chunkId: candidate.chunk.id,
-      sourceType: candidate.chunk.sourceType,
-      sourceId: candidate.chunk.sourceId,
-      title: candidate.chunk.sourceTitle,
-      chunkIndex: candidate.chunk.chunkIndex,
-      snippet: candidate.chunk.content.slice(0, 400),
-      score: Number(result.score.toFixed(6)),
-    };
-  });
-
-  return results;
+  try {
+    const reranked = await defaultModelGateway.rerank({
+      workspaceId: params.workspaceId,
+      workflowJobId: params.workflowJobId,
+      agentRunId: params.agentRunId,
+      query,
+      documents: scored.map((entry) => `${entry.chunk.sourceTitle ?? ""}\n${entry.chunk.content}`.trim()),
+      topK: resultLimit,
+      failFastOnRateLimit: true,
+    });
+    return reranked.results.map((result) => toResult(scored[result.index].chunk, result.score));
+  } catch (error) {
+    if (!(error instanceof ModelProviderHttpError) || error.status !== 429) throw error;
+    logger.warn("Knowledge search using combined ranking after provider rate limit", {
+      workspaceId: params.workspaceId,
+      stage: "rerank",
+      httpStatus: error.status,
+    });
+    return scored.slice(0, resultLimit).map(({ chunk, score }) => toResult(chunk, score));
+  }
 }
 
 export async function answerKnowledgeQuestion(params: {

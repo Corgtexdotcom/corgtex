@@ -95,6 +95,7 @@ export type EmbeddingRequest = {
   workspaceId: string;
   model?: string;
   input: string | string[];
+  failFastOnRateLimit?: boolean;
   workflowJobId?: string;
   agentRunId?: string;
   catalogItemId?: string;
@@ -112,6 +113,7 @@ export type RerankRequest = {
   query: string;
   documents: string[];
   topK?: number;
+  failFastOnRateLimit?: boolean;
   workflowJobId?: string;
   agentRunId?: string;
   catalogItemId?: string;
