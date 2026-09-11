@@ -104,7 +104,7 @@ function commitmentIdentity(item: Record<string, unknown>, includeEvidence: bool
   const type = normalizeInsightType(item.type, null);
   if (operation !== "CREATE" || (type !== "ACTION_ITEM" && type !== "FOLLOW_UP")) return null;
   const identity = [
-    type,
+    "Action",
     operation,
     normalizeDedupeText(normalizeInsightTitle(item.title)),
     normalizeDedupeText(item.assigneeHint),
@@ -114,7 +114,7 @@ function commitmentIdentity(item: Record<string, unknown>, includeEvidence: bool
     identity.push(
       normalizeDedupeText(item.blockTitle),
       normalizeDedupeText(stripMeetingBlockContext(normalizeInsightBody(typeof item.body === "string" ? item.body : "", type))),
-      normalizeDedupeText(typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : ""),
+      normalizeDedupeText(typeof item.sourceQuote === "string" ? normalizeMeetingProductTerminology(item.sourceQuote).slice(0, 200) : ""),
     );
   }
   return JSON.stringify(identity);
@@ -695,30 +695,31 @@ Be conservative — only extract items you're confident about.
         workspaceId: params.workspaceId,
         meetingId: meeting.id,
         status: "SUGGESTED",
+        reviewedAt: null,
         sourceRecordId: null,
       },
     });
 
-    const pendingCommitments = await tx.meetingInsight.findMany({
+    const sourceCommitments = await tx.meetingInsight.findMany({
       where: {
         workspaceId: params.workspaceId,
         meetingId: meeting.id,
         sourceRecordId: latestSourceRecord?.id ?? null,
-        status: "SUGGESTED",
-        reviewedAt: null,
+        status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] },
         supersededAt: null,
         operation: "CREATE",
         type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
       },
     });
-    const pendingCommitmentIdentities = new Set<string>();
-    for (const pending of pendingCommitments) {
-      const item = withCommitmentContext({ ...pending, body: pending.bodyMd });
+    const sourceCommitmentIdentities = new Set<string>();
+    for (const existing of sourceCommitments) {
+      const item = withCommitmentContext({ ...existing, body: existing.bodyMd });
       addCommitment(item);
       const identity = commitmentIdentity(item, true);
-      if (identity) pendingCommitmentIdentities.add(identity);
+      if (identity) sourceCommitmentIdentities.add(identity);
     }
-    for (const pending of pendingCommitments) {
+    for (const pending of sourceCommitments) {
+      if (pending.status !== "SUGGESTED" || pending.reviewedAt) continue;
       const group = commitmentIdentity({ ...pending, body: pending.bodyMd }, false);
       if ((commitmentGroups.get(group ?? "")?.size ?? 0) < 2) continue;
       const metadata = pending.metadataJson && typeof pending.metadataJson === "object" && !Array.isArray(pending.metadataJson)
@@ -782,7 +783,7 @@ Be conservative — only extract items you're confident about.
         ? normalizeMeetingProductTerminology(item.dedupeKey).trim().toLowerCase().replace(/\s+/g, "-").slice(0, 160)
         : "";
       const commitment = commitmentIdentity(item, true);
-      if (commitment && pendingCommitmentIdentities.has(commitment)) continue;
+      if (commitment && sourceCommitmentIdentities.has(commitment)) continue;
       const dedupeKey = commitment
         ? `commitment:${createHash("sha256").update(commitment).digest("hex")}`
         : modelDedupeKey || deterministicInsightDedupeKey({

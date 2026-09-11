@@ -573,7 +573,7 @@ describe("meeting-intelligence", () => {
       ] } });
       await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
       expect(prisma.meetingInsight.findMany).toHaveBeenCalledWith({ where: expect.objectContaining({
-        workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: "source-1", status: "SUGGESTED", reviewedAt: null, supersededAt: null,
+        workspaceId: "ws-1", meetingId: "meeting-1", sourceRecordId: "source-1", status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] }, supersededAt: null,
       }) });
       expect(prisma.meetingInsight.updateMany).toHaveBeenCalledWith({
         where: expect.objectContaining({ id: pending.id, workspaceId: "ws-1", sourceRecordId: "source-1", status: "SUGGESTED", reviewedAt: null }),
@@ -636,6 +636,68 @@ describe("meeting-intelligence", () => {
       await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
         .resolves.toMatchObject({ applied: 0, skipped: 2 });
       expect(createActionMock).not.toHaveBeenCalled();
+    });
+
+    it("treats action items and follow-ups as one commitment family", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const shared = { operation: "CREATE", title: "Prepare report", body: "Milan will prepare the report.", assigneeHint: "Milan", confidence: 0.99 };
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [
+        { ...shared, type: "ACTION_ITEM", dedupeKey: "action" },
+        { ...shared, type: "FOLLOW_UP", dedupeKey: "follow-up" },
+        { ...shared, type: "FOLLOW_UP", body: "Milan owns preparing the report.", dedupeKey: "variant" },
+      ] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      const rows = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap(([call]) => call.data);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.metadataJson.requiresCommitmentReview)).toBe(true);
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+      await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+        .resolves.toMatchObject({ applied: 0, skipped: 2 });
+      expect(createActionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"])("holds a new ambiguous variant without changing a reviewed %s commitment", async (status) => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const reviewed = {
+        id: "reviewed", type: "ACTION_ITEM", operation: "CREATE", title: "Prepare report", assigneeHint: "Milan",
+        bodyMd: "Milan will prepare the report.", sourceQuote: "I will prepare it.", dueAt: null,
+        status, reviewedAt: new Date("2026-09-01T12:00:00Z"), metadataJson: { retained: true }, dedupeKey: "legacy-reviewed",
+      };
+      const baseline = JSON.stringify(reviewed);
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([reviewed]);
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [
+        { ...reviewed, body: reviewed.bodyMd, dedupeKey: "new-key" },
+        { ...reviewed, body: "Milan owns preparing the report.", dedupeKey: "variant" },
+      ] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      const rows = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap(([call]) => call.data);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].metadataJson.requiresCommitmentReview).toBe(true);
+      expect(JSON.stringify(reviewed)).toBe(baseline);
+      expect(prisma.meetingInsight.deleteMany).toHaveBeenCalledWith({ where: expect.objectContaining({ status: "SUGGESTED", reviewedAt: null, sourceRecordId: null }) });
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: reviewed.id }) }));
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+      await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+        .resolves.toMatchObject({ applied: 0, skipped: 1 });
+      expect(createActionMock).not.toHaveBeenCalled();
+    });
+
+    it("compares quotes after the same terminology correction and truncation used in storage", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const quote = "x".repeat(190) + " Cortex report";
+      const storedQuote = quote.replace("Cortex", "Corgtex").slice(0, 200);
+      const shared = { type: "ACTION_ITEM", operation: "CREATE", title: "Prepare report", assigneeHint: "Milan", confidence: 0.9 };
+      (prisma.meetingTranscriptSourceRecord.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: "source-1", recordedAt: new Date() });
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{
+        ...shared, id: "existing", bodyMd: "Milan will prepare the report.", sourceQuote: storedQuote, status: "SUGGESTED", metadataJson: {},
+      }]);
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [{
+        ...shared, body: "Milan will prepare the report.", sourceQuote: quote, dedupeKey: "new-key",
+      }] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      expect(prisma.meetingInsight.createMany).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "existing" }) }));
     });
 
     it("extracts named, collective, and coordinator team actions without awareness-only items", async () => {
