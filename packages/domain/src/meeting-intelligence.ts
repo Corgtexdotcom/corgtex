@@ -3,6 +3,7 @@ import { CrmActivityType } from "@prisma/client";
 import type { MeetingInsightType, MeetingInsight, MeetingInsightOperation, Prisma, ProposalResolutionOutcome } from "@prisma/client";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { AppError, invariant } from "./errors";
 import { defaultModelGateway } from "@corgtex/models";
 import { createAction, updateAction } from "./actions";
@@ -161,7 +162,7 @@ function createWorkspaceMemberDirectoryLoader(workspaceId: string): MemberDirect
   return async () => {
     if (cached === null) {
       cached = await prisma.member.findMany({
-        where: { workspaceId },
+        where: { workspaceId, isActive: true, ...humanMemberIdentityWhere() },
         include: { user: true },
       });
     }
@@ -981,6 +982,7 @@ export async function applyInsight(
         workspaceId: params.workspaceId,
         actionId: insight.targetEntityId,
         status: "COMPLETED",
+        completedVia: fullBody,
       });
       appliedEntityType = "Action";
       appliedEntityId = insight.targetEntityId;

@@ -1,6 +1,7 @@
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import { createAction, publishAction } from "./actions";
 import { requireWorkspaceMembership } from "./auth";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { invariant } from "./errors";
 
 export const SLACK_MEETING_ACTION_REVIEW_FLAG = "SLACK_MEETING_ACTION_REVIEW";
@@ -742,7 +743,7 @@ async function resolveAssigneeMemberId(workspaceId: string, assigneeHint: string
   const hint = assigneeHint?.trim().toLowerCase();
   if (!hint) return null;
   const members = await prisma.member.findMany({
-    where: { workspaceId },
+    where: { workspaceId, isActive: true, ...humanMemberIdentityWhere() },
     include: { user: true },
   });
   const exact = members.find((member: { id: string; user: { displayName?: string | null; email: string } }) =>
