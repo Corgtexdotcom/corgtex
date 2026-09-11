@@ -611,6 +611,33 @@ describe("meeting-intelligence", () => {
       expect(JSON.stringify(pending)).toBe(baseline);
     });
 
+    it("preserves different resolved customer block contexts while merging repeats in the same block", async () => {
+      const { defaultModelGateway } = await import("@corgtex/models");
+      const context = await buildMeetingIntelligenceContextMock();
+      context.meeting.blocksJson = { version: 1, blocks: [
+        { sequence: 1, title: "Customer A", kind: "update", summaryMd: "Review Customer A." },
+        { sequence: 2, title: "Customer B", kind: "update", summaryMd: "Review Customer B." },
+      ] };
+      buildMeetingIntelligenceContextMock.mockResolvedValue(context);
+      const shared = { type: "ACTION_ITEM", operation: "CREATE", title: "Send the report", body: "Milan will send the report.", assigneeHint: "Milan", sourceQuote: "I will send the report.", confidence: 0.99 };
+      (defaultModelGateway.extract as ReturnType<typeof vi.fn>).mockResolvedValue({ output: { insights: [
+        { ...shared, blockSequence: 1, dedupeKey: "first" },
+        { ...shared, blockTitle: "Customer A", dedupeKey: "repeat" },
+        { ...shared, blockSequence: 2, dedupeKey: "second" },
+      ] } });
+      await extractMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" });
+      const rows = (prisma.meetingInsight.createMany as ReturnType<typeof vi.fn>).mock.calls.flatMap(([call]) => call.data);
+      expect(rows).toHaveLength(2);
+      expect(rows[0].bodyMd).toContain("**MEETING BLOCK:** Customer A");
+      expect(rows[1].bodyMd).toContain("**MEETING BLOCK:** Customer B");
+      expect(new Set(rows.map((row) => row.dedupeKey)).size).toBe(2);
+      expect(rows.every((row) => row.metadataJson.requiresCommitmentReview)).toBe(true);
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(rows);
+      await expect(autoApplyMeetingInsights(mockActor, { workspaceId: "ws-1", meetingId: "meeting-1" }))
+        .resolves.toMatchObject({ applied: 0, skipped: 2 });
+      expect(createActionMock).not.toHaveBeenCalled();
+    });
+
     it("extracts named, collective, and coordinator team actions without awareness-only items", async () => {
       const { defaultModelGateway } = await import("@corgtex/models");
       const action = (title: string, body: string, assigneeHint: string, dedupeKey: string) => ({

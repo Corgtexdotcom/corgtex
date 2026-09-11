@@ -112,6 +112,7 @@ function commitmentIdentity(item: Record<string, unknown>, includeEvidence: bool
   ];
   if (includeEvidence) {
     identity.push(
+      normalizeDedupeText(item.blockTitle),
       normalizeDedupeText(stripMeetingBlockContext(normalizeInsightBody(typeof item.body === "string" ? item.body : "", type))),
       normalizeDedupeText(typeof item.sourceQuote === "string" ? item.sourceQuote.slice(0, 200) : ""),
     );
@@ -658,11 +659,22 @@ Be conservative — only extract items you're confident about.
   const resolvableProposalIds = new Set(meetingContext.proposals
     .filter((item: { id: string; status: string }) => item.status === "OPEN")
     .map((item: { id: string }) => item.id));
+  const withCommitmentContext = (item: Record<string, unknown>) => {
+    if (!commitmentIdentity(item, false)) return item;
+    const bodyBlockTitle = typeof item.body === "string"
+      ? item.body.match(/^\s*\*\*MEETING BLOCK:\*\*\s*([^\r\n]+)/)?.[1] : null;
+    const block = resolveMeetingBlockReference(meeting.blocksJson, {
+      sequence: typeof item.blockSequence === "number" ? item.blockSequence : null,
+      title: typeof item.blockTitle === "string" ? normalizeMeetingProductTerminology(item.blockTitle) : bodyBlockTitle,
+      kind: typeof item.blockKind === "string" ? item.blockKind : null,
+    });
+    return { ...item, blockTitle: block?.title ?? null };
+  };
   const insights = mergeExtractedInsightItems(extractedItems.filter((item) => {
     const type = normalizeTargetEntityType(item.targetEntityType);
     const id = typeof item.targetEntityId === "string" ? item.targetEntityId.trim() : null;
     return !type || !id || validTargets.has(`${type}:${id}`);
-  }));
+  }).map(withCommitmentContext));
   const commitmentGroups = new Map<string, Set<string>>();
   const addCommitment = (item: Record<string, unknown>) => {
     const group = commitmentIdentity(item, false);
@@ -701,7 +713,7 @@ Be conservative — only extract items you're confident about.
     });
     const pendingCommitmentIdentities = new Set<string>();
     for (const pending of pendingCommitments) {
-      const item = { ...pending, body: pending.bodyMd };
+      const item = withCommitmentContext({ ...pending, body: pending.bodyMd });
       addCommitment(item);
       const identity = commitmentIdentity(item, true);
       if (identity) pendingCommitmentIdentities.add(identity);
