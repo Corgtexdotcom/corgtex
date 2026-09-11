@@ -943,7 +943,11 @@ describe("communication Slack integration", () => {
     }));
   });
 
-  it("redacts deleted Slack messages and removes indexed Brain chunks", async () => {
+  it.each([
+    { rawRetentionDays: 3650 },
+    { publicIngestionEnabled: false, channelAdmissionMode: "selected" },
+    { publicIngestionEnabled: true, channelAdmissionMode: "selected" },
+  ])("redacts existing deleted messages even when ingestion is held: %j", async (settings) => {
     const { processSlackInboundEvent } = await import("./communication");
     prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
       id: "inbound-delete",
@@ -969,14 +973,16 @@ describe("communication Slack integration", () => {
         workspaceId: "workspace-1",
         provider: "SLACK",
         status: "ACTIVE",
-        settings: { rawRetentionDays: 3650 },
+        settings,
       },
     });
-    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: true });
+    prismaMock.communicationChannel.upsert.mockResolvedValueOnce({ id: "channel-1", kind: "PUBLIC", isIngestEnabled: false });
     prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(slackMessageRow());
 
     await processSlackInboundEvent("inbound-delete");
 
+    expect(prismaMock.communicationChannel.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
     expect(prismaMock.communicationMessage.updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         installationId: "install-1",
@@ -1010,6 +1016,27 @@ describe("communication Slack integration", () => {
         type: "communication.slack.context-summary",
       }),
     }));
+  });
+
+  it("does not create channels or history for a deletion without a stored message", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-unknown-delete",
+      provider: "SLACK",
+      payload: { event: { type: "message", subtype: "message_deleted", channel: "C-unknown", deleted_ts: "1714320000.000100" } },
+      installation: {
+        id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE",
+        settings: { publicIngestionEnabled: false, channelAdmissionMode: "selected" },
+      },
+    });
+    prismaMock.communicationMessage.findUnique.mockResolvedValueOnce(null);
+
+    await processSlackInboundEvent("inbound-unknown-delete");
+
+    expect(prismaMock.communicationChannel.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.knowledgeChunk.deleteMany).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.upsert).not.toHaveBeenCalled();
   });
 
   it("creates private action drafts from Slack slash commands", async () => {

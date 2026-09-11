@@ -79,12 +79,12 @@ export async function GET(
     }
 
     const redirectUri = slackCallbackRedirectUri(request, `/api/control-plane/deployments/${deploymentId}/integrations/slack/callback`);
-    const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri);
-    const expectedTeamId = parsed.expectedTeamId ?? target.expectedTeamId;
-    if (expectedTeamId && slackTeamId(oauthResponse) !== expectedTeamId) {
-      return controlPlaneSlackRedirect(request, deploymentId, "wrong-team");
-    }
     try {
+      const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri, target.managedWorkspaceId);
+      const expectedTeamId = parsed.expectedTeamId ?? target.expectedTeamId;
+      if (expectedTeamId && slackTeamId(oauthResponse) !== expectedTeamId) {
+        return controlPlaneSlackRedirect(request, deploymentId, "wrong-team");
+      }
       await saveControlPlaneSlackInstallation(actor, {
         deploymentId,
         oauthResponse,

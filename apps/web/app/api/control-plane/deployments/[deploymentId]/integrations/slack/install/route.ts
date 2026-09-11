@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
+  AppError,
   createSlackOAuthState,
   getControlPlaneSlackSetupTarget,
+  getSlackWorkspaceBinding,
   slackOAuthScopes,
 } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
@@ -29,12 +31,17 @@ export async function GET(
     const { deploymentId } = await props.params;
     const target = await getControlPlaneSlackSetupTarget(actor, deploymentId);
 
-    if (!env.SLACK_CLIENT_ID) {
+    const binding = getSlackWorkspaceBinding(target.managedWorkspaceId);
+    if (!binding?.clientId || !binding.clientSecret) {
       return NextResponse.redirect(appRedirectUrl(request, `/control-plane/deployments/${deploymentId}?tab=tools&slack=not-configured`));
     }
 
+    if (binding.source === "workspace" && target.expectedTeamId && target.expectedTeamId !== binding.teamId) {
+      throw new AppError(409, "SLACK_TEAM_MISMATCH", "Slack workspace binding does not match this workspace.");
+    }
+    const expectedTeamId = binding.teamId ?? target.expectedTeamId;
     const state = createSlackOAuthState(target.managedWorkspaceId, {
-      expectedTeamId: target.expectedTeamId,
+      expectedTeamId,
       flow: {
         kind: "control_plane",
         deploymentId,
@@ -52,12 +59,12 @@ export async function GET(
 
     const redirectUri = slackCallbackRedirectUri(request, `/api/control-plane/deployments/${deploymentId}/integrations/slack/callback`);
     const authorize = new URL("https://slack.com/oauth/v2/authorize");
-    authorize.searchParams.set("client_id", env.SLACK_CLIENT_ID);
-    authorize.searchParams.set("scope", slackOAuthScopes());
+    authorize.searchParams.set("client_id", binding.clientId);
+    authorize.searchParams.set("scope", binding.scopes?.join(",") ?? slackOAuthScopes());
     authorize.searchParams.set("redirect_uri", redirectUri);
     authorize.searchParams.set("state", state.value);
-    if (target.expectedTeamId) {
-      authorize.searchParams.set("team", target.expectedTeamId);
+    if (expectedTeamId) {
+      authorize.searchParams.set("team", expectedTeamId);
     }
 
     return NextResponse.redirect(authorize);

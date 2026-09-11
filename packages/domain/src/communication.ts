@@ -1002,17 +1002,6 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
   const ts = normalized.ts;
   if (!externalChannelId || !ts) return { skipped: true, reason: "missing_channel_or_ts" };
 
-  if (isRecord(installation.settings) && installation.settings.publicIngestionEnabled === false) {
-    return { skipped: true, reason: "public_ingestion_disabled" };
-  }
-  const channel = await ensureSlackChannel(installation, {
-    ...event,
-    channel: externalChannelId,
-  });
-  if (!channel || channel.kind !== "PUBLIC" || !channel.isIngestEnabled) {
-    return { skipped: true, reason: "channel_not_ingested" };
-  }
-
   if (normalized.isDeleted) {
     const existing = await prisma.communicationMessage.findUnique({
       where: {
@@ -1049,6 +1038,17 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
       });
     }
     return { skipped: true, reason: "message_deleted" };
+  }
+
+  if (isRecord(installation.settings) && installation.settings.publicIngestionEnabled === false) {
+    return { skipped: true, reason: "public_ingestion_disabled" };
+  }
+  const channel = await ensureSlackChannel(installation, {
+    ...event,
+    channel: externalChannelId,
+  });
+  if (!channel || channel.kind !== "PUBLIC" || !channel.isIngestEnabled) {
+    return { skipped: true, reason: "channel_not_ingested" };
   }
 
   if (normalized.hidden || normalized.isBot) {
