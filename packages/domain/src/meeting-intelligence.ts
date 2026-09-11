@@ -109,8 +109,6 @@ function commitmentIdentity(item: Record<string, unknown>, includeEvidence: bool
     normalizeDedupeText(normalizeInsightTitle(item.title)),
     normalizeDedupeText(item.assigneeHint),
     normalizeDueAt(item.dueAt ?? item.dueDate)?.toISOString() ?? "",
-    normalizeDedupeText(item.targetEntityType),
-    normalizeDedupeText(item.targetEntityId),
   ];
   if (includeEvidence) {
     identity.push(
@@ -652,13 +650,6 @@ Be conservative — only extract items you're confident about.
     }
   }
 
-  const insights = mergeExtractedInsightItems(extractedItems);
-  const commitmentCounts = new Map<string, number>();
-  for (const item of insights) {
-    const identity = commitmentIdentity(item, false);
-    if (identity) commitmentCounts.set(identity, (commitmentCounts.get(identity) ?? 0) + 1);
-  }
-
   const validTargets = new Map<string, string>([
     ...meetingContext.actions.map((item: { id: string }) => [`Action:${item.id}`, item.id] as const),
     ...meetingContext.tensions.map((item: { id: string }) => [`Tension:${item.id}`, item.id] as const),
@@ -667,6 +658,21 @@ Be conservative — only extract items you're confident about.
   const resolvableProposalIds = new Set(meetingContext.proposals
     .filter((item: { id: string; status: string }) => item.status === "OPEN")
     .map((item: { id: string }) => item.id));
+  const insights = mergeExtractedInsightItems(extractedItems.filter((item) => {
+    const type = normalizeTargetEntityType(item.targetEntityType);
+    const id = typeof item.targetEntityId === "string" ? item.targetEntityId.trim() : null;
+    return !type || !id || validTargets.has(`${type}:${id}`);
+  }));
+  const commitmentGroups = new Map<string, Set<string>>();
+  const addCommitment = (item: Record<string, unknown>) => {
+    const group = commitmentIdentity(item, false);
+    const identity = commitmentIdentity(item, true);
+    if (!group || !identity) return;
+    const identities = commitmentGroups.get(group) ?? new Set<string>();
+    identities.add(identity);
+    commitmentGroups.set(group, identities);
+  };
+  for (const item of insights) addCommitment(item);
 
   const extractedInsights = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const createdInsights: MeetingInsight[] = [];
@@ -680,6 +686,39 @@ Be conservative — only extract items you're confident about.
         sourceRecordId: null,
       },
     });
+
+    const pendingCommitments = await tx.meetingInsight.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        meetingId: meeting.id,
+        sourceRecordId: latestSourceRecord?.id ?? null,
+        status: "SUGGESTED",
+        reviewedAt: null,
+        supersededAt: null,
+        operation: "CREATE",
+        type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
+      },
+    });
+    for (const pending of pendingCommitments) addCommitment({ ...pending, body: pending.bodyMd });
+    for (const pending of pendingCommitments) {
+      const group = commitmentIdentity({ ...pending, body: pending.bodyMd }, false);
+      if ((commitmentGroups.get(group ?? "")?.size ?? 0) < 2) continue;
+      const metadata = pending.metadataJson && typeof pending.metadataJson === "object" && !Array.isArray(pending.metadataJson)
+        ? pending.metadataJson : {};
+      if (metadata.requiresCommitmentReview === true) continue;
+      await tx.meetingInsight.updateMany({
+        where: {
+          id: pending.id,
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          sourceRecordId: latestSourceRecord?.id ?? null,
+          status: "SUGGESTED",
+          reviewedAt: null,
+          supersededAt: null,
+        },
+        data: { metadataJson: { ...metadata, requiresCommitmentReview: true } },
+      });
+    }
     
     for (const item of insights) {
       const targetEntityType = normalizeTargetEntityType(item.targetEntityType);
@@ -764,7 +803,7 @@ Be conservative — only extract items you're confident about.
         dedupeKey: sourceDedupeKey,
         metadataJson: {
           ...(isCrmInsightType(type) && crm ? { crm } : {}),
-          ...((commitmentCounts.get(commitmentIdentity(item, false) ?? "") ?? 0) > 1
+          ...((commitmentGroups.get(commitmentIdentity(item, false) ?? "")?.size ?? 0) > 1
             ? { requiresCommitmentReview: true }
             : {}),
         } as Prisma.InputJsonValue,
