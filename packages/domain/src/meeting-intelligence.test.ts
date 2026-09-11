@@ -1682,6 +1682,7 @@ describe("meeting-intelligence", () => {
           workspaceId: "ws-1",
           meetingId: "meeting-1",
           status: "SUGGESTED",
+          reviewedAt: null,
           sourceRecordId: null,
         },
       });
