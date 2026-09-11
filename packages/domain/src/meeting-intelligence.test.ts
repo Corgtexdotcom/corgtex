@@ -934,9 +934,13 @@ describe("meeting-intelligence", () => {
         title: "Create customer escalation rule",
         bodyMd: expect.stringContaining("escalations"),
       }));
-      expect(submitProposalMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
-        workspaceId: "ws-1",
-        proposalId: "proposal-from-tension-1",
+      expect(submitProposalMock).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          status: "APPLIED",
+          appliedEntityType: "Proposal",
+          appliedEntityId: "proposal-from-tension-1",
+        }),
       }));
     });
 
@@ -1348,6 +1352,55 @@ describe("meeting-intelligence", () => {
   });
 
   describe("autoApplyMeetingInsights", () => {
+    it.each([false, true])("links an already-open public proposal without resubmitting it (linked tension: %s)", async (linkedTension) => {
+      const insight = {
+        id: "insight-public-proposal",
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        type: "PROPOSAL",
+        operation: "CREATE",
+        status: "SUGGESTED",
+        confidence: 0.95,
+        sourceQuote: "We agreed to propose a new escalation rule.",
+        targetEntityType: linkedTension ? "Tension" : null,
+        targetEntityId: linkedTension ? "tension-1" : null,
+        title: "Escalation rule",
+        bodyMd: "Propose a clear escalation path.",
+        meeting: { id: "meeting-1", title: "Weekly sync" },
+      };
+      (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([insight]);
+      (prisma.meetingInsight.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(insight);
+      const create = linkedTension ? createProposalFromTensionMock : createProposalMock;
+      // Both public creation paths open the proposal and activate its approval flow.
+      create.mockResolvedValue({ id: "proposal-public", status: "OPEN", isPrivate: false });
+      submitProposalMock.mockRejectedValue(new Error("Only draft proposals can be opened."));
+
+      await expect(autoApplyMeetingInsights(mockActor, {
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+      })).resolves.toMatchObject({ applied: 1, failed: 0, skipped: 0 });
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        workspaceId: "ws-1",
+        meetingId: "meeting-1",
+        isPrivate: false,
+      }));
+      expect(linkedTension ? createProposalMock : createProposalFromTensionMock).not.toHaveBeenCalled();
+      expect(submitProposalMock).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.update).toHaveBeenCalledTimes(1);
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith({
+        where: { id: insight.id },
+        data: expect.objectContaining({
+          status: "APPLIED",
+          appliedEntityType: "Proposal",
+          appliedEntityId: "proposal-public",
+          autoAppliedAt: expect.any(Date),
+          autoApplyError: null,
+        }),
+      });
+    });
+
     it("only loads high-confidence suggested or confirmed insights for auto-apply", async () => {
       (prisma.meetingInsight.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
         {

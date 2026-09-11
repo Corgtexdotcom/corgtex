@@ -2,6 +2,8 @@
 
 import { createHash } from "node:crypto";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
+import { resolveRecallWorkspaceBinding, requireRecallWorkspaceBindingFromEnv, recallWorkspaceBindingsEnabledInEnv } from "../packages/shared/src/recall-workspace-bindings-core.mjs";
 import prismaPackage from "@prisma/client";
 
 const { PrismaClient } = prismaPackage;
@@ -172,11 +174,14 @@ async function resolveWorkspace(prisma, ref) {
   return workspace;
 }
 
-function requiredProviderEnv(provider) {
+export function requiredProviderEnv(provider, workspaceId) {
   if (provider === "RECALL_AI") {
+    const binding = recallWorkspaceBindingsEnabledInEnv(process.env)
+      ? requireRecallWorkspaceBindingFromEnv(process.env, workspaceId)
+      : resolveRecallWorkspaceBinding(process.env, workspaceId);
     return [
-      ["RECALL_API_KEY", process.env.RECALL_API_KEY],
-      ["RECALL_WEBHOOK_SECRET", process.env.RECALL_WEBHOOK_SECRET],
+      ["RECALL_API_KEY", binding?.apiKey],
+      ["RECALL_WEBHOOK_SECRET", binding?.webhookSecret],
     ];
   }
   return [
@@ -185,10 +190,10 @@ function requiredProviderEnv(provider) {
   ];
 }
 
-function validateProviderEnv(providers) {
+function validateProviderEnv(providers, workspaceId) {
   const missing = [];
   for (const provider of providers) {
-    for (const [name, value] of requiredProviderEnv(provider)) {
+    for (const [name, value] of requiredProviderEnv(provider, workspaceId)) {
       if (!value) missing.push(name);
     }
   }
@@ -327,8 +332,8 @@ async function cleanupSmokeMeeting(prisma, params) {
   pass("removed temporary smoke meeting");
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   if (args.help === true || args.h === true) usage(0);
 
   const [rawBaseUrl, email, password, workspaceRef, rawMeetingUrl, rawJoinAt] = args._;
@@ -385,7 +390,7 @@ async function main() {
     const providers = providerOverride
       ? [providerOverride]
       : [config.defaultProvider, config.fallbackProvider].filter(Boolean);
-    validateProviderEnv(providers);
+    validateProviderEnv(providers, workspace.id);
     pass("recorder vendor env is present");
 
     const dryRunSummary = {
@@ -492,7 +497,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

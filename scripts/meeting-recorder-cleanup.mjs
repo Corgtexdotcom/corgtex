@@ -2,6 +2,8 @@
 
 import { createHash } from "node:crypto";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
+import { requireRecallWorkspaceBindingFromEnv, recallWorkspaceBindingsEnabledInEnv } from "../packages/shared/src/recall-workspace-bindings-core.mjs";
 import prismaPackage from "@prisma/client";
 
 const { PrismaClient } = prismaPackage;
@@ -124,12 +126,10 @@ function recallDeleteCanFallBackToLeave(error) {
   return /\b(400|405|409|425)\b/.test(error instanceof Error ? error.message : String(error));
 }
 
-async function cancelRecall(recording) {
-  const apiKey = process.env.RECALL_API_KEY;
-  const region = process.env.RECALL_REGION || "us-east-1";
-  if (!apiKey) {
-    throw new Error("RECALL_API_KEY is missing.");
-  }
+export async function cancelRecall(recording) {
+  const { apiKey, region, source } = requireRecallWorkspaceBindingFromEnv(process.env, recording.workspaceId);
+  // A scoped 404 cannot prove cancellation: the configured provider account may be wrong.
+  const missingBotStatuses = source === "legacy" ? [404] : [];
   if (shouldDeleteScheduledRecallBot(recording)) {
     try {
       await fetchProvider(`https://${region}.recall.ai/api/v1/bot/${recording.externalBotId}/`, {
@@ -138,7 +138,7 @@ async function cancelRecall(recording) {
           Authorization: recallAuthorization(apiKey),
           accept: "application/json",
         },
-      }, "RECALL_AI", [404]);
+      }, "RECALL_AI", missingBotStatuses);
       return "delete";
     } catch (error) {
       if (!recallDeleteCanFallBackToLeave(error)) {
@@ -153,7 +153,7 @@ async function cancelRecall(recording) {
       accept: "application/json",
       "content-type": "application/json",
     },
-  }, "RECALL_AI", [404]);
+  }, "RECALL_AI", missingBotStatuses);
   return "leave_call";
 }
 
@@ -301,8 +301,8 @@ async function enqueueReconcile(prisma, workspaceId) {
   });
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   if (args.help === true || args.h === true) usage(0);
   const workspaceRef = args.workspace ?? args._[0];
   if (!workspaceRef) usage();
@@ -365,6 +365,18 @@ async function main() {
       },
       orderBy: { recordedAt: "asc" },
     });
+
+    // Applying cleanup requires every selected Recall binding before any writes.
+    // Read-only inventory must remain available without provider credentials.
+    if (apply && recallWorkspaceBindingsEnabledInEnv(process.env)) {
+      for (const meeting of meetings) {
+        for (const recording of meeting.recordings) {
+          if (recording.provider === "RECALL_AI") {
+            requireRecallWorkspaceBindingFromEnv(process.env, recording.workspaceId);
+          }
+        }
+      }
+    }
 
     const summary = {
       mode: apply ? "apply" : "dry-run",
@@ -509,6 +521,8 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  fail(error instanceof Error ? error.message : String(error));
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((error) => {
+    fail(error instanceof Error ? error.message : String(error));
+  });
+}

@@ -1,3 +1,4 @@
+import { getRecallWorkspaceBinding } from "./recall-workspace-bindings";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { createHash, randomUUID } from "node:crypto";
@@ -3943,6 +3944,7 @@ function recorderMonthBounds(now = new Date()) {
 }
 
 function controlPlaneRecorderRuntimeChecks(config: {
+  workspaceId?: string;
   defaultProvider: MeetingRecorderProvider;
   fallbackProvider?: MeetingRecorderProvider | null;
 }) {
@@ -3957,18 +3959,19 @@ function controlPlaneRecorderRuntimeChecks(config: {
     },
   ];
   if (providers.has("RECALL_AI")) {
+    const binding = getRecallWorkspaceBinding(config.workspaceId);
     checks.push(
       {
         key: "recall_api_key",
         label: "Recall API key",
-        ok: Boolean(env.RECALL_API_KEY),
-        detail: env.RECALL_API_KEY ? "Configured." : "RECALL_API_KEY is missing.",
+        ok: Boolean(binding?.apiKey),
+        detail: binding?.apiKey ? "Configured for this workspace." : "Recall API key is missing for this workspace.",
       },
       {
         key: "recall_webhook_secret",
         label: "Recall webhook secret",
-        ok: Boolean(env.RECALL_WEBHOOK_SECRET),
-        detail: env.RECALL_WEBHOOK_SECRET ? "Configured." : "RECALL_WEBHOOK_SECRET is missing.",
+        ok: Boolean(binding?.webhookSecret),
+        detail: binding?.webhookSecret ? "Configured for this workspace." : "Recall webhook secret is missing for this workspace.",
       },
     );
   }
@@ -4593,6 +4596,7 @@ function buildManagedRecorderRow(row: ControlPlaneDeploymentRow, state: BatchedM
 
   const config = state.configByWorkspaceId.get(row.managedWorkspaceId) ?? null;
   const effectiveConfig = {
+    workspaceId: row.managedWorkspaceId,
     enabled: config?.enabled ?? false,
     defaultProvider: config?.defaultProvider ?? "RECALL_AI" as MeetingRecorderProvider,
     fallbackProvider: config?.fallbackProvider ?? null,
@@ -6953,7 +6957,7 @@ function buildControlPlaneInternalScheduleCounts(params: {
     }
     if (!params.entitlementByWorkspaceId.get(meeting.workspaceId) || !config?.enabled) continue;
     if (!config.autoRecordEnabled) continue;
-    if (!controlPlaneRecorderRuntimeChecks({ defaultProvider: config.defaultProvider, fallbackProvider: null }).every((check) => check.ok)) continue;
+    if (!controlPlaneRecorderRuntimeChecks({ workspaceId: meeting.workspaceId, defaultProvider: config.defaultProvider, fallbackProvider: null }).every((check) => check.ok)) continue;
     if (meeting.recordedAt.getTime() - params.now.getTime() <= CONTROL_PLANE_RECORDER_AUTO_SCHEDULE_MIN_LEAD_MS) continue;
     if (meeting.recordings.some(controlPlaneRecordingShowsSchedulingFailure)) continue;
 
