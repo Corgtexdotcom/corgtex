@@ -44,11 +44,11 @@ export async function GET(request: Request) {
 
     await getSlackOAuthInstallTarget(actor, parsed.workspaceId);
     const redirectUri = slackCallbackRedirectUri(request);
-    const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri, parsed.workspaceId);
-    if (parsed.expectedTeamId && slackTeamId(oauthResponse) !== parsed.expectedTeamId) {
-      return slackToolsRedirect(request, parsed.workspaceId, "wrong-team");
-    }
     try {
+      const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri, parsed.workspaceId);
+      if (parsed.expectedTeamId && slackTeamId(oauthResponse) !== parsed.expectedTeamId) {
+        return slackToolsRedirect(request, parsed.workspaceId, "wrong-team");
+      }
       await saveSlackInstallation(actor, {
         workspaceId: parsed.workspaceId,
         oauthResponse,

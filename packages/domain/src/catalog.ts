@@ -385,7 +385,7 @@ function managedEnterpriseServiceSources(workspaceId: string, flags: CatalogFeat
     }));
 }
 
-function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "sourceId">, flags: CatalogFeatureFlags) {
+function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "sourceId">, flags: CatalogFeatureFlags, workspaceId: string) {
   if (item.sourceType === "AGENT_CONFIG" || item.sourceType === "AGENT_IDENTITY") {
     return flags.AGENT_GOVERNANCE;
   }
@@ -411,7 +411,8 @@ function isCatalogItemAvailable(item: Pick<CatalogItemRecord, "sourceType" | "so
     return flags.APP_MARKETPLACE;
   }
   if (item.sourceType === "COMMUNICATION_INSTALLATION" && item.sourceId === "slack") {
-    return Boolean(process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET);
+    const binding = getSlackWorkspaceBinding(workspaceId);
+    return Boolean(binding?.clientId && binding.clientSecret);
   }
   if (item.sourceType === "OAUTH_CONNECTION" && item.sourceId === "google") {
     return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
@@ -439,7 +440,7 @@ async function requireAvailableCatalogItem(workspaceId: string, catalogItemId: s
     }),
     getCatalogFeatureFlags(workspaceId),
   ]);
-  invariant(item && isCatalogItemAvailable(item, featureFlags), 404, "NOT_FOUND", "Catalog item not found.");
+  invariant(item && isCatalogItemAvailable(item, featureFlags, workspaceId), 404, "NOT_FOUND", "Catalog item not found.");
   return item;
 }
 
@@ -724,7 +725,7 @@ export async function listCatalogItems(actor: AppActor, workspaceId: string) {
   }
 
   const serialized = items
-    .filter((item) => isCatalogItemAvailable(item, featureFlags))
+    .filter((item) => isCatalogItemAvailable(item, featureFlags, workspaceId))
     .map((item) => serializeCatalogItem({
       item,
       userId,
@@ -797,7 +798,7 @@ export async function getCatalogItem(actor: AppActor, params: {
     }),
   ]);
 
-  invariant(item && isCatalogItemAvailable(item, featureFlags), 404, "NOT_FOUND", "Catalog item not found.");
+  invariant(item && isCatalogItemAvailable(item, featureFlags, params.workspaceId), 404, "NOT_FOUND", "Catalog item not found.");
   const totalCostUsd = usageRows.reduce((sum, row) => sum + Number(row.billableCostUsd ?? row.estimatedCostUsd ?? 0), 0);
   const totalTokens = usageRows.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0);
 

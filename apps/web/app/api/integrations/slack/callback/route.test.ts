@@ -134,6 +134,15 @@ describe("GET /api/integrations/slack/callback", () => {
     );
   });
 
+  it("redirects a scoped app mismatch thrown during OAuth exchange", async () => {
+    exchangeSlackOAuthCodeMock.mockRejectedValueOnce(Object.assign(new Error("wrong app"), {code: "SLACK_TEAM_MISMATCH"}));
+    isSlackTenantBindingErrorMock.mockReturnValueOnce(true);
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/callback?code=auth-code&state=state-value"));
+    expect(response.headers.get("location")).toBe("https://app.corgtex.com/workspaces/workspace-1/tools?type=CONNECTOR&q=slack&slack=wrong-team");
+    expect(saveSlackInstallationMock).not.toHaveBeenCalled();
+  });
+
   it("redirects binding conflicts without leaking tenant details", async () => {
     const bindingError = Object.assign(new Error("bound elsewhere"), { code: "SLACK_TEAM_ALREADY_CONNECTED" });
     saveSlackInstallationMock.mockRejectedValueOnce(bindingError);
