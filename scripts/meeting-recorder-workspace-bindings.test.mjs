@@ -102,6 +102,41 @@ describe("standalone recorder scripts share the domain Recall contract", () => {
     expect(prisma.workflowJob.upsert).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["malformed map", "{broken"],
+    ["empty map", "{}"],
+    ["missing workspace binding", JSON.stringify({ [ids[1]]: bindings[ids[1]] })],
+    ["missing legacy credentials", undefined],
+  ])("allows local disable with %s without provider calls or reconcile jobs", async (_label, raw) => {
+    vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", raw);
+    vi.stubEnv("RECALL_API_KEY", undefined);
+    vi.stubEnv("RECALL_WEBHOOK_SECRET", undefined);
+    prisma.workspaceFeatureFlag.upsert.mockImplementation(async ({ update }) => ({ flag: "MEETING_RECORDERS", ...update }));
+    prisma.workspaceMeetingRecorderConfig.upsert.mockImplementation(async ({ update }) => update);
+    prisma.$transaction.mockImplementation(async (operations) => Promise.all(operations));
+
+    await enable(["--workspace", "resolved-slug", "--disabled"]);
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.workspaceFeatureFlag.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId_flag: { workspaceId: ids[0], flag: "MEETING_RECORDERS" } },
+      update: { enabled: false },
+      create: expect.objectContaining({ workspaceId: ids[0], enabled: false }),
+    }));
+    expect(prisma.workspaceMeetingRecorderConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { workspaceId: ids[0] },
+      update: expect.objectContaining({ enabled: false }),
+      create: expect.objectContaining({ workspaceId: ids[0], enabled: false }),
+    }));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(prisma.workflowJob.upsert).not.toHaveBeenCalled();
+    expect(JSON.parse(console.log.mock.calls.at(-1)[0])).toMatchObject({
+      featureFlag: { enabled: false }, config: { enabled: false },
+      reconcileJob: null, env: null, webhookUrls: null, warnings: [],
+    });
+    expect(prisma.$disconnect).toHaveBeenCalledTimes(1);
+  });
+
   it("checks all persisted recording bindings before cancelling even an earlier valid row", async () => {
     setMap({ [ids[0]]: bindings[ids[0]] });
     prisma.meeting.findMany.mockResolvedValue([{ id: "meeting", recordings: [bot(ids[0]), bot(ids[1])] }]);

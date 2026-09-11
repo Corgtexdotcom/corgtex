@@ -166,7 +166,10 @@ export async function main(argv = process.argv.slice(2)) {
   const prisma = new PrismaClient();
   try {
     const workspace = await resolveWorkspace(prisma, workspaceRef);
-    const env = envStatus(defaultProvider, fallbackProvider, workspace.id);
+    // Local shutdown must remain available when provider credentials are broken.
+    const env = enabled
+      ? envStatus(defaultProvider, fallbackProvider, workspace.id)
+      : { status: null, webhookUrls: null, warnings: [] };
     const [featureFlag, config] = await prisma.$transaction([
       prisma.workspaceFeatureFlag.upsert({
         where: {
