@@ -137,6 +137,76 @@ describe("standalone recorder scripts share the domain Recall contract", () => {
     expect(prisma.$disconnect).toHaveBeenCalledTimes(1);
   });
 
+  it.each([null, "MEETING_BAAS"])("enables BaaS-only with fallback %s despite malformed unrelated Recall configuration", async (fallback) => {
+    vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", "{broken");
+    vi.stubEnv("MEETING_BAAS_API_KEY", "synthetic-baas-key");
+    vi.stubEnv("MEETING_BAAS_WEBHOOK_SECRET", "synthetic-baas-secret");
+    prisma.workspaceFeatureFlag.upsert.mockImplementation(async ({ update }) => ({ flag: "MEETING_RECORDERS", ...update }));
+    prisma.workspaceMeetingRecorderConfig.upsert.mockImplementation(async ({ update }) => update);
+    prisma.$transaction.mockImplementation(async (operations) => Promise.all(operations));
+    await enable(["--workspace", "resolved-slug", "--default-provider", "baas", "--fallback-provider", fallback ? "baas" : "none"]);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.workspaceMeetingRecorderConfig.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ enabled: true, defaultProvider: "MEETING_BAAS", fallbackProvider: fallback }),
+    }));
+    expect(prisma.workflowJob.upsert).toHaveBeenCalledTimes(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["{broken", JSON.stringify({ [ids[1]]: bindings[ids[1]] })])("keeps Recall fallback enable fail-closed: %s", async (raw) => {
+    vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", raw);
+    await expect(enable(["--workspace", "resolved-slug", "--default-provider", "baas", "--fallback-provider", "recall"])).rejects.toMatchObject({ status: 503 });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.workspaceFeatureFlag.upsert).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["{broken", JSON.stringify({ [ids[1]]: bindings[ids[1]] })])("inventories mixed providers in default and explicit dry-run with invalid Recall binding: %s", async (raw) => {
+    vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", raw);
+    prisma.meeting.findMany.mockResolvedValue([{ id: "meeting", recordings: [
+      { ...bot(ids[0], "baas-1"), provider: "MEETING_BAAS" },
+      { ...bot(ids[0], "baas-2"), provider: "MEETING_BAAS" },
+      bot(ids[0], "canonical"), bot(),
+    ] }]);
+    for (const extra of [[], ["--dry-run"]]) {
+      await cleanup([...cleanupArgs.slice(0, -1), ...extra, "--enqueue-reconcile"]);
+      expect(JSON.parse(console.log.mock.calls.at(-1)[0])).toMatchObject({ mode: "dry-run", duplicateGroupsFound: 2 });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(prisma.meetingRecording.update).not.toHaveBeenCalled();
+    expect(prisma.workflowJob.upsert).not.toHaveBeenCalled();
+    await expect(cleanup(cleanupArgs)).rejects.toMatchObject({ status: 503 });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(prisma.meetingRecording.update).not.toHaveBeenCalled();
+  });
+
+  it("applies BaaS-only cleanup despite malformed unrelated Recall configuration", async () => {
+    vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", "{broken");
+    vi.stubEnv("MEETING_BAAS_API_KEY", "synthetic-baas-key");
+    prisma.meeting.findMany.mockResolvedValue([{ id: "meeting", recordings: [
+      { ...bot(ids[0], "canonical"), provider: "MEETING_BAAS" },
+      { ...bot(), provider: "MEETING_BAAS" },
+    ] }]);
+    await cleanup(cleanupArgs);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(prisma.meetingRecording.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "duplicate" }, data: expect.objectContaining({ status: "SKIPPED" }) }));
+  });
+
+  it("smoke validates only the selected providers, including default/fallback and explicit override", async () => {
+    vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", "{broken");
+    vi.stubEnv("MEETING_BAAS_API_KEY", "synthetic-baas-key");
+    vi.stubEnv("MEETING_BAAS_WEBHOOK_SECRET", "synthetic-baas-secret");
+    const args = ["https://app.example.com", "synthetic@example.com", "synthetic-password", "resolved-slug", "https://meet.google.com/abc-defg-hij", "2026-10-01T12:00:00Z"];
+    await smoke([...args, "--provider", "baas"]);
+    prisma.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({ enabled: true, defaultProvider: "MEETING_BAAS", fallbackProvider: null });
+    await smoke(args);
+    prisma.workspaceMeetingRecorderConfig.findUnique.mockResolvedValue({ enabled: true, defaultProvider: "MEETING_BAAS", fallbackProvider: "RECALL_AI" });
+    await expect(smoke(args)).rejects.toMatchObject({ status: 503 });
+    await expect(smoke([...args, "--provider", "recall"])).rejects.toMatchObject({ status: 503 });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(prisma.meeting.create).not.toHaveBeenCalled();
+  });
+
   it("checks all persisted recording bindings before cancelling even an earlier valid row", async () => {
     setMap({ [ids[0]]: bindings[ids[0]] });
     prisma.meeting.findMany.mockResolvedValue([{ id: "meeting", recordings: [bot(ids[0]), bot(ids[1])] }]);

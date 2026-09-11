@@ -366,8 +366,9 @@ export async function main(argv = process.argv.slice(2)) {
       orderBy: { recordedAt: "asc" },
     });
 
-    // Resolve every selected persisted row before any cancellation or cleanup writes.
-    if (recallWorkspaceBindingsEnabledInEnv(process.env)) {
+    // Applying cleanup requires every selected Recall binding before any writes.
+    // Read-only inventory must remain available without provider credentials.
+    if (apply && recallWorkspaceBindingsEnabledInEnv(process.env)) {
       for (const meeting of meetings) {
         for (const recording of meeting.recordings) {
           if (recording.provider === "RECALL_AI") {

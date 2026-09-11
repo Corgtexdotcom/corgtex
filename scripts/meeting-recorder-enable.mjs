@@ -91,9 +91,11 @@ function baseUrlFromEnv() {
 export function envStatus(defaultProvider, fallbackProvider, workspaceId) {
   const scoped = recallWorkspaceBindingsEnabledInEnv(process.env);
   const usesRecall = [defaultProvider, fallbackProvider].includes("RECALL_AI");
-  const binding = scoped && usesRecall
-    ? requireRecallWorkspaceBindingFromEnv(process.env, workspaceId)
-    : resolveRecallWorkspaceBinding(process.env, workspaceId);
+  const binding = !usesRecall
+    ? null
+    : scoped
+      ? requireRecallWorkspaceBindingFromEnv(process.env, workspaceId)
+      : resolveRecallWorkspaceBinding(process.env, workspaceId);
   const baseUrl = baseUrlFromEnv();
   const warnings = [];
   const status = {
