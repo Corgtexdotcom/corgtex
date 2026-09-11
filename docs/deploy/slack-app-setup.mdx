@@ -18,15 +18,36 @@ For the hosted Corgtex app, configure these URLs in Slack App Management:
 | Events request URL | `https://app.corgtex.com/api/integrations/slack/events` |
 | Interactivity request URL | `https://app.corgtex.com/api/integrations/slack/interactivity` |
 
-Customer-specific deployments must use the deployed origin for that customer, not a different customer tenant. For example, a Chirone runtime with `APP_URL=https://chirone.corgtex.com` must have its Slack app redirect URL configured as `https://chirone.corgtex.com/api/integrations/slack/callback`, plus matching slash command, Events API, and interactivity request URLs on the same origin.
+Dedicated deployments must use their own deployed origin for the OAuth callback and all request URLs. The table above describes legacy single-app mode, where `SLACK_WORKSPACE_BINDINGS_JSON` is absent.
 
 Keep the Slack app manifest in the Slack App Management dashboard or another private operational store, not in this public repository. Apply changes to the same Slack app whose Client ID is deployed as `SLACK_CLIENT_ID`.
 
 ## Deployment Checks
 
-Before testing an install, verify in the deployment platform that the runtime has `APP_URL=https://app.corgtex.com` and has non-empty values for `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_APP_ID`, `SLACK_SIGNING_SECRET`, and `ENCRYPTION_KEY`. Do not print or paste secret values into logs, tickets, PRs, or chat.
+For legacy single-app mode, before testing an install, verify in the deployment platform that the runtime has `APP_URL=https://app.corgtex.com` and has non-empty values for `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_APP_ID`, `SLACK_SIGNING_SECRET`, and `ENCRYPTION_KEY`. Do not print or paste secret values into logs, tickets, PRs, or chat.
 
 The Slack Client ID in production must match the Slack app where the redirect URL and request URLs were configured. A common failure mode is updating a development Slack app while production still points at a different Client ID.
+
+## Workspace-scoped Slack Apps
+
+To retain separate Slack app identities on one runtime, configure `SLACK_WORKSPACE_BINDINGS_JSON` through the existing deployment secret store on both web and worker. It is a JSON object keyed by the exact Corgtex workspace UUID. Each entry requires `teamId`, `appId`, `clientId`, `clientSecret`, `signingSecret`, and a nonempty `scopes` array. Use the corresponding app's credentials and exact reviewed bot scopes; do not put this secret map in workspace settings, source control, or logs.
+
+The standard command, mention, and shortcut permissions are `commands`, `chat:write`, `app_mentions:read`, `users:read`, `users:read.email`, `channels:read`, and `reactions:read`. Scoped OAuth requests exactly that entry's scopes. Do not add `channels:join`, private-channel scopes, or DM scopes merely to reconnect an existing installation. Configure only the Slack commands, shortcuts, and event subscriptions supported by those approved permissions. `channels:history` is needed for public-channel history; it does not authorize discovery, joining, or importing every channel.
+
+For the placeholder Corgtex workspace UUID below, configure its Slack app as follows, replacing `app.example.com` with the actual shared runtime origin:
+
+| Slack setting | URL |
+|---|---|
+| OAuth Redirect URL | `https://app.example.com/api/integrations/slack/callback` |
+| Events request URL | `https://app.example.com/api/integrations/slack/11111111-1111-4111-8111-111111111111/events` |
+| Slash command request URL | `https://app.example.com/api/integrations/slack/11111111-1111-4111-8111-111111111111/commands` |
+| Interactivity request URL | `https://app.example.com/api/integrations/slack/11111111-1111-4111-8111-111111111111/interactivity` |
+
+The OAuth callback stays shared and uses signed workspace-bound state. Installation requires workspace admin or the existing Control Plane authorization; callback authorization is checked again before exchange. The returned Slack app and team must match the entry. Request routes verify the selected app's signature and signed app/team identity, then check the stored installation before handling business events. Slack URL verification requires a valid signature but does not require an existing installation.
+
+When the map is defined, an unknown workspace or an unscoped request never falls back to global Slack credentials. An empty or malformed map fails closed. In this mode the global Slack variables are not required for mapped workspaces; `APP_URL` and `ENCRYPTION_KEY` remain required. When the map is absent, the legacy configuration and URLs above continue to work.
+
+Scoped reconnect preserves existing installation settings and channel ingestion flags, while enforcing `channelAdmissionMode: selected`, `publicArchiveSyncEnabled: false`, `broadPublicIngestion: false`, and `autoJoinPublicChannels: false`. Newly discovered channels start disabled. Reconnect does not release an ingestion hold or authorize broader channel access; restore only previously approved channel flags through the reviewed operational workflow. Existing proactive settings remain unchanged.
 
 ## Install Flow
 
@@ -36,9 +57,9 @@ If Slack shows the wrong workspace in the OAuth consent screen, stop the install
 
 After installation, verify the workspace settings page shows Slack as connected, then test `/corgtex Jan should follow up tomorrow`, `/corgtex brief`, an app mention such as `@Corgtex turn this into a tension`, and a message shortcut capture in Slack. Direct messages are not part of the v1 Slack surface, so do not add DM scopes or DM event subscriptions for this setup.
 
-For hosted workspaces that use Slack as long-term context, include `channels:history` and `channels:join` in the bot scopes, and subscribe the bot to `message.channels` events in addition to `app_mention` and `app_home_opened`. Corgtex uses those scopes and events to join public channels, capture accessible public-channel messages, index those messages into Brain retrieval, and maintain thread/channel summaries for the Slack agent. Private channels and DMs remain out of scope.
+For legacy single-app workspaces explicitly authorized for broad public-channel ingestion, include `channels:history` and `channels:join` in the bot scopes, and subscribe the bot to `message.channels` events in addition to `app_mention` and `app_home_opened`. Corgtex uses those scopes and events to join public channels, capture accessible public-channel messages, index those messages into Brain retrieval, and maintain thread/channel summaries for the Slack agent. Private channels and DMs remain out of scope.
 
-The worker schedules `communication.slack.public-archive` daily for active Slack installations with `channels:history`. For first-time customer onboarding or a recovery import, run `node /app/scripts/sync-slack-public-archive.mjs` inside the customer runtime with `WORKSPACE_SLUG` or `WORKSPACE_ID` set. The command reports counts only and must not print Slack message content, channel names, or token values.
+The worker schedules `communication.slack.public-archive` only for eligible active installations with `channels:history` and no archive or ingestion hold. In authorized legacy broad-ingestion mode, `node /app/scripts/sync-slack-public-archive.mjs` can run inside that runtime with `WORKSPACE_SLUG` or `WORKSPACE_ID` set. It refuses all workspace-scoped credential configurations before provider access, and also refuses legacy installations with selected-channel admission or explicit archive, public-ingestion, or broad-ingestion holds. A disabled auto-join setting prevents channel joining. Do not remove those guards to perform a reconnect or scoped recovery; use the reviewed exact-channel recovery workflow instead. The command reports counts only and must not print Slack message content, channel names, or token values.
 
 Raw Slack message text is retained according to the installation retention setting and is redacted by the communication retention worker when it expires. When raw text is redacted or a Slack delete event arrives, Corgtex removes the corresponding raw Slack knowledge chunks. Durable context summaries may remain as derived organizational memory unless the workspace disables Slack ingestion or asks for a broader deletion.
 

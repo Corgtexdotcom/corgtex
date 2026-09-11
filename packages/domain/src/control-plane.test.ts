@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppActor } from "@corgtex/shared";
 
-const { prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks, storageMock, leaseMocks, inventoryEvaluatorMock } = vi.hoisted(() => ({
+const { slackAvailabilityEnv, prismaMock, encryptSecretMock, decryptSecretMock, memberMocks, communicationMocks, storageMock, leaseMocks, inventoryEvaluatorMock } = vi.hoisted(() => ({
+  slackAvailabilityEnv: { map: undefined as string | undefined, clientId: "slack-client-id" as string | undefined, clientSecret: "slack-client-secret" as string | undefined },
   prismaMock: {
+    oAuthConnection: { findMany: vi.fn(async () => []) },
     $queryRaw: vi.fn(),
     $transaction: vi.fn(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
@@ -397,8 +399,9 @@ vi.mock("@corgtex/shared", () => ({
     RECALL_API_KEY: "recall-key",
     RECALL_WEBHOOK_SECRET: "recall-secret",
     RECALL_REGION: "us-east-1",
-    SLACK_CLIENT_ID: "slack-client-id",
-    SLACK_CLIENT_SECRET: "slack-client-secret",
+    get SLACK_WORKSPACE_BINDINGS_JSON() { return slackAvailabilityEnv.map; },
+    get SLACK_CLIENT_ID() { return slackAvailabilityEnv.clientId; },
+    get SLACK_CLIENT_SECRET() { return slackAvailabilityEnv.clientSecret; },
   },
   prisma: prismaMock,
   encryptSecret: encryptSecretMock,
@@ -494,9 +497,64 @@ function recentRecorderProofDate(offsetMs = 0) {
 }
 
 describe("control plane domain", () => {
+  describe("Slack connector availability", () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const otherWorkspaceId = "22222222-2222-4222-8222-222222222222";
+    const binding = { teamId: "TONE", appId: "AONE", clientId: "scoped-client", clientSecret: "scoped-secret", signingSecret: "scoped-signing", scopes: ["commands"] };
+
+    async function availability(managedWorkspaceId: string | null = workspaceId) {
+      prismaMock.customerDeployment.findUnique.mockResolvedValue({
+        id: "dep-slack", deploymentKind: managedWorkspaceId ? "SHARED_WORKSPACE" : "REMOTE_MANAGED",
+        managedWorkspaceId, managedWorkspace: null, supportCredentialEnc: null,
+      });
+      const { getControlPlaneIntegrationStatus } = await import("./control-plane");
+      const status = await getControlPlaneIntegrationStatus(operatorActor, "dep-slack");
+      return status.availableConnectors.find((connector) => connector.key === "slack");
+    }
+
+    it("advertises the authorized workspace's scoped OAuth binding without global credentials", async () => {
+      slackAvailabilityEnv.map = JSON.stringify({ [workspaceId]: binding });
+      slackAvailabilityEnv.clientId = undefined;
+      slackAvailabilityEnv.clientSecret = undefined;
+      expect(await availability()).toMatchObject({ canManageFromControlPlane: true });
+    });
+
+    it("does not offer another workspace's credentials or global fallback", async () => {
+      slackAvailabilityEnv.map = JSON.stringify({ [otherWorkspaceId]: binding });
+      expect(await availability()).toMatchObject({ canManageFromControlPlane: false });
+    });
+
+    it("retains legacy OAuth-pair availability when the map is absent", async () => {
+      expect(await availability()).toMatchObject({ canManageFromControlPlane: true });
+      slackAvailabilityEnv.clientSecret = undefined;
+      expect(await availability()).toMatchObject({ canManageFromControlPlane: false });
+    });
+
+    it("fails closed for malformed scoped configuration without exposing its contents", async () => {
+      slackAvailabilityEnv.map = "private-invalid-map";
+      await expect(availability()).rejects.toMatchObject({ code: "SLACK_WORKSPACE_BINDINGS_INVALID", message: "Slack workspace configuration is invalid." });
+    });
+
+    it("does not resolve local credentials for a remote deployment", async () => {
+      slackAvailabilityEnv.map = "private-invalid-map";
+      expect(await availability(null)).toMatchObject({ canManageFromControlPlane: false });
+    });
+
+    it("requires control-plane access before resolving scoped configuration", async () => {
+      slackAvailabilityEnv.map = "private-invalid-map";
+      prismaMock.customerDeploymentAccess.findUnique.mockResolvedValue(null);
+      const { getControlPlaneIntegrationStatus } = await import("./control-plane");
+      await expect(getControlPlaneIntegrationStatus(userActor, "dep-slack")).rejects.toMatchObject({ status: 403 });
+      expect(prismaMock.customerDeployment.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
   beforeEach(() => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();
+    slackAvailabilityEnv.map = undefined;
+    slackAvailabilityEnv.clientId = "slack-client-id";
+    slackAvailabilityEnv.clientSecret = "slack-client-secret";
     prismaMock.$transaction.mockImplementation(async (operations: unknown[] | ((tx: unknown) => unknown)) => (
       typeof operations === "function" ? operations(prismaMock) : Promise.all(operations)
     ));
