@@ -43,6 +43,8 @@ For the placeholder Corgtex workspace UUID below, configure its Slack app as fol
 | Slash command request URL | `https://app.example.com/api/integrations/slack/11111111-1111-4111-8111-111111111111/commands` |
 | Interactivity request URL | `https://app.example.com/api/integrations/slack/11111111-1111-4111-8111-111111111111/interactivity` |
 
+For an install started from the Control Plane, also register `https://app.example.com/api/control-plane/deployments/<deploymentId>/integrations/slack/callback`, replacing `<deploymentId>` with that deployment’s ID. That flow uses its deployment-specific redirect; workspace settings use the shared callback in the table.
+
 The OAuth callback stays shared and uses signed workspace-bound state. Installation requires workspace admin or the existing Control Plane authorization; callback authorization is checked again before exchange. The returned Slack app and team must match the entry. Request routes verify the selected app's signature and signed app/team identity, then check the stored installation before handling business events. Slack URL verification requires a valid signature but does not require an existing installation.
 
 When the map is defined, an unknown workspace or an unscoped request never falls back to global Slack credentials. An empty or malformed map fails closed. In this mode the global Slack variables are not required for mapped workspaces; `APP_URL` and `ENCRYPTION_KEY` remain required. When the map is absent, the legacy configuration and URLs above continue to work.

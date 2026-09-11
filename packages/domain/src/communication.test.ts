@@ -352,17 +352,34 @@ describe("communication Slack integration", () => {
     expect(prismaMock.communicationChannel.upsert).not.toHaveBeenCalled();
   });
 
-  it("holds queued archive jobs without discovery, joins or history calls", async () => {
+  it.each([{ scopes: ["channels:history", "channels:join"] }, { scopes: [] }])("holds queued archive jobs with scopes $scopes", async ({ scopes }) => {
     const { syncSlackPublicArchiveForWorkspace, slackPublicArchiveEnabled } = await import("./communication");
     for (const settings of [{publicArchiveSyncEnabled: false}, {publicIngestionEnabled: false}, {channelAdmissionMode: "selected"}, {broadPublicIngestion: false}]) {
       expect(slackPublicArchiveEnabled(settings)).toBe(false);
-      prismaMock.communicationInstallation.findFirst.mockResolvedValue({id: "install-1", workspaceId: "ws-1", scopes: ["channels:history", "channels:join"], settings, botTokenEnc: null});
+      prismaMock.communicationInstallation.findFirst.mockResolvedValue({id: "install-1", workspaceId: "ws-1", scopes, settings, botTokenEnc: null});
       await expect(syncSlackPublicArchiveForWorkspace("ws-1")).resolves.toMatchObject({channelsSeen: 0, messagesUpserted: 0});
     }
     expect(slackWebClientMock.conversations.list).not.toHaveBeenCalled();
     expect(slackWebClientMock.conversations.join).not.toHaveBeenCalled();
     expect(slackWebClientMock.conversations.history).not.toHaveBeenCalled();
     expect(prismaMock.communicationInstallation.update).not.toHaveBeenCalled();
+  });
+
+  it("checks a durable workspace team before the configured OAuth fallback", async () => {
+    const { getSlackExpectedTeamIdForWorkspace } = await import("./communication");
+    configureScopedSlack();
+    prismaMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce({ externalWorkspaceId: "TDURABLE" });
+    await expect(getSlackExpectedTeamIdForWorkspace(scopedWorkspace)).resolves.toBe("TDURABLE");
+    expect(prismaMock.communicationInstallation.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("uses the configured team before dormant installation history when no durable binding exists", async () => {
+    const { getSlackExpectedTeamIdForWorkspace } = await import("./communication");
+    configureScopedSlack();
+    prismaMock.workspaceIntegrationBinding.findUnique.mockResolvedValueOnce(null);
+    prismaMock.communicationInstallation.findFirst.mockResolvedValue({ externalWorkspaceId: "TDORMANT" });
+    await expect(getSlackExpectedTeamIdForWorkspace(scopedWorkspace)).resolves.toBe("T1");
+    expect(prismaMock.communicationInstallation.findFirst).not.toHaveBeenCalled();
   });
 
   it("requests public channel history and join scopes for archive installs", async () => {

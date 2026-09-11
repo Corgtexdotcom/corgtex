@@ -418,12 +418,13 @@ function isPrismaUniqueConstraintError(error: unknown) {
   return isRecord(error) && error.code === "P2002";
 }
 
-async function findSlackWorkspaceExpectedTeamId(client: SlackBindingPrismaClient, workspaceId: string) {
+async function findSlackWorkspaceExpectedTeamId(client: SlackBindingPrismaClient, workspaceId: string, configuredTeamFallback?: string | null) {
   const binding = await client.workspaceIntegrationBinding.findUnique({
     where: { workspaceId_provider: { workspaceId, provider: "SLACK" } },
     select: { externalWorkspaceId: true },
   });
   if (binding) return binding.externalWorkspaceId;
+  if (configuredTeamFallback) return configuredTeamFallback;
 
   const activeInstallation = await client.communicationInstallation.findFirst({
     where: {
@@ -449,8 +450,7 @@ async function findSlackWorkspaceExpectedTeamId(client: SlackBindingPrismaClient
 
 export async function getSlackExpectedTeamIdForWorkspace(workspaceId: string) {
   const binding = getSlackWorkspaceBinding(workspaceId);
-  if (binding?.source === "workspace") return binding.teamId;
-  return findSlackWorkspaceExpectedTeamId(prisma, workspaceId);
+  return findSlackWorkspaceExpectedTeamId(prisma, workspaceId, binding?.source === "workspace" ? binding.teamId : null);
 }
 
 export async function getSlackOAuthInstallTarget(actor: AppActor, workspaceId: string) {
@@ -1313,7 +1313,6 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
     orderBy: { installedAt: "desc" },
   });
   invariant(installation, 404, "SLACK_NOT_CONNECTED", "Active Slack installation was not found.");
-  invariant(installation.scopes.includes("channels:history"), 400, "SLACK_SCOPE_MISSING", "Slack installation is missing channels:history.");
 
   const lookbackDays = Math.max(0, Math.floor(options.lookbackDays ?? SLACK_PUBLIC_ARCHIVE_LOOKBACK_DAYS));
   const retentionDays = Math.max(1, Math.floor(options.retentionDays ?? rawRetentionDays(installation.settings)));
@@ -1341,6 +1340,7 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
 
   // Also fence already-queued archive jobs after a reconnect or an administrator hold.
   if (!slackPublicArchiveEnabled(installation.settings)) return summary;
+  invariant(installation.scopes.includes("channels:history"), 400, "SLACK_SCOPE_MISSING", "Slack installation is missing channels:history.");
   const client = slackClient(encryptedBotToken(installation));
 
   let cursor: string | undefined;
