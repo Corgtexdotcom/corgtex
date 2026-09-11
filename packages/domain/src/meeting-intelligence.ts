@@ -15,6 +15,7 @@ import { createCrmMeetingReviewInsights, crmInsightPayload, requireCrmInsightEma
 import { buildMeetingIntelligenceContext } from "./meeting-intelligence-context";
 import { shouldBypassAutoApplyForSlackMeetingActionReview } from "./meeting-action-review";
 import {
+  normalizeMeetingBlocks,
   normalizeMeetingProductTerminology,
   prependMeetingBlockContext,
   resolveMeetingBlockReference,
@@ -99,7 +100,31 @@ function normalizeDedupeText(value: unknown) {
     : "";
 }
 
+function commitmentIdentity(item: Record<string, unknown>, includeEvidence: boolean) {
+  const operation = item.operation === "RESOLVE" ? "RESOLVE" : "CREATE";
+  const type = normalizeInsightType(item.type, null);
+  if (operation !== "CREATE" || (type !== "ACTION_ITEM" && type !== "FOLLOW_UP")) return null;
+  const identity = [
+    "Action",
+    operation,
+    normalizeDedupeText(normalizeInsightTitle(item.title)),
+    normalizeDedupeText(item.assigneeHint),
+    normalizeDueAt(item.dueAt ?? item.dueDate)?.toISOString() ?? "",
+  ];
+  if (includeEvidence) {
+    identity.push(
+      normalizeDedupeText(item.blockTitle),
+      normalizeDedupeText(item.blockKind),
+      normalizeDedupeText(stripMeetingBlockContext(normalizeInsightBody(typeof item.body === "string" ? item.body : "", type))),
+      normalizeDedupeText(typeof item.sourceQuote === "string" ? normalizeMeetingProductTerminology(item.sourceQuote).slice(0, 200) : ""),
+    );
+  }
+  return JSON.stringify(identity);
+}
+
 function rawInsightMergeKey(item: Record<string, unknown>) {
+  const commitment = commitmentIdentity(item, true);
+  if (commitment) return `commitment:${commitment}`;
   const modelDedupeKey = normalizeDedupeText(item.dedupeKey).replace(/\s+/g, "-").slice(0, 160);
   if (modelDedupeKey) return `model:${modelDedupeKey}`;
 
@@ -485,10 +510,10 @@ Extract all:
 
 Use any user-provided ingestion guidance to prioritize what matters and what follow-up work the operator wanted highlighted. Treat guidance as trusted operator context for spelling, name, and terminology corrections. When guidance corrects a transcript term, use the corrected term in titles and body text. Do not invent new decisions, tasks, tensions, proposals, or resolutions from guidance alone. If an item mainly comes from guidance rather than transcript evidence, say that clearly in the body and leave sourceQuote null.
 Correct meeting transcript drift where Cortex means Corgtex. Use Corgtex in human-facing titles, bodies, source quotes, and meeting block labels.
-If transcriptChunkedForExtraction is true, analyze the supplied transcript chunk carefully. The full transcript is processed across multiple chunks, so do not treat chunk boundaries or processing metadata as meeting content.
+If transcriptChunkedForExtraction is true, extract new items only from evidence in the supplied transcript chunk. The full summary and meetingBlocks are context for interpretation, not additional evidence for creating items in this chunk. Do not repeat commitments from the summary that are absent from this chunk. Source quotes must come from the current chunk. The full transcript is processed across multiple chunks, so do not treat chunk boundaries or processing metadata as meeting content.
 When contextual intelligence is enabled, use Corgtex context to connect the meeting to previous recurring meetings, active actions, active tensions, open proposals, recent deliberation, and relevant knowledge. Prefer updating or discussing existing records over creating duplicates.
 Use meetingBlocks as the conversation map. Assign each extracted item to the most relevant block using blockSequence, blockTitle, and blockKind. If a proposal discussion leads to a decision or resolution, keep that connection in the body and target fields when supported by existingRecords.
-Treat owner-backed commitments as ACTION_ITEM items even when they appear in summaryMd, key takeaways, action item sections, or indirect transcript wording. If someone says they will do something, needs to contact someone, owns a follow-up, or must prepare a next step, extract a concrete ACTION_ITEM with that owner when the evidence is clear.
+Treat owner-backed commitments as ACTION_ITEM items when the supplied transcript evidence is clear, including indirect wording, key takeaways, and action item sections. For an unchunked transcript, summaryMd may also support these commitments. For a chunked transcript, summaryMd alone never authorizes another item. If someone says they will do something, needs to contact someone, owns a follow-up, or must prepare a next step, extract a concrete ACTION_ITEM with that owner when the evidence is clear.
 Treat team-update, scorecard, round-robin, department update, and status update sections as extraction-relevant. Do not drop action items, tensions, proposals, or follow-ups just because they are inside an update section.
 For team-scoped action items, extract one collective ACTION_ITEM with assigneeHint such as "Team members" or "Workspace team"; do not duplicate one action per person unless each person has a distinct named responsibility. If a coordinator owns setup and the team must self-select or pick up work, extract the coordinator action separately from the team-scoped follow-up. Do not create action items for vague awareness, general monitoring, or "keep in mind" language unless there is a concrete next step.
 CRM items are review suggestions only. Do not imply Corgtex sent an email. Use CRM_CONTACT when the participant/contact should be reviewed, CRM_DEAL when there is a commercial opportunity/pilot/proposal/expansion signal, and CRM_ACTIVITY when there is a relationship timeline entry or follow-up reminder. Put structured CRM fields under crm.
@@ -628,8 +653,6 @@ Be conservative — only extract items you're confident about.
     }
   }
 
-  const insights = mergeExtractedInsightItems(extractedItems);
-
   const validTargets = new Map<string, string>([
     ...meetingContext.actions.map((item: { id: string }) => [`Action:${item.id}`, item.id] as const),
     ...meetingContext.tensions.map((item: { id: string }) => [`Tension:${item.id}`, item.id] as const),
@@ -638,6 +661,37 @@ Be conservative — only extract items you're confident about.
   const resolvableProposalIds = new Set(meetingContext.proposals
     .filter((item: { id: string; status: string }) => item.status === "OPEN")
     .map((item: { id: string }) => item.id));
+  const withCommitmentContext = (item: Record<string, unknown>) => {
+    if (!commitmentIdentity(item, false)) return item;
+    const bodyBlock = typeof item.body === "string"
+      ? item.body.match(/^\s*\*\*MEETING BLOCK:\*\*[^\S\r\n]*([^\r\n]+)(?:\r?\n\*\*BLOCK KIND:\*\*[^\S\r\n]*([^\r\n]+))?/) : null;
+    const title = typeof item.blockTitle === "string" ? normalizeMeetingProductTerminology(item.blockTitle) : bodyBlock?.[1];
+    const kind = typeof item.blockKind === "string" ? item.blockKind : bodyBlock?.[2];
+    const preciseBlock = title && kind ? normalizeMeetingBlocks(meeting.blocksJson).blocks.find((block) =>
+      normalizeDedupeText(block.title) === normalizeDedupeText(title)
+      && block.kind === kind.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")) : null;
+    const block = resolveMeetingBlockReference(meeting.blocksJson, {
+      sequence: typeof item.blockSequence === "number" ? item.blockSequence : preciseBlock?.sequence,
+      title,
+      kind,
+    });
+    return { ...item, blockTitle: block?.title ?? null, blockKind: block?.kind ?? null, blockSequence: block?.sequence ?? null };
+  };
+  const insights = mergeExtractedInsightItems(extractedItems.filter((item) => {
+    const type = normalizeTargetEntityType(item.targetEntityType);
+    const id = typeof item.targetEntityId === "string" ? item.targetEntityId.trim() : null;
+    return !type || !id || validTargets.has(`${type}:${id}`);
+  }).map(withCommitmentContext));
+  const commitmentGroups = new Map<string, Set<string>>();
+  const addCommitment = (item: Record<string, unknown>) => {
+    const group = commitmentIdentity(item, false);
+    const identity = commitmentIdentity(item, true);
+    if (!group || !identity) return;
+    const identities = commitmentGroups.get(group) ?? new Set<string>();
+    identities.add(identity);
+    commitmentGroups.set(group, identities);
+  };
+  for (const item of insights) addCommitment(item);
 
   const extractedInsights = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const createdInsights: MeetingInsight[] = [];
@@ -648,9 +702,71 @@ Be conservative — only extract items you're confident about.
         workspaceId: params.workspaceId,
         meetingId: meeting.id,
         status: "SUGGESTED",
+        reviewedAt: null,
         sourceRecordId: null,
       },
     });
+
+    const sourceCommitments = await tx.meetingInsight.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        meetingId: meeting.id,
+        sourceRecordId: latestSourceRecord?.id ?? null,
+        status: { in: ["SUGGESTED", "CONFIRMED", "APPLIED", "DISMISSED"] },
+        supersededAt: null,
+        operation: "CREATE",
+        type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
+      },
+    });
+    const sourceCommitmentIdentities = new Set<string>();
+    for (const existing of sourceCommitments) {
+      const item = withCommitmentContext({ ...existing, body: existing.bodyMd });
+      addCommitment(item);
+      const identity = commitmentIdentity(item, true);
+      if (identity) sourceCommitmentIdentities.add(identity);
+    }
+    if (latestSourceRecord) {
+      const reviewedLegacyCommitments = await tx.meetingInsight.findMany({
+        where: {
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          sourceRecordId: null,
+          supersededAt: null,
+          operation: "CREATE",
+          type: { in: ["ACTION_ITEM", "FOLLOW_UP"] },
+          OR: [
+            { status: { in: ["CONFIRMED", "APPLIED", "DISMISSED"] } },
+            { status: "SUGGESTED", reviewedAt: { not: null } },
+          ],
+        },
+      });
+      for (const existing of reviewedLegacyCommitments) {
+        const item = withCommitmentContext({ ...existing, body: existing.bodyMd });
+        addCommitment(item);
+        const identity = commitmentIdentity(item, true);
+        if (identity) sourceCommitmentIdentities.add(identity);
+      }
+    }
+    for (const pending of sourceCommitments) {
+      if (pending.status !== "SUGGESTED" || pending.reviewedAt) continue;
+      const group = commitmentIdentity({ ...pending, body: pending.bodyMd }, false);
+      if ((commitmentGroups.get(group ?? "")?.size ?? 0) < 2) continue;
+      const metadata = pending.metadataJson && typeof pending.metadataJson === "object" && !Array.isArray(pending.metadataJson)
+        ? pending.metadataJson : {};
+      if (metadata.requiresCommitmentReview === true) continue;
+      await tx.meetingInsight.updateMany({
+        where: {
+          id: pending.id,
+          workspaceId: params.workspaceId,
+          meetingId: meeting.id,
+          sourceRecordId: latestSourceRecord?.id ?? null,
+          status: "SUGGESTED",
+          reviewedAt: null,
+          supersededAt: null,
+        },
+        data: { metadataJson: { ...metadata, requiresCommitmentReview: true } },
+      });
+    }
     
     for (const item of insights) {
       const targetEntityType = normalizeTargetEntityType(item.targetEntityType);
@@ -695,7 +811,11 @@ Be conservative — only extract items you're confident about.
       const modelDedupeKey = typeof item.dedupeKey === "string"
         ? normalizeMeetingProductTerminology(item.dedupeKey).trim().toLowerCase().replace(/\s+/g, "-").slice(0, 160)
         : "";
-      const dedupeKey = modelDedupeKey || deterministicInsightDedupeKey({
+      const commitment = commitmentIdentity(item, true);
+      if (commitment && sourceCommitmentIdentities.has(commitment)) continue;
+      const dedupeKey = commitment
+        ? `commitment:${createHash("sha256").update(commitment).digest("hex")}`
+        : modelDedupeKey || deterministicInsightDedupeKey({
         meetingId: meeting.id,
         type,
         operation,
@@ -730,7 +850,12 @@ Be conservative — only extract items you're confident about.
         deliberationEntryType,
         resolutionOutcome,
         dedupeKey: sourceDedupeKey,
-        metadataJson: (isCrmInsightType(type) && crm ? { crm } : {}) as Prisma.InputJsonValue,
+        metadataJson: {
+          ...(isCrmInsightType(type) && crm ? { crm } : {}),
+          ...((commitmentGroups.get(commitmentIdentity(item, false) ?? "")?.size ?? 0) > 1
+            ? { requiresCommitmentReview: true }
+            : {}),
+        } as Prisma.InputJsonValue,
         sourceRecordId: latestSourceRecord?.id ?? null,
         sourceRecordedAt: latestSourceRecord?.recordedAt ?? meeting.recordedAt ?? null,
       };
@@ -742,7 +867,9 @@ Be conservative — only extract items you're confident about.
           OR: [
             { dedupeKey: sourceDedupeKey },
             {
-              dedupeKey: null,
+              ...(commitment
+                ? { sourceRecordId: insightData.sourceRecordId, assigneeHint: insightData.assigneeHint, dueAt: insightData.dueAt, sourceQuote: insightData.sourceQuote }
+                : { dedupeKey: null }),
               type,
               operation,
               title,
@@ -1180,6 +1307,11 @@ export async function autoApplyMeetingInsights(
   const loadMemberDirectory = createWorkspaceMemberDirectoryLoader(params.workspaceId);
 
   for (const insight of insights) {
+    if (insight.metadataJson && typeof insight.metadataJson === "object" && !Array.isArray(insight.metadataJson)
+      && insight.metadataJson.requiresCommitmentReview === true) {
+      skipped++;
+      continue;
+    }
     const requiredThreshold = Math.max(confidenceThreshold, autoApplyThresholdForInsight(insight));
     if ((insight.confidence ?? 0) < requiredThreshold) {
       skipped++;
