@@ -3431,7 +3431,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
 
   const existingEvent = await prisma.meetingRecorderProviderEvent.findUnique({
     where: { dedupeKey },
-    select: { id: true, processedAt: true },
+    select: { id: true, processedAt: true, createdAt: true },
   });
   if (existingEvent?.processedAt) {
     recorderLog("info", "webhook_duplicate", {
@@ -3489,11 +3489,18 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   }
 
   if (!recording) {
+    // Scoped callbacks may beat publication of the provider bot ID. Bound that
+    // retry window by the immutable event creation time, not its last delivery.
+    const firstSeenAt = existingEvent?.createdAt ?? new Date();
+    const retryUnmatched = provider === "RECALL_AI" && Boolean(authenticatedWorkspaceId)
+      && Date.now() - firstSeenAt.getTime() < 10 * 60 * 1000;
     await prisma.meetingRecorderProviderEvent.update({
       where: { id: providerEvent.id },
       data: {
-        processedAt: null,
-        error: "No matching MeetingRecording found; awaiting recording publication.",
+        processedAt: retryUnmatched ? null : new Date(),
+        error: retryUnmatched
+          ? "No matching MeetingRecording found; awaiting recording publication."
+          : "No matching MeetingRecording found; unmatched event acknowledged.",
       },
     });
     recorderLog("warn", "webhook_unmatched", {
@@ -3504,7 +3511,10 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
       meetingId: event.meetingId,
       recordingId: event.recordingId,
     });
-    throw new AppError(503, "RECORDER_WEBHOOK_RECORDING_NOT_READY", "The matching recording is not available yet; retry this event.");
+    if (retryUnmatched) {
+      throw new AppError(503, "RECORDER_WEBHOOK_RECORDING_NOT_READY", "The matching recording is not available yet; retry this event.");
+    }
+    return { processed: false, duplicate: false };
   }
 
   if (!(provider === "RECALL_AI" && event.eventType === "transcript.done")) {

@@ -4474,6 +4474,46 @@ describe("meeting recorder domain", () => {
         expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Token scoped-api-1" }) }));
     });
 
+    it("acknowledges a permanently unmatched scoped callback after its publication window", async () => {
+      const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+      const raw = payload();
+      prismaMock.meetingRecording.findUnique.mockResolvedValue(null);
+      prismaMock.meetingRecorderProviderEvent.findUnique.mockResolvedValue({
+        id: "expired-event", processedAt: null, createdAt: new Date(Date.now() - 10 * 60 * 1000),
+      });
+      await expect(processMeetingRecorderWebhook("RECALL_AI", { workspaceId: workspaceIds[0], rawBody: raw, headers: headers(raw) }))
+        .resolves.toMatchObject({ processed: false, duplicate: false });
+      expect(prismaMock.meetingRecorderProviderEvent.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ processedAt: expect.any(Date), error: expect.stringContaining("acknowledged") }),
+      }));
+      expect(prismaMock.meetingRecording.update).not.toHaveBeenCalled();
+    });
+
+    it("acknowledges unmatched Meeting BaaS callbacks without entering the Recall retry window", async () => {
+      const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+      prismaMock.meetingRecording.findFirst.mockResolvedValue(null);
+      await expect(processMeetingRecorderWebhook("MEETING_BAAS", {
+        rawBody: JSON.stringify({ id: "unmatched-baas", event: "bot.completed", data: { bot_id: "missing-baas-bot" } }),
+        headers: { "x-mb-secret": "baas-secret" },
+      })).resolves.toMatchObject({ processed: false, duplicate: false });
+      expect(prismaMock.meetingRecorderProviderEvent.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ processedAt: expect.any(Date) }),
+      }));
+    });
+
+    it("preserves immediate acknowledgement of unmatched legacy Recall callbacks", async () => {
+      const { processMeetingRecorderWebhook } = await import("./meeting-recorders");
+      vi.stubEnv("RECALL_WORKSPACE_BINDINGS_JSON", undefined);
+      const raw = payload();
+      prismaMock.meetingRecording.findUnique.mockResolvedValue(null);
+      const legacyHeaders = { ...headers(raw), "svix-signature": `v1,${createHmac("sha256", "recall-secret").update(`scoped-message.1.${raw}`).digest("base64")}` };
+      await expect(processMeetingRecorderWebhook("RECALL_AI", { rawBody: raw, headers: legacyHeaders }))
+        .resolves.toMatchObject({ processed: false, duplicate: false });
+      expect(prismaMock.meetingRecorderProviderEvent.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ processedAt: expect.any(Date) }),
+      }));
+    });
+
     it("refuses unconfigured workspace cancellation and unscoped webhook without any provider fallback", async () => {
       const { cancelMeetingRecording, processMeetingRecorderWebhook } = await import("./meeting-recorders");
       const absentId = "44444444-4444-4444-8444-444444444444";

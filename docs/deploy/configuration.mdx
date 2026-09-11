@@ -198,7 +198,9 @@ from the same Recall workspace and region. Subscribe to `bot.joining`,
 `recording.failed`, `transcript.done`, and `transcript.failed`.
 
 When the map is present, missing workspace entries and unscoped Recall webhooks
-fail closed; global Recall credentials are not used as a fallback. Deploy support
+fail closed; global Recall credentials are not used as a fallback. Unmatched scoped
+callbacks are retried for up to ten minutes while a recording is being published;
+permanently unmatched events are then acknowledged with a diagnostic. Deploy support
 for scoped routing before enabling the map. Preserve existing provider account
 bindings for scheduled bots, and verify callbacks and transcript processing before
 removing old endpoints. The enable, smoke and cleanup commands use the same binding
