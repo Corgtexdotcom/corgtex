@@ -63,6 +63,11 @@ const actorUserIdForWorkspace = vi.hoisted(() => vi.fn());
 const recordAudit = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
+  env: {
+    get SLACK_CLIENT_ID() { return process.env.SLACK_CLIENT_ID; },
+    get SLACK_CLIENT_SECRET() { return process.env.SLACK_CLIENT_SECRET; },
+    get SLACK_WORKSPACE_BINDINGS_JSON() { return process.env.SLACK_WORKSPACE_BINDINGS_JSON; },
+  },
   prisma: prismaMock,
   randomOpaqueToken: randomOpaqueTokenMock,
   sha256: sha256Mock,
@@ -192,6 +197,7 @@ describe("catalog domain", () => {
     vi.stubEnv("GOOGLE_CLIENT_SECRET", "");
     vi.stubEnv("MICROSOFT_CLIENT_ID", "");
     vi.stubEnv("MICROSOFT_CLIENT_SECRET", "");
+    vi.stubEnv("SLACK_WORKSPACE_BINDINGS_JSON", undefined);
     vi.stubEnv("SLACK_CLIENT_ID", "");
     vi.stubEnv("SLACK_CLIENT_SECRET", "");
     prismaMock.workspaceToolLink.findMany.mockResolvedValue([

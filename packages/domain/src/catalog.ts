@@ -21,6 +21,7 @@ import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { connectorReadinessManifest, listConnectorReadinessProfiles } from "./connector-readiness";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
+import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
 
 const CREDENTIAL_PREFIX = "agentc-";
@@ -183,7 +184,8 @@ function requireUser(actor: AppActor) {
 
 function connectorSources(workspaceId: string, flags: CatalogFeatureFlags): CatalogSourceInput[] {
   const sources: CatalogSourceInput[] = [];
-  if (process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET) {
+  const slackBinding = getSlackWorkspaceBinding(workspaceId);
+  if (slackBinding?.clientId && slackBinding.clientSecret) {
     sources.push({
       type: "CONNECTOR",
       sourceType: "COMMUNICATION_INSTALLATION",

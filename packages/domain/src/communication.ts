@@ -24,6 +24,7 @@ import {
   updateSlackMeetingActionReviewProposalFromModal,
 } from "./meeting-action-review";
 import { createProposal, submitProposal } from "./proposals";
+import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
 import { createTension, publishTension } from "./tensions";
 
 export type CommunicationWorkItemKind = "ACTION" | "TENSION" | "PROPOSAL" | "BRAIN_NOTE";
@@ -261,8 +262,9 @@ export function readSlackOAuthState(state: string) {
   }
 }
 
-export function verifySlackRequest(rawBody: string, headers: Headers | Record<string, string | string[] | undefined>) {
-  invariant(env.SLACK_SIGNING_SECRET, 500, "SLACK_NOT_CONFIGURED", "SLACK_SIGNING_SECRET is not configured.");
+export function verifySlackRequest(rawBody: string, headers: Headers | Record<string, string | string[] | undefined>, workspaceId?: string) {
+  const binding = getSlackWorkspaceBinding(workspaceId);
+  invariant(binding?.signingSecret, 503, "SLACK_NOT_CONFIGURED", "Slack request verification is not configured for this workspace.");
 
   const readHeader = (name: string) => {
     if (headers instanceof Headers) {
@@ -279,11 +281,41 @@ export function verifySlackRequest(rawBody: string, headers: Headers | Record<st
   invariant(Math.abs(Date.now() / 1000 - timestampSeconds) <= 300, 401, "INVALID_SLACK_SIGNATURE", "Slack request timestamp is outside the allowed window.");
 
   const base = `v0:${timestamp}:${rawBody}`;
-  const expected = `v0=${createHmac("sha256", env.SLACK_SIGNING_SECRET).update(base).digest("hex")}`;
+  const expected = `v0=${createHmac("sha256", binding.signingSecret).update(base).digest("hex")}`;
   const expectedBuffer = Buffer.from(expected);
   const actualBuffer = Buffer.from(signature);
   invariant(actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer), 401, "INVALID_SLACK_SIGNATURE", "Slack request signature is invalid.");
+  if (binding.source === "workspace") {
+    let payload: unknown;
+    try {
+      if (rawBody.trimStart().startsWith("{")) payload = JSON.parse(rawBody);
+      else {
+        const form = new URLSearchParams(rawBody);
+        payload = form.has("payload") ? JSON.parse(form.get("payload")!) : Object.fromEntries(form);
+      }
+    } catch {
+      throw new AppError(400, "INVALID_SLACK_PAYLOAD", "Invalid Slack request payload.");
+    }
+    invariant(isRecord(payload), 400, "INVALID_SLACK_PAYLOAD", "Invalid Slack request payload.");
+    // Slack's signed URL verification envelope contains no team or app identity.
+    if (payload.type !== "url_verification") {
+      const teamId = asString(payload.team_id) || (isRecord(payload.team) ? asString(payload.team.id) : "");
+      invariant(teamId === binding.teamId && asString(payload.api_app_id) === binding.appId,
+        403, "SLACK_TENANT_MISMATCH", "Slack request does not match this workspace configuration.");
+    }
+  }
   return true;
+}
+
+/** Recheck persisted routing after signature verification, before accepting any scoped payload. */
+export async function verifySlackWorkspaceInstallation(workspaceId: string, payload: Record<string, unknown>) {
+  const binding = getSlackWorkspaceBinding(workspaceId);
+  const teamId = asString(payload.team_id) || (isRecord(payload.team) ? asString(payload.team.id) : "");
+  invariant(binding?.source === "workspace" && teamId === binding.teamId && asString(payload.api_app_id) === binding.appId,
+    403, "SLACK_TENANT_MISMATCH", "Slack request does not match this workspace configuration.");
+  const installation = await slackInstallationByTeam(teamId);
+  invariant(installation?.workspaceId === workspaceId && installation.appId === binding.appId,
+    403, "SLACK_TENANT_MISMATCH", "Slack installation does not match this workspace configuration.");
 }
 
 export async function listCommunicationInstallations(actor: AppActor, workspaceId: string) {
@@ -343,12 +375,13 @@ export async function updateCommunicationSettings(actor: AppActor, installationI
   });
 }
 
-export async function exchangeSlackOAuthCode(code: string, redirectUri: string) {
-  invariant(env.SLACK_CLIENT_ID && env.SLACK_CLIENT_SECRET, 500, "SLACK_NOT_CONFIGURED", "Slack OAuth is not configured.");
+export async function exchangeSlackOAuthCode(code: string, redirectUri: string, workspaceId?: string) {
+  const binding = getSlackWorkspaceBinding(workspaceId);
+  invariant(binding?.clientId && binding.clientSecret, 503, "SLACK_NOT_CONFIGURED", "Slack OAuth is not configured for this workspace.");
 
   const response = await slackClient().oauth.v2.access({
-    client_id: env.SLACK_CLIENT_ID,
-    client_secret: env.SLACK_CLIENT_SECRET,
+    client_id: binding.clientId,
+    client_secret: binding.clientSecret,
     code,
     redirect_uri: redirectUri,
   });
@@ -357,6 +390,10 @@ export async function exchangeSlackOAuthCode(code: string, redirectUri: string) 
     throw new Error(`Slack OAuth failed: ${response.error ?? "missing installation data"}`);
   }
 
+  if (binding.source === "workspace") {
+    invariant(response.team.id === binding.teamId && response.app_id === binding.appId,
+      409, "SLACK_TEAM_MISMATCH", "Slack OAuth response does not match this workspace configuration.");
+  }
   return response;
 }
 
@@ -411,6 +448,8 @@ async function findSlackWorkspaceExpectedTeamId(client: SlackBindingPrismaClient
 }
 
 export async function getSlackExpectedTeamIdForWorkspace(workspaceId: string) {
+  const binding = getSlackWorkspaceBinding(workspaceId);
+  if (binding?.source === "workspace") return binding.teamId;
   return findSlackWorkspaceExpectedTeamId(prisma, workspaceId);
 }
 
@@ -435,6 +474,11 @@ export async function saveSlackInstallationForWorkspace(params: {
   const teamId = slackTeamIdFromOAuthResponse(params.oauthResponse);
   invariant(teamId, 400, "INVALID_SLACK_INSTALLATION", "Slack OAuth response did not include a team id.");
 
+  const appBinding = getSlackWorkspaceBinding(params.workspaceId);
+  if (appBinding?.source === "workspace") {
+    invariant(teamId === appBinding.teamId && params.oauthResponse.app_id === appBinding.appId,
+      409, "SLACK_TEAM_MISMATCH", "Slack OAuth response does not match this workspace configuration.");
+  }
   const grantedScopes = typeof params.oauthResponse.scope === "string"
     ? params.oauthResponse.scope.split(",").map((scope) => scope.trim()).filter(Boolean)
     : [];
@@ -457,7 +501,7 @@ export async function saveSlackInstallationForWorkspace(params: {
       const [existingTeamInstallation, existingTeamBinding] = await Promise.all([
         tx.communicationInstallation.findUnique({
           where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
-          select: { workspaceId: true },
+          select: { workspaceId: true, settings: true },
         }),
         tx.workspaceIntegrationBinding.findUnique({
           where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
@@ -472,12 +516,18 @@ export async function saveSlackInstallationForWorkspace(params: {
         throw new AppError(409, "SLACK_TEAM_ALREADY_CONNECTED", "That Slack workspace is already bound to another Corgtex workspace.");
       }
 
+      const preservedSettings = existingTeamInstallation && isRecord(existingTeamInstallation.settings)
+        ? existingTeamInstallation.settings : slackArchiveSettings(grantedScopes);
+      const settings = appBinding?.source === "workspace"
+        ? { ...preservedSettings, channelAdmissionMode: "selected", publicArchiveSyncEnabled: false,
+          broadPublicIngestion: false, autoJoinPublicChannels: false }
+        : preservedSettings;
       const persistedBinding = await tx.workspaceIntegrationBinding.upsert({
         where: { workspaceId_provider: { workspaceId: params.workspaceId, provider: "SLACK" } },
         update: {
           externalOrgId: params.oauthResponse.enterprise?.id ?? null,
           externalTeamName: params.oauthResponse.team?.name ?? null,
-          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          appId: params.oauthResponse.app_id ?? appBinding?.appId ?? null,
           installedByUserId: params.installedByUserId ?? null,
         },
         create: {
@@ -486,7 +536,7 @@ export async function saveSlackInstallationForWorkspace(params: {
           externalWorkspaceId: teamId,
           externalOrgId: params.oauthResponse.enterprise?.id ?? null,
           externalTeamName: params.oauthResponse.team?.name ?? null,
-          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          appId: params.oauthResponse.app_id ?? appBinding?.appId ?? null,
           installedByUserId: params.installedByUserId ?? null,
         },
         select: { externalWorkspaceId: true },
@@ -500,7 +550,7 @@ export async function saveSlackInstallationForWorkspace(params: {
         update: {
           externalOrgId: params.oauthResponse.enterprise?.id ?? null,
           externalTeamName: params.oauthResponse.team?.name ?? null,
-          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          appId: params.oauthResponse.app_id ?? appBinding?.appId ?? null,
           botUserId: params.oauthResponse.bot_user_id ?? null,
           botTokenEnc,
           scopes: grantedScopes,
@@ -510,7 +560,7 @@ export async function saveSlackInstallationForWorkspace(params: {
           installedAt: new Date(),
           disconnectedAt: null,
           lastError: null,
-          settings: slackArchiveSettings(grantedScopes),
+          settings,
         },
         create: {
           workspaceId: params.workspaceId,
@@ -518,13 +568,13 @@ export async function saveSlackInstallationForWorkspace(params: {
           externalWorkspaceId: teamId,
           externalOrgId: params.oauthResponse.enterprise?.id ?? null,
           externalTeamName: params.oauthResponse.team?.name ?? null,
-          appId: params.oauthResponse.app_id ?? env.SLACK_APP_ID ?? null,
+          appId: params.oauthResponse.app_id ?? appBinding?.appId ?? null,
           botUserId: params.oauthResponse.bot_user_id ?? null,
           botTokenEnc,
           scopes: grantedScopes,
           optionalScopes,
           installedByUserId: params.installedByUserId ?? null,
-          settings: slackArchiveSettings(grantedScopes),
+          settings,
         },
       });
     });
@@ -555,6 +605,8 @@ async function slackInstallationByTeam(teamId: string) {
     where: { provider_externalWorkspaceId: { provider: "SLACK", externalWorkspaceId: teamId } },
   });
   if (!installation) return null;
+  const appBinding = getSlackWorkspaceBinding(installation.workspaceId);
+  if (appBinding?.source === "workspace" && (appBinding.teamId !== teamId || appBinding.appId !== installation.appId)) return null;
 
   const binding = await prisma.workspaceIntegrationBinding.findUnique({
     where: { workspaceId_provider: { workspaceId: installation.workspaceId, provider: "SLACK" } },
@@ -799,7 +851,7 @@ export async function resolveSlackNotificationRecipient(params: {
   }
 }
 
-async function ensureSlackChannel(installation: { id: string; workspaceId: string }, event: Record<string, unknown>) {
+async function ensureSlackChannel(installation: { id: string; workspaceId: string; settings?: Prisma.JsonValue | null }, event: Record<string, unknown>) {
   const externalChannelId = asString(event.channel);
   if (!externalChannelId) return null;
   const channelType = asString(event.channel_type);
@@ -829,7 +881,7 @@ async function ensureSlackChannel(installation: { id: string; workspaceId: strin
       provider: "SLACK",
       externalChannelId,
       kind,
-      isIngestEnabled: kind === "PUBLIC",
+      isIngestEnabled: kind === "PUBLIC" && !(isRecord(installation.settings) && installation.settings.channelAdmissionMode === "selected"),
       lastSeenAt: new Date(),
     },
   });
@@ -950,6 +1002,9 @@ async function ingestSlackMessage(installation: { id: string; workspaceId: strin
   const ts = normalized.ts;
   if (!externalChannelId || !ts) return { skipped: true, reason: "missing_channel_or_ts" };
 
+  if (isRecord(installation.settings) && installation.settings.publicIngestionEnabled === false) {
+    return { skipped: true, reason: "public_ingestion_disabled" };
+  }
   const channel = await ensureSlackChannel(installation, {
     ...event,
     channel: externalChannelId,
@@ -1238,6 +1293,12 @@ async function syncSlackArchiveChannelHistory(params: {
   return { scanned, upserted, capped: false };
 }
 
+export function slackPublicArchiveEnabled(settings: unknown): boolean {
+  return !isRecord(settings) || (settings.publicArchiveSyncEnabled !== false
+    && settings.publicIngestionEnabled !== false && settings.broadPublicIngestion !== false
+    && settings.channelAdmissionMode !== "selected");
+}
+
 export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, options: {
   lookbackDays?: number;
   retentionDays?: number;
@@ -1257,8 +1318,8 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
   const lookbackDays = Math.max(0, Math.floor(options.lookbackDays ?? SLACK_PUBLIC_ARCHIVE_LOOKBACK_DAYS));
   const retentionDays = Math.max(1, Math.floor(options.retentionDays ?? rawRetentionDays(installation.settings)));
   const maxMessagesPerChannel = Math.max(0, Math.floor(options.maxMessagesPerChannel ?? 0));
-  const autoJoinPublicChannels = installation.scopes.includes("channels:join");
-  const client = slackClient(encryptedBotToken(installation));
+  const autoJoinPublicChannels = installation.scopes.includes("channels:join")
+    && !(isRecord(installation.settings) && installation.settings.autoJoinPublicChannels === false);
   const oldest = unixSecondsAgo(lookbackDays);
   const expiresRawAt = rawRetentionDate(retentionDays);
   const archiveInstallation: SlackArchiveInstallation = installation;
@@ -1277,6 +1338,10 @@ export async function syncSlackPublicArchiveForWorkspace(workspaceId: string, op
     lookbackDays,
     retentionDays,
   };
+
+  // Also fence already-queued archive jobs after a reconnect or an administrator hold.
+  if (!slackPublicArchiveEnabled(installation.settings)) return summary;
+  const client = slackClient(encryptedBotToken(installation));
 
   let cursor: string | undefined;
   do {

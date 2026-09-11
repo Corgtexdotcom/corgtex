@@ -33,6 +33,7 @@ import {
   runControlPlaneClientMigrationWorkerVerificationJob,
   runControlPlaneReleaseDeployJob,
   syncSlackPublicArchiveForWorkspace,
+  slackPublicArchiveEnabled,
   reportPendingAiUsageToStripe,
   createRoleOnboardingIntro,
   runEnterpriseAppHealthCheckJob,
@@ -1401,15 +1402,16 @@ export async function scheduleDailyJobs() {
     distinct: ["workspaceId"],
     select: { workspaceId: true },
   });
-  const slackArchiveWorkspaces = await prisma.communicationInstallation.findMany({
+  const slackArchiveInstallations = await prisma.communicationInstallation.findMany({
     where: {
       provider: "SLACK",
       status: "ACTIVE",
       scopes: { has: "channels:history" },
     },
     distinct: ["workspaceId"],
-    select: { workspaceId: true },
+    select: { workspaceId: true, settings: true },
   });
+  const slackArchiveWorkspaces = slackArchiveInstallations.filter((installation) => slackPublicArchiveEnabled(installation.settings));
   const {
     getNewspaperLocalDateParts,
     getWorkspaceDigestSettings,

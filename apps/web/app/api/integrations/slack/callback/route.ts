@@ -4,6 +4,7 @@ import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import {
   exchangeSlackOAuthCode,
+  getSlackOAuthInstallTarget,
   isSlackTenantBindingError,
   readSlackOAuthState,
   saveSlackInstallation,
@@ -41,8 +42,9 @@ export async function GET(request: Request) {
       return NextResponse.redirect(appRedirectUrl(request, "/workspaces?error=slack-invalid-state"));
     }
 
+    await getSlackOAuthInstallTarget(actor, parsed.workspaceId);
     const redirectUri = slackCallbackRedirectUri(request);
-    const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri);
+    const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri, parsed.workspaceId);
     if (parsed.expectedTeamId && slackTeamId(oauthResponse) !== parsed.expectedTeamId) {
       return slackToolsRedirect(request, parsed.workspaceId, "wrong-team");
     }

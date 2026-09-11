@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   requirePageActorMock,
   exchangeSlackOAuthCodeMock,
+  getSlackOAuthInstallTargetMock,
   isSlackTenantBindingErrorMock,
   readSlackOAuthStateMock,
   saveSlackInstallationMock,
@@ -12,6 +13,7 @@ const {
 } = vi.hoisted(() => ({
   requirePageActorMock: vi.fn(),
   exchangeSlackOAuthCodeMock: vi.fn(),
+  getSlackOAuthInstallTargetMock: vi.fn(),
   isSlackTenantBindingErrorMock: vi.fn(),
   readSlackOAuthStateMock: vi.fn(),
   saveSlackInstallationMock: vi.fn(),
@@ -58,6 +60,7 @@ vi.mock("@corgtex/domain", () => ({
     }
   },
   exchangeSlackOAuthCode: exchangeSlackOAuthCodeMock,
+  getSlackOAuthInstallTarget: getSlackOAuthInstallTargetMock,
   isSlackTenantBindingError: isSlackTenantBindingErrorMock,
   readSlackOAuthState: readSlackOAuthStateMock,
   saveSlackInstallation: saveSlackInstallationMock,
@@ -74,6 +77,7 @@ beforeEach(() => {
     expectedTeamId: "T1",
     flow: { kind: "workspace" },
   });
+  getSlackOAuthInstallTargetMock.mockResolvedValue({ workspaceId: "workspace-1", expectedTeamId: "T1" });
   exchangeSlackOAuthCodeMock.mockResolvedValue({ ok: true, team: { id: "T1" }, access_token: "xoxb-token" });
   saveSlackInstallationMock.mockResolvedValue({ id: "installation-1" });
   isSlackTenantBindingErrorMock.mockReturnValue(false);
@@ -100,6 +104,7 @@ describe("GET /api/integrations/slack/callback", () => {
     expect(exchangeSlackOAuthCodeMock).toHaveBeenCalledWith(
       "auth-code",
       "https://app.corgtex.com/api/integrations/slack/callback",
+      "workspace-1",
     );
     expect(saveSlackInstallationMock).toHaveBeenCalledWith(
       { kind: "user", user: { id: "user-1" } },
@@ -142,6 +147,26 @@ describe("GET /api/integrations/slack/callback", () => {
     expect(response.headers.get("location")).toBe(
       "https://app.corgtex.com/workspaces/workspace-1/tools?type=CONNECTOR&q=slack&slack=wrong-team",
     );
+  });
+
+  it("rechecks admin authorization before exchanging a valid callback code", async () => {
+    getSlackOAuthInstallTargetMock.mockRejectedValueOnce(Object.assign(new Error("Forbidden"), { status: 403 }));
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/callback?code=auth-code&state=state-value&workspaceId=other"));
+    expect(getSlackOAuthInstallTargetMock).toHaveBeenCalledWith({ kind: "user", user: { id: "user-1" } }, "workspace-1");
+    expect(response.status).toBe(403);
+    expect(exchangeSlackOAuthCodeMock).not.toHaveBeenCalled();
+    expect(saveSlackInstallationMock).not.toHaveBeenCalled();
+  });
+
+  it("does not resolve scope or exchange when the cookie does not match state", async () => {
+    cookieGetMock.mockReturnValueOnce({ value: "different-state:nonce-value" });
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/callback?code=auth-code&state=state-value"));
+    expect(response.headers.get("location")).toContain("slack-invalid-state");
+    expect(getSlackOAuthInstallTargetMock).not.toHaveBeenCalled();
+    expect(exchangeSlackOAuthCodeMock).not.toHaveBeenCalled();
+    expect(saveSlackInstallationMock).not.toHaveBeenCalled();
   });
 
   it("lets Next.js handle auth redirects instead of converting them to JSON errors", async () => {

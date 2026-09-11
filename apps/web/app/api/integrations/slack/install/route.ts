@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { createSlackOAuthState, getSlackOAuthInstallTarget, slackOAuthScopes } from "@corgtex/domain";
+import { AppError, createSlackOAuthState, getSlackOAuthInstallTarget, getSlackWorkspaceBinding, slackOAuthScopes } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
 
@@ -15,13 +15,18 @@ export async function GET(request: Request) {
       return NextResponse.redirect(appRedirectUrl(request, "/workspaces?error=missing-workspace"));
     }
 
-    if (!env.SLACK_CLIENT_ID) {
+    const target = await getSlackOAuthInstallTarget(actor, workspaceId);
+    const binding = getSlackWorkspaceBinding(workspaceId);
+    if (!binding?.clientId || !binding.clientSecret) {
       return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/tools?type=CONNECTOR&q=slack&slack=not-configured`));
     }
 
-    const target = await getSlackOAuthInstallTarget(actor, workspaceId);
+    if (binding.source === "workspace" && target.expectedTeamId && target.expectedTeamId !== binding.teamId) {
+      throw new AppError(409, "SLACK_TEAM_MISMATCH", "Slack workspace binding does not match this workspace.");
+    }
+    const expectedTeamId = binding.teamId ?? target.expectedTeamId;
     const state = createSlackOAuthState(workspaceId, {
-      expectedTeamId: target.expectedTeamId,
+      expectedTeamId,
       flow: {
         kind: "workspace",
         initiatedByUserId: actor.kind === "user" ? actor.user.id : null,
@@ -38,12 +43,12 @@ export async function GET(request: Request) {
 
     const redirectUri = slackCallbackRedirectUri(request);
     const authorize = new URL("https://slack.com/oauth/v2/authorize");
-    authorize.searchParams.set("client_id", env.SLACK_CLIENT_ID);
-    authorize.searchParams.set("scope", slackOAuthScopes());
+    authorize.searchParams.set("client_id", binding.clientId);
+    authorize.searchParams.set("scope", binding.scopes?.join(",") ?? slackOAuthScopes());
     authorize.searchParams.set("redirect_uri", redirectUri);
     authorize.searchParams.set("state", state.value);
-    if (target.expectedTeamId) {
-      authorize.searchParams.set("team", target.expectedTeamId);
+    if (expectedTeamId) {
+      authorize.searchParams.set("team", expectedTeamId);
     }
 
     return NextResponse.redirect(authorize);

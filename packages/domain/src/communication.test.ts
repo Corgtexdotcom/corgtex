@@ -115,6 +115,9 @@ vi.mock("@corgtex/shared", () => ({
     APP_URL: "https://app.example.test",
     NODE_ENV: "test",
     SLACK_SIGNING_SECRET: "slack-secret",
+    get SLACK_WORKSPACE_BINDINGS_JSON() { return process.env.SLACK_WORKSPACE_BINDINGS_JSON; },
+    SLACK_CLIENT_ID: "global-client",
+    SLACK_CLIENT_SECRET: "global-secret",
     ENCRYPTION_KEY: "a".repeat(64),
   },
   randomOpaqueToken: vi.fn(() => "nonce"),
@@ -189,6 +192,7 @@ function slackMessageRow(overrides: Record<string, unknown> = {}) {
 describe("communication Slack integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv("SLACK_WORKSPACE_BINDINGS_JSON", undefined);
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     createActionMock.mockResolvedValue({ id: "action-1" });
     prismaMock.communicationEntityLink.create.mockResolvedValue({});
@@ -282,6 +286,83 @@ describe("communication Slack integration", () => {
     const staleTimestamp = Math.floor(Date.now() / 1000) - 600;
 
     expect(() => verifySlackRequest(body, signedHeaders(body, staleTimestamp))).toThrow("timestamp");
+  });
+
+  const scopedWorkspace = "11111111-1111-4111-8111-111111111111";
+  function configureScopedSlack() {
+    vi.stubEnv("SLACK_WORKSPACE_BINDINGS_JSON", JSON.stringify({ [scopedWorkspace]: {
+      teamId: "T1", appId: "A1", clientId: "111.222", clientSecret: "scoped-client-secret",
+      signingSecret: "slack-secret", scopes: ["commands", "channels:history"],
+    } }));
+  }
+
+  it("authenticates scoped envelopes and rejects signed wrong-team or wrong-app payloads", async () => {
+    const { verifySlackRequest } = await import("./communication");
+    configureScopedSlack();
+    const envelope = JSON.stringify({team_id: "T1", api_app_id: "A1", event: {type: "message"}});
+    expect(verifySlackRequest(envelope, signedHeaders(envelope), scopedWorkspace)).toBe(true);
+    for (const payload of [{team_id: "T2", api_app_id: "A1"}, {team_id: "T1", api_app_id: "A2"}]) {
+      const raw = JSON.stringify(payload);
+      expect(() => verifySlackRequest(raw, signedHeaders(raw), scopedWorkspace)).toThrow("does not match");
+    }
+    expect(() => verifySlackRequest(envelope, signedHeaders(envelope))).toThrow("not configured");
+    expect(() => verifySlackRequest(envelope, signedHeaders(envelope), "22222222-2222-4222-8222-222222222222")).toThrow("not configured");
+    const challenge = JSON.stringify({type: "url_verification", challenge: "test-challenge"});
+    expect(verifySlackRequest(challenge, signedHeaders(challenge), scopedWorkspace)).toBe(true);
+    expect(() => verifySlackRequest(challenge, new Headers(), scopedWorkspace)).toThrow("timestamp");
+    const command = new URLSearchParams({team_id: "T1", api_app_id: "A1", command: "/corgtex"}).toString();
+    expect(verifySlackRequest(command, signedHeaders(command), scopedWorkspace)).toBe(true);
+    const interaction = new URLSearchParams({payload: JSON.stringify({team: {id: "T1"}, api_app_id: "A1"})}).toString();
+    expect(verifySlackRequest(interaction, signedHeaders(interaction), scopedWorkspace)).toBe(true);
+  });
+
+  it("rejects scoped delivery when persisted installation belongs to another workspace", async () => {
+    const { verifySlackWorkspaceInstallation } = await import("./communication");
+    configureScopedSlack();
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({id: "install-1", workspaceId: "other", appId: "A1"});
+    await expect(verifySlackWorkspaceInstallation(scopedWorkspace, {team_id: "T1", api_app_id: "A1"})).rejects.toThrow("does not match");
+    expect(prismaMock.communicationInboundEvent.create).not.toHaveBeenCalled();
+    prismaMock.communicationInstallation.findUnique.mockResolvedValue({id: "install-1", workspaceId: scopedWorkspace, appId: "A1"});
+    await expect(verifySlackWorkspaceInstallation(scopedWorkspace, {team_id: "T1", api_app_id: "A1"})).resolves.toBeUndefined();
+  });
+
+  it("exchanges OAuth with scoped credentials and rejects another app response", async () => {
+    const { exchangeSlackOAuthCode } = await import("./communication");
+    configureScopedSlack();
+    slackWebClientMock.oauth.v2.access.mockResolvedValue({ok: true, team: {id: "T1"}, app_id: "A1", access_token: "synthetic-token"});
+    await exchangeSlackOAuthCode("code", "https://example.test/callback", scopedWorkspace);
+    expect(slackWebClientMock.oauth.v2.access).toHaveBeenCalledWith(expect.objectContaining({client_id: "111.222", client_secret: "scoped-client-secret"}));
+    slackWebClientMock.oauth.v2.access.mockResolvedValue({ok: true, team: {id: "T1"}, app_id: "A2", access_token: "synthetic-token"});
+    await expect(exchangeSlackOAuthCode("code", "https://example.test/callback", scopedWorkspace)).rejects.toThrow("does not match");
+  });
+
+  it("preserves reconnect settings and selected channel policy for a scoped app", async () => {
+    const { saveSlackInstallationForWorkspace } = await import("./communication");
+    configureScopedSlack();
+    txMock.communicationInstallation.findUnique.mockResolvedValue({workspaceId: scopedWorkspace, settings: {
+      mutedChannelIds: ["C-muted"], proactiveEnabled: false, lastPublicArchiveSyncAt: "2026-09-01T00:00:00Z", rawRetentionDays: 90,
+    }});
+    await saveSlackInstallationForWorkspace({workspaceId: scopedWorkspace, oauthResponse: {
+      ok: true, team: {id: "T1"}, app_id: "A1", access_token: "synthetic-token", scope: "commands,channels:history",
+    } as any});
+    expect(txMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({update: expect.objectContaining({
+      settings: {mutedChannelIds: ["C-muted"], proactiveEnabled: false, lastPublicArchiveSyncAt: "2026-09-01T00:00:00Z", rawRetentionDays: 90,
+        channelAdmissionMode: "selected", publicArchiveSyncEnabled: false, broadPublicIngestion: false, autoJoinPublicChannels: false},
+    })}));
+    expect(prismaMock.communicationChannel.upsert).not.toHaveBeenCalled();
+  });
+
+  it("holds queued archive jobs without discovery, joins or history calls", async () => {
+    const { syncSlackPublicArchiveForWorkspace, slackPublicArchiveEnabled } = await import("./communication");
+    for (const settings of [{publicArchiveSyncEnabled: false}, {publicIngestionEnabled: false}, {channelAdmissionMode: "selected"}, {broadPublicIngestion: false}]) {
+      expect(slackPublicArchiveEnabled(settings)).toBe(false);
+      prismaMock.communicationInstallation.findFirst.mockResolvedValue({id: "install-1", workspaceId: "ws-1", scopes: ["channels:history", "channels:join"], settings, botTokenEnc: null});
+      await expect(syncSlackPublicArchiveForWorkspace("ws-1")).resolves.toMatchObject({channelsSeen: 0, messagesUpserted: 0});
+    }
+    expect(slackWebClientMock.conversations.list).not.toHaveBeenCalled();
+    expect(slackWebClientMock.conversations.join).not.toHaveBeenCalled();
+    expect(slackWebClientMock.conversations.history).not.toHaveBeenCalled();
+    expect(prismaMock.communicationInstallation.update).not.toHaveBeenCalled();
   });
 
   it("requests public channel history and join scopes for archive installs", async () => {
@@ -784,6 +865,22 @@ describe("communication Slack integration", () => {
         status: "IGNORED",
         error: "Slack installation is not active.",
       }),
+    }));
+    expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
+  });
+
+  it("keeps unseen public channels disabled after selected-channel reconnect", async () => {
+    const { processSlackInboundEvent } = await import("./communication");
+    prismaMock.communicationInboundEvent.findUnique.mockResolvedValueOnce({
+      id: "inbound-new-channel", provider: "SLACK",
+      payload: {event: {type: "message", channel: "C-new", channel_type: "channel", user: "U1", ts: "1714320000.000100", text: "outside selected channels"}},
+      installation: {id: "install-1", workspaceId: "workspace-1", provider: "SLACK", status: "ACTIVE", settings: {channelAdmissionMode: "selected"}},
+    });
+    prismaMock.communicationChannel.upsert.mockImplementationOnce(async ({create}) => ({id: "new-channel", ...create}));
+    await processSlackInboundEvent("inbound-new-channel");
+    expect(prismaMock.communicationChannel.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.not.objectContaining({isIngestEnabled: true}),
+      create: expect.objectContaining({externalChannelId: "C-new", isIngestEnabled: false}),
     }));
     expect(prismaMock.communicationMessage.upsert).not.toHaveBeenCalled();
   });
