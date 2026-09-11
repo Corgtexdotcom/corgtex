@@ -149,6 +149,7 @@ type Env = {
   readonly PROCUREMENT_NOTIFY_EMAIL: string | undefined;
   readonly SENTRY_DSN: string | undefined;
   readonly ENCRYPTION_KEY: string | undefined;
+  readonly SLACK_WORKSPACE_BINDINGS_JSON: string | undefined;
   readonly SLACK_CLIENT_ID: string | undefined;
   readonly SLACK_CLIENT_SECRET: string | undefined;
   readonly SLACK_SIGNING_SECRET: string | undefined;
@@ -384,6 +385,10 @@ export const env: Env = {
   },
   get ENCRYPTION_KEY() {
     return optional("ENCRYPTION_KEY");
+  },
+  get SLACK_WORKSPACE_BINDINGS_JSON() {
+    // A configured empty map must fail closed rather than enable legacy fallback.
+    return process.env.SLACK_WORKSPACE_BINDINGS_JSON;
   },
   get SLACK_CLIENT_ID() {
     return optional("SLACK_CLIENT_ID");

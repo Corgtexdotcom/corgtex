@@ -146,6 +146,7 @@ vi.mock("@corgtex/domain", () => ({
   captureReferencesForSource: captureReferencesForSourceMock,
   purgeExpiredCommunicationMessages: purgeExpiredCommunicationMessagesMock,
   syncSlackPublicArchiveForWorkspace: syncSlackPublicArchiveForWorkspaceMock,
+  slackPublicArchiveEnabled: (settings: {publicArchiveSyncEnabled?:boolean} | null) => settings?.publicArchiveSyncEnabled !== false,
   runMeetingAgendaThreadEdit: runMeetingAgendaThreadEditMock,
   runMeetingAgendaPreparation: runMeetingAgendaPreparationMock,
   ensureMeetingSeriesOccurrences: ensureMeetingSeriesOccurrencesMock,
@@ -1266,6 +1267,16 @@ describe("scheduleDailyJobs", () => {
     isNewspaperScheduleDueMock.mockReset().mockReturnValue(true);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
+  });
+
+  it("does not schedule a broad archive for an installation with a reconnect hold", async () => {
+    prismaMock.communicationInstallation.findMany.mockResolvedValue([
+      {workspaceId: "ws-1", settings: {publicArchiveSyncEnabled: false}},
+      {workspaceId: "ws-2", settings: {publicArchiveSyncEnabled: true}},
+    ]);
+    await scheduleDailyJobs();
+    const archives = createdWorkflowJobs().filter((job: {type: string}) => job.type === "communication.slack.public-archive");
+    expect(archives).toEqual([expect.objectContaining({workspaceId: "ws-2"})]);
   });
 
   it("schedules retention, digest, and Slack archive jobs once the daily window has opened", async () => {

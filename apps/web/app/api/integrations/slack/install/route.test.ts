@@ -4,6 +4,7 @@ const {
   requirePageActorMock,
   createSlackOAuthStateMock,
   getSlackOAuthInstallTargetMock,
+  getSlackWorkspaceBindingMock,
   slackOAuthScopesMock,
   cookiesMock,
   cookieSetMock,
@@ -11,6 +12,7 @@ const {
   requirePageActorMock: vi.fn(),
   createSlackOAuthStateMock: vi.fn(),
   getSlackOAuthInstallTargetMock: vi.fn(),
+  getSlackWorkspaceBindingMock: vi.fn(),
   slackOAuthScopesMock: vi.fn(),
   cookiesMock: vi.fn(),
   cookieSetMock: vi.fn(),
@@ -58,6 +60,7 @@ vi.mock("@corgtex/domain", () => ({
   },
   createSlackOAuthState: createSlackOAuthStateMock,
   getSlackOAuthInstallTarget: getSlackOAuthInstallTargetMock,
+  getSlackWorkspaceBinding: getSlackWorkspaceBindingMock,
   slackOAuthScopes: slackOAuthScopesMock,
 }));
 
@@ -68,6 +71,7 @@ beforeEach(() => {
   requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
   getSlackOAuthInstallTargetMock.mockResolvedValue({ workspaceId: "workspace-1", expectedTeamId: "T1" });
   createSlackOAuthStateMock.mockReturnValue({ value: "state-value", nonce: "nonce-value", expectedTeamId: "T1" });
+  getSlackWorkspaceBindingMock.mockReturnValue({ source: "legacy", clientId: "slack-client-id", clientSecret: "synthetic-client-secret", teamId: null, scopes: null });
   slackOAuthScopesMock.mockReturnValue("commands,chat:write");
   cookiesMock.mockResolvedValue({
     set: cookieSetMock,
@@ -125,6 +129,47 @@ describe("GET /api/integrations/slack/install", () => {
     const authorizeUrl = new URL(response.headers.get("location") ?? "");
 
     expect(authorizeUrl.searchParams.get("team")).toBeNull();
+  });
+
+  it("uses scoped app/team/scopes without broadening permissions", async () => {
+    getSlackWorkspaceBindingMock.mockReturnValueOnce({ source: "workspace", clientId: "scoped-client-id", clientSecret: "secret", teamId: "T1", scopes: ["commands", "chat:write"] });
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/install?workspaceId=workspace-1"));
+    const url = new URL(response.headers.get("location")!);
+    expect(url.searchParams.get("client_id")).toBe("scoped-client-id");
+    expect(url.searchParams.get("team")).toBe("T1");
+    expect(url.searchParams.get("scope")).toBe("commands,chat:write");
+    expect(slackOAuthScopesMock).not.toHaveBeenCalled();
+    expect(response.headers.get("location")).not.toContain("secret");
+  });
+
+  it("rejects a configured team differing from the persisted binding before setting state", async () => {
+    getSlackWorkspaceBindingMock.mockReturnValueOnce({ source: "workspace", clientId: "scoped", clientSecret: "secret", teamId: "TOTHER", scopes: ["commands"] });
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/install?workspaceId=workspace-1"));
+    expect(response.status).toBe(409);
+    expect(cookieSetMock).not.toHaveBeenCalled();
+    expect(createSlackOAuthStateMock).not.toHaveBeenCalled();
+  });
+
+  it("authorizes workspace admin before reading operator configuration", async () => {
+    getSlackOAuthInstallTargetMock.mockRejectedValueOnce(Object.assign(new Error("Forbidden"), { status: 403 }));
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/install?workspaceId=workspace-1"));
+    expect(response.status).toBe(403);
+    expect(getSlackWorkspaceBindingMock).not.toHaveBeenCalled();
+    expect(cookieSetMock).not.toHaveBeenCalled();
+  });
+
+  it("does not use globals when scoped configuration is missing or malformed", async () => {
+    const { GET } = await import("./route");
+    getSlackWorkspaceBindingMock.mockReturnValueOnce(null);
+    const missing = await GET(new Request("https://app.corgtex.com/api/integrations/slack/install?workspaceId=workspace-1"));
+    expect(missing.headers.get("location")).toContain("slack=not-configured");
+    getSlackWorkspaceBindingMock.mockImplementationOnce(() => { throw Object.assign(new Error("Slack workspace configuration is invalid."), { status: 503 }); });
+    const invalid = await GET(new Request("https://app.corgtex.com/api/integrations/slack/install?workspaceId=workspace-1"));
+    expect(invalid.status).toBe(503);
+    expect(cookieSetMock).not.toHaveBeenCalled();
   });
 
   it("lets Next.js handle auth redirects instead of converting them to JSON errors", async () => {

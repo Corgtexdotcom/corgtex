@@ -133,6 +133,9 @@ async function syncChannelHistory(client, installation, channelId, options) {
 }
 
 async function main() {
+  if (process.env.SLACK_WORKSPACE_BINDINGS_JSON !== undefined) {
+    throw new Error("Broad Slack archive sync is unavailable with workspace-scoped credentials. Use the selected-channel recovery workflow.");
+  }
   const workspace = await resolveWorkspace();
   if (!workspace) {
     throw new Error("Workspace not found for Slack public archive sync.");
@@ -150,11 +153,20 @@ async function main() {
     throw new Error("Active Slack installation with an encrypted bot token was not found.");
   }
 
+  const settings = installation.settings && typeof installation.settings === "object" && !Array.isArray(installation.settings)
+    ? installation.settings
+    : {};
+  // Match the domain archive admission rules before decrypting or contacting Slack.
+  if (settings.publicArchiveSyncEnabled === false || settings.publicIngestionEnabled === false
+    || settings.broadPublicIngestion === false || settings.channelAdmissionMode === "selected") {
+    throw new Error("Slack public archive ingestion is held for this installation.");
+  }
+
   const scopes = installation.scopes ?? [];
   if (!scopes.includes("channels:history")) {
     throw new Error("Slack installation is missing channels:history; reinstall Slack before syncing public channels.");
   }
-  const autoJoinPublicChannels = scopes.includes("channels:join");
+  const autoJoinPublicChannels = scopes.includes("channels:join") && settings.autoJoinPublicChannels !== false;
   const lookbackDays = readPositiveInt("SLACK_ARCHIVE_LOOKBACK_DAYS", DEFAULT_LOOKBACK_DAYS);
   const retentionDays = readPositiveInt("SLACK_ARCHIVE_RETENTION_DAYS", DEFAULT_RETENTION_DAYS);
   const maxMessagesPerChannel = readPositiveInt("SLACK_ARCHIVE_MAX_MESSAGES_PER_CHANNEL", 0);
@@ -255,9 +267,6 @@ async function main() {
     cursor = response.response_metadata?.next_cursor || undefined;
   } while (cursor);
 
-  const settings = installation.settings && typeof installation.settings === "object" && !Array.isArray(installation.settings)
-    ? installation.settings
-    : {};
   await prisma.communicationInstallation.update({
     where: { id: installation.id },
     data: {

@@ -63,6 +63,11 @@ const actorUserIdForWorkspace = vi.hoisted(() => vi.fn());
 const recordAudit = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
+  env: {
+    get SLACK_CLIENT_ID() { return process.env.SLACK_CLIENT_ID; },
+    get SLACK_CLIENT_SECRET() { return process.env.SLACK_CLIENT_SECRET; },
+    get SLACK_WORKSPACE_BINDINGS_JSON() { return process.env.SLACK_WORKSPACE_BINDINGS_JSON; },
+  },
   prisma: prismaMock,
   randomOpaqueToken: randomOpaqueTokenMock,
   sha256: sha256Mock,
@@ -192,6 +197,7 @@ describe("catalog domain", () => {
     vi.stubEnv("GOOGLE_CLIENT_SECRET", "");
     vi.stubEnv("MICROSOFT_CLIENT_ID", "");
     vi.stubEnv("MICROSOFT_CLIENT_SECRET", "");
+    vi.stubEnv("SLACK_WORKSPACE_BINDINGS_JSON", undefined);
     vi.stubEnv("SLACK_CLIENT_ID", "");
     vi.stubEnv("SLACK_CLIENT_SECRET", "");
     prismaMock.workspaceToolLink.findMany.mockResolvedValue([
@@ -308,6 +314,27 @@ describe("catalog domain", () => {
       create: { workspaceId: "workspace-1", approvalMode: "ADMIN" },
       update: {},
     });
+  });
+
+  it("shows scoped Slack without global credentials in list, detail and actions only for its workspace", async () => {
+    const {listCatalogItems, getCatalogItem, setCatalogFavorite} = await import("./catalog");
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    vi.stubEnv("SLACK_WORKSPACE_BINDINGS_JSON", JSON.stringify({[workspaceId]: {
+      teamId: "T1", appId: "A1", clientId: "123.456", clientSecret: "synthetic-secret", signingSecret: "synthetic-signing", scopes: ["commands"],
+    }}));
+    const slack = catalogItemFixture({id: "slack-1", title: "Slack", sourceType: "COMMUNICATION_INSTALLATION", sourceId: "slack"});
+    prismaMock.catalogItem.findMany.mockResolvedValue([slack]);
+    prismaMock.catalogItem.findFirst.mockResolvedValue(slack);
+    prismaMock.catalogFavorite.findUnique.mockResolvedValue(null);
+    prismaMock.modelUsage.findMany.mockResolvedValue([]);
+    prismaMock.agentCredential.count.mockResolvedValue(0);
+    expect((await listCatalogItems(actor, workspaceId)).items.map(i=>i.id)).toEqual(["slack-1"]);
+    expect((await getCatalogItem(actor, {workspaceId, catalogItemId: "slack-1"})).item.id).toBe("slack-1");
+    await expect(setCatalogFavorite(actor, {workspaceId, catalogItemId: "slack-1", favorite: true})).resolves.toBeDefined();
+    const other = "22222222-2222-4222-8222-222222222222";
+    expect((await listCatalogItems(actor, other)).items).toEqual([]);
+    await expect(getCatalogItem(actor, {workspaceId: other, catalogItemId: "slack-1"})).rejects.toMatchObject({status: 404});
+    await expect(setCatalogFavorite(actor, {workspaceId: other, catalogItemId: "slack-1", favorite: true})).rejects.toMatchObject({status: 404});
   });
 
   it("hides stale derived catalog items when backing features or connectors are unavailable", async () => {

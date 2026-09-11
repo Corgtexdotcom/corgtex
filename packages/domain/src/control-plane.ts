@@ -1,3 +1,4 @@
+import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
 import { getRecallWorkspaceBinding } from "./recall-workspace-bindings";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
@@ -5148,10 +5149,14 @@ async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymen
 
 function controlPlaneInstallableConnectors(params: {
   hasManagedWorkspace: boolean;
+  managedWorkspaceId?: string;
   communicationInstallations?: Array<{ provider: string; status: string }>;
   oauthConnections?: Array<{ provider: string; status: string }>;
   dataSourceCount?: number;
 }) {
+  const slackBinding = params.hasManagedWorkspace && params.managedWorkspaceId
+    ? getSlackWorkspaceBinding(params.managedWorkspaceId)
+    : null;
   const slackInstalled = params.communicationInstallations?.some((installation) => (
     installation.provider === "SLACK" && installation.status !== "DISCONNECTED"
   )) ?? false;
@@ -5169,7 +5174,7 @@ function controlPlaneInstallableConnectors(params: {
       provider: "SLACK",
       kind: "communication",
       configured: slackInstalled,
-      canManageFromControlPlane: params.hasManagedWorkspace && Boolean(env.SLACK_CLIENT_ID && env.SLACK_CLIENT_SECRET),
+      canManageFromControlPlane: Boolean(slackBinding?.clientId && slackBinding.clientSecret),
       requiresHumanConsent: true,
     },
     {
@@ -6278,6 +6283,7 @@ export async function getControlPlaneIntegrationStatus(actor: AppActor, deployme
       : null,
     availableConnectors: controlPlaneInstallableConnectors({
       hasManagedWorkspace: true,
+      managedWorkspaceId: deployment.managedWorkspaceId,
       communicationInstallations,
       oauthConnections,
       dataSourceCount: dataSources.length,

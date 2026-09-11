@@ -110,6 +110,7 @@ describe("GET /api/control-plane/deployments/[deploymentId]/integrations/slack/c
     expect(exchangeSlackOAuthCodeMock).toHaveBeenCalledWith(
       "auth-code",
       "https://app.corgtex.com/api/control-plane/deployments/dep-1/integrations/slack/callback",
+      "ws-1",
     );
     expect(saveControlPlaneSlackInstallationMock).toHaveBeenCalledWith(
       { kind: "user", user: { id: "operator-1" } },
@@ -149,5 +150,29 @@ describe("GET /api/control-plane/deployments/[deploymentId]/integrations/slack/c
     );
 
     expect(response.headers.get("location")).toBe("https://app.corgtex.com/control-plane/deployments/dep-1?tab=tools&slack=wrong-team");
+  });
+  it("redirects scoped exchange team/app errors without saving or exposing provider details", async () => {
+    const error = Object.assign(new Error("synthetic-private-provider-detail"), { code: "SLACK_TEAM_MISMATCH" });
+    exchangeSlackOAuthCodeMock.mockRejectedValueOnce(error);
+    isSlackTenantBindingErrorMock.mockReturnValueOnce(true);
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/callback?code=auth-code&state=state-value&workspaceId=untrusted"), { params: Promise.resolve({ deploymentId: "dep-1" }) });
+    expect(exchangeSlackOAuthCodeMock).toHaveBeenCalledWith("auth-code", expect.any(String), "ws-1");
+    expect(response.headers.get("location")).toBe("https://app.corgtex.com/control-plane/deployments/dep-1?tab=tools&slack=wrong-team");
+    expect(await response.text()).not.toContain("synthetic-private-provider-detail");
+    expect(saveControlPlaneSlackInstallationMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves authorization and cookie-bound target checks before any exchange", async () => {
+    const { GET } = await import("./route");
+    getControlPlaneSlackSetupTargetMock.mockRejectedValueOnce(Object.assign(new Error("Forbidden"), { code: "FORBIDDEN", status: 403 }));
+    const denied = await GET(new Request("https://app.corgtex.com/callback?code=auth-code&state=state-value"), { params: Promise.resolve({ deploymentId: "dep-1" }) });
+    expect(denied.status).toBe(403);
+    expect(exchangeSlackOAuthCodeMock).not.toHaveBeenCalled();
+    getControlPlaneSlackSetupTargetMock.mockResolvedValueOnce({ deploymentId: "dep-1", managedWorkspaceId: "different-ws", expectedTeamId: "T1" });
+    const mismatch = await GET(new Request("https://app.corgtex.com/callback?code=auth-code&state=state-value"), { params: Promise.resolve({ deploymentId: "dep-1" }) });
+    expect(mismatch.headers.get("location")).toContain("slack=invalid-state");
+    expect(exchangeSlackOAuthCodeMock).not.toHaveBeenCalled();
+    expect(saveControlPlaneSlackInstallationMock).not.toHaveBeenCalled();
   });
 });
