@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createCipheriv, createDecipheriv } from "node:crypto";
 import fs from "node:fs";
-import test from "node:test";
+import { test } from "vitest";
 
 const source = fs.readFileSync(new URL("./sync-slack-public-archive.mjs", import.meta.url), "utf8")
   .replace(/^#!.*\n/, "")
