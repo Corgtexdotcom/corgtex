@@ -157,6 +157,7 @@ type Env = {
   readonly BOX_CLIENT_SECRET: string | undefined;
   readonly BOX_MCP_SCOPES: string | undefined;
   readonly RECALL_API_KEY: string | undefined;
+  readonly RECALL_WORKSPACE_BINDINGS_JSON: string | undefined;
   readonly RECALL_REGION: string;
   readonly RECALL_WEBHOOK_SECRET: string | undefined;
   readonly MEETING_BAAS_API_KEY: string | undefined;
@@ -407,6 +408,10 @@ export const env: Env = {
   },
   get RECALL_API_KEY() {
     return optional("RECALL_API_KEY");
+  },
+  get RECALL_WORKSPACE_BINDINGS_JSON() {
+    // An explicitly empty map must fail closed instead of enabling legacy credentials.
+    return process.env.RECALL_WORKSPACE_BINDINGS_JSON;
   },
   get RECALL_REGION() {
     return optional("RECALL_REGION") ?? "us-east-1";

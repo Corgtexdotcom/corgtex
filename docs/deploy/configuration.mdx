@@ -178,6 +178,32 @@ The dedicated Ops control plane exposes operator-only routes for automation. The
 
 Old UI links under `/control-plane/customers/:deploymentId` are kept as compatibility redirects only. New operator links must use `/control-plane/deployments/:deploymentId`.
 
+## Recall recorder credentials
+
+For a single provider workspace, configure `RECALL_API_KEY`, `RECALL_WEBHOOK_SECRET`,
+and `RECALL_REGION` in both web and worker runtimes. The webhook URL is
+`/api/integrations/meeting-recorders/recall/webhook`.
+
+For shared hosting with separate Recall accounts, store `RECALL_WORKSPACE_BINDINGS_JSON`
+as a secret in both runtimes. It is a JSON object keyed by Corgtex workspace UUID.
+Each entry requires `apiKey`, `webhookSecret`, `region` (for example `us-east-1`),
+and `providerWorkspaceId` for the corresponding Recall workspace. Keep this object
+in the deployment secret store, never in workspace provider settings or source control.
+
+Configure each Recall dashboard webhook to call
+`/api/integrations/meeting-recorders/recall/<corgtex-workspace-uuid>/webhook` on the
+public application origin. Use the signing secret for that endpoint and the API key
+from the same Recall workspace and region. Subscribe to `bot.joining`,
+`bot.in_call_recording`, `bot.done`, `bot.fatal`, `recording.done`,
+`recording.failed`, `transcript.done`, and `transcript.failed`.
+
+When the map is present, missing workspace entries and unscoped Recall webhooks
+fail closed; global Recall credentials are not used as a fallback. Deploy support
+for scoped routing before enabling the map. Preserve existing provider account
+bindings for scheduled bots, and verify callbacks and transcript processing before
+removing old endpoints. Reverting to a release without scoped routing requires
+restoring the prior compatible credential and endpoint configuration as well.
+
 ## Example `.env` File
 
 ```env

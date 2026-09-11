@@ -1,3 +1,4 @@
+import { getRecallWorkspaceBinding, requireRecallWorkspaceBinding, recallWorkspaceBindingsEnabled } from "./recall-workspace-bindings";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   Prisma,
@@ -212,6 +213,7 @@ const WINDOWS_TIME_ZONE_TO_IANA: Record<string, string> = {
 };
 
 export type MeetingRecorderScheduleInput = {
+  workspaceId?: string;
   meetingUrl: string;
   joinAt: Date;
   joinMode?: "immediate" | "scheduled";
@@ -290,6 +292,7 @@ type ScheduleAttemptResult = {
 };
 
 type RecordingCancelContext = {
+  workspaceId?: string;
   joinAt?: Date | null;
   status?: MeetingRecordingStatus | null;
 };
@@ -463,12 +466,14 @@ export function verifySvixLikeSignature(params: {
   });
 }
 
-export function verifyRecallWebhookSignature(params: { headers: Headers | Record<string, string>; payload: string }) {
-  if (!env.RECALL_WEBHOOK_SECRET) {
+export function verifyRecallWebhookSignature(params: { headers: Headers | Record<string, string>; payload: string; workspaceId?: string }) {
+  invariant(!recallWorkspaceBindingsEnabled() || Boolean(params.workspaceId), 503, "RECORDER_WEBHOOK_WORKSPACE_REQUIRED", "Use the workspace-specific Recall webhook URL.");
+  const binding = getRecallWorkspaceBinding(params.workspaceId);
+  if (!binding?.webhookSecret) {
     throw new AppError(503, "RECORDER_WEBHOOK_SECRET_MISSING", "Recall webhook verification is not configured.");
   }
   return verifySvixLikeSignature({
-    secret: env.RECALL_WEBHOOK_SECRET,
+    secret: binding.webhookSecret,
     headers: params.headers,
     payload: params.payload,
   });
@@ -489,8 +494,8 @@ export function verifyMeetingBaasWebhookSignature(params: { headers: Headers | R
   });
 }
 
-function requireVendorSecret(provider: MeetingRecorderProvider) {
-  const value = provider === "RECALL_AI" ? env.RECALL_API_KEY : env.MEETING_BAAS_API_KEY;
+function requireVendorSecret(provider: "MEETING_BAAS") {
+  const value = env.MEETING_BAAS_API_KEY;
   if (!value) {
     throw new AppError(503, "RECORDER_VENDOR_NOT_CONFIGURED", `${provider} API key is not configured.`);
   }
@@ -617,7 +622,8 @@ function extractBotId(provider: MeetingRecorderProvider, response: unknown) {
 }
 
 async function scheduleRecallBot(input: MeetingRecorderScheduleInput): Promise<ScheduleAttemptResult> {
-  const request = buildRecallCreateBotRequest(input, requireVendorSecret("RECALL_AI"));
+  const binding = requireRecallWorkspaceBinding(input.workspaceId);
+  const request = buildRecallCreateBotRequest(input, binding.apiKey, binding.region);
   const response = await fetchJson(request.url, request.init);
   return {
     externalBotId: extractBotId("RECALL_AI", response),
@@ -649,9 +655,10 @@ function recallDeleteCanFallBackToLeave(error: unknown) {
   return error instanceof ProviderRequestError && [400, 405, 409, 425].includes(error.status);
 }
 
-async function deleteScheduledRecallBot(externalBotId: string) {
-  const apiKey = requireVendorSecret("RECALL_AI");
-  await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/`, {
+async function deleteScheduledRecallBot(externalBotId: string, workspaceId?: string) {
+  const binding = requireRecallWorkspaceBinding(workspaceId);
+  const apiKey = binding.apiKey;
+  await fetchJson(`https://${binding.region}.recall.ai/api/v1/bot/${externalBotId}/`, {
     method: "DELETE",
     headers: {
       Authorization: recallAuthorization(apiKey),
@@ -660,9 +667,10 @@ async function deleteScheduledRecallBot(externalBotId: string) {
   }, { okStatuses: [404] });
 }
 
-async function leaveRecallBot(externalBotId: string) {
-  const apiKey = requireVendorSecret("RECALL_AI");
-  await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/leave_call/`, {
+async function leaveRecallBot(externalBotId: string, workspaceId?: string) {
+  const binding = requireRecallWorkspaceBinding(workspaceId);
+  const apiKey = binding.apiKey;
+  await fetchJson(`https://${binding.region}.recall.ai/api/v1/bot/${externalBotId}/leave_call/`, {
     method: "POST",
     headers: {
       Authorization: recallAuthorization(apiKey),
@@ -675,7 +683,7 @@ async function leaveRecallBot(externalBotId: string) {
 async function cancelRecallBot(externalBotId: string, context?: RecordingCancelContext) {
   if (shouldDeleteScheduledRecallBot(context)) {
     try {
-      await deleteScheduledRecallBot(externalBotId);
+      await deleteScheduledRecallBot(externalBotId, context?.workspaceId);
       return;
     } catch (error) {
       if (!recallDeleteCanFallBackToLeave(error)) {
@@ -687,7 +695,7 @@ async function cancelRecallBot(externalBotId: string, context?: RecordingCancelC
       });
     }
   }
-  await leaveRecallBot(externalBotId);
+  await leaveRecallBot(externalBotId, context?.workspaceId);
 }
 
 async function cancelMeetingBaasBot(externalBotId: string) {
@@ -700,9 +708,10 @@ async function cancelMeetingBaasBot(externalBotId: string) {
   }, { okStatuses: [404] });
 }
 
-async function createRecallAsyncTranscript(recordingId: string) {
-  const apiKey = requireVendorSecret("RECALL_AI");
-  await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/recording/${recordingId}/create_transcript/`, {
+async function createRecallAsyncTranscript(recordingId: string, workspaceId?: string) {
+  const binding = requireRecallWorkspaceBinding(workspaceId);
+  const apiKey = binding.apiKey;
+  await fetchJson(`https://${binding.region}.recall.ai/api/v1/recording/${recordingId}/create_transcript/`, {
     method: "POST",
     headers: {
       Authorization: recallAuthorization(apiKey),
@@ -790,9 +799,13 @@ function combineRecallTranscriptPayloads(payloads: unknown[]) {
   });
 }
 
-async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string) {
+async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string, region: string) {
+  const url = new URL(downloadUrl);
+  invariant(url.protocol === "https:" && !url.username && !url.password, 502, "RECORDER_TRANSCRIPT_URL_INVALID", "Recall returned an invalid transcript URL.");
+  const authenticatedApiDownload = url.origin === `https://${region}.recall.ai` && !recallSignedDownloadUrl(downloadUrl);
   const transcriptPayload = await fetchJson(downloadUrl, {
-    headers: recallSignedDownloadUrl(downloadUrl)
+    redirect: "error",
+    headers: !authenticatedApiDownload
       ? { accept: "application/json" }
       : {
           Authorization: recallAuthorization(apiKey),
@@ -802,13 +815,14 @@ async function fetchRecallTranscriptDownload(downloadUrl: string, apiKey: string
   return transcriptPayload;
 }
 
-async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | null; transcriptUrl?: string | null; externalBotId?: string | null }) {
-  const apiKey = requireVendorSecret("RECALL_AI");
+async function fetchRecallTranscriptArtifact(params: { workspaceId?: string; transcriptId?: string | null; transcriptUrl?: string | null; externalBotId?: string | null }) {
+  const binding = requireRecallWorkspaceBinding(params.workspaceId);
+  const apiKey = binding.apiKey;
   let downloadUrl = params.transcriptUrl ?? null;
   let metadata: unknown = null;
 
   if (!downloadUrl && params.transcriptId) {
-    metadata = await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/transcript/${params.transcriptId}/`, {
+    metadata = await fetchJson(`https://${binding.region}.recall.ai/api/v1/transcript/${params.transcriptId}/`, {
       headers: {
         Authorization: recallAuthorization(apiKey),
         accept: "application/json",
@@ -819,10 +833,10 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
 
   if (!downloadUrl && params.externalBotId) {
     try {
-      metadata = await fetchRecallBot(params.externalBotId);
+      metadata = await fetchRecallBot(params.externalBotId, params.workspaceId);
       const downloadUrls = recallBotTranscriptDownloadUrls(metadata);
       if (downloadUrls.length > 0) {
-        const transcriptPayloads = await Promise.all(downloadUrls.map((url) => fetchRecallTranscriptDownload(url, apiKey)));
+        const transcriptPayloads = await Promise.all(downloadUrls.map((url) => fetchRecallTranscriptDownload(url, apiKey, binding.region)));
         return { transcriptPayload: combineRecallTranscriptPayloads(transcriptPayloads), metadata };
       }
     } catch (error) {
@@ -834,7 +848,7 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
   }
 
   if (!downloadUrl && params.externalBotId) {
-    const transcriptPayload = await fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${params.externalBotId}/transcript/`, {
+    const transcriptPayload = await fetchJson(`https://${binding.region}.recall.ai/api/v1/bot/${params.externalBotId}/transcript/`, {
       headers: {
         Authorization: recallAuthorization(apiKey),
         accept: "application/json",
@@ -850,13 +864,14 @@ async function fetchRecallTranscriptArtifact(params: { transcriptId?: string | n
   }
 
   invariant(downloadUrl, 404, "RECORDER_TRANSCRIPT_NOT_READY", "Recall transcript is not ready.");
-  const transcriptPayload = await fetchRecallTranscriptDownload(downloadUrl, apiKey);
+  const transcriptPayload = await fetchRecallTranscriptDownload(downloadUrl, apiKey, binding.region);
   return { transcriptPayload, metadata };
 }
 
-async function fetchRecallBot(externalBotId: string) {
-  const apiKey = requireVendorSecret("RECALL_AI");
-  return fetchJson(`https://${env.RECALL_REGION}.recall.ai/api/v1/bot/${externalBotId}/`, {
+async function fetchRecallBot(externalBotId: string, workspaceId?: string) {
+  const binding = requireRecallWorkspaceBinding(workspaceId);
+  const apiKey = binding.apiKey;
+  return fetchJson(`https://${binding.region}.recall.ai/api/v1/bot/${externalBotId}/`, {
     headers: {
       Authorization: recallAuthorization(apiKey),
       accept: "application/json",
@@ -1145,6 +1160,7 @@ async function cleanupDuplicateScheduledProviderBots(
       invariant(duplicate.externalBotId, 409, "RECORDER_DUPLICATE_MISSING_BOT", "Duplicate recorder is missing its provider bot id.");
       try {
         await providerCancel(duplicate.provider, duplicate.externalBotId, {
+          workspaceId: duplicate.workspaceId,
           joinAt: recorderJoinInstant(duplicate),
           status: duplicate.status,
         });
@@ -1953,6 +1969,7 @@ export async function getMeetingRecorderMonthlyUsage(workspaceId: string, now = 
 }
 
 function providerRuntimeChecks(config: {
+  workspaceId?: string;
   defaultProvider: MeetingRecorderProvider;
   fallbackProvider?: MeetingRecorderProvider | null;
 }): RecorderReadinessCheck[] {
@@ -1967,18 +1984,19 @@ function providerRuntimeChecks(config: {
     },
   ];
   if (providers.has("RECALL_AI")) {
+    const binding = getRecallWorkspaceBinding(config.workspaceId);
     checks.push(
       {
         key: "recall_api_key",
         label: "Recall API key",
-        ok: Boolean(env.RECALL_API_KEY),
-        detail: env.RECALL_API_KEY ? "Configured." : "RECALL_API_KEY is missing.",
+        ok: Boolean(binding?.apiKey),
+        detail: binding?.apiKey ? "Configured for this workspace." : "Recall API key is missing for this workspace.",
       },
       {
         key: "recall_webhook_secret",
         label: "Recall webhook secret",
-        ok: Boolean(env.RECALL_WEBHOOK_SECRET),
-        detail: env.RECALL_WEBHOOK_SECRET ? "Configured." : "RECALL_WEBHOOK_SECRET is missing.",
+        ok: Boolean(binding?.webhookSecret),
+        detail: binding?.webhookSecret ? "Configured for this workspace." : "Recall webhook secret is missing for this workspace.",
       },
     );
   }
@@ -2002,9 +2020,10 @@ function providerRuntimeChecks(config: {
 }
 
 function providerCanSchedule(config: {
+  workspaceId?: string;
   defaultProvider: MeetingRecorderProvider;
 }) {
-  return providerRuntimeChecks({ defaultProvider: config.defaultProvider, fallbackProvider: null }).every((check) => check.ok);
+  return providerRuntimeChecks({ workspaceId: config.workspaceId, defaultProvider: config.defaultProvider, fallbackProvider: null }).every((check) => check.ok);
 }
 
 function recorderProofObservedAt(recording: {
@@ -2544,7 +2563,7 @@ function estimatedMeetingMinutes(meeting: { recordedAt: Date; scheduledEndAt: Da
 
 async function getEffectiveRecorderConfig(workspaceId: string) {
   const config = await prisma.workspaceMeetingRecorderConfig.findUnique({ where: { workspaceId } });
-  return config ?? defaultConfigData();
+  return config ?? { workspaceId, ...defaultConfigData() };
 }
 
 async function enforceMonthlyCap(params: {
@@ -2623,6 +2642,7 @@ async function retireMismatchedActiveRecordings(params: {
     if (recording.externalBotId) {
       try {
         await providerCancel(recording.provider, recording.externalBotId, {
+          workspaceId: recording.workspaceId,
           joinAt: recorderJoinInstant({ joinAt: recording.joinAt, meeting: { recordedAt: params.recordedAt } }),
           status: recording.status,
         });
@@ -3140,6 +3160,7 @@ async function attemptProviderSchedule(params: {
   });
   try {
     const scheduled = await providerSchedule(params.provider, {
+      workspaceId: params.workspaceId,
       meetingUrl: params.meetingUrl,
       joinAt: params.joinAt,
       joinMode: params.joinMode,
@@ -3211,6 +3232,7 @@ export async function cancelMeetingRecording(actor: AppActor, params: { workspac
   if (recording.externalBotId) {
     try {
       await providerCancel(recording.provider, recording.externalBotId, {
+        workspaceId: recording.workspaceId,
         joinAt: recording.joinAt,
         status: recording.status,
       });
@@ -3255,6 +3277,7 @@ async function cancelAutoRecordingsForMeeting(workspaceId: string, meetingId: st
     if (recording.externalBotId) {
       try {
         await providerCancel(recording.provider, recording.externalBotId, {
+          workspaceId: recording.workspaceId,
           joinAt: recording.joinAt,
           status: recording.status,
         });
@@ -3334,7 +3357,7 @@ function recallStatus(eventType: string, code: string | null): MeetingRecordingS
   if (eventType === "bot.joining") return "JOINING";
   if (eventType === "bot.in_call_recording" || eventType === "recording.processing") return "RECORDING";
   if (eventType === "bot.done" || eventType === "recording.done" || eventType === "transcript.done") return "COMPLETED";
-  if (eventType === "bot.failed" || eventType === "recording.failed" || eventType === "transcript.failed" || code === "failed") return "FAILED";
+  if (eventType === "bot.fatal" || eventType === "bot.failed" || eventType === "recording.failed" || eventType === "transcript.failed" || code === "failed" || code === "fatal") return "FAILED";
   if (eventType === "bot.call_ended" || eventType === "recording.deleted") return "CANCELLED";
   return null;
 }
@@ -3380,9 +3403,10 @@ function meetingBaasStatus(eventType: string, status: string | null): MeetingRec
 export async function processMeetingRecorderWebhook(provider: MeetingRecorderProvider, params: {
   headers: Headers | Record<string, string>;
   rawBody: string;
+  workspaceId?: string;
 }) {
   const verified = provider === "RECALL_AI"
-    ? verifyRecallWebhookSignature({ headers: params.headers, payload: params.rawBody })
+    ? verifyRecallWebhookSignature({ headers: params.headers, payload: params.rawBody, workspaceId: params.workspaceId })
     : verifyMeetingBaasWebhookSignature({ headers: params.headers, payload: params.rawBody });
   if (!verified) {
     recorderLog("warn", "webhook_signature_invalid", { provider });
@@ -3391,7 +3415,11 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
 
   const payload = JSON.parse(params.rawBody) as unknown;
   const event = provider === "RECALL_AI" ? normalizeRecallWebhook(payload) : normalizeMeetingBaasWebhook(payload);
-  const dedupeKey = `${provider}:${event.eventId ?? createHash("sha256").update(params.rawBody).digest("hex")}`;
+  const authenticatedWorkspaceId = provider === "RECALL_AI" ? params.workspaceId : undefined;
+  invariant(!authenticatedWorkspaceId || !event.workspaceId || event.workspaceId === authenticatedWorkspaceId,
+    403, "RECORDER_WEBHOOK_WORKSPACE_MISMATCH", "Recorder webhook does not match its configured workspace.");
+  const issuer = authenticatedWorkspaceId ? `${provider}:${authenticatedWorkspaceId}` : provider;
+  const dedupeKey = `${issuer}:${event.eventId ?? createHash("sha256").update(params.rawBody).digest("hex")}`;
   recorderLog("info", "webhook_received", {
     provider,
     eventType: event.eventType,
@@ -3414,7 +3442,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
     return { processed: false, duplicate: true };
   }
 
-  let recording = await findRecordingForWebhook(provider, event);
+  let recording = await findRecordingForWebhook(provider, event, authenticatedWorkspaceId);
 
   let providerEvent: { id: string };
   if (provider === "RECALL_AI" && event.eventType === "transcript.done" && recording) {
@@ -3447,8 +3475,8 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
       where: { dedupeKey },
       update: {},
       create: {
-        workspaceId: recording?.workspaceId ?? event.workspaceId,
-        recordingId: recording?.id ?? event.recordingId,
+        workspaceId: recording?.workspaceId ?? authenticatedWorkspaceId ?? event.workspaceId,
+        recordingId: recording?.id ?? null,
         provider,
         externalEventId: event.eventId,
         externalBotId: event.externalBotId,
@@ -3464,8 +3492,8 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
     await prisma.meetingRecorderProviderEvent.update({
       where: { id: providerEvent.id },
       data: {
-        processedAt: new Date(),
-        error: "No matching MeetingRecording found.",
+        processedAt: null,
+        error: "No matching MeetingRecording found; awaiting recording publication.",
       },
     });
     recorderLog("warn", "webhook_unmatched", {
@@ -3476,7 +3504,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
       meetingId: event.meetingId,
       recordingId: event.recordingId,
     });
-    return { processed: false, duplicate: false };
+    throw new AppError(503, "RECORDER_WEBHOOK_RECORDING_NOT_READY", "The matching recording is not available yet; retry this event.");
   }
 
   if (!(provider === "RECALL_AI" && event.eventType === "transcript.done")) {
@@ -3484,7 +3512,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   }
 
   if (provider === "RECALL_AI" && event.eventType === "recording.done" && event.recordingIdForTranscript) {
-    await createRecallAsyncTranscript(event.recordingIdForTranscript);
+    await createRecallAsyncTranscript(event.recordingIdForTranscript, recording.workspaceId);
   }
 
   if (shouldFetchTranscript(provider, event)) {
@@ -3495,7 +3523,7 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
 
   await prisma.meetingRecorderProviderEvent.update({
     where: { id: providerEvent.id },
-    data: { processedAt: new Date(), recordingId: recording.id, workspaceId: recording.workspaceId },
+    data: { processedAt: new Date(), recordingId: recording.id, workspaceId: recording.workspaceId, error: null },
   });
   recorderLog("info", "webhook_processed", {
     provider,
@@ -3508,23 +3536,33 @@ export async function processMeetingRecorderWebhook(provider: MeetingRecorderPro
   return { processed: true, duplicate: false, recordingId: recording.id };
 }
 
-async function findRecordingForWebhook(provider: MeetingRecorderProvider, event: ProviderWebhookEvent) {
+async function findRecordingForWebhook(provider: MeetingRecorderProvider, event: ProviderWebhookEvent, authenticatedWorkspaceId?: string) {
+  const workspaceId = authenticatedWorkspaceId ?? event.workspaceId;
+  const validate = (recording: MeetingRecording) => {
+    invariant(recording.provider === provider && (!workspaceId || recording.workspaceId === workspaceId)
+      && (!event.meetingId || recording.meetingId === event.meetingId)
+      && (!event.externalBotId || !recording.externalBotId || recording.externalBotId === event.externalBotId),
+    403, "RECORDER_WEBHOOK_RECORDING_MISMATCH", "Recorder webhook identifiers do not match the recording.");
+    return recording;
+  };
   if (event.recordingId) {
     const recording = await prisma.meetingRecording.findUnique({ where: { id: event.recordingId } });
-    if (recording) return recording;
+    // An explicit missing recording must not be substituted with another recording.
+    return recording ? validate(recording) : null;
   }
   if (event.externalBotId) {
     const recording = await prisma.meetingRecording.findFirst({
-      where: { provider, externalBotId: event.externalBotId },
+      where: { provider, externalBotId: event.externalBotId, ...(workspaceId ? { workspaceId } : {}) },
       orderBy: { createdAt: "desc" },
     });
-    if (recording) return recording;
+    return recording ? validate(recording) : null;
   }
-  if (event.workspaceId && event.meetingId) {
-    return prisma.meetingRecording.findFirst({
-      where: { workspaceId: event.workspaceId, meetingId: event.meetingId, provider },
+  if (workspaceId && event.meetingId) {
+    const recording = await prisma.meetingRecording.findFirst({
+      where: { workspaceId, meetingId: event.meetingId, provider },
       orderBy: { createdAt: "desc" },
     });
+    return recording ? validate(recording) : null;
   }
   return null;
 }
@@ -3789,6 +3827,7 @@ async function ingestProviderTranscript(provider: MeetingRecorderProvider, recor
   }
   const artifact = provider === "RECALL_AI"
     ? await fetchRecallTranscriptArtifact({
+      workspaceId: recording.workspaceId,
       transcriptId: event.transcriptId,
       transcriptUrl: event.transcriptUrl,
       externalBotId: recording.externalBotId,
@@ -3953,6 +3992,7 @@ async function markDuplicateRecoveredRecordingsSkipped(group: RecoverableRecallR
       }
       try {
         await providerCancel(recording.provider, recording.externalBotId, {
+          workspaceId: recording.workspaceId,
           joinAt: recorderJoinInstant(recording),
           status: recording.status,
         });
@@ -4233,7 +4273,7 @@ async function recoverRecallTranscripts(workspaceId: string) {
         }
 
         try {
-          const bot = await fetchRecallBot(current.externalBotId);
+          const bot = await fetchRecallBot(current.externalBotId, current.workspaceId);
           if (!recallBotIsDone(bot)) {
             continue;
           }
@@ -4250,7 +4290,7 @@ async function recoverRecallTranscripts(workspaceId: string) {
           }
           throw error;
         }
-        const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId });
+        const artifact = await fetchRecallTranscriptArtifact({ externalBotId: current.externalBotId, workspaceId: current.workspaceId });
         const latest = await findRecoverableRecallRecording(recording.id);
         if (!latest || latest.transcriptProcessedAt || !latest.externalBotId) {
           continue;
@@ -4344,7 +4384,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
       continue;
     }
     try {
-      const bot = await fetchRecallBot(recording.externalBotId);
+      const bot = await fetchRecallBot(recording.externalBotId, recording.workspaceId);
       const failure = recallBotTerminalFailure(bot);
       if (!failure) {
         continue;
@@ -4386,6 +4426,7 @@ export async function reconcileMeetingRecorders(workspaceId: string) {
     if (recording.externalBotId) {
       try {
         await providerCancel(recording.provider, recording.externalBotId, {
+          workspaceId: recording.workspaceId,
           joinAt: recorderJoinInstant(recording),
           status: recording.status,
         });
