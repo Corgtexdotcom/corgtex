@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { Prisma } from "@prisma/client";
 
 const {
   buildMeetingIntelligenceContextMock,
@@ -138,6 +139,7 @@ vi.mock("./meeting-intelligence-context", () => ({
 }));
 
 import { prisma } from "@corgtex/shared";
+import { humanMemberIdentityWhere, isHumanMemberIdentity } from "./member-identity";
 import { 
   extractMeetingInsights, 
   confirmInsight, 
@@ -743,6 +745,68 @@ describe("meeting-intelligence", () => {
   describe("applyInsight", () => {
     it("is defined and callable", async () => {
       expect(applyInsight).toBeDefined();
+    });
+
+    it.each(["ACTION_ITEM", "FOLLOW_UP", "TENSION"])("uses only the active human match for %s despite earlier historical/system duplicates", async (type) => {
+      const candidates = [
+        { id: "historical", workspaceId: "ws-1", isActive: false, kind: "HUMAN" as const, user: { displayName: "Milan", email: "historical@example.com" } },
+        { id: "system", workspaceId: "ws-1", isActive: true, kind: "SYSTEM" as const, user: { displayName: "Milan", email: "system@example.com" } },
+        { id: "legacy-system", workspaceId: "ws-1", isActive: true, kind: "HUMAN" as const, user: { displayName: "Milan", email: "support+milan@example.com" } },
+        { id: "other-workspace", workspaceId: "ws-2", isActive: true, kind: "HUMAN" as const, user: { displayName: "Milan", email: "other@example.com" } },
+        { id: "active-human", workspaceId: "ws-1", isActive: true, kind: "HUMAN" as const, user: { displayName: "Milan", email: "milan@example.com" } },
+      ];
+      (prisma.member.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (args: Prisma.MemberFindManyArgs) => candidates.filter((member) =>
+        member.workspaceId === args?.where?.workspaceId
+        && (args.where.isActive !== true || member.isActive)
+        && (!args.where.NOT || isHumanMemberIdentity(member))
+      ) as never);
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-eligible", workspaceId: "ws-1", meetingId: "meeting-1", type,
+        operation: "CREATE", status: "SUGGESTED", title: "Follow up", bodyMd: "Milan will follow up.",
+        assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-eligible" });
+
+      expect(prisma.member.findMany).toHaveBeenCalledWith({
+        where: { workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() }, include: { user: true },
+      });
+      expect(type === "TENSION" ? createTensionMock : createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining(
+        type === "TENSION" ? { raisedByMemberId: "active-human" } : { assigneeMemberId: "active-human" },
+      ));
+    });
+
+    it("does not assign an inactive-only hint", async () => {
+      (prisma.member.findMany as ReturnType<typeof vi.fn>).mockImplementation(async (args: Prisma.MemberFindManyArgs) =>
+        args?.where?.isActive === true ? [] : [{ id: "historical", user: { displayName: "Milan", email: "old@example.com" } }] as never);
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-old", workspaceId: "ws-1", meetingId: "meeting-1", type: "ACTION_ITEM",
+        operation: "CREATE", status: "SUGGESTED", title: "Follow up", bodyMd: "Follow up.",
+        assigneeHint: "Milan", meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-old" });
+      expect(createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({ assigneeMemberId: null }));
+    });
+
+    it("completes an action with the existing insight evidence and meeting provenance", async () => {
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-resolve", workspaceId: "ws-1", meetingId: "meeting-1", type: "ACTION_ITEM",
+        operation: "RESOLVE", targetEntityType: "Action", targetEntityId: "action-1", status: "SUGGESTED",
+        title: "Follow up completed", bodyMd: "The owner confirmed the handoff was delivered.",
+        meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      updateActionMock.mockImplementation(async (_actor, params) => {
+        if (!params.completedVia?.trim()) throw new Error("Completion note is required.");
+        return { id: "action-1" };
+      });
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-resolve" });
+      expect(updateActionMock).toHaveBeenCalledWith(mockActor, {
+        workspaceId: "ws-1", actionId: "action-1", status: "COMPLETED",
+        completedVia: "The owner confirmed the handoff was delivered.\n\n*Created from meeting:* [Weekly sync](/workspaces/ws-1/meetings/meeting-1)",
+      });
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ status: "APPLIED", appliedEntityType: "Action", appliedEntityId: "action-1" }),
+      }));
     });
 
     it("uses assignee hints as raised-by members for tension insights", async () => {
