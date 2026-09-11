@@ -49,13 +49,15 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   };
 });
 
-vi.mock("@corgtex/models", () => ({
+vi.mock("@corgtex/models", async () => ({
+  ...await import("../../models/src/provider-errors"),
   defaultModelGateway: modelGatewayMock,
   resolveModel: vi.fn().mockReturnValue("fake-model"),
 }));
 
 import { syncKnowledgeForSource } from "./chunks";
-import { resetLocalCacheStore } from "@corgtex/shared";
+import { ModelProviderHttpError } from "../../models/src/provider-errors";
+import { logger, resetLocalCacheStore } from "@corgtex/shared";
 import { answerKnowledgeQuestion, searchIndexedKnowledge, invalidateKnowledgeCache } from "./retrieval";
 
 describe("knowledge retrieval cache", () => {
@@ -113,6 +115,59 @@ describe("knowledge retrieval cache", () => {
     });
     expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
     expect(modelGatewayMock.rerank).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns authorized positive lexical matches when query embedding is rate limited", async () => {
+    const chunk = { id: "allowed", sourceType: "DOCUMENT", sourceId: "doc-allowed", sourceTitle: "Travel policy", chunkIndex: 0, content: "Travel reimbursement policy.", createdAt: new Date("2026-04-03T09:00:00Z") };
+    prismaMock.knowledgeChunk.findMany
+      .mockResolvedValueOnce([{ ...chunk, id: "withdrawn" }, chunk, { ...chunk, id: "unrelated", sourceTitle: "Other", content: "Bananas and pears" }])
+      .mockResolvedValueOnce([{ id: "allowed", embedding: [1, 0] }, { id: "unrelated", embedding: [1, 0] }]);
+    modelGatewayMock.embed.mockRejectedValueOnce(new ModelProviderHttpError(429, "provider fixture throttled"));
+
+    const result = await searchIndexedKnowledge({ workspaceId: "ws-1", query: "travel policy", limit: 1, sourceTypes: ["DOCUMENT"], accessDomains: ["WORKSPACE"], maxSensitivity: "INTERNAL" });
+
+    expect(result).toEqual([expect.objectContaining({ chunkId: "allowed", sourceId: "doc-allowed", snippet: chunk.content, score: expect.any(Number) })]);
+    expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
+    expect(modelGatewayMock.embed).toHaveBeenCalledWith(expect.objectContaining({ failFastOnRateLimit: true }));
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[0][0]).toMatchObject({ where: { workspaceId: "ws-1", sourceType: "DOCUMENT", accessDomain: { in: ["WORKSPACE"] }, sensitivity: { in: ["PUBLIC", "INTERNAL"] } } });
+    expect(prismaMock.knowledgeChunk.findMany.mock.calls[1][0]).toMatchObject({ where: { workspaceId: "ws-1", accessDomain: { in: ["WORKSPACE"] }, sourceType: { in: ["DOCUMENT"] }, sensitivity: { in: ["PUBLIC", "INTERNAL"] } } });
+    expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "travel policy", limit: 1, sourceTypes: ["DOCUMENT"], accessDomains: ["WORKSPACE"], maxSensitivity: "INTERNAL" })).toEqual(result);
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the combined ranking when reranking is rate limited", async () => {
+    const chunk = { id: "lexical", sourceType: "DOCUMENT", sourceId: "doc-1", sourceTitle: "Policy", chunkIndex: 0, content: "travel policy", createdAt: new Date("2026-04-03T09:00:00Z") };
+    prismaMock.knowledgeChunk.findMany
+      .mockResolvedValueOnce([chunk, { ...chunk, id: "semantic", content: "travel" }])
+      .mockResolvedValueOnce([{ id: "lexical", embedding: [-1, 0] }, { id: "semantic", embedding: [1, 0] }]);
+    modelGatewayMock.rerank.mockRejectedValueOnce(new ModelProviderHttpError(429, "provider fixture throttled"));
+    const result = await searchIndexedKnowledge({ workspaceId: "ws-1", query: "travel policy", limit: 1 });
+    expect(result).toEqual([expect.objectContaining({ chunkId: "semantic", score: expect.any(Number) })]);
+    expect(modelGatewayMock.embed).toHaveBeenCalledTimes(1);
+    expect(modelGatewayMock.rerank).toHaveBeenCalledWith(expect.objectContaining({ failFastOnRateLimit: true }));
+  });
+
+  it.each(["embed", "rerank"] as const)("does not conceal non-provider429 or other %s failures", async (stage) => {
+    const chunk = { id: "chunk-error", sourceType: "DOCUMENT", sourceId: "doc-error", sourceTitle: "Policy", chunkIndex: 0, content: "travel policy", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") };
+    prismaMock.knowledgeChunk.findMany.mockResolvedValue([chunk]);
+    for (const error of [new ModelProviderHttpError(401, "auth fixture"), new ModelProviderHttpError(503, "unavailable fixture"), new Error("429 appears in unrelated error text"), Object.assign(new Error("budget fixture"), { status: 429 })]) {
+      modelGatewayMock[stage].mockRejectedValueOnce(error);
+      await expect(searchIndexedKnowledge({ workspaceId: "ws-1", query: "travel policy" })).rejects.toBe(error);
+    }
+  });
+
+  it("does not return zero-lexical matches or log provider content on query429", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      prismaMock.knowledgeChunk.findMany.mockResolvedValue([{ id: "unrelated", sourceType: "DOCUMENT", sourceId: "doc-other", sourceTitle: "Other", chunkIndex: 0, content: "Bananas and pears", embedding: [1, 0], createdAt: new Date("2026-04-03T09:00:00Z") }]);
+      modelGatewayMock.embed.mockRejectedValueOnce(new ModelProviderHttpError(429, "PRIVATE_PROVIDER_CONTENT"));
+      expect(await searchIndexedKnowledge({ workspaceId: "ws-1", query: "travel policy" })).toEqual([]);
+      expect(modelGatewayMock.rerank).not.toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE_PROVIDER_CONTENT");
+      expect(warn).toHaveBeenCalledWith(expect.any(String), { workspaceId: "ws-1", stage: "query_embedding", httpStatus: 429 });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("partitions search caches by the normalized access-domain set", async () => {

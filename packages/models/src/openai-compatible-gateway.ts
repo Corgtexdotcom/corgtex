@@ -13,6 +13,7 @@ import type {
 } from "./contracts";
 import { assertCatalogModelBudget, assertWorkspaceModelBudget, recordModelUsage } from "./usage";
 import { estimateModelCost, getModelPrice } from "./pricing";
+import { ModelProviderHttpError } from "./provider-errors";
 
 type UsageDetails = {
   provider: string;
@@ -570,6 +571,7 @@ async function requestWithRetries<T>(
   operation: RequestOperation,
   errorPrefix: string,
   read: (response: Response) => Promise<T>,
+  failFastOnRateLimit = false,
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     let retryError: unknown;
@@ -583,8 +585,12 @@ async function requestWithRetries<T>(
       if (response.ok) return await abortable(read(response), operation.signal);
       responseStatus = response.status;
       retryHeaders = response.headers;
+      if (response.status === 429 && failFastOnRateLimit) {
+        void response.body?.cancel().catch(() => {});
+        throw new ModelProviderHttpError(response.status, `${errorPrefix} (${response.status})`);
+      }
       const errorText = await abortable(response.text(), operation.signal);
-      const error = new Error(`${errorPrefix} (${response.status}): ${errorText}`);
+      const error = new ModelProviderHttpError(response.status, `${errorPrefix} (${response.status}): ${errorText}`);
       if (attempt >= MAX_REQUEST_RETRIES || !isRetryableStatus(response.status)) throw error;
       retryError = error;
     } catch (error) {
@@ -659,7 +665,7 @@ async function sleep(ms: number, signal?: AbortSignal) {
   throwIfAborted(signal);
 }
 
-async function postJson<TResponse>(path: string, body: Record<string, unknown>, route: ModelProviderRoute | undefined, operation: RequestOperation) {
+async function postJson<TResponse>(path: string, body: Record<string, unknown>, route: ModelProviderRoute | undefined, operation: RequestOperation, failFastOnRateLimit = false) {
   const payload = JSON.stringify(withProviderOptions(providerForRoute(route), body));
   return requestWithRetries(
     `${baseUrl(route)}${path}`,
@@ -667,6 +673,7 @@ async function postJson<TResponse>(path: string, body: Record<string, unknown>, 
     operation,
     "OpenAI-compatible request failed",
     (response) => response.json() as Promise<TResponse>,
+    failFastOnRateLimit,
   );
 }
 
@@ -1096,7 +1103,7 @@ async function embedTexts(request: EmbeddingRequest) {
     const response = await postJson<EmbeddingApiResponse>("/embeddings", {
       model,
       input: inputs,
-    }, route, operation);
+    }, route, operation, request.failFastOnRateLimit);
     const latencyMs = Date.now() - startedAt;
     const embeddings = (response.data ?? []).map((entry) => entry.embedding ?? []);
     const inputTokens = response.usage?.prompt_tokens ?? inputs.reduce((sum, value) => sum + value.length, 0);
@@ -1273,6 +1280,7 @@ export const openAICompatibleModelGateway: ModelGateway = {
       ...usageContext(request),
       model: request.model ?? env.MODEL_EMBEDDING_DEFAULT,
       input: [request.query, ...request.documents],
+      failFastOnRateLimit: request.failFastOnRateLimit,
     });
     const [queryEmbedding, ...documentEmbeddings] = embedded.embeddings;
     const results = request.documents

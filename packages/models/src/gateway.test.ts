@@ -1923,6 +1923,69 @@ describe("provider retry windows and operation deadlines", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
+  it.each(["embed", "rerank"] as const)("fails fast on provider429 only when %s explicitly requests it", async (kind) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("private provider body", { status: 429, headers: { "Retry-After": "30" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = (kind === "embed"
+      ? gateway.embed({ workspaceId: "ws-1", model: "gpt-test", input: "query", failFastOnRateLimit: true })
+      : gateway.rerank({ workspaceId: "ws-1", model: "gpt-test", query: "query", documents: ["document"], topK: 1, failFastOnRateLimit: true }))
+      .catch(error => error);
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await result).toMatchObject({ status: 429 });
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it.each(["embed", "rerank"] as const)("preserves ordinary429 retries for %s", async (kind) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("throttled", { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = (kind === "embed"
+      ? gateway.embed({ workspaceId: "ws-1", model: "gpt-test", input: "query" })
+      : gateway.rerank({ workspaceId: "ws-1", model: "gpt-test", query: "query", documents: ["document"], topK: 1 }))
+      .catch(error => error);
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(await result).toMatchObject({ status: 429 });
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 503])("preserves HTTP%s behavior when fail-fast429 is enabled", async (status) => {
+    const { gateway, recordModelUsage } = await setup();
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("other failure", { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = gateway.embed({ workspaceId: "ws-1", model: "gpt-test", input: "query", failFastOnRateLimit: true }).catch(error => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ status });
+    expect(fetchMock).toHaveBeenCalledTimes(status === 401 ? 1 : 3);
+    expect(recordModelUsage).not.toHaveBeenCalled();
+  });
+
+  it("recognizes429 immediately without reading a stalled error body", async () => {
+    const { gateway } = await setup();
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({ cancel }), { status: 429 });
+    const readBody = vi.spyOn(response, "text");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    const startedAt = Date.now();
+    const result = await gateway.embed({ workspaceId: "ws-1", model: "gpt-test", input: "query", failFastOnRateLimit: true }).catch(error => error);
+    expect(result).toMatchObject({ status: 429, message: "OpenAI-compatible request failed (429)" });
+    expect(readBody).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(Date.now()).toBe(startedAt);
+  });
+
+  it("still checks the normal workspace budget before a fail-fast embedding request", async () => {
+    const { gateway } = await setup();
+    const { assertWorkspaceModelBudget } = await import("./usage");
+    const budgetError = new Error("workspace budget fixture");
+    vi.mocked(assertWorkspaceModelBudget).mockRejectedValueOnce(budgetError);
+    vi.stubGlobal("fetch", vi.fn());
+    await expect(gateway.embed({ workspaceId: "ws-1", model: "gpt-test", input: "query", failFastOnRateLimit: true })).rejects.toBe(budgetError);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ "Retry-After": "30" }, 30_000],
     [{ "Retry-After": "Mon, 07 Sep 2026 00:00:30 GMT" }, 30_000],
