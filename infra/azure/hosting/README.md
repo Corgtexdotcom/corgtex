@@ -106,6 +106,149 @@ backend. Do not replay this bootstrap template over a domain-bound app: it has n
 custom-domain configuration. Subsequent releases use image-only Container App
 updates with digest/readiness/public-smoke proof and the previous image retained.
 
+## Repeatable site image updates
+
+Use `scripts/azure-site-image-release.mjs` with the published `receipt.json` and its
+already-imported ACR digest. It defaults to read-only Azure planning and local
+redacted evidence. No dependency installation is required. It never imports images,
+replays Bicep, changes scale/domain/identity settings, or invokes selfserve fleet
+or monitor release paths. The coordinator retains ownership of production writers.
+
+Keep one private target file under ignored `.artifacts/`. Fill these placeholders
+from the approved site's resource IDs and bound domains; the script reads the full
+live configuration itself. The ACR must be in the same subscription (its resource
+group may differ). Only the existing single-container `site`, Single revision,
+Consumption app with external HTTPS ingress on port 3000 is supported.
+
+```json
+{
+  "purpose": "corgtex-public-site",
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "resourceGroup": "SITE_RESOURCE_GROUP",
+  "appName": "SITE_APP_NAME",
+  "containerName": "site",
+  "resourceId": "/subscriptions/SUBSCRIPTION_ID/resourceGroups/SITE_RESOURCE_GROUP/providers/Microsoft.App/containerApps/SITE_APP_NAME",
+  "registryResourceId": "/subscriptions/SUBSCRIPTION_ID/resourceGroups/REGISTRY_RESOURCE_GROUP/providers/Microsoft.ContainerRegistry/registries/REGISTRY_NAME",
+  "registryServer": "REGISTRY_NAME.azurecr.io",
+  "domains": ["corgtex.com", "www.corgtex.com"]
+}
+```
+
+List exactly the domains bound to this app, which may differ from this example if
+an apex redirect lives elsewhere. No domain or certificate binding is created.
+Use an existing Azure CLI login with read access to the target and ACR manifests;
+execution additionally needs Container App update permission. The script does not
+grant access, change accounts, or install CLI extensions. Receipt origin and build
+settings remain the coordinator's acceptance responsibility; a local JSON receipt
+is validated structurally against the hosting workflow format, not authenticated
+against GitHub.
+
+Set `SITE_IMAGE` to the imported `REGISTRY.azurecr.io/corgtex/site@sha256:HEX`
+reference matching the receipt, and `PREVIOUS_SITE_IMAGE` to the exact current ACR
+digest reference from approved readback. Both are nonsecret image identifiers.
+Each `--out` must be a new directory whose parent already exists.
+
+```sh
+# Read-only plan. Existing .artifacts/ contains target.json and receipt.json.
+node scripts/azure-site-image-release.mjs \
+  --target .artifacts/target.json --receipt .artifacts/receipt.json \
+  --image "$SITE_IMAGE" --expected-current-image "$PREVIOUS_SITE_IMAGE" \
+  --out .artifacts/site-release-plan
+
+# Only when the coordinator authorizes this exact target and serializes writers.
+node scripts/azure-site-image-release.mjs \
+  --target .artifacts/target.json --receipt .artifacts/receipt.json \
+  --image "$SITE_IMAGE" --expected-current-image "$PREVIOUS_SITE_IMAGE" \
+  --execute --confirm-target "$SITE_RESOURCE_ID" --out .artifacts/site-release-run
+```
+
+`--confirm-target` must exactly equal the target file's full app resource ID.
+Every Azure call pins the subscription. Resource IDs, ACR login server, imported
+manifest digest, app/container, current digest and domain/certificate bindings are
+checked before the sole `az containerapp update --container-name site --image ...`
+write. A second app read immediately before submission detects intervening drift;
+it is not an atomic lock. Keep all other writers fenced for the run.
+
+Evidence uses a private directory (0700) and exclusive files (0600): `intent.json`
+holds the previous image, redacted configuration and whole-configuration/template
+fingerprints; `submitted.json` is written before submitting an update; successful
+readback adds `after.json` and `ready.json`. Other outcomes write `result.json`.
+Environment values, arguments, headers and arbitrary configuration strings are
+redacted. Secret payloads are never requested, forwarded in argv or written to
+evidence; provider stdout/stderr and raw CLI exceptions are never printed. Secret
+names/references are checked, not secret values or external Key Vault contents.
+Treat the local evidence as private recovery material, not a signed attestation.
+
+Readiness polls for up to 300 seconds by default (`--wait-seconds 1..1800`,
+`--poll-seconds 1..30`, default 5). Each CLI call is bounded to 30 seconds; polling
+calls are further limited by the remaining readiness deadline. Preflight and the
+single update submission precede that deadline. `READY` requires the latest ready
+revision to contain the exact digest, be active/provisioned/healthy, and match the
+original template and configuration. Environment values, secret references, domain
+and certificate bindings, identity, registry settings, resources, scale, probes,
+arguments and other configuration must remain unchanged. The full app fingerprints
+exclude only the selected image and generated revision suffix; they are not
+normalized for API response differences. Revision comparison alone allows omitted
+`imageType` and `resources.ephemeralStorage` string fields, absent/null
+`customMetricsSettings`, and absent/null scale cooldown/polling values equivalent
+to defaults 300/30. Explicit revision values are compared; nondefault scale values,
+CPU, memory, replica bounds and rules remain checked. If the revision omits image
+type or ephemeral storage, their preservation is proved by the full app readback,
+not independently by the revision response. The expected revision template comes
+from live app readback only after its full fingerprint matches the saved baseline,
+so existing intents need no rewrite or new plaintext configuration evidence.
+A scale-to-zero
+revision can pass only if Azure also reports it Healthy; no replica is forced up.
+
+Timeouts, failed readbacks and ambiguous submissions exit nonzero. They never
+resubmit the update or roll back automatically. Keep the run directory and first
+reconcile that same intent and target using read-only provider calls:
+
+```sh
+node scripts/azure-site-image-release.mjs --target .artifacts/target.json \
+  --reconcile .artifacts/site-release-run --out .artifacts/site-release-reconciled
+```
+
+If Azure's update response was lost but subsequent same-target readback proves the
+digest ready and configuration unchanged, the run can still report `READY`. A
+still-pending, failed or drifted target requires coordinator investigation before
+another write. An interrupted process may leave only `intent.json` or
+`submitted.json`; these are sufficient for reconciliation. Do not infer failure
+of the Azure operation from the local timeout.
+
+For an explicitly authorized image rollback, retain the previous ACR manifest and
+use the original run or reconciliation directory. The script selects its saved
+previous digest and first reconciles the attempted image's exact revision and
+configuration through fresh readback. That revision must be healthy/ready or
+terminally failed (`Failed` provisioning plus `Failed`/`ActivationFailed` running
+state), with no app update pending. It refuses ambiguous or drifted targets, then
+uses the same image-only update and readiness path. Omit execute/confirmation to
+plan first. Config drift is not repaired by image rollback.
+
+```sh
+node scripts/azure-site-image-release.mjs --target .artifacts/target.json \
+  --rollback-from .artifacts/site-release-reconciled --expected-current-image "$SITE_IMAGE" \
+  --execute --confirm-target "$SITE_RESOURCE_ID" --out .artifacts/site-rollback-run
+```
+
+`READY` proves provider revision/configuration readiness only. Both runtime and
+public health remain explicitly `UNPROVEN` in this tool's output. Separately run
+the existing read-only site candidate smoke against the intended runtime origin
+and each actual public origin, then apply the coordinator's browser acceptance.
+The current site `/api/health` identifies `corgtex-site` but has no build SHA or
+image digest, so a healthy response alone cannot identify the serving release.
+Provider certificate bindings are checked; DNS, TLS validity, certificate resource
+contents and external identity permissions are outside the configuration proof.
+
+```sh
+node --test scripts/azure-site-image-release.node-test.mjs
+node scripts/migration/site-candidate-smoke.mjs "$RUNTIME_ORIGIN" "$SIGNUP_ORIGIN"
+node scripts/migration/site-candidate-smoke.mjs "$PUBLIC_SITE_ORIGIN" "$SIGNUP_ORIGIN"
+```
+
+CLI references: [image update](https://learn.microsoft.com/en-us/cli/azure/containerapp#az-containerapp-update)
+and [manifest metadata](https://learn.microsoft.com/en-us/cli/azure/acr/manifest#az-acr-manifest-show-metadata).
+
 ## Monitor acceptance and writer handoff
 
 The monitor template overrides the existing image's issue-writing command with
