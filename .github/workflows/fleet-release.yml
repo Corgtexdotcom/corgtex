@@ -157,6 +157,7 @@ jobs:
 
       - name: Plan fleet release
         if: ${{ inputs.dry_run }}
+        id: plan
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
@@ -290,6 +291,7 @@ jobs:
           RELEASE_SHA: ${{ steps.manifest.outputs.git_sha }}
           TARGETS_INPUT: ${{ inputs.targets }}
           PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
           PROMOTION_OUTCOME: ${{ steps.promotion.outcome }}
           PROMOTION_VERIFIED: ${{ steps.promotion.outputs.promotion_verified }}
           OBSERVATION_OUTCOME: ${{ steps.observation.outcome }}

@@ -6,7 +6,7 @@ export function fleetReleaseSummary(env) {
   const verified = !dryRun && env.PROMOTION_VERIFIED === "true"
     && env.PROMOTION_OUTCOME === "success" && env.OBSERVATION_OUTCOME === "success";
   const status = dryRun
-    ? env.PREFLIGHT_OUTCOME === "success" ? "DRY RUN ONLY" : "DRY RUN FAILED"
+    ? env.PLAN_OUTCOME === "success" ? "DRY RUN ONLY" : "DRY RUN FAILED"
     : verified ? "RELEASE VERIFIED" : "RELEASE NOT VERIFIED";
   const detail = dryRun
     ? "No provider promotion occurred. A successful dry run is planning evidence only; image availability and live readiness remain unproven."
@@ -16,7 +16,7 @@ export function fleetReleaseSummary(env) {
   const literal = (value) => String(value || "unavailable").replace(/[\r\n`]/g, " ");
   return {
     verified,
-    summary: `## ${status}\n\n${detail}\n\n- Release: \`${literal(env.RELEASE_SHA)}\`\n- Selected targets: \`${literal(env.TARGETS_INPUT)}\`\n- Preflight: ${literal(env.PREFLIGHT_OUTCOME)}\n- Promotion: ${literal(env.PROMOTION_OUTCOME)}\n- Observation: ${literal(env.OBSERVATION_OUTCOME)}\n`,
+    summary: `## ${status}\n\n${detail}\n\n- Release: \`${literal(env.RELEASE_SHA)}\`\n- Selected targets: \`${literal(env.TARGETS_INPUT)}\`\n- ${dryRun ? "Plan" : "Preflight"}: ${literal(dryRun ? env.PLAN_OUTCOME : env.PREFLIGHT_OUTCOME)}\n- Promotion: ${literal(env.PROMOTION_OUTCOME)}\n- Observation: ${literal(env.OBSERVATION_OUTCOME)}\n`,
   };
 }
 
