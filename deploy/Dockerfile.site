@@ -22,10 +22,22 @@ RUN npm ci --ignore-scripts
 
 FROM deps AS build
 COPY . .
+ARG NEXT_PUBLIC_SITE_URL
+ARG NEXT_PUBLIC_APP_URL
+ARG NEXT_PUBLIC_ENTERPRISE_APP_URL
+ARG NEXT_PUBLIC_DEMO_URL
+ARG NEXT_PUBLIC_BOOK_DEMO_URL
+ARG NEXT_PUBLIC_INTERCOM_APP_ID
+ARG NEXT_PUBLIC_INTERCOM_API_BASE
+ARG CORGTEX_RELEASE_GIT_SHA=unknown
+ENV CORGTEX_RELEASE_GIT_SHA=${CORGTEX_RELEASE_GIT_SHA}
 RUN npm run build:site
 
 FROM base AS runtime
 ENV NODE_ENV=production
+ARG CORGTEX_RELEASE_GIT_SHA=unknown
+ENV CORGTEX_RELEASE_GIT_SHA=${CORGTEX_RELEASE_GIT_SHA}
+LABEL org.opencontainers.image.revision=${CORGTEX_RELEASE_GIT_SHA}
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/apps/site ./apps/site

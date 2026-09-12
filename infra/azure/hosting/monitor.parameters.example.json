@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "jobName": { "value": "caj-replace-ops-monitor" },
+    "environmentResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.App/managedEnvironments/REPLACE" },
+    "identityResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REPLACE" },
+    "registryServer": { "value": "REPLACE.azurecr.io" },
+    "monitorImage": { "value": "REPLACE.azurecr.io/corgtex/ops-monitor@sha256:REPLACE" },
+    "healthTargets": { "value": [
+      { "name": "site", "service": "site", "url": "https://www.example.com/api/health", "expectJson": { "status": "ok" } }
+    ] }
+  }
+}

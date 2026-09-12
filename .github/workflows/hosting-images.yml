@@ -1,0 +1,59 @@
+name: Hosting Images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hosting-images-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build site and ops-monitor images
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute immutable image names
+        id: image
+        shell: bash
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "site=${repo}/site:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "monitor=${repo}/ops-monitor:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Build and publish site
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.site
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.site }}
+          build-args: |
+            CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
+            NEXT_PUBLIC_SITE_URL=${{ vars.NEXT_PUBLIC_SITE_URL || 'https://corgtex.com' }}
+            NEXT_PUBLIC_APP_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://selfserve.corgtex.com' }}
+            NEXT_PUBLIC_ENTERPRISE_APP_URL=${{ vars.NEXT_PUBLIC_ENTERPRISE_APP_URL || 'https://app.corgtex.com' }}
+            NEXT_PUBLIC_DEMO_URL=${{ vars.NEXT_PUBLIC_DEMO_URL || 'https://app.corgtex.com/demo' }}
+            NEXT_PUBLIC_BOOK_DEMO_URL=${{ vars.NEXT_PUBLIC_BOOK_DEMO_URL }}
+            NEXT_PUBLIC_INTERCOM_APP_ID=${{ vars.NEXT_PUBLIC_INTERCOM_APP_ID }}
+            NEXT_PUBLIC_INTERCOM_API_BASE=${{ vars.NEXT_PUBLIC_INTERCOM_API_BASE || 'https://api-iam.intercom.io' }}
+      - name: Build and publish monitor
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.ops-monitor
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.monitor }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}

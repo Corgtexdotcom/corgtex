@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "siteName": { "value": "ca-replace-site" },
+    "environmentResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.App/managedEnvironments/REPLACE" },
+    "identityResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REPLACE" },
+    "registryServer": { "value": "REPLACE.azurecr.io" },
+    "siteImage": { "value": "REPLACE.azurecr.io/corgtex/site@sha256:REPLACE" },
+    "environmentVariables": { "value": [
+      { "name": "POSTHOG_ENABLED", "value": "false" }
+    ] }
+  }
+}
