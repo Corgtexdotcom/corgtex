@@ -24,6 +24,10 @@ export function crmPageCount(total: number, pageSize = CRM_FULL_PAGE_SIZE) {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
+export function crmAvailablePage(page: number, total: number, pageSize = CRM_FULL_PAGE_SIZE) {
+  return Math.min(Math.max(1, page), crmPageCount(total, pageSize));
+}
+
 export function optionValue<TValue extends string>(
   value: string | string[] | undefined,
   allowed: readonly TValue[],

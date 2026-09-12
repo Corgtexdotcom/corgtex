@@ -12,8 +12,12 @@ import {
 } from "@corgtex/domain";
 import type { CrmActivityType } from "@prisma/client";
 import { getTranslations } from "next-intl/server";
+import { redirect } from "next/navigation";
 
-import { completeActivityAction } from "../actions";
+import {
+  archiveActivityAction,
+  completeActivityAction,
+} from "../actions";
 import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import {
@@ -22,10 +26,18 @@ import {
   crmFilters,
   crmPageMetrics,
 } from "../chat-page-context";
-import { accountHref, labelFromCrmCode, relationshipDashboardHref, relationshipFullPageHref } from "../view-model";
+import {
+  accountHref,
+  accountNavigationState,
+  labelFromCrmCode,
+  relationshipDashboardHref,
+  relationshipFullPageHref,
+} from "../view-model";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 import { RelationshipNav, relationshipNavLabels } from "../RelationshipNav";
 import {
   CRM_FULL_PAGE_SIZE,
+  crmAvailablePage,
   crmPageCount,
   crmPageHref,
   crmPageOffset,
@@ -119,10 +131,17 @@ export default async function RelationshipActivityPage({
     };
     return labels[value] ?? t("activityIconDefault");
   };
-  const accountLink = (account?: { id: string; name: string } | null) => (
-    account ? <a href={accountHref(workspaceId, account.id)}>{account.name}</a> : <span className="muted">{t("emptyAccount")}</span>
-  );
+  const accountLink = (account?: { id: string; name: string; archivedAt?: Date | string | null } | null) => {
+    const nav = accountNavigationState(workspaceId, account);
+    if (nav.isMissing) return <span className="muted">{t("emptyAccount")}</span>;
+    if (nav.isArchived) return <span className="muted">{account?.name || t("archivedAccount")}</span>;
+    return <a href={nav.href ?? nav.fallbackHref}>{account!.name}</a>;
+  };
   const pageCount = crmPageCount(activityResult.total);
+  const availablePage = crmAvailablePage(page, activityResult.total);
+  if (availablePage !== page) {
+    redirect(crmPageHref(pagePath, resolvedSearch, { page: availablePage === 1 ? null : availablePage }));
+  }
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
   const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_ACTIVITY_VIEW ? null : viewMode });
@@ -139,13 +158,24 @@ export default async function RelationshipActivityPage({
         : activities;
   const tableActiveSort = sort === "recent" ? "date" : sort;
   const tableSortDirection = sort === "recent" ? "desc" : sortDirection;
-  const renderCompleteAction = (activity: (typeof activities)[number]) => !activity.completedAt ? (
-    <form action={completeActivityAction}>
-      <input type="hidden" name="workspaceId" value={workspaceId} />
-      <input type="hidden" name="activityId" value={activity.id} />
-      <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
-    </form>
-  ) : null;
+  const renderCompleteAction = (activity: (typeof activities)[number]) => (
+    <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+      {!activity.completedAt && (
+        <form action={completeActivityAction}>
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="activityId" value={activity.id} />
+          <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+        </form>
+      )}
+      <form action={archiveActivityAction}>
+        <input type="hidden" name="workspaceId" value={workspaceId} />
+        <input type="hidden" name="activityId" value={activity.id} />
+        <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
+          {t("btnArchiveActivity")}
+        </ConfirmSubmitButton>
+      </form>
+    </div>
+  );
   const activityTableColumns: WorkItemTableColumn[] = [
     { id: "activity", label: t("fullActivityTitle") },
     {

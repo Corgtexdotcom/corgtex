@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import React, { useEffect, useState, type ReactNode } from "react";
 
 export function ConfirmSubmitButton({
   children,
@@ -11,9 +11,13 @@ export function ConfirmSubmitButton({
   confirmMessage: string;
   className?: string;
 }) {
+  const [ready, setReady] = useState(false);
+  useEffect(() => setReady(true), []);
+
   return (
     <button
       type="submit"
+      disabled={!ready}
       className={className}
       onClick={(event) => {
         if (!window.confirm(confirmMessage)) {

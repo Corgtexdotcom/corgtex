@@ -46,6 +46,30 @@ describe("CRM Integration Lifecycle", () => {
     adminActor = { kind: "user", user: adminUser, member };
   });
 
+  it("rejects archives by outsiders and cross-workspace record IDs without changing records", async () => {
+    const foreign = await prisma.workspace.create({ data: { slug: `crm-foreign-${Date.now()}`, name: "Foreign fixture" } });
+    const contact = await prisma.crmContact.create({ data: { workspaceId: workspace.id, email: "protected@example.test" } });
+    const foreignContact = await prisma.crmContact.create({ data: { workspaceId: foreign.id, email: "foreign@example.test" } });
+    const deal = await prisma.crmDeal.create({ data: { workspaceId: workspace.id, contactId: contact.id, title: "Protected deal" } });
+    const activity = await prisma.crmActivity.create({ data: { workspaceId: workspace.id, title: "Protected activity" } });
+    const foreignDeal = await prisma.crmDeal.create({ data: { workspaceId: foreign.id, contactId: foreignContact.id, title: "Foreign deal" } });
+    const foreignActivity = await prisma.crmActivity.create({ data: { workspaceId: foreign.id, title: "Foreign activity" } });
+    const outsider = await prisma.user.create({ data: { email: `crm-outsider-${Date.now()}@example.test`, passwordHash: "dummy" } });
+    const outsiderActor = { kind: "user" as const, user: outsider };
+
+    await expect(archiveCrmDeal(outsiderActor, { workspaceId: workspace.id, dealId: deal.id })).rejects.toMatchObject({ status: 403 });
+    await expect(archiveCrmActivity(outsiderActor, { workspaceId: workspace.id, activityId: activity.id })).rejects.toMatchObject({ status: 403 });
+    await expect(archiveCrmDeal(adminActor, { workspaceId: workspace.id, dealId: foreignDeal.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(archiveCrmActivity(adminActor, { workspaceId: workspace.id, activityId: foreignActivity.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    for (const id of [deal.id, foreignDeal.id]) {
+      expect(await prisma.crmDeal.findUnique({ where: { id } })).toMatchObject({ archivedAt: null });
+    }
+    for (const id of [activity.id, foreignActivity.id]) {
+      expect(await prisma.crmActivity.findUnique({ where: { id } })).toMatchObject({ archivedAt: null });
+    }
+    expect(await prisma.workspaceArchiveRecord.count({ where: { entityId: { in: [deal.id, activity.id, foreignDeal.id, foreignActivity.id] } } })).toBe(0);
+  });
+
   it("preserves non-cascading parent restore and independently archived children", async () => {
     const suffix = Date.now().toString();
     const account = await prisma.crmAccount.create({ data: { workspaceId: workspace.id, name: `Archive ${suffix}`, slug: `archive-${suffix}` } });

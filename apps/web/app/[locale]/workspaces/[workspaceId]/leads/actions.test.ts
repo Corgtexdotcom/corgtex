@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { revalidatePath } from "next/cache";
 
 const actor = {
   kind: "user" as const,
@@ -12,6 +13,8 @@ const actor = {
 
 const archiveContact = vi.fn();
 const archiveCrmAccount = vi.fn();
+const archiveCrmDeal = vi.fn();
+const archiveCrmActivity = vi.fn();
 const approveQualification = vi.fn();
 const completeActivity = vi.fn();
 const convertCrmAccountToClient = vi.fn();
@@ -54,6 +57,8 @@ vi.mock("@/lib/workspace-feature-flags", () => ({
 vi.mock("@corgtex/domain", () => ({
   archiveContact,
   archiveCrmAccount,
+  archiveCrmDeal,
+  archiveCrmActivity,
   approveQualification,
   completeActivity,
   convertCrmAccountToClient,
@@ -161,6 +166,70 @@ describe("relationship server actions", () => {
     await createDealAction(buildDealFormData("NOT_A_STAGE"));
 
     expect(createDeal.mock.calls[0]?.[1]?.stage).toBeUndefined();
+  });
+
+  it.each([
+    ["deal", "archiveDealAction", "dealId", archiveCrmDeal],
+    ["activity", "archiveActivityAction", "activityId", archiveCrmActivity],
+  ] as const)("blocks %s archive when the demo guard, actor, or domain denies it", async (_kind, actionName, idField, archive) => {
+    const actions = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set(idField, "record-1");
+    const denied = new Error("Access denied");
+
+    enforceDemoGuard.mockRejectedValueOnce(denied);
+    await expect(actions[actionName](formData)).rejects.toThrow(denied);
+    expect(requirePageActor).not.toHaveBeenCalled();
+    expect(archive).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+
+    requirePageActor.mockRejectedValueOnce(denied);
+    await expect(actions[actionName](formData)).rejects.toThrow(denied);
+    expect(archive).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+
+    archive.mockRejectedValueOnce(denied);
+    await expect(actions[actionName](formData)).rejects.toThrow(denied);
+    expect(archive).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      [idField]: "record-1",
+    });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("archives deals", async () => {
+    const { archiveDealAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("dealId", "deal-1");
+
+    await archiveDealAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(requirePageActor).toHaveBeenCalled();
+    expect(archiveCrmDeal).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      dealId: "deal-1",
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1", "layout");
+  });
+
+  it("archives activities", async () => {
+    const { archiveActivityAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("activityId", "activity-1");
+
+    await archiveActivityAction(formData);
+
+    expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(requirePageActor).toHaveBeenCalled();
+    expect(archiveCrmActivity).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      activityId: "activity-1",
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/workspaces/workspace-1", "layout");
   });
 
 });
