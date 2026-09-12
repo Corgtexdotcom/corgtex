@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import {
   parseArgs,
   planRailwayAction,
@@ -13,7 +14,7 @@ const dryRun = Boolean(args["dry-run"]);
 const confirm = Boolean(args.confirm);
 
 async function main() {
-  const plan = planRailwayAction(action, service, process.env);
+  const plan = buildRailwayActionPlan(action, service, process.env);
   if (dryRun) {
     console.log(JSON.stringify({ dryRun: true, plan: publicPlan(plan) }, null, 2));
     return;
@@ -54,6 +55,115 @@ async function executeRailwayAction(plan) {
   throw new Error(`Unsupported action: ${plan.action}`);
 }
 
+function buildRailwayActionPlan(action, service, env) {
+  try {
+    return planRailwayAction(action, service, env);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (action === "inspect" && message.startsWith("Railway service is not allowlisted:")) {
+      const controlPlanePlan = planCustomerRailwayInspect(service, env);
+      if (controlPlanePlan) return controlPlanePlan;
+    }
+    throw error;
+  }
+}
+
+function planCustomerRailwayInspect(service, env) {
+  const customer = findCustomerDeployment(service, env);
+  if (!customer) return null;
+
+  const cloudProvider = optionalText(customer.cloudProvider)?.toUpperCase();
+  if (cloudProvider !== "RAILWAY") {
+    throw new Error(`Customer deployment is not Railway-backed: ${service}`);
+  }
+
+  if (!isMonitorableCustomerStatus(customer.provisioningStatus, customer.deploymentStatus)) {
+    throw new Error(`Customer deployment is not active or degraded: ${service}`);
+  }
+
+  const serviceId = optionalText(customer.providerWebServiceId);
+  const environmentId = optionalText(customer.providerEnvironmentId);
+  if (!serviceId || !environmentId) {
+    throw new Error(`Railway customer inspect requires provider web service and environment IDs: ${service}`);
+  }
+
+  return {
+    action: "inspect",
+    service,
+    entry: {
+      service,
+      serviceId,
+      environmentId,
+      deploymentId: optionalText(customer.providerDeploymentId),
+      projectId: optionalText(customer.providerProjectId),
+    },
+    mutation: "deployments",
+    source: "control-plane",
+  };
+}
+
+function findCustomerDeployment(service, env) {
+  const requested = slugSafe(service);
+  return loadCustomerDeployments(env).find((customer) => {
+    const candidates = [
+      customer.customerSlug,
+      customer.slug,
+      customer.id,
+      customer.label,
+      customer.customDomain,
+    ];
+    return candidates.some((candidate) => slugSafe(candidate) === requested);
+  }) ?? null;
+}
+
+function loadCustomerDeployments(env) {
+  const configured = optionalText(env.RAILWAY_OPS_CUSTOMERS_JSON);
+  if (configured) {
+    const parsed = JSON.parse(configured);
+    if (!Array.isArray(parsed)) {
+      throw new Error("RAILWAY_OPS_CUSTOMERS_JSON must be an array.");
+    }
+    return parsed;
+  }
+
+  const result = spawnSync(process.execPath, ["scripts/control-plane.mjs", "list-customers"], {
+    cwd: process.cwd(),
+    env,
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(`Control-plane customer discovery failed with exit code ${result.status ?? 1}.`);
+  }
+  const parsed = JSON.parse(result.stdout);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Control-plane customer discovery did not return an array.");
+  }
+  return parsed;
+}
+
+function isMonitorableCustomerStatus(provisioningStatus, deploymentStatus) {
+  const provisioning = optionalText(provisioningStatus)?.toLowerCase();
+  const deployment = optionalText(deploymentStatus)?.toUpperCase();
+  if (deployment && !["ACTIVE", "DEGRADED"].includes(deployment)) return false;
+  if (!provisioning) return true;
+  return provisioning === "active" || provisioning === "degraded";
+}
+
+function optionalText(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+function slugSafe(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+}
+
 async function latestDeployment(entry) {
   const result = await railwayGraphql(
     `query LatestDeployment($serviceId: String!, $environmentId: String!) {
@@ -74,7 +184,7 @@ async function latestDeployment(entry) {
   );
   const deployment = result.deployments?.edges?.[0]?.node;
   if (!deployment?.id) {
-    throw new Error(`No Railway deployment found for allowlisted service ${entry.service}.`);
+    throw new Error(`No Railway deployment found for service ${entry.service}.`);
   }
   return deployment;
 }
@@ -121,7 +231,7 @@ function summarizeResponse(responseText) {
 }
 
 function publicPlan(plan) {
-  return {
+  const output = {
     action: plan.action,
     service: plan.service,
     mutation: plan.mutation,
@@ -134,6 +244,10 @@ function publicPlan(plan) {
       hasProjectId: Boolean(plan.entry.projectId),
     },
   };
+  if (plan.source) {
+    output.source = plan.source;
+  }
+  return output;
 }
 
 main().catch((error) => {
