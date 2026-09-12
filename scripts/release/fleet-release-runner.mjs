@@ -180,6 +180,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   if (env.FLEET_RELEASE_TARGETS_FILE) emitTargetInventory(results.filter((result) => result.status === "succeeded" || retainedTargets.has(result.target)).map((result) => result.target), env, deps);
+  emitGithubOutput("promotion_verified", results.length > 0 && results.every((result) => result.status === "succeeded"), deps);
   return { manifest, results };
 }
 
@@ -1124,11 +1125,11 @@ async function deployAzureTarget(target, manifest, deps) {
       "--force",
     ], deps);
   }
-  updateAzureContainerApp(target.azure.webAppName, manifest.acrWebImage, target, manifest, deps);
-  updateAzureContainerApp(target.azure.workerAppName, manifest.acrWorkerImage, target, manifest, deps);
+  const webRevision = updateAzureContainerApp(target.azure.webAppName, manifest.acrWebImage, target, manifest, deps);
+  const workerRevision = updateAzureContainerApp(target.azure.workerAppName, manifest.acrWorkerImage, target, manifest, deps);
   return {
-    webRevision: showAzureRevision(target.azure.webAppName, target, deps),
-    workerRevision: showAzureRevision(target.azure.workerAppName, target, deps),
+    webRevision: await waitForAzureRevision(target.azure.webAppName, webRevision, manifest.acrWebImage, target, deps),
+    workerRevision: await waitForAzureRevision(target.azure.workerAppName, workerRevision, manifest.acrWorkerImage, target, deps),
   };
 }
 
@@ -1215,7 +1216,7 @@ function updateAzureContainerApp(name, image, target, manifest, deps) {
   }
 
   const releaseEnv = Object.entries(azureReleaseVariables(manifest, deps.env ?? process.env)).map(([key, value]) => `${key}=${value}`);
-  runCommand("az", [
+  const result = runCommand("az", [
     "containerapp",
     "update",
     "--name",
@@ -1226,29 +1227,50 @@ function updateAzureContainerApp(name, image, target, manifest, deps) {
     image,
     "--set-env-vars",
     ...releaseEnv,
-    "--output",
-    "none",
-  ], deps);
-}
-
-function showAzureRevision(name, target, deps) {
-  const result = runCommand("az", [
-    "containerapp",
-    "show",
-    "--name",
-    name,
-    "--resource-group",
-    target.azure.resourceGroup,
     "--query",
-    "{latest:properties.latestRevisionName,ready:properties.latestReadyRevisionName}",
-    "-o",
+    "{latest:properties.latestRevisionName,image:properties.template.containers[0].image}",
+    "--output",
     "json",
   ], deps);
-  const revision = JSON.parse(result.stdout);
-  if (!revision.latest || revision.latest !== revision.ready) {
-    throw new Error(`${target.label} Azure ${name} latest revision is not ready`);
+  const updated = JSON.parse(result.stdout);
+  if (!updated.latest?.startsWith(`${name}--`) || updated.image !== image) {
+    throw new Error(`${target.label} Azure ${name} update did not identify the intended revision/image`);
   }
-  return revision.latest;
+  return updated.latest;
+}
+
+export async function waitForAzureRevision(name, expectedRevision, expectedImage, target, deps = {}) {
+  const env = deps.env ?? process.env;
+  const timeoutMs = parsePositiveInteger(env.FLEET_RELEASE_AZURE_TIMEOUT_MS, 600_000);
+  const intervalMs = parsePositiveInteger(env.FLEET_RELEASE_AZURE_INTERVAL_MS, 10_000);
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  let lastState = "not observed";
+  while (now() - startedAt < timeoutMs) {
+    let revision;
+    try {
+      const result = runCommand("az", [
+        "containerapp", "show", "--name", name,
+        "--resource-group", target.azure.resourceGroup,
+        "--query", "{latest:properties.latestRevisionName,ready:properties.latestReadyRevisionName,image:properties.template.containers[0].image,state:properties.provisioningState}",
+        "-o", "json",
+      ], deps, { timeout: Math.max(1, timeoutMs - (now() - startedAt)) });
+      revision = JSON.parse(result.stdout);
+    } catch (error) {
+      throw new Error(`${target.label} Azure ${name} readiness read failed while waiting for ${expectedRevision}: ${error.message}. Last state: ${lastState}`);
+    }
+    lastState = `latest=${revision.latest ?? "missing"}, ready=${revision.ready ?? "missing"}, image=${revision.image ?? "missing"}, state=${revision.state ?? "missing"}`;
+    if (revision.latest !== expectedRevision || revision.image !== expectedImage) {
+      throw new Error(`${target.label} Azure ${name} revision changed while waiting for ${expectedRevision} (${expectedImage}): ${lastState}`);
+    }
+    if (["Failed", "Canceled"].includes(revision.state)) {
+      throw new Error(`${target.label} Azure ${name} provisioning failed for ${expectedRevision}: ${lastState}`);
+    }
+    if (revision.ready === expectedRevision && revision.state === "Succeeded") return expectedRevision;
+    const remainingMs = timeoutMs - (now() - startedAt);
+    if (remainingMs > 0) await sleep(Math.min(intervalMs, remainingMs), deps);
+  }
+  throw new Error(`${target.label} Azure ${name} timed out after ${timeoutMs}ms waiting for ${expectedRevision} (${expectedImage}): ${lastState}. Verify provider/runtime state before retrying promotion.`);
 }
 
 async function pollHealth(url, manifest, deps) {
@@ -1333,12 +1355,13 @@ async function runWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-function runCommand(command, args, deps) {
-  if (deps.runCommand) return deps.runCommand(command, args);
+function runCommand(command, args, deps, options = {}) {
+  if (deps.runCommand) return Object.keys(options).length ? deps.runCommand(command, args, options) : deps.runCommand(command, args);
   const result = spawnSync(command, args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     env: deps.env ?? process.env,
+    ...options,
   });
   if (result.status !== 0) {
     const rendered = renderCommand(command, args);

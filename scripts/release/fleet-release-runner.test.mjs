@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { azureReleaseVariables, latestRailwayStatus, preflightOpsRailwayProvider, releaseVariables, runFleetRelease } from "./fleet-release-runner.mjs";
+import { azureReleaseVariables, latestRailwayStatus, preflightOpsRailwayProvider, releaseVariables, runFleetRelease, waitForAzureRevision } from "./fleet-release-runner.mjs";
 import { MCP_CONNECTOR_DEFAULT_SCOPES } from "./fleet-release-core.mjs";
 import { buildFleetReleaseIncident, fleetReleaseSlackPayload } from "./fleet-release-alerts.mjs";
 import { assertPostDeployProbeReady, postDeployProbeFailureSummary, sanitizePostDeployProbe } from "./fleet-release-probes.mjs";
@@ -73,6 +73,72 @@ function azureProviderStatus(overrides = {}) {
     ...overrides,
   };
 }
+
+function azureRevisionState(name, overrides = {}) {
+  return {
+    latest: `${name}--revision`, ready: `${name}--revision`,
+    image: `acr1.azurecr.io/corgtex/${name === "web-app" ? "web" : "worker"}:sha-${SHA}`,
+    state: "Succeeded", ...overrides,
+  };
+}
+
+describe("Azure revision readiness", () => {
+  const target = JSON.parse(azureTargetJson())[0];
+  const expected = azureRevisionState("web-app");
+  function harness(states) {
+    let time = 0;
+    let index = 0;
+    return {
+      env: { FLEET_RELEASE_AZURE_TIMEOUT_MS: "25", FLEET_RELEASE_AZURE_INTERVAL_MS: "10" },
+      now: () => time,
+      sleep: vi.fn(async (ms) => { time += ms; }),
+      runCommand: vi.fn(() => ({ stdout: JSON.stringify(states[Math.min(index++, states.length - 1)]) })),
+    };
+  }
+  const wait = (deps) => waitForAzureRevision("web-app", expected.latest, expected.image, target, deps);
+
+  it("accepts an immediately ready intended revision without sleeping", async () => {
+    const deps = harness([expected]);
+    await expect(wait(deps)).resolves.toBe(expected.latest);
+    expect(deps.sleep).not.toHaveBeenCalled();
+    expect(deps.runCommand.mock.calls[0][2]).toEqual({ timeout: 25 });
+  });
+
+  it("waits through stale ready state and provisioning until the intended revision is ready", async () => {
+    const deps = harness([{ ...expected, ready: "web-app--old" }, { ...expected, state: "InProgress" }, expected]);
+    await expect(wait(deps)).resolves.toBe(expected.latest);
+    expect(deps.sleep.mock.calls).toEqual([[10], [10]]);
+  });
+
+  it("bounds stale-ready waiting and includes the expected and observed state", async () => {
+    const deps = harness([{ ...expected, ready: "web-app--old" }]);
+    await expect(wait(deps)).rejects.toThrow(/timed out after 25ms.*web-app--revision.*ready=web-app--old/);
+    expect(deps.sleep.mock.calls).toEqual([[10], [10], [5]]);
+    expect(deps.runCommand).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    { latest: "web-app--other", ready: "web-app--other" },
+    { latest: "web-app--old", ready: "web-app--old" },
+    { image: "acr1.azurecr.io/corgtex/web:sha-other" },
+  ])("rejects a different revision or image even if it is ready: %j", async (change) => {
+    const deps = harness([{ ...expected, ready: "web-app--old" }, { ...expected, ...change }]);
+    await expect(wait(deps)).rejects.toThrow(/revision changed while waiting for web-app--revision/);
+  });
+
+  it.each(["Failed", "Canceled"])("stops on terminal provisioning state %s", async (state) => {
+    const deps = harness([{ ...expected, state }]);
+    await expect(wait(deps)).rejects.toThrow(/provisioning failed.*state=/);
+    expect(deps.sleep).not.toHaveBeenCalled();
+  });
+
+  it("reports provider read errors with target context and does not retry access failures", async () => {
+    const deps = harness([expected]);
+    deps.runCommand.mockImplementation(() => { throw new Error("AuthorizationFailed"); });
+    await expect(wait(deps)).rejects.toThrow(/web-app readiness read failed.*web-app--revision.*AuthorizationFailed/);
+    expect(deps.runCommand).toHaveBeenCalledTimes(1);
+  });
+});
 
 function selfServeRegistry(overrides = {}) {
   return {
@@ -2295,9 +2361,10 @@ describe("fleet release runner", () => {
   it("does not record a verified Azure release when public OAuth metadata is incorrect", async () => {
     const controlPlaneTools = [];
     const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[1] === "update") return { stdout: JSON.stringify(azureRevisionState(args[3])) };
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         if (args[args.indexOf("--query") + 1].includes(".env")) return { stdout: JSON.stringify(azurePublicUrlEntries()), stderr: "" };
-        return { stdout: JSON.stringify({ latest: `${args[3]}-revision`, ready: `${args[3]}-revision` }), stderr: "" };
+        return { stdout: JSON.stringify(azureRevisionState(args[3])), stderr: "" };
       }
       return { stdout: "", stderr: "" };
     });
@@ -2332,13 +2399,16 @@ describe("fleet release runner", () => {
   it("sets migrate-and-web startup variables during Azure deploys", async () => {
     const toolCalls = [];
     let releaseRecorded = false;
+    let readinessReads = 0;
     const abortSignalForTimeout = vi.fn(() => new AbortController().signal);
     const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[1] === "update") return { stdout: JSON.stringify(azureRevisionState(args[3])) };
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         if (args[args.indexOf("--query") + 1].includes(".env")) {
           return { stdout: JSON.stringify(azurePublicUrlEntries()), stderr: "" };
         }
-        return { stdout: JSON.stringify({ latest: `${args[3]}-revision`, ready: `${args[3]}-revision` }), stderr: "" };
+        readinessReads += 1;
+        return { stdout: JSON.stringify(azureRevisionState(args[3], readinessReads === 1 ? { ready: "previous-revision" } : {})), stderr: "" };
       }
       return { stdout: "", stderr: "" };
     });
@@ -2396,6 +2466,8 @@ describe("fleet release runner", () => {
     });
 
     expect(result.results).toHaveLength(1);
+    expect(readinessReads).toBe(3);
+    expect(result.results[0].result.providerResult).toEqual({ webRevision: "web-app--revision", workerRevision: "worker-app--revision" });
     expect(abortSignalForTimeout).toHaveBeenCalledTimes(4);
     const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
       command === "az" && args[0] === "containerapp" && args[1] === "update"
