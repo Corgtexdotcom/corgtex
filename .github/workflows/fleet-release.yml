@@ -103,6 +103,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Preserve release summary runner across source checkouts
+        run: cp scripts/release/fleet-release-summary.mjs "$RUNNER_TEMP/fleet-release-summary.mjs"
+
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -252,6 +255,7 @@ jobs:
             --force-after-failure "$FORCE_AFTER_FAILURE_INPUT"
 
       - name: Run post-deploy observation gate
+        id: observation
         if: ${{ !inputs.dry_run && steps.promotion.outputs.observation_targets != '' }}
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
@@ -278,6 +282,18 @@ jobs:
             --since "$OBSERVATION_SINCE" \
             --summary-file .artifacts/post-deploy-observation-gate/fleet-release.json \
             --publish-advisories
+
+      - name: Summarize release evidence
+        if: ${{ always() }}
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          RELEASE_SHA: ${{ steps.manifest.outputs.git_sha }}
+          TARGETS_INPUT: ${{ inputs.targets }}
+          PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
+          PROMOTION_OUTCOME: ${{ steps.promotion.outcome }}
+          PROMOTION_VERIFIED: ${{ steps.promotion.outputs.promotion_verified }}
+          OBSERVATION_OUTCOME: ${{ steps.observation.outcome }}
+        run: node "$RUNNER_TEMP/fleet-release-summary.mjs"
 
       - name: Upload observation summary
         if: ${{ always() && !inputs.dry_run }}
