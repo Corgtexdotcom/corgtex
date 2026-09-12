@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  crmAvailablePage,
   crmPageCount,
   crmPageHref,
   crmPageOffset,
@@ -26,6 +27,12 @@ describe("CRM full page helpers", () => {
     expect(crmPageOffset(3, 25)).toBe(50);
     expect(crmPageCount(0, 25)).toBe(1);
     expect(crmPageCount(51, 25)).toBe(3);
+  });
+
+  it("clamps a stale page to the available result range", () => {
+    expect(crmAvailablePage(2, 25, 25)).toBe(1);
+    expect(crmAvailablePage(3, 51, 25)).toBe(3);
+    expect(crmAvailablePage(0, 0, 25)).toBe(1);
   });
 
   it("preserves filters while replacing pagination", () => {

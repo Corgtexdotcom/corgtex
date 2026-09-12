@@ -9,6 +9,8 @@ import { redirect } from "next/navigation";
 import {
   archiveContact,
   archiveCrmAccount,
+  archiveCrmDeal,
+  archiveCrmActivity,
   createCrmAccount,
   convertCrmAccountToClient,
   createExecutionRequest,
@@ -190,6 +192,19 @@ export async function updateDealAction(formData: FormData) {
   refresh(workspaceId);
 }
 
+export async function archiveDealAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await archiveCrmDeal(actor, {
+    workspaceId,
+    dealId: asString(formData, "dealId"),
+  });
+  refresh(workspaceId);
+}
+
 export async function createActivityAction(formData: FormData) {
   const _demoGuardWsId = formData.get("workspaceId") as string;
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
@@ -218,6 +233,19 @@ export async function completeActivityAction(formData: FormData) {
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
   await completeActivity(actor, {
+    workspaceId,
+    activityId: asString(formData, "activityId"),
+  });
+  refresh(workspaceId);
+}
+
+export async function archiveActivityAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = asString(formData, "workspaceId");
+  await archiveCrmActivity(actor, {
     workspaceId,
     activityId: asString(formData, "activityId"),
   });
