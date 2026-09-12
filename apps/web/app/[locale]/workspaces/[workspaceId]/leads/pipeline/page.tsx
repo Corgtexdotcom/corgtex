@@ -9,7 +9,10 @@ import { listDeals, listMembers, requireWorkspaceMembership } from "@corgtex/dom
 import type { CrmDealStage } from "@prisma/client";
 import { ExternalLink } from "lucide-react";
 import { getTranslations } from "next-intl/server";
+import { redirect } from "next/navigation";
+import { ConfirmSubmitButton } from "@/lib/components/ConfirmSubmitButton";
 
+import { archiveDealAction } from "../actions";
 import { CrmTableSortHeader } from "../CrmTableSortHeader";
 import { CrmChatPageContext } from "../CrmChatPageContext";
 import { DealPipelineBoard } from "../DealPipelineBoard";
@@ -26,10 +29,12 @@ import {
   labelFromCrmCode,
   relationshipDashboardHref,
   relationshipFullPageHref,
+  accountNavigationState,
 } from "../view-model";
 import { RelationshipNav, relationshipNavLabels } from "../RelationshipNav";
 import {
   CRM_FULL_PAGE_SIZE,
+  crmAvailablePage,
   crmPageCount,
   crmPageHref,
   crmPageOffset,
@@ -101,6 +106,10 @@ export default async function RelationshipPipelinePage({
     CLOSED_LOST: t("stageLost"),
   };
   const pageCount = crmPageCount(dealResult.total);
+  const availablePage = crmAvailablePage(page, dealResult.total);
+  if (availablePage !== page) {
+    redirect(crmPageHref(pagePath, resolvedSearch, { page: availablePage === 1 ? null : availablePage }));
+  }
   const previousHref = crmPageHref(pagePath, resolvedSearch, { page: Math.max(page - 1, 1) });
   const nextHref = crmPageHref(pagePath, resolvedSearch, { page: Math.min(page + 1, pageCount) });
   const clearHref = crmPageHref(pagePath, {}, { view: viewMode === DEFAULT_PIPELINE_VIEW ? null : viewMode });
@@ -142,9 +151,10 @@ export default async function RelationshipPipelinePage({
     return compareText(ownerText(left.ownerUserId), ownerText(right.ownerUserId));
   }) : dealResult.items;
   const accountLink = (deal: (typeof dealResult.items)[number]) => {
-    if (!deal.account) return <span className="muted">{t("emptyAccount")}</span>;
-    if (deal.account.archivedAt) return <span className="muted">{deal.account.name}</span>;
-    return <a href={`/workspaces/${workspaceId}/leads/accounts/${deal.account.id}`}>{deal.account.name}</a>;
+    const nav = accountNavigationState(workspaceId, deal.account);
+    if (nav.isMissing) return <span className="muted">{t("emptyAccount")}</span>;
+    if (nav.isArchived) return <span className="muted">{deal.account?.name}</span>;
+    return <a href={nav.href ?? nav.fallbackHref}>{deal.account?.name}</a>;
   };
   const dealTableColumns: WorkItemTableColumn[] = [
     {
@@ -235,16 +245,30 @@ export default async function RelationshipPipelinePage({
       value: <strong>{formatCurrency(deal.valueCents ?? 0)}</strong>,
       followUp: <span className="muted">{followUpText(deal)}</span>,
       owner: <span className="muted">{ownerText(deal.ownerUserId)}</span>,
-      actions: deal.account && !deal.account.archivedAt ? (
-        <a
-          href={`/workspaces/${workspaceId}/leads/accounts/${deal.account.id}?view=pipeline`}
-          className="nr-icon-link nr-table-action"
-          aria-label={t("openDetail")}
-          title={t("openDetail")}
-        >
-          <ExternalLink size={15} aria-hidden="true" />
-        </a>
-      ) : null,
+      actions: (() => {
+        const nav = accountNavigationState(workspaceId, deal.account);
+        return (
+          <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+            <form action={archiveDealAction}>
+              <input type="hidden" name="workspaceId" value={workspaceId} />
+              <input type="hidden" name="dealId" value={deal.id} />
+              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
+                {t("btnArchiveDeal")}
+              </ConfirmSubmitButton>
+            </form>
+            {nav.href && (
+              <a
+                href={`${nav.href}?view=pipeline`}
+                className="nr-icon-link nr-table-action"
+                aria-label={t("openDetail")}
+                title={t("openDetail")}
+              >
+                <ExternalLink size={15} aria-hidden="true" />
+              </a>
+            )}
+          </div>
+        );
+      })(),
     },
   }));
   const crmChatPageContext = {
@@ -351,6 +375,8 @@ export default async function RelationshipPipelinePage({
               stageAgeToday: t("pipelineStageAgeToday"),
               stageAgeYesterday: t("pipelineStageAgeYesterday"),
               stageAgeDays: (days) => t("pipelineStageAgeDays", { days }),
+              archiveDeal: t("btnArchiveDeal"),
+              confirmArchiveDeal: t("confirmArchiveDeal"),
             }}
             workItemLabels={{
               settingsLabel: tWork("columnSettings"),
@@ -389,9 +415,30 @@ export default async function RelationshipPipelinePage({
                 <div className="nr-tag-group">
                   <span className="tag-sm">{stageLabels[deal.stage] ?? labelFromCrmCode(deal.stage)}</span>
                   <span className="tag-sm">{t("pipelineOwner")}: {ownerText(deal.ownerUserId)}</span>
-                  <span className="tag-sm">{t("pipelineAccount")}: {deal.account?.name ?? t("emptyAccount")}</span>
+                  <span className="tag-sm">{t("pipelineAccount")}: {(() => {
+                    const nav = accountNavigationState(workspaceId, deal.account);
+                    if (nav.isMissing) return <span className="muted">{t("emptyAccount")}</span>;
+                    if (nav.isArchived) return <span className="muted">{deal.account?.name}</span>;
+                    return deal.account?.name;
+                  })()}</span>
                 </div>
-                {deal.account && <a href={`/workspaces/${workspaceId}/leads/accounts/${deal.account.id}?view=pipeline`} className="link-button small" style={{ width: "fit-content" }}>{t("openDetail")}</a>}
+                <div className="row" style={{ gap: 8 }}>
+                  <form action={archiveDealAction}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <input type="hidden" name="dealId" value={deal.id} />
+                    <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
+                      {t("btnArchiveDeal")}
+                    </ConfirmSubmitButton>
+                  </form>
+                  {(() => {
+                    const nav = accountNavigationState(workspaceId, deal.account);
+                    return nav.href ? (
+                      <a href={`${nav.href}?view=pipeline`} className="link-button small">
+                        {t("openDetail")}
+                      </a>
+                    ) : null;
+                  })()}
+                </div>
               </div>
             ))}
           </div>

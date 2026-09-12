@@ -89,6 +89,30 @@ export function accountHref(workspaceId: string, accountId: string) {
   return `/workspaces/${workspaceId}/leads/accounts/${accountId}`;
 }
 
+export function accountNavigationState(
+  workspaceId: string,
+  account: { id: string; archivedAt?: Date | string | null } | null | undefined
+): {
+  isMissing: boolean;
+  isArchived: boolean;
+  href: string | null;
+  fallbackHref: string;
+} {
+  const fallbackHref = relationshipDashboardHref(workspaceId);
+  if (!account) {
+    return { isMissing: true, isArchived: false, href: null, fallbackHref };
+  }
+  if (account.archivedAt) {
+    return { isMissing: false, isArchived: true, href: null, fallbackHref };
+  }
+  return {
+    isMissing: false,
+    isArchived: false,
+    href: accountHref(workspaceId, account.id),
+    fallbackHref: fallbackHref,
+  };
+}
+
 export function relationshipDashboardHref(workspaceId: string) {
   return `/workspaces/${workspaceId}/leads`;
 }
