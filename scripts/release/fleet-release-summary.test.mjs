@@ -3,15 +3,24 @@ import { describe, expect, it } from "vitest";
 import { fleetReleaseSummary } from "./fleet-release-summary.mjs";
 
 describe("fleet release summary", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/fleet-release.yml", import.meta.url), "utf8");
+  function dryRunEnvironment(planOutcome) {
+    const planStepId = workflow.match(/name: Plan fleet release\n        if: \$\{\{ inputs.dry_run \}\}\n        id: (\w+)/)?.[1];
+    expect(planStepId).toBeTruthy();
+    const outcomes = { [planStepId]: planOutcome, preflight: "skipped", promotion: "skipped", observation: "skipped" };
+    const mapped = Object.fromEntries([...workflow.matchAll(/^          (\w+): \$\{\{ steps\.(\w+)\.outcome \}\}$/gm)]
+      .map(([, key, step]) => [key, outcomes[step]]));
+    return { DRY_RUN_INPUT: "true", ...mapped };
+  }
   const success = { DRY_RUN_INPUT: "false", PROMOTION_VERIFIED: "true", PREFLIGHT_OUTCOME: "success", PROMOTION_OUTCOME: "success", OBSERVATION_OUTCOME: "success" };
   it("never calls a successful dry run a verified release", () => {
-    const result = fleetReleaseSummary({ DRY_RUN_INPUT: "true", PLAN_OUTCOME: "success", PREFLIGHT_OUTCOME: "skipped", PROMOTION_OUTCOME: "skipped", OBSERVATION_OUTCOME: "skipped" });
+    const result = fleetReleaseSummary(dryRunEnvironment("success"));
     expect(result.verified).toBe(false);
     expect(result.summary).toContain("DRY RUN ONLY");
     expect(result.summary).toContain("No provider promotion occurred");
   });
   it.each(["failure", "skipped"])("identifies %s planning during a dry run", (outcome) => {
-    expect(fleetReleaseSummary({ DRY_RUN_INPUT: "true", PLAN_OUTCOME: outcome, PREFLIGHT_OUTCOME: "skipped" }).summary).toContain("DRY RUN FAILED");
+    expect(fleetReleaseSummary(dryRunEnvironment(outcome)).summary).toContain("DRY RUN FAILED");
   });
   it("requires completed promotion and observation for selected-target proof", () => {
     expect(fleetReleaseSummary(success)).toMatchObject({ verified: true, summary: expect.stringContaining("RELEASE VERIFIED") });
@@ -24,7 +33,6 @@ describe("fleet release summary", () => {
     expect(fleetReleaseSummary({ ...success, ...change })).toMatchObject({ verified: false, summary: expect.stringContaining("RELEASE NOT VERIFIED") });
   });
   it("runs the summary even on failure and consumes actual step outcomes", () => {
-    const workflow = readFileSync(new URL("../../.github/workflows/fleet-release.yml", import.meta.url), "utf8");
     expect(workflow).toContain("PROMOTION_VERIFIED: ${{ steps.promotion.outputs.promotion_verified }}");
     expect(workflow).toContain("OBSERVATION_OUTCOME: ${{ steps.observation.outcome }}");
     expect(workflow).toContain("name: Plan fleet release\n        if: ${{ inputs.dry_run }}\n        id: plan");
