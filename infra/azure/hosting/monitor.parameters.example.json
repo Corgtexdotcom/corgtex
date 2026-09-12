@@ -6,7 +6,7 @@
     "environmentResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.App/managedEnvironments/REPLACE" },
     "identityResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REPLACE" },
     "registryServer": { "value": "REPLACE.azurecr.io" },
-    "monitorImage": { "value": "REPLACE.azurecr.io/corgtex/ops-monitor@sha256:REPLACE" },
+    "monitorImageSha256": { "value": "REPLACE_WITH_64_HEX_FROM_VERIFIED_DIGEST" },
     "healthTargets": { "value": [
       { "name": "site", "service": "site", "url": "https://www.example.com/api/health", "expectJson": { "status": "ok" } }
     ] }

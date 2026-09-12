@@ -6,7 +6,7 @@
     "environmentResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.App/managedEnvironments/REPLACE" },
     "identityResourceId": { "value": "/subscriptions/REPLACE/resourceGroups/REPLACE/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REPLACE" },
     "registryServer": { "value": "REPLACE.azurecr.io" },
-    "siteImage": { "value": "REPLACE.azurecr.io/corgtex/site@sha256:REPLACE" },
+    "siteImageSha256": { "value": "REPLACE_WITH_64_HEX_FROM_VERIFIED_DIGEST" },
     "environmentVariables": { "value": [
       { "name": "POSTHOG_ENABLED", "value": "false" }
     ] }

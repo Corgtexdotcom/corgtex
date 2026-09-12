@@ -8,8 +8,10 @@ export async function checkSiteCandidate({ origin, signupOrigin, fetchImpl = fet
   const paths = ["/api/health", "/", "/es", "/about", "/es/about", "/sitemap.xml", "/llms.txt"];
   const checked = [];
   for (const path of paths) {
-    // Never follow a candidate redirect to another host: that could hide broken hosting.
-    let url = new URL(path, candidate);
+    // Follow only canonical trailing-slash redirects for this requested route.
+    const requested = new URL(path, candidate);
+    const withTrailingSlash = requested.pathname === "/" ? "/" : `${requested.pathname}/`;
+    let url = requested;
     let response;
     for (let redirects = 0; redirects <= 5; redirects += 1) {
       response = await fetchImpl(url, { redirect: "manual", signal: AbortSignal.timeout(30_000) });
@@ -18,6 +20,10 @@ export async function checkSiteCandidate({ origin, signupOrigin, fetchImpl = fet
       if (!location) throw new Error(`${path}: redirect is missing Location`);
       url = new URL(location, url);
       if (url.origin !== candidate.origin) throw new Error(`${path}: redirected outside candidate origin`);
+      if ((url.pathname !== requested.pathname && url.pathname !== withTrailingSlash)
+        || url.search !== requested.search || url.hash !== requested.hash) {
+        throw new Error(`${path}: redirect changed requested route`);
+      }
     }
     if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
     const text = await response.text();

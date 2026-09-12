@@ -14,11 +14,21 @@ operations. Template compilation and image builds do not migrate hosting.
 ## Build and validate
 
 `Hosting Images` is a manual workflow in `fleet-release-production`. It publishes
-`site:sha-<full-sha>` and `ops-monitor:sha-<full-sha>` under the repository's GHCR
-namespace. It neither logs into Azure nor deploys anything. The existing app fleet
-release and Railway monitor Docker command are unchanged. Dispatch it from the
-approved merged revision, import both images into the existing ACR through the
-authorized import path, and record resolved digests before creating candidates.
+site and monitor images under the repository's GHCR namespace, using
+`build-<run-id>-<attempt>` aliases. Tags are not immutable deployment references:
+the same source commit can build different bytes with changed public settings or
+base images. The workflow records the actual publish-step digests, source commit,
+run and attempt in `receipt.json`, uploads the receipt as
+`hosting-images-<run-id>-<attempt>`, and displays digest references in its summary.
+It neither logs into Azure nor deploys anything. Dispatch from the approved merged
+revision and import only the receipt's `repository@sha256:<hex>` source references
+through the authorized import path. Import into ACR repositories `corgtex/site`
+and `corgtex/ops-monitor`; verify each imported digest equals its receipt before
+preparing candidate parameters. Stop on mismatch; never substitute a tag lookup.
+Set `siteImageSha256` and `monitorImageSha256` to the corresponding 64 hex
+characters (without `sha256:`). Templates construct digest-only ACR references;
+they no longer accept arbitrary image or tag parameters. Preserve the source and
+import readback receipts alongside candidate acceptance and rollback evidence.
 
 Before building, match these environment variables in the workflow environment to
 the source site: `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_APP_URL`,
@@ -29,13 +39,15 @@ Next.js embeds public values at build time; changing Azure runtime variables alo
 does not correct a wrong signup target or restore the Intercom widget. Omitted
 Intercom app ID disables the widget, so its presence must be checked for parity.
 The default production URLs retain selfserve signup and backup-app demo/enterprise
-routing. Use a new image SHA/digest for changed build configuration.
+routing. A rebuild needs its own receipt and digest acceptance even at the same
+source commit; commit identity alone is not proof of image identity.
 
 ```sh
 az bicep build --file infra/azure/hosting/site.bicep --stdout > /tmp/site.arm.json
 az bicep build --file infra/azure/hosting/monitor.bicep --stdout > /tmp/monitor.arm.json
 az bicep build --file infra/azure/hosting/site-identity.bicep --stdout > /tmp/site-identity.arm.json
 npx vitest run --project unit scripts/migration/site-candidate-smoke.test.mjs
+npx vitest run --project unit scripts/migration/hosting-image-receipt.test.mjs
 node scripts/check-public-docs.mjs
 node scripts/check-private-boundary.mjs
 ```
@@ -74,8 +86,9 @@ image digest, `/api/health`, and public site routes:
 node scripts/migration/site-candidate-smoke.mjs "$CANDIDATE_ORIGIN" "$SIGNUP_ORIGIN"
 ```
 
-This smoke never invokes demo or lead creation, analytics, or signup. It also
-rejects cross-host redirects that could silently test the old host. Separately
+This smoke never invokes demo or lead creation, analytics, or signup. It rejects
+cross-host redirects and path/query changes before fetching a redirected URL;
+only the requested route's canonical trailing slash is allowed. Separately
 inspect mobile/desktop pages, canonical URLs, Intercom configuration and asset
 loading. The existing `scripts/site-smoke.mjs` additionally exercises app demo
 sessions; it is not a read-only candidate preflight.

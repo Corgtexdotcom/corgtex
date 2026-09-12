@@ -5,7 +5,10 @@ param jobName string
 param environmentResourceId string
 param identityResourceId string
 param registryServer string
-param monitorImage string
+@description('64-character SHA-256 hex from the published digest receipt, verified after import into corgtex/ops-monitor. Tags are not deployment references.')
+@minLength(64)
+@maxLength(64)
+param monitorImageSha256 string
 @description('Copy the source target array without changing names or URLs: incident deduplication depends on them.')
 @minLength(1)
 param healthTargets array
@@ -31,7 +34,7 @@ resource monitor 'Microsoft.App/jobs@2024-03-01' = {
     template: {
       containers: [{
         name: 'ops-monitor'
-        image: monitorImage
+        image: '${registryServer}/corgtex/ops-monitor@sha256:${monitorImageSha256}'
         command: ['node', '/app/scripts/ops/health-sweep.mjs']
         args: ['--dry-run']
         env: [

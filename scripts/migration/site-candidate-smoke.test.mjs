@@ -40,6 +40,24 @@ describe("Azure site candidate smoke", () => {
       url.pathname === "/about" ? new Response(null, { status: 307, headers: { location: "/about/" } }) : fixture(url),
     })).resolves.toHaveProperty("checked");
   });
+  it.each([
+    ["/about", "/"],
+    ["/es/about", "/"],
+    ["/llms.txt", "/"],
+    ["/about", "/demo"],
+    ["/about", "/api/demo-leads"],
+    ["/about", "/about?preview=true"],
+  ])("rejects %s redirecting to %s before fetching the destination", async (source, destination) => {
+    const visited = [];
+    await expect(checkSiteCandidate({ ...config, fetchImpl: async (url) => {
+      visited.push(`${url.pathname}${url.search}`);
+      return url.pathname === source
+        ? new Response(null, { status: 307, headers: { location: destination } })
+        : fixture(url);
+    } })).rejects.toThrow("changed requested route");
+    expect(visited.at(-1)).toBe(source);
+    expect(visited.filter((url) => url === destination)).toHaveLength(destination === "/" ? 1 : 0);
+  });
   it("rejects an app health endpoint masquerading as the site", async () => {
     await expect(checkSiteCandidate({ ...config, fetchImpl: async () => Response.json({ status: "ok", app: "web" }) }))
       .rejects.toThrow("Wrong site health");

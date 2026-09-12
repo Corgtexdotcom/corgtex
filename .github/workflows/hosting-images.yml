@@ -24,14 +24,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Compute immutable image names
+      - name: Compute build aliases
         id: image
         shell: bash
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "site=${repo}/site:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "monitor=${repo}/ops-monitor:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          build_tag="build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "site=${repo}/site:${build_tag}" >> "$GITHUB_OUTPUT"
+          echo "monitor=${repo}/ops-monitor:${build_tag}" >> "$GITHUB_OUTPUT"
       - name: Build and publish site
+        id: site
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -49,6 +51,7 @@ jobs:
             NEXT_PUBLIC_INTERCOM_APP_ID=${{ vars.NEXT_PUBLIC_INTERCOM_APP_ID }}
             NEXT_PUBLIC_INTERCOM_API_BASE=${{ vars.NEXT_PUBLIC_INTERCOM_API_BASE || 'https://api-iam.intercom.io' }}
       - name: Build and publish monitor
+        id: monitor
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -57,3 +60,19 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.monitor }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Record digest-only handoff
+        env:
+          SITE_IMAGE_DIGEST: ${{ steps.site.outputs.digest }}
+          MONITOR_IMAGE_DIGEST: ${{ steps.monitor.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/hosting-images
+          node scripts/migration/hosting-image-receipt.mjs > .artifacts/hosting-images/receipt.json
+          node scripts/migration/hosting-image-receipt.mjs --summary >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve published image receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosting-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/hosting-images/receipt.json
+          if-no-files-found: error

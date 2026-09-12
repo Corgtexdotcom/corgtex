@@ -6,8 +6,10 @@ param environmentResourceId string
 @description('Dedicated site identity with only AcrPull at the source registry. Never use the production push/import identity. Created separately after access approval.')
 param identityResourceId string
 param registryServer string
-@description('Use an imported site image pinned by digest, or an immutable sha- tag.')
-param siteImage string
+@description('64-character SHA-256 hex from the published digest receipt, verified after import into corgtex/site. Tags are not deployment references.')
+@minLength(64)
+@maxLength(64)
+param siteImageSha256 string
 @description('Runtime settings, including existing PostHog configuration. Public browser settings must also be supplied when building the image.')
 param environmentVariables array = []
 @description('Supply through a secure deployment parameter from the protected delivery environment, never a committed parameter file.')
@@ -40,7 +42,7 @@ resource site 'Microsoft.App/containerApps@2024-03-01' = {
     template: {
       containers: [{
         name: 'site'
-        image: siteImage
+        image: '${registryServer}/corgtex/site@sha256:${siteImageSha256}'
         env: concat(environmentVariables, [{ name: 'PORT', value: '3000' }], empty(posthogProjectToken) ? [] : [
           { name: 'POSTHOG_PROJECT_TOKEN', secretRef: 'posthog-project-token' }
         ])
