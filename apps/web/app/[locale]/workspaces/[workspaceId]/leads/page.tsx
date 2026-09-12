@@ -371,7 +371,7 @@ export default async function LeadsPage({
               </div>
             </div>
 
-            <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+            <section className="nr-table-wrap" style={{ minWidth: 0 }}>
               <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                 <div>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAttentionTitle")}</h2>
@@ -474,8 +474,8 @@ export default async function LeadsPage({
               </table>
             </section>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 20 }}>
-              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))", gap: 20 }}>
+              <section className="nr-table-wrap" style={{ minWidth: 0 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardAccountSummaryTitle")}</h2>
                   <a href={fullPageHrefs.accounts} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewAccounts")} title={t("dashboardViewAccounts")}>
@@ -537,7 +537,7 @@ export default async function LeadsPage({
                 </table>
               </section>
 
-              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+              <section className="nr-table-wrap" style={{ minWidth: 0 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardPipelineSummaryTitle")}</h2>
                   <a href={fullPageHrefs.pipeline} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("dashboardViewPipeline")} title={t("dashboardViewPipeline")}>
@@ -598,7 +598,7 @@ export default async function LeadsPage({
                 </table>
               </section>
 
-              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+              <section className="nr-table-wrap" style={{ minWidth: 0 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("fullActivityTitle")}</h2>
                   <a href={fullPageHrefs.activity} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("viewActivity")} title={t("viewActivity")}>
@@ -659,7 +659,7 @@ export default async function LeadsPage({
                 </table>
               </section>
 
-              <section className="nr-table-wrap" style={{ overflow: "hidden" }}>
+              <section className="nr-table-wrap" style={{ minWidth: 0 }}>
                 <div className="row" style={{ alignItems: "flex-start", gap: 12, padding: "12px 12px 0" }}>
                   <h2 style={{ margin: 0, fontSize: "1.1rem" }}>{t("dashboardSuggestionSummaryTitle")}</h2>
                   <a href={fullPageHrefs.suggestions} className="nr-icon-link nr-table-action" style={{ marginLeft: "auto" }} aria-label={t("viewSuggestions")} title={t("viewSuggestions")}>
