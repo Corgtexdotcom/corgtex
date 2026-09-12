@@ -142,17 +142,30 @@ describe("tenant purge Prisma snapshot adapter", () => {
     expect(Object.keys(adapter)).toEqual(["createTenantPurgePrismaAuthorizeAndCapture"]);
     const pattern = "(?:\\bfrom\\s*|\\bimport\\s*\\(\\s*|\\brequire\\s*\\(\\s*|^\\s*import\\s+)"
       + "([\"'])[^\"']*tenant-purge-prisma-snapshot-adapter\\1";
+    const permitted = new Set([
+      "packages/domain/src/tenant-purge-prisma-snapshot-adapter.test.ts",
+      "packages/domain/src/tenant-purge-prisma-snapshot-adapter.authority-conformance.test.ts",
+      "packages/domain/src/tenant-purge-prisma-snapshot-adapter.topology-conformance.test.ts",
+    ]);
     const pending = ["packages"]; const consumers: string[] = [];
     while (pending.length > 0) {
       const directory = pending.pop()!;
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         const file = join(directory, entry.name);
         if (entry.isDirectory()) pending.push(file);
-        else if (file.endsWith(".ts")
-          && file !== "packages/domain/src/tenant-purge-prisma-snapshot-adapter.test.ts"
+        else if (file.endsWith(".ts") && !permitted.has(file)
           && new RegExp(pattern, "m").test(readFileSync(file, "utf8"))) consumers.push(file);
       }
     }
     expect(consumers).toEqual([]);
+    const modules = [
+      'import x from "./tenant-purge-prisma-snapshot-adapter"',
+      'export { x } from "./tenant-purge-prisma-snapshot-adapter"',
+      'import("./tenant-purge-prisma-snapshot-adapter")',
+      'require("./tenant-purge-prisma-snapshot-adapter")',
+      'import "./tenant-purge-prisma-snapshot-adapter"',
+    ];
+    expect(modules.map((source) => new RegExp(pattern, "m").test(source))).toEqual(new Array(5).fill(true));
+    expect(new RegExp(pattern, "m").test("must reject tenant-purge-prisma-snapshot-adapter imports")).toBe(false);
   });
 });
