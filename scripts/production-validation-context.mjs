@@ -6,6 +6,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { collectProductionValidationPrNumbers } from "./production-validation-pr-numbers.mjs";
+import { readPin, resolveBaseline } from "./accepted-core-baseline.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_RECORDER_DEPLOYMENTS = "";
@@ -55,6 +56,8 @@ const NON_APP_RELEASE_FILES = new Set([
   // policy QA and live smoke, but no unrelated backup-app image deployment.
   "scripts/production-validation-context.mjs",
   "scripts/production-validation-context.test.mjs",
+  "scripts/accepted-core-baseline.mjs",
+  "scripts/accepted-core-baseline.test.mjs",
   "scripts/ci-production-boundary.test.mjs",
 ]);
 
@@ -257,12 +260,17 @@ export function resolveProductionValidationContext({
   clientReadinessRoutesInput,
   smokeInputs = {},
   changedFiles = [],
+  acceptedBaseline = null,
 }) {
   const allowed = eventName === "workflow_run"
     ? workflowRunIsTrusted(event, githubRepository)
     : true;
 
-  const enabled = allowed;
+  // Source CI already validates the accepted Core baseline. Its completion (or
+  // a schedule) is not authority to import new-main fixtures into that runtime.
+  // Explicit dispatch remains an exact incoming release validation.
+  const baselineOnly = Boolean(acceptedBaseline) && eventName !== "workflow_dispatch";
+  const enabled = allowed && !baselineOnly;
   const prNumbers = collectProductionValidationPrNumbers({
     baseline: baselinePrNumbers,
     explicit: prNumbersInput,
@@ -281,6 +289,7 @@ export function resolveProductionValidationContext({
 
   return {
     enabled: boolOutput(enabled),
+    validation_mode: baselineOnly ? "accepted-baseline-ci-only" : "legacy-or-explicit-release",
     trusted_ref: boolOutput(githubRef === "refs/heads/main" || (eventName === "workflow_run" && allowed)),
     base_url: validateBaseUrl(baseUrlInput),
     expected_git_sha: expectedGitSha,
@@ -343,6 +352,11 @@ async function main() {
     const requiresAppRelease = requiresProductionAppRelease(changedFiles);
     const context = { source: "ci-push-range", before, after, changedFiles,
       skipReleaseMatch: !requiresAppRelease, requiresProductionAppRelease: requiresAppRelease };
+    if (process.env.ACCEPTED_CORE_BASELINE === "true") {
+      context.validationMode = "accepted-core-baseline";
+      context.acceptedSourceSha = validateGitSha(process.env.ACCEPTED_CORE_SOURCE_SHA, "accepted baseline source");
+      if (!context.acceptedSourceSha) throw new Error("Accepted baseline source is missing.");
+    }
     if (process.env.RELEASE_CONTEXT_PATH) await writeFile(process.env.RELEASE_CONTEXT_PATH, `${JSON.stringify(context, null, 2)}\n`);
     if (args.output) await writeFile(args.output, `${formatGithubOutput({
       skip_release_match: boolOutput(!requiresAppRelease), requires_app_release: boolOutput(requiresAppRelease),
@@ -352,6 +366,9 @@ async function main() {
   }
   const event = await readEvent(process.env.GITHUB_EVENT_PATH);
   const eventName = process.env.GITHUB_EVENT_NAME;
+  const automaticTrusted = process.env.GITHUB_REPOSITORY === "Corgtexdotcom/corgtex" && process.env.GITHUB_REF === "refs/heads/main"
+    && (eventName === "schedule" || (eventName === "workflow_run" && workflowRunIsTrusted(event, process.env.GITHUB_REPOSITORY)));
+  const acceptedBaseline = automaticTrusted ? await resolveBaseline(await readPin()) : null;
   const changedFiles = await changedFilesForEvent({
     eventName,
     event,
@@ -380,6 +397,7 @@ async function main() {
       recorderReadiness: process.env.PRODUCTION_VALIDATION_RECORDER_READINESS_SMOKE_INPUT,
     },
     changedFiles,
+    acceptedBaseline,
   });
 
   if (args.output) {

@@ -58,8 +58,15 @@ jobs:
           echo "short=$(git rev-parse --short "$sha")" >> "$GITHUB_OUTPUT"
           echo "subject=$(git log -1 --pretty=format:%s "$sha")" >> "$GITHUB_OUTPUT"
 
-      - name: Guard against revert loops
+      - name: Require deployed-change attribution for source auto-revert
         if: steps.check.outputs.trigger == 'true'
+        id: baseline-policy
+        env:
+          FAILED_SHA: ${{ steps.merge.outputs.sha }}
+        run: node scripts/accepted-core-baseline.mjs recovery-policy
+
+      - name: Guard against revert loops
+        if: steps.check.outputs.trigger == 'true' && steps.baseline-policy.outputs.automatic_revert_allowed == 'true'
         id: guard
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

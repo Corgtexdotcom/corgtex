@@ -26,6 +26,9 @@ const HOSTING_FILES = [".github/workflows/hosting-images.yml", "deploy/Dockerfil
   "infra/azure/hosting/site-identity.bicep", "infra/azure/hosting/site.bicep", "infra/azure/hosting/site.parameters.example.json",
   "scripts/migration/hosting-image-receipt.mjs", "scripts/migration/hosting-image-receipt.test.mjs",
   "scripts/migration/site-candidate-smoke.mjs", "scripts/migration/site-candidate-smoke.test.mjs"];
+const BASELINE_FEATURE_FILES = [".codex/ops/accepted-core-baseline.md", ".github/workflows/accepted-core-baseline.yml",
+  ".github/workflows/ci.yml", ".github/workflows/auto-revert.yml", "scripts/production-validation-context.mjs",
+  "scripts/production-validation-context.test.mjs", "scripts/accepted-core-baseline.mjs", "scripts/accepted-core-baseline.test.mjs"];
 const temporaryDirectories = [];
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -110,6 +113,22 @@ describe("production validation context", () => {
   it.each([SITE_RELEASE_FILES, HOSTING_FILES].map((files) => [files]))("does not require an unrelated app release for the verified hosting change set", (changedFiles) => {
     expect(requiresProductionAppRelease(changedFiles)).toBe(false);
     expect(resolve({ changedFiles })).toMatchObject({ expected_git_sha: "", enabled: "true", crm_smoke: "true", client_readiness_smoke: "true" });
+  });
+
+  it("does not demand Core promotion for the integrated disabled baseline feature, but retains mixed/unknown requirements", async () => {
+    const repo = await gitFixture();
+    await repo.write("README.md");
+    const before = repo.commit();
+    for (const path of BASELINE_FEATURE_FILES) await repo.write(path);
+    const after = repo.commit();
+    const changedFiles = productionAppChangedFilesFromGit({ before, after, cwd: repo.cwd });
+    expect(new Set(changedFiles)).toEqual(new Set(BASELINE_FEATURE_FILES));
+    expect(requiresProductionAppRelease(changedFiles)).toBe(false);
+    expect(resolve({ changedFiles })).toMatchObject({ enabled: "true", expected_git_sha: "", crm_smoke: "true" });
+    for (const path of ["apps/web/app/page.tsx", "apps/worker/src/main.ts", "prisma/schema.prisma",
+      "scripts/accepted-core-baseline-extra.mjs", "scripts/unknown.mjs"]) {
+      expect(requiresProductionAppRelease([...changedFiles, path])).toBe(true);
+    }
   });
 
   it.each(["apps/web/app/page.tsx", "apps/worker/src/main.ts", "packages/shared/src/env.ts", "packages/domain/src/main.ts",

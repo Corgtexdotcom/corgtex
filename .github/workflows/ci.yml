@@ -276,6 +276,11 @@ jobs:
 
   smoke-prod:
     name: Production Smoke Test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository == 'Corgtexdotcom/corgtex'
+    environment: fleet-release-production
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     needs:
       - check
@@ -285,6 +290,9 @@ jobs:
       smoke_proof: ${{ steps.smoke-proof.outputs.available }}
       skip_release_match: ${{ steps.app-release.outputs.skip_release_match }}
       observation_since: ${{ steps.observation-window.outputs.since }}
+      baseline_enabled: ${{ steps.baseline.outputs.enabled }}
+      baseline_source_sha: ${{ steps.baseline.outputs.source_sha }}
+      baseline_receipt_sha256: ${{ steps.baseline.outputs.receipt_sha256 }}
     steps:
       - name: Non-production smoke gate
         if: github.ref != 'refs/heads/main'
@@ -308,9 +316,32 @@ jobs:
         run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve reviewed accepted Core baseline (absent config keeps legacy policy)
+        id: baseline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/accepted-core-baseline.mjs resolve
+
+      - name: Require credentials for configured baseline
+        if: steps.baseline.outputs.enabled == 'true' && steps.check-secrets.outputs.skip == 'true'
+        run: exit 1
+
+      - uses: actions/checkout@v5
+        if: steps.baseline.outputs.enabled == 'true'
+        with:
+          ref: ${{ steps.baseline.outputs.verifier_sha }}
+          path: .baseline/verifier
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: steps.baseline.outputs.enabled == 'true'
+        with:
+          ref: ${{ steps.baseline.outputs.source_sha }}
+          path: .baseline/source
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -319,10 +350,23 @@ jobs:
           cache: npm
 
       - run: npm ci
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true' && steps.baseline.outputs.enabled != 'true'
+
+      - run: npm ci --ignore-scripts
+        if: steps.baseline.outputs.enabled == 'true'
+        working-directory: .baseline/verifier
+      - run: npm ci --ignore-scripts
+        if: steps.baseline.outputs.enabled == 'true'
+        working-directory: .baseline/source
+      - run: node node_modules/prisma/build/index.js generate
+        if: steps.baseline.outputs.enabled == 'true'
+        working-directory: .baseline/source
+      - run: node node_modules/prisma/build/index.js migrate diff --from-schema-datamodel prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code
+        if: steps.baseline.outputs.enabled == 'true'
+        working-directory: .baseline/source
 
       - run: npx prisma generate
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true' && steps.baseline.outputs.enabled != 'true'
 
       - name: Wait for healthy self-serve deployment
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
@@ -339,6 +383,8 @@ jobs:
           RELEASE_CONTEXT_BEFORE: ${{ github.event.before }}
           RELEASE_CONTEXT_AFTER: ${{ github.sha }}
           RELEASE_CONTEXT_PATH: .artifacts/production-app-release-context/release-context.json
+          ACCEPTED_CORE_BASELINE: ${{ steps.baseline.outputs.enabled }}
+          ACCEPTED_CORE_SOURCE_SHA: ${{ steps.baseline.outputs.source_sha }}
         run: |
           set -euo pipefail
           mkdir -p .artifacts/production-app-release-context
@@ -355,20 +401,39 @@ jobs:
       - run: node scripts/self-serve-production-readiness.mjs --base-url=https://selfserve.corgtex.com
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
       - run: node scripts/railway-smoke.mjs https://app.corgtex.com ${{ secrets.ADMIN_EMAIL }} ${{ secrets.ADMIN_PASSWORD }}
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true' && steps.baseline.outputs.enabled != 'true'
         env:
           CORGTEX_SKIP_RELEASE_MATCH: ${{ steps.app-release.outputs.skip_release_match }}
           CORGTEX_RELEASE_MATCH_TIMEOUT_MS: 1200000
 
+      - name: Verify accepted Core provider, health, auth and schema using pinned verifier and source
+        if: steps.baseline.outputs.enabled == 'true'
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: node .baseline/verifier/scripts/accepted-core-baseline.mjs check
+
+      - name: Retain sanitized Core baseline authentication proof
+        if: steps.baseline.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-baseline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/core-baseline/auth-smoke.json
+          if-no-files-found: error
+          retention-days: 90
+
       # Controlled rollout owns production migrations. Wait for its exact
       # release before read-only DB verification; never bootstrap from CI.
       - name: Verify bundled production migrations
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true' && steps.baseline.outputs.enabled != 'true'
         run: node --input-type=module -e 'import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();'
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
       - run: node scripts/check-migration-health.mjs
-        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
+        if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true' && steps.baseline.outputs.enabled != 'true'
         env:
           DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
 
@@ -386,6 +451,7 @@ jobs:
     environment: fleet-release-production
     permissions:
       contents: read
+      actions: read
       id-token: write
       issues: write
     env:
@@ -404,12 +470,37 @@ jobs:
       OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
       OBSERVATION_SINCE: ${{ needs.smoke-prod.outputs.observation_since }}
       SMOKE_SKIP_RELEASE_MATCH: ${{ needs.smoke-prod.outputs.skip_release_match }}
+      ACCEPTED_CORE_BASELINE: ${{ needs.smoke-prod.outputs.baseline_enabled }}
+      ACCEPTED_CORE_SOURCE_SHA: ${{ needs.smoke-prod.outputs.baseline_source_sha }}
+      ACCEPTED_CORE_RECEIPT_SHA256: ${{ needs.smoke-prod.outputs.baseline_receipt_sha256 }}
       RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
       FLEET_RELEASE_TARGETS_JSON: ${{ vars.FLEET_RELEASE_TARGETS_JSON }}
       FLEET_RELEASE_OPS_TARGET_JSON: ${{ vars.FLEET_RELEASE_OPS_TARGET_JSON }}
       FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve same immutable Core receipt for observation
+        if: env.ACCEPTED_CORE_BASELINE == 'true'
+        id: baseline
+        run: node scripts/accepted-core-baseline.mjs resolve
+      - name: Bind observation to preceding smoke receipt
+        if: env.ACCEPTED_CORE_BASELINE == 'true'
+        env:
+          RESOLVED_RECEIPT_HASH: ${{ steps.baseline.outputs.receipt_sha256 }}
+        run: test "$RESOLVED_RECEIPT_HASH" = "$ACCEPTED_CORE_RECEIPT_SHA256"
+      - uses: actions/checkout@v5
+        if: env.ACCEPTED_CORE_BASELINE == 'true'
+        with:
+          ref: ${{ steps.baseline.outputs.verifier_sha }}
+          path: .baseline/verifier
+          persist-credentials: false
+      - name: Verify Core provider before observation
+        if: env.ACCEPTED_CORE_BASELINE == 'true'
+        run: node .baseline/verifier/scripts/accepted-core-baseline.mjs provider
 
       - uses: actions/setup-node@v5
         with:
@@ -456,6 +547,12 @@ jobs:
             read -r app_version
           } < <(read_health_release "https://app.corgtex.com/api/health")
 
+          if [[ "$ACCEPTED_CORE_BASELINE" == "true" ]]; then
+            test "$app_git_sha" = "$ACCEPTED_CORE_SOURCE_SHA"
+            app_git_sha="$ACCEPTED_CORE_SOURCE_SHA"
+            app_image_tag="sha-$ACCEPTED_CORE_SOURCE_SHA"
+          fi
+
           {
             read -r selfserve_git_sha
             read -r selfserve_image_tag
@@ -488,12 +585,20 @@ jobs:
             '
           )"
           echo "Observation uses live target releases from app, selfserve, and ops health"
-          node scripts/post-deploy-observation-gate.mjs \
+          observation_script="scripts/post-deploy-observation-gate.mjs"
+          if [[ "$ACCEPTED_CORE_BASELINE" == "true" ]]; then
+            observation_script=".baseline/verifier/scripts/post-deploy-observation-gate.mjs"
+          fi
+          node "$observation_script" \
             --manifest-json "$manifest_json" \
             --targets backup-app,azure-selfserve,ops \
             --since "$OBSERVATION_SINCE" \
             --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
             --publish-advisories
+
+      - name: Verify Core provider after observation
+        if: env.ACCEPTED_CORE_BASELINE == 'true'
+        run: node .baseline/verifier/scripts/accepted-core-baseline.mjs provider
 
       - name: Upload observation summary
         if: always()
