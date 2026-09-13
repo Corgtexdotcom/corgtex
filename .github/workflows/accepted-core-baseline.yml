@@ -1,0 +1,84 @@
+name: Accept Existing Core Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_json:
+        description: Reviewed sanitized target, image and retained build/auth evidence contract; never credentials
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: accepted-core-baseline
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    if: github.ref == 'refs/heads/main' && github.repository == 'Corgtexdotcom/corgtex'
+    environment: fleet-release-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Validate protected bootstrap inputs
+        id: request
+        env:
+          BASELINE_EVIDENCE_JSON: ${{ inputs.evidence_json }}
+        run: node scripts/accepted-core-baseline.mjs prepare
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.request.outputs.source_sha }}
+          path: .baseline/source
+          persist-credentials: false
+      # Installation never receives production credentials.
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts
+        working-directory: .baseline/source
+      - run: node node_modules/prisma/build/index.js generate
+        working-directory: .baseline/source
+      - run: node node_modules/prisma/build/index.js migrate diff --from-schema-datamodel prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code
+        working-directory: .baseline/source
+      - name: Verify and accept existing deployment without promotion
+        id: acceptance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          FLEET_RELEASE_BACKUP_APP_TARGET_JSON: ${{ vars.FLEET_RELEASE_BACKUP_APP_TARGET_JSON }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: node scripts/accepted-core-baseline.mjs bootstrap
+      - name: Publish immutable accepted receipt
+        id: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: accepted-core-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/core-baseline/accepted/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish nonaccepted diagnostic
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-baseline-nonaccepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/core-baseline/diagnostic.json
+          if-no-files-found: ignore
+      - name: Adoption references (not activation)
+        env:
+          RECEIPT_HASH: ${{ steps.acceptance.outputs.receipt_sha256 }}
+          TARGET_HASH: ${{ steps.acceptance.outputs.target_sha256 }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_HASH: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          printf 'Receipt SHA256: %s\nTarget SHA256: %s\nArtifact ID: %s\nArchive SHA256: %s\n' \
+            "$RECEIPT_HASH" "$TARGET_HASH" "$ARTIFACT_ID" "$ARTIFACT_HASH" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Not adopted. A separate protected config PR must pin this successful exact run/attempt and verifier SHA.' >> "$GITHUB_STEP_SUMMARY"
