@@ -490,7 +490,7 @@ jobs:
           echo "Observation uses live target releases from app, selfserve, and ops health"
           node scripts/post-deploy-observation-gate.mjs \
             --manifest-json "$manifest_json" \
-            --targets main-production-smoke \
+            --targets backup-app,azure-selfserve,ops \
             --since "$OBSERVATION_SINCE" \
             --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
             --publish-advisories
