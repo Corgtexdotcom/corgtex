@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { normalizeObservationTargets, runObservationGate } from "./post-deploy-observation-gate.mjs";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const recovery = readFileSync(new URL("../.github/workflows/auto-revert.yml", import.meta.url), "utf8");
@@ -11,6 +12,66 @@ function job(name) {
 }
 
 describe("automatic production CI boundary", () => {
+  const observationTargets = job("observe-prod").match(/--targets ([^\s]+)/)?.[1];
+
+  it("observes exactly the three live release targets collected by main CI", () => {
+    const observe = job("observe-prod");
+    const manifests = [...observe.matchAll(/\{ target: "([^"]+)"/g)].map((match) => match[1]);
+    expect(manifests).toEqual(["backup-app", "azure-selfserve", "ops"]);
+    expect([...normalizeObservationTargets(observationTargets)]).toEqual(manifests);
+    expect(observe).toContain('OBSERVATION_REQUIRE_SOURCE: "true"');
+    expect(observe).toContain("environment: fleet-release-production");
+  });
+
+  it("does not query legacy customers during main observation but retains full-fleet failure", async () => {
+    const queriedServices = [];
+    const target = (id) => ({ id, label: id, provider: "railway",
+      railway: { projectId: "project", environmentId: "production", webServiceId: id } });
+    const env = {
+      RAILWAY_API_TOKEN: "test-token",
+      AZURE_APPLICATIONINSIGHTS_APP_NAME: "test-app",
+      AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: "test-rg",
+      OBSERVATION_REQUIRE_SOURCE: "true",
+      FLEET_RELEASE_TARGETS_JSON: JSON.stringify([target("legacy-customer")]),
+      FLEET_RELEASE_OPS_TARGET_JSON: JSON.stringify(target("ops")),
+      FLEET_RELEASE_BACKUP_APP_TARGET_JSON: JSON.stringify(target("backup-app")),
+    };
+    const deps = {
+      runCommand: () => JSON.stringify({ tables: [{ columns: [], rows: [] }] }),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        if (body.query.includes("LatestDeployment")) {
+          queriedServices.push(body.variables.serviceId);
+          const edges = body.variables.serviceId === "legacy-customer" ? []
+            : [{ node: { id: `${body.variables.serviceId}-deployment`, status: "SUCCESS" } }];
+          return new Response(JSON.stringify({ data: { deployments: { edges } } }));
+        }
+        return new Response(JSON.stringify({ data: { httpLogs: [] } }));
+      },
+    };
+    const options = { manifest: { gitSha: "a".repeat(40) },
+      since: new Date("2026-09-13T04:00:00Z"), env, deps };
+    const summary = await runObservationGate({ ...options, targets: observationTargets });
+    expect(summary.status).toBe("passed");
+    expect(summary.missingRequiredSources).toEqual([]);
+    expect(queriedServices.sort()).toEqual(["backup-app", "ops"]);
+    await expect(runObservationGate({ ...options, targets: "all" }))
+      .rejects.toThrow("No Railway deployment found for legacy-customer");
+  });
+
+  it("still blocks main observation when required telemetry is unavailable", async () => {
+    const summary = await runObservationGate({
+      manifest: { gitSha: "a".repeat(40) },
+      since: new Date("2026-09-13T04:00:00Z"),
+      targets: observationTargets,
+      env: { OBSERVATION_REQUIRE_SOURCE: "true" },
+    });
+    expect(summary.status).toBe("blocked");
+    expect(summary.missingRequiredSources).toEqual(expect.arrayContaining([
+      "azure_monitor", "backup-app: railway or posthog", "ops: railway or posthog",
+    ]));
+  });
+
   it("verifies bundled migrations after the exact-release wait without bootstrap or ingestion writes", () => {
     const smoke = job("smoke-prod");
     expect(smoke).toContain('import { verifyMigrations } from "./scripts/start-web.mjs"; await verifyMigrations();');
