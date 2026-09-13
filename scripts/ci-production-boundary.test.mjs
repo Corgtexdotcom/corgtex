@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { normalizeObservationTargets, runObservationGate } from "./post-deploy-observation-gate.mjs";
+import { buildObservationSummary, normalizeObservationTargets, runObservationGate } from "./post-deploy-observation-gate.mjs";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const recovery = readFileSync(new URL("../.github/workflows/auto-revert.yml", import.meta.url), "utf8");
@@ -70,6 +70,24 @@ describe("automatic production CI boundary", () => {
     expect(summary.missingRequiredSources).toEqual(expect.arrayContaining([
       "azure_monitor", "backup-app: railway or posthog", "ops: railway or posthog",
     ]));
+  });
+
+  it("preserves conservative unknown-provider failures without blocking attributed customer rows", () => {
+    const sha = "a".repeat(40);
+    const failure = (instance_id) => ({ source: "posthog", provider: "railway",
+      event: "corgtex_route_error", release_git_sha: sha, route: "/api/example",
+      status: "500", instance_id });
+    const summary = buildObservationSummary({
+      manifest: { gitSha: sha }, since: new Date("2026-09-13T04:00:00Z"),
+      targets: observationTargets,
+      rows: [failure("railway-customers/example"), failure("unclassified-runtime"),
+        failure("ops"), failure("backup-app")],
+    });
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures.map((row) => row.instance_id))
+      .toEqual(["unclassified-runtime", "ops", "backup-app"]);
+    expect(summary.advisoryFailures.map((row) => row.instance_id))
+      .toEqual(["railway-customers/example"]);
   });
 
   it("verifies bundled migrations after the exact-release wait without bootstrap or ingestion writes", () => {
