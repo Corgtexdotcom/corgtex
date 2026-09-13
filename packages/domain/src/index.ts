@@ -29,6 +29,7 @@ export * from "./conversations";
 export * from "./communication";
 export * from "./slack-workspace-bindings";
 export * from "./control-plane";
+export * from "./control-plane-workspaces";
 export * from "./control-plane-adapters";
 export * from "./customer-lifecycle";
 export * from "./documents";

@@ -46,23 +46,23 @@ export default function ControlPlaneLayout({
         
         {/* Header Bar */}
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-line bg-bg-alt px-6">
-          <div className="flex items-center gap-4">
+          <div className="flex min-w-0 items-center gap-4 pr-3">
             <button
               onClick={() => setIsSidebarOpen(true)}
-              className="rounded-md border border-line bg-surface p-1.5 text-muted hover:text-white md:hidden"
+              className="shrink-0 rounded-md border border-line bg-surface p-1.5 text-muted hover:text-white md:hidden"
               aria-label="Open menu"
             >
               <Menu className="w-5 h-5" />
             </button>
 
-            <nav className="flex items-center gap-1.5 text-xs text-muted font-medium">
+            <nav className="flex min-w-0 items-center gap-1.5 text-xs text-muted font-medium">
               {breadcrumbs.map((crumb, idx, arr) => (
-                <div key={crumb.href} className="flex items-center gap-1.5">
-                  {idx > 0 && <span className="text-muted">/</span>}
+                <div key={crumb.href} className={`${idx === arr.length - 1 ? "flex" : "hidden md:flex"} min-w-0 items-center gap-1.5`}>
+                  {idx > 0 && <span className="hidden text-muted md:inline">/</span>}
                   {idx === arr.length - 1 ? (
-                    <span className="text-text-strong font-semibold tracking-wide">{t(crumb.labelKey)}</span>
+                    <span className="truncate text-text-strong font-semibold">{t(crumb.labelKey)}</span>
                   ) : (
-                    <Link href={crumb.href} className="hover:text-text transition-colors">
+                    <Link href={crumb.href} className="truncate hover:text-text transition-colors">
                       {t(crumb.labelKey)}
                     </Link>
                   )}
@@ -71,7 +71,7 @@ export default function ControlPlaneLayout({
             </nav>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3">
             <ControlPlaneLanguageSwitcher />
             <div className="flex items-center gap-2 border-l border-line pl-3">
               <div className="flex h-8 w-8 select-none items-center justify-center rounded-md border border-line bg-surface text-xs font-semibold text-white">

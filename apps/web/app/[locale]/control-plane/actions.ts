@@ -516,4 +516,6 @@ export async function enqueueDeployLatestRolloutAction(formData: FormData) {
   invalidateControlPlaneReadCache();
   revalidatePath("/control-plane");
   revalidatePath("/es/control-plane");
+  revalidatePath("/control-plane/deployments");
+  revalidatePath("/es/control-plane/deployments");
 }

@@ -59,7 +59,8 @@ describe("control-plane copy", () => {
 
     expect(sidebar).toContain("controlPlaneNavGroups");
     expect(sidebar).toContain("isControlPlaneNavItemActive");
-    expect(dashboard).toContain('id="fleet"');
+    expect(dashboard).not.toContain("getControlPlaneFleetOverview");
+    expect(readSource("./deployments/page.tsx")).toContain('id="fleet"');
 
     for (const removed of [
       "CommandPalette",
