@@ -28,13 +28,7 @@ export const controlPlaneNavGroups: ControlPlaneNavGroup[] = [
     key: "fleet",
     labelKey: "navGroups.fleet",
     items: [
-      { key: "dashboard", labelKey: "nav.dashboard", href: "/control-plane", match: ["/control-plane"] },
-      {
-        key: "customers",
-        labelKey: "nav.customers",
-        href: "/control-plane#fleet",
-        match: ["/control-plane/deployments", "/control-plane/customers"],
-      },
+      { key: "dashboard", labelKey: "nav.dashboard", href: "/control-plane", match: ["/control-plane/workspaces"] },
       {
         key: "selfServe",
         labelKey: "nav.selfServe",
@@ -47,6 +41,12 @@ export const controlPlaneNavGroups: ControlPlaneNavGroup[] = [
     key: "observe",
     labelKey: "navGroups.observe",
     items: [
+      {
+        key: "customers",
+        labelKey: "nav.customers",
+        href: "/control-plane/deployments",
+        match: ["/control-plane/deployments", "/control-plane/customers"],
+      },
       { key: "agents", labelKey: "nav.agents", href: "/control-plane/agents", match: ["/control-plane/agents"] },
       { key: "releases", labelKey: "nav.releases", href: "/control-plane/releases", match: ["/control-plane/releases"] },
       { key: "recorders", labelKey: "nav.recorders", href: "/control-plane/recorders", match: ["/control-plane/recorders"] },
@@ -74,7 +74,7 @@ function normalizeControlPlanePathname(pathname: string) {
 
 export function isControlPlaneNavItemActive(pathname: string, item: ControlPlaneNavItem) {
   const normalized = normalizeControlPlanePathname(pathname);
-  if (item.key === "dashboard") return normalized === "/control-plane";
+  if (item.key === "dashboard") return normalized === "/control-plane" || normalized.startsWith("/control-plane/workspaces");
   return item.match.some((prefix) => normalized.startsWith(prefix));
 }
 
@@ -89,15 +89,14 @@ export function getControlPlaneBreadcrumbs(pathname: string) {
   if (!section) return crumbs;
 
   const navItem = controlPlaneNavGroups.flatMap((group) => group.items).find((item) => {
-    if (item.key === "dashboard") return false;
     return item.match.some((prefix) => normalized.startsWith(prefix));
   });
 
   if (navItem) {
     crumbs.push({ labelKey: navItem.labelKey, href: navItem.href });
   }
-  if (section === "deployments" && segments[2]) {
-    crumbs.push({ labelKey: "nav.details", href: `/control-plane/deployments/${segments[2]}` });
+  if ((section === "deployments" || section === "workspaces") && segments[2]) {
+    crumbs.push({ labelKey: "nav.details", href: `/control-plane/${section}/${segments[2]}` });
   }
 
   return crumbs;
