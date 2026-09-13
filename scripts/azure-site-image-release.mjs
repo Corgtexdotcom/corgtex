@@ -19,6 +19,15 @@ const canonical = (value) => JSON.stringify(value, (_, item) => item && !Array.i
 const fingerprint = (value) => createHash("sha256").update(canonical(value)).digest("hex");
 const copy = (value) => structuredClone(value);
 
+function normalizeSecretRefValue(env) {
+  // Azure may materialize an empty literal beside a reference. Keep null and
+  // nonempty literals distinct; inspectApp still validates registered names.
+  if (typeof env.secretRef !== "string" || !env.secretRef || env.value !== "") return env;
+  const result = { ...env };
+  delete result.value;
+  return result;
+}
+
 export function validateTarget(input) {
   if (!input || input.purpose !== "corgtex-public-site" || !UUID.test(input.subscriptionId ?? "")
     || !NAME.test(input.resourceGroup ?? "") || !/^[a-z][a-z0-9-]{0,30}$/.test(input.appName ?? "")
@@ -62,6 +71,7 @@ function invariants(app) {
   const template = copy(app.properties.template);
   delete template.revisionSuffix;
   template.containers[0].image = "<image-only>";
+  if (template.containers[0].env) template.containers[0].env = template.containers[0].env.map(normalizeSecretRefValue);
   const configuration = copy(app.properties.configuration);
   for (const secret of configuration.secrets ?? []) delete secret.value;
   return {
@@ -96,7 +106,7 @@ export function inspectApp(app, target) {
   const container = p.template.containers[0];
   const image = validateImage(container.image, target);
   const secretNames = new Set((p.configuration.secrets ?? []).map((secret) => secret.name));
-  if ((container.env ?? []).some((env) => env.secretRef && (!secretNames.has(env.secretRef) || env.value != null))) fail("INVALID_SECRET_REFERENCE");
+  if ((container.env ?? []).some((env) => env.secretRef && (!secretNames.has(env.secretRef) || normalizeSecretRefValue(env).value != null))) fail("INVALID_SECRET_REFERENCE");
   const invariant = invariants(app);
   return {
     image, revision: p.latestRevisionName, readyRevision: p.latestReadyRevisionName,
@@ -133,6 +143,7 @@ function revisionTemplate(template) {
   const result = copy(template);
   delete result.revisionSuffix;
   result.containers[0].image = "<image-only>";
+  if (result.containers[0].env) result.containers[0].env = result.containers[0].env.map(normalizeSecretRefValue);
   if (result.customMetricsSettings == null) delete result.customMetricsSettings;
   if (result.scale) {
     result.scale.cooldownPeriod ??= 300;

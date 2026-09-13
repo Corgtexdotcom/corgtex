@@ -92,6 +92,84 @@ function harness(custom = {}) {
 
 const execute = { ...options, execute: true, confirmTarget: target.resourceId };
 
+// Frozen from the pre-normalization script, with the secretRef value key absent.
+const historicalFingerprints = {
+  configurationFingerprint: "c65118c676d0ff1b2c8289c730b12fc6cc2c9db587f735c0ae8d176deec05af0",
+  templateFingerprint: "633f1b145c27a57df7c704c92b5015c34c14b9f82fb25eb617d165d5c1d21218",
+};
+
+test("keeps historical absent-value fingerprints and normalizes Azure's empty secretRef value without mutating input", () => {
+  const original = app();
+  const before = inspectApp(original, target);
+  assert.deepEqual({ configurationFingerprint: before.configurationFingerprint, templateFingerprint: before.templateFingerprint }, historicalFingerprints);
+  original.properties.template.containers[0].env[2].value = "";
+  assert.deepEqual(inspectApp(original, target), before);
+  assert.equal(original.properties.template.containers[0].env[2].value, "");
+});
+
+test("accepts the observed empty secretRef value after the simulated image-only update", async () => {
+  const h = harness({ update: ({ app }) => { app.properties.template.containers[0].env[2].value = ""; } });
+  assert.equal((await releaseSite(execute, h.dependencies)).status, "READY");
+  assert.equal(h.state.writes, 1);
+  assert.equal(h.state.evidence["after.json"].configurationFingerprint, h.state.evidence["intent.json"].before.configurationFingerprint);
+  assert.equal(h.state.evidence["after.json"].templateFingerprint, h.state.evidence["intent.json"].before.templateFingerprint);
+  assert.deepEqual(h.state.evidence["after.json"].bindings, h.state.evidence["intent.json"].before.bindings);
+  assert.equal(JSON.stringify(h.state.evidence).includes(secret), false);
+  assert.equal(JSON.stringify(h.state.calls).includes(secret), false);
+});
+
+for (const [appEmpty, revisionEmpty] of [[true, true], [true, false], [false, true]]) {
+  test(`reconciles historical intent read-only with app empty=${appEmpty}, revision empty=${revisionEmpty}`, async () => {
+    const h = harness({ revision: (revision) => {
+      revisionResponseFields(revision);
+      const env = revision.properties.template.containers[0].env[2];
+      if (revisionEmpty) env.value = "";
+      else delete env.value;
+    } });
+    h.state.app.properties.template.containers[0].image = image;
+    if (appEmpty) h.state.app.properties.template.containers[0].env[2].value = "";
+    const saved = { schemaVersion: 1, target, image, before: { image: previousImage, ...historicalFingerprints } };
+    const savedCopy = structuredClone(saved);
+    const result = await releaseSite({ target, reconcile: saved }, h.dependencies);
+    assert.equal(result.status, "READY");
+    assert.equal(result.runtimeHealth, "UNPROVEN");
+    assert.equal(result.publicHealth, "UNPROVEN");
+    assert.equal(h.state.writes, 0);
+    assert.deepEqual(saved, savedCopy);
+    assert.equal(h.state.evidence["after.json"].configurationFingerprint, saved.before.configurationFingerprint);
+    assert.equal(h.state.evidence["after.json"].templateFingerprint, saved.before.templateFingerprint);
+  });
+}
+
+for (const value of ["nonempty-literal", " ", 0, false]) test(`rejects secretRef literal ${JSON.stringify(value)}`, () => {
+  const original = app();
+  original.properties.template.containers[0].env[2].value = value;
+  assert.throws(() => inspectApp(original, target), /INVALID_SECRET_REFERENCE/);
+});
+
+for (const value of [undefined, null, ""]) test(`rejects a missing registered secret with value ${JSON.stringify(value)}`, () => {
+  const original = app();
+  original.properties.configuration.secrets = [];
+  if (value !== undefined) original.properties.template.containers[0].env[2].value = value;
+  assert.throws(() => inspectApp(original, target), /INVALID_SECRET_REFERENCE/);
+});
+
+test("preserves null and ordinary literal-value fingerprint distinctions", () => {
+  const before = inspectApp(app(), target);
+  for (const mutate of [
+    (env) => { env[2].value = null; },
+    (env) => { delete env[2].secretRef; env[2].value = ""; },
+    (env) => { env[2].secretRef = ""; env[2].value = ""; },
+    (env) => { env[0].value = ""; },
+  ]) {
+    const original = app();
+    mutate(original.properties.template.containers[0].env);
+    const after = inspectApp(original, target);
+    assert.notEqual(after.configurationFingerprint, before.configurationFingerprint);
+    assert.notEqual(after.templateFingerprint, before.templateFingerprint);
+  }
+});
+
 function appResponseFields(template) {
   template.containers[0].imageType = "ContainerImage";
   template.containers[0].resources.ephemeralStorage = "1Gi";
@@ -150,8 +228,16 @@ for (const [name, mutate] of [
   ["revision minimum replicas", (t) => { t.scale.minReplicas = 1; }],
   ["revision maximum replicas", (t) => { t.scale.maxReplicas = 3; }],
   ["revision scale rules", (t) => { t.scale.rules[0].http.metadata.concurrentRequests = "100"; }],
+  ["revision secret literal", (t) => { t.containers[0].env[2].value = "nonempty-literal"; }],
+  ["revision missing secret reference", (t) => { delete t.containers[0].env[2].secretRef; }],
+  ["revision unregistered secret reference", (t) => { t.containers[0].env[2].secretRef = "missing"; }],
+  ["revision null secret value", (t) => { t.containers[0].env[2].value = null; }],
 ]) test(`revision-only normalization preserves detection of ${name} drift`, async () => {
-  const h = harness({ revision: (r) => { revisionResponseFields(r); mutate(r.properties.template); } });
+  const h = harness({ revision: (r) => {
+    revisionResponseFields(r);
+    r.properties.template.containers[0].env[2].value = "";
+    mutate(r.properties.template);
+  } });
   appResponseFields(h.state.app.properties.template);
   assert.equal((await releaseSite(execute, h.dependencies)).status, "REVISION_CONFIGURATION_DRIFT");
   assert.equal(h.state.evidence["ready.json"], undefined);
@@ -303,8 +389,11 @@ for (const [name, mutate] of [
   ["command", (a) => { a.properties.template.containers[0].command = ["new"]; }],
   ["traffic", (a) => { a.properties.configuration.ingress.traffic[0].weight = 90; }],
   ["tags", (a) => { a.tags.owner = "changed"; }],
-]) test(`detects ${name} drift after the write without a corrective mutation`, async () => {
-  const { state, dependencies } = harness({ update: ({ app }) => mutate(app) });
+]) test(`detects ${name} drift alongside empty secretRef normalization without a corrective mutation`, async () => {
+  const { state, dependencies } = harness({ update: ({ app }) => {
+    app.properties.template.containers[0].env[2].value = "";
+    mutate(app);
+  } });
   assert.equal((await releaseSite(execute, dependencies)).status, "CONFIGURATION_DRIFT_RECONCILE_REQUIRED");
   assert.equal(state.writes, 1);
   assert.equal(state.evidence["ready.json"], undefined);
