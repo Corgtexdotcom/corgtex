@@ -17,9 +17,55 @@ describe("site demo backend continuity", () => {
     vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://selfserve.corgtex.com");
     vi.stubEnv("DEMO_BACKEND_URL", undefined);
     vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     fetchMock.mockReset().mockImplementation(async () => Response.json({ ok: true }));
   });
-  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+
+  it.each([{ stage: "capture", handler: capture }, { stage: "qualify", handler: qualify }])("does not impose a timeout or retry a pending $stage write", async ({ handler }) => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation(() => new Promise<Response>(resolve => { finish = resolve; }));
+    let settled = false;
+    const pending = handler(request()).then(response => { settled = true; return response; });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("signal");
+    expect(timeout).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
+    finish(Response.json({ ok: true }));
+    expect((await pending).status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
+  it.each([{ stage: "capture", handler: capture }, { stage: "qualify", handler: qualify }])("logs only fixed diagnostic fields for $stage failures", async ({ stage, handler }) => {
+    const secret = "synthetic-sensitive-sentinel";
+    const input = () => request({ token: secret, email: secret }, { Cookie: secret, Authorization: secret, "x-real-ip": secret });
+    vi.stubEnv("DEMO_BACKEND_URL", `https://user:${secret}@private.invalid`);
+    await handler(input());
+    vi.stubEnv("DEMO_BACKEND_URL", `https://${secret}.invalid`);
+    fetchMock.mockRejectedValueOnce(new Error(secret))
+      .mockResolvedValueOnce(Response.json({ error: secret }, { status: 503 }))
+      .mockResolvedValueOnce(new Response(secret, { status: 307, headers: { Location: `https://${secret}.invalid` } }))
+      .mockResolvedValueOnce(new Response(`<html>${secret}</html>`, { status: 400 }))
+      .mockResolvedValueOnce(Response.json([secret]))
+      .mockResolvedValueOnce(Response.json({ error: { code: "INVALID_INPUT", message: "Invalid qualification token.", debug: secret } }, { status: 400 }));
+    for (let i = 0; i < 6; i++) await handler(input());
+    await handler(new NextRequest("https://site.invalid/api/demo-leads", { method: "POST", body: secret }));
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["Demo proxy failure", { stage, failureClass: "invalid_configuration", status: 503 }],
+      ["Demo proxy failure", { stage, failureClass: "transport", status: 502 }],
+      ["Demo proxy failure", { stage, failureClass: "upstream_status", status: 503 }],
+      ["Demo proxy failure", { stage, failureClass: "upstream_redirect", status: 307 }],
+      ["Demo proxy failure", { stage, failureClass: "invalid_upstream_response", status: 400 }],
+      ["Demo proxy failure", { stage, failureClass: "invalid_upstream_response", status: 200 }],
+      ["Demo proxy failure", { stage, failureClass: "upstream_status", status: 400 }],
+      ["Demo proxy failure", { stage, failureClass: "invalid_payload", status: 400 }],
+    ]);
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain(secret);
+  });
 
   it("keeps both stages on Core while signup goes to selfserve", async () => {
     expect((await capture(request())).status).toBe(200);

@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
+function reportFailure(
+  stage: "capture" | "qualify",
+  failureClass: "invalid_payload" | "invalid_configuration" | "upstream_status" | "upstream_redirect" | "invalid_upstream_response" | "transport",
+  status: number,
+) {
+  console.warn("Demo proxy failure", { stage, failureClass, status });
+}
+
 function demoBackendOrigin() {
   const configured = process.env.DEMO_BACKEND_URL;
   const value = configured === undefined
@@ -38,12 +46,14 @@ export async function forwardDemoRequest(request: NextRequest, stage: "capture" 
   try {
     body = await request.json();
   } catch {
+    reportFailure(stage, "invalid_payload", 400);
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
   }
   let origin: string;
   try {
     origin = demoBackendOrigin();
   } catch {
+    reportFailure(stage, "invalid_configuration", 503);
     return unavailable(503);
   }
   try {
@@ -57,14 +67,30 @@ export async function forwardDemoRequest(request: NextRequest, stage: "capture" 
       body: JSON.stringify(body),
       redirect: "error",
       cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
     });
-    if (response.status >= 500) return unavailable(response.status);
-    if (response.status >= 300 && response.status < 400) return unavailable();
-    const data: unknown = await response.json();
-    if (!data || typeof data !== "object" || Array.isArray(data)) return unavailable();
+    if (response.status >= 500) {
+      reportFailure(stage, "upstream_status", response.status);
+      return unavailable(response.status);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      reportFailure(stage, "upstream_redirect", response.status);
+      return unavailable();
+    }
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      reportFailure(stage, "invalid_upstream_response", response.status);
+      return unavailable();
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      reportFailure(stage, "invalid_upstream_response", response.status);
+      return unavailable();
+    }
+    if (!response.ok) reportFailure(stage, "upstream_status", response.status);
     return NextResponse.json(response.ok ? data : publicError(data as Record<string, unknown>), { status: response.status });
   } catch {
+    reportFailure(stage, "transport", 502);
     return unavailable();
   }
 }
