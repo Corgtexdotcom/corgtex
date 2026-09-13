@@ -108,43 +108,23 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Download failed CI push-range release context
+        if: steps.guard.outputs.trigger == 'true'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: production-app-release-context
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: .artifacts/ci-release-context
+
       - name: Detect production app release requirement
         if: steps.guard.outputs.trigger == 'true'
         id: app-release
         env:
-          SHA: ${{ steps.merge.outputs.sha }}
-        run: |
-          set -euo pipefail
-          before="$(git rev-parse "${SHA}^1" 2>/dev/null || true)"
-
-          if [ -z "$before" ]; then
-            echo "requires_app_release=true" >> "$GITHUB_OUTPUT"
-            echo "Previous main commit is unknown; production app release match remains required."
-            exit 0
-          fi
-
-          changed_files="$(git diff --name-only "$before" "$SHA")"
-          echo "Changed files:"
-          printf '%s\n' "$changed_files"
-
-          requires_app_release=false
-          while IFS= read -r path; do
-            [ -z "$path" ] && continue
-            case "$path" in
-              AGENTS.md|README.md|knip.jsonc|tsconfig.unused.json|docs/*|.github/*|.agents/*|.codex/*|apps/site/*)
-                ;;
-              *)
-                requires_app_release=true
-                ;;
-            esac
-          done <<< "$changed_files"
-
-          echo "requires_app_release=$requires_app_release" >> "$GITHUB_OUTPUT"
-          if [ "$requires_app_release" = "true" ]; then
-            echo "Production app-affecting changes detected; recovery requires release match."
-          else
-            echo "Only docs, workflow, agent-guidance, cleanup-tooling config, or site-only files changed; recovery accepts healthy app smoke without release match."
-          fi
+          RELEASE_CONTEXT_AFTER: ${{ steps.merge.outputs.sha }}
+          PRODUCTION_VALIDATION_CI_RELEASE_CONTEXT_PATH: .artifacts/ci-release-context/release-context.json
+        run: node scripts/production-validation-context.mjs --classify-app-release --output="$GITHUB_OUTPUT"
 
       - name: Check current production health before reverting
         if: steps.guard.outputs.trigger == 'true'

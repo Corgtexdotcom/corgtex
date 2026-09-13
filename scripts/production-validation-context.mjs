@@ -33,6 +33,30 @@ const CLIENT_READINESS_ROUTE_NAMES = new Set([
   "operator",
 ]);
 const UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED = "__unknown_production_app_release_required__";
+// Standalone site/monitor hosting inputs: hosting-images.yml, the hosting README
+// and site release CLI are their callers. Web/worker code and startup do not use
+// them, even where an image's blanket COPY happens to include the scripts.
+const NON_APP_RELEASE_FILES = new Set([
+  "deploy/Dockerfile.site",
+  "infra/azure/hosting/README.md",
+  "infra/azure/hosting/site.bicep",
+  "infra/azure/hosting/site.parameters.example.json",
+  "infra/azure/hosting/site-identity.bicep",
+  "infra/azure/hosting/registry-pull.bicep",
+  "infra/azure/hosting/monitor.bicep",
+  "infra/azure/hosting/monitor.parameters.example.json",
+  "scripts/azure-site-image-release.mjs",
+  "scripts/azure-site-image-release.node-test.mjs",
+  "scripts/migration/hosting-image-receipt.mjs",
+  "scripts/migration/hosting-image-receipt.test.mjs",
+  "scripts/migration/site-candidate-smoke.mjs",
+  "scripts/migration/site-candidate-smoke.test.mjs",
+  // CI/validation policy and its tests execute on the runner. Changes still need
+  // policy QA and live smoke, but no unrelated backup-app image deployment.
+  "scripts/production-validation-context.mjs",
+  "scripts/production-validation-context.test.mjs",
+  "scripts/ci-production-boundary.test.mjs",
+]);
 
 function boolOutput(value) {
   return value ? "true" : "false";
@@ -86,10 +110,13 @@ function normalizeClientReadinessRoutes(value) {
 }
 
 export function productionAppReleaseRelevantPath(filePath) {
-  const path = normalizeOptionalText(filePath);
+  if (typeof filePath !== "string") return true;
+  const path = filePath;
   if (!path) return false;
+  if (/[\r\n\0\\]/.test(path) || path.split("/").some((part) => !part || part === "." || part === "..")) return true;
   return !(
-    path === "AGENTS.md"
+    NON_APP_RELEASE_FILES.has(path)
+    || path === "AGENTS.md"
     || path === "README.md"
     || path === "knip.jsonc"
     || path === "tsconfig.unused.json"
@@ -102,17 +129,33 @@ export function productionAppReleaseRelevantPath(filePath) {
 }
 
 export function requiresProductionAppRelease(changedFiles) {
-  return changedFiles.some(productionAppReleaseRelevantPath);
+  return !Array.isArray(changedFiles) || changedFiles.some(productionAppReleaseRelevantPath);
+}
+
+export function productionAppChangedFilesFromGit({ before, after, cwd = process.cwd() }) {
+  if (![before, after].every((sha) => /^[a-f0-9]{40}$/i.test(sha ?? "") && !/^0+$/.test(sha)) || before === after) {
+    return [UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED];
+  }
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", before, after], { cwd, stdio: "ignore" });
+    // Disabling rename detection retains both deleted runtime and added site
+    // paths. NUL delimiters avoid Git quoting or newline-based path truncation.
+    const output = execFileSync("git", ["diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", before, after, "--"],
+      { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return output.split("\0").filter(Boolean);
+  } catch {
+    return [UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED];
+  }
 }
 
 function readSingleCommitChangedFilesFromGit() {
   try {
-    execFileSync("git", ["rev-parse", "HEAD^"], { stdio: "ignore" });
+    const before = execFileSync("git", ["rev-parse", "HEAD^1"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const after = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return productionAppChangedFilesFromGit({ before, after });
   } catch {
-    return [];
+    return [UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED];
   }
-  const output = execFileSync("git", ["diff", "--name-only", "HEAD^", "HEAD"], { encoding: "utf8" });
-  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 export async function changedFilesForEvent({
@@ -181,17 +224,19 @@ async function changedFilesFromCiReleaseContext({ releaseContextPath, event }) {
   const context = JSON.parse(text);
   const eventSha = validateGitSha(event?.workflow_run?.head_sha, "workflow_run.head_sha");
   const contextAfter = validateGitSha(context?.after, "ci_release_context.after");
+  const contextBefore = validateGitSha(context?.before, "ci_release_context.before");
   if (eventSha && contextAfter && eventSha !== contextAfter) {
     throw new Error(`CI release context SHA does not match workflow_run.head_sha; context_after=${contextAfter} workflow_run_head_sha=${eventSha}`);
   }
 
-  if (Array.isArray(context?.changedFiles)) {
-    const changedFiles = [...new Set(context.changedFiles.map(normalizeOptionalText).filter(Boolean))];
-    if (changedFiles.length > 0) return changedFiles;
+  if (context?.source !== "ci-push-range" || !eventSha || !contextAfter || !contextBefore
+    || /^0+$/.test(contextBefore) || contextBefore === contextAfter) {
+    return [UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED];
   }
 
-  if (context?.requiresProductionAppRelease === false || context?.skipReleaseMatch === true) {
-    return [];
+  if (Array.isArray(context?.changedFiles) && context.changedFiles.every((path) => typeof path === "string" && path.length > 0)) {
+    const changedFiles = [...new Set(context.changedFiles)];
+    if (changedFiles.length > 0 || (context?.requiresProductionAppRelease === false && context?.skipReleaseMatch === true)) return changedFiles;
   }
 
   return [UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED];
@@ -274,12 +319,37 @@ function parseArgs(argv) {
     const [name, ...valueParts] = arg.split("=");
     const value = valueParts.join("=");
     if (name === "--output") args.output = value;
+    if (name === "--classify-app-release") args.classifyAppRelease = true;
   }
   return args;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.classifyAppRelease) {
+    const before = process.env.RELEASE_CONTEXT_BEFORE ?? "";
+    const after = process.env.RELEASE_CONTEXT_AFTER ?? "";
+    const releaseContextPath = process.env.PRODUCTION_VALIDATION_CI_RELEASE_CONTEXT_PATH;
+    let changedFiles;
+    try {
+      changedFiles = releaseContextPath
+        ? await changedFilesForEvent({ eventName: "workflow_run", event: { workflow_run: { head_sha: after } }, releaseContextPath })
+        : productionAppChangedFilesFromGit({ before, after });
+    } catch {
+      // Recovery still runs its health/auth/schema checks when range evidence is
+      // unreadable or stale, but must also match the failed app release exactly.
+      changedFiles = [UNKNOWN_PRODUCTION_APP_RELEASE_REQUIRED];
+    }
+    const requiresAppRelease = requiresProductionAppRelease(changedFiles);
+    const context = { source: "ci-push-range", before, after, changedFiles,
+      skipReleaseMatch: !requiresAppRelease, requiresProductionAppRelease: requiresAppRelease };
+    if (process.env.RELEASE_CONTEXT_PATH) await writeFile(process.env.RELEASE_CONTEXT_PATH, `${JSON.stringify(context, null, 2)}\n`);
+    if (args.output) await writeFile(args.output, `${formatGithubOutput({
+      skip_release_match: boolOutput(!requiresAppRelease), requires_app_release: boolOutput(requiresAppRelease),
+    })}\n`, { flag: "a" });
+    console.log(JSON.stringify(context, null, 2));
+    return;
+  }
   const event = await readEvent(process.env.GITHUB_EVENT_PATH);
   const eventName = process.env.GITHUB_EVENT_NAME;
   const changedFiles = await changedFilesForEvent({
