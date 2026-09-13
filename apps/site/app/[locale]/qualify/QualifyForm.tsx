@@ -43,8 +43,7 @@ function QualifyFormInner() {
     setLoading(true);
     setError(null);
     try {
-      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://app.corgtex.com";
-      const res = await fetch(`${appUrl}/api/demo-leads/qualify`, {
+      const res = await fetch("/api/demo-leads/qualify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -61,7 +60,8 @@ function QualifyFormInner() {
         setSuccess(true);
       } else {
         const data = await res.json();
-        setError(data.error || t("genericError"));
+        const message = typeof data.error === "string" ? data.error : data.error?.message;
+        setError(typeof message === "string" ? message : t("genericError"));
       }
     } catch {
       setError(t("networkError"));
