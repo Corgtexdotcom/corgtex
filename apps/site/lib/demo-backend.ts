@@ -28,6 +28,14 @@ function unavailable(status = 502) {
   return NextResponse.json({ error: "Demo service is temporarily unavailable. Please try again." }, { status });
 }
 
+async function cancelRejectedBody(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Cleanup must not replace the upstream status or expose cancellation errors.
+  }
+}
+
 function publicError(data: Record<string, unknown>) {
   const error = data.error;
   const message = typeof error === "string" ? error
@@ -69,10 +77,12 @@ export async function forwardDemoRequest(request: NextRequest, stage: "capture" 
       cache: "no-store",
     });
     if (response.status >= 500) {
+      await cancelRejectedBody(response);
       reportFailure(stage, "upstream_status", response.status);
       return unavailable(response.status);
     }
     if (response.status >= 300 && response.status < 400) {
+      await cancelRejectedBody(response);
       reportFailure(stage, "upstream_redirect", response.status);
       return unavailable();
     }

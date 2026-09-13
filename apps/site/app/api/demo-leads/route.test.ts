@@ -142,7 +142,37 @@ describe("site demo backend continuity", () => {
     expect(await (await qualify(request())).json()).toEqual({ error: "Demo service is temporarily unavailable. Please try again." });
   });
 
-  it("does not retry or fall back to another backend after a redirect", async () => {
+  it.each([
+    { stage: "capture", handler: capture, status: 503 },
+    { stage: "qualify", handler: qualify, status: 503 },
+    { stage: "capture", handler: capture, status: 307 },
+    { stage: "qualify", handler: qualify, status: 307 },
+  ])("cancels rejected $stage response bodies at status $status even when cleanup rejects", async ({ stage, handler, status }) => {
+    for (const rejects of [false, true]) {
+      vi.mocked(console.warn).mockClear();
+      fetchMock.mockClear();
+      const cancel = vi.fn(() => rejects ? Promise.reject(new Error("private cancellation detail")) : Promise.resolve());
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode("private upstream body")); },
+        cancel,
+      });
+      fetchMock.mockResolvedValue(new Response(body, { status }));
+      const response = await handler(request());
+      expect(cancel).toHaveBeenCalledExactlyOnceWith(undefined);
+      expect(body.locked).toBe(false);
+      expect(await body.getReader().read()).toEqual({ done: true, value: undefined });
+      expect(response.status).toBe(status >= 500 ? status : 502);
+      expect(await response.json()).toEqual({ error: "Demo service is temporarily unavailable. Please try again." });
+      expect(vi.mocked(console.warn).mock.calls).toEqual([
+        ["Demo proxy failure", { stage, failureClass: status >= 500 ? "upstream_status" : "upstream_redirect", status }],
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("defensively rejects a mocked 307 response without retry or fallback", async () => {
+    // Native fetch with redirect: "error" rejects instead of returning this response.
+    // This covers only the defensive status branch, not real redirect classification.
     fetchMock.mockResolvedValue(new Response(null, { status: 307, headers: { Location: "https://other.invalid" } }));
     const response = await qualify(request());
     expect(response.status).toBe(502);
