@@ -9,10 +9,15 @@ export const GET = withWorkspaceRoute(async (_request, { actor, workspaceId, par
   const disabled = await disabledWorkspaceFeatureResponse(workspaceId, "BUILD_ARTIFACTS");
   if (disabled) return disabled;
 
-  const { signedUrl } = await getBuildArtifactAssetSignedUrl(actor, {
+  const { signedUrl, file } = await getBuildArtifactAssetSignedUrl(actor, {
     workspaceId,
     artifactId: params.artifactId,
     assetId: params.assetId,
   });
+  if (file) return new NextResponse(new Uint8Array(file.data), { headers: {
+    "Content-Type": "application/octet-stream", "Content-Disposition": "attachment",
+    "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+  } });
+  if (!signedUrl) return new NextResponse(null, { status: 404 });
   return NextResponse.redirect(signedUrl, 302);
 });

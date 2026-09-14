@@ -19,7 +19,9 @@ afterEach(() => {
 });
 
 function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record<string, string | undefined> = {}) {
+  prismaMock.workspaceSupportGrant ??= { findUnique: vi.fn().mockResolvedValue(null) };
   vi.doMock("@corgtex/shared", () => ({
+    setSupportAuthorizationActor: vi.fn(),
     prisma: prismaMock,
     env: {
       APP_URL: "https://app.test",
@@ -748,6 +750,9 @@ describe("MCP OAuth workspace membership revalidation", () => {
       select: {
         id: true,
         isActive: true,
+        role: true,
+        workspaceId: true,
+        userId: true,
       },
     });
   });

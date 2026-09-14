@@ -1,6 +1,7 @@
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
+import { supportCapabilityVersion } from "./workspace-support-access";
 import { requireWorkspaceMembership } from "./auth";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 
@@ -165,6 +166,7 @@ export async function issueAuthorizationCode(actor: AppActor, params: {
 
   await prisma.oAuthAuthorizationCode.create({
     data: {
+      supportGrantVersion: await supportCapabilityVersion(actor.user.id, params.workspaceId),
       appId: app.id,
       userId: actor.user.id,
       workspaceId: params.workspaceId,
@@ -218,6 +220,7 @@ export async function exchangeAuthorizationCode(params: {
     throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
   }
 
+  await supportCapabilityVersion(authCode.userId, authCode.workspaceId, authCode.supportGrantVersion);
   // Mark code as used
   await prisma.oAuthAuthorizationCode.update({
     where: { id: authCode.id },
@@ -233,6 +236,7 @@ export async function exchangeAuthorizationCode(params: {
   const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
   const tokenParams = {
+    supportGrantVersion: authCode.supportGrantVersion,
     appId: app.id,
     userId: authCode.userId,
     workspaceId: authCode.workspaceId,
@@ -301,6 +305,8 @@ export async function refreshAccessToken(params: {
     throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
   }
 
+  await supportCapabilityVersion(token.userId, token.workspaceId, token.supportGrantVersion);
+
   const accessTokenToken = `at_${randomOpaqueToken()}`;
   const refreshTokenToken = `rt_${randomOpaqueToken()}`; // Optional: rotating refresh tokens
 
@@ -360,6 +366,8 @@ export async function resolveOAuthAccessToken(tokenString: string) {
   });
 
   if (!user) return null;
+
+  await supportCapabilityVersion(user.id, token.workspaceId, token.supportGrantVersion);
 
   const actor: AppActor = {
     kind: "user",

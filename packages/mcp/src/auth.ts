@@ -1,5 +1,5 @@
 import type { AppActor } from "@corgtex/shared";
-import { env } from "@corgtex/shared";
+import { env, beginAuthorizationContext } from "@corgtex/shared";
 import { resolveAgentActorFromBearer, describeScope, requireWorkspaceMembership, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
 import type { McpOAuthProviderKey } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
@@ -63,6 +63,7 @@ export async function authenticateMcpRequest(
   authorizationHeader: string | null,
   options: { resourceUrl?: string } = {},
 ): Promise<McpSessionContext> {
+  beginAuthorizationContext();
   if (!authorizationHeader?.startsWith("Bearer ")) {
     throw new AppError(401, "UNAUTHENTICATED", "Missing or invalid Authorization header. Use: Bearer <token>");
   }

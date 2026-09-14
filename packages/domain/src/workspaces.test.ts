@@ -64,6 +64,7 @@ describe("workspaces domain", () => {
         name: "New Workspace",
         slug: "new-workspace-",
         description: "Description",
+        supportOwnerUserId: "user-1",
       },
     });
     expect(prismaMock.member.create).toHaveBeenCalledWith({

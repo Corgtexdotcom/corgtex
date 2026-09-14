@@ -1,4 +1,5 @@
 import type { MemberRole, Prisma } from "@prisma/client";
+import { requireUnmanagedMember } from "./workspace-support-access";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -142,6 +143,9 @@ export async function addMemberEmailAlias(actor: AppActor, params: {
     allowedRoles: ["ADMIN"],
   });
 
+  const member = await prisma.member.findUnique({ where: { id: params.memberId }, select: { workspaceId: true, userId: true } });
+  invariant(member?.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+  await requireUnmanagedMember(prisma, params.workspaceId, member.userId);
   const alias = await prisma.$transaction((tx) => writeMemberEmailAlias(tx, {
     workspaceId: params.workspaceId,
     memberId: params.memberId,
@@ -409,6 +413,8 @@ export async function mergeWorkspaceMembers(actor: AppActor, params: {
     ]);
     invariant(source && source.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Source member not found.");
     invariant(target && target.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Target member not found.");
+    await requireUnmanagedMember(tx, params.workspaceId, source.userId);
+    await requireUnmanagedMember(tx, params.workspaceId, target.userId);
     invariant(!source.mergedIntoMemberId, 400, "INVALID_STATE", "Source member has already been merged.");
     invariant(!target.mergedIntoMemberId && target.isActive, 400, "INVALID_STATE", "Target member must be active and unmerged.");
     invariant(source.kind === target.kind, 400, "INVALID_INPUT", "Source and target member kinds must match.");

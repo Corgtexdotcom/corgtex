@@ -363,7 +363,6 @@ function canReadGoalRecord(
     authorUserId?: string | null;
   },
 ) {
-  if (actor.kind === "user" && actor.user.globalRole === "OPERATOR") return true;
   if (goal.isPrivate !== true) return true;
   if (goal.status !== "DRAFT") return false;
   if (actor.kind === "agent") return true;

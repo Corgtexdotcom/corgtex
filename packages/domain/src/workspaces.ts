@@ -33,6 +33,7 @@ export async function createWorkspace(actor: AppActor, params: {
         name,
         slug,
         description: params.description?.trim() || null,
+        supportOwnerUserId: actor.user.id,
       },
     });
 

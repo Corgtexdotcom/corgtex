@@ -3,6 +3,8 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, selfServeOpsMock, sendEmailMock, sharedEnv } = vi.hoisted(() => {
   const prisma = {
+    workspace: { findUnique: vi.fn().mockResolvedValue(null) },
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),
     member: {
       findMany: vi.fn(),
@@ -76,6 +78,7 @@ const { prismaMock, selfServeOpsMock, sendEmailMock, sharedEnv } = vi.hoisted(()
 });
 
 vi.mock("@corgtex/shared", () => ({
+  setSupportAuthorizationActor: vi.fn(),
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash:${value}`),
   randomOpaqueToken: vi.fn(() => "opaque-token"),
@@ -88,6 +91,19 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("./self-serve-ops", () => ({
   maybeCaptureSelfServeSetupEmail: selfServeOpsMock.maybeCaptureSelfServeSetupEmail,
 }));
+
+vi.mock("./auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./auth")>();
+  return { ...actual, requireWorkspaceMembership: (params: Parameters<typeof actual.requireWorkspaceMembership>[0]) => {
+    // The operator fixture is also an explicit workspace admin; global role alone grants nothing.
+    if (params.actor.kind === "user" && params.actor.user.id === "admin-user" && params.actor.user.globalRole === "OPERATOR") {
+      return actual.requireWorkspaceMembership({ ...params, resolvedMembership: {
+        id: "fixture-admin", workspaceId: params.workspaceId, userId: "admin-user", role: "ADMIN", isActive: true,
+      } });
+    }
+    return actual.requireWorkspaceMembership(params);
+  } };
+});
 
 const actor: AppActor = {
   kind: "user" as const,

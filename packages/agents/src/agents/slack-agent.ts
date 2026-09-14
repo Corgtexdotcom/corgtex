@@ -387,7 +387,7 @@ async function undoLastSlackCreatedItem(actor: HumanActor, params: SlackAgentJob
 async function loadActor(workspaceId: string, userId: string): Promise<HumanActor | null> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true, displayName: true, globalRole: true },
+    select: { id: true, email: true, displayName: true, globalRole: true, isSupportAccount: true },
   });
   if (!user) return null;
 

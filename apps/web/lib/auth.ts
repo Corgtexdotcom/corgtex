@@ -1,10 +1,14 @@
 import { cookies } from "next/headers";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import type { NextRequest } from "next/server";
 import { clearSession, isGlobalOperator, resolveAgentActorFromBearer, resolveControlPlaneAgentFromBearer, resolveSessionActor } from "@corgtex/domain";
 import { env, isDatabaseUnavailableError, sessionCookieName } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
+import { beginAuthorizationContext, setSupportAuthorizationActor } from "@corgtex/shared";
 import { AppError } from "@corgtex/domain";
+import { getWorkspaceSupportGrant, requireWorkspaceMembership } from "@corgtex/domain";
+import { isWorkspaceAuthorizedProviderRoute, requireSupportRequestAccess, workspaceIdFromPath } from "./support-request-access";
 
 const SESSION_UNAVAILABLE_REDIRECT = "/login?error=session-unavailable";
 const SESSION_RESOLUTION_TIMEOUT_MS = 15_000;
@@ -42,6 +46,7 @@ function assertAllowedInControlPlaneMode(actor: AppActor) {
 }
 
 export async function resolveRequestActor(request: NextRequest) {
+  beginAuthorizationContext();
   const authorization = request.headers.get("authorization");
   if (authorization?.startsWith("Bearer ")) {
     const bearer = authorization.slice("Bearer ".length).trim();
@@ -55,6 +60,8 @@ export async function resolveRequestActor(request: NextRequest) {
 
     if (agentActor) {
       assertAllowedInControlPlaneMode(agentActor);
+      setSupportAuthorizationActor(agentActor);
+      await requireSupportRequestAccess(agentActor, request.nextUrl.pathname);
       return agentActor;
     }
   }
@@ -77,6 +84,8 @@ export async function resolveRequestActor(request: NextRequest) {
   }
 
   assertAllowedInControlPlaneMode(actor);
+  setSupportAuthorizationActor(actor);
+  await requireSupportRequestAccess(actor, request.nextUrl.pathname);
   return actor;
 }
 
@@ -100,6 +109,7 @@ export async function resolveControlPlaneRequestActor(request: NextRequest) {
 }
 
 export async function requirePageActor() {
+  beginAuthorizationContext();
   const cookieStore = await cookies();
   const token = cookieStore.get(sessionCookieName())?.value;
   if (!token) {
@@ -120,9 +130,32 @@ export async function requirePageActor() {
     redirect("/login");
   }
 
+  setSupportAuthorizationActor(actor);
   if (env.CONTROL_PLANE_MODE && !isGlobalOperator(actor)) {
     redirect("/login?error=control-plane-only");
   }
+
+  const requestHeaders = await headers();
+  const pathname = requestHeaders.get("x-corgtex-pathname") ?? "";
+  const workspaceId = workspaceIdFromPath(pathname);
+  if (!pathname) throw new AppError(403, "AUTHORIZATION_CONTEXT_REQUIRED", "Page authorization context is unavailable.");
+  if (actor.kind === "user") {
+    const supportPath = /^\/(?:en\/|es\/)?support(?:\/[^/]+)?\/?$/.test(pathname);
+    if (supportPath) {
+      if (requestHeaders.has("next-action")) throw new AppError(403, "SUPPORT_ACCESS_RESTRICTED", "This action is unavailable on the support setup page.");
+      return actor;
+    }
+    if (isWorkspaceAuthorizedProviderRoute(pathname) && !requestHeaders.has("next-action")) return actor;
+    // Consent enumerates only explicit memberships; issuance rechecks the selected workspace.
+    if (/^\/(?:api\/|en\/|es\/)?oauth\/authorize$/.test(pathname) && !requestHeaders.has("next-action")) return actor;
+    const grant = workspaceId ? await getWorkspaceSupportGrant(actor, workspaceId) : null;
+    if (grant && (!grant.isActive || grant.role === "SETUP")) {
+      if (requestHeaders.has("next-action")) throw new AppError(403, "SUPPORT_CONTENT_RESTRICTED", "Content access is restricted.");
+      redirect(grant.isActive ? `/support/${workspaceId}` : "/support");
+    }
+  }
+
+  if (workspaceId) await requireWorkspaceMembership({ actor, workspaceId });
 
   return actor;
 }

@@ -5,6 +5,7 @@ export * from "./db-errors";
 export * from "./env";
 export * from "./rate-limiter";
 export * from "./types";
+export * from "./support-context";
 export * from "./json";
 export * from "./email";
 export * from "./branding";

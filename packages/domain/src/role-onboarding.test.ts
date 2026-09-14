@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $executeRaw: vi.fn(),
     $transaction: vi.fn(),
     roleOnboardingSession: {
@@ -32,7 +33,21 @@ const { prismaMock } = vi.hoisted(() => {
   return { prismaMock: prisma };
 });
 
+vi.mock("./auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./auth")>();
+  return { ...actual, requireWorkspaceMembership: (params: Parameters<typeof actual.requireWorkspaceMembership>[0]) => {
+    // Operator fixtures also have an explicit ADMIN membership.
+    if (params.actor.kind === "user" && params.actor.user.globalRole === "OPERATOR") {
+      return actual.requireWorkspaceMembership({ ...params, resolvedMembership: {
+        id: "fixture-admin", workspaceId: params.workspaceId, userId: params.actor.user.id, role: "ADMIN", isActive: true,
+      } });
+    }
+    return actual.requireWorkspaceMembership(params);
+  } };
+});
+
 vi.mock("@corgtex/shared", () => ({
+  setSupportAuthorizationActor: vi.fn(),
   prisma: prismaMock,
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
   env: {

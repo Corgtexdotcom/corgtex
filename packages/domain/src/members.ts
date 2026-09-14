@@ -4,6 +4,7 @@ import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from 
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
+import { requireUnmanagedMember } from "./workspace-support-access";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
@@ -393,6 +394,7 @@ export async function createMember(actor: AppActor, params: {
       },
     });
 
+    await requireUnmanagedMember(tx, params.workspaceId, user.id);
     const member = await tx.member.upsert({
       where: {
         workspaceId_userId: {
@@ -507,6 +509,7 @@ export async function updateMember(actor: AppActor, params: {
     });
 
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
@@ -679,6 +682,7 @@ export async function resendMemberAccessLink(actor: AppActor, params: {
     });
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
 
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
     const token = await issueSetupToken(tx, member.userId);
     await tx.auditLog.create({
       data: {

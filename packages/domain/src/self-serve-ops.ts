@@ -4,7 +4,6 @@ import {
   decryptSecret,
   encryptSecret,
   env,
-  hashPassword,
   prisma,
   randomOpaqueToken,
   sha256,
@@ -13,10 +12,7 @@ import {
 import type { AgentActor, AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { isGlobalOperator } from "./auth";
-import { activeRoleAssignmentWhere } from "./role-assignment-activity";
 
-const SUPPORT_SESSION_TTL_MS = 60 * 60 * 1000;
-const SUPPORT_EMAIL_DOMAIN = "corgtex.local";
 const CONTROL_PLANE_READ_SCOPE = "control-plane:read";
 const CONTROL_PLANE_DEPLOYMENT_WRITE_ROLES = new Set<CustomerDeploymentAccessRole>(["SUPPORT_ADMIN", "CUSTOMER_IT_ADMIN"]);
 const REGISTRY_SYNC_SCHEMA_VERSION = "self-serve-registry-sync-v1";
@@ -934,262 +930,25 @@ export async function listSelfServeCustomerRegistry(actor: AppActor, params: {
   };
 }
 
-function supportEmailForWorkspace(workspaceId: string, sessionNonce: string) {
-  const workspaceKey = workspaceId.slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase() || "workspace";
-  const sessionKey = sessionNonce.slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase()
-    || randomOpaqueToken().slice(0, 12).replace(/[^a-z0-9]/gi, "").toLowerCase()
-    || "session";
-  return `support+${workspaceKey}-${sessionKey}@${SUPPORT_EMAIL_DOMAIN}`;
-}
-
-async function cloneRoleAssignments(tx: Prisma.TransactionClient, params: {
-  sourceMemberId: string | null;
-  supportMemberId: string;
-}) {
-  await tx.roleAssignment.deleteMany({ where: { memberId: params.supportMemberId } });
-  if (!params.sourceMemberId) return;
-  const assignments = await tx.roleAssignment.findMany({
-    where: {
-      memberId: params.sourceMemberId,
-      ...activeRoleAssignmentWhere(),
-    },
-    select: { roleId: true, expiresAt: true, transferReason: true },
-  });
-  if (assignments.length === 0) return;
-  await tx.roleAssignment.createMany({
-    data: assignments.map((assignment) => ({
-      memberId: params.supportMemberId,
-      roleId: assignment.roleId,
-      expiresAt: assignment.expiresAt,
-      transferReason: assignment.transferReason,
-    })),
-    skipDuplicates: true,
-  });
-}
-
-async function createSupportLoginSession(tx: Prisma.TransactionClient, params: {
-  userId: string;
-  expiresAt: Date;
-  ipAddress?: string | null;
-  userAgent?: string | null;
-}) {
-  const token = randomOpaqueToken();
-  await tx.session.create({
-    data: {
-      userId: params.userId,
-      tokenHash: sha256(token),
-      expiresAt: params.expiresAt,
-      ipAddress: params.ipAddress,
-      userAgent: params.userAgent,
-    },
-  });
-  return { token, expiresAt: params.expiresAt };
-}
-
-export async function createSelfServeSupportSession(actor: AppActor, params: {
+// Legacy impersonation URLs remain recognizable but never mint or consume access.
+export async function createSelfServeSupportSession(_actor: AppActor, _params: {
   deploymentId?: string | null;
   workspaceId?: string | null;
   targetMemberId?: string | null;
   reason: string;
-}) {
-  requireSelfServeControlPlaneScope(actor, "control-plane:support:write");
-  if (params.deploymentId?.trim()) {
-    await requireSelfServeControlPlaneAccess(actor, { deploymentId: params.deploymentId.trim(), write: true });
-  } else {
-    invariant(isGlobalOperator(actor) || isControlPlaneAgent(actor), 403, "FORBIDDEN", "Control plane access is required.");
-  }
-
-  const deploymentId = params.deploymentId?.trim() || null;
-  let deployment = deploymentId
-    ? await prisma.customerDeployment.findUnique({
-      where: { id: deploymentId },
-      select: { id: true, managedWorkspaceId: true, label: true },
-    })
-    : null;
-  invariant(!deploymentId || deployment, 404, "NOT_FOUND", "Customer deployment not found.");
-  const requestedWorkspaceId = params.workspaceId?.trim() || null;
-  if (!deployment && requestedWorkspaceId) {
-    deployment = await prisma.customerDeployment.findFirst({
-      where: { managedWorkspaceId: requestedWorkspaceId },
-      select: { id: true, managedWorkspaceId: true, label: true },
-    });
-  }
-  const trialBoundary = !deployment && requestedWorkspaceId
-    ? await prisma.procurementTrial.findFirst({
-      where: { workspaceId: requestedWorkspaceId },
-      select: { id: true },
-    })
-    : null;
-  invariant(deployment || trialBoundary, 404, "NOT_FOUND", "Self-serve deployment or trial not found for support session.");
-  const workspaceId = requestedWorkspaceId || deployment?.managedWorkspaceId || "";
-  invariant(workspaceId, 400, "INVALID_INPUT", "A managed workspace is required for support sessions.");
-  invariant(!deployment || workspaceId === deployment.managedWorkspaceId, 400, "INVALID_INPUT", "Workspace does not match the deployment.");
-
-  const workspace = await prisma.workspace.findUnique({
-    where: { id: workspaceId },
-    select: { id: true, name: true, slug: true },
-  });
-  invariant(workspace, 404, "NOT_FOUND", "Workspace not found.");
-
-  const requestedTargetMemberId = params.targetMemberId?.trim() || null;
-  const targetMember = requestedTargetMemberId
-    ? await prisma.member.findUnique({
-      where: { id: requestedTargetMemberId },
-      select: { id: true, workspaceId: true, role: true, user: { select: { email: true, displayName: true } } },
-    })
-    : null;
-  invariant(!requestedTargetMemberId || targetMember, 404, "NOT_FOUND", "Target member not found.");
-  invariant(!targetMember || targetMember.workspaceId === workspaceId, 400, "INVALID_INPUT", "Target member does not belong to the workspace.");
-  const supportRole: MemberRole = targetMember?.role ?? "ADMIN";
-  const secret = randomOpaqueToken();
-  const supportEmail = supportEmailForWorkspace(workspaceId, randomOpaqueToken());
-  const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
-  const reason = params.reason.trim();
-  invariant(reason.length > 0, 400, "INVALID_INPUT", "Support session reason is required.");
-
-  const created = await prisma.$transaction(async (tx) => {
-    const supportUser = await tx.user.create({
-      data: {
-        email: supportEmail,
-        displayName: "Corgtex Support",
-        passwordHash: hashPassword(randomOpaqueToken()),
-      },
-      select: { id: true, email: true, displayName: true },
-    });
-
-    const supportMember = await tx.member.create({
-      data: {
-        workspaceId,
-        userId: supportUser.id,
-        role: supportRole,
-        kind: "SYSTEM",
-        isActive: true,
-      },
-      select: { id: true, role: true },
-    });
-    await cloneRoleAssignments(tx, {
-      sourceMemberId: targetMember?.id ?? null,
-      supportMemberId: supportMember.id,
-    });
-
-    const operation = await tx.supportOperation.create({
-      data: {
-        deploymentId: deployment?.id ?? null,
-        workspaceId,
-        actorUserId: actorUserId(actor),
-        actorLabel: actorLabel(actor),
-        action: "support.session.open",
-        reason,
-        status: "COMPLETED",
-        startedAt: new Date(),
-        completedAt: new Date(),
-        inputSummary: redactObject({
-          targetMemberId: targetMember?.id ?? null,
-          targetMemberEmail: targetMember?.user.email ?? null,
-          clonedRole: supportRole,
-        }) as Prisma.InputJsonObject,
-        resultSummary: { workspaceId, supportMemberId: supportMember.id },
-      },
-      select: { id: true },
-    });
-
-    const session = await tx.selfServeSupportSession.create({
-      data: {
-        deploymentId: deployment?.id ?? null,
-        workspaceId,
-        operationId: operation.id,
-        supportUserId: supportUser.id,
-        supportMemberId: supportMember.id,
-        targetMemberId: targetMember?.id ?? null,
-        tokenHash: sha256(secret),
-        reason,
-        expiresAt,
-      },
-      select: { id: true },
-    });
-
-    await tx.auditLog.create({
-      data: {
-        workspaceId,
-        actorUserId: actorUserId(actor),
-        action: "support.session.opened",
-        entityType: "SelfServeSupportSession",
-        entityId: session.id,
-        meta: toInputJson({
-          deploymentId: deployment?.id ?? null,
-          operationId: operation.id,
-          targetMemberId: targetMember?.id ?? null,
-          supportMemberId: supportMember.id,
-          expiresAt: expiresAt.toISOString(),
-        }) as Prisma.InputJsonObject,
-      },
-    });
-
-    return { operation, session, supportMember, supportUser };
-  });
-
-  return {
-    id: created.session.id,
-    operationId: created.operation.id,
-    workspaceId,
-    supportUser: created.supportUser,
-    supportMember: created.supportMember,
-    targetMemberId: targetMember?.id ?? null,
-    url: `${env.APP_URL.replace(/\/$/, "")}/support/sessions/${encodeURIComponent(secret)}`,
-    expiresAt,
-  };
+}): Promise<{
+  id: string; operationId: string; workspaceId: string;
+  supportUser: { id: string; email: string; displayName: string | null };
+  supportMember: { id: string; role: MemberRole };
+  targetMemberId: string | null; url: string; expiresAt: Date;
+}> {
+  throw new AppError(403, "NAMED_SUPPORT_ACCOUNT_REQUIRED", "Use an owner-approved named support account.");
 }
 
-export async function consumeSelfServeSupportSession(params: {
+export async function consumeSelfServeSupportSession(_params: {
   token: string;
   ipAddress?: string | null;
   userAgent?: string | null;
-}) {
-  const token = params.token.trim();
-  invariant(token.length > 0, 400, "INVALID_INPUT", "Support session token is required.");
-  const now = new Date();
-  const supportSession = await prisma.selfServeSupportSession.findUnique({
-    where: { tokenHash: sha256(token) },
-  });
-  invariant(supportSession, 404, "NOT_FOUND", "Support session not found.");
-  invariant(!supportSession.usedAt, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
-  invariant(supportSession.expiresAt > now, 410, "SUPPORT_SESSION_EXPIRED", "Support session has expired.");
-
-  const session = await prisma.$transaction(async (tx) => {
-    const claim = await tx.selfServeSupportSession.updateMany({
-      where: {
-        id: supportSession.id,
-        usedAt: null,
-        expiresAt: { gt: now },
-      },
-      data: { usedAt: now },
-    });
-    invariant(claim.count === 1, 410, "SUPPORT_SESSION_USED", "Support session has already been used.");
-
-    const loginSession = await createSupportLoginSession(tx, {
-      userId: supportSession.supportUserId,
-      expiresAt: supportSession.expiresAt,
-      ipAddress: params.ipAddress,
-      userAgent: params.userAgent,
-    });
-    await tx.auditLog.create({
-      data: {
-        workspaceId: supportSession.workspaceId,
-        actorUserId: supportSession.supportUserId,
-        action: "support.session.consumed",
-        entityType: "SelfServeSupportSession",
-        entityId: supportSession.id,
-        meta: {
-          operationId: supportSession.operationId,
-          targetMemberId: supportSession.targetMemberId,
-        },
-      },
-    });
-    return loginSession;
-  });
-
-  return {
-    workspaceId: supportSession.workspaceId,
-    session,
-  };
+}): Promise<{ workspaceId: string; session: { token: string; expiresAt: Date } }> {
+  throw new AppError(403, "NAMED_SUPPORT_ACCOUNT_REQUIRED", "Use an owner-approved named support account.");
 }

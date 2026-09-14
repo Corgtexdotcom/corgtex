@@ -6,7 +6,11 @@ const {
   handleRouteError,
   resolveKnowledgeAccessDomains,
   resolveRequestActor,
+  getWorkspaceSupportGrant,
+  requireWorkspaceMembership,
+  getFile,
 } = vi.hoisted(() => ({
+  getWorkspaceSupportGrant: vi.fn(), requireWorkspaceMembership: vi.fn(), getFile: vi.fn(),
   brainSourceFindFirst: vi.fn(),
   getSignedUrl: vi.fn(),
   handleRouteError: vi.fn(),
@@ -28,6 +32,8 @@ class MockAppError extends Error {
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
   resolveKnowledgeAccessDomains,
+  getWorkspaceSupportGrant,
+  requireWorkspaceMembership,
 }));
 
 vi.mock("@corgtex/shared", () => ({
@@ -41,6 +47,7 @@ vi.mock("@corgtex/shared", () => ({
 vi.mock("@corgtex/storage", () => ({
   defaultStorage: {
     getSignedUrl,
+    get: getFile,
   },
 }));
 
@@ -74,6 +81,9 @@ describe("GET /api/workspaces/[workspaceId]/brain/sources/[sourceId]/file", () =
   beforeEach(() => {
     vi.clearAllMocks();
     resolveRequestActor.mockResolvedValue(actor);
+    getWorkspaceSupportGrant.mockReset().mockResolvedValue(null);
+    requireWorkspaceMembership.mockReset().mockResolvedValue({ role: "ADMIN" });
+    getFile.mockReset().mockResolvedValue({ data: Buffer.from("fixture bytes") });
     resolveKnowledgeAccessDomains.mockResolvedValue(["WORKSPACE"]);
     brainSourceFindFirst.mockResolvedValue({ fileStorageKey: "sources/source-1/report.pdf" });
     getSignedUrl.mockResolvedValue("https://storage.example.test/signed-report");
@@ -104,6 +114,26 @@ describe("GET /api/workspaces/[workspaceId]/brain/sources/[sourceId]/file", () =
     expect(getSignedUrl).toHaveBeenCalledWith("sources/source-1/report.pdf", 3600);
     expect(response.status).toBe(302);
     expect(response.headers.get("location")).toBe("https://storage.example.test/signed-report");
+  });
+
+  it("uses this workspace's Full grant, not an account flag, to avoid issuing a bearer download URL", async () => {
+    getWorkspaceSupportGrant.mockResolvedValue({ role: "FULL", isActive: true, version: 1 });
+    const { GET } = await import("./route");
+    const response = await GET(request(), context());
+    expect(getWorkspaceSupportGrant).toHaveBeenCalledWith(actor, "workspace-1");
+    expect(getSignedUrl).not.toHaveBeenCalled();
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "workspace-1" });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("fixture bytes");
+  });
+
+  it("does not restrict an ordinary membership's downloads because of historical account metadata", async () => {
+    resolveRequestActor.mockResolvedValue({ ...actor, user: { ...actor.user, isSupportAccount: true } });
+    const { GET } = await import("./route");
+    const response = await GET(request(), context());
+    expect(response.status).toBe(302);
+    expect(getSignedUrl).toHaveBeenCalledOnce();
+    expect(getFile).not.toHaveBeenCalled();
   });
 
   it("returns not found without signing when the source is outside the actor's domains", async () => {

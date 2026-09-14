@@ -130,6 +130,7 @@ describe("tenant purge derived selector registry", () => {
 
   it("locks both late joins, dormant procurement evidence, and all six writers", () => {
     expect(() => assertTenantPurgeWriterEvidence(writers)).not.toThrow();
+    expect(() => assertTenantPurgeWriterEvidence({ ...writers, selfServe: `${writers.selfServe}\nselfServeSupportSession.create({})` })).toThrow(/writer evidence/);
     expect(schema).toMatch(/model Workspace[\s\S]*?slug\s+String\s+@unique/);
     expect(schema).toMatch(/model CustomerDeploymentBootstrapRun[\s\S]*?@@unique\(\[customerSlug, bundleChecksum\]\)[\s\S]*?@@index\(\[customerSlug, status\]\)/);
     expect(schema).toMatch(/model ProcurementIdempotencyKey[\s\S]*?@@index\(\[setupSessionId\]\)/);
