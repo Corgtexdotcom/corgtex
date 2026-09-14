@@ -380,7 +380,7 @@ describe("fleet release runner", () => {
     expect(deps.fetchImpl).not.toHaveBeenCalled();
   });
 
-  it.each(["baseline", "candidate", "missing", "rollback-proof"])("rejects %s proof mismatch before the first Ops provider mutation", async failure => {
+  it.each(["baseline", "candidate", "missing", "rollback-proof", "candidate-reference", "rollback-reference"])("rejects %s proof mismatch before the first Ops provider mutation", async failure => {
     const deps = registryDeps();
     if (failure !== "missing") {
       await runFleetRelease(["check-images", "--release", SHA, "--targets", "ops"], deps);
@@ -388,6 +388,11 @@ describe("fleet release runner", () => {
       if (failure === "rollback-proof") {
         const proof = JSON.parse(readFileSync(deps.env.FLEET_RELEASE_REGISTRY_PROOF_FILE, "utf8"));
         proof.images = proof.images.filter(image => image.purpose !== "rollback");
+        writeFileSync(deps.env.FLEET_RELEASE_REGISTRY_PROOF_FILE, JSON.stringify(proof));
+      }
+      if (failure.endsWith("-reference")) {
+        const proof = JSON.parse(readFileSync(deps.env.FLEET_RELEASE_REGISTRY_PROOF_FILE, "utf8"));
+        proof.images.find(image => image.purpose === failure.split("-")[0]).immutableImage = `ghcr.io/other/web@sha256:${"b".repeat(64)}`;
         writeFileSync(deps.env.FLEET_RELEASE_REGISTRY_PROOF_FILE, JSON.stringify(proof));
       }
     }
@@ -399,9 +404,74 @@ describe("fleet release runner", () => {
   it("accepts matching registry proof and retains the staged Ops rollout", async () => {
     const deps = registryDeps();
     await runFleetRelease(["check-images", "--release", SHA, "--targets", "ops"], deps);
+    // Republishing the tag after preflight must not change the submitted source.
+    deps.runCommand.mockReturnValue({ stdout: JSON.stringify({ Descriptor: {
+      digest: `sha256:${"c".repeat(64)}`, platform: { os: "linux", architecture: "amd64" },
+    } }) });
     const result = await runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Synthetic matched proof"], deps);
     expect(result.results[0].status).toBe("succeeded");
     expect(deps.calls.find(call => call.query.includes("mutation"))?.query).toContain("variableCollectionUpsert");
+    const updates = deps.calls.filter(call => call.query.includes("serviceInstanceUpdate"));
+    expect(updates.map(call => call.variables.input.source.image)).toEqual(["web", "worker"].map(role =>
+      `ghcr.io/corgtexdotcom/corgtex/${role}@sha256:${"b".repeat(64)}`));
+    expect(deps.runCommand).toHaveBeenCalledTimes(4);
+  });
+
+  it("inspects already pinned rollback baselines and supports a subsequent Ops release", async () => {
+    const deps = registryDeps();
+    for (const [role, serviceId] of [["web", "web-1"], ["worker", "worker-1"]]) {
+      const stage = railwayStage(serviceId);
+      const image = `ghcr.io/corgtexdotcom/corgtex/${role}@sha256:${"b".repeat(64)}`;
+      stage.instance.source.image = image;
+      stage.environment.config.services[serviceId].source.image = image;
+    }
+    const proof = await runFleetRelease(["check-images", "--release", SHA, "--targets", "ops"], deps);
+    expect(proof.images.filter(image => image.purpose === "rollback").every(image => image.image === image.immutableImage)).toBe(true);
+    const result = await runFleetRelease(["deploy", "--release", SHA, "--targets", "ops", "--reason", "Pinned baseline regression"], deps);
+    expect(result.results[0].status).toBe("succeeded");
+  });
+
+  it("rejects a digest-addressed baseline whose inspected descriptor differs", () => {
+    expect(() => inspectFleetRegistryImage(`ghcr.io/corgtexdotcom/corgtex/web@sha256:${"c".repeat(64)}`, "web", "rollback", {
+      runCommand: manifestOutput,
+    })).toThrow("lacks valid linux/amd64 manifest proof");
+  });
+
+  it.each(["default", "all", "managed-customers,selfserve,ops"].flatMap(selection => [
+    { deploymentStatus: "SUSPENDED" }, { deploymentStatus: "RETIRED" }, { releaseEligible: false },
+  ].map(state => ({ selection, state }))))("excludes ineligible Ops from broad provider and registry preflight: $selection $state", async ({ selection, state }) => {
+    const deps = registryDeps();
+    deps.env.FLEET_RELEASE_OPS_TARGET_JSON = targetJson(state);
+    const provider = await runFleetRelease(["preflight-provider", "--targets", selection], deps);
+    expect(provider.targets).toEqual([]);
+    const result = await runFleetRelease(["check-images", "--release", SHA, "--targets", selection], deps);
+    expect(result.ops).toEqual([]);
+    expect(result.images).toHaveLength(2);
+    expect(deps.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("uses the planner snapshot instead of reintroducing a currently configured Ops target", async () => {
+    const deps = registryDeps();
+    deps.env.FLEET_RELEASE_OPS_TARGET_JSON = targetJson({ deploymentStatus: "SUSPENDED" });
+    deps.env.FLEET_RELEASE_TARGETS_JSON = targetJson({ id: "selfserve", group: "selfserve", label: "Selfserve", url: "https://selfserve.corgtex.com" });
+    deps.env.FLEET_RELEASE_TARGETS_FILE = join(mkdtempSync(join(tmpdir(), "fleet-selected-")), "targets.json");
+    await runFleetRelease(["deploy", "--release", SHA, "--targets", "default", "--dry-run", "true", "--reason", "Snapshot exclusion"], deps);
+    deps.env.FLEET_RELEASE_OPS_TARGET_JSON = targetJson();
+    const proof = await runFleetRelease(["check-images", "--release", SHA, "--targets", "default"], deps);
+    expect(proof.ops).toEqual([]);
+    expect(proof.images).toHaveLength(2);
+    expect(deps.calls).toEqual([]);
+  });
+
+  it("fails closed on missing planning snapshot and explicitly selected ineligible Ops", async () => {
+    const deps = registryDeps();
+    deps.env.FLEET_RELEASE_TARGETS_FILE = join(tmpdir(), "missing-snapshot", "targets.json");
+    await expect(runFleetRelease(["check-images", "--release", SHA, "--targets", "ops"], deps)).rejects.toThrow("planning snapshot");
+    expect(deps.runCommand).not.toHaveBeenCalled();
+    delete deps.env.FLEET_RELEASE_TARGETS_FILE;
+    deps.env.FLEET_RELEASE_OPS_TARGET_JSON = targetJson({ releaseEligible: false });
+    await expect(runFleetRelease(["check-images", "--release", SHA, "--targets", "ops"], deps)).rejects.toThrow("not release-eligible");
+    expect(deps.calls).toEqual([]);
   });
 
   it("combines full-workflow planning and registry checks with zero provider effects", async () => {
@@ -424,6 +494,9 @@ describe("fleet release runner", () => {
     const check = workflow.split("- name: Verify release images exist\n")[1].split("\n      - ")[0];
     expect(check).toContain('--targets "$TARGETS_INPUT"');
     expect(check).toContain("FLEET_RELEASE_REGISTRY_PROOF_FILE:");
+    expect(check).toContain("FLEET_RELEASE_TARGETS_FILE:");
+    const plan = workflow.split("- name: Plan fleet release\n")[1].split("\n      - ")[0];
+    expect(plan).toContain("FLEET_RELEASE_TARGETS_FILE:");
     const promote = workflow.split("- name: Promote release through rings\n")[1].split("\n      - ")[0];
     expect(promote).toContain("if: ${{ !inputs.dry_run }}");
     expect(promote).toContain("FLEET_RELEASE_REGISTRY_PROOF_FILE:");

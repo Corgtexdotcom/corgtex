@@ -161,6 +161,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
         run: |
@@ -216,6 +217,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           FLEET_RELEASE_REGISTRY_PROOF_FILE: ${{ runner.temp }}/fleet-release-registry-proof.json
         run: |
           node scripts/release/fleet-release-runner.mjs check-images \

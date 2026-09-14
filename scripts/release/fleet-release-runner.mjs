@@ -74,21 +74,26 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
   if (command === "preflight-provider") {
     const env = deps.env ?? process.env;
-    const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default");
+    const selection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
+    const selectedGroups = normalizeTargets(selection);
     const protectedGroups = selectedGroups.filter((group) => ["ops", "backup-app"].includes(group));
     if (!protectedGroups.length) {
       const result = { status: "READY", effects: 0, targets: [] };
       console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
       return result;
     }
-    const targets = filterTargetsByGroups(await discoverTargets(deps, protectedGroups), protectedGroups);
+    const targets = filterTargetsByGroups(await discoverTargets(deps, protectedGroups), protectedGroups, { excludeIneligible: isBroadTargetSelection(selection) });
     for (const group of protectedGroups) {
-      if (targets.filter((target) => target.group === group).length !== 1) {
+      const count = targets.filter((target) => target.group === group).length;
+      if (count !== 1 && !(count === 0 && isBroadTargetSelection(selection))) {
         throw new Error(`${group} provider preflight requires exactly one configured target.`);
       }
     }
     const verified = [];
-    for (const target of targets) verified.push(await preflightOpsRailwayProvider(target, deps));
+    for (const target of targets) {
+      if (targetEligibilityErrors(target).length) throw new Error("Protected Railway target is not release-eligible.");
+      verified.push(await preflightOpsRailwayProvider(target, deps));
+    }
     const result = { status: "READY", effects: 0, targets: verified };
     console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
     return result;
@@ -113,7 +118,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
 
   const allTargets = await discoverTargets(deps, selectedGroups);
-  const broadSelection = ["", "default", "all"].includes(String(targetSelection).trim().toLowerCase()) || [normalizeTargets("default"), normalizeTargets("all")].some((groups) => groups.length === selectedGroups.length && groups.every((group) => selectedGroups.includes(group)));
+  const broadSelection = isBroadTargetSelection(targetSelection);
   let targets = filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
@@ -433,6 +438,12 @@ async function resolveLatestStableSha(deps) {
   throw new Error("latest-stable could not be resolved. Set FLEET_RELEASE_STABLE_GIT_SHA to a canary-proven release SHA, or pass --release <full-sha> explicitly.");
 }
 
+function isBroadTargetSelection(selection) {
+  const selectedGroups = normalizeTargets(selection);
+  return ["", "default", "all"].includes(String(selection).trim().toLowerCase())
+    || [normalizeTargets("default"), normalizeTargets("all")].some(groups => groups.length === selectedGroups.length && groups.every(group => selectedGroups.includes(group)));
+}
+
 async function discoverTargets(deps, selectedGroups) {
   const env = deps.env ?? process.env;
   const snapshot = env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE);
@@ -605,8 +616,7 @@ export function checkReleaseImages(manifest, deps) {
 export function inspectFleetRegistryImage(image, role, purpose, deps = {}) {
   const repository = `ghcr.io/corgtexdotcom/corgtex/${role}`;
   if (!["web", "worker"].includes(role) || !["candidate", "rollback"].includes(purpose)
-    || typeof image !== "string" || !image.startsWith(`${repository}:sha-`)
-    || !/^[0-9a-f]{40}$/.test(image.slice(`${repository}:sha-`.length))) {
+    || !isCanonicalFleetImage(image, role)) {
     throw new Error("Registry preflight rejected an unsupported image reference; use canonical web/worker SHA release images.");
   }
   let output;
@@ -629,6 +639,7 @@ export function inspectFleetRegistryImage(image, role, purpose, deps = {}) {
       && entry.Descriptor.platform.architecture === "amd64");
     if (amd64.length !== 1 || !/^sha256:[0-9a-f]{64}$/.test(amd64[0].Descriptor.digest)) throw new Error();
     const digest = amd64[0].Descriptor.digest;
+    if (image.includes("@") && image !== `${repository}@${digest}`) throw new Error();
     return { purpose, role, image, platform: "linux/amd64", manifestDigest: digest, immutableImage: `${repository}@${digest}` };
   } catch {
     throw new Error(`Registry preflight lacks valid linux/amd64 manifest proof for ${purpose} ${role}; reconcile image publication before promotion.`);
@@ -637,25 +648,29 @@ export function inspectFleetRegistryImage(image, role, purpose, deps = {}) {
 
 export async function checkFleetRegistryImages(manifest, selection, deps = {}) {
   const groups = normalizeTargets(selection);
+  const snapshotPath = (deps.env ?? process.env).FLEET_RELEASE_TARGETS_FILE;
+  if (snapshotPath && !existsSync(snapshotPath)) throw new Error("Registry preflight requires the selected-target planning snapshot.");
   const images = [
     inspectFleetRegistryImage(manifest.ghcrWebImage, "web", "candidate", deps),
     inspectFleetRegistryImage(manifest.ghcrWorkerImage, "worker", "candidate", deps),
   ];
   const ops = [];
   if (groups.includes("ops")) {
-    const targets = filterTargetsByGroups(await discoverTargets(deps, ["ops"]), ["ops"]);
-    if (targets.length !== 1) throw new Error("Ops registry preflight requires exactly one configured target.");
-    const target = targets[0];
-    if (target.provider !== "railway" || !target.railway?.webServiceId || !target.railway.workerServiceId) {
-      throw new Error("Ops registry preflight target is invalid.");
+    const targets = filterTargetsByGroups(await discoverTargets(deps, ["ops"]), ["ops"], { excludeIneligible: isBroadTargetSelection(selection) });
+    if (targets.length > 1 || (!targets.length && !isBroadTargetSelection(selection))) throw new Error("Ops registry preflight requires exactly one configured target.");
+    for (const target of targets) {
+      if (targetEligibilityErrors(target).length) throw new Error("Ops registry preflight target is not release-eligible.");
+      if (target.provider !== "railway" || !target.railway?.webServiceId || !target.railway.workerServiceId) {
+        throw new Error("Ops registry preflight target is invalid.");
+      }
+      const stages = [];
+      for (const role of ["web", "worker"]) {
+        const stage = await readOpsRailwayStage(target, { key: role, serviceId: target.railway[`${role}ServiceId`] }, deps);
+        stages.push(stage);
+        images.push(inspectFleetRegistryImage(stage.image, role, "rollback", deps));
+      }
+      ops.push({ targetId: target.id, baselineDigest: createHash("sha256").update(JSON.stringify(stages)).digest("hex") });
     }
-    const stages = [];
-    for (const role of ["web", "worker"]) {
-      const stage = await readOpsRailwayStage(target, { key: role, serviceId: target.railway[`${role}ServiceId`] }, deps);
-      stages.push(stage);
-      images.push(inspectFleetRegistryImage(stage.image, role, "rollback", deps));
-    }
-    ops.push({ targetId: target.id, baselineDigest: createHash("sha256").update(JSON.stringify(stages)).digest("hex") });
   }
   const result = { ok: true, effects: 0, gitSha: manifest.gitSha, images, ops };
   const path = (deps.env ?? process.env).FLEET_RELEASE_REGISTRY_PROOF_FILE;
@@ -671,16 +686,27 @@ function verifyOpsRegistryBaseline(target, manifest, stages, deps) {
     const baselineDigest = createHash("sha256").update(JSON.stringify(stages)).digest("hex");
     if (proof.ok !== true || proof.effects !== 0 || proof.gitSha !== manifest.gitSha
       || proof.ops?.length !== 1 || proof.ops[0].targetId !== target.id || proof.ops[0].baselineDigest !== baselineDigest) throw new Error();
+    const candidates = {};
     for (const [index, role] of ["web", "worker"].entries()) {
       for (const purpose of ["candidate", "rollback"]) {
         const expectedImage = purpose === "candidate" ? manifest[role === "web" ? "ghcrWebImage" : "ghcrWorkerImage"] : stages[index].image;
         const matches = proof.images?.filter(image => image.role === role && image.purpose === purpose && image.image === expectedImage);
         if (matches?.length !== 1 || matches[0].platform !== "linux/amd64" || !/^sha256:[0-9a-f]{64}$/.test(matches[0].manifestDigest)) throw new Error();
+        const immutableImage = `ghcr.io/corgtexdotcom/corgtex/${role}@${matches[0].manifestDigest}`;
+        if (matches[0].immutableImage !== immutableImage || (expectedImage.includes("@") && expectedImage !== immutableImage)) throw new Error();
+        if (purpose === "candidate") candidates[role] = immutableImage;
       }
     }
+    return candidates;
   } catch {
     throw new Error("Ops registry proof is missing, invalid, or its baseline changed; repeat the protected registry preflight before promotion.");
   }
+}
+
+function isCanonicalFleetImage(image, role) {
+  const repository = `ghcr.io/corgtexdotcom/corgtex/${role}`;
+  return typeof image === "string" && ((image.startsWith(`${repository}:sha-`) && /^[0-9a-f]{40}$/.test(image.slice(`${repository}:sha-`.length)))
+    || (image.startsWith(`${repository}@sha256:`) && /^[0-9a-f]{64}$/.test(image.slice(`${repository}@sha256:`.length))));
 }
 
 async function deployTarget(target, manifest, reason, deps) {
@@ -823,7 +849,10 @@ async function deployRailwayTarget(target, manifest, deps) {
   if (protectedStagedRailway) {
     for (const service of services) expected.set(service.serviceId, await readOpsRailwayStage(target, service, deps));
   }
-  if (target.group === "ops") verifyOpsRegistryBaseline(target, manifest, [...expected.values()], deps);
+  if (target.group === "ops") {
+    const candidates = verifyOpsRegistryBaseline(target, manifest, [...expected.values()], deps);
+    if (candidates) for (const service of services) service.image = candidates[service.key];
+  }
   async function verifyStaging(selected = services) {
     for (const service of selected) {
       const current = await readOpsRailwayStage(target, service, deps);
@@ -955,8 +984,9 @@ async function readOpsRailwayStage(target, service, deps) {
     || config.source.image !== instance.source.image || config.source.repo
     || config.source.autoUpdates != null) fail("source configuration conflicts with a staged image release");
   const expectedRepository = `ghcr.io/corgtexdotcom/corgtex/${service.key}:`;
-  if (!instance.source.image.startsWith(expectedRepository)
-    || !/^sha-[0-9a-f]{40}$/.test(instance.source.image.slice(expectedRepository.length))) fail("source image is not an immutable canonical release");
+  const canonicalTag = instance.source.image.startsWith(expectedRepository)
+    && /^sha-[0-9a-f]{40}$/.test(instance.source.image.slice(expectedRepository.length));
+  if (!canonicalTag && !(target.group === "ops" && isCanonicalFleetImage(instance.source.image, service.key))) fail("source image is not an immutable canonical release");
   // The backup services use the canonical workspace scripts. These exact
   // role-bound commands honor the web startup mode and worker entry point.
   const allowedBackupCommand = target.group === "backup-app"
