@@ -66,7 +66,9 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   }
   if (command === "check-images") {
     const manifest = await resolveManifest(args, deps);
-    const result = checkReleaseImages(manifest, deps);
+    const result = args.targets !== undefined
+      ? await checkFleetRegistryImages(manifest, args.targets, deps)
+      : checkReleaseImages(manifest, deps);
     console.log(JSON.stringify({ stage: "image-check", ...result }, null, 2));
     return result;
   }
@@ -598,6 +600,89 @@ export function checkReleaseImages(manifest, deps) {
   return { ok: true, images };
 }
 
+// The protected workflow uses its existing GHCR login. Inspect only canonical
+// release refs, never accepting registry hosts or credentials from provider data.
+export function inspectFleetRegistryImage(image, role, purpose, deps = {}) {
+  const repository = `ghcr.io/corgtexdotcom/corgtex/${role}`;
+  if (!["web", "worker"].includes(role) || !["candidate", "rollback"].includes(purpose)
+    || typeof image !== "string" || !image.startsWith(`${repository}:sha-`)
+    || !/^[0-9a-f]{40}$/.test(image.slice(`${repository}:sha-`.length))) {
+    throw new Error("Registry preflight rejected an unsupported image reference; use canonical web/worker SHA release images.");
+  }
+  let output;
+  try {
+    output = runCommand("docker", ["manifest", "inspect", "--verbose", image], deps, {
+      timeout: 30_000, killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
+    }).stdout;
+  } catch {
+    // Docker errors can contain credential/configuration details. Do not relay
+    // stderr or infer missing versus denied from an ambiguous registry response.
+    throw new Error(`Registry preflight cannot read ${purpose} ${role} image. Verify the existing GHCR login and image availability; preserve rollback images before promotion. No provider changes were authorized by this check.`);
+  }
+  try {
+    if (typeof output !== "string" || Buffer.byteLength(output) > 1024 * 1024) throw new Error();
+    const parsed = JSON.parse(output);
+    const entries = Array.isArray(parsed) ? parsed : [parsed];
+    // Docker verbose returns platform manifest descriptors for an image index.
+    // This is platform-manifest proof, not a fabricated top-level index digest.
+    const amd64 = entries.filter(entry => entry?.Descriptor?.platform?.os === "linux"
+      && entry.Descriptor.platform.architecture === "amd64");
+    if (amd64.length !== 1 || !/^sha256:[0-9a-f]{64}$/.test(amd64[0].Descriptor.digest)) throw new Error();
+    const digest = amd64[0].Descriptor.digest;
+    return { purpose, role, image, platform: "linux/amd64", manifestDigest: digest, immutableImage: `${repository}@${digest}` };
+  } catch {
+    throw new Error(`Registry preflight lacks valid linux/amd64 manifest proof for ${purpose} ${role}; reconcile image publication before promotion.`);
+  }
+}
+
+export async function checkFleetRegistryImages(manifest, selection, deps = {}) {
+  const groups = normalizeTargets(selection);
+  const images = [
+    inspectFleetRegistryImage(manifest.ghcrWebImage, "web", "candidate", deps),
+    inspectFleetRegistryImage(manifest.ghcrWorkerImage, "worker", "candidate", deps),
+  ];
+  const ops = [];
+  if (groups.includes("ops")) {
+    const targets = filterTargetsByGroups(await discoverTargets(deps, ["ops"]), ["ops"]);
+    if (targets.length !== 1) throw new Error("Ops registry preflight requires exactly one configured target.");
+    const target = targets[0];
+    if (target.provider !== "railway" || !target.railway?.webServiceId || !target.railway.workerServiceId) {
+      throw new Error("Ops registry preflight target is invalid.");
+    }
+    const stages = [];
+    for (const role of ["web", "worker"]) {
+      const stage = await readOpsRailwayStage(target, { key: role, serviceId: target.railway[`${role}ServiceId`] }, deps);
+      stages.push(stage);
+      images.push(inspectFleetRegistryImage(stage.image, role, "rollback", deps));
+    }
+    ops.push({ targetId: target.id, baselineDigest: createHash("sha256").update(JSON.stringify(stages)).digest("hex") });
+  }
+  const result = { ok: true, effects: 0, gitSha: manifest.gitSha, images, ops };
+  const path = (deps.env ?? process.env).FLEET_RELEASE_REGISTRY_PROOF_FILE;
+  if (path) writeFileSync(path, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+  return result;
+}
+
+function verifyOpsRegistryBaseline(target, manifest, stages, deps) {
+  const path = (deps.env ?? process.env).FLEET_RELEASE_REGISTRY_PROOF_FILE;
+  if (!path) return; // Legacy callers retain their contract; full workflow supplies this path.
+  try {
+    const proof = JSON.parse(readFileSync(path, "utf8"));
+    const baselineDigest = createHash("sha256").update(JSON.stringify(stages)).digest("hex");
+    if (proof.ok !== true || proof.effects !== 0 || proof.gitSha !== manifest.gitSha
+      || proof.ops?.length !== 1 || proof.ops[0].targetId !== target.id || proof.ops[0].baselineDigest !== baselineDigest) throw new Error();
+    for (const [index, role] of ["web", "worker"].entries()) {
+      for (const purpose of ["candidate", "rollback"]) {
+        const expectedImage = purpose === "candidate" ? manifest[role === "web" ? "ghcrWebImage" : "ghcrWorkerImage"] : stages[index].image;
+        const matches = proof.images?.filter(image => image.role === role && image.purpose === purpose && image.image === expectedImage);
+        if (matches?.length !== 1 || matches[0].platform !== "linux/amd64" || !/^sha256:[0-9a-f]{64}$/.test(matches[0].manifestDigest)) throw new Error();
+      }
+    }
+  } catch {
+    throw new Error("Ops registry proof is missing, invalid, or its baseline changed; repeat the protected registry preflight before promotion.");
+  }
+}
+
 async function deployTarget(target, manifest, reason, deps) {
   const providerResult = target.provider === "azure"
     ? await deployAzureTarget(target, { ...manifest, acrWebImage: `${target.azure.acrServer}/corgtex/web:${manifest.imageTag}`, acrWorkerImage: `${target.azure.acrServer}/corgtex/worker:${manifest.imageTag}` }, deps)
@@ -738,6 +823,7 @@ async function deployRailwayTarget(target, manifest, deps) {
   if (protectedStagedRailway) {
     for (const service of services) expected.set(service.serviceId, await readOpsRailwayStage(target, service, deps));
   }
+  if (target.group === "ops") verifyOpsRegistryBaseline(target, manifest, [...expected.values()], deps);
   async function verifyStaging(selected = services) {
     for (const service of selected) {
       const current = await readOpsRailwayStage(target, service, deps);
