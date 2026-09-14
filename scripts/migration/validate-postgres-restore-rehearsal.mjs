@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { expectedResourceGroupId } from "./validate-azure-what-if.mjs";
+import { verifySchemaRepresentation } from "./postgres-schema-representation.mjs";
 
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 const EXPECTED_CLIENT_SHA256 = "707be00bd89b2c0cf1ebdf8c0d389ff24b5f69d9f2ba35a113cddf8f073296bf";
@@ -329,8 +330,9 @@ const sumRows = (tables) => tables.reduce((sum, table) => sum + table.rowCount, 
 const sumStatuses = (statuses) => statuses.reduce((sum, status) => sum + status.count, 0);
 
 export function validatePostgresRestoreRehearsal(document, cleanup) {
-  expectExactKeys(document, ["schemaVersion", "domain", "sourceRef", "targetRef", "source", "destination", "archiveSequences"], "INVALID_DOCUMENT");
-  if (document.schemaVersion !== "1.0.0") fail("SCHEMA_VERSION_MISMATCH");
+  const representation = document?.schemaVersion === "2.0.0";
+  expectExactKeys(document, ["schemaVersion", "domain", "sourceRef", "targetRef", "source", "destination", "archiveSequences", ...(representation ? ["schemaRepresentation"] : [])], "INVALID_DOCUMENT");
+  if (!representation && document.schemaVersion !== "1.0.0") fail("SCHEMA_VERSION_MISMATCH");
   if (!new Set(["core", "ops"]).has(document.domain)) fail("INVALID_DOMAIN");
   validateOpaqueRef(document.sourceRef, "INVALID_SOURCE_REF");
   validateOpaqueRef(document.targetRef, "INVALID_TARGET_REF");
@@ -351,7 +353,9 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
   compareExact(localeDefinition(source.locale), localeDefinition(destination.locale), "LOCALE_PARITY_MISMATCH");
   const crossRuntimeVersionRelation = classifyCollationVersionRelation(source.locale, destination.locale);
   compareExact(source.extensions, destination.extensions, "EXTENSION_MISMATCH");
-  compareExact(source.schema, destination.schema, "SCHEMA_DIGEST_MISMATCH");
+  if (representation) {
+    if (!verifySchemaRepresentation(document.schemaRepresentation, source.schema, destination.schema)) fail("SCHEMA_REPRESENTATION_UNPROVEN");
+  } else compareExact(source.schema, destination.schema, "SCHEMA_DIGEST_MISMATCH");
   compareExact(source.tables, destination.tables, "TABLE_PARITY_MISMATCH");
   compareExact(source.largeObjects, destination.largeObjects, "LARGE_OBJECT_PARITY_MISMATCH");
   compareExact(source.migrations, destination.migrations, "MIGRATION_PARITY_MISMATCH");
@@ -374,6 +378,7 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
   return {
     schemaVersion: "1.0.0",
     status: "POSTGRES_REHEARSAL_VERIFIED",
+    ...(representation ? { schemaRepresentation: "PG18_ORDERED_AND_V1" } : {}),
     domainRef: `sha256:${sha256(document.domain).slice(0, 16)}`,
     sourceRef: document.sourceRef,
     targetRef: document.targetRef,

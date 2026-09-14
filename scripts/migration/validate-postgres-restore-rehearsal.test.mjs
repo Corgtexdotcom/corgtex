@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   validatePostgresRestoreRehearsal,
@@ -24,6 +29,21 @@ const POSTGRES_RESOURCE_ID = `${SCOPE}/providers/Microsoft.DBforPostgreSQL/flexi
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const clone = (value) => structuredClone(value);
+
+it("loads the cleanup validator without installed packages or runner side effects", () => {
+  const root = mkdtempSync(join(tmpdir(), "corgtex-validator-no-deps-"));
+  try {
+    for (const name of ["validate-postgres-restore-rehearsal.mjs", "validate-azure-what-if.mjs",
+      "postgres-schema-representation.mjs", "postgres-schema-tokens.mjs", "postgres-check-structure.mjs"]) {
+      copyFileSync(new URL(name, import.meta.url), join(root, name));
+    }
+    const url = pathToFileURL(join(root, "validate-postgres-restore-rehearsal.mjs")).href;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e",
+      `const m = await import(${JSON.stringify(url)}); if (typeof m.validateRecoveryIntent !== "function") process.exit(1);`],
+    { cwd: root, encoding: "utf8", timeout: 10000 });
+    expect(result.status, result.stderr).toBe(0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 const databaseEvidence = () => ({
   server: { majorVersion: 18 },

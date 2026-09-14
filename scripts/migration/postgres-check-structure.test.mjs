@@ -3,7 +3,11 @@ import {
   KNOWN_CHECK_KEY,
   captureKnownCheckStructure,
   compareKnownCheckStructure,
+  verifyBoundOrderedAnd,
+  captureBoundCheck,
 } from "./postgres-check-structure.mjs";
+import { verifySchemaRepresentation, REPRESENTATION_VERSION } from "./postgres-schema-representation.mjs";
+import { tokenizeSchemaDump, schemaTokenDigest } from "./run-postgres-restore-rehearsal.mjs";
 
 const variable = (attno) => `{VAR :varno 1 :varattno ${attno} :vartype 16 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn ${attno} :location -1}`;
 const bool = (op, ...args) => `{BOOLEXPR :boolop ${op} :args (${args.join(" ")}) :location -1}`;
@@ -174,6 +178,146 @@ const expectedFields = {
   attribute: "NAMESPACE TABLE NAME TYPE TYPMOD COLLATION",
   database_collation: "ENCODING PROVIDER COLLATE CTYPE LOCALE ICU_RULES VERSION ACTUAL_VERSION",
 };
+
+const representationFixture = () => {
+  const identity = ["TABLE", "renamed", "RenamedTable", "RenamedCheck"];
+  const side = (tree, expression) => {
+    const definition = `CHECK (${expression})`;
+    const bindings = supportedBindings();
+    for (const row of bindings.filter((r) => r.kind === "attribute")) row.identity.splice(0, 2, "renamed", "RenamedTable");
+    const semantics = { ...entry("unused").semantics,
+      DEFINITION: schemaTokenDigest(tokenizeSchemaDump(definition)),
+      CHECK_EXPRESSION: schemaTokenDigest(tokenizeSchemaDump(expression)) };
+    return { serverVersion: 180006,
+      tokens: tokenizeSchemaDump(`CREATE TABLE renamed."RenamedTable" ("pointKey" text, "pointOrder" integer, "sourceOrder" integer, CONSTRAINT "RenamedCheck" ${definition}); CREATE INDEX other_index ON renamed."RenamedTable" ("pointOrder");`),
+      manifest: [{ key: JSON.stringify(identity), type: "CHECK", semantics }],
+      check: { identity, tree, definition, expression, bindings } };
+  };
+  return { version: REPRESENTATION_VERSION,
+    source: side(supportedNested, `(("pointOrder" >= 1 AND "pointOrder" <= 10) AND "sourceOrder" >= 1 AND "pointKey" = 'point-'::text || "pointOrder"::text)`),
+    destination: side(supportedFlat, `("pointOrder" >= 1 AND "pointOrder" <= 10 AND "sourceOrder" >= 1 AND "pointKey" = 'point-'::text || "pointOrder"::text)`) };
+};
+const verifyRepresentation = (proof) => verifySchemaRepresentation(proof,
+  { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: schemaTokenDigest(proof.source.tokens) },
+  { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: schemaTokenDigest(proof.destination.tokens) });
+
+const replaceCapturedSql = (side, expression) => {
+  const old = tokenizeSchemaDump(side.check.definition);
+  const start = side.tokens.findIndex((_, i) => JSON.stringify(side.tokens.slice(i, i + old.length)) === JSON.stringify(old));
+  if (start < 0) throw new Error("TEST_CHECK_MISSING");
+  side.check.expression = expression;
+  side.check.definition = `CHECK (${expression})`;
+  const definition = tokenizeSchemaDump(side.check.definition);
+  side.tokens.splice(start, old.length, ...definition);
+  const row = side.manifest.find((r) => r.key === JSON.stringify(side.check.identity));
+  row.semantics.DEFINITION = schemaTokenDigest(definition);
+  row.semantics.CHECK_EXPRESSION = schemaTokenDigest(tokenizeSchemaDump(expression));
+};
+
+describe("bound versioned schema representation", () => {
+  it("accepts a renamed candidate with exact residual executable coverage", () => {
+    expect(verifyRepresentation(representationFixture())).toBe(true);
+  });
+  it.each([
+    ["bound changed with stale tree", (s) => s.replace("<= 10", "<= 11")],
+    ["FALSE with stale tree", () => "FALSE"],
+    ["operator", (s) => s.replace("<= 10", ">= 10")],
+    ["literal", (s) => s.replace("'point-'", "'other-'")],
+    ["cast", (s) => s.replace("::text", "::varchar")],
+    ["leaf parentheses", (s) => s.replace('"pointOrder" >= 1', '("pointOrder" >= 1)')],
+    ["mixed precedence", (s) => s.replace('"pointOrder" <= 10 AND', '"pointOrder" <= 10 OR')],
+  ])("rejects rewritten SQL and updated hashes with %s", (_name, change) => {
+    const p = representationFixture();
+    replaceCapturedSql(p.destination, change(p.destination.check.expression));
+    expect(verifyRepresentation(p)).toBe(false);
+  });
+  it("rejects mixed-precedence regrouping even with unchanged non-parenthesis tokens", () => {
+    const p = representationFixture();
+    replaceCapturedSql(p.source, '(("pointOrder" >= 1 OR "pointOrder" <= 10) AND "sourceOrder" >= 1)');
+    replaceCapturedSql(p.destination, '("pointOrder" >= 1 OR ("pointOrder" <= 10 AND "sourceOrder" >= 1))');
+    expect(verifyRepresentation(p)).toBe(false);
+  });
+  it("retains identical parenthesized leaves while flattening AND nodes", () => {
+    const p = representationFixture();
+    for (const side of [p.source, p.destination]) {
+      replaceCapturedSql(side, side.check.expression.replaceAll('"pointOrder" >= 1', '("pointOrder" >= 1)'));
+    }
+    expect(verifyRepresentation(p)).toBe(true);
+  });
+  it("requires definition and expression to describe the same SQL", () => {
+    const p = representationFixture();
+    p.destination.check.expression = "FALSE";
+    p.destination.manifest[0].semantics.CHECK_EXPRESSION = schemaTokenDigest(tokenizeSchemaDump("FALSE"));
+    expect(verifyRepresentation(p)).toBe(false);
+  });
+  it.each([0, 1, 10, 11])("retains exact integer boundary datum %s across grouping", (value) => {
+    const p = representationFixture();
+    for (const side of [p.source, p.destination]) side.check.tree = side.check.tree.replaceAll("[ 1 0 0", `[ ${value} 0 0`);
+    expect(verifyBoundOrderedAnd(p.source.check, p.destination.check)).toBe(true);
+    p.destination.check.tree = p.destination.check.tree.replace(`[ ${value} 0 0`, `[ ${value + 1} 0 0`);
+    expect(verifyBoundOrderedAnd(p.source.check, p.destination.check)).toBe(false);
+  });
+  it("retains NULL constants and does not conflate them with non-NULL datums", () => {
+    const p = representationFixture();
+    const nullable = constant(23).replace(":constisnull false", ":constisnull true")
+      .replace(":constvalue 4 [ 1 0 0 0 0 0 0 0 ]", ":constvalue <>");
+    for (const side of [p.source, p.destination]) side.check.tree = side.check.tree.replaceAll(constant(23), nullable);
+    expect(verifyBoundOrderedAnd(p.source.check, p.destination.check)).toBe(true);
+    p.destination.check.tree = p.destination.check.tree.replace(nullable, constant(23));
+    expect(verifyBoundOrderedAnd(p.source.check, p.destination.check)).toBe(false);
+  });
+  it("rejects unsafe operations even when both captured bindings agree", () => {
+    const p = representationFixture();
+    for (const side of [p.source, p.destination]) side.check.bindings.find((r) => r.kind === "function").identity[8] = "v";
+    expect(verifyRepresentation(p)).toBe(false);
+  });
+  it.each([
+    ["constant", (p) => { p.destination.check.tree = p.destination.check.tree.replace("[ 1 0", "[ 2 0"); }],
+    ["column", (p) => { p.destination.check.tree = p.destination.check.tree.replace(":varattno 2", ":varattno 3"); }],
+    ["type", (p) => { p.destination.check.tree = p.destination.check.tree.replace(":vartype 23", ":vartype 25"); }],
+    ["cast", (p) => { p.destination.check.tree = p.destination.check.tree.replace(":coerceformat 1", ":coerceformat 2"); }],
+    ["operator", (p) => { p.destination.check.tree = p.destination.check.tree.replace(":opno 525", ":opno 523"); }],
+    ["OR even on both sides", (p) => { for (const s of [p.source, p.destination]) s.check.tree = s.check.tree.replaceAll(":boolop and", ":boolop or"); }],
+    ["unsupported node", (p) => { p.source.check.tree = p.source.check.tree.replace("{OPEXPR", "{FUNCEXPR"); }],
+    ["truncated capture", (p) => { p.source.check.tree = p.source.check.tree.slice(0, -1); }],
+    ["capture failure", (p) => { p.source.check = null; }],
+    ["persisted diagnostic", (p) => { p.source.check = { status: "ASSOCIATIVE_GROUPING_ONLY", operationsSupported: false }; }],
+    ["server patch mismatch", (p) => { p.destination.serverVersion += 1; }],
+    ["binding volatility", (p) => { p.destination.check.bindings.find((r) => r.kind === "function").identity[8] = "v"; }],
+    ["binding collation", (p) => { p.destination.check.bindings.find((r) => r.kind === "collation").identity[3] = false; }],
+    ["validation flag", (p) => { p.destination.manifest[0].semantics.VALIDATION = false; }],
+    ["enforcement flag", (p) => { p.destination.manifest[0].semantics.ENFORCEMENT = false; }],
+    ["inheritance flag", (p) => { p.destination.manifest[0].semantics.INHERITANCE[1] = 1; }],
+    ["missing constraint", (p) => { p.destination.manifest = []; }],
+    ["extra constraint", (p) => { p.destination.manifest.push({ ...p.destination.manifest[0], key: "extra" }); }],
+    ["unbound definition", (p) => { p.destination.check.definition = 'CHECK ("pointOrder" > 0)'; }],
+  ])("fails closed for %s", (_name, mutate) => {
+    const p = representationFixture(); mutate(p); expect(verifyRepresentation(p)).toBe(false);
+  });
+  it.each([
+    "CREATE INDEX another_index ON renamed.\"RenamedTable\" (\"sourceOrder\");",
+    "ALTER TABLE renamed.\"RenamedTable\" ADD CONSTRAINT extra CHECK (\"sourceOrder\" > 0);",
+    "CREATE TRIGGER extra BEFORE INSERT ON renamed.\"RenamedTable\" EXECUTE FUNCTION changed();",
+    "CREATE POLICY extra ON renamed.\"RenamedTable\" USING (true);",
+    "ALTER TABLE renamed.\"RenamedTable\" ALTER COLUMN \"pointOrder\" SET DEFAULT 9;",
+  ])("retains exact residual coverage for %s", (sql) => {
+    const p = representationFixture(); p.destination.tokens.push(...tokenizeSchemaDump(sql));
+    expect(verifyRepresentation(p)).toBe(false);
+  });
+  it("rejects a raw digest unrelated to its supplied tokens", () => {
+    const p = representationFixture();
+    expect(verifySchemaRepresentation(p, { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: "a".repeat(64) },
+      { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: schemaTokenDigest(p.destination.tokens) })).toBe(false);
+  });
+  it("does not accept diagnostic OR grouping with unsupported operations", () => {
+    const p = representationFixture();
+    for (const s of [p.source, p.destination]) s.check.tree = s.check.tree.replaceAll(":boolop and", ":boolop or");
+    expect(verifyBoundOrderedAnd(p.source.check, p.destination.check)).toBe(false);
+  });
+  it("sanitizes failed bound capture", async () => {
+    expect(await captureBoundCheck({ query: async () => { throw new Error("private-capture-error"); } }, entry("x"))).toBeNull();
+  });
+});
 
 describe("CHECK binding field diagnostic and version assessment", () => {
   it("isolates version drift without relaxing strict binding equality", async () => {
