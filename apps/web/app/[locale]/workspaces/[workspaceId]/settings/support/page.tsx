@@ -1,4 +1,4 @@
-import { listWorkspaceSupportGrants, supportConnectorPreparationSchema } from "@corgtex/domain";
+import { canManageWorkspaceSupport, listWorkspaceSupportGrants, requireWorkspaceMembership, supportConnectorPreparationSchema } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { SupportAccessManager } from "./SupportAccessManager";
 
@@ -6,6 +6,12 @@ export const dynamic = "force-dynamic";
 export default async function SupportAccessPage({ params }: { params: Promise<{ workspaceId: string }> }) {
   const actor = await requirePageActor();
   const { workspaceId } = await params;
+  await requireWorkspaceMembership({ actor, workspaceId });
+  if (!(await canManageWorkspaceSupport(actor, workspaceId))) {
+    return <div className="space-y-4"><h1 className="text-2xl font-semibold">Support Access</h1>
+      <p>Support access is available only to the verified workspace owner. Ownership is not inferred from an administrator role.</p>
+      <a href={`/workspaces/${workspaceId}/settings`}>Back to settings</a></div>;
+  }
   const grants = await listWorkspaceSupportGrants(actor, workspaceId);
   return <div className="space-y-6">
     <h1 className="text-2xl font-semibold">Support Access</h1>

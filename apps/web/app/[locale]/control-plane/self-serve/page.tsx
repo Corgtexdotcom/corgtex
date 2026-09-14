@@ -8,7 +8,6 @@ import { listSelfServeCustomerRegistry, requireControlPlaneAccess } from "@corgt
 import { Link } from "@/i18n/routing";
 import { requirePageActor } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { SupportSessionButton } from "./_components/support-session-button";
 import { TrialReviewButtons } from "./_components/trial-review-buttons";
 import { ControlPlanePageHeader, ControlPlaneStatusStrip } from "../_components/control-plane-ui";
 
@@ -324,11 +323,7 @@ export default async function ControlPlaneSelfServePage() {
                           </Link>
                         )}
                         {item.workspace && (
-                          <SupportSessionButton
-                            deploymentId={item.deployment?.id}
-                            workspaceId={item.workspace.id}
-                            companyName={item.companyName}
-                          />
+                          <span className="text-xs text-muted">Support requires a workspace owner grant.</span>
                         )}
                       </div>
                     </td>

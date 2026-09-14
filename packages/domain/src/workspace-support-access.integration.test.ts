@@ -8,6 +8,9 @@ import { issueAgentCredential, resolveAgentActorFromBearer } from "./agent-auth"
 import { changeWorkspaceSupportGrant, getSupportConnectorPreparationForConsent, getSupportSetup, requireUnmanagedMember, updateSupportSetup, withWorkspaceSupportExecution, supportCapabilityVersion } from "./workspace-support-access";
 import { createSlackOAuthState, readSlackOAuthState } from "./communication";
 import { saveOAuthConnectionAndEnqueueCalendarSync } from "./integrations";
+import { createMember, updateMember } from "./members";
+import { canManageWorkspaceSupport, lockWorkspaceMembership } from "./workspace-support-access";
+import { linkOrProvisionSsoUser } from "./sso";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -45,6 +48,29 @@ describe("owner-selected support access", () => {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   }));
 
+  supportTest("serializes ordinary membership creation behind the support workspace lock", async () => {
+    let release!: () => void;
+    let locked!: () => void;
+    const acquired = new Promise<void>((resolve) => { locked = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`;
+      locked();
+      await gate;
+    });
+    await acquired;
+    let settled = false;
+    const mutation = createMember(owner, { workspaceId, email: support.user.email, role: "CONTRIBUTOR" }).finally(() => { settled = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled).toBe(false);
+    } finally {
+      release();
+      await holder;
+      await mutation;
+    }
+  });
+
   supportTest("defaults to a content-free grant and defeats a forged cached ADMIN membership", async () => {
     await change("SETUP");
     expect(await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } })).toBeNull();
@@ -54,6 +80,58 @@ describe("owner-selected support access", () => {
     await expect(requireWorkspaceMembership({ actor: support, workspaceId: randomUUID() })).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
     expect(isGlobalOperator(support)).toBe(true);
     await expect(requireUnmanagedMember(prisma, workspaceId, support.user.id)).rejects.toMatchObject({ code: "SUPPORT_OWNER_REQUIRED" });
+  });
+
+  supportTest("shows support management only to a verified active human owner", async () => {
+    expect(await canManageWorkspaceSupport(owner, workspaceId)).toBe(true);
+    expect(await canManageWorkspaceSupport(support, workspaceId)).toBe(false);
+    await change("FULL");
+    expect(await canManageWorkspaceSupport(support, workspaceId)).toBe(false);
+    await prisma.workspace.update({ where: { id: workspaceId }, data: { supportOwnerUserId: null } });
+    expect(await canManageWorkspaceSupport(owner, workspaceId)).toBe(false);
+  });
+
+  supportTest("does not turn SSO support login into ordinary membership", async () => {
+    await change("SETUP");
+    const input = { workspaceId, provider: "google", providerSubjectId: randomUUID(), email: support.user.email };
+    await linkOrProvisionSsoUser(input);
+    await linkOrProvisionSsoUser(input);
+    expect(await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } })).toBeNull();
+  });
+
+  supportTest("serializes membership reactivation and grant creation in both lock orders", async () => {
+    const member = await prisma.member.create({ data: { workspaceId, userId: support.user.id, role: "CONTRIBUTOR", isActive: false } });
+    for (const supportFirst of [true, false]) {
+      await prisma.workspaceSupportGrant.deleteMany({ where: { workspaceId } });
+      await prisma.member.update({ where: { id: member.id }, data: { isActive: false } });
+      let release!: () => void;
+      let acquired!: () => void;
+      const held = new Promise<void>((resolve) => { acquired = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const first = prisma.$transaction(async (tx) => {
+        await lockWorkspaceMembership(tx, workspaceId);
+        if (!supportFirst) await requireUnmanagedMember(tx, workspaceId, support.user.id);
+        acquired();
+        await gate;
+        if (supportFirst) {
+          await tx.workspaceSupportGrant.create({ data: { workspaceId, userId: support.user.id, grantedByUserId: owner.user.id, role: "SETUP" } });
+        } else {
+          await tx.member.update({ where: { id: member.id }, data: { isActive: true } });
+        }
+      });
+      await held;
+      const second = (supportFirst
+        ? updateMember(owner, { workspaceId, memberId: member.id, isActive: true })
+        : change("SETUP")).then(() => null, (error: { code: string }) => error.code);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } finally { release(); }
+      await first;
+      expect(await second).toBe(supportFirst ? "SUPPORT_OWNER_REQUIRED" : "EXISTING_MEMBERSHIP");
+      const actual = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+      const grant = await prisma.workspaceSupportGrant.findUnique({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } });
+      expect(actual.isActive && grant?.isActive).toBeFalsy();
+    }
   });
 
   supportTest("requires the verified owner, never an arbitrary admin or support recipient", async () => {

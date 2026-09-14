@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withWorkspaceMcpCors, workspaceMcpPreflight } from "@/lib/workspace-mcp-cors";
 import { MCP_CONNECTOR_DEFAULT_SCOPES } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import {
@@ -12,6 +13,7 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ workspaceId: string }> },
 ) {
+  return withWorkspaceMcpCors(request, async () => {
   const { workspaceId } = await context.params;
   if (!isWorkspaceMcpId(workspaceId)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -43,4 +45,7 @@ export async function GET(
     scopes_supported: MCP_CONNECTOR_DEFAULT_SCOPES,
     bearer_methods_supported: ["header"],
   }, { headers: { "Cache-Control": "public, max-age=300" } });
+  }, "GET, OPTIONS");
 }
+
+export const OPTIONS = (request: NextRequest) => workspaceMcpPreflight(request, "GET, OPTIONS");

@@ -1,5 +1,5 @@
 import type { MemberRole, Prisma } from "@prisma/client";
-import { requireUnmanagedMember } from "./workspace-support-access";
+import { lockWorkspaceMembership, requireUnmanagedMember } from "./workspace-support-access";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -401,6 +401,7 @@ export async function mergeWorkspaceMembers(actor: AppActor, params: {
   }
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
     const [source, target] = await Promise.all([
       tx.member.findUnique({
         where: { id: params.sourceMemberId },

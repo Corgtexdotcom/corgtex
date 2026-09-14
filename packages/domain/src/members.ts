@@ -4,7 +4,7 @@ import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from 
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
-import { requireUnmanagedMember } from "./workspace-support-access";
+import { lockWorkspaceMembership, requireUnmanagedMember } from "./workspace-support-access";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
@@ -377,6 +377,7 @@ export async function createMember(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const randomPassword = randomOpaqueToken();
+    await lockWorkspaceMembership(tx, params.workspaceId);
     const user = await tx.user.upsert({
       where: { email },
       update: {
@@ -493,6 +494,7 @@ export async function updateMember(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
     const member = await tx.member.findUnique({
       where: { id: params.memberId },
       include: {
@@ -676,6 +678,7 @@ export async function resendMemberAccessLink(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
     const member = await tx.member.findUnique({
       where: { id: params.memberId },
       include: { user: { select: { id: true, email: true, displayName: true } } },

@@ -6,6 +6,18 @@ import { requireDeploymentWorkspaceScope, requireWorkspaceMembership } from "./a
 import { z } from "zod";
 
 type Db = Prisma.TransactionClient;
+export async function lockWorkspaceMembership(db: Db, workspaceId: string) {
+  await db.$queryRaw(Prisma.sql`SELECT id FROM "Workspace" WHERE id = ${workspaceId} FOR UPDATE`);
+}
+
+export async function canManageWorkspaceSupport(actor: AppActor, workspaceId: string) {
+  await requireDeploymentWorkspaceScope(workspaceId);
+  if (actor.kind !== "user") return false;
+  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { supportOwnerUserId: true } });
+  if (workspace?.supportOwnerUserId !== actor.user.id) return false;
+  const member = await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: actor.user.id } }, select: { isActive: true, role: true, kind: true } });
+  return Boolean(member?.isActive && member.role === "ADMIN" && member.kind === "HUMAN");
+}
 export type SupportRole = "SETUP" | "FULL";
 export const SUPPORT_CHECKLIST_KEYS = ["configurationPrepared", "consentRequested", "handoffReady"] as const;
 export const supportConnectorPreparationSchema = z.array(z.discriminatedUnion("provider", [
@@ -101,7 +113,7 @@ export async function changeWorkspaceSupportGrant(actor: AppActor, params: {
   invariant(email.length > 0, 400, "INVALID_INPUT", "A named account is required.");
   return prisma.$transaction(async (tx) => {
     // Serialize grant changes with ownership and membership changes.
-    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Workspace" WHERE id = ${params.workspaceId} FOR UPDATE`);
+    await lockWorkspaceMembership(tx, params.workspaceId);
     const ownerId = await requireSupportOwner(tx, actor, params.workspaceId);
     const user = await tx.user.findUnique({ where: { email }, select: { id: true } });
     invariant(user && user.id !== ownerId, 400, "INVALID_SUPPORT_ACCOUNT", "Choose another existing named account.");

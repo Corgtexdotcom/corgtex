@@ -5,7 +5,6 @@ import {
   configureControlPlaneMeetingRecorderIntegration,
   createControlPlaneClient,
   createControlPlaneCustomerMember,
-  createSelfServeSupportSession,
   deployLatestControlPlaneRelease,
   enqueueControlPlaneFleetSnapshots,
   enqueueControlPlaneDeployLatestRollout,
@@ -115,20 +114,6 @@ const tools = [
         completedAt: { type: "string" },
       },
       required: ["runId", "status"],
-    },
-  },
-  {
-    name: "create_self_serve_support_session",
-    description: "Create an audited one-time support login for a shared-cloud self-serve workspace.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        deploymentId: { type: "string" },
-        workspaceId: { type: "string" },
-        targetMemberId: { type: "string" },
-        reason: { type: "string" },
-      },
-      required: ["reason"],
     },
   },
   {
@@ -770,7 +755,6 @@ const toolScopes: Record<string, string> = {
   list_customers: "control-plane:read",
   list_self_serve_customers: "control-plane:read",
   record_self_serve_smoke_run: "control-plane:support:write",
-  create_self_serve_support_session: "control-plane:support:write",
   approve_self_serve_trial_request: "control-plane:clients:write",
   reject_self_serve_trial_request: "control-plane:clients:write",
   create_client: "control-plane:clients:write",
@@ -999,14 +983,6 @@ export async function POST(request: NextRequest) {
         error: argOptionalString(args, "error"),
         startedAt: argOptionalString(args, "startedAt"),
         completedAt: argOptionalString(args, "completedAt"),
-      })));
-    }
-    if (name === "create_self_serve_support_session") {
-      return rpcResult(id, textContent(await createSelfServeSupportSession(actor, {
-        deploymentId: argOptionalString(args, "deploymentId"),
-        workspaceId: argOptionalString(args, "workspaceId"),
-        targetMemberId: argOptionalString(args, "targetMemberId"),
-        reason: argString(args, "reason"),
       })));
     }
     if (name === "approve_self_serve_trial_request") {

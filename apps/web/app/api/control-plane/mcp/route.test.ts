@@ -141,7 +141,6 @@ describe("/api/control-plane/mcp", () => {
       "list_customers",
       "list_self_serve_customers",
       "record_self_serve_smoke_run",
-      "create_self_serve_support_session",
       "approve_self_serve_trial_request",
       "reject_self_serve_trial_request",
       "create_client",
@@ -195,6 +194,15 @@ describe("/api/control-plane/mcp", () => {
       "run_customer_support_operation",
       "record_customer_support_audit",
     ]);
+  });
+
+  it("rejects direct invocation of the retired support login tool", async () => {
+    const { POST } = await import("./route");
+    const response = await POST(request({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "create_self_serve_support_session", arguments: { reason: "fixture" } },
+    }) as never);
+    expect((await response.json()).error).toBeTruthy();
+    expect(mocks.createSelfServeSupportSession).not.toHaveBeenCalled();
   });
 
   it("requires release scope and forwards bounded managed release operations", async () => {

@@ -1,5 +1,6 @@
 import {
   AppError,
+  canManageWorkspaceSupport,
   getWorkspaceMcpPublicUrl,
   getMemberInvitePolicy,
   getModelUsageBudget,
@@ -80,6 +81,7 @@ export default async function SettingsPage({
   const { workspaceId } = await params;
   const search = await searchParams;
   const actor = await requirePageActor();
+  const canManageSupport = await canManageWorkspaceSupport(actor, workspaceId);
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
   const tab = search.tab ?? (featureFlags.SETTINGS_GENERAL ? "general" : "members");
 
@@ -243,7 +245,7 @@ export default async function SettingsPage({
       </header>
 
       <div className="nr-tab-bar" style={{ marginBottom: 32 }}>
-        <a href={`/workspaces/${workspaceId}/settings/support`} className="nr-tab">Support access</a>
+        {canManageSupport && <a href={`/workspaces/${workspaceId}/settings/support`} className="nr-tab">Support access</a>}
         {featureFlags.SETTINGS_GENERAL && (
           <a href={`/workspaces/${workspaceId}/settings?tab=general`} className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}>
             {t("tabGeneral")}

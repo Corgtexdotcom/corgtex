@@ -17,6 +17,7 @@ const { prismaMock, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   return {
     requireWorkspaceMembershipMock: vi.fn(),
     prismaMock: {
+      $queryRaw: vi.fn().mockResolvedValue([]),
       workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
       workspace: { findUnique: vi.fn().mockResolvedValue(null) },
       $transaction: vi.fn(),

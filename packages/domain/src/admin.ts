@@ -6,6 +6,7 @@ import type { CustomerDeploymentCloudProvider, MemberRole, Prisma } from "@prism
 import { AppError, invariant } from "./errors";
 import { requestPasswordReset } from "./password-reset";
 import { createMember } from "./members";
+import { lockWorkspaceMembership, requireUnmanagedMember } from "./workspace-support-access";
 import { requireGlobalOperator } from "./auth";
 import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
 import { createWorkspace } from "./workspaces";
@@ -401,8 +402,14 @@ export async function adminRemoveFromWorkspace(actor: AppActor, params: {
   memberId: string;
 }) {
   requireGlobalOperator(actor);
-  await prisma.member.delete({
-    where: { id: params.memberId },
+  const target = await prisma.member.findUnique({ where: { id: params.memberId }, select: { workspaceId: true } });
+  invariant(target, 404, "NOT_FOUND", "Member not found");
+  await prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, target.workspaceId);
+    const member = await tx.member.findFirst({ where: { id: params.memberId, workspaceId: target.workspaceId } });
+    invariant(member, 404, "NOT_FOUND", "Member not found");
+    await requireUnmanagedMember(tx, target.workspaceId, member.userId);
+    await tx.member.delete({ where: { id: member.id } });
   });
 }
 
@@ -613,9 +620,12 @@ export async function adminUpdateMember(actor: AppActor, params: {
   role: MemberRole;
 }) {
   requireGlobalOperator(actor);
-  await prisma.member.update({
-    where: { id: params.memberId },
-    data: { role: params.role }
+  await prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    const member = await tx.member.findFirst({ where: { id: params.memberId, workspaceId: params.workspaceId } });
+    invariant(member, 404, "NOT_FOUND", "Member not found");
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
+    await tx.member.update({ where: { id: member.id }, data: { role: params.role } });
   });
 }
 
@@ -624,9 +634,12 @@ export async function adminDeactivateMember(actor: AppActor, params: {
   memberId: string;
 }) {
   requireGlobalOperator(actor);
-  await prisma.member.update({
-    where: { id: params.memberId },
-    data: { isActive: false }
+  await prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    const member = await tx.member.findFirst({ where: { id: params.memberId, workspaceId: params.workspaceId } });
+    invariant(member, 404, "NOT_FOUND", "Member not found");
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
+    await tx.member.update({ where: { id: member.id }, data: { isActive: false } });
   });
 }
 

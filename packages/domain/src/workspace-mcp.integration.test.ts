@@ -5,6 +5,15 @@ import type { AppActor } from "@corgtex/shared";
 import { exchangeMcpAuthorizationCode, getWorkspaceMcpPublicUrl, issueMcpAuthorizationCode, refreshMcpAccessToken, registerMcpOAuthClient, resolveMcpOAuthAccessToken } from "./mcp-connector";
 import { listWorkspaceMcpConnections, revokeWorkspaceMcpConnection, withMcpConnectionExecution } from "./mcp-connections";
 import { changeWorkspaceSupportGrant } from "./workspace-support-access";
+import { dispatchReleaseDiagnostic } from "./release-diagnostics";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readFileSync: (...args: Parameters<typeof actual.readFileSync>) =>
+    args[0] === "/app/release-build.json"
+      ? JSON.stringify({ schemaVersion: 1, role: "web", gitSha: "a".repeat(40) })
+      : (actual.readFileSync as (...values: unknown[]) => unknown)(...args) };
+});
 
 describe("workspace-specific MCP grants", () => {
   const suffix = randomUUID();
@@ -128,6 +137,69 @@ describe("workspace-specific MCP grants", () => {
     await expect(withMcpConnectionExecution(job, run)).rejects.toMatchObject({ code: "MCP_CONNECTION_REVOKED" });
     expect(run).not.toHaveBeenCalled();
     expect(await withMcpConnectionExecution({ workspaceId: a }, async () => "system-owned")).toBe("system-owned");
+  });
+
+  it("adopts the initiating connection when rearming an existing queued job", async () => {
+    const token = await connect(a);
+    const session = await resolveMcpOAuthAccessToken(token.access_token, getWorkspaceMcpPublicUrl(a));
+    const job = await prisma.workflowJob.create({ data: { workspaceId: a, type: "fixture", status: "FAILED", payload: {} } });
+    await runWithMcpExecutionOrigin({ connectionId: session!.connectionId, workspaceId: a }, () =>
+      prisma.workflowJob.updateMany({ where: { id: job.id, workspaceId: a, status: "FAILED" }, data: { status: "PENDING" } }));
+    const updated = await prisma.workflowJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(updated.mcpConnectionId).toBe(session!.connectionId);
+    await revokeWorkspaceMcpConnection(actor, a, session!.connectionId);
+    await expect(withMcpConnectionExecution(updated, async () => "must not execute")).rejects.toMatchObject({ code: "MCP_CONNECTION_REVOKED" });
+  });
+
+  it("binds update and upsert rearm but preserves empty upserts and unrelated system writes", async () => {
+    const token = await connect(a);
+    const connection = await resolveMcpOAuthAccessToken(token.access_token, getWorkspaceMcpPublicUrl(a));
+    const job = await prisma.workflowJob.create({ data: { workspaceId: a, type: "fixture", payload: {}, status: "FAILED" } });
+    const foreign = await prisma.workflowJob.create({ data: { workspaceId: b, type: "fixture", payload: {}, status: "FAILED" } });
+    const origin = { connectionId: connection!.connectionId, workspaceId: a };
+    await runWithMcpExecutionOrigin(origin, async () => {
+      const unchanged = await prisma.workflowJob.upsert({ where: { id: job.id }, create: { workspaceId: a, type: "fixture", payload: {} }, update: {} });
+      expect(unchanged.mcpConnectionId).toBeNull();
+      await expect(prisma.workflowJob.update({ where: { id: foreign.id }, data: { status: "PENDING" } })).rejects.toMatchObject({ code: "P2025" });
+      await expect(prisma.workflowJob.updateMany({ where: { id: { in: [job.id, foreign.id] } }, data: { status: "PENDING" } })).rejects.toThrow("MCP_WORKSPACE_REQUIRED");
+      await expect(prisma.workflowJob.update({ where: { id: job.id }, data: { workspaceId: b } })).rejects.toThrow("MCP_WORKSPACE_MISMATCH");
+      expect((await prisma.workflowJob.update({ where: { id: job.id }, data: { status: "PENDING" } })).mcpConnectionId).toBe(origin.connectionId);
+    });
+    await prisma.workflowJob.update({ where: { id: job.id }, data: { status: "FAILED" } });
+    expect((await prisma.workflowJob.findUniqueOrThrow({ where: { id: job.id } })).mcpConnectionId).toBe(origin.connectionId);
+    await prisma.workflowJob.update({ where: { id: job.id }, data: { mcpConnectionId: null } });
+    const rearmed = await runWithMcpExecutionOrigin(origin, () => prisma.workflowJob.upsert({
+      where: { id: job.id }, create: { workspaceId: a, type: "fixture", payload: {} }, update: { status: "PENDING" },
+    }));
+    expect(rearmed.mcpConnectionId).toBe(origin.connectionId);
+    expect((await prisma.workflowJob.findUniqueOrThrow({ where: { id: foreign.id } })).mcpConnectionId).toBeNull();
+  });
+
+  it("fences the real release-diagnostic retry after its initiating connection is revoked", async () => {
+    const workspaceId = randomUUID();
+    await prisma.workspace.create({ data: { id: workspaceId, slug: workspaceId, name: "Synthetic diagnostic" } });
+    try {
+      await prisma.member.create({ data: { workspaceId, userId: actor.user.id, role: "ADMIN", kind: "HUMAN" } });
+      const token = await connect(workspaceId);
+      const connection = await resolveMcpOAuthAccessToken(token.access_token, getWorkspaceMcpPublicUrl(workspaceId));
+      const request = { operationId: randomUUID(), expectedGitSha: "a".repeat(40) };
+      const initial = await dispatchReleaseDiagnostic(actor, workspaceId, request);
+      await prisma.workflowJob.update({ where: { id: initial.jobId }, data: { status: "FAILED", attempts: 1 } });
+      await runWithMcpExecutionOrigin({ connectionId: connection!.connectionId, workspaceId }, () =>
+        dispatchReleaseDiagnostic(actor, workspaceId, { ...request, retryAttempt: 1 }));
+      const job = await prisma.workflowJob.findUniqueOrThrow({ where: { id: initial.jobId } });
+      expect(job.status).toBe("PENDING");
+      expect(job.mcpConnectionId).toBe(connection!.connectionId);
+      await revokeWorkspaceMcpConnection(actor, workspaceId, connection!.connectionId);
+      const run = vi.fn();
+      await expect(withMcpConnectionExecution(job, run)).rejects.toMatchObject({ code: "MCP_CONNECTION_REVOKED" });
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      await prisma.workflowJob.deleteMany({ where: { workspaceId } });
+      await prisma.mcpOAuthAuthorizationCode.deleteMany({ where: { workspaceId } });
+      await prisma.mcpOAuthAccessToken.deleteMany({ where: { workspaceId } });
+      await prisma.workspace.delete({ where: { id: workspaceId } });
+    }
   });
 
   it("enforces Setup denial and non-revivable Full support versions", async () => {

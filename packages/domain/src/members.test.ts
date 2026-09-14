@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, selfServeOpsMock, sendEmailMock, sharedEnv } = vi.hoisted(() => {
   const prisma = {
+    $queryRaw: vi.fn().mockResolvedValue([]),
     workspace: { findUnique: vi.fn().mockResolvedValue(null) },
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),

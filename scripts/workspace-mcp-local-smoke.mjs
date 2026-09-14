@@ -78,6 +78,7 @@ try {
   assert.equal((await rpc(1, tokens[0].access_token, "tools/list")).status(), 401);
   assert.equal((await rpc(0, tokens[0].access_token, "tools/call", { name: "get_workspace_info", arguments: { workspaceId: ids[1] } })).status(), 403);
   await page.goto(`${origin}/workspaces/${ids[0]}/settings?tab=ai-workspaces`, { waitUntil: "networkidle", timeout: 120000 });
+  assert.equal(await page.getByRole("link", { name: "Support access", exact: true }).count(), 0, "Legacy null owner must not advertise owner-only settings");
   const panel = page.getByRole("region", { name: "Workspace MCP connections" });
   await panel.getByText("Shared MCP fixture", { exact: true }).waitFor();
   await panel.scrollIntoViewIfNeeded();
@@ -91,6 +92,21 @@ try {
   await panel.getByText("No connections yet.").waitFor();
   assert.equal((await rpc(0, tokens[0].access_token, "tools/list")).status(), 401);
   assert.equal((await rpc(1, tokens[1].access_token, "tools/list")).status(), 200);
+  await page.goto(`${origin}/workspaces/${ids[0]}/settings/support`, { waitUntil: "networkidle", timeout: 120000 });
+  await page.getByText("Support access is available only to the verified workspace owner.", { exact: false }).waitFor();
+  await page.screenshot({ path: ".artifacts/workspace-mcp/support-unavailable-mobile.png" });
+  await prisma.workspace.update({ where: { id: ids[0] }, data: { supportOwnerUserId: user.id } });
+  await page.goto(`${origin}/workspaces/${ids[0]}/settings`, { waitUntil: "networkidle", timeout: 120000 });
+  await page.getByRole("link", { name: "Support access", exact: true }).waitFor();
+  await page.getByRole("link", { name: "Support access", exact: true }).click();
+  await page.getByRole("heading", { name: "Support Access", exact: true }).waitFor();
+  await page.screenshot({ path: ".artifacts/workspace-mcp/support-owner-mobile.png" });
+  for (const method of ["GET", "POST"]) {
+    const retired = await context.request.fetch(`${origin}/support/sessions/synthetic-retired`, { method });
+    assert.equal(retired.status(), 410);
+    assert.ok(!retired.headers()["set-cookie"]);
+    assert.ok(!(await retired.text()).includes("<form"));
+  }
   console.log("PASS: scoped discovery/challenge, fixed consent, shared registration A/B, tools/resources, forged workspace denial, independent UI revoke, desktop/mobile rendering. External AI clients not exercised.");
 } finally {
   await browser.close();

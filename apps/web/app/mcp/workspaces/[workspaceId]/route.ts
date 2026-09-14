@@ -4,6 +4,7 @@ import { AppError, getWorkspaceMcpOrigin, MCP_CONNECTOR_DEFAULT_SCOPES } from "@
 import { isWorkspaceMcpId, workspaceMcpResource, workspaceMcpMetadataUrl } from "@corgtex/shared/workspace-mcp-resource";
 import { POST as handlePost, mcpAuthErrorResponse } from "@/lib/mcp-transport";
 import { handleRouteError } from "@/lib/http";
+import { withWorkspaceMcpCors, workspaceMcpPreflight } from "@/lib/workspace-mcp-cors";
 
 type Context = { params: Promise<{ workspaceId: string }> };
 
@@ -20,8 +21,10 @@ async function scope(request: NextRequest, context: Context) {
 }
 
 export async function POST(request: NextRequest, context: Context) {
-  try { return await handlePost(request, await scope(request, context)); }
-  catch (error) { return handleRouteError(error); }
+  return withWorkspaceMcpCors(request, async () => {
+    try { return await handlePost(request, await scope(request, context)); }
+    catch (error) { return handleRouteError(error); }
+  });
 }
 
 async function authenticate(request: NextRequest, context: Context) {
@@ -39,5 +42,6 @@ async function authenticate(request: NextRequest, context: Context) {
   } catch (error) { return handleRouteError(error); }
 }
 
-export const GET = authenticate;
-export const DELETE = authenticate;
+export const GET = (request: NextRequest, context: Context) => withWorkspaceMcpCors(request, () => authenticate(request, context));
+export const DELETE = GET;
+export const OPTIONS = (request: NextRequest) => workspaceMcpPreflight(request);

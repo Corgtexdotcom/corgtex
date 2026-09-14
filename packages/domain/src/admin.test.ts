@@ -16,6 +16,14 @@ vi.mock("./auth", () => ({
 // Dedicated transaction-client mock with separate delegates so tests can prove
 // that removeCustomerDeployment never falls through to the global prisma client.
 const txMocks = vi.hoisted(() => ({
+  $queryRaw: vi.fn().mockResolvedValue([]),
+  workspace: { findUnique: vi.fn().mockResolvedValue(null) },
+  workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
+  member: {
+    findFirst: vi.fn().mockResolvedValue({ id: "m_1", workspaceId: "ws_1", userId: "u_1" }),
+    update: vi.fn().mockResolvedValue({}),
+    delete: vi.fn().mockResolvedValue({}),
+  },
   providerCutover: { findFirst: vi.fn().mockResolvedValue(null) },
   customerDeploymentEvent: { create: vi.fn().mockResolvedValue({ id: "evt_1" }) },
   customerDeployment: { delete: vi.fn().mockResolvedValue({}) },
@@ -59,6 +67,7 @@ vi.mock("@corgtex/shared", () => ({
       count: vi.fn().mockResolvedValue(0),
     },
     member: {
+      findUnique: vi.fn().mockResolvedValue({ workspaceId: "ws_1" }),
       findMany: vi.fn().mockResolvedValue([]),
       findUniqueOrThrow: vi.fn().mockResolvedValue({
         id: "m_1",
@@ -375,7 +384,7 @@ describe("Platform Admin Tools", () => {
     await admin.adminRemoveFromWorkspace(dummyActor, { memberId: "m_1" });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.delete).toHaveBeenCalledWith({
+    expect(txMocks.member.delete).toHaveBeenCalledWith({
       where: { id: "m_1" },
     });
   });
@@ -412,7 +421,7 @@ describe("Platform Admin Tools", () => {
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.update).toHaveBeenCalledWith({
+    expect(txMocks.member.update).toHaveBeenCalledWith({
       where: { id: "m_1" },
       data: { role: "ADMIN" },
     });
@@ -427,7 +436,7 @@ describe("Platform Admin Tools", () => {
     });
 
     expect(requireGlobalOperator).toHaveBeenCalledWith(dummyActor);
-    expect(prisma.member.update).toHaveBeenCalledWith({
+    expect(txMocks.member.update).toHaveBeenCalledWith({
       where: { id: "m_1" },
       data: { isActive: false },
     });

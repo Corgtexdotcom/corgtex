@@ -16,12 +16,33 @@ const createClient = () => {
     const params = { model, action: operation, args: args as Record<string, any> };
     const mcpOrigin = getMcpExecutionOrigin();
     if (mcpOrigin && ["Event", "WorkflowJob"].includes(params.model ?? "") &&
-        ["create", "createMany", "upsert"].includes(params.action)) {
-      const data = params.action === "upsert" ? params.args.create : params.args.data;
-      for (const row of Array.isArray(data) ? data : [data]) {
-        const workspaceId = row.workspaceId ?? row.workspace?.connect?.id;
-        if (workspaceId !== mcpOrigin.workspaceId) throw new Error("MCP_WORKSPACE_MISMATCH");
-        row.mcpConnectionId = mcpOrigin.connectionId;
+        ["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) {
+      const assertWorkspace = (value: unknown) => {
+        if (value !== mcpOrigin.workspaceId) throw new Error("MCP_WORKSPACE_MISMATCH");
+      };
+      const stamp = (row: Record<string, any>, creating: boolean) => {
+        if (creating || row.workspaceId !== undefined) assertWorkspace(typeof row.workspaceId === "object" ? row.workspaceId?.set : row.workspaceId ?? row.workspace?.connect?.id);
+        if (row.workspace !== undefined) {
+          assertWorkspace(row.workspace?.connect?.id);
+          if (Object.keys(row.workspace).some((key) => key !== "connect")) throw new Error("MCP_WORKSPACE_MISMATCH");
+        }
+        if (creating || Object.keys(row).length > 0) row.mcpConnectionId = mcpOrigin.connectionId;
+      };
+      if (["update", "updateMany", "upsert"].includes(params.action)) {
+        const where = params.args.where ?? {};
+        // Constrain the actual write atomically, not a preceding read of matching rows.
+        if (where.workspaceId !== undefined) assertWorkspace(where.workspaceId);
+        if (params.action === "updateMany" && where.workspaceId === undefined) throw new Error("MCP_WORKSPACE_REQUIRED");
+        params.args.where = { ...where, workspaceId: mcpOrigin.workspaceId };
+      }
+      if (params.action === "upsert") {
+        stamp(params.args.create, true);
+        // Empty idempotent upserts retain the existing job's ownership.
+        stamp(params.args.update, false);
+      } else {
+        for (const row of Array.isArray(params.args.data) ? params.args.data : [params.args.data]) {
+          stamp(row, params.action === "create" || params.action === "createMany");
+        }
       }
     }
     const context = getSupportAuthorizationContext();
@@ -31,6 +52,7 @@ const createClient = () => {
       ? [params.args.create, params.args.update]
       : Array.isArray(params.args.data) ? params.args.data : [params.args.data];
     for (const row of rows) {
+      if (params.action === "upsert" && row === params.args.update && Object.keys(row).length === 0) continue;
       let workspaceId = row.workspaceId ?? row.workspace?.connect?.id ?? params.args.create?.workspaceId ?? context.origin?.workspaceId;
       if (!workspaceId && params.args.where?.id) {
         const existing = params.model === "Event"
