@@ -10,6 +10,15 @@ on:
         options:
           - rehearse
           - recover
+          - qualify-target
+      recovery_kind:
+        description: "Recover a restore intent or a metadata-only target qualification intent."
+        required: true
+        type: choice
+        default: restore
+        options:
+          - restore
+          - target-qualification
       domain:
         description: "Exactly one Railway PostgreSQL data domain to restore and verify."
         required: true
@@ -36,6 +45,127 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  qualify-target:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-target'
+    name: Qualify existing Ops target metadata only
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg
+      TARGET_POSTGRES_HOST: corgtex-mig-reh-restore-pg.postgres.database.azure.com
+      TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      QUALIFICATION_DIR: .artifacts/target-qualification/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate metadata-only inputs and protected credential presence
+        env:
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$DOMAIN" == ops && -z "$RECOVERY_RUN_ID" && -z "$RECOVERY_RUN_ATTEMPT" ]] || exit 1
+          [[ -n "$TARGET_POSTGRES_ADMIN_PASSWORD" ]] || { echo '::error::Protected target credential missing.'; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Verify stopped baseline and prepare typed qualification intent
+        id: qualification_prepare
+        timeout-minutes: 10
+        env:
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+          node scripts/migration/qualify-ops-azure-target.mjs prepare "$QUALIFICATION_DIR"
+      - name: Persist qualification recovery intent before START
+        id: qualification_intent
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-target-qualification-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_DIR }}/qualification-intent.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Start target, open single-IP access and read metadata once
+        timeout-minutes: 45
+        env:
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: node scripts/migration/qualify-ops-azure-target.mjs run "$QUALIFICATION_DIR"
+      - name: Remove qualification access and return target to Stopped
+        if: ${{ always() && steps.qualification_prepare.outcome == 'success' }}
+        timeout-minutes: 20
+        run: node scripts/migration/qualify-ops-azure-target.mjs cleanup "$QUALIFICATION_DIR"
+      - name: Upload private target qualification receipts
+        if: ${{ always() && steps.qualification_prepare.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-target-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  recover-target-qualification:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'target-qualification'
+    name: Recover exact target qualification lifecycle only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      QUALIFICATION_DIR: .artifacts/target-qualification-recovery/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate exact qualification recovery inputs
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$DOMAIN" == ops ]] || exit 1
+          [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ && "$RECOVERY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+      - uses: actions/download-artifact@v5
+        with:
+          name: azure-target-qualification-${{ inputs.recovery_run_id }}-${{ inputs.recovery_run_attempt }}
+          path: ${{ env.QUALIFICATION_DIR }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recovery_run_id }}
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Recover run-owned firewall and stopped-server state
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/migration/qualify-ops-azure-target.mjs recover "$QUALIFICATION_DIR"
+      - name: Upload private qualification recovery receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-target-qualification-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
   rehearsal:
     if: github.ref == 'refs/heads/main' && inputs.operation == 'rehearse'
     name: Restore one read-only snapshot and prove parity
@@ -641,7 +771,7 @@ jobs:
           retention-days: 7
 
   recovery:
-    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover'
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind != 'target-qualification'
     name: Recover exact resources from persisted intent
     runs-on: ubuntu-latest
     timeout-minutes: 45

@@ -1,0 +1,60 @@
+# Ops Target Metadata Qualification
+
+The existing protected Azure PostgreSQL rehearsal workflow also supports
+`qualify-target` with domain `ops`. This is not `rehearse`: it reads only the
+existing target's PostgreSQL metadata, without Railway source secrets, dumps,
+scratch databases, migrations or extension installation. Main, the existing
+environment approval and shared non-cancelling concurrency gate remain required.
+
+The target password stays in the existing protected environment secret and is
+passed only to the preparation/probe steps. Missing credentials fail before
+START. Do not extract that secret or run the full restore as a substitute.
+
+Preparation checks the exact account/principal roles, non-authoritative resource
+group, server identity/configuration, stopped state, absent firewall rules and
+private endpoint connections. It persists and uploads a typed intent before any
+provider effect. Its absolute deadline is one hour from preparation, with the
+final fifteen minutes reserved for cleanup. START/readiness, a run-owned single
+IPv4 rule and one bounded read-only SQL connection are the only qualification
+actions. The metadata probe retains verified TLS and never alters the database.
+
+`always()` cleanup removes only the intent's rule, returns the originally stopped
+server to Stopped and verifies both readbacks. A failed metadata query is not a
+reason to leave compute running. Ambiguous CLI responses are reconciled by reads,
+not repeated mutations. START and STOP request terminal CLI completion; an
+ambiguous START followed by Stopped is not cleanup proof. Cleanup waits for Ready,
+then issues STOP once and verifies Stopped. If Ready cannot be observed within
+the remaining window, it reports unresolved rather than successful cleanup.
+Unexpected target identity or foreign access fails closed.
+Late cleanup may still recover the resource but explicitly fails the original
+one-hour window. An Azure operation or lost runner can prevent timely cleanup:
+the supervising operator must retain the absolute deadline independently. A job
+timeout is not a guarantee that Azure stopped compute.
+
+For interruption recovery, use the same workflow's `recover` operation with
+`recovery_kind=target-qualification`, domain `ops` and the exact original run ID
+and attempt. It downloads the original execution receipts, not the prepare-only
+intent artifact, and performs no scratch database deletion. Before Azure calls,
+existing read-only GitHub activity must prove the exact completed original run
+attempt, attempted qualification step, unsuccessful cleanup, and no intervening
+workflow run. The original START marker is required; a cleanup receipt or native
+successful cleanup rejects recovery even if the target has since become Ready.
+Superseded attempts, incomplete activity results and missing execution receipts
+fail closed. A second recovery run is not automatically authorized by the old
+intent. Lost receipts or a never-observed START transition require separately
+reviewed operator reconciliation; they must not be worked around with an intent.
+Default `recovery_kind=restore` preserves the existing restore
+recovery path. Qualification recovery needs no PostgreSQL password, Node package
+installation or database connection. Both paths share workflow concurrency.
+
+Private artifacts separate the intent, START-attempt marker, metadata and cleanup
+receipts. No credential, raw exception or Azure token is logged. `metadata`
+capture is not production compatibility/capacity acceptance, and cleanup success
+is not proof of a bill. The per-run intent records a USD5 transition cap; the
+operator owns actual spend accounting and the separately approved cumulative
+allowance. No monthly hosting budget is enlarged by this operation.
+
+Before dispatch, independently review the complete workflow/probe/lifecycle diff,
+verify the current target and protected identity, confirm the applicable spend
+reservation and assign an operator to monitor cleanup. Do not start another run
+while any earlier lifecycle remains unresolved.
