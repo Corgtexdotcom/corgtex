@@ -5,7 +5,7 @@ import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readF
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { RESOURCE, HOST, ProbeError, connectionConfig, capture, sanitize } from "./probe-ops-azure-target.mjs";
+import { RESOURCE, HOST, ProbeError, connectionConfig, captureWhenReady, sanitize } from "./probe-ops-azure-target.mjs";
 import { validateRehearsalPrincipal } from "./validate-postgres-restore-rehearsal.mjs";
 
 export const SUBSCRIPTION = "227eb707-bc46-415e-a09b-7d2b69fb14b2";
@@ -101,7 +101,7 @@ export class Azure {
     const p = await this.call(["network", "private-endpoint-connection", "list", "--id", RESOURCE]);
     assert(Array.isArray(p) && p.length === 0, "PRIVATE_ENDPOINT_DRIFT");
   }
-  async start() { await this.identity(); return this.call(["postgres", "flexible-server", "start", "--resource-group", GROUP, "--name", SERVER]); }
+  async start() { await this.identity(); return this.call(["postgres", "flexible-server", "start", "--resource-group", GROUP, "--name", SERVER, "--no-wait"]); }
   async stop() { await this.identity(); return this.call(["postgres", "flexible-server", "stop", "--resource-group", GROUP, "--name", SERVER]); }
   async createRule(i) {
     await this.identity();
@@ -151,7 +151,7 @@ export async function qualify(api, i, probe, markAttempt, c = clock) {
   await api.createRule(i);
   assert(validateRules(await api.rules(), i).length === 1, "FIREWALL_CREATE_UNPROVEN");
   remaining(i.workDeadline, c);
-  const result = await probe();
+  const result = await probe({ deadline: i.workDeadline });
   remaining(i.workDeadline, c);
   return result;
 }
@@ -178,7 +178,7 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   // Stopped can be the pre-transition readback of an accepted START. It is not
   // terminal evidence. Without observing Ready, leave this execution unresolved.
   if (s.state === "Starting" || s.state === "Stopped") s = await waitState(api, "Ready", cleanupDeadline, c);
-  assert(s.state === "Ready", "START_TERMINAL_UNPROVEN");
+  assert(s.state === "Ready" || s.state === "Stopping", "START_TERMINAL_UNPROVEN");
   if (s.state === "Ready") {
     try { await api.stop(); } catch { /* Bounded state polling resolves an ambiguous response. */ }
   }
@@ -278,7 +278,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   if (mode === "run") {
     const config = await connectionConfig(env);
     const { default: pg } = await import("pg");
-    const result = await qualify(api, i, () => capture(new pg.Client(config)), () => save(`${dir}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
+    const result = await qualify(api, i, (options) => captureWhenReady(() => new pg.Client(config), options), () => save(`${dir}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
     save(`${dir}/metadata.json`, result); console.log(JSON.stringify({ status: result.status, comparison: result.comparison }));
   } else {
     const result = await cleanup(api, i, clock, recovery); save(`${dir}/cleanup.json`, result);

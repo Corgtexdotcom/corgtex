@@ -15,17 +15,29 @@ group, server identity/configuration, stopped state, absent firewall rules and
 private endpoint connections. It persists and uploads a typed intent before any
 provider effect. Its absolute deadline is one hour from preparation, with the
 final fifteen minutes reserved for cleanup. START/readiness, a run-owned single
-IPv4 rule and one bounded read-only SQL connection are the only qualification
-actions. The metadata probe retains verified TLS and never alters the database.
+IPv4 rule, bounded connection-readiness checks and one metadata capture are the
+only qualification actions. Readiness follows the existing firewall-propagation
+pattern: up to five minutes of transient connection retries, each closed, using
+the same verified TLS, credentials and startup read-only settings. Its sole query
+checks that posture. Authentication/certificate/guard failures do not fall back.
+Then one connection captures metadata; catalog capture is never retried.
+Readiness and capture (including bounded disconnect) are capped by the remaining
+work deadline. Readiness exhaustion means UNPROVEN, not platform incompatibility.
+The probe never alters the database.
 
 `always()` cleanup removes only the intent's rule, returns the originally stopped
 server to Stopped and verifies both readbacks. A failed metadata query is not a
 reason to leave compute running. Ambiguous CLI responses are reconciled by reads,
-not repeated mutations. START and STOP request terminal CLI completion; an
+not repeated mutations. START submits with --no-wait and bounded Ready polling;
+the CLI submission timeout is not a one-minute startup limit. STOP requests
+terminal CLI completion with readback reconciliation after a lost response. An
 ambiguous START followed by Stopped is not cleanup proof. Cleanup waits for Ready,
 then issues STOP once and verifies Stopped. If Ready cannot be observed within
 the remaining window, it reports unresolved rather than successful cleanup.
 Unexpected target identity or foreign access fails closed.
+After the same execution-ownership checks, recovery observing Stopping waits
+directly for Stopped without submitting another STOP. A bare stale intent never
+authorizes this path; an initial Stopped after ambiguous START remains unresolved.
 Late cleanup may still recover the resource but explicitly fails the original
 one-hour window. An Azure operation or lost runner can prevent timely cleanup:
 the supervising operator must retain the absolute deadline independently. A job
@@ -48,8 +60,10 @@ recovery path. Qualification recovery needs no PostgreSQL password, Node package
 installation or database connection. Both paths share workflow concurrency.
 
 Private artifacts separate the intent, START-attempt marker, metadata and cleanup
-receipts. No credential, raw exception or Azure token is logged. `metadata`
-capture is not production compatibility/capacity acceptance, and cleanup success
+receipts. No credential, raw exception or Azure token is logged.
+Standalone --execute receipts also reside under ignored .artifacts/target-qualification,
+never beside source scripts. All receipt files are exclusive-create mode 0600.
+Metadata capture is not production compatibility/capacity acceptance, and cleanup success
 is not proof of a bill. The per-run intent records a USD5 transition cap; the
 operator owns actual spend accounting and the separately approved cumulative
 allowance. No monthly hosting budget is enlarged by this operation.

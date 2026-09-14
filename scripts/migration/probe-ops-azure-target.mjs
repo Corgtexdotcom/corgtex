@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Private metadata-only probe. Parent owns credentials, access, start/stop and costs.
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const RESOURCE = "/subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg";
@@ -68,7 +68,7 @@ export function sanitize(error) {
     rawErrorSuppressed: true };
 }
 
-export async function capture(client, { deadlineMs = 60000, closeMs = 3000 } = {}) {
+export async function capture(client, { deadlineMs = 60000, closeMs = 3000, readinessOnly = false } = {}) {
   let timer, closeTimer, expired = false, transaction = false, rollback = false, disconnected = false;
   const query = async (sql) => {
     check(!expired, "DEADLINE");
@@ -79,6 +79,7 @@ export async function capture(client, { deadlineMs = 60000, closeMs = 3000 } = {
   const work = async () => {
     await client.connect();
     guard((await query(SQL.guard)).rows[0], "read committed");
+    if (readinessOnly) return null;
     check((await query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")).command === "BEGIN", "BEGIN_UNPROVEN"); transaction = true;
     guard((await query(SQL.guard)).rows[0], "repeatable read");
     const metadata = {};
@@ -108,6 +109,10 @@ export async function capture(client, { deadlineMs = 60000, closeMs = 3000 } = {
     clearTimeout(closeTimer);
   }
   if (failure) throw failure;
+  if (readinessOnly) {
+    check(disconnected, "CLEANUP_UNPROVEN");
+    return { status: "TARGET_CONNECTION_READY", disconnected: true };
+  }
   check(!transaction && rollback && disconnected, "CLEANUP_UNPROVEN");
   const settings = result.settings[0], capacity = result.capacity[0];
   check([capacity.max_connections, capacity.reserved_connections, capacity.superuser_reserved_connections]
@@ -127,6 +132,43 @@ export async function capture(client, { deadlineMs = 60000, closeMs = 3000 } = {
     limits: "Existing postgres metadata only; no scratch/extension installation, source reads, restore, table data, workload capacity, production acceptance, firewall cleanup or cost-accounting proof." };
 }
 
+export async function captureWhenReady(clientFactory, { deadline, now = Date.now,
+  sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  check(Number.isSafeInteger(deadline) && deadline > now(), "DEADLINE");
+  const readinessDeadline = Math.min(deadline, now() + 300000);
+  let attempts = 0, ready = false;
+  const budget = (until, cap) => {
+    const total = Math.min(cap, until - now());
+    check(total >= 2, "DEADLINE");
+    const closeMs = Math.min(3000, Math.floor(total / 4));
+    return { deadlineMs: total - closeMs, closeMs };
+  };
+  while (now() < readinessDeadline) {
+    attempts++;
+    try {
+      // Match the existing firewall-readiness pattern, but bound close as well
+      // and verify startup read-only/TLS configuration before a single capture.
+      await capture(clientFactory(), { ...budget(readinessDeadline, 5000), readinessOnly: true });
+      ready = true; break;
+    } catch (error) {
+      const transient = ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "EAI_AGAIN", "28000", "57P03"].includes(error?.code)
+        || (error instanceof ProbeError && error.code === "DEADLINE")
+        || (error instanceof Error && error.message === "timeout expired");
+      if (!transient) throw error;
+    }
+    const delay = Math.min(5000, readinessDeadline - now());
+    if (delay > 0) await sleep(delay);
+  }
+  check(ready, "TARGET_READINESS_UNPROVEN");
+  const result = await capture(clientFactory(), budget(deadline, 60000));
+  check(now() <= deadline, "DEADLINE");
+  return { ...result, readinessAttempts: attempts };
+}
+
+export function standaloneReceiptPath(timestamp) {
+  return new URL(`../../.artifacts/target-qualification/ops-azure-target-metadata-${timestamp}.json`, import.meta.url);
+}
+
 async function main() {
   if (!process.argv.slice(2).length) { console.log(JSON.stringify({ status: "NO_EXECUTION", resource: RESOURCE, mode: "--execute", independentQaRequired: true })); return; }
   check(process.argv.length === 3 && process.argv[2] === "--execute", "INVALID_ARGUMENTS");
@@ -136,7 +178,8 @@ async function main() {
   receipt.scriptSha256 = hash(readFileSync(fileURLToPath(import.meta.url)));
   const bytes = JSON.stringify(receipt, null, 2) + "\n";
   check(Buffer.byteLength(bytes) <= 65536, "RECEIPT_LIMIT");
-  const path = new URL(`ops-azure-target-metadata-${Date.now()}.json`, import.meta.url);
+  const path = standaloneReceiptPath(Date.now());
+  mkdirSync(new URL(".", path), { recursive: true, mode: 0o700 });
   writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
   console.log(JSON.stringify({ status: receipt.status, comparison: receipt.comparison, rollback: true, disconnected: true, receipt: fileURLToPath(path) }));
 }

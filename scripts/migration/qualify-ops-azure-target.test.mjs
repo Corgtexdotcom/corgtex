@@ -142,11 +142,34 @@ describe("target qualification lifecycle", () => {
     api.stop = async () => { events.push("stop-failed"); throw Error("denied"); }; c.time = i.deadline - 1;
     await expect(cleanup(api, i, c)).rejects.toThrow("ABSOLUTE_DEADLINE_EXCEEDED"); expect(events.filter(e => e === "stop-failed")).toHaveLength(1);
   });
+  it("reconciles interrupted STOP only after recovery ownership verification", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Stopping";
+    api.verifyRecovery = async () => { events.push("owned"); };
+    c.sleep = async ms => { c.time += ms; api.current.state = "Stopped"; };
+    events.length = 0;
+    expect((await cleanup(api, i, c, true)).serverStopped).toBe(true);
+    expect(events[0]).toBe("owned"); expect(events).not.toContain("stop");
+  });
+  it("passes absolute remaining deadline to the readiness and capture callback", async () => {
+    const { api, c } = setup(); const i = await prepare(api, inputs, c); c.time = i.workDeadline - 100;
+    let received;
+    await qualify(api, i, async options => { received = options; }, async () => {}, c);
+    expect(received).toEqual({ deadline: i.workDeadline });
+  });
+  it("allows multi-minute asynchronous START without a second START", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.start = async () => { events.push("start"); api.current.state = "Starting"; };
+    c.sleep = async ms => { c.time += ms; if (c.time >= i.createdAt + 180000) api.current.state = "Ready"; };
+    await qualify(api, i, async () => {}, async () => {}, c);
+    expect(c.time - i.createdAt).toBe(180000); expect(events.filter(e => e === "start")).toHaveLength(1);
+  });
   it("binds every Azure write to a fresh identity check and exact CLI arguments", async () => {
     const api = new Azure({}); const calls = []; api.identity = async () => calls.push("identity"); api.call = async (args) => calls.push(args);
     const { api: fake, c } = setup(); const i = await prepare(fake, inputs, c);
     await api.start(); await api.createRule(i); await api.deleteRule(i); await api.stop();
     for (let n = 0; n < calls.length; n += 2) expect(calls[n]).toBe("identity");
+    expect(calls[1]).toContain("--no-wait");
     expect(calls[3]).toContain("--server-name"); expect(calls[3]).toContain(i.ipv4); expect(calls[5]).toContain(i.firewallName);
     expect(calls.flat().join(" ")).not.toMatch(/(?:database| db |grant|role assignment create)/u);
   });

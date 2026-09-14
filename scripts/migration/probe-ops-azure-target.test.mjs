@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { RESOURCE, HOST, SQL, OPTIONS, connectionConfig, capture, sanitize } from "./probe-ops-azure-target.mjs";
+import { RESOURCE, HOST, SQL, OPTIONS, connectionConfig, capture, captureWhenReady, standaloneReceiptPath, sanitize } from "./probe-ops-azure-target.mjs";
 
 const posture = (isolation) => ({ default_ro: "on", ro: "on", isolation, statement_timeout: "5s",
   lock_timeout: "1s", idle_timeout: "15s", transaction_timeout: "1min", search_path: "pg_catalog",
@@ -100,4 +100,43 @@ test("query scope is catalog only, no full restore or mutation", () => {
     assert.match(sql, /^SELECT /u);
     assert.doesNotMatch(sql, /\b(?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|GRANT|REVOKE|COPY|pg_dump|_prisma_migrations)\b/iu);
   }
+});
+
+test("bounded firewall readiness retries transient connections then captures once", async () => {
+  let time = 1000; const clients = [];
+  const factory = () => {
+    const c = clients.length < 2 ? mock({ connectError: Object.assign(Error("private"), { code: "ECONNRESET" }) }) : mock();
+    clients.push(c); return c;
+  };
+  const r = await captureWhenReady(factory, { deadline: 61000, now: () => time, sleep: async ms => { time += ms; } });
+  assert.equal(r.readinessAttempts, 3); assert.equal(clients.length, 4);
+  assert.equal(clients.filter(c => c.calls.includes(SQL.settings)).length, 1);
+  assert.equal(clients[2].calls.includes(SQL.guard), true);
+  assert.equal(clients.every(c => c.ended), true);
+});
+test("readiness expiry is unproven, not a platform incompatibility result", async () => {
+  let time = 1000, attempts = 0;
+  await assert.rejects(captureWhenReady(() => { attempts++; return mock({ connectError: Object.assign(Error("private"), { code: "57P03" }) }); },
+    { deadline: 11000, now: () => time, sleep: async ms => { time += ms; } }), { code: "TARGET_READINESS_UNPROVEN" });
+  assert.equal(time, 11000); assert.equal(attempts, 2);
+});
+test("no retry or TLS/auth fallback on credential, certificate or guard failures", async () => {
+  for (const change of [{ connectError: Object.assign(Error("private"), { code: "28P01" }) },
+    { connectError: Object.assign(Error("private"), { code: "CERT_HAS_EXPIRED" }) }, { guard: { ro: "off" } }]) {
+    let attempts = 0;
+    await assert.rejects(captureWhenReady(() => { attempts++; return mock(change); }, { deadline: Date.now() + 10000 }));
+    assert.equal(attempts, 1);
+  }
+});
+test("metadata capture gets only remaining work time including bounded disconnect", async () => {
+  let attempts = 0; const clients = [], started = Date.now();
+  await assert.rejects(captureWhenReady(() => {
+    const c = mock(); if (attempts++) c.query = async () => new Promise(() => {});
+    clients.push(c); return c;
+  }, { deadline: started + 40 }), { code: "DEADLINE" });
+  assert.equal(clients.length, 2); assert.equal(clients[1].ended, true);
+  assert.ok(Date.now() - started < 1000);
+});
+test("standalone receipt resides under repository artifacts, not script sources", () => {
+  assert.match(standaloneReceiptPath(123).pathname, /\/CORGTEX\/\.artifacts\/target-qualification\/ops-azure-target-metadata-123\.json$/u);
 });
