@@ -77,6 +77,8 @@ function syncSettingsStringList(value: unknown) {
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string; workspaceId: string }> }): Promise<Metadata> {
   const { workspaceId } = await params;
+  const actor = await requirePageActor();
+  await requireWorkspaceMembership({ actor, workspaceId });
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } });
   if (!workspace) return { title: "Corgtex" };
   const branding = workspaceBranding(workspace);

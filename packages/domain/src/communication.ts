@@ -195,6 +195,8 @@ export function slackOAuthScopes() {
 export type SlackOAuthFlowKind = "workspace" | "control_plane";
 
 export type SlackOAuthStateFlow = {
+  supportGrantVersion?: number | null;
+  preparedSelectedChannels?: boolean;
   kind: SlackOAuthFlowKind;
   deploymentId?: string | null;
   initiatedByUserId?: string | null;
@@ -220,25 +222,38 @@ export function createSlackOAuthState(workspaceId: string, params: {
   const nonce = randomOpaqueToken(24);
   const expectedTeamId = normalizeSlackTeamId(params.expectedTeamId);
   const flow = params.flow ?? { kind: "workspace" };
+  const payload = Buffer.from(JSON.stringify(compactJsonObject({
+    v: 2,
+    issuedAt: Date.now(),
+    workspaceId,
+    nonce,
+    expectedTeamId: expectedTeamId ?? undefined,
+    flow: flow.kind,
+    deploymentId: flow.deploymentId ?? undefined,
+    initiatedByUserId: flow.initiatedByUserId ?? undefined,
+    supportGrantVersion: flow.supportGrantVersion ?? undefined,
+    preparedSelectedChannels: flow.preparedSelectedChannels || undefined,
+  }))).toString("base64url");
+  const signature = createHmac("sha256", env.SESSION_COOKIE_SECRET).update(`slack-oauth-state:v2:${payload}`).digest("base64url");
   return {
     nonce,
     expectedTeamId,
-    value: Buffer.from(JSON.stringify(compactJsonObject({
-      v: 1,
-      workspaceId,
-      nonce,
-      expectedTeamId: expectedTeamId ?? undefined,
-      flow: flow.kind,
-      deploymentId: flow.deploymentId ?? undefined,
-      initiatedByUserId: flow.initiatedByUserId ?? undefined,
-    }))).toString("base64url"),
+    value: `${payload}.${signature}`,
   };
 }
 
 export function readSlackOAuthState(state: string) {
   try {
-    const parsed = JSON.parse(Buffer.from(state, "base64url").toString("utf8")) as unknown;
+    const parts = state.split(".");
+    if (parts.length !== 2 || !/^[A-Za-z0-9_-]{43}$/.test(parts[1])) return null;
+    const [payload, signature] = parts;
+    const expected = createHmac("sha256", env.SESSION_COOKIE_SECRET).update(`slack-oauth-state:v2:${payload}`).digest();
+    const candidate = Buffer.from(signature, "base64url");
+    if (candidate.length !== expected.length || !timingSafeEqual(candidate, expected)) return null;
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
     if (!isRecord(parsed)) return null;
+    if (parsed.v !== 2 || typeof parsed.issuedAt !== "number" || !Number.isFinite(parsed.issuedAt)
+      || parsed.issuedAt > Date.now() || Date.now() - parsed.issuedAt > 10 * 60 * 1000) return null;
     const workspaceId = asString(parsed.workspaceId);
     const nonce = asString(parsed.nonce);
     if (!workspaceId || !nonce) return null;
@@ -249,9 +264,13 @@ export function readSlackOAuthState(state: string) {
         deploymentId: asString(parsed.deploymentId) || null,
         initiatedByUserId: asString(parsed.initiatedByUserId) || null,
       }
-      : { kind: "workspace" };
+      : { kind: "workspace",
+        ...(asString(parsed.initiatedByUserId) ? { initiatedByUserId: asString(parsed.initiatedByUserId) } : {}),
+        ...(typeof parsed.supportGrantVersion === "number" ? { supportGrantVersion: parsed.supportGrantVersion } : {}),
+        ...(parsed.preparedSelectedChannels === true ? { preparedSelectedChannels: true } : {}),
+      };
     return {
-      version: Number(parsed.v) === 1 ? 1 : 0,
+      version: 2,
       workspaceId,
       nonce,
       expectedTeamId: normalizeSlackTeamId(asString(parsed.expectedTeamId)),
@@ -466,6 +485,7 @@ export function isSlackTenantBindingError(error: unknown) {
 }
 
 export async function saveSlackInstallationForWorkspace(params: {
+  preparedSelectedChannels?: boolean;
   workspaceId: string;
   oauthResponse: SlackOAuthResponse;
   installedByUserId?: string | null;
@@ -489,6 +509,10 @@ export async function saveSlackInstallationForWorkspace(params: {
   try {
     return await prisma.$transaction(async (tx) => {
       const currentWorkspaceTeamId = await findSlackWorkspaceExpectedTeamId(tx, params.workspaceId);
+      if (params.preparedSelectedChannels) {
+        const existing = await tx.communicationInstallation.findFirst({ where: { workspaceId: params.workspaceId, provider: "SLACK" }, select: { id: true } });
+        invariant(!existing, 409, "CONNECTION_ALREADY_EXISTS", "Manage the existing connection in workspace integrations.");
+      }
       const expectedTeamId = normalizeSlackTeamId(params.expectedTeamId) ?? currentWorkspaceTeamId;
 
       if (expectedTeamId && expectedTeamId !== teamId) {
@@ -518,7 +542,7 @@ export async function saveSlackInstallationForWorkspace(params: {
 
       const preservedSettings = existingTeamInstallation && isRecord(existingTeamInstallation.settings)
         ? existingTeamInstallation.settings : slackArchiveSettings(grantedScopes);
-      const settings = appBinding?.source === "workspace"
+      const settings = appBinding?.source === "workspace" || params.preparedSelectedChannels
         ? { ...preservedSettings, channelAdmissionMode: "selected", publicArchiveSyncEnabled: false,
           broadPublicIngestion: false, autoJoinPublicChannels: false }
         : preservedSettings;
@@ -587,6 +611,7 @@ export async function saveSlackInstallationForWorkspace(params: {
 }
 
 export async function saveSlackInstallation(actor: AppActor, params: {
+  preparedSelectedChannels?: boolean;
   workspaceId: string;
   oauthResponse: SlackOAuthResponse;
   expectedTeamId?: string | null;
@@ -597,6 +622,7 @@ export async function saveSlackInstallation(actor: AppActor, params: {
     oauthResponse: params.oauthResponse,
     installedByUserId: actor.kind === "user" ? actor.user.id : null,
     expectedTeamId: params.expectedTeamId,
+    ...(params.preparedSelectedChannels ? { preparedSelectedChannels: true } : {}),
   });
 }
 
@@ -686,7 +712,7 @@ async function resolveHumanActorForSlackUser(installationId: string, externalUse
   if (mapped?.userId) {
     const user = await prisma.user.findUnique({
       where: { id: mapped.userId },
-      select: { id: true, email: true, displayName: true, globalRole: true },
+      select: { id: true, email: true, displayName: true, globalRole: true, isSupportAccount: true },
     });
     if (user) return { kind: "user", user };
   }
@@ -707,7 +733,7 @@ async function resolveHumanActorForSlackUser(installationId: string, externalUse
     const user = email
       ? await prisma.user.findUnique({
         where: { email },
-        select: { id: true, email: true, displayName: true, globalRole: true },
+        select: { id: true, email: true, displayName: true, globalRole: true, isSupportAccount: true },
       })
       : null;
     const member = user

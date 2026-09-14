@@ -242,6 +242,7 @@ export default async function SettingsPage({
       </header>
 
       <div className="nr-tab-bar" style={{ marginBottom: 32 }}>
+        <a href={`/workspaces/${workspaceId}/settings/support`} className="nr-tab">Support access</a>
         {featureFlags.SETTINGS_GENERAL && (
           <a href={`/workspaces/${workspaceId}/settings?tab=general`} className={`nr-tab ${tab === "general" ? "nr-tab-active" : ""}`}>
             {t("tabGeneral")}

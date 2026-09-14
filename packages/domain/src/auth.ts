@@ -1,12 +1,13 @@
 import type { MemberRole, Prisma } from "@prisma/client";
 import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
+import { getSupportAuthorizationContext, setSupportAuthorizationActor, setSupportAuthorizationGrant } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { systemActorMemberIdentityWhere } from "./member-identity";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
-async function requireDeploymentWorkspaceScope(workspaceId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
+export async function requireDeploymentWorkspaceScope(workspaceId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
   const workspaceSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
   if (!workspaceSlug) {
     return;
@@ -122,6 +123,7 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
           email: true,
           displayName: true,
           globalRole: true,
+          isSupportAccount: true,
         },
       },
     },
@@ -176,9 +178,19 @@ export async function requireWorkspaceMembership(params: {
   tx?: Prisma.TransactionClient;
 }) {
   const db = params.tx ?? prisma;
+  setSupportAuthorizationActor(params.actor);
   await requireDeploymentWorkspaceScope(params.workspaceId, db);
 
   if (params.actor.kind === "agent") {
+    if (params.actor.supportOrigin) {
+      const origin = params.actor.supportOrigin;
+      const grant = await db.workspaceSupportGrant.findUnique({
+        where: { workspaceId_userId: { workspaceId: params.workspaceId, userId: origin.userId } },
+        select: { role: true, isActive: true, version: true },
+      });
+      invariant(origin.workspaceId === params.workspaceId && grant?.isActive && grant.role === "FULL" && grant.version === origin.version,
+        403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
+    }
     const allowed = new Set(params.actor.workspaceIds ?? []);
     if (allowed.size === 0) {
       throw new AppError(403, "AGENT_WORKSPACE_SCOPE_REQUIRED", "Agent is not scoped to any workspace.");
@@ -194,7 +206,21 @@ export async function requireWorkspaceMembership(params: {
     return null;
   }
 
-  if (params.resolvedMembership !== undefined) {
+  const supportGrant = await db.workspaceSupportGrant.findUnique({
+      where: { workspaceId_userId: { workspaceId: params.workspaceId, userId: params.actor.user.id } },
+      select: { role: true, isActive: true, version: true },
+  });
+  if (supportGrant) {
+    if (!supportGrant.isActive || supportGrant.role !== "FULL") {
+      throw new AppError(403, "SUPPORT_CONTENT_RESTRICTED", "Content access is restricted.");
+    }
+    const origin = getSupportAuthorizationContext()?.origin;
+    invariant(!origin || (origin.userId === params.actor.user.id && origin.workspaceId === params.workspaceId && origin.version === supportGrant.version),
+      403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
+    setSupportAuthorizationGrant({ userId: params.actor.user.id, workspaceId: params.workspaceId, version: supportGrant.version });
+  }
+
+  if (params.resolvedMembership !== undefined && !supportGrant) {
     if (params.allowedRoles && params.allowedRoles.length > 0) {
       if (!params.resolvedMembership || !params.allowedRoles.includes(params.resolvedMembership.role as MemberRole)) {
         throw new AppError(403, "FORBIDDEN", "Insufficient permissions.");
@@ -202,16 +228,6 @@ export async function requireWorkspaceMembership(params: {
     }
     invariant(params.resolvedMembership?.isActive, 403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
     return params.resolvedMembership;
-  }
-
-  if (isGlobalOperator(params.actor)) {
-    return {
-      id: "global-operator",
-      workspaceId: params.workspaceId,
-      userId: params.actor.user.id,
-      role: "ADMIN",
-      isActive: true,
-    } as MembershipSummary;
   }
 
   const membership = await db.member.findUnique({
@@ -300,7 +316,10 @@ export async function listActorWorkspaces(actor: AppActor) {
 
   if (isGlobalOperator(actor)) {
     return prisma.workspace.findMany({
-      where: deploymentSlug ? { slug: deploymentSlug } : undefined,
+      where: {
+        ...(deploymentSlug ? { slug: deploymentSlug } : {}),
+        supportGrants: { none: { userId: actor.user.id, OR: [{ isActive: false }, { role: "SETUP" }] } },
+      },
       select: {
         id: true,
         slug: true,
@@ -320,6 +339,7 @@ export async function listActorWorkspaces(actor: AppActor) {
           isActive: true,
         },
       },
+      supportGrants: { none: { userId: actor.user.id, OR: [{ isActive: false }, { role: "SETUP" }] } },
     },
     select: {
       id: true,

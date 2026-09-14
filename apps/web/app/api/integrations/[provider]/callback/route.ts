@@ -2,7 +2,7 @@ import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { getPublicOrigin } from "@/lib/public-origin";
 import { type NextRequest, NextResponse } from "next/server";
-import { saveOAuthConnectionAndEnqueueCalendarSync, upsertExternalMcpConnection, verifyIntegrationOAuthState } from "@corgtex/domain";
+import { requireWorkspaceMembership, supportCapabilityVersion, saveOAuthConnectionAndEnqueueCalendarSync, upsertExternalMcpConnection, verifyIntegrationOAuthState } from "@corgtex/domain";
 import {
   clearOAuthStateCookie,
   type IntegrationOAuthIntent,
@@ -64,7 +64,7 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
     const errorDescription = request.nextUrl.searchParams.get("error_description");
     const cookieState = request.cookies.get(oauthStateCookieName(provider))?.value;
 
-    let statePayload: { workspaceId: string | null; intent?: IntegrationOAuthIntent; returnTo?: string | null };
+    let statePayload: { workspaceId: string | null; intent?: IntegrationOAuthIntent; returnTo?: string | null; supportGrantVersion?: number | null; calendarImport?: boolean };
     try {
       if (!state || !cookieState || state !== cookieState) {
         throw new Error("OAuth state cookie mismatch");
@@ -77,6 +77,10 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       });
     }
     const workspaceId = statePayload.workspaceId ?? "";
+    if (workspaceId) {
+      await requireWorkspaceMembership({ actor, workspaceId });
+      await supportCapabilityVersion(actor.user.id, workspaceId, statePayload.supportGrantVersion ?? null);
+    }
     const intent = statePayload.intent ?? "calendar";
     workspaceIdForError = workspaceId || null;
 
@@ -242,21 +246,22 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       await saveOAuthConnectionAndEnqueueCalendarSync(actor, {
         workspaceId,
         provider: "GOOGLE",
+        ...(statePayload.calendarImport === undefined ? {} : { requireNewConnection: true }),
         accessToken: String(tokenData.access_token),
         refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
         expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,
         providerAccountId: String(profileData.id),
         providerEmail: typeof profileData.email === "string" ? profileData.email : null,
         scopes: typeof tokenData.scope === "string" ? tokenData.scope.split(" ") : [],
-        createSyncSettings: intent === "documents"
+        createSyncSettings: intent === "documents" || statePayload.calendarImport === false
           ? {
             calendar: { enabled: false, includeAllEvents: false },
             documents: { enabled: false, selectedDriveIds: [] },
             email: { enabled: false, filters: [] },
           }
           : undefined,
-        enableCalendarSync: intent === "calendar",
-        enqueueCalendarSync: intent !== "documents",
+        enableCalendarSync: intent === "calendar" && statePayload.calendarImport !== false,
+        enqueueCalendarSync: intent !== "documents" && statePayload.calendarImport !== false,
       });
 
       return redirectWithStateCleared(appUrl, workspaceId, provider, {
@@ -324,6 +329,11 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       await saveOAuthConnectionAndEnqueueCalendarSync(actor, {
         workspaceId,
         provider: "MICROSOFT",
+        ...(statePayload.calendarImport === undefined ? {} : {
+          requireNewConnection: true,
+          createSyncSettings: { calendar: { enabled: statePayload.calendarImport, includeAllEvents: false }, documents: { enabled: false, selectedDriveIds: [] }, email: { enabled: false, filters: [] } },
+          enqueueCalendarSync: statePayload.calendarImport,
+        }),
         accessToken: String(tokenData.access_token),
         refreshToken: typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : null,
         expiresIn: typeof tokenData.expires_in === "number" ? tokenData.expires_in : null,

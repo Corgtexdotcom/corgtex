@@ -67,6 +67,7 @@ const {
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  getSupportAuthorizationContext: vi.fn().mockReturnValue(undefined),
   env: {
     MODEL_CHAT_CONVERSATION: "chat-model",
     MODEL_PROVIDER: "openai_compatible",
@@ -106,6 +107,7 @@ vi.mock("@corgtex/models", async (importOriginal) => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  supportCapabilityVersion: vi.fn().mockResolvedValue(1),
   AppError: class AppError extends Error {
     constructor(public status: number, public code: string, message: string) {
       super(message);
@@ -332,6 +334,22 @@ describe("processConversationTurn", () => {
     };
   }
 
+  it("stops a support stream on revocation before returning another content chunk", async () => {
+    const { getSupportAuthorizationContext } = await import("@corgtex/shared");
+    const { supportCapabilityVersion } = await import("@corgtex/domain");
+    vi.mocked(getSupportAuthorizationContext).mockReturnValueOnce({ origin: { userId: "user-1", workspaceId: "ws-1", version: 1 } });
+    vi.mocked(supportCapabilityVersion).mockResolvedValueOnce(1).mockRejectedValueOnce(new Error("SUPPORT_AUTHORIZATION_REVOKED"));
+    chatEventStreamMock.mockReturnValueOnce(eventResponse([
+      { type: "tool_call_delta", index: 0, idDelta: "answer", nameDelta: "respond_conversation", argumentsDelta: "{\"answer\":\"Allowed" },
+      { type: "tool_call_delta", index: 0, argumentsDelta: " RESTRICTED\"}" },
+    ], { content: "", tool_calls: [answerCall("answer", "Allowed RESTRICTED")] }));
+    const { processConversationTurnStream } = await import("./conversation");
+    const stream = processConversationTurnStream({ ...turnContext(), userMessage: "Say hello." });
+    await expect(stream.next()).resolves.toEqual({ done: false, value: "Allowed" });
+    await expect(stream.next()).rejects.toThrow("SUPPORT_AUTHORIZATION_REVOKED");
+    expect(supportCapabilityVersion).toHaveBeenLastCalledWith("user-1", "ws-1", 1);
+  });
+
   function turnContext(actor = testUserActor()) { return { workspaceId: "ws-1", sessionId: "session-1", userId: "user-1", agentKey: "assistant", userMessage: "Update it.", actor }; } function toolCall(id: string, name: string, args: Record<string, unknown> = {}) { return { id, function: { name, arguments: JSON.stringify(args) } }; } function answerCall(id: string, answer: string) { return toolCall(id, "respond_conversation", { answer }); } function eventResponse(events: any[], result: Record<string, any>) { return (async function* () { for (const event of events) yield event; return result; })(); }
   function streamResponse(chunks: string[], result: Record<string, any>) {
     return (async function* () {
@@ -545,6 +563,7 @@ describe("processConversationTurn", () => {
     const { processConversationTurn } = await import("./conversation");
 
     await expect(processConversationTurn({
+      actor: testUserActor(),
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",
@@ -673,6 +692,7 @@ describe("processConversationTurn", () => {
 
     const { processConversationTurn } = await import("./conversation");
     const result = await processConversationTurn({
+      actor: testUserActor(),
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",
@@ -754,6 +774,7 @@ describe("processConversationTurn", () => {
 
     const { processConversationTurn } = await import("./conversation");
     await processConversationTurn({
+      actor: testUserActor(),
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",
@@ -781,6 +802,7 @@ describe("processConversationTurn", () => {
 
     const { processConversationTurn } = await import("./conversation");
     await processConversationTurn({
+      actor: testUserActor(),
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",
@@ -860,6 +882,7 @@ describe("processConversationTurn", () => {
 
     const { processConversationTurn } = await import("./conversation");
     const result = await processConversationTurn({
+      actor: testUserActor(),
       workspaceId: "ws-1",
       sessionId: "session-1",
       userId: "user-1",

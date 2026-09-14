@@ -23,6 +23,7 @@ vi.mock("@corgtex/domain", () => {
 });
 
 vi.mock("@corgtex/shared", () => ({
+  beginAuthorizationContext: vi.fn(),
   env: { APP_URL: "https://app.test" },
 }));
 

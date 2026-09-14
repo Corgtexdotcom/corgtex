@@ -23,6 +23,7 @@ export * from "./agent-memory";
 export * from "./agent-runs";
 export * from "./approvals";
 export * from "./auth";
+export * from "./workspace-support-access";
 export * from "./circles";
 export * from "./constitutions";
 export * from "./conversations";

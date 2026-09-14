@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { supportCapabilityVersion } from "./workspace-support-access";
+import { requireWorkspaceMembership } from "./auth";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
@@ -719,20 +721,16 @@ async function hasActiveMcpWorkspaceMembership(params: {
   userId: string;
   workspaceId: string;
 }) {
-  const membership = await prisma.member.findUnique({
-    where: {
-      workspaceId_userId: {
-        workspaceId: params.workspaceId,
-        userId: params.userId,
-      },
-    },
-    select: {
-      id: true,
-      isActive: true,
-    },
-  });
-
-  return Boolean(membership?.isActive);
+  try {
+    await requireWorkspaceMembership({
+      actor: { kind: "user", user: { id: params.userId, email: "", displayName: null } },
+      workspaceId: params.workspaceId,
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof AppError && error.status === 403) return false;
+    throw error;
+  }
 }
 
 async function requireActiveMcpWorkspaceMembership(params: {
@@ -912,6 +910,7 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
 
   await prisma.mcpOAuthAuthorizationCode.create({
     data: {
+      supportGrantVersion: await supportCapabilityVersion(actor.user.id, params.workspaceId),
       clientId: client.id,
       userId: actor.user.id,
       workspaceId: params.workspaceId,
@@ -971,6 +970,7 @@ export async function exchangeMcpAuthorizationCode(params: {
     throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
   }
   await requireActiveMcpWorkspaceMembership({ userId: authCode.userId, workspaceId: authCode.workspaceId });
+  await supportCapabilityVersion(authCode.userId, authCode.workspaceId, authCode.supportGrantVersion);
 
   await prisma.mcpOAuthAuthorizationCode.update({
     where: { id: authCode.id },
@@ -993,6 +993,7 @@ export async function exchangeMcpAuthorizationCode(params: {
   });
 
   const tokenParams = {
+    supportGrantVersion: authCode.supportGrantVersion,
     clientId: client.id,
     userId: authCode.userId,
     workspaceId: authCode.workspaceId,
@@ -1048,6 +1049,7 @@ export async function refreshMcpAccessToken(params: {
     throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
   }
   await requireActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId });
+  await supportCapabilityVersion(token.userId, token.workspaceId, token.supportGrantVersion);
 
   const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
   const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
@@ -1123,6 +1125,8 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
     return null;
   }
 
+  await supportCapabilityVersion(token.userId, token.workspaceId, token.supportGrantVersion);
+
   return {
     actor: {
       kind: "user" as const,
@@ -1131,6 +1135,7 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
         email: token.user.email,
         displayName: token.user.displayName,
         globalRole: token.user.globalRole,
+        isSupportAccount: token.user.isSupportAccount,
       },
     },
     workspaceId: token.workspaceId,

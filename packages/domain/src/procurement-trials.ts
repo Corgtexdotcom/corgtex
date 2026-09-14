@@ -907,6 +907,7 @@ async function createActiveTrial(params: {
       email: params.normalized.adminEmail,
       displayName: params.normalized.adminName,
     });
+    await tx.workspace.update({ where: { id: workspace.id }, data: { supportOwnerUserId: admin.user.id } });
 
     const credentialSecret = randomOpaqueToken();
     const connectorToken = `${AGENT_CREDENTIAL_PREFIX}${credentialSecret}`;

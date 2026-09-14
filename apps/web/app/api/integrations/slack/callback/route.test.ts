@@ -10,7 +10,9 @@ const {
   cookiesMock,
   cookieGetMock,
   cookieDeleteMock,
+  supportCapabilityVersion,
 } = vi.hoisted(() => ({
+  supportCapabilityVersion: vi.fn(),
   requirePageActorMock: vi.fn(),
   exchangeSlackOAuthCodeMock: vi.fn(),
   getSlackOAuthInstallTargetMock: vi.fn(),
@@ -49,6 +51,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  supportCapabilityVersion,
   AppError: class AppError extends Error {
     status: number;
     code: string;
@@ -68,6 +71,7 @@ vi.mock("@corgtex/domain", () => ({
 
 beforeEach(() => {
   vi.resetModules();
+  supportCapabilityVersion.mockReset().mockResolvedValue(null);
   vi.stubEnv("APP_URL", "https://app.corgtex.com/");
   requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
   readSlackOAuthStateMock.mockReturnValue({
@@ -75,7 +79,7 @@ beforeEach(() => {
     workspaceId: "workspace-1",
     nonce: "nonce-value",
     expectedTeamId: "T1",
-    flow: { kind: "workspace" },
+    flow: { kind: "workspace", initiatedByUserId: "user-1" },
   });
   getSlackOAuthInstallTargetMock.mockResolvedValue({ workspaceId: "workspace-1", expectedTeamId: "T1" });
   exchangeSlackOAuthCodeMock.mockResolvedValue({ ok: true, team: { id: "T1" }, access_token: "xoxb-token" });
@@ -94,6 +98,25 @@ afterEach(() => {
 });
 
 describe("GET /api/integrations/slack/callback", () => {
+  it("rejects an obsolete Full grant before exchanging a Slack code", async () => {
+    requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "support-1", isSupportAccount: true } });
+    readSlackOAuthStateMock.mockReturnValue({ workspaceId: "workspace-1", nonce: "nonce-value", expectedTeamId: "T1", flow: { kind: "workspace", initiatedByUserId: "support-1", supportGrantVersion: 2 } });
+    supportCapabilityVersion.mockRejectedValueOnce(Object.assign(new Error("Support authorization is unavailable."), { status: 403, code: "SUPPORT_AUTHORIZATION_REVOKED" }));
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/callback?code=code&state=state-value"));
+    expect(response.status).toBe(403);
+    expect(supportCapabilityVersion).toHaveBeenCalledWith("support-1", "workspace-1", 2);
+    expect(exchangeSlackOAuthCodeMock).not.toHaveBeenCalled();
+    expect(saveSlackInstallationMock).not.toHaveBeenCalled();
+  });
+
+  it("carries the owner-reviewed selected-channel configuration through the callback", async () => {
+    readSlackOAuthStateMock.mockReturnValue({ workspaceId: "workspace-1", nonce: "nonce-value", expectedTeamId: "T1", flow: { kind: "workspace", initiatedByUserId: "user-1", preparedSelectedChannels: true } });
+    const { GET } = await import("./route");
+    const response = await GET(new Request("https://app.corgtex.com/api/integrations/slack/callback?code=code&state=state-value"));
+    expect(response.headers.get("location")).toContain("slack=connected");
+    expect(saveSlackInstallationMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ preparedSelectedChannels: true }));
+  });
   it("exchanges Slack OAuth codes with the same callback URL used during install", async () => {
     const { GET } = await import("./route");
 

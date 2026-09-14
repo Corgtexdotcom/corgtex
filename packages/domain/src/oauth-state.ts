@@ -11,6 +11,8 @@ type OAuthStatePayload = {
   returnTo: string | null;
   nonce: string;
   issuedAt: number;
+  supportGrantVersion?: number | null;
+  calendarImport?: boolean;
 };
 
 export type IntegrationOAuthIntent = "calendar" | "documents" | "external_mcp";
@@ -32,6 +34,8 @@ export function createIntegrationOAuthState(params: {
   workspaceId?: string | null;
   intent?: IntegrationOAuthIntent;
   returnTo?: string | null;
+  supportGrantVersion?: number | null;
+  calendarImport?: boolean;
 }) {
   const payload = base64UrlJson({
     userId: params.userId,
@@ -40,6 +44,8 @@ export function createIntegrationOAuthState(params: {
     returnTo: params.returnTo?.trim() || null,
     nonce: randomOpaqueToken(16),
     issuedAt: Date.now(),
+    ...(params.supportGrantVersion == null ? {} : { supportGrantVersion: params.supportGrantVersion }),
+    ...(params.calendarImport === undefined ? {} : { calendarImport: params.calendarImport }),
   } satisfies OAuthStatePayload);
   return `${payload}.${sign(payload)}`;
 }
@@ -71,5 +77,7 @@ export function verifyIntegrationOAuthState(state: string | null | undefined, ex
     workspaceId: payload.workspaceId,
     intent: payload.intent ?? "calendar",
     returnTo: payload.returnTo ?? null,
+    ...(payload.supportGrantVersion === undefined ? {} : { supportGrantVersion: payload.supportGrantVersion }),
+    ...(payload.calendarImport === undefined ? {} : { calendarImport: payload.calendarImport }),
   };
 }

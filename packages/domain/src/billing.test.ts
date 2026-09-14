@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock } = vi.hoisted(() => {
   const prisma = {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),
     workspace: { update: vi.fn(), findUnique: vi.fn() },
     modelUsageBudget: { upsert: vi.fn() },

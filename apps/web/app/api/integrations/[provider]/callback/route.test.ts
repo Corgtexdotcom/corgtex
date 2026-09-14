@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const { requirePageActor, saveOAuthConnectionAndEnqueueCalendarSync, verifyIntegrationOAuthState } = vi.hoisted(() => ({
+const { requirePageActor, saveOAuthConnectionAndEnqueueCalendarSync, verifyIntegrationOAuthState, requireWorkspaceMembership, supportCapabilityVersion } = vi.hoisted(() => ({
+  requireWorkspaceMembership: vi.fn(), supportCapabilityVersion: vi.fn(),
   requirePageActor: vi.fn(),
   saveOAuthConnectionAndEnqueueCalendarSync: vi.fn(),
   verifyIntegrationOAuthState: vi.fn(),
@@ -17,13 +18,17 @@ vi.mock("@/lib/http", () => ({
   }, { status: error.status ?? 500 }),
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  ...(await import("../../../../../../../packages/domain/src/errors")),
+  requireWorkspaceMembership, supportCapabilityVersion,
   saveOAuthConnectionAndEnqueueCalendarSync,
   verifyIntegrationOAuthState,
 }));
 
 beforeEach(() => {
   vi.resetModules();
+  requireWorkspaceMembership.mockReset().mockResolvedValue({ id: "member-1" });
+  supportCapabilityVersion.mockReset().mockResolvedValue(null);
   vi.stubGlobal("fetch", vi.fn());
   vi.stubEnv("GOOGLE_CLIENT_ID", "google-client-id");
   vi.stubEnv("GOOGLE_CLIENT_SECRET", "google-client-secret");
@@ -38,6 +43,27 @@ afterEach(() => {
 });
 
 describe("GET /api/integrations/[provider]/callback", () => {
+  it.each(["setup", "revoked-version"])("blocks %s before exchanging an OAuth code", async (reason) => {
+    requirePageActor.mockResolvedValue({ kind: "user", user: { id: "support-1", isSupportAccount: true } });
+    verifyIntegrationOAuthState.mockReturnValue({ workspaceId: "ws-1", supportGrantVersion: 2 });
+    (reason === "setup" ? requireWorkspaceMembership : supportCapabilityVersion).mockRejectedValueOnce(new Error("Support authorization is unavailable."));
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("https://app.corgtex.com/api/integrations/google/callback?code=code&state=state", { headers: { cookie: "corgtex_google_oauth_state=state" } }), { params: Promise.resolve({ provider: "google" }) });
+    expect(response.headers.get("location")).toContain("integrationStatus=error");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(saveOAuthConnectionAndEnqueueCalendarSync).not.toHaveBeenCalled();
+  });
+
+  it("completes Full support consent after validating membership and the captured version", async () => {
+    requirePageActor.mockResolvedValue({ kind: "user", user: { id: "support-1", isSupportAccount: true } });
+    verifyIntegrationOAuthState.mockReturnValue({ workspaceId: "ws-1", supportGrantVersion: 2, calendarImport: false });
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ access_token: "fixture" })).mockResolvedValueOnce(Response.json({ id: "fixture" }));
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("https://app.corgtex.com/api/integrations/google/callback?code=code&state=state", { headers: { cookie: "corgtex_google_oauth_state=state" } }), { params: Promise.resolve({ provider: "google" }) });
+    expect(response.headers.get("location")).toContain("integrationStatus=success");
+    expect(supportCapabilityVersion).toHaveBeenCalledWith("support-1", "ws-1", 2);
+    expect(saveOAuthConnectionAndEnqueueCalendarSync).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ enqueueCalendarSync: false, enableCalendarSync: false, requireNewConnection: true }));
+  });
   it("redirects back to workspace Tools and enqueues a calendar sync job after a successful Google connect", async () => {
     requirePageActor.mockResolvedValue({
       kind: "user",

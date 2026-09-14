@@ -1,7 +1,7 @@
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
 import { getPublicOrigin } from "@/lib/public-origin";
-import { createIntegrationOAuthState, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, createIntegrationOAuthState, getSupportConnectorPreparationForConsent, requireWorkspaceMembership, supportCapabilityVersion } from "@corgtex/domain";
 import { type NextRequest, NextResponse } from "next/server";
 import { integrationRedirectUrl, isIntegrationOAuthProvider, setOAuthStateCookie } from "../../oauth-flow";
 
@@ -30,14 +30,24 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
     const appUrl = getPublicOrigin(request);
     const workspaceId = request.nextUrl.searchParams.get("workspaceId") || "";
     const rawIntent = request.nextUrl.searchParams.get("intent");
-    const intent = rawIntent === "documents" ? "documents" : rawIntent === "external_mcp" ? "external_mcp" : "calendar";
+    let intent = rawIntent === "documents" ? "documents" as const : rawIntent === "external_mcp" ? "external_mcp" as const : "calendar" as const;
     const returnTo = safeWorkspaceReturnTo(workspaceId, request.nextUrl.searchParams.get("returnTo"));
     if (workspaceId) {
       await requireWorkspaceMembership({ actor, workspaceId });
     }
+    const supportGrantVersion = workspaceId ? await supportCapabilityVersion(actor.user.id, workspaceId) : null;
     const { provider } = params;
     if (!isIntegrationOAuthProvider(provider)) {
       return NextResponse.json({ error: "Unsupported provider" }, { status: 400 });
+    }
+    const preparationId = request.nextUrl.searchParams.get("preparationId");
+    let calendarImport: boolean | undefined;
+    if (preparationId) {
+      const preparation = await getSupportConnectorPreparationForConsent(actor, { workspaceId, grantId: preparationId,
+        revision: Number(request.nextUrl.searchParams.get("preparationRevision")), provider });
+      if (preparation.intent === "selected_channels") throw new AppError(400, "INVALID_INPUT", "Wrong connector preparation.");
+      intent = preparation.intent;
+      calendarImport = preparation.calendarImport;
     }
 
     if (provider === "google") {
@@ -53,7 +63,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
       const scopes = intent === "documents"
         ? ["openid", "email", "profile", "https://www.googleapis.com/auth/drive.file"].join(" ")
         : ["openid", "email", "profile", "https://www.googleapis.com/auth/calendar.readonly"].join(" ");
-      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent, returnTo });
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent, returnTo,
+        ...(supportGrantVersion == null ? {} : { supportGrantVersion }), ...(calendarImport === undefined ? {} : { calendarImport }) });
 
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authUrl.searchParams.set("client_id", clientId);
@@ -81,7 +92,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
 
       const redirectUri = `${appUrl}/api/integrations/microsoft/callback`;
       const scopes = ["offline_access", "User.Read", "Calendars.Read"].join(" ");
-      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, returnTo });
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, returnTo,
+        ...(supportGrantVersion == null ? {} : { supportGrantVersion }), ...(calendarImport === undefined ? {} : { calendarImport }) });
 
       const authUrl = new URL("https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize");
       authUrl.searchParams.set("client_id", clientId);
@@ -116,7 +128,8 @@ export async function GET(request: NextRequest, props: { params: Promise<{ provi
 
       const redirectUri = `${appUrl}/api/integrations/box/callback`;
       const scopes = (process.env.BOX_MCP_SCOPES || "root_readwrite ai.readwrite").trim();
-      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent: "external_mcp", returnTo });
+      const state = createIntegrationOAuthState({ userId: actor.user.id, workspaceId, intent: "external_mcp", returnTo,
+        ...(supportGrantVersion == null ? {} : { supportGrantVersion }) });
 
       const authUrl = new URL("https://account.box.com/api/oauth2/authorize");
       authUrl.searchParams.set("client_id", clientId);

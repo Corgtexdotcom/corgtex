@@ -734,6 +734,9 @@ enum TenantPurgeRunStatus {
 
 model Workspace {
   id                             String                                @id @default(uuid())
+  supportOwnerUserId             String?
+  supportOwner                   User?                                 @relation("WorkspaceSupportOwner", fields: [supportOwnerUserId], references: [id], onDelete: Restrict)
+  supportGrants                  WorkspaceSupportGrant[]
   slug                           String                                @unique
   name                           String
   description                    String?
@@ -1547,6 +1550,9 @@ model CommunicationEntityLink {
 
 model User {
   id                            String                                @id @default(uuid())
+  isSupportAccount              Boolean                               @default(false)
+  supportOwnedWorkspaces        Workspace[]                           @relation("WorkspaceSupportOwner")
+  workspaceSupportGrants        WorkspaceSupportGrant[]               @relation("WorkspaceSupportRecipient")
   email                         String                                @unique
   displayName                   String?
   bio                           String?                               @db.Text
@@ -1608,6 +1614,33 @@ model User {
   createdMemberEmailAliases     MemberEmailAlias[]                    @relation("MemberEmailAliasCreator")
   mergedMembers                 Member[]                              @relation("MemberMergedBy")
   uploadedMeetingAudioAssets    MeetingAudioAsset[]                   @relation("MeetingAudioAssetUploader")
+}
+
+enum WorkspaceSupportRole {
+  SETUP
+  FULL
+}
+
+model WorkspaceSupportGrant {
+  id              String               @id @default(uuid())
+  workspaceId     String
+  userId          String
+  role            WorkspaceSupportRole @default(SETUP)
+  isActive        Boolean              @default(true)
+  version         Int                  @default(1)
+  grantedByUserId String
+  revokedAt       DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  setupChecklist  Json?
+  setupConnectors Json?
+  setupRevision   Int                  @default(0)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user User @relation("WorkspaceSupportRecipient", fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, userId])
+  @@index([userId, isActive])
 }
 
 model Session {
@@ -2138,6 +2171,7 @@ model AppSurfaceAssignment {
 }
 
 model AppSession {
+  supportGrantVersion Int?
   id                String    @id @default(uuid())
   workspaceId       String
   appInstallationId String
@@ -3420,6 +3454,8 @@ model WorkspacePermalink {
 
 model Event {
   id            String      @id @default(uuid())
+  supportOriginUserId String?
+  supportGrantVersion Int?
   workspaceId   String?
   type          String
   aggregateType String?
@@ -3442,6 +3478,8 @@ model Event {
 
 model WorkflowJob {
   id             String            @id @default(uuid())
+  supportOriginUserId String?
+  supportGrantVersion Int?
   workspaceId    String?
   eventId        String?
   type           String
@@ -3786,6 +3824,7 @@ model ModelUsage {
 }
 
 model AgentCredential {
+  supportGrantVersion Int?
   id                 String    @id @default(uuid())
   workspaceId        String
   createdByUserId    String?
@@ -4859,6 +4898,7 @@ model OAuthApp {
 }
 
 model OAuthAuthorizationCode {
+  supportGrantVersion Int?
   id          String    @id @default(uuid())
   appId       String
   userId      String
@@ -4876,6 +4916,7 @@ model OAuthAuthorizationCode {
 }
 
 model OAuthAccessToken {
+  supportGrantVersion Int?
   id               String    @id @default(uuid())
   appId            String
   userId           String
@@ -4911,6 +4952,7 @@ model McpOAuthClient {
 }
 
 model McpOAuthAuthorizationCode {
+  supportGrantVersion Int?
   id                  String    @id @default(uuid())
   clientId            String
   userId              String
@@ -4936,6 +4978,7 @@ model McpOAuthAuthorizationCode {
 }
 
 model McpOAuthAccessToken {
+  supportGrantVersion Int?
   id               String    @id @default(uuid())
   clientId         String
   userId           String

@@ -8,7 +8,10 @@ const {
   slackOAuthScopesMock,
   cookiesMock,
   cookieSetMock,
+  supportCapabilityVersion,
+  getSupportConnectorPreparationForConsent,
 } = vi.hoisted(() => ({
+  supportCapabilityVersion: vi.fn(), getSupportConnectorPreparationForConsent: vi.fn(),
   requirePageActorMock: vi.fn(),
   createSlackOAuthStateMock: vi.fn(),
   getSlackOAuthInstallTargetMock: vi.fn(),
@@ -48,6 +51,7 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 vi.mock("@corgtex/domain", () => ({
+  supportCapabilityVersion, getSupportConnectorPreparationForConsent,
   AppError: class AppError extends Error {
     status: number;
     code: string;
@@ -66,6 +70,8 @@ vi.mock("@corgtex/domain", () => ({
 
 beforeEach(() => {
   vi.resetModules();
+  supportCapabilityVersion.mockReset().mockResolvedValue(null);
+  getSupportConnectorPreparationForConsent.mockReset();
   vi.stubEnv("APP_URL", "https://app.corgtex.com/");
   vi.stubEnv("SLACK_CLIENT_ID", "slack-client-id");
   requirePageActorMock.mockResolvedValue({ kind: "user", user: { id: "user-1" } });

@@ -1,6 +1,6 @@
-import { resolveOAuthAccessToken } from "@corgtex/domain";
+import { requireWorkspaceMembership, resolveOAuthAccessToken } from "@corgtex/domain";
 import { AppError } from "@corgtex/domain";
-import { checkRateLimit, RATE_LIMITS } from "@corgtex/shared";
+import { beginAuthorizationContext, checkRateLimit, RATE_LIMITS } from "@corgtex/shared";
 import { NextRequest } from "next/server";
 
 /**
@@ -8,6 +8,7 @@ import { NextRequest } from "next/server";
  * Returns the actor and workspace context if valid. Throws 401/403 AppError if missing/invalid/insufficient scopes.
  */
 export async function requireGptAuth(request: NextRequest, requiredScope?: string) {
+  beginAuthorizationContext();
   const authHeader = request.headers.get("authorization");
   
   if (!authHeader?.toLowerCase().startsWith("bearer ")) {
@@ -24,6 +25,8 @@ export async function requireGptAuth(request: NextRequest, requiredScope?: strin
   if (requiredScope && !session.scopes.includes(requiredScope)) {
     throw new AppError(403, "FORBIDDEN", `Missing required scope: ${requiredScope}`);
   }
+
+  await requireWorkspaceMembership({ actor: session.actor, workspaceId: session.workspaceId });
 
   const rateLimit = await checkRateLimit(`ws:${session.workspaceId}:gpt-api`, RATE_LIMITS.API_PER_WORKSPACE);
   if (!rateLimit.allowed) {

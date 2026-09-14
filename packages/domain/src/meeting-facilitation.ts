@@ -643,7 +643,7 @@ export async function runMeetingAgendaThreadEdit(params: {
 }) {
   const actorUser = await prisma.user.findUnique({
     where: { id: params.actorUserId },
-    select: { id: true, email: true, displayName: true, globalRole: true },
+    select: { id: true, email: true, displayName: true, globalRole: true, isSupportAccount: true },
   });
   invariant(actorUser, 404, "NOT_FOUND", "Agenda editor user not found.");
   const actor: AppActor = { kind: "user", user: actorUser };

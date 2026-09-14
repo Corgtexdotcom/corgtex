@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { requirePageActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
-import { AppError, createSlackOAuthState, getSlackOAuthInstallTarget, getSlackWorkspaceBinding, slackOAuthScopes } from "@corgtex/domain";
+import { AppError, createSlackOAuthState, getSlackOAuthInstallTarget, getSlackWorkspaceBinding, slackOAuthScopes, supportCapabilityVersion, getSupportConnectorPreparationForConsent } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
 
@@ -16,6 +16,10 @@ export async function GET(request: Request) {
     }
 
     const target = await getSlackOAuthInstallTarget(actor, workspaceId);
+    const supportGrantVersion = actor.kind === "user" ? await supportCapabilityVersion(actor.user.id, workspaceId) : null;
+    const preparationId = url.searchParams.get("preparationId");
+    if (preparationId) await getSupportConnectorPreparationForConsent(actor, { workspaceId, grantId: preparationId,
+      revision: Number(url.searchParams.get("preparationRevision")), provider: "slack" });
     const binding = getSlackWorkspaceBinding(workspaceId);
     if (!binding?.clientId || !binding.clientSecret) {
       return NextResponse.redirect(appRedirectUrl(request, `/workspaces/${workspaceId}/tools?type=CONNECTOR&q=slack&slack=not-configured`));
@@ -30,6 +34,8 @@ export async function GET(request: Request) {
       flow: {
         kind: "workspace",
         initiatedByUserId: actor.kind === "user" ? actor.user.id : null,
+        ...(supportGrantVersion == null ? {} : { supportGrantVersion }),
+        ...(preparationId ? { preparedSelectedChannels: true } : {}),
       },
     });
     const cookieStore = await cookies();

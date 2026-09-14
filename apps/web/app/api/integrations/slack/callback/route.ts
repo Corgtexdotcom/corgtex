@@ -8,6 +8,8 @@ import {
   isSlackTenantBindingError,
   readSlackOAuthState,
   saveSlackInstallation,
+  AppError,
+  supportCapabilityVersion,
 } from "@corgtex/domain";
 import { appRedirectUrl, rethrowNextRedirectError, slackCallbackRedirectUri } from "../oauth";
 
@@ -43,6 +45,10 @@ export async function GET(request: Request) {
     }
 
     await getSlackOAuthInstallTarget(actor, parsed.workspaceId);
+    if (parsed.flow.kind !== "workspace" || actor.kind !== "user" || parsed.flow.initiatedByUserId !== actor.user.id) {
+      throw new AppError(403, "OAUTH_STATE_USER_MISMATCH", "OAuth state does not match the signed-in user.");
+    }
+    if (actor.kind === "user") await supportCapabilityVersion(actor.user.id, parsed.workspaceId, parsed.flow.supportGrantVersion ?? null);
     const redirectUri = slackCallbackRedirectUri(request);
     try {
       const oauthResponse = await exchangeSlackOAuthCode(code, redirectUri, parsed.workspaceId);
@@ -53,6 +59,7 @@ export async function GET(request: Request) {
         workspaceId: parsed.workspaceId,
         oauthResponse,
         expectedTeamId: parsed.expectedTeamId,
+        ...(parsed.flow.preparedSelectedChannels ? { preparedSelectedChannels: true } : {}),
       });
     } catch (error) {
       if (isSlackTenantBindingError(error)) {

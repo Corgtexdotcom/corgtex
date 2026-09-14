@@ -8,6 +8,7 @@ const {
   sha256Mock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     oAuthApp: {
       findUnique: vi.fn(),
     },
@@ -82,6 +83,7 @@ describe("OAuth server domain", () => {
     });
     expect(prismaMock.oAuthAuthorizationCode.create).toHaveBeenCalledWith({
       data: {
+        supportGrantVersion: null,
         appId: "oauth-app-1",
         userId: "user-1",
         workspaceId: "workspace-1",

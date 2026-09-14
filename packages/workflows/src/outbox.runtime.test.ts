@@ -34,6 +34,7 @@ const {
   runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn() },
     $transaction: vi.fn(),
     workflowJob: {
       updateMany: vi.fn(),
@@ -106,7 +107,8 @@ const {
   runFinanceReportImportProposalJobMock: vi.fn(),
 }));
 
-vi.mock("@corgtex/shared", () => ({
+vi.mock("@corgtex/shared", async () => ({
+  ...(await import("../../shared/src/support-context")),
   logger: loggerMock,
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
@@ -136,7 +138,8 @@ vi.mock("@corgtex/knowledge", () => ({
   syncKnowledgeForSource: vi.fn(),
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  withWorkspaceSupportExecution: (await import("../../domain/src/workspace-support-access")).withWorkspaceSupportExecution,
   recordGovernanceScore: vi.fn(),
   createWebhookDeliveries: vi.fn(),
   deliverWebhook: vi.fn(),
@@ -306,6 +309,36 @@ describe("runPendingJobs", () => {
         lockedBy: null,
       }),
     });
+  });
+
+  it.each([
+    null,
+    { isActive: false, role: "FULL", version: 1 },
+    { isActive: true, role: "SETUP", version: 1 },
+    { isActive: true, role: "FULL", version: 3 },
+  ])("does not invoke a content handler or progress writer with revoked support provenance %j", async (grant) => {
+    prismaMock.workspaceSupportGrant.findUnique.mockResolvedValue(grant);
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "support-job", workspaceId: "ws-1", type: "agent.meeting-summary",
+      payload: { meetingId: "meeting-1" }, attempts: 1, supportOriginUserId: "support-1", supportGrantVersion: 1 }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(prismaMock.workspaceSupportGrant.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { workspaceId_userId: { workspaceId: "ws-1", userId: "support-1" } } }));
+    expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
+    expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "support-job" }, data: expect.objectContaining({ status: "FAILED" }) }));
+  });
+
+  it("carries a validated Full grant into the actual job handler", async () => {
+    prismaMock.workspaceSupportGrant.findUnique.mockResolvedValue({ isActive: true, role: "FULL", version: 7 });
+    const { getSupportAuthorizationContext } = await import("../../shared/src/support-context");
+    runAgentWorkflowJobMock.mockImplementation(async () => {
+      expect(getSupportAuthorizationContext()?.origin).toEqual({ userId: "support-1", workspaceId: "ws-1", version: 7 });
+      return { success: true };
+    });
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "support-job", workspaceId: "ws-1", type: "agent.meeting-summary",
+      payload: { meetingId: "meeting-1" }, attempts: 1, supportOriginUserId: "support-1", supportGrantVersion: 7 }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runAgentWorkflowJobMock).toHaveBeenCalledOnce();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "COMPLETED" }) }));
   });
 
   it("dispatches only a well-formed Finance report extraction job", async () => {

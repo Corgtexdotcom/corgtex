@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const { requirePageActor, createIntegrationOAuthState, requireWorkspaceMembership } = vi.hoisted(() => ({
+const { requirePageActor, createIntegrationOAuthState, requireWorkspaceMembership, supportCapabilityVersion, getSupportConnectorPreparationForConsent } = vi.hoisted(() => ({
+  supportCapabilityVersion: vi.fn(), getSupportConnectorPreparationForConsent: vi.fn(),
   requirePageActor: vi.fn(),
   createIntegrationOAuthState: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
@@ -17,13 +18,17 @@ vi.mock("@/lib/http", () => ({
   }, { status: error.status ?? 500 }),
 }));
 
-vi.mock("@corgtex/domain", () => ({
+vi.mock("@corgtex/domain", async () => ({
+  ...(await import("../../../../../../../packages/domain/src/errors")),
+  supportCapabilityVersion, getSupportConnectorPreparationForConsent,
   createIntegrationOAuthState,
   requireWorkspaceMembership,
 }));
 
 beforeEach(() => {
   vi.resetModules();
+  supportCapabilityVersion.mockReset().mockResolvedValue(null);
+  getSupportConnectorPreparationForConsent.mockReset();
   vi.stubEnv("GOOGLE_CLIENT_ID", "google-client-id");
   vi.stubEnv("MICROSOFT_CLIENT_ID", "microsoft-client-id");
   vi.stubEnv("BOX_CLIENT_ID", "box-client-id");
@@ -41,6 +46,31 @@ afterEach(() => {
 });
 
 describe("GET /api/integrations/[provider]/connect", () => {
+  it("starts Full support consent with a workspace-bound grant version", async () => {
+    requirePageActor.mockResolvedValue({ kind: "user", user: { id: "support-1", isSupportAccount: true } });
+    supportCapabilityVersion.mockResolvedValue(4);
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("https://app.corgtex.com/api/integrations/google/connect?workspaceId=ws-1"), { params: Promise.resolve({ provider: "google" }) });
+    expect(response.status).toBe(307);
+    expect(createIntegrationOAuthState).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", supportGrantVersion: 4 }));
+  });
+
+  it("rejects Setup for its workspace without changing personal provider consent authority", async () => {
+    requirePageActor.mockResolvedValue({ kind: "user", user: { id: "support-1", isSupportAccount: true } });
+    const { GET } = await import("./route");
+    requireWorkspaceMembership.mockRejectedValueOnce(Object.assign(new Error("Content restricted"), { status: 403 }));
+    expect((await GET(new NextRequest("https://app.corgtex.com/api/integrations/google/connect?workspaceId=ws-1"), { params: Promise.resolve({ provider: "google" }) })).status).toBe(403);
+    expect(createIntegrationOAuthState).not.toHaveBeenCalled();
+    expect((await GET(new NextRequest("https://app.corgtex.com/api/integrations/google/connect"), { params: Promise.resolve({ provider: "google" }) })).status).toBe(307);
+  });
+
+  it("uses the owner-reviewed preparation instead of widening intent from the URL", async () => {
+    getSupportConnectorPreparationForConsent.mockResolvedValue({ provider: "google", intent: "documents", calendarImport: false });
+    const { GET } = await import("./route");
+    const response = await GET(new NextRequest("https://app.corgtex.com/api/integrations/google/connect?workspaceId=ws-1&preparationId=grant-1&preparationRevision=2&intent=calendar"), { params: Promise.resolve({ provider: "google" }) });
+    expect(new URL(response.headers.get("location")!).searchParams.get("scope")).not.toContain("calendar");
+    expect(createIntegrationOAuthState).toHaveBeenCalledWith(expect.objectContaining({ intent: "documents", calendarImport: false }));
+  });
   it("starts Google OAuth with public origin, read-only calendar scope, and a state cookie", async () => {
     const { GET } = await import("./route");
     const response = await GET(

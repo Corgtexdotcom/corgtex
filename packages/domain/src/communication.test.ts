@@ -115,6 +115,7 @@ vi.mock("@corgtex/shared", () => ({
     APP_URL: "https://app.example.test",
     NODE_ENV: "test",
     SLACK_SIGNING_SECRET: "slack-secret",
+    SESSION_COOKIE_SECRET: "local-oauth-state-secret",
     get SLACK_WORKSPACE_BINDINGS_JSON() { return process.env.SLACK_WORKSPACE_BINDINGS_JSON; },
     SLACK_CLIENT_ID: "global-client",
     SLACK_CLIENT_SECRET: "global-secret",
@@ -404,7 +405,7 @@ describe("communication Slack integration", () => {
     });
 
     expect(readSlackOAuthState(state.value)).toEqual({
-      version: 1,
+      version: 2,
       workspaceId: "workspace-1",
       nonce: "nonce",
       expectedTeamId: "T1",
@@ -416,20 +417,39 @@ describe("communication Slack integration", () => {
     });
   });
 
-  it("keeps reading legacy Slack OAuth state while callbacks roll over", async () => {
+  it("rejects unsigned legacy Slack OAuth state", async () => {
     const { readSlackOAuthState } = await import("./communication");
     const legacyState = Buffer.from(JSON.stringify({
       workspaceId: "workspace-1",
       nonce: "nonce",
     })).toString("base64url");
 
-    expect(readSlackOAuthState(legacyState)).toEqual({
-      version: 0,
-      workspaceId: "workspace-1",
-      nonce: "nonce",
-      expectedTeamId: null,
-      flow: { kind: "workspace" },
-    });
+    expect(readSlackOAuthState(legacyState)).toBeNull();
+  });
+
+  it.each([
+    { supportGrantVersion: 3 }, { initiatedByUserId: "different-user" },
+    { workspaceId: "different-workspace" }, { preparedSelectedChannels: false },
+    { flow: "control_plane", deploymentId: "different-deployment" },
+  ])("rejects Slack consent state tampering even with a copied nonce: %j", async (changes) => {
+    const { createSlackOAuthState, readSlackOAuthState } = await import("./communication");
+    const state = createSlackOAuthState("workspace-1", { flow: { kind: "workspace", initiatedByUserId: "support-1", supportGrantVersion: 1, preparedSelectedChannels: true } });
+    expect(readSlackOAuthState(state.value)?.flow).toMatchObject({ supportGrantVersion: 1, preparedSelectedChannels: true });
+    const [payload, signature] = state.value.split(".");
+    const modified = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(payload, "base64url").toString()), ...changes })).toString("base64url");
+    expect(readSlackOAuthState(`${modified}.${signature}`)).toBeNull();
+    expect(readSlackOAuthState(modified)).toBeNull();
+  });
+
+  it("expires signed Slack consent independently of the cookie lifetime", async () => {
+    const { createSlackOAuthState, readSlackOAuthState } = await import("./communication");
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const state = createSlackOAuthState("workspace-1");
+      clock.mockReturnValue(now + 10 * 60 * 1000 + 1);
+      expect(readSlackOAuthState(state.value)).toBeNull();
+    } finally { clock.mockRestore(); }
   });
 
   it("stores archive settings with long retention when public history is granted", async () => {
@@ -478,6 +498,27 @@ describe("communication Slack integration", () => {
         }),
       }),
     }));
+  });
+
+  it("applies prepared selected-channel configuration even with a shared app and broad granted scopes", async () => {
+    const { saveSlackInstallation } = await import("./communication");
+    await saveSlackInstallation({ kind: "user", user: { id: "owner-1" } } as any, {
+      workspaceId: "workspace-1", preparedSelectedChannels: true,
+      oauthResponse: { ok: true, team: { id: "T1", name: "Fixture" }, access_token: "fixture", scope: "commands,channels:history,channels:join" } as any,
+    });
+    expect(txMock.communicationInstallation.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ settings: expect.objectContaining({ channelAdmissionMode: "selected", publicArchiveSyncEnabled: false, broadPublicIngestion: false, autoJoinPublicChannels: false }) }),
+    }));
+  });
+
+  it("rejects a prepared Slack install when another connection appeared after consent started", async () => {
+    const { saveSlackInstallation } = await import("./communication");
+    txMock.communicationInstallation.findFirst.mockResolvedValue({ id: "existing", externalWorkspaceId: "T1" });
+    await expect(saveSlackInstallation({ kind: "user", user: { id: "owner-1" } } as any, {
+      workspaceId: "workspace-1", preparedSelectedChannels: true,
+      oauthResponse: { ok: true, team: { id: "T1" }, access_token: "fixture", scope: "commands" } as any,
+    })).rejects.toMatchObject({ code: "CONNECTION_ALREADY_EXISTS" });
+    expect(txMock.communicationInstallation.upsert).not.toHaveBeenCalled();
   });
 
   it("stores Slack installations for a target workspace without workspace membership checks", async () => {
