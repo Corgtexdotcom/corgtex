@@ -9,6 +9,14 @@ The release workflow must use the GitHub environment `fleet-release-production`.
 
 Fleet promotion reuses immutable GHCR images for the release SHA. It does not build Docker images. If the canonical web or worker image for `sha-<gitSha>` is missing, publish it with the `Release Images` workflow before running a real fleet promotion.
 
+The full `fleet-release.yml` workflow also verifies registry availability when dispatched with `dry_run=true`, using its existing GHCR login and package-read permission. It inspects the candidate web and worker images and, when Ops is selected, both canonical configured Ops baseline images from the protected Railway readback. The check records linux/amd64 platform-manifest digests and immutable references, not a top-level index digest. Each inspection is bounded to 30 seconds. Missing or inaccessible images stop the workflow with a redacted error; no provider deployment, registry push, or tag change occurs in dry-run mode. This does not extend `fleet-release-preflight.yml` or the CLI's default planning workflow permissions.
+
+For a real full-workflow promotion, the Ops baseline must still match the registry-check fingerprint before the first staging mutation. A missing proof, changed candidate, or baseline drift requires a fresh protected registry preflight. Existing staging drift checks remain in place. This proof covers configured baseline image availability, not database recovery or acceptance of a historical serving revision; other providers retain their existing rollback contracts.
+
+Ops source updates use the inspected candidate's canonical `repository@sha256:digest` reference, not its SHA tag, so a later tag republication cannot substitute another image. Later Ops releases accept and inspect those digest-pinned configured baselines; rollback evidence retains their immutable references and rejects a mismatched descriptor. There is no automatic rollback writer in this runner. An explicitly requested older release uses the same candidate inspection and digest-pinned update path; retained baseline references remain evidence for separately governed recovery.
+
+Registry checks consume the same selected-target snapshot as promotion, including in full-workflow dry runs. Broad `default`/`all` selections exclude lifecycle-ineligible Ops targets rather than inspecting their rollback images; explicit ineligible Ops selections fail closed. Initial protected-provider preflight uses the same broad-selection eligibility rule.
+
 ## Required GitHub Environment Settings
 
 Configure these values on the `fleet-release-production` environment. Store secret values only in GitHub environment secrets, never in docs, issues, PR bodies, logs, or committed files.
