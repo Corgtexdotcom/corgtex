@@ -552,6 +552,20 @@ describe("control plane domain", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();
+    prismaMock.$queryRaw.mockReset().mockImplementation(async (query) => {
+      const accounts = await prismaMock.customerAccount.findMany.mock.results.at(-1)?.value ?? [];
+      const orphans = await prismaMock.customerDeployment.findMany.mock.results.at(-1)?.value ?? [];
+      const accountQuery = query.sql.includes('WHERE snapshot."customerAccountId"');
+      const parents = accountQuery ? accounts : [
+        ...accounts.flatMap((account: any) => [account.primaryDeployment, ...(account.deployments ?? [])].filter(Boolean)),
+        ...orphans,
+      ];
+      return parents.filter((parent: any) => query.values.includes(parent.id)).flatMap((parent: any) => (
+        (parent.fleetSnapshots ?? []).map((snapshot: any) => ({
+          ...snapshot, [accountQuery ? "customerAccountId" : "deploymentId"]: parent.id,
+        }))
+      ));
+    });
     slackAvailabilityEnv.map = undefined;
     slackAvailabilityEnv.clientId = "slack-client-id";
     slackAvailabilityEnv.clientSecret = "slack-client-secret";
@@ -1890,6 +1904,9 @@ describe("control plane domain", () => {
     const accountListArgs = prismaMock.customerAccount.findMany.mock.calls[0]?.[0] as any;
     expect(accountListArgs.include.primaryDeployment.include.supportOperations).toBeUndefined();
     expect(accountListArgs.include.primaryDeployment.include._count).toBeUndefined();
+    expect(accountListArgs.include.fleetSnapshots).toBeUndefined();
+    expect(accountListArgs.include.primaryDeployment.include.fleetSnapshots).toBeUndefined();
+    expect(accountListArgs.include.deployments.include.fleetSnapshots).toBeUndefined();
     expect(result[0]).toMatchObject({
       id: "inst-1",
       customerAccountId: "cust-1",
@@ -1934,6 +1951,41 @@ describe("control plane domain", () => {
       deploymentStatus: "DRAFT",
       supportConnectorStatus: "not_configured",
     });
+  });
+
+  it("hydrates only selected deployments and account-only fallback snapshots", async () => {
+    const { listControlPlaneDeployments } = await import("./control-plane");
+    const snapshot = { id: "account-snapshot", snapshotKind: "HEALTH", status: "degraded",
+      summary: { nested: { preserved: "x".repeat(2000) } }, error: "synthetic error",
+      observedAt: new Date("2026-01-01"), createdAt: new Date("2026-01-02") };
+    const deployment = (id: string, deploymentStatus = "ACTIVE") => ({ id, deploymentStatus, fleetSnapshots: [] });
+    prismaMock.customerAccount.findMany.mockResolvedValue([
+      { id: "primary-account", primaryDeployment: deployment("primary", "SUSPENDED"), deployments: [deployment("not-selected")], fleetSnapshots: [snapshot] },
+      { id: "active-account", primaryDeployment: null, deployments: [deployment("recent-draft", "DRAFT"), deployment("active")], fleetSnapshots: [snapshot] },
+      { id: "recent-account", primaryDeployment: null, deployments: [deployment("recent", "DRAFT")], fleetSnapshots: [snapshot] },
+      { id: "account-only", primaryDeployment: null, deployments: [], fleetSnapshots: [snapshot] },
+      { id: "account-empty", primaryDeployment: null, deployments: [], fleetSnapshots: [] },
+    ] as any);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([deployment("orphan")] as any);
+    const rows = await listControlPlaneDeployments(operatorActor);
+    expect(rows.map(row => row.id)).toEqual(["primary", "active", "recent", "account-only", "account-empty", "orphan"]);
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2);
+    const queries = prismaMock.$queryRaw.mock.calls.map(([query]) => query);
+    expect(queries.find(query => query.sql.includes('WHERE snapshot."deploymentId"')).values).toEqual(["primary", "active", "recent", "orphan"]);
+    expect(queries.find(query => query.sql.includes('WHERE snapshot."customerAccountId"')).values).toEqual(["account-only", "account-empty"]);
+    expect(rows.find(row => row.id === "account-only")?.fleetSnapshots).toEqual([{ ...snapshot, customerAccountId: "account-only" }]);
+    expect(rows.find(row => row.id === "account-empty")?.fleetSnapshots).toEqual([]);
+    expect(rows.find(row => row.id === "primary")?.fleetSnapshots).toEqual([]);
+    expect(prismaMock.customerAccount.findMany.mock.calls[0][0].include.fleetSnapshots).toBeUndefined();
+    expect(prismaMock.customerDeployment.findMany.mock.calls[0][0].include.fleetSnapshots).toBeUndefined();
+  });
+
+  it("does not load roster snapshots without global control-plane access", async () => {
+    const { listControlPlaneDeployments } = await import("./control-plane");
+    const actor = { kind: "user", user: { id: "ordinary-user", globalRole: "USER" } } as AppActor;
+    await expect(listControlPlaneDeployments(actor)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prismaMock.customerAccount.findMany).not.toHaveBeenCalled();
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
   });
 
   it("returns lean MCP-compatible customer summaries", async () => {
