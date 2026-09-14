@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { getMcpPublicUrl } from "@corgtex/domain";
+import { installerWorkspaceUrl, WorkspaceMcpPicker } from "./WorkspaceMcpPicker";
 import { buildInstallerPath } from "@/lib/install-helpers";
 
 export const dynamic = "force-dynamic";
@@ -69,8 +69,10 @@ const TILES = [
   },
 ];
 
-export default function InstallIndexPage() {
-  const connectorUrl = getMcpPublicUrl();
+export default async function InstallIndexPage({ searchParams }: { searchParams: Promise<{ workspaceId?: string }> }) {
+  const { workspaceId } = await searchParams;
+  if (!workspaceId) return <WorkspaceMcpPicker />;
+  const connectorUrl = await installerWorkspaceUrl(workspaceId);
 
   return (
     <main className="min-h-screen bg-[var(--bg)] px-4 py-10 sm:py-16">
@@ -89,7 +91,7 @@ export default function InstallIndexPage() {
           {TILES.map((tile) => (
             <li key={tile.id}>
               <Link
-                href={tile.href}
+                href={`${tile.href}?workspaceId=${encodeURIComponent(workspaceId)}`}
                 className="block h-full rounded-[var(--radius-lg)] border bg-[var(--surface)] p-5 transition hover:border-[var(--line)]"
                 style={{
                   borderColor: tile.primary ? "var(--accent)" : "var(--line-subtle)",

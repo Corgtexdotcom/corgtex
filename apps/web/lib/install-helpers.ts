@@ -4,6 +4,14 @@
  * (CorgtexConnectorManager) so neither pulls in the other's bundle.
  */
 
+import { parseWorkspaceMcpResource } from "@corgtex/shared/workspace-mcp-resource";
+
+export function mcpConnectionName(connectorUrl: string): string {
+  const url = new URL(connectorUrl);
+  const id = parseWorkspaceMcpResource(connectorUrl, url.origin);
+  return id ? `corgtex-workspace-${id}` : "corgtex";
+}
+
 export type CursorMcpConfig = {
   type: "http";
   url: string;
@@ -11,13 +19,13 @@ export type CursorMcpConfig = {
 
 export type CursorMcpJsonConfig = {
   mcpServers: {
-    corgtex: CursorMcpConfig;
+    [name: string]: CursorMcpConfig;
   };
 };
 
 export type VsCodeMcpConfig = {
   servers: {
-    corgtex: {
+    [name: string]: {
       type: "http";
       url: string;
     };
@@ -26,7 +34,7 @@ export type VsCodeMcpConfig = {
 
 export type CopilotCliMcpConfig = {
   mcpServers: {
-    corgtex: {
+    [name: string]: {
       type: "http";
       url: string;
       tools: string[];
@@ -36,7 +44,7 @@ export type CopilotCliMcpConfig = {
 
 export type GeminiMcpConfig = {
   mcpServers: {
-    corgtex: {
+    [name: string]: {
       httpUrl: string;
     };
   };
@@ -52,7 +60,7 @@ export function buildCursorMcpConfig(connectorUrl: string): CursorMcpConfig {
 export function buildCursorMcpJsonConfig(connectorUrl: string): CursorMcpJsonConfig {
   return {
     mcpServers: {
-      corgtex: buildCursorMcpConfig(connectorUrl),
+      [mcpConnectionName(connectorUrl)]: buildCursorMcpConfig(connectorUrl),
     },
   };
 }
@@ -60,7 +68,7 @@ export function buildCursorMcpJsonConfig(connectorUrl: string): CursorMcpJsonCon
 export function buildVsCodeMcpConfig(connectorUrl: string): VsCodeMcpConfig {
   return {
     servers: {
-      corgtex: {
+      [mcpConnectionName(connectorUrl)]: {
         type: "http",
         url: connectorUrl,
       },
@@ -71,7 +79,7 @@ export function buildVsCodeMcpConfig(connectorUrl: string): VsCodeMcpConfig {
 export function buildCopilotCliMcpConfig(connectorUrl: string): CopilotCliMcpConfig {
   return {
     mcpServers: {
-      corgtex: {
+      [mcpConnectionName(connectorUrl)]: {
         type: "http",
         url: connectorUrl,
         tools: ["*"],
@@ -83,7 +91,7 @@ export function buildCopilotCliMcpConfig(connectorUrl: string): CopilotCliMcpCon
 export function buildGeminiMcpConfig(connectorUrl: string): GeminiMcpConfig {
   return {
     mcpServers: {
-      corgtex: {
+      [mcpConnectionName(connectorUrl)]: {
         httpUrl: connectorUrl,
       },
     },
@@ -112,7 +120,8 @@ export function encodeBase64Utf8(value: string): string {
 
 export function buildCursorInstallLinks(connectorUrl: string): { app: string; browser: string } {
   const encodedConfig = encodeURIComponent(encodeBase64Utf8(JSON.stringify(buildCursorMcpConfig(connectorUrl))));
-  const name = encodeURIComponent("Corgtex");
+  const connectionName = mcpConnectionName(connectorUrl);
+  const name = encodeURIComponent(connectionName === "corgtex" ? "Corgtex" : connectionName);
 
   return {
     app: `cursor://anysphere.cursor-deeplink/mcp/install?name=${name}&config=${encodedConfig}`,
@@ -121,15 +130,15 @@ export function buildCursorInstallLinks(connectorUrl: string): { app: string; br
 }
 
 export function buildClaudeCodeCommand(connectorUrl: string): string {
-  return `claude mcp add --transport http corgtex --scope user ${connectorUrl}`;
+  return `claude mcp add --transport http ${mcpConnectionName(connectorUrl)} --scope user ${connectorUrl}`;
 }
 
 export function buildCopilotCliCommand(connectorUrl: string): string {
-  return `copilot mcp add corgtex --type http --url ${connectorUrl} --tools "*"`;
+  return `copilot mcp add ${mcpConnectionName(connectorUrl)} --type http --url ${connectorUrl} --tools "*"`;
 }
 
 export function buildGeminiMcpCommand(connectorUrl: string): string {
-  return `gemini mcp add --transport http --scope user corgtex ${connectorUrl}`;
+  return `gemini mcp add --transport http --scope user ${mcpConnectionName(connectorUrl)} ${connectorUrl}`;
 }
 
 export const CLAUDE_CONNECTORS_URL = "https://claude.ai/customize/connectors";

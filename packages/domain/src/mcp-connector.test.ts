@@ -358,7 +358,7 @@ describe("MCP connector registry", () => {
       scopes: ["workspace:read", "tools:write"],
       codeChallenge: "challenge",
       codeChallengeMethod: "S256",
-      resource: "https://app.test/mcp",
+      resource: "https://app.test/mcp/workspaces/ws-1",
     });
 
     expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
@@ -403,7 +403,7 @@ describe("MCP connector registry", () => {
       scopes: ["workspace:read", "proposals:write", "actions:write"],
       codeChallenge: "challenge",
       codeChallengeMethod: "S256",
-      resource: "https://app.test/mcp",
+      resource: "https://app.test/mcp/workspaces/ws-1",
     });
 
     expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
@@ -444,7 +444,7 @@ describe("MCP connector registry", () => {
       scopes: ["workspace:read", "actions:write"],
       codeChallenge: "challenge",
       codeChallengeMethod: "S256",
-      resource: "https://app.test/mcp",
+      resource: "https://app.test/mcp/workspaces/ws-1",
     })).rejects.toMatchObject({
       status: 400,
       code: "INVALID_INPUT",
@@ -489,7 +489,7 @@ describe("MCP connector registry", () => {
       resource: "not a url",
     })).rejects.toMatchObject({
       status: 400,
-      code: "INVALID_INPUT",
+      code: "MCP_REAUTHORIZATION_REQUIRED",
     });
     expect(createAuthorizationCodeMock).not.toHaveBeenCalled();
   });

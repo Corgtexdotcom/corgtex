@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { env } from "./env";
 import { getSupportAuthorizationContext } from "./support-context";
+import { getMcpExecutionOrigin } from "./mcp-execution-context";
 
 const createClient = () => {
   const client = new PrismaClient({
@@ -13,6 +14,16 @@ const createClient = () => {
   });
   const extended = client.$extends({ query: { $allModels: { async $allOperations({ model, operation, args, query }) {
     const params = { model, action: operation, args: args as Record<string, any> };
+    const mcpOrigin = getMcpExecutionOrigin();
+    if (mcpOrigin && ["Event", "WorkflowJob"].includes(params.model ?? "") &&
+        ["create", "createMany", "upsert"].includes(params.action)) {
+      const data = params.action === "upsert" ? params.args.create : params.args.data;
+      for (const row of Array.isArray(data) ? data : [data]) {
+        const workspaceId = row.workspaceId ?? row.workspace?.connect?.id;
+        if (workspaceId !== mcpOrigin.workspaceId) throw new Error("MCP_WORKSPACE_MISMATCH");
+        row.mcpConnectionId = mcpOrigin.connectionId;
+      }
+    }
     const context = getSupportAuthorizationContext();
     if (!context?.supportUserId || !["Event", "WorkflowJob"].includes(params.model ?? "")
       || !["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) return query(args);

@@ -28,6 +28,19 @@ vi.mock("@corgtex/shared", () => ({
 }));
 
 describe("authenticateMcpRequest", () => {
+  it("rejects a one-workspace agent at another workspace endpoint", async () => {
+    resolveAgentActorFromBearerMock.mockResolvedValue({ kind: "agent", authProvider: "bootstrap", workspaceIds: ["A"] });
+    const { authenticateMcpRequest } = await import("./auth");
+    await expect(authenticateMcpRequest("Bearer fixture", { workspaceId: "B", resourceUrl: "https://mcp.test/mcp/workspaces/B" })).rejects.toMatchObject({ status: 401 });
+    expect(requireWorkspaceMembershipMock).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "https://mcp.test/mcp", "https://mcp.test/mcp/workspaces/A"])("rejects OAuth endpoint mismatch for stored audience %s", async (resource) => {
+    resolveAgentActorFromBearerMock.mockResolvedValue(null);
+    resolveMcpOAuthAccessTokenMock.mockResolvedValue({ actor: { kind: "user", user: { id: "user" } }, workspaceId: "A", resource });
+    const { authenticateMcpRequest } = await import("./auth");
+    await expect(authenticateMcpRequest("Bearer fixture", { workspaceId: "B", resourceUrl: "https://mcp.test/mcp/workspaces/B" })).rejects.toMatchObject({ code: "MCP_REAUTHORIZATION_REQUIRED" });
+  });
   beforeEach(() => {
     resolveAgentActorFromBearerMock.mockReset();
     resolveMcpOAuthAccessTokenMock.mockReset();

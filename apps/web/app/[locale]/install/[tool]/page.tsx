@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getMcpPublicUrl } from "@corgtex/domain";
+import { installerWorkspaceUrl, WorkspaceMcpPicker } from "../WorkspaceMcpPicker";
 import { installerProviderSlug, type InstallerProviderKey } from "@/lib/install-helpers";
 import { GuidedProviderInstaller } from "./GuidedProviderInstaller";
 
@@ -57,12 +57,14 @@ export default async function GuidedInstallPage({
   const providerKey = installerProviderSlug(tool);
   if (!providerKey || providerKey === "claude" || providerKey === "claude-code") notFound();
 
-  const connectorUrl = getMcpPublicUrl();
   const workspaceId = firstParam(search.workspaceId);
+  if (!workspaceId) return <WorkspaceMcpPicker tool={tool} />;
+  const connectorUrl = await installerWorkspaceUrl(workspaceId);
   const returnTo = safeReturnTo(search.returnTo);
 
   return (
     <main className="min-h-screen bg-[var(--bg)] px-4 py-10 sm:py-16">
+      <p className="mx-auto mb-4 max-w-xl break-all">Connection name: Corgtex - {workspaceId}</p>
       <GuidedProviderInstaller
         providerKey={providerKey}
         connectorUrl={connectorUrl}

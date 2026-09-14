@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { WorkspaceMcpConnections } from "./WorkspaceMcpConnections";
 import {
   buildInstallerPath,
   buildInstallerShareUrl,
@@ -364,6 +365,7 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName, workspace
         </details>
       </div>
 
+      {workspaceId ? <WorkspaceMcpConnections workspaceId={workspaceId} /> : null}
       <details>
         <summary style={{ cursor: "pointer", fontSize: "0.95rem", fontWeight: 600, padding: "8px 0" }}>
           Other AI tools (OpenWork, ChatGPT, Cursor, Copilot, Gemini, Claude Code, Other)

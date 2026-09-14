@@ -20,6 +20,9 @@ export async function POST(request: NextRequest) {
       bodyData = await request.json();
     } else if (contentType.includes("application/x-www-form-urlencoded")) {
       const formData = await request.formData();
+      if (formData.getAll("resource").length > 1 || formData.getAll("client_id").length > 1) {
+        return NextResponse.json({ error: "invalid_request", error_description: "Only one client and resource may be requested." }, { status: 400 });
+      }
       formData.forEach((value, key) => {
         bodyData[key] = value.toString();
       });
@@ -108,6 +111,8 @@ export async function POST(request: NextRequest) {
         const tokens = await refreshMcpAccessToken({
           refreshToken,
           clientId,
+          resource: bodyData.resource,
+          scopes: bodyData.scope ? bodyData.scope.split(" ").filter(Boolean) : undefined,
         });
 
         return NextResponse.json(tokens, {

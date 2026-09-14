@@ -1,6 +1,7 @@
 import type { EventStatus, NewspaperCadence, Prisma, WorkflowJobStatus } from "@prisma/client";
 import { logger, prisma } from "@corgtex/shared";
 import { withWorkspaceSupportExecution } from "@corgtex/domain";
+import { withMcpConnectionExecution } from "@corgtex/domain";
 import { deriveJobsForEvent } from "./derive-jobs";
 import { handleReleaseDiagnostic } from "./release-diagnostic-handler";
 import { deriveNotificationsForEvent } from "./derive-notifications";
@@ -63,6 +64,7 @@ const LOCK_TIMEOUT_MS = 5 * 60 * 1_000;
 const MEETING_RECORDER_RECONCILE_INTERVAL_MS = 10 * 60 * 1_000;
 
 type ClaimedEvent = {
+  mcpConnectionId?: string | null;
   supportOriginUserId?: string | null;
   supportGrantVersion?: number | null;
   id: string;
@@ -76,6 +78,7 @@ type ClaimedEvent = {
 };
 
 type ClaimedJob = {
+  mcpConnectionId?: string | null;
   supportOriginUserId?: string | null;
   supportGrantVersion?: number | null;
   id: string;
@@ -336,6 +339,7 @@ async function claimPendingEvents(workerId: string, batchSize: number) {
       WHERE event.id = candidates.id
       RETURNING
         event.id,
+        event."mcpConnectionId",
         event."supportOriginUserId",
         event."supportGrantVersion",
         event."workspaceId" AS "workspaceId",
@@ -490,6 +494,7 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
       WHERE job.id = candidates.id
       RETURNING
         job.id,
+        job."mcpConnectionId",
         job."supportOriginUserId",
         job."supportGrantVersion",
         job."workspaceId" AS "workspaceId",
@@ -500,13 +505,14 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
   });
 }
 
-function supportAuthorizationRevoked(error: unknown) {
-  return error instanceof Error && ((error as Error & { code?: string }).code === "SUPPORT_AUTHORIZATION_REVOKED" || error.message === "SUPPORT_AUTHORIZATION_REVOKED");
+function executionAuthorizationRevoked(error: unknown) {
+  const revokedCodes = ["SUPPORT_AUTHORIZATION_REVOKED", "MCP_CONNECTION_REVOKED"];
+  return error instanceof Error && (revokedCodes.includes((error as Error & { code?: string }).code ?? "") || revokedCodes.includes(error.message));
 }
 
 async function failEvent(event: ClaimedEvent, error: unknown) {
   const message = error instanceof Error ? error.message : "Unknown event dispatch error.";
-  const status: EventStatus = event.attempts >= MAX_ATTEMPTS || supportAuthorizationRevoked(error) ? "FAILED" : "PENDING";
+  const status: EventStatus = event.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
 
   await prisma.event.update({
     where: { id: event.id },
@@ -535,7 +541,7 @@ async function completeJob(jobId: string) {
 
 async function failJob(job: ClaimedJob, error: unknown) {
   const message = error instanceof Error ? error.message : "Unknown worker error.";
-  const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || supportAuthorizationRevoked(error) ? "FAILED" : "PENDING";
+  const status: WorkflowJobStatus = job.attempts >= MAX_ATTEMPTS || executionAuthorizationRevoked(error) ? "FAILED" : "PENDING";
 
   await prisma.workflowJob.update({
     where: { id: job.id },
@@ -1074,7 +1080,7 @@ export async function dispatchPendingEvents(workerId: string, batchSize = DEFAUL
 
   for (const event of events) {
     try {
-      await withWorkspaceSupportExecution(event, () => prisma.$transaction(async (tx) => {
+      await withWorkspaceSupportExecution(event, () => withMcpConnectionExecution(event, () => prisma.$transaction(async (tx) => {
         const derivedJobs = deriveJobsForEvent(event);
         for (const job of derivedJobs) {
           let dependsOnJobId: string | null = null;
@@ -1124,7 +1130,7 @@ export async function dispatchPendingEvents(workerId: string, batchSize = DEFAUL
             lockedBy: null,
           },
         });
-      }));
+      })));
     } catch (error) {
       await failEvent(event, error);
     }
@@ -1139,16 +1145,16 @@ async function processClaimedJob(workerId: string, job: ClaimedJob) {
   let failure: unknown = null;
   try {
     const diagnostic = job.type === RELEASE_DIAGNOSTIC_JOB_TYPE;
-    await withWorkspaceSupportExecution(job, async () => {
+    await withWorkspaceSupportExecution(job, () => withMcpConnectionExecution(job, async () => {
       await recordMeetingProgressForJob(job, "ACTIVE");
       const result = await (diagnostic ? handleReleaseDiagnostic(job, workerId) : handleJob(job));
       await recordMeetingProgressForJob(job, resultWasSkipped(result) ? "SKIPPED" : "COMPLETED");
-    });
+    }));
     if (!diagnostic) await completeJob(job.id);
   } catch (error) {
     failed = true;
     failure = error;
-    if (job.attempts >= MAX_ATTEMPTS && !supportAuthorizationRevoked(error)) {
+    if (job.attempts >= MAX_ATTEMPTS && !executionAuthorizationRevoked(error)) {
       await recordMeetingProgressForJob(job, "FAILED", { error });
     }
     if (job.type === RELEASE_DIAGNOSTIC_JOB_TYPE) {

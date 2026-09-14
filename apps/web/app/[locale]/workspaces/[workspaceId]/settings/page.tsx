@@ -1,5 +1,6 @@
 import {
   AppError,
+  getWorkspaceMcpPublicUrl,
   getMemberInvitePolicy,
   getModelUsageBudget,
   getSsoConfigByWorkspace,
@@ -18,9 +19,9 @@ import {
   requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { getModuleManifests } from "@corgtex/domain/modules";
-import { env } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { headers } from "next/headers";
+import { WorkspaceMcpConnections } from "./WorkspaceMcpConnections";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
@@ -165,7 +166,7 @@ export default async function SettingsPage({
   const host = headersList.get("host") || "localhost:3000";
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
-  const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
+  const connectorUrl = getWorkspaceMcpPublicUrl(workspaceId);
   const t = await getTranslations("settings");
   const format = await getFormatter();
   const aiWorkspaceProviders = listAiWorkspaceToolProviders().map((provider) => ({
@@ -416,6 +417,8 @@ export default async function SettingsPage({
       )}
 
       {tab === "ai-workspaces" && (
+        <div className="stack" style={{ gap: 24 }}>
+        <WorkspaceMcpConnections workspaceId={workspaceId} />
         <AiWorkspaceManager
           connectorUrl={connectorUrl}
           origin={origin}
@@ -428,6 +431,7 @@ export default async function SettingsPage({
           selectedProviderKey={selectedProviderKey}
           selectedServiceKey={selectedServiceKey}
         />
+        </div>
       )}
     </>
   );

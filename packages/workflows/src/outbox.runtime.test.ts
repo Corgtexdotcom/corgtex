@@ -34,6 +34,7 @@ const {
   runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    mcpOAuthAccessToken: { findUnique: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn() },
     $transaction: vi.fn(),
     workflowJob: {
@@ -109,6 +110,7 @@ const {
 
 vi.mock("@corgtex/shared", async () => ({
   ...(await import("../../shared/src/support-context")),
+  ...(await import("../../shared/src/mcp-execution-context")),
   logger: loggerMock,
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
@@ -140,6 +142,7 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/domain", async () => ({
   withWorkspaceSupportExecution: (await import("../../domain/src/workspace-support-access")).withWorkspaceSupportExecution,
+  withMcpConnectionExecution: (await import("../../domain/src/mcp-connections")).withMcpConnectionExecution,
   recordGovernanceScore: vi.fn(),
   createWebhookDeliveries: vi.fn(),
   deliverWebhook: vi.fn(),
@@ -325,6 +328,16 @@ describe("runPendingJobs", () => {
     expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
     expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "support-job" }, data: expect.objectContaining({ status: "FAILED" }) }));
+  });
+
+  it("does not execute or write meeting progress after the initiating MCP connection is revoked", async () => {
+    prismaMock.mcpOAuthAccessToken.findUnique.mockResolvedValue(null);
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "mcp-job", workspaceId: "ws-1", type: "agent.meeting-summary",
+      payload: { meetingId: "meeting-1" }, attempts: 5, mcpConnectionId: "revoked-connection" }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
+    expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "mcp-job" }, data: expect.objectContaining({ status: "FAILED" }) }));
   });
 
   it("carries a validated Full grant into the actual job handler", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parseWorkspaceMcpResource, workspaceMcpOrigin, workspaceMcpResource } from "@corgtex/shared/workspace-mcp-resource";
 import { supportCapabilityVersion } from "./workspace-support-access";
 import { requireWorkspaceMembership } from "./auth";
 import { lookup } from "node:dns/promises";
@@ -771,6 +772,21 @@ export function getMcpPublicUrl(origin?: string) {
   return base.replace(/\/$/, "");
 }
 
+export function getWorkspaceMcpOrigin() {
+  return workspaceMcpOrigin({ mcpPublicUrl: env.MCP_PUBLIC_URL, appUrl: env.APP_URL, allowLocalHttp: env.NODE_ENV !== "production" });
+}
+
+export function getWorkspaceMcpPublicUrl(workspaceId: string) {
+  return workspaceMcpResource(getWorkspaceMcpOrigin(), workspaceId);
+}
+
+export function requireWorkspaceMcpResource(resource?: string | null, workspaceId?: string) {
+  const boundWorkspaceId = resource ? parseWorkspaceMcpResource(resource, getWorkspaceMcpOrigin()) : null;
+  invariant(boundWorkspaceId && (!workspaceId || workspaceId === boundWorkspaceId), 400,
+    "MCP_REAUTHORIZATION_REQUIRED", "Reconnect using this workspace's MCP URL from Corgtex settings. Resource and workspace must match exactly.");
+  return boundWorkspaceId;
+}
+
 function normalizeMcpResource(resource: string) {
   try {
     const parsed = new URL(resource);
@@ -784,6 +800,10 @@ function normalizeMcpResource(resource: string) {
 }
 
 export function areEquivalentMcpResources(storedResource: string, requestedResource: string) {
+  // Scoped resources never use legacy alias or URL normalization rules.
+  if (storedResource.includes("/workspaces/") || requestedResource.includes("/workspaces/")) {
+    return storedResource === requestedResource && parseWorkspaceMcpResource(storedResource, getWorkspaceMcpOrigin()) !== null;
+  }
   const stored = normalizeMcpResource(storedResource);
   const requested = normalizeMcpResource(requestedResource);
   if (stored === requested) return true;
@@ -904,7 +924,8 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
   invariant(params.codeChallengeMethod === "S256", 400, "INVALID_INPUT", "PKCE code_challenge_method must be S256.");
 
   const instance = await resolveMcpConnectorInstanceForWorkspace(params.workspaceId);
-  const resource = params.resource ? normalizeMcpResource(params.resource) : getMcpPublicUrl();
+  requireWorkspaceMcpResource(params.resource, params.workspaceId);
+  const resource = getWorkspaceMcpPublicUrl(params.workspaceId);
   const scopes = requestedScopes(params.scopes, client.scopes);
   const code = `${MCP_CODE_PREFIX}${randomOpaqueToken()}`;
 
@@ -955,7 +976,8 @@ export async function exchangeMcpAuthorizationCode(params: {
   if (authCode.redirectUri !== params.redirectUri) {
     throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
   }
-  if (params.resource && authCode.resource && !areEquivalentMcpResources(authCode.resource, params.resource)) {
+  requireWorkspaceMcpResource(authCode.resource, authCode.workspaceId);
+  if (params.resource !== authCode.resource) {
     throw new AppError(400, "INVALID_INPUT", "Resource parameter mismatch.");
   }
 
@@ -972,25 +994,11 @@ export async function exchangeMcpAuthorizationCode(params: {
   await requireActiveMcpWorkspaceMembership({ userId: authCode.userId, workspaceId: authCode.workspaceId });
   await supportCapabilityVersion(authCode.userId, authCode.workspaceId, authCode.supportGrantVersion);
 
-  await prisma.mcpOAuthAuthorizationCode.update({
-    where: { id: authCode.id },
-    data: { usedAt: new Date() },
-  });
-
   const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
   const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
   const expiresInSeconds = 3600;
   const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
   const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
-  const existingToken = await prisma.mcpOAuthAccessToken.findFirst({
-    where: {
-      clientId: client.id,
-      userId: authCode.userId,
-      workspaceId: authCode.workspaceId,
-      instanceSlug: authCode.instanceSlug,
-    },
-  });
 
   const tokenParams = {
     supportGrantVersion: authCode.supportGrantVersion,
@@ -1007,16 +1015,15 @@ export async function exchangeMcpAuthorizationCode(params: {
     revokedAt: null,
   };
 
-  if (existingToken) {
-    await prisma.mcpOAuthAccessToken.update({
-      where: { id: existingToken.id },
-      data: tokenParams,
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.mcpOAuthAuthorizationCode.updateMany({
+      where: { id: authCode.id, usedAt: null, expiresAt: { gt: new Date() } },
+      data: { usedAt: new Date() },
     });
-  } else {
-    await prisma.mcpOAuthAccessToken.create({
-      data: tokenParams,
-    });
-  }
+    invariant(claimed.count === 1, 400, "INVALID_INPUT", "Authorization code already used or expired.");
+    // Each fresh consent creates an independent connection, not a software-client overwrite.
+    await tx.mcpOAuthAccessToken.create({ data: tokenParams });
+  });
 
   return {
     access_token: accessToken,
@@ -1030,6 +1037,8 @@ export async function exchangeMcpAuthorizationCode(params: {
 export async function refreshMcpAccessToken(params: {
   refreshToken: string;
   clientId: string;
+  resource?: string | null;
+  scopes?: string[];
 }) {
   const client = await getMcpOAuthClientByClientId(params.clientId);
   const token = await prisma.mcpOAuthAccessToken.findUnique({
@@ -1051,29 +1060,38 @@ export async function refreshMcpAccessToken(params: {
   await requireActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId });
   await supportCapabilityVersion(token.userId, token.workspaceId, token.supportGrantVersion);
 
+  if (token.resource?.includes("/workspaces/")) requireWorkspaceMcpResource(token.resource, token.workspaceId);
+  invariant(!params.resource || (token.resource !== null && areEquivalentMcpResources(token.resource, params.resource)),
+    400, "INVALID_INPUT", "Resource parameter mismatch.");
+  invariant(!params.scopes || (params.scopes.every((scope) => token.scopes.includes(scope)) &&
+    new Set(params.scopes).size === new Set(token.scopes).size),
+    400, "INVALID_INPUT", "Refresh cannot change permissions. Reconnect to authorize different scopes.");
+  const scopes = token.scopes;
+
   const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
   const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
   const expiresInSeconds = 3600;
   const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
   const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  await prisma.mcpOAuthAccessToken.update({
-    where: { id: token.id },
+  const rotated = await prisma.mcpOAuthAccessToken.updateMany({
+    where: { id: token.id, refreshHash: sha256(params.refreshToken), revokedAt: null },
     data: {
       tokenHash: sha256(accessToken),
       refreshHash: sha256(refreshToken),
       expiresAt,
       refreshExpiresAt,
-      revokedAt: null,
+      scopes,
     },
   });
+  invariant(rotated.count === 1, 401, "UNAUTHENTICATED", "Refresh token already rotated or revoked.");
 
   return {
     access_token: accessToken,
     token_type: "bearer",
     expires_in: expiresInSeconds,
     refresh_token: refreshToken,
-    scope: token.scopes.join(" "),
+    scope: scopes.join(" "),
   };
 }
 
@@ -1115,6 +1133,10 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
   if (new Date() > token.expiresAt) {
     return null;
   }
+  const scopedWorkspace = expectedResource ? parseWorkspaceMcpResource(expectedResource, getWorkspaceMcpOrigin()) : null;
+  if (scopedWorkspace && (token.workspaceId !== scopedWorkspace || token.resource !== expectedResource)) return null;
+  if (token.resource?.includes("/workspaces/") &&
+      (!expectedResource || token.resource !== expectedResource || scopedWorkspace !== token.workspaceId)) return null;
   if (expectedResource && token.resource && !areEquivalentMcpResources(token.resource, expectedResource)) {
     return null;
   }
@@ -1139,6 +1161,7 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
       },
     },
     workspaceId: token.workspaceId,
+    connectionId: token.id,
     scopes: token.scopes,
     instanceSlug: token.instanceSlug,
     resource: token.resource,

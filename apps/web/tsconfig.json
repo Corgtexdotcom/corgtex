@@ -8,6 +8,7 @@
       }
     ],
     "paths": {
+      "@corgtex/shared/workspace-mcp-resource": ["../../packages/shared/src/workspace-mcp-resource.ts"],
       "@/*": ["./*"],
       "@corgtex/shared": ["../../packages/shared/src/index.ts"],
       "@corgtex/shared/telemetry": ["../../packages/shared/src/telemetry.ts"],

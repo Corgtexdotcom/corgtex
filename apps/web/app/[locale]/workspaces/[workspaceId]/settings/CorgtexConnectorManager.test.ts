@@ -35,6 +35,15 @@ function decodeCursorConfig(link: string): unknown {
 }
 
 describe("CorgtexConnectorManager setup helpers", () => {
+  it("generates non-overwriting configuration names for two immutable workspace URLs", () => {
+    const a = "https://mcp.example.com/mcp/workspaces/seed-A";
+    const b = "https://mcp.example.com/mcp/workspaces/seed-B";
+    expect(Object.keys(buildCursorMcpJsonConfig(a).mcpServers)).toEqual(["corgtex-workspace-seed-A"]);
+    expect(Object.keys(buildCursorMcpJsonConfig(b).mcpServers)).toEqual(["corgtex-workspace-seed-B"]);
+    expect(buildClaudeCodeCommand(a)).toContain("corgtex-workspace-seed-A");
+    expect(buildGeminiMcpCommand(b)).toContain("corgtex-workspace-seed-B");
+    expect(new URL(buildCursorInstallLinks(b).app).searchParams.get("name")).toBe("corgtex-workspace-seed-B");
+  });
   it("builds the Cursor MCP config expected by Cursor install links", () => {
     expect(buildCursorMcpConfig(CONNECTOR_URL)).toEqual({
       type: "http",

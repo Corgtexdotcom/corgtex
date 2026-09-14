@@ -8,6 +8,7 @@ const integrationDatabaseUrl =
 export default defineConfig({
   resolve: {
     alias: {
+      "@corgtex/shared/workspace-mcp-resource": fileURLToPath(new URL("./packages/shared/src/workspace-mcp-resource.ts", import.meta.url)),
       "@": fileURLToPath(new URL("./apps/web", import.meta.url)),
       "@corgtex/domain/modules": fileURLToPath(new URL("./packages/domain/src/modules/index.ts", import.meta.url)),
       "@corgtex/domain": fileURLToPath(new URL("./packages/domain/src/index.ts", import.meta.url)),

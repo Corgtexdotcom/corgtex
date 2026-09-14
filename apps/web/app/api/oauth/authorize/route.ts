@@ -5,7 +5,8 @@ import { handleRouteError } from "@/lib/http";
 import { getPublicOrigin } from "@/lib/public-origin";
 import {
   getMcpOAuthClientByClientId,
-  getMcpPublicUrl,
+  requireWorkspaceMcpResource,
+  getWorkspaceMcpOrigin,
   getOAuthAppByClientId,
   isAllowedMcpRedirectUri,
   isAllowedOAuthRedirectUri,
@@ -51,6 +52,10 @@ export async function GET(request: NextRequest) {
 
     const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
     if (mcpClient) {
+      if (url.searchParams.getAll("resource").length !== 1) {
+        return NextResponse.json({ error: "invalid_target", message: "Use one workspace-specific MCP URL from Corgtex settings." }, { status: 400 });
+      }
+      requireWorkspaceMcpResource(resource);
       if (!isAllowedMcpRedirectUri(mcpClient.redirectUris, redirectUri)) {
         return NextResponse.json({ error: "invalid_request", message: "Redirect URI is not registered" }, { status: 400 });
       }
@@ -60,7 +65,7 @@ export async function GET(request: NextRequest) {
 
       await requirePageActor();
 
-      const consentUrl = new URL("/oauth/authorize", getPublicOrigin(request));
+      const consentUrl = new URL("/oauth/authorize", getWorkspaceMcpOrigin());
       consentUrl.searchParams.set("client_id", clientId);
       consentUrl.searchParams.set("redirect_uri", redirectUri);
       consentUrl.searchParams.set("state", state || "");
@@ -156,7 +161,7 @@ export async function POST(request: NextRequest) {
         scopes: scopeArray.length > 0 ? scopeArray : undefined,
         codeChallenge: body.codeChallenge ?? "",
         codeChallengeMethod: body.codeChallengeMethod ?? "",
-        resource: body.resource || getMcpPublicUrl(getPublicOrigin(request)),
+        resource: body.resource,
       });
     } else {
       const app = await getOAuthAppByClientId(body.clientId);

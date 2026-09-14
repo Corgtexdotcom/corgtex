@@ -16,6 +16,7 @@ export type McpSessionContext = {
   resource?: string | null;
   clientId?: string;
   clientName?: string | null;
+  connectionId?: string;
   providerKey?: McpOAuthProviderKey;
 };
 
@@ -61,7 +62,7 @@ function settingsUrl(workspaceId: string): string {
  */
 export async function authenticateMcpRequest(
   authorizationHeader: string | null,
-  options: { resourceUrl?: string } = {},
+  options: { resourceUrl?: string; workspaceId?: string } = {},
 ): Promise<McpSessionContext> {
   beginAuthorizationContext();
   if (!authorizationHeader?.startsWith("Bearer ")) {
@@ -90,6 +91,9 @@ export async function authenticateMcpRequest(
       );
     }
     const [workspaceId] = workspaceIds;
+    if (options.workspaceId && workspaceId !== options.workspaceId) {
+      throw new AppError(401, "UNAUTHENTICATED", "Credential is not bound to this workspace endpoint.");
+    }
     await requireWorkspaceMembership({ actor: agentActor, workspaceId });
     if (agentActor.authProvider !== "bootstrap") {
       await requireTrialMcpAccess(workspaceId);
@@ -105,6 +109,9 @@ export async function authenticateMcpRequest(
 
   const oauthSession = await resolveMcpOAuthAccessToken(token, options.resourceUrl);
   if (oauthSession) {
+    if (options.workspaceId && (oauthSession.workspaceId !== options.workspaceId || oauthSession.resource !== options.resourceUrl)) {
+      throw new AppError(401, "MCP_REAUTHORIZATION_REQUIRED", "Reconnect using this workspace's MCP URL.");
+    }
     await requireWorkspaceMembership({ actor: oauthSession.actor, workspaceId: oauthSession.workspaceId });
     await requireTrialMcpAccess(oauthSession.workspaceId);
     return {
@@ -116,6 +123,7 @@ export async function authenticateMcpRequest(
       resource: oauthSession.resource,
       clientId: oauthSession.clientId,
       clientName: oauthSession.clientName,
+      connectionId: oauthSession.connectionId,
       providerKey: oauthSession.providerKey,
     };
   }

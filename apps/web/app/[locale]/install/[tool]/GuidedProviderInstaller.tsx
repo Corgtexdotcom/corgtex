@@ -170,7 +170,7 @@ function buildProviderConfig(providerKey: InstallerProviderKey, connectorUrl: st
       steps: [
         "In ChatGPT, open Settings, then Connectors, then Advanced settings.",
         "Turn on Developer Mode if it is not already enabled.",
-        "Create an app named Corgtex, paste the HTTPS Corgtex MCP URL, scan tools, and save it.",
+        "Use the workspace-specific connection name shown above, paste its HTTPS MCP URL, scan tools, and save it.",
         "When ChatGPT opens Corgtex, authorize as your current Corgtex user for this workspace.",
       ],
       notes: [

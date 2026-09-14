@@ -5,6 +5,7 @@ export * from "./ai-workspace-selection";
 export * from "./action-policy";
 export * from "./oauth-server";
 export * from "./mcp-connector";
+export * from "./mcp-connections";
 export * from "./mcp-tool-capabilities";
 export * from "./post-deploy-probe-contract";
 export * from "./external-mcp";

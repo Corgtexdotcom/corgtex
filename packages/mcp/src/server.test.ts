@@ -731,6 +731,7 @@ describe("createCorgtexMcpServer", () => {
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "workspace:read");
     expect(payload).toEqual({
       authKind: "oauth",
+      connectionId: null,
       corgtexUser: {
         id: "user-1",
         displayName: "User One",

@@ -2,6 +2,8 @@ import { requirePageActor } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import {
   getMcpOAuthClientByClientId,
+  requireWorkspaceMcpResource,
+  requireWorkspaceMembership,
   getOAuthAppByClientId,
   isAllowedMcpRedirectUri,
   isAllowedOAuthRedirectUri,
@@ -166,6 +168,9 @@ export default async function OAuthAuthorizePage(props: Props) {
   const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
 
   if (mcpClient) {
+    let boundWorkspaceId: string;
+    try { boundWorkspaceId = requireWorkspaceMcpResource(resource); }
+    catch { return <ErrorPanel>Reconnect using the workspace-specific MCP URL from Corgtex settings. Existing global connections cannot be converted without new consent.</ErrorPanel>; }
     if (!isAllowedMcpRedirectUri(mcpClient.redirectUris, redirectUri)) {
       return <ErrorPanel>The connector redirect URL is not registered.</ErrorPanel>;
     }
@@ -175,6 +180,9 @@ export default async function OAuthAuthorizePage(props: Props) {
 
     const allowedWorkspaces = [];
     for (const workspace of userWorkspaces) {
+      if (workspace.id !== boundWorkspaceId) continue;
+      try { await requireWorkspaceMembership({ actor, workspaceId: workspace.id }); }
+      catch { continue; }
       const instance = await resolveMcpConnectorInstanceForWorkspace(workspace.id).catch(() => null);
       if (instance) {
         allowedWorkspaces.push({ workspace, instance });
@@ -277,7 +285,7 @@ export default async function OAuthAuthorizePage(props: Props) {
                     <input type="hidden" name="workspaceId" value={selectedWorkspace.workspace.id} />
                     <p className="text-sm font-medium text-[var(--text-strong)]">Workspace</p>
                     <p className="mt-2 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-strong)]">
-                      {selectedWorkspace.workspace.name} ({selectedWorkspace.instance.displayName})
+                      {selectedWorkspace.workspace.name} ({selectedWorkspace.workspace.id})
                     </p>
                   </div>
                 )}

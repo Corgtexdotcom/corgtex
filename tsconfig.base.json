@@ -16,6 +16,7 @@
     "incremental": true,
     "baseUrl": ".",
     "paths": {
+      "@corgtex/shared/workspace-mcp-resource": ["packages/shared/src/workspace-mcp-resource.ts"],
       "@/*": ["apps/web/*"],
       "@corgtex/shared": ["packages/shared/src/index.ts"],
       "@corgtex/shared/telemetry": ["packages/shared/src/telemetry.ts"],
