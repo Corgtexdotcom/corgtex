@@ -2,6 +2,7 @@ import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
 import { getRecallWorkspaceBinding } from "./recall-workspace-bindings";
 import { managedAzureReleaseEligible } from "./managed-azure-release-policy";
 import { persistCustomerDeploymentHealth } from "./customer-deployment-health";
+import { loadControlPlaneSnapshots } from "./control-plane-snapshots";
 import { createHash, randomUUID } from "node:crypto";
 import { assertManagedAzureTargetBinding, reconcileManagedAzureTarget, reconcileManagedAzureTargetSchema,
   requireManagedAzureAccountAuthority } from "./managed-azure-targets";
@@ -517,10 +518,6 @@ const CONTROL_PLANE_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 const controlPlaneDeploymentInclude = {
   managedWorkspace: {
     select: managedWorkspaceSelect,
-  },
-  fleetSnapshots: {
-    orderBy: { createdAt: "desc" },
-    take: 6,
   },
 } satisfies Prisma.CustomerDeploymentInclude;
 
@@ -2866,10 +2863,6 @@ export async function listControlPlaneDeployments(actor: AppActor) {
         take: 5,
         include: controlPlaneDeploymentInclude,
       },
-      fleetSnapshots: {
-        orderBy: { createdAt: "desc" },
-        take: 6,
-      },
     },
   });
   const accountRows = accounts.map((account) => {
@@ -2943,7 +2936,6 @@ export async function listControlPlaneDeployments(actor: AppActor) {
         managedWorkspaceId: null,
         managedWorkspace: null,
         supportOperations: [],
-        fleetSnapshots: account.fleetSnapshots,
         hasSupportCredential: false,
         supportCredentialEnc: undefined,
         createdAt: account.createdAt,
@@ -2977,7 +2969,15 @@ export async function listControlPlaneDeployments(actor: AppActor) {
     supportCredentialEnc: undefined,
   }));
 
-  return [...accountRows, ...orphanedDeploymentRows];
+  const rows = [...accountRows, ...orphanedDeploymentRows];
+  const [deploymentSnapshots, accountSnapshots] = await Promise.all([
+    loadControlPlaneSnapshots("deployment", rows.filter((row) => row.hasDeployment).map((row) => row.id)),
+    loadControlPlaneSnapshots("account", rows.filter((row) => !row.hasDeployment).map((row) => row.id)),
+  ]);
+  return rows.map((row) => ({
+    ...row,
+    fleetSnapshots: (row.hasDeployment ? deploymentSnapshots : accountSnapshots).get(row.id) ?? [],
+  }));
 }
 
 function normalizedStatus(value: unknown) {
