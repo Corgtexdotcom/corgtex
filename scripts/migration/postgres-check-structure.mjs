@@ -1,4 +1,4 @@
-// Diagnostic only: this module never changes schema-parity acceptance.
+// Bounded structural primitives; legacy named-check diagnostics remain diagnostic only.
 export const KNOWN_CHECK_KEY = JSON.stringify([
   "TABLE", "public", "ConstitutionSourceReference", "ConstitutionSource_point_contract_check",
 ]);
@@ -245,7 +245,7 @@ const supportedOperators = new Map([
   [98, ["=", 25, 16, 67, "texteq"]],
   [654, ["||", 25, 25, 1258, "textcat"]],
 ]);
-const supportedOperations = ({ root, bindings }) => {
+const supportedOperations = ({ root, bindings }, relation = ["public", "ConstitutionSourceReference"]) => {
   const bound = (kind, oid, expected) => same(bindings.get(`${kind}:${oid}`), expected);
   for (const [oid, [name, length, byValue, category, collation, input, output]] of supportedTypes) {
     if (!bound("type", oid, ["pg_catalog", name, "b", length, byValue, category, collation,
@@ -267,8 +267,8 @@ const supportedOperations = ({ root, bindings }) => {
       const type = n("vartype");
       const collation = type === 25 ? 100 : 0;
       const attr = bindings.get(`attribute:${n("varattno")}`);
-      return [23, 25].includes(type) && n("varcollid") === collation && attr?.[0] === "public"
-        && attr[1] === "ConstitutionSourceReference" && same(attr.slice(3), [type, -1, collation]) ? type : null;
+      return [23, 25].includes(type) && n("varcollid") === collation && attr?.[0] === relation[0]
+        && attr[1] === relation[1] && same(attr.slice(3), [type, -1, collation]) ? type : null;
     }
     if (node.tag === "CONST") {
       const type = n("consttype");
@@ -417,4 +417,76 @@ export function compareKnownCheckStructure(source, destination, candidate, serve
     sourceNodes: left.nodes, destinationNodes: right.nodes,
     sourceFlattened: left.flattened, destinationFlattened: right.flattened,
   };
+}
+
+// Capture raw inputs from the caller's actual read-only catalog snapshot. Status
+// summaries are deliberately not representation proof inputs.
+export async function captureBoundCheck(client, entry) {
+  try {
+    const identity = JSON.parse(entry.key);
+    if (entry.type !== "CHECK" || identity.length !== 4 || identity[0] !== "TABLE"
+      || !identity.slice(1).every((v) => typeof v === "string" && v.length > 0 && v.length <= 63)
+      || !/^[1-9][0-9]{0,9}$/u.test(entry.diagnostic.constraintOid)) return null;
+    await client.query("SAVEPOINT corgtex_bound_check");
+    try {
+      await client.query("SET LOCAL statement_timeout = '15s'");
+      const boundary = await client.query("SELECT current_setting('transaction_read_only') AS ro");
+      if (boundary.rows[0]?.ro !== "on") return null;
+      const query = await client.query(`
+        SELECT c.conrelid::text AS relation_oid,
+          CASE WHEN octet_length(c.conbin::text)<=262144 THEN c.conbin::text END AS tree,
+          CASE WHEN octet_length(pg_get_constraintdef(c.oid,false))<=65536
+            THEN pg_get_constraintdef(c.oid,false) END AS definition,
+          CASE WHEN octet_length(pg_get_expr(c.conbin,c.conrelid,false))<=65536
+            THEN pg_get_expr(c.conbin,c.conrelid,false) END AS expression
+        FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+          JOIN pg_namespace n ON n.oid=t.relnamespace
+        WHERE c.oid=$1::oid AND c.contype='c' AND n.nspname=$2 AND t.relname=$3 AND c.conname=$4
+          AND c.connamespace=n.oid AND t.relkind='r' AND t.relpersistence='p' AND NOT t.relispartition
+          AND NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid=t.oid OR inhparent=t.oid)
+      `, [entry.diagnostic.constraintOid, ...identity.slice(1)]);
+      if (query.rows.length !== 1 || typeof query.rows[0].definition !== "string") return null;
+      const { tree, definition, expression, relation_oid: relationOid } = query.rows[0];
+      if (typeof expression !== "string") return null;
+      const prepared = prepare(tree);
+      const references = Object.entries(prepared.refs).flatMap(([kind, ids]) => [...ids].map((oid) => ({ kind, oid })));
+      references.push({ kind: "database_collation", oid: 0 });
+      if (references.length > 256) return null;
+      const rows = (await client.query(bindingsSql, [references.map((r) => r.kind), references.map((r) => r.oid), relationOid])).rows;
+      validateBindings(rows, references);
+      return structuredClone({ identity, tree, definition, expression, bindings: rows });
+    } finally {
+      await client.query("ROLLBACK TO SAVEPOINT corgtex_bound_check");
+      await client.query("RELEASE SAVEPOINT corgtex_bound_check");
+    }
+  } catch { return null; }
+}
+
+export function verifyBoundOrderedAnd(left, right) {
+  try {
+    const build = (input) => {
+      if (!input || !same(Object.keys(input).sort(), ["bindings", "definition", "expression", "identity", "tree"])) reject();
+      if (!Array.isArray(input.identity) || input.identity.length !== 4 || input.identity[0] !== "TABLE"
+        || !input.identity.slice(1).every((v) => typeof v === "string" && v.length > 0 && v.length <= 63)) reject();
+      const prepared = prepare(input.tree);
+      const references = Object.entries(prepared.refs).flatMap(([kind, ids]) => [...ids].map((oid) => ({ kind, oid })));
+      references.push({ kind: "database_collation", oid: 0 });
+      if (references.length > 256) reject();
+      const bindings = validateBindings(input.bindings, references);
+      const result = { ...prepared, bindings };
+      if (!supportedOperations(result, input.identity.slice(1, 3))) reject();
+      const db = bindings.get("database_collation:0");
+      if (!db || db[0] !== "UTF8" || db[1] !== "c" || db[6] !== db[7]) reject();
+      for (const [key, value] of bindings) {
+        if (key.startsWith("collation:") && (value[3] !== true || value[9] !== value[10]
+          && !(key === "collation:100" && value[9] === null && value[10] === db[7]))) reject();
+      }
+      return result;
+    };
+    if (!same(left?.identity, right?.identity)) return false;
+    const a = build(left), b = build(right);
+    return compareBindings(a.bindings, b.bindings).bindingsEqual
+      && a.canonical === b.canonical && a.original !== b.original
+      && a.flattened !== b.flattened;
+  } catch { return false; }
 }
