@@ -8,7 +8,7 @@ last fifteen minutes remain reserved for cleanup. This code is not authorization
 to dispatch, publish inputs, grant roles or spend money.
 
 The same job also accepts `prepare-synthetic`, domain `ops`: it verifies the
-published pins, exercises Linux bootstrap/TLS/baseline checks and removes the
+published pins, exercises Linux bootstrap/TLS/baseline and Docker client transport checks, and removes the
 local fixture, skipping Azure login and all provider steps. Use that bounded
 preparation receipt before requesting an actual target run. The outer job timeout
 includes pre-START dependency preparation; it does not extend the one-hour Azure
@@ -17,8 +17,9 @@ intent or its cleanup reserve.
 ## Inputs And Local Bootstrap
 
 The parent must first audit and publish four reviewed fixture assets under the
-existing repository's `ops-synthetic-source-v1` release. Publication and repository
-visibility/privacy review are separate from Azure approval. No new secret or
+existing repository's `ops-synthetic-source-v1` release. This repository and its
+release assets are PUBLIC, not private storage. Publication of every payload
+requires a privacy/provenance audit separate from Azure approval. No new secret or
 permission is required by the downloader (`contents: read`); it cannot create a
 release. Missing assets fail before Azure login/START. All four bytestrings are
 hash-bound in `synthetic-ops-source.mjs`, not trusted by filename, tag or receipt:
@@ -28,7 +29,20 @@ hash-bound in `synthetic-ops-source.mjs`, not trusted by filename, tag or receip
 - `synthetic.dump`: 858929 bytes, the retained fictional Ops archive, not a source
   backup. Contains the frozen migration ledger and synthetic queues; no workers run.
 - `corpus.sql`: 930 bytes, the predeclared 48-string corpus.
-- `source-baseline.json`: 21090 bytes, the retained source-only capture.
+- `source-baseline.json`: 7683 bytes, a minimal projection of the retained capture:
+  schema version, attested source runtime, corpus SQL hash and exact observations.
+  SHA256: `307c6d2543a29e29c39df4c5cd843b82c38f8b794c1c4f3b595a8635f4200905`.
+
+The original 21090-byte receipt and local ownership/publication manifest stay
+private and must NOT be release assets. `projectSourceBaseline` derives the
+projection without recomputing/reordering observations; both consumers validate
+the runtime/corpus binding and new file pin. Parent audit must verify exact
+`JSON.stringify(observations)` equivalence against the original receipt. Its SHA256
+is `87e6f6000c360231e78bc340927459acd6ad6d6f567340adce43a6be555d1eec`.
+The other three payloads are unchanged. The image includes BuildKit invocation,
+relative build-context path, revision and timestamp metadata; the dump includes
+synthetic migration IDs/timestamps. Those require audit too. Do not silently
+repack the image or change the accepted dump to remove metadata.
 
 No binaries, database archives, credentials or generated proof belong in Git.
 The workflow downloads only these named assets and verifies them before Docker
@@ -51,6 +65,15 @@ the network gateway and has one fixed upstream: the exact rehearsal target on
 5432. Its hostname remains the TLS identity; no certificate override is installed.
 This host-network plumbing must be exercised on Linux before an authorized cloud
 dispatch; macOS Docker Desktop is not silently treated as an equivalent host.
+`prepare-synthetic` exercises the same gateway relay and Docker PATH wrapper
+against only the owned local source. It maps `synthetic-target.invalid` to the
+internal gateway, uses that hostname's fixture certificate SAN, and runs the
+unchanged `probeTargetClientConnection` with the pinned client image, generated
+service/pass files and verify-full TLS. A single read-only `SELECT 1` must complete,
+psql must exit, its container must disappear and its reader session must close.
+The gateway relay, client files and wrapper then close. No Azure hostname is
+resolved or contacted by this local test, and no default route is added. Native
+Linux execution of this new path remains NOT_RUN until separately exercised.
 
 ## Work And Proof
 
@@ -87,6 +110,10 @@ limits cannot consume the cleanup reserve. Logs suppress raw exceptions/secrets.
 deletion and the existing firewall/STOP lifecycle. A scratch failure does not skip
 STOP and cannot produce a successful overall cleanup receipt. Local resource
 ownership, scratch state and lifecycle receipts remain outside credential temp dirs.
+Guarded local cleanup and temporary credential removal run before provider
+preflight, including when identity/target checks fail. Such provider failure keeps
+its original error, blocks all provider cleanup mutations and requires recovery;
+local success alone cannot produce a successful lifecycle cleanup receipt.
 
 For a completed failed/interrupted run, dispatch `recover` with
 `recovery_kind=synthetic-qualification`, domain `ops` and its exact run ID/attempt.
@@ -106,7 +133,7 @@ restriction) remains HOLD; there is no fallback START or permission escalation.
 The original deadline is never extended as a success claim. The parent retains
 independent deadline/spend supervision if the runner or provider fails.
 
-Before execution: independent integrated QA, private input publication/audit,
+Before execution: independent integrated QA, audited PUBLIC input publication,
 Linux bootstrap/transport evidence, explicit scratch/vector/two-restore window
 approval, and parent confirmation of the existing exact temporary Reader plus
 Contributor role pair are required. Those roles were removed after metadata

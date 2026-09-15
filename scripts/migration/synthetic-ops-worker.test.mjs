@@ -5,11 +5,12 @@ import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { HOST } from "./probe-ops-azure-target.mjs";
 
-const mocks = vi.hoisted(() => ({ run: vi.fn(), cleanup: vi.fn(), database: vi.fn(), pinned: vi.fn(), pins: {} }));
-vi.mock("./run-postgres-restore-rehearsal.mjs", async original => ({ ...await original(), runPostgresRestoreRehearsal: mocks.run, cleanupScratchDatabase: mocks.cleanup }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), cleanup: vi.fn(), database: vi.fn(), pinned: vi.fn(), baseline: vi.fn(), corpus: vi.fn(), clientFiles: vi.fn(), probe: vi.fn(), pins: {} }));
+vi.mock("./run-postgres-restore-rehearsal.mjs", async original => ({ ...await original(), runPostgresRestoreRehearsal: mocks.run, cleanupScratchDatabase: mocks.cleanup, writeClientFiles: mocks.clientFiles, probeTargetClientConnection: mocks.probe }));
 vi.mock("./bootstrap-synthetic-ops.mjs", async original => ({ ...await original(), withDatabase: mocks.database }));
-vi.mock("./synthetic-ops-source.mjs", async original => ({ ...await original(), pinnedBytes: mocks.pinned, SOURCE_PINS: mocks.pins }));
+vi.mock("./synthetic-ops-source.mjs", async original => ({ ...await original(), pinnedBytes: mocks.pinned, readSourceBaseline: mocks.baseline, collectCorpus: mocks.corpus, SOURCE_PINS: mocks.pins }));
 import { work } from "./synthetic-ops-worker.mjs";
+import { LOCAL_CLIENT_HOST } from "./bootstrap-synthetic-ops.mjs";
 
 let root, config;
 const archive = Buffer.from("test-only synthetic archive");
@@ -66,5 +67,39 @@ describe("synthetic worker uses unchanged restore contracts", () => {
     config.scratchName = "corgtex";
     await expect(work("cleanup", config)).rejects.toThrow("SYNTHETIC_SCRATCH_NAME_INVALID");
     expect(mocks.cleanup).not.toHaveBeenCalled();
+  });
+  it("compares the corpus through the projected baseline reader, without a private receipt shape", async () => {
+    const observations = { orderedIds: [2, 1] };
+    mocks.baseline.mockReturnValue({ schemaVersion: 1, observations });
+    mocks.corpus.mockResolvedValue({ observations, indexesValid: true });
+    mocks.database.mockImplementation((_config, run) => run({ query: async () => ({ rowCount: 0, rows: [{ version: 180006, encoding: "UTF8", locale: "en_US.utf8", ctype: "en_US.utf8", provider: "c", recorded: "2.38", actual: "2.38", vector: "0.8.2", tls: true }] }) }));
+    expect(await work("corpus", config)).toMatchObject({ status: "SYNTHETIC_CORPUS_MATCHED" });
+    expect(mocks.baseline).toHaveBeenCalledWith(root);
+  });
+});
+
+describe("provider-free client transport uses the unchanged runner probe", () => {
+  const localConfig = () => {
+    const id = "12345678-1234-1234-1234-123456789abc";
+    return { owned: { id, network: `syn-ops-${id}`, container: `syn-source-${id}` }, tempDir: root, artifactDir: root,
+      sourceConfig: { dockerHost: `syn-source-${id}`, database: "source", user: "fixture_reader", sslmode: "require" },
+      targetAdminConfig: { host: LOCAL_CLIENT_HOST, dockerHost: LOCAL_CLIENT_HOST, database: "source", user: "fixture_reader", password: "synthetic-local-only", sslmode: "verify-full", port: 4567 } };
+  };
+  it("uses the pinned client's one-query path with local TLS service credentials and the owned network", async () => {
+    const cfg = localConfig(), files = { serviceFile: "test-service", passFile: "test-pass" };
+    mocks.clientFiles.mockReturnValue(files);
+    expect(await work("transport", cfg)).toEqual({ status: "LOCAL_CLIENT_QUERY_CLOSED", providerEffects: 0 });
+    expect(mocks.clientFiles).toHaveBeenCalledWith(root, cfg.sourceConfig, cfg.targetAdminConfig, expect.any(Function));
+    expect(mocks.probe).toHaveBeenCalledExactlyOnceWith({ tempDir: root, clientFiles: files, network: cfg.owned.network, artifactDir: root });
+    expect(mocks.run).not.toHaveBeenCalled(); expect(mocks.database).not.toHaveBeenCalled();
+  });
+  it.each(["host", "dockerHost", "database", "user", "sslmode"])("rejects a widened local transport %s before spawning a client", async field => {
+    const cfg = localConfig(); cfg.targetAdminConfig[field] = field.includes("Host") || field === "host" ? HOST : "wrong";
+    await expect(work("transport", cfg)).rejects.toThrow("LOCAL_CLIENT_CONFIG_MISMATCH");
+    expect(mocks.clientFiles).not.toHaveBeenCalled(); expect(mocks.probe).not.toHaveBeenCalled();
+  });
+  it("propagates a real client transport failure instead of declaring preparation ready", async () => {
+    mocks.probe.mockRejectedValueOnce(new Error("TARGET_CLIENT_CONNECTION_PROBE_FAILED"));
+    await expect(work("transport", localConfig())).rejects.toThrow("TARGET_CLIENT_CONNECTION_PROBE_FAILED");
   });
 });

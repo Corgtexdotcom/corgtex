@@ -1,14 +1,26 @@
 import { copyFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { runPostgresRestoreRehearsal, cleanupScratchDatabase, nodeClientConfig, buildCreateDatabaseSql } from "./run-postgres-restore-rehearsal.mjs";
-import { SOURCE_PINS, pinnedBytes, hash, check, ATTEST_SQL, assertRuntime, collectCorpus, compareCorpus } from "./synthetic-ops-source.mjs";
-import { bootstrapSource, save, withDatabase } from "./bootstrap-synthetic-ops.mjs";
+import { runPostgresRestoreRehearsal, cleanupScratchDatabase, nodeClientConfig, buildCreateDatabaseSql, writeClientFiles, probeTargetClientConnection } from "./run-postgres-restore-rehearsal.mjs";
+import { SOURCE_PINS, pinnedBytes, readSourceBaseline, hash, check, ATTEST_SQL, assertRuntime, collectCorpus, compareCorpus } from "./synthetic-ops-source.mjs";
+import { bootstrapSource, save, withDatabase, LOCAL_CLIENT_HOST } from "./bootstrap-synthetic-ops.mjs";
 import { SyntheticSubprocesses } from "./synthetic-subprocess.mjs";
 import { HOST } from "./probe-ops-azure-target.mjs";
 
 export const sourceSettings = { encoding: "UTF8", provider: "libc", collation: "en_US.utf8", ctype: "en_US.utf8", providerLocale: null, icuRules: null };
 export async function work(mode, config, supervisor = new SyntheticSubprocesses()) {
   if (mode === "source") return bootstrapSource({ ...config, supervisor });
+  if (mode === "transport") {
+    const t = config.targetAdminConfig, s = config.sourceConfig, o = config.owned;
+    check(/^[a-f0-9-]{36}$/u.test(o?.id) && o.network === `syn-ops-${o.id}` && o.container === `syn-source-${o.id}`
+      && t?.host === LOCAL_CLIENT_HOST && t.dockerHost === LOCAL_CLIENT_HOST && t.database === "source"
+      && t.user === "fixture_reader" && t.sslmode === "verify-full" && t.password === "synthetic-local-only"
+      && Number.isInteger(t.port) && t.port > 0 && t.port <= 65535
+      && s?.dockerHost === o.container && s.database === "source" && s.user === "fixture_reader" && s.sslmode === "require",
+    "LOCAL_CLIENT_CONFIG_MISMATCH");
+    const clientFiles = writeClientFiles(config.tempDir, s, t, () => {});
+    await probeTargetClientConnection({ tempDir: config.tempDir, clientFiles, network: o.network, artifactDir: config.artifactDir });
+    return { status: "LOCAL_CLIENT_QUERY_CLOSED", providerEffects: 0 };
+  }
   check(config.targetAdminConfig?.host === HOST && config.targetAdminConfig.database === "postgres"
     && config.targetAdminConfig.sslmode === "verify-full", "SYNTHETIC_TARGET_CONFIG_MISMATCH");
   check(/^corgtex_rehearsal_syn_[1-9][0-9]*_[1-9][0-9]*_(1|2|corpus)$/u.test(config.scratchName), "SYNTHETIC_SCRATCH_NAME_INVALID");
@@ -49,7 +61,7 @@ export async function work(mode, config, supervisor = new SyntheticSubprocesses(
     assertRuntime((await c.query(ATTEST_SQL)).rows[0], "2.38");
     return collectCorpus(c);
   });
-  const comparison = compareCorpus(captured, JSON.parse(pinnedBytes(config.bundle, "source-baseline.json")).probe.baseline);
+  const comparison = compareCorpus(captured, readSourceBaseline(config.bundle));
   save(`${config.artifactDir}/corpus.json`, { captured, comparison });
   check(comparison.observationsEqual && comparison.indexesValid, "SYNTHETIC_CORPUS_DIVERGENCE");
   return { status: "SYNTHETIC_CORPUS_MATCHED", productionAccepted: false };

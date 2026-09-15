@@ -8,10 +8,26 @@ export const SOURCE_PINS = {
   "source-image.tar": "b9d445db75b43d2e8d3ee9640572b98d9e0b7024f247866ea19084ec213fae05",
   "synthetic.dump": "a95a642469e99139d36b755585339299af4e9a511356550c3dd230e3b93ca57e",
   "corpus.sql": "062f093f5c2959cdd2ee569063f1ff37995e26a1398e011f9a964a9d945fca71",
-  "source-baseline.json": "464274564bba2c30de1871d6ddef5ab40eb262f44c807d39babf83652424594e",
+  "source-baseline.json": "307c6d2543a29e29c39df4c5cd843b82c38f8b794c1c4f3b595a8635f4200905",
 };
 export const check = (value, code) => { if (!value) throw new ProbeError(code); };
 export const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+export const SOURCE_BASELINE_RUNTIME = { version: "180006", locale: "en_US.utf8", provider: "c", recorded: "2.41", actual: "2.41", vector: "0.8.2", tls: true };
+export function validateSourceBaseline(value) {
+  check(value?.schemaVersion === 1 && Object.keys(value).sort().join() === "corpusSha256,observations,schemaVersion,sourceRuntime"
+    && JSON.stringify(value.sourceRuntime) === JSON.stringify(SOURCE_BASELINE_RUNTIME)
+    && value.corpusSha256 === SOURCE_PINS["corpus.sql"] && value.observations && typeof value.observations === "object", "SOURCE_BASELINE_BINDING_MISMATCH");
+  return value;
+}
+// Explicit projection for parent audit. The original run receipt stays private;
+// copying observations preserves their values and ordering without recomputation.
+export function projectSourceBaseline(receipt) {
+  const db = receipt.probe.database;
+  return validateSourceBaseline({ schemaVersion: 1,
+    sourceRuntime: { version: db.version, locale: db.locale, provider: db.provider, recorded: db.recorded, actual: db.actual, vector: db.installed_vector, tls: db.tls },
+    corpusSha256: receipt.probe.baseline.corpusSha256, observations: receipt.probe.baseline.observations });
+}
+export const readSourceBaseline = directory => validateSourceBaseline(JSON.parse(pinnedBytes(directory, "source-baseline.json")));
 export function pinnedBytes(directory, name) {
   check(Object.hasOwn(SOURCE_PINS, name), "UNKNOWN_SYNTHETIC_INPUT");
   const fd = openSync(resolve(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW);

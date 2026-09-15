@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Azure, SUBSCRIPTION, GROUP, SERVER, validateEnvironment, validateIntent, validateServer, validateRules, prepare, qualify, cleanup, recoveryEvidence, readIntent } from "./qualify-ops-azure-target.mjs";
@@ -7,7 +7,7 @@ import { HOST, RESOURCE, connectionConfig, captureWhenReady } from "./probe-ops-
 import { targetDatabaseConfigFromEnv } from "./run-postgres-restore-rehearsal.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
 import { SOURCE_PINS, verifyBundle, hash, check } from "./synthetic-ops-source.mjs";
-import { LABEL, save, inspectSource, relay, dockerTools, cleanupLocal } from "./bootstrap-synthetic-ops.mjs";
+import { LABEL, save, inspectSource, relay, dockerTools, cleanupLocal, clientTransport } from "./bootstrap-synthetic-ops.mjs";
 import { SyntheticSubprocesses, supervisedExecFile, localToolEnvironment } from "./synthetic-subprocess.mjs";
 
 const worker = fileURLToPath(new URL("./synthetic-ops-worker.mjs", import.meta.url));
@@ -74,9 +74,12 @@ export async function recoverScratchDatabases(intent, directory, recovery) {
   }
   return results;
 }
-export async function completeSyntheticCleanup({ local, databases, lifecycle }) {
+export async function completeSyntheticCleanup({ local, preflight = async () => {}, databases, lifecycle }) {
   let failure, scratch, stopped;
   try { await local(); } catch (e) { failure = e; }
+  // Local ownership does not depend on provider availability. A failed provider
+  // preflight remains the original error and authorizes no database/STOP action.
+  await preflight();
   try { scratch = await databases(); } catch (e) { failure ??= e; }
   // Scratch/runner failure is not permission to leave the owned paid lifecycle up.
   try { stopped = await lifecycle(); } catch (e) { failure ??= e; }
@@ -136,8 +139,8 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       return;
     }
     if (mode === "cleanup" && !existsSync(`${directory}/start-attempt.json`)) {
-      if (existsSync(`${directory}/local-owner.json`)) await cleanupLocal(dockerTools(supervisor, Date.now() + 60000), readIntent(`${directory}/local-owner.json`));
-      rmSync(temp, { recursive: true, force: true });
+      try { if (existsSync(`${directory}/local-owner.json`)) await cleanupLocal(dockerTools(supervisor, Date.now() + 60000), readIntent(`${directory}/local-owner.json`)); }
+      finally { rmSync(temp, { recursive: true, force: true }); }
       save(`${directory}/cleanup.json`, { status: "START_NOT_ATTEMPTED", providerEffects: 0 }); return;
     }
     const intent = validateSyntheticIntent(readIntent(intentPath), recovering ? env.RECOVERY_RUN_ID : env.GITHUB_RUN_ID, recovering ? env.RECOVERY_RUN_ATTEMPT : env.GITHUB_RUN_ATTEMPT);
@@ -146,22 +149,16 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       check(!existsSync(`${directory}/cleanup.json`), "EXECUTION_ALREADY_CLEANED");
       verifyBundle(bundle);
       const owned = JSON.parse(readFileSync(`${directory}/source-ready.json`, "utf8")).owned;
-      const docker = dockerTools(supervisor, i.workDeadline), { address, gateway } = await inspectSource(docker, owned);
+      const docker = dockerTools(supervisor, i.workDeadline), { address } = await inspectSource(docker, owned);
       const sourceBridge = await relay("127.0.0.1", address, 5432);
-      // Internal clients have no default route. This listener has exactly one
-      // immutable upstream, the already qualified rehearsal target, not a proxy API.
-      const targetBridge = await relay(gateway, HOST, 5432);
-      const ca = readFileSync(`${temp}/tls/ca.crt`, "utf8");
-      const targetAdminConfig = { ...targetDatabaseConfigFromEnv(env, "postgres"), dockerPort: targetBridge.port };
-      const sourceConfig = { host: "127.0.0.1", port: sourceBridge.port, dockerHost: owned.container, dockerPort: 5432,
-        user: "fixture_reader", password: "synthetic-local-only", database: "source", sslmode: "require", sourceTlsRootCert: ca };
-      const bin = `${temp}/bin`; mkdirSync(bin, { mode: 0o700 });
-      const dockerPath = (await supervisor.run("which", ["docker"], { deadline: i.workDeadline, env: localToolEnvironment(env) })).trim();
-      check(/^\/[A-Za-z0-9_./-]+$/u.test(dockerPath), "DOCKER_PATH_INVALID");
-      writeFileSync(`${bin}/docker`, `#!/bin/sh\n[ "$1" = run ] || exit 91\nshift\nexec '${dockerPath}' run --pull=never --label '${LABEL}=${owned.id}' --add-host '${HOST}:${gateway}' "$@"\n`, { mode: 0o700, flag: "wx" });
-      chmodSync(`${bin}/docker`, 0o700);
-      const childEnv = { ...localToolEnvironment(env), PATH: `${bin}:${env.PATH}` };
+      let transport;
       try {
+        transport = await clientTransport({ supervisor, deadline: i.workDeadline, directory: temp, owned, target: "azure", env });
+        const ca = readFileSync(`${temp}/tls/ca.crt`, "utf8");
+        const targetAdminConfig = { ...targetDatabaseConfigFromEnv(env, "postgres"), dockerPort: transport.port };
+        const sourceConfig = { host: "127.0.0.1", port: sourceBridge.port, dockerHost: owned.container, dockerPort: 5432,
+          user: "fixture_reader", password: "synthetic-local-only", database: "source", sslmode: "require", sourceTlsRootCert: ca };
+        const childEnv = transport.env;
         const { default: pg } = await import("pg");
         const config = await connectionConfig(env);
         await qualify(api, i, async () => {
@@ -192,7 +189,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
             await invoke(supervisor, "cleanup", configs.get(phase), temp, Math.min(i.deadline, Date.now() + 120000));
           }, (phase, result) => save(`${directory}/${phase}/result.json`, result));
         }, () => save(`${directory}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
-      } finally { await sourceBridge.close(); await targetBridge.close(); }
+      } finally { await sourceBridge.close(); if (transport) await transport.close(); }
       return;
     }
     if (mode === "finalize") {
@@ -218,13 +215,15 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     check(!existsSync(`${directory}/cleanup.json`), "EXECUTION_ALREADY_CLEANED");
     if (recovering) await recoveryEvidence(i, env, directory, fetch, "synthetic");
     api.deadline = recovering ? Date.now() + 900000 : Math.max(i.deadline, Date.now() + 60000);
-    await api.identity(); await api.boundary(); validateServer(await api.server(), true); validateRules(await api.rules(), i);
     const cleaned = await completeSyntheticCleanup({
       local: async () => {
         if (!recovering) {
           try { if (existsSync(`${directory}/local-owner.json`)) await cleanupLocal(dockerTools(supervisor, Date.now() + 60000), readIntent(`${directory}/local-owner.json`)); }
           finally { rmSync(temp, { recursive: true, force: true }); }
         }
+      },
+      preflight: async () => {
+        await api.identity(); await api.boundary(); validateServer(await api.server(), true); validateRules(await api.rules(), i);
       },
       databases: () => recoverScratchDatabases(intent, directory, new ScratchRecovery(supervisor, api, Math.min(api.deadline, Date.now() + 300000), env)),
       lifecycle: async () => {

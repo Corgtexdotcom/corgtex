@@ -5,11 +5,11 @@ import { resolve } from "node:path";
 import net from "node:net";
 import { parse } from "yaml";
 import { SyntheticSubprocesses, localToolEnvironment, supervisedExecFile } from "./synthetic-subprocess.mjs";
-import { SOURCE_PINS, SOURCE_IMAGE, hash, pinnedBytes, assertRuntime, compareCorpus } from "./synthetic-ops-source.mjs";
+import { SOURCE_PINS, SOURCE_IMAGE, SOURCE_BASELINE_RUNTIME, projectSourceBaseline, validateSourceBaseline, hash, pinnedBytes, assertRuntime, compareCorpus } from "./synthetic-ops-source.mjs";
 import { HOST, RESOURCE, ProbeError } from "./probe-ops-azure-target.mjs";
 import { syntheticIntent, validateSyntheticIntent, validateScratchState, validatePrivateTemp, ScratchRecovery, runSyntheticPasses, completeSyntheticCleanup } from "./qualify-synthetic-ops.mjs";
 import { validateRecoveryEvidence } from "./qualify-ops-azure-target.mjs";
-import { relay, inspectSource, cleanupLocal, LABEL } from "./bootstrap-synthetic-ops.mjs";
+import { relay, inspectSource, cleanupLocal, clientTransport, LOCAL_CLIENT_HOST, LABEL } from "./bootstrap-synthetic-ops.mjs";
 import { work } from "./synthetic-ops-worker.mjs";
 
 const dirs = [];
@@ -73,6 +73,24 @@ describe("fixed synthetic input and runtime guards", () => {
   it("does not confuse catalog-valid indexes with matching corpus behavior", () => {
     expect(compareCorpus({ observations: [2, 1], indexesValid: true }, { observations: [1, 2] })).toMatchObject({ observationsEqual: false, indexesValid: true, schemaGuardWaived: false });
     expect(compareCorpus({ observations: [1, 2], indexesValid: false }, { observations: [1, 2] })).toMatchObject({ observationsEqual: true, indexesValid: false });
+  });
+  it("projects only exact observations, source runtime and corpus binding from the private receipt", () => {
+    const observations = { orderedIds: [2, 1], ranges: [{ lo: "a", hi: "z", ids: [1] }], expressions: [{ id: 1, lower: "61" }], lowerRange: [1] };
+    const receipt = { id: "private-run", resources: { container: "private-id" }, cleanup: { details: "private" },
+      probe: { database: { ...SOURCE_BASELINE_RUNTIME, installed_vector: "0.8.2", pid: 123 },
+        baseline: { observations, corpusSha256: SOURCE_PINS["corpus.sql"], indexEvidence: { privatePlans: true } } } };
+    const baseline = projectSourceBaseline(receipt);
+    expect(baseline).toEqual({ schemaVersion: 1, sourceRuntime: SOURCE_BASELINE_RUNTIME, corpusSha256: SOURCE_PINS["corpus.sql"], observations });
+    expect(baseline.observations).toBe(observations);
+    expect(JSON.stringify(baseline.observations)).toBe(JSON.stringify(receipt.probe.baseline.observations));
+    expect(JSON.stringify(baseline)).not.toMatch(/private|pid|indexEvidence|cleanup|resources/u);
+  });
+  it.each(["runtime", "corpus", "privateFields"])("rejects a projected baseline with changed %s binding", field => {
+    const baseline = { schemaVersion: 1, sourceRuntime: { ...SOURCE_BASELINE_RUNTIME }, corpusSha256: SOURCE_PINS["corpus.sql"], observations: {} };
+    if (field === "runtime") baseline.sourceRuntime.actual = "2.38";
+    if (field === "corpus") baseline.corpusSha256 = "different";
+    if (field === "privateFields") baseline.resources = {};
+    expect(() => validateSourceBaseline(baseline)).toThrow("SOURCE_BASELINE_BINDING_MISMATCH");
   });
   it("rejects non-target worker configurations before connecting", async () => {
     await expect(work("restore", { targetAdminConfig: { host: "customer.invalid" } })).rejects.toThrow("SYNTHETIC_TARGET_CONFIG_MISMATCH");
@@ -140,6 +158,27 @@ describe("run-owned scratch recovery", () => {
 });
 
 describe("local fixture transport and ownership", () => {
+  it("executes the shared Docker wrapper with only the local hostname/gateway and cleans its listener", async () => {
+    const id = "12345678-1234-1234-1234-123456789abc", owned = { id, network: `syn-ops-${id}`, container: `syn-source-${id}` };
+    const directory = temporary(), real = new SyntheticSubprocesses();
+    const run = vi.fn(async (command, args) => {
+      if (command === "which") return "/bin/echo";
+      expect(command).toBe("docker");
+      if (args[0] === "network") return JSON.stringify([{ Internal: true, EnableIPv6: false, Labels: { [LABEL]: id }, IPAM: { Config: [{ Gateway: "127.0.0.1" }] } }]);
+      return JSON.stringify([{ Config: { Labels: { [LABEL]: id } }, Image: SOURCE_IMAGE, HostConfig: {}, NetworkSettings: { Networks: { [owned.network]: { IPAddress: "127.0.0.1" } } } }]);
+    });
+    const transport = await clientTransport({ supervisor: { run }, deadline: Date.now() + 5000, directory, owned, target: "local", env: { PATH: "/bin", GH_TOKEN: "not-inherited" } });
+    try {
+      const output = await real.run(resolve(directory, "client-bin/docker"), ["run", "--rm", "--network", owned.network, "pinned-client", "psql"], { deadline: Date.now() + 2000, env: transport.env });
+      expect(output).toContain(`--pull=never --label ${LABEL}=${id} --add-host ${LOCAL_CLIENT_HOST}:127.0.0.1`);
+      expect(output).toContain(`--network ${owned.network} pinned-client psql`);
+      expect(output).not.toContain(HOST); expect(transport.env.GH_TOKEN).toBeUndefined();
+      await expect(real.run(resolve(directory, "client-bin/docker"), ["pull", "anything"], { deadline: Date.now() + 2000, env: transport.env })).rejects.toThrow();
+    } finally { await transport.close(); real.stop(); }
+    expect(existsSync(resolve(directory, "client-bin"))).toBe(false);
+    const error = await new Promise(done => { const s = net.connect({ host: "127.0.0.1", port: transport.port }); s.once("error", done); s.once("connect", () => { s.destroy(); done(null); }); });
+    expect(error?.code).toBe("ECONNREFUSED");
+  });
   it("forwards to only its fixed endpoint and cleanly closes actual sockets", async () => {
     const echo = net.createServer(s => s.pipe(s));
     await new Promise(r => echo.listen(0, "127.0.0.1", r));
