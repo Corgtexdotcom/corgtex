@@ -122,7 +122,7 @@ the sanitized file alone is not an accepted receipt or adoption authorization.
 Both auth and build observations must still be at most 24 hours old, so obtain
 fresh retained build readback as well. Reacceptance uses the same protected
 bootstrap followed by a separate config PR, never an automatic renewal. The
-known checksum variance remains nonaccepted by this path too.
+historical exception below is checked again; renewal cannot expand its scope.
 
 ## Validation Boundaries
 
@@ -136,15 +136,32 @@ checks and prevents external engine downloads. No candidate Prisma model or
 candidate fixture is used against Core.
 
 The live ledger query is bounded, read-only and compares the accepted source's
-sorted migration-name/SQL-byte-checksum manifest exactly. Schema diff uses the
+sorted migration-name/SQL-byte-checksum manifest, with only the fixed historical
+disposition below. Schema diff uses the
 accepted datamodel and Prisma version with read-only/statement/lock limits. Only
 Prisma-supported schema constructs are covered; no historical data-correctness or
-all-database-features claim is made. Current Core's known original-Git checksum
-variance remains **nonaccepted**. Supported-schema equality does not waive it.
-Do not replay SQL, rewrite the ledger or silently add a historical checksum list.
-That variance requires explicit later disposition before this strict producer can
-accept the current baseline. Failed bootstrap can publish a nonaccepted diagnostic
-code, never an accepted receipt.
+all-database-features claim is made.
+
+The user-approved historical disposition is limited to source
+`d0a3896ef917b50f2fec2d797908f29aa026a058` and migration
+`20260617120000_drop_legacy_proposal_reactions`: applied checksum
+`570ac368fa8994eb9c6ff751eb40172bfb03aeabc511d7d063de0fe93925caa1`
+matches original Git `f3bd4102`, while the source checksum
+`614cdf040b15f381255592683128686d90904182721ca117ba43975dd1927e26`
+matches revision `e6c094cd`. The later SQL added a deterministic ID to the
+INSERT before DROP; no historical row correctness is certified. The code binds
+the complete d0 migration-manifest and datamodel hashes and rejects every other
+mismatch, missing/duplicate/unfinished row, or extra rolled-back row on this path.
+No evidence input or environment flag can select additional exceptions.
+
+An accepted historical receipt explicitly retains `exactLedgerMatch: false` and
+the fixed `historicalLedgerException`, including
+`historicalRowCorrectnessCertified: false`. Receipt consumers and subsequent live
+checks validate that binding; changing the accepted ledger representation fails
+closed. Exact-ledger receipts retain their existing format. This does not rewrite
+the ledger, replay SQL, accept arbitrary drift, or activate the baseline. Fresh
+proof, protected bootstrap, schema comparison and separate adoption still apply.
+Failed bootstrap can publish a nonaccepted diagnostic code, never an accepted receipt.
 
 Source CI retains Core health/authentication checks and post-deploy observation,
 with the Core observation SHA pinned rather than selected from live health. Live

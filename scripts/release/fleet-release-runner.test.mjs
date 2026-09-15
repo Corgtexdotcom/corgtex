@@ -2596,12 +2596,65 @@ describe("fleet release runner", () => {
     expect(controlPlaneTools).not.toContain("record_verified_release");
   });
 
-  it("sets migrate-and-web startup variables during Azure deploys", async () => {
+  it.each([
+    ["failed web provisioning", { state: "Failed" }, null],
+    ["web revision drift", { latest: "web-app--other" }, null],
+    ["web readiness timeout", { ready: "web-app--old" }, null],
+    ["pending or failed web migrations", {}, { status: "degraded", schema: "stale" }],
+    ["unavailable database", {}, { database: "down" }],
+    ["old serving release", {}, { release: { imageTag: "sha-old", gitSha: "old" } }],
+  ])("leaves the worker untouched after %s", async (_label, revision, health) => {
+    const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[1] === "update") return { stdout: JSON.stringify(azureRevisionState(args[3])) };
+      if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
+        if (args[args.indexOf("--query") + 1].includes(".env")) return { stdout: JSON.stringify(azurePublicUrlEntries()) };
+        return { stdout: JSON.stringify(azureRevisionState(args[3], revision)) };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const fetchImpl = vi.fn(async (url) => {
+      expect(new URL(String(url)).pathname).toBe("/api/health");
+      return { ok: true, json: async () => ({ ...await healthResponse().json(), ...health }) };
+    });
+    await expect(runFleetRelease([
+      "deploy", "--release", SHA, "--targets", "azure-selfserve", "--reason", "Verify migration gate.",
+    ], {
+      env: {
+        ...azureReleaseEnv(),
+        FLEET_RELEASE_AZURE_TIMEOUT_MS: "10",
+        FLEET_RELEASE_AZURE_INTERVAL_MS: "1",
+        FLEET_RELEASE_HEALTH_TIMEOUT_MS: "10",
+        FLEET_RELEASE_HEALTH_INTERVAL_MS: "1",
+      },
+      runCommand,
+      fetchImpl,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    })).rejects.toThrow("Ring 2 failed");
+
+    const mutations = runCommand.mock.calls.filter(([command, args]) => command === "az"
+      && args[0] === "containerapp" && args[1] !== "show");
+    expect(mutations.map(([, args]) => args[1])).toEqual(["secret", "update"]);
+    expect(mutations.every(([, args]) => args[args.indexOf("--name") + 1] === "web-app")).toBe(true);
+    // No compensating scale/traffic/deactivation or old-image mutation is submitted.
+    expect(runCommand.mock.calls.filter(([, args]) => args[0] === "acr").map(([, args]) => args[1])).toEqual(["import", "import"]);
+    if (health) expect(fetchImpl).toHaveBeenCalled();
+    else expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("gates the worker on new web migrations and preserves Azure release variables", async () => {
     const toolCalls = [];
     let releaseRecorded = false;
     let readinessReads = 0;
+    let healthReads = 0;
+    let workerUpdated = false;
     const abortSignalForTimeout = vi.fn(() => new AbortController().signal);
     const runCommand = vi.fn((command, args) => {
+      if (command === "az" && args[0] === "containerapp" && ["secret", "update"].includes(args[1])
+        && args[args.indexOf("--name") + 1] === "worker-app") {
+        expect(readinessReads).toBe(2);
+        expect(healthReads).toBe(2);
+        if (args[1] === "update") workerUpdated = true;
+      }
       if (command === "az" && args[1] === "update") return { stdout: JSON.stringify(azureRevisionState(args[3])) };
       if (command === "az" && args[0] === "containerapp" && args[1] === "show") {
         if (args[args.indexOf("--query") + 1].includes(".env")) {
@@ -2613,6 +2666,16 @@ describe("fleet release runner", () => {
       return { stdout: "", stderr: "" };
     });
     const fetchImpl = vi.fn(async (url, options = {}) => {
+      if (new URL(String(url)).pathname === "/api/health") {
+        healthReads += 1;
+        if (healthReads <= 2) {
+          expect(readinessReads).toBe(2);
+          expect(workerUpdated).toBe(false);
+        } else {
+          expect(workerUpdated).toBe(true);
+        }
+        if (healthReads === 1) return { ok: true, json: async () => ({ ...await healthResponse().json(), schema: "stale" }) };
+      }
       if (String(url).includes("/api/control-plane/mcp")) {
         const body = JSON.parse(options.body);
         toolCalls.push(body.params.name);
@@ -2667,6 +2730,7 @@ describe("fleet release runner", () => {
 
     expect(result.results).toHaveLength(1);
     expect(readinessReads).toBe(3);
+    expect(healthReads).toBe(3);
     expect(result.results[0].result.providerResult).toEqual({ webRevision: "web-app--revision", workerRevision: "worker-app--revision" });
     expect(abortSignalForTimeout).toHaveBeenCalledTimes(4);
     const updateCalls = runCommand.mock.calls.filter(([command, args]) => (
