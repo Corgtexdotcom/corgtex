@@ -6014,6 +6014,160 @@ describe("control plane domain", () => {
     });
   });
 
+  describe("current-account rollout targets", () => {
+    const currentDeployment = {
+      id: "legacy-current",
+      label: "Explicitly designated live legacy",
+      customerSlug: "live-legacy",
+      customerAccountId: "account-current",
+      customerAccount: { id: "account-current", primaryDeploymentId: "legacy-current" },
+      cloudProvider: "RAILWAY",
+      deploymentKind: "HOSTED",
+      deploymentStatus: "ACTIVE",
+      provisioningStatus: "active",
+      managedWorkspace: null,
+      releaseImageTag: "release-old",
+      releaseVersion: null,
+      lastHealthStatus: "ok",
+      lastHealthCheck: new Date("2026-09-15T00:00:00Z"),
+      railwayProjectId: "project-current",
+      railwayEnvironmentId: "env-current",
+      railwayWebServiceId: "web-current",
+      railwayWorkerServiceId: "worker-current",
+    };
+
+    beforeEach(() => {
+      vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
+      vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
+      vi.stubEnv("CONTROL_PLANE_RAILWAY_LATEST_RELEASE_IMAGE_TAG", "release-new");
+    });
+
+    it("filters bulk candidates to designated primaries and rejects a hidden ACTIVE secondary", async () => {
+      const { enqueueControlPlaneDeployLatestRollout } = await import("./control-plane");
+      // Return a stale candidate as well, proving preflight does not trust query filtering alone.
+      prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
+        currentDeployment,
+        { ...currentDeployment, id: "hidden-secondary" },
+      ]);
+      const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+        allEligible: true, includeUnhealthy: true, reason: "Release only current customer targets.",
+      });
+      expect(prismaMock.customerDeployment.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ primaryForAccount: { isNot: null } }),
+        include: { customerAccount: { select: { id: true, primaryDeploymentId: true } } },
+      }));
+      expect(result).toMatchObject({ queuedJobs: 1, results: [
+        { deploymentId: "legacy-current", status: "queued" },
+        { deploymentId: "hidden-secondary", status: "skipped", blockers: [expect.stringContaining("unproven or superseded")] },
+      ] });
+      expect(prismaMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["superseded", { customerAccount: { id: "account-current", primaryDeploymentId: "replacement" } }],
+      ["missing primary", { customerAccount: { id: "account-current", primaryDeploymentId: null } }],
+      ["missing account", { customerAccount: null }],
+      ["unlinked deployment", { customerAccountId: null }],
+      ["another account's primary", { customerAccount: { id: "another-account", primaryDeploymentId: "legacy-current" } }],
+    ])("rejects forged explicit selection and force execution for %s", async (_label, override) => {
+      const { enqueueControlPlaneDeployLatestRollout, deployLatestControlPlaneRelease, getControlPlaneDeployLatestPreflight } = await import("./control-plane");
+      const deployment = { ...currentDeployment, ...override };
+      prismaMock.customerDeployment.findMany.mockResolvedValueOnce([deployment]);
+      prismaMock.customerDeployment.findUnique.mockResolvedValue(deployment);
+      const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+        deploymentIds: [deployment.id], includeUnhealthy: true, reason: "Forged explicit target selection.",
+      });
+      expect(result).toMatchObject({ queuedJobs: 0, results: [{
+        status: "preflight_failed", blockers: [expect.stringContaining("unproven or superseded")],
+      }] });
+      const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, deployment.id);
+      expect(preflight.checks).toContainEqual(expect.objectContaining({ key: "current_account_target", ok: false }));
+      const railwayClient = { graphql: vi.fn() };
+      await expect(deployLatestControlPlaneRelease(operatorActor, {
+        deploymentId: deployment.id, force: true, reason: "Try to bypass target authority.",
+      }, railwayClient)).rejects.toMatchObject({ status: 400, code: "RELEASE_PREFLIGHT_FAILED", message: expect.stringContaining("unproven or superseded") });
+      expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
+      expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+      expect(prismaMock.customerReleaseTarget.upsert).not.toHaveBeenCalled();
+      expect(railwayClient.graphql).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])("rechecks a changed primary in the actual queued worker handler (force=%s)", async (force) => {
+      const { enqueueControlPlaneDeployLatestRollout, runControlPlaneReleaseDeployJob } = await import("./control-plane");
+      prismaMock.customerDeployment.findMany.mockResolvedValueOnce([{
+        ...currentDeployment, lastHealthStatus: force ? "down" : "ok",
+      }]);
+      const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+        deploymentIds: [currentDeployment.id], includeUnhealthy: force, reason: "Queue the currently designated target.",
+      });
+      expect(result.queuedJobs).toBe(1);
+      const payload = prismaMock.workflowJob.createMany.mock.calls[0][0].data.payload;
+      expect(payload.force).toBe(force);
+      prismaMock.customerDeployment.findUnique.mockResolvedValueOnce({
+        ...currentDeployment,
+        customerAccount: { id: "account-current", primaryDeploymentId: "new-primary" },
+      });
+      await expect(runControlPlaneReleaseDeployJob(payload)).rejects.toMatchObject({
+        code: "RELEASE_PREFLIGHT_FAILED", message: expect.stringContaining("unproven or superseded"),
+      });
+      expect(prismaMock.customerDeployment.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: currentDeployment.id },
+        include: expect.objectContaining({ customerAccount: { select: { id: true, primaryDeploymentId: true } } }),
+      }));
+      expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+      expect(prismaMock.customerReleaseTarget.upsert).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["Azure", { cloudProvider: "AZURE" }, "azure_workflow_reconciliation"],
+      ["shared workspace", { deploymentKind: "SHARED_WORKSPACE", managedWorkspaceId: "shared-workspace" }, "not_shared_workspace"],
+      ["backup", { url: "https://app.corgtex.com" }, "not_backup"],
+    ])("preserves the %s exclusion even with current designation and force", async (_label, override, blockerKey) => {
+      const { getControlPlaneDeployLatestPreflight, enqueueControlPlaneDeployLatestRollout, deployLatestControlPlaneRelease } = await import("./control-plane");
+      const deployment = { ...currentDeployment, ...override };
+      prismaMock.customerDeployment.findMany.mockResolvedValueOnce([deployment]);
+      prismaMock.customerDeployment.findUnique.mockResolvedValue(deployment);
+      const preflight = await getControlPlaneDeployLatestPreflight(operatorActor, deployment.id);
+      expect(preflight.checks).toContainEqual(expect.objectContaining({ key: "current_account_target", ok: true }));
+      expect(preflight.checks).toContainEqual(expect.objectContaining({ key: blockerKey, ok: false }));
+      const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+        deploymentIds: [deployment.id], includeUnhealthy: true, reason: "Preserve existing provider and shared exclusions.",
+      });
+      expect(result).toMatchObject({ queuedJobs: 0, results: [{ status: "preflight_failed" }] });
+      const railwayClient = { graphql: vi.fn() };
+      await expect(deployLatestControlPlaneRelease(operatorActor, {
+        deploymentId: deployment.id, force: true, reason: "Do not bypass existing exclusions.",
+      }, railwayClient)).rejects.toMatchObject({ code: "RELEASE_PREFLIGHT_FAILED" });
+      expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
+      expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+      expect(railwayClient.graphql).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { deploymentStatus: "RETIRED" },
+      { provisioningStatus: "archived" },
+      { provisioningStatus: "retired" },
+    ])("does not revive retained history through a primary designation or health override: %j", async (override) => {
+      const { enqueueControlPlaneDeployLatestRollout, deployLatestControlPlaneRelease } = await import("./control-plane");
+      const deployment = { ...currentDeployment, ...override };
+      prismaMock.customerDeployment.findMany.mockResolvedValueOnce([deployment]);
+      prismaMock.customerDeployment.findUnique.mockResolvedValueOnce(deployment);
+      const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
+        deploymentIds: [deployment.id], includeUnhealthy: true, reason: "Try retained history.",
+      });
+      expect(result).toMatchObject({ queuedJobs: 0, results: [{ status: "preflight_failed", blockers: [expect.stringContaining("Retired or archived")] }] });
+      const railwayClient = { graphql: vi.fn() };
+      await expect(deployLatestControlPlaneRelease(operatorActor, {
+        deploymentId: deployment.id, force: true, reason: "Try retained history.",
+      }, railwayClient)).rejects.toMatchObject({ code: "RELEASE_PREFLIGHT_FAILED" });
+      expect(prismaMock.workflowJob.createMany).not.toHaveBeenCalled();
+      expect(prismaMock.customerDeployment.update).not.toHaveBeenCalled();
+      expect(railwayClient.graphql).not.toHaveBeenCalled();
+    });
+  });
+
   it("preflights and deploys the configured latest release for one customer", async () => {
     vi.stubEnv("CONTROL_PLANE_LATEST_WEB_IMAGE", "ghcr.io/corgtex/web:new");
     vi.stubEnv("CONTROL_PLANE_LATEST_WORKER_IMAGE", "ghcr.io/corgtex/worker:new");
@@ -6024,6 +6178,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "acme",
       deploymentKind: "HOSTED",
       deploymentStatus: "ACTIVE",
@@ -6115,6 +6270,7 @@ describe("control plane domain", () => {
       id: "enterprise-alpha-1",
       label: "Enterprise Alpha Production",
       customerAccountId: "cust-alpha",
+      customerAccount: { id: "cust-alpha", primaryDeploymentId: "enterprise-alpha-1" },
       customerSlug: "enterprise-alpha",
       cloudProvider: "RAILWAY",
       deploymentKind: "HOSTED",
@@ -6166,9 +6322,9 @@ describe("control plane domain", () => {
       railwayWorkerServiceId: "worker-1",
     };
     prismaMock.customerDeployment.findMany.mockResolvedValueOnce([
-      { ...baseDeployment, id: "enterprise-alpha-1", label: "Enterprise Alpha Production", customerSlug: "enterprise-alpha", railwayProjectId: "project-alpha" },
-      { ...baseDeployment, id: "enterprise-beta-1", label: "Enterprise Beta Production", customerSlug: "enterprise-beta", railwayProjectId: "project-beta" },
-      { ...baseDeployment, id: "enterprise-gamma-1", label: "Enterprise Gamma Production", customerSlug: "enterprise-gamma", railwayProjectId: "project-gamma" },
+      { ...baseDeployment, customerAccountId: "cust-alpha", customerAccount: { id: "cust-alpha", primaryDeploymentId: "enterprise-alpha-1" }, id: "enterprise-alpha-1", label: "Enterprise Alpha Production", customerSlug: "enterprise-alpha", railwayProjectId: "project-alpha" },
+      { ...baseDeployment, customerAccountId: "cust-beta", customerAccount: { id: "cust-beta", primaryDeploymentId: "enterprise-beta-1" }, id: "enterprise-beta-1", label: "Enterprise Beta Production", customerSlug: "enterprise-beta", railwayProjectId: "project-beta" },
+      { ...baseDeployment, customerAccountId: "cust-gamma", customerAccount: { id: "cust-gamma", primaryDeploymentId: "enterprise-gamma-1" }, id: "enterprise-gamma-1", label: "Enterprise Gamma Production", customerSlug: "enterprise-gamma", railwayProjectId: "project-gamma" },
     ]);
 
     const result = await enqueueControlPlaneDeployLatestRollout(operatorActor, {
@@ -6198,6 +6354,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "acme",
       deploymentKind: "HOSTED",
       deploymentStatus: "ACTIVE",
@@ -6235,6 +6392,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "acme",
       cloudProvider: "RAILWAY",
       deploymentKind: "HOSTED",
@@ -6295,6 +6453,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "acme",
       cloudProvider: "RAILWAY",
       deploymentKind: "HOSTED",
@@ -6343,6 +6502,7 @@ describe("control plane domain", () => {
       label: "Managed Workspace",
       url: "https://workspace.test",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "shared-1" },
       customerSlug: "managed-workspace",
       deploymentKind: "SHARED_WORKSPACE",
       deploymentStatus: "ACTIVE",
@@ -6383,6 +6543,7 @@ describe("control plane domain", () => {
       label: "Corgtex Self-Serve",
       url: "https://selfserve.corgtex.com",
       customerAccountId: "cust-selfserve",
+      customerAccount: { id: "cust-selfserve", primaryDeploymentId: "selfserve-1" },
       customerSlug: "selfserve",
       cloudProvider: "AZURE",
       deploymentKind: "HOSTED",
@@ -6438,6 +6599,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "acme",
       deploymentKind: "HOSTED",
       deploymentStatus: "ACTIVE",
@@ -6492,6 +6654,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Acme",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "acme",
       deploymentKind: "HOSTED",
       deploymentStatus: "ACTIVE",
@@ -6541,6 +6704,7 @@ describe("control plane domain", () => {
       id: "inst-1",
       label: "Suspended",
       customerAccountId: "cust-1",
+      customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
       customerSlug: "suspended",
       deploymentKind: "HOSTED",
       deploymentStatus: "SUSPENDED",
@@ -6583,6 +6747,7 @@ describe("control plane domain", () => {
         id: "inst-1",
         label: "Acme",
         customerAccountId: "cust-1",
+        customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
@@ -6599,6 +6764,7 @@ describe("control plane domain", () => {
         id: "inst-2",
         label: "Broken",
         customerAccountId: "cust-2",
+        customerAccount: { id: "cust-2", primaryDeploymentId: "inst-2" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
@@ -6657,6 +6823,7 @@ describe("control plane domain", () => {
         url: "https://enterprise-alpha.example.com",
         customerSlug: "enterprise-alpha",
         customerAccountId: "cust-1",
+        customerAccount: { id: "cust-1", primaryDeploymentId: "enterprise-1" },
         cloudProvider: "RAILWAY",
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
@@ -6676,6 +6843,7 @@ describe("control plane domain", () => {
         url: "https://selfserve.corgtex.com",
         customerSlug: "selfserve",
         customerAccountId: "cust-2",
+        customerAccount: { id: "cust-2", primaryDeploymentId: "selfserve-1" },
         cloudProvider: "AZURE",
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
@@ -6695,6 +6863,7 @@ describe("control plane domain", () => {
         url: "https://app.corgtex.com",
         customerSlug: "corgtex-internal",
         customerAccountId: "cust-3",
+        customerAccount: { id: "cust-3", primaryDeploymentId: "backup-1" },
         cloudProvider: "RAILWAY",
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
@@ -6714,6 +6883,7 @@ describe("control plane domain", () => {
         url: "https://workspace.test",
         customerSlug: "managed-workspace",
         customerAccountId: "cust-4",
+        customerAccount: { id: "cust-4", primaryDeploymentId: "shared-1" },
         cloudProvider: "RAILWAY",
         deploymentKind: "SHARED_WORKSPACE",
         managedWorkspaceId: "ws-managed",
@@ -6767,6 +6937,7 @@ describe("control plane domain", () => {
         id: "inst-1",
         label: "Acme",
         customerAccountId: "cust-1",
+        customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
@@ -6848,6 +7019,7 @@ describe("control plane domain", () => {
         id: "inst-1",
         label: "Acme",
         customerAccountId: "cust-1",
+        customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
@@ -6939,6 +7111,7 @@ describe("control plane domain", () => {
         id: "inst-1",
         label: "Unhealthy",
         customerAccountId: "cust-1",
+        customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
@@ -6955,6 +7128,7 @@ describe("control plane domain", () => {
         id: "inst-2",
         label: "Missing Railway",
         customerAccountId: "cust-2",
+        customerAccount: { id: "cust-2", primaryDeploymentId: "inst-2" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
@@ -7005,6 +7179,7 @@ describe("control plane domain", () => {
         id: "inst-1",
         label: "Acme",
         customerAccountId: "cust-1",
+        customerAccount: { id: "cust-1", primaryDeploymentId: "inst-1" },
         deploymentStatus: "ACTIVE",
         provisioningStatus: "active",
         releaseImageTag: "release-old",
