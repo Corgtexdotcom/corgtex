@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const findMany = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
+  setSupportAuthorizationActor: vi.fn(),
   env: { DEPLOYMENT_WORKSPACE_SCOPE_SLUG: undefined },
   prisma: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
+    member: { findUnique: vi.fn().mockResolvedValue(null) },
     workspace: {
       findMany,
     },
@@ -70,9 +73,9 @@ describe("listActorWorkspaces", () => {
       },
     });
 
-    expect(findMany.mock.calls[0]?.[0].where).toBeUndefined();
+    expect(findMany.mock.calls[0]?.[0].where).toEqual({ supportGrants: { none: { userId: "user-1", OR: [{ isActive: false }, { role: "SETUP" }] } } });
 
-    const membership = await requireWorkspaceMembership({
+    await expect(requireWorkspaceMembership({
       actor: {
         kind: "user",
         user: {
@@ -84,14 +87,6 @@ describe("listActorWorkspaces", () => {
       },
       workspaceId: "ws-1",
       allowedRoles: ["ADMIN"],
-    });
-
-    expect(membership).toEqual({
-      id: "global-operator",
-      workspaceId: "ws-1",
-      userId: "user-1",
-      role: "ADMIN",
-      isActive: true,
-    });
+    })).rejects.toMatchObject({ code: "NOT_A_MEMBER" });
   });
 });

@@ -18,6 +18,7 @@ import {
 } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
+import { getWorkspaceSupportGrant } from "./workspace-support-access";
 import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
@@ -744,8 +745,14 @@ export async function getBuildArtifactAssetSignedUrl(actor: AppActor, params: {
     select: { id: true, storageKey: true },
   });
   invariant(asset, 404, "NOT_FOUND", "Build artifact asset not found.");
+  if ((actor.kind === "user" && await getWorkspaceSupportGrant(actor, params.workspaceId)) || (actor.kind === "agent" && actor.supportOrigin)) {
+    const file = await defaultStorage.get(asset.storageKey, { maxBytes: 64 * 1024 * 1024 });
+    invariant(file, 404, "NOT_FOUND", "Build artifact asset not found.");
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+    return { signedUrl: null, file };
+  }
   const signedUrl = await defaultStorage.getSignedUrl(asset.storageKey, PUBLIC_PROOF_URL_TTL_SECONDS);
-  return { signedUrl };
+  return { signedUrl, file: null };
 }
 
 export async function revokeBuildArtifactPublicAccess(actor: AppActor, params: {

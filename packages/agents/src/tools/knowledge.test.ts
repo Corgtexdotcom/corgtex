@@ -35,9 +35,9 @@ describe("interactive agent knowledge", () => {
     searchIndexedKnowledgeMock.mockResolvedValue([]);
   });
 
-  it("fails closed to workspace knowledge without an authenticated actor", async () => {
+  it("grants no knowledge domains without an authenticated actor", async () => {
     await expect(resolveInteractiveKnowledgeAccessDomains(undefined, "workspace-1"))
-      .resolves.toEqual(["WORKSPACE"]);
+      .rejects.toThrow("Authenticated actor is required");
     expect(resolveKnowledgeAccessDomainsMock).not.toHaveBeenCalled();
   });
 

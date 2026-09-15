@@ -120,6 +120,7 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
   createSyncSettings?: Prisma.InputJsonValue;
   enqueueCalendarSync?: boolean;
   enableCalendarSync?: boolean;
+  requireNewConnection?: boolean;
 }) {
   invariant(actor.kind === "user", 403, "FORBIDDEN", "Only users can connect OAuth providers.");
 
@@ -137,8 +138,15 @@ export async function saveOAuthConnectionAndEnqueueCalendarSync(actor: AppActor,
         id: true,
         scopes: true,
         syncSettings: true,
+        workspaceId: true,
+        status: true,
       },
     });
+    invariant(!params.requireNewConnection || !existing, 409, "CONNECTION_ALREADY_EXISTS", "Manage the existing connection in workspace integrations.");
+    if (existing?.workspaceId && existing.workspaceId !== params.workspaceId) {
+      await requireWorkspaceMembership({ actor, workspaceId: existing.workspaceId, tx });
+      invariant(existing.status === "DISCONNECTED", 409, "CONNECTION_ALREADY_BOUND", "Disconnect the existing workspace connection before changing its binding.");
+    }
     const scopes = mergeOAuthScopes(existing?.scopes ?? [], params.scopes ?? []);
     const createSyncSettings = params.enableCalendarSync
       ? enableCalendarInSyncSettings(params.createSyncSettings ?? params.syncSettings ?? defaultOAuthSyncSettings())

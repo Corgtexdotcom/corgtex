@@ -1,3 +1,4 @@
+import { supportCapabilityVersion } from "./workspace-support-access";
 import type {
   AppInstallationStatus,
   AppRuntimeMode,
@@ -543,9 +544,10 @@ async function createEnterpriseAppSession(actor: AppActor, params: {
   };
   await prisma.appSession.create({
     data: {
+      supportGrantVersion: await supportCapabilityVersion(actor.kind === "user" ? actor.user.id : actor.supportOrigin?.userId, params.workspaceId),
       workspaceId: params.workspaceId,
       appInstallationId: row.id,
-      actorUserId: actor.kind === "user" ? actor.user.id : null,
+      actorUserId: actor.kind === "user" ? actor.user.id : actor.supportOrigin?.userId ?? null,
       audience: row.appDefinition.appKey,
       tokenHash: sha256(token),
       scopes: row.grantedScopes,
@@ -1900,6 +1902,7 @@ export async function consumeEnterpriseAppSessionToken(params: {
   invariant(session, 401, "INVALID_TOKEN", "Invalid enterprise app session token.");
   invariant(!session.revokedAt, 401, "TOKEN_REVOKED", "Enterprise app session token has been revoked.");
   invariant(session.expiresAt > new Date(), 401, "TOKEN_EXPIRED", "Enterprise app session token has expired.");
+  await supportCapabilityVersion(session.actorUserId, session.workspaceId, session.supportGrantVersion);
   const audience = text(params.audience);
   invariant(!audience || audience === session.audience, 401, "WRONG_AUDIENCE", "Enterprise app session token audience mismatch.");
   const workspaceId = text(params.workspaceId);

@@ -135,3 +135,5 @@ export * from "./avatar";
 export * from "./provider-cutover";
 export * from "./customer-issue-publication";
 export * from "./exact-target-inventory";
+export * from "./workspace-support-access";
+export * from "./workspace-support-configuration";

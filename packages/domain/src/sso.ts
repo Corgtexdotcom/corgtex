@@ -3,6 +3,21 @@ import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
 import { randomBytes } from "node:crypto";
+import { lockWorkspaceMembership } from "./workspace-support-access";
+
+async function ensureSsoMembership(workspaceId: string, userId: string) {
+  await prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, workspaceId);
+    // Managed support accounts authenticate normally but never gain an ordinary membership through SSO.
+    const grant = await tx.workspaceSupportGrant.findUnique({ where: { workspaceId_userId: { workspaceId, userId } } });
+    if (grant) return;
+    await tx.member.upsert({
+      where: { workspaceId_userId: { workspaceId, userId } },
+      update: {},
+      create: { workspaceId, userId, role: "CONTRIBUTOR", isActive: true },
+    });
+  });
+}
 
 export async function getSsoConfigByWorkspace(actor: AppActor, workspaceId: string) {
   await requireWorkspaceMembership({ actor, workspaceId, allowedRoles: ["ADMIN"] });
@@ -108,21 +123,7 @@ export async function linkOrProvisionSsoUser(params: {
   });
 
   if (existingIdentity) {
-    await prisma.member.upsert({
-      where: {
-        workspaceId_userId: {
-          workspaceId: params.workspaceId,
-          userId: existingIdentity.userId,
-        }
-      },
-      update: {},
-      create: {
-        workspaceId: params.workspaceId,
-        userId: existingIdentity.userId,
-        role: "CONTRIBUTOR",
-        isActive: true,
-      }
-    });
+    await ensureSsoMembership(params.workspaceId, existingIdentity.userId);
 
     return existingIdentity.user;
   }
@@ -161,21 +162,7 @@ export async function linkOrProvisionSsoUser(params: {
     }
   });
 
-  await prisma.member.upsert({
-    where: {
-      workspaceId_userId: {
-        workspaceId: params.workspaceId,
-        userId: user.id,
-      }
-    },
-    update: {},
-    create: {
-      workspaceId: params.workspaceId,
-      userId: user.id,
-      role: "CONTRIBUTOR",
-      isActive: true,
-    }
-  });
+  await ensureSsoMembership(params.workspaceId, user.id);
 
   return user;
 }

@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { isGlobalOperator, listActorWorkspaces } from "@corgtex/domain";
+import { hasActiveWorkspaceSupport, isGlobalOperator, listActorWorkspaces } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { requirePageActor } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope, hasDeploymentWorkspaceScope } from "@/lib/deployment-workspace-scope";
@@ -25,6 +25,7 @@ export default async function IndexPage({
   const workspaces = filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor));
 
   if (workspaces.length === 0) {
+    if (await hasActiveWorkspaceSupport(actor)) redirect(localizedPath("/support", locale));
     redirect(hasDeploymentWorkspaceScope() ? localizedPath("/find-account", locale) : localizedPath("/workspaces/create", locale));
   }
 

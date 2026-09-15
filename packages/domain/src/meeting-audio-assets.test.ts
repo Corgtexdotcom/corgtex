@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, defaultStorageMock, defaultModelGatewayMock, intakeMeetingTranscriptMock } = vi.hoisted(() => ({
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),
     meeting: {
       findFirst: vi.fn(),
