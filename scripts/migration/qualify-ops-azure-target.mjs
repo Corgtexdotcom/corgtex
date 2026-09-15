@@ -158,10 +158,18 @@ const remaining = (deadline, c) => assert(c.now() < deadline, "ABSOLUTE_DEADLINE
 async function waitState(api, wanted, deadline, c, intent) {
   while (true) {
     remaining(deadline, c);
-    if (intent) { await api.identity(); await api.boundary(); validateRules(await api.rules(), intent); }
-    const s = validateServer(await api.server(), Boolean(intent));
-    remaining(deadline, c);
-    if ([wanted].flat().includes(s.state)) return s;
+    try {
+      let ownedRules;
+      if (intent) { await api.identity(); await api.boundary(); ownedRules = validateRules(await api.rules(), intent); }
+      const s = validateServer(await api.server(), Boolean(intent));
+      remaining(deadline, c);
+      if ([wanted].flat().includes(s.state)) return { ...s, ownedRules };
+    } catch (error) {
+      if (c.now() >= deadline && (error.code === "AZURE_OPERATION_DEADLINE" || /^AZURE_[A-Z_]+_FAILED$/u.test(error.code ?? ""))) {
+        throw new ProbeError("ABSOLUTE_DEADLINE_EXCEEDED");
+      }
+      throw error;
+    }
     await c.sleep(Math.min(5000, deadline - c.now()));
   }
 }
@@ -238,7 +246,13 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   // A failed CLI response may follow an accepted write. Reconcile readbacks,
   // and still stop owned compute if removal of the owned firewall rule fails.
   if (rules.length) {
-    try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
+    // A late rule read can itself reveal an in-flight CREATE. Settle again,
+    // using the owned rules read before that fresh state, not another late read.
+    const beforeDelete = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
+    observedStopping ||= beforeDelete.state === "Stopping";
+    if (beforeDelete.ownedRules.length) {
+      try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
+    }
   }
   let s = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
   // Stopped can be the pre-transition readback of an accepted START. It is not

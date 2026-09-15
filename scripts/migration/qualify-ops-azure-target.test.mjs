@@ -206,6 +206,57 @@ describe("target qualification lifecycle", () => {
     expect(c.time).toBe(i.deadline); expect(events.filter(e => e === "delete")).toHaveLength(1);
     expect(events).not.toContain("stop");
   });
+  it("settles a late owned rule that starts Updating between the Ready read and DELETE", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Ready";
+    const create = api.createRule, read = api.rules, remove = api.deleteRule;
+    let reads = 0;
+    api.rules = async () => {
+      if (++reads === 3) { await create(i); api.current.state = "Updating"; }
+      return read();
+    };
+    api.deleteRule = async intent => {
+      events.push("delete-attempt");
+      if (api.current.state === "Updating") throw new ProbeError("AZURE_FIREWALL_DELETE_FAILED");
+      return remove(intent);
+    };
+    c.sleep = async ms => { c.time += ms; if (c.time >= i.createdAt + 540000) api.current.state = "Ready"; };
+    const result = await cleanup(api, i, c);
+    expect(result.firewallAbsent && result.serverStopped).toBe(true);
+    expect(events.filter(e => e === "delete-attempt")).toHaveLength(1);
+    expect(events.filter(e => e === "stop")).toHaveLength(1);
+  });
+  it.each(["identity", "boundary", "rules", "server"])("normalizes expired cleanup polling %s reads without more writes", async method => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Updating";
+    c.sleep = async ms => {
+      c.time += ms;
+      api[method] = async () => { c.time = i.deadline; throw new ProbeError(method === "identity" ? "AZURE_OPERATION_DEADLINE" : "AZURE_SERVER_READ_FAILED"); };
+    };
+    await expect(cleanup(api, i, c)).rejects.toThrow("ABSOLUTE_DEADLINE_EXCEEDED");
+    expect(events).not.toContain("delete"); expect(events).not.toContain("stop");
+    expect(api.deadline).toBe(i.deadline);
+  });
+  it.each(["AZURE_OPERATION_DEADLINE", "AZURE_SERVER_READ_FAILED", "AZURE_PRINCIPAL_MISMATCH", "ROLE_PRINCIPAL_MISMATCH", "FIREWALL_OWNER_MISMATCH", "TARGET_DRIFT"])("classifies the second cleanup identity read correctly: %s", async code => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Updating"; let identityReads = 0;
+    api.identity = async () => {
+      if (++identityReads === 2) { c.time = i.deadline; throw new ProbeError(code); }
+    };
+    const expected = ["AZURE_OPERATION_DEADLINE", "AZURE_SERVER_READ_FAILED"].includes(code) ? "ABSOLUTE_DEADLINE_EXCEEDED" : code;
+    await expect(cleanup(api, i, c)).rejects.toThrow(expected);
+    expect(identityReads).toBe(2); expect(events).not.toContain("delete"); expect(events).not.toContain("stop");
+  });
+  it.each(["AZURE_PRINCIPAL_MISMATCH", "FOREIGN_FIREWALL_RULES", "AZURE_SERVER_READ_FAILED"])("preserves cleanup drift or early provider errors: %s", async code => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Updating";
+    c.sleep = async ms => {
+      c.time += ms;
+      api.rules = async () => { if (code !== "AZURE_SERVER_READ_FAILED") c.time = i.deadline; throw new ProbeError(code); };
+    };
+    await expect(cleanup(api, i, c)).rejects.toThrow(code);
+    expect(events).not.toContain("delete"); expect(events).not.toContain("stop");
+  });
   it("reconciles owned Updating to Stopping to Stopped without a second STOP", async () => {
     const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
     api.current.state = "Updating"; api.verifyRecovery = async () => events.push("owned");

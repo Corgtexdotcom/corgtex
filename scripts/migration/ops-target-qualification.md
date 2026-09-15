@@ -57,6 +57,13 @@ while waiting. Prepare and initial START still require Stopped; Updating is not
 permission to adopt someone else's server operation. The ambiguous-START Stopped
 guard and exact recovery provenance requirements are unchanged. Expiry is an
 unresolved failure, not proof that access or compute was removed.
+If a late cleanup rule read reveals the accepted CREATE while Azure enters
+Updating, cleanup obtains another owned-rule read followed by a fresh settled
+state before its sole DELETE attempt. It uses that paired readback without
+another intervening rule read. Polling reads that exhaust the cleanup deadline
+report `ABSOLUTE_DEADLINE_EXCEEDED`, including Azure operation-deadline and
+operation-failure errors. Earlier read failures and semantic identity, role,
+ownership or target-drift errors retain their original codes.
 After the same execution-ownership checks, recovery observing Stopping waits
 directly for Stopped without submitting another STOP. A bare stale intent never
 supplies that observation: Stopping seen earlier in the same owned cleanup call
