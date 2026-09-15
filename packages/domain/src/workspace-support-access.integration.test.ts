@@ -105,6 +105,18 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
     await change("FULL");
     expect(await prisma.event.count({ where: { workspaceId, type: "member.created" } })).toBe(1);
   });
+  isolated("retired support identities cannot receive grants but existing access can be revoked", async () => {
+    await prisma.user.update({ where: { id: support.user.id }, data: { isSupportAccount: true } });
+    for (const role of ["FULL", "SETUP"] as const) {
+      await expect(change(role)).rejects.toMatchObject({ code: "INVALID_SUPPORT_ACCOUNT" });
+    }
+    expect(await prisma.workspaceSupportGrant.count({ where: { workspaceId } })).toBe(0);
+    await prisma.user.update({ where: { id: support.user.id }, data: { isSupportAccount: false } });
+    await change("FULL");
+    await prisma.user.update({ where: { id: support.user.id }, data: { isSupportAccount: true } });
+    await expect(change("FULL", 1, false)).resolves.toMatchObject({ isActive: false });
+    await expect(change("FULL", 2)).rejects.toMatchObject({ code: "INVALID_SUPPORT_ACCOUNT" });
+  });
   isolated("Setup cannot use global role, cached ADMIN, real content loader or self-grant", async () => {
     await change("SETUP");
     expect(await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } })).toBeNull();

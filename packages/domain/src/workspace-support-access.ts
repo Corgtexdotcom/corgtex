@@ -136,8 +136,9 @@ export async function changeWorkspaceSupportGrant(actor: AppActor, params: {
     // Serialize grant changes with ownership and membership changes.
     await lockWorkspaceMembership(tx, params.workspaceId);
     const ownerId = await requireSupportOwner(tx, actor, params.workspaceId);
-    const user = await tx.user.findUnique({ where: { email }, select: { id: true } });
+    const user = await tx.user.findUnique({ where: { email }, select: { id: true, isSupportAccount: true } });
     invariant(user && user.id !== ownerId, 400, "INVALID_SUPPORT_ACCOUNT", "Choose another existing named account.");
+    invariant(!params.isActive || !user.isSupportAccount, 400, "INVALID_SUPPORT_ACCOUNT", "Retired support identities cannot receive access.");
     const where = { workspaceId_userId: { workspaceId: params.workspaceId, userId: user.id } };
     const current = await tx.workspaceSupportGrant.findUnique({ where });
     invariant((current?.version ?? 0) === params.expectedVersion, 409, "VERSION_CONFLICT", "Support access changed. Refresh and try again.");
