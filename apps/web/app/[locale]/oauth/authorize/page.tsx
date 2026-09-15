@@ -172,7 +172,9 @@ export default async function OAuthAuthorizePage(props: Props) {
   if (mcpClient) {
     let boundWorkspace: string | null = null;
     try { if (resource) boundWorkspace = validateMcpConsentResource(resource); }
-    catch { return <ErrorPanel>This connector resource is not a workspace on this deployment.</ErrorPanel>; }
+    catch (error) { return <ErrorPanel>{error instanceof Error && "code" in error && error.code === "MCP_WORKSPACE_CONNECTIONS_DISABLED"
+      ? "Workspace MCP connections are not active on this deployment. Existing legacy connections remain available."
+      : "This connector resource is not a workspace on this deployment."}</ErrorPanel>; }
     if (!isAllowedMcpRedirectUri(mcpClient.redirectUris, redirectUri)) {
       return <ErrorPanel>The connector redirect URL is not registered.</ErrorPanel>;
     }

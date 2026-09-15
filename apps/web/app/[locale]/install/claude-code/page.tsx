@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { WorkspacePicker } from "../WorkspacePicker";
 import { ClaudeCodeInstaller } from "./ClaudeCodeInstaller";
 import { buildClaudeCodeCommand } from "@/lib/install-helpers";
@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 export default async function ConnectClaudeCodePage({ searchParams }: { searchParams: Promise<{ workspaceId?: string }> }) {
   const { workspaceId } = await searchParams;
   if (!workspaceId) return <WorkspacePicker path="/install/claude-code" />;
-  const connectorUrl = getWorkspaceMcpResource(workspaceId);
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
   const command = buildClaudeCodeCommand(connectorUrl);
 
   return (

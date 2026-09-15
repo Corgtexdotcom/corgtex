@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, runWithSupportOrigin, runWithMcpOrigin, getMcpOrigin } from "@corgtex/shared";
 import type { AppActor, McpOrigin } from "@corgtex/shared";
 import { issueMcpAuthorizationCode, exchangeMcpAuthorizationCode, refreshMcpAccessToken, resolveMcpOAuthAccessToken,
   revokeMcpWorkspaceConnection, listMcpWorkspaceConnections } from "./mcp-connector";
-import { getWorkspaceMcpResource } from "./mcp-resource";
+import { getWorkspaceMcpResource, getWorkspaceMcpInstallUrl } from "./mcp-resource";
 import { withMcpConnectionExecution } from "./mcp-execution";
 import { changeWorkspaceSupportGrant, lockWorkspaceMembership } from "./workspace-support-access";
 import { requireWorkspaceMembership } from "./auth";
@@ -37,6 +37,7 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
   });
 
   beforeEach(async () => fresh(async () => {
+    vi.stubEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", "true");
     const suffix = randomUUID();
     const user = await prisma.user.create({ data: { email: `mcp-user-${suffix}@example.test`, passwordHash: "synthetic" } });
     const admin = await prisma.user.create({ data: { email: `mcp-owner-${suffix}@example.test`, passwordHash: "synthetic" } });
@@ -52,6 +53,7 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
     await prisma.workspace.deleteMany({ where: { id: { in: [a, b] } } });
     await prisma.mcpOAuthClient.deleteMany({ where: { id: clientDbId } });
     await prisma.user.deleteMany({ where: { id: { in: [actor.user.id, owner.user.id] } } });
+    vi.unstubAllEnvs();
   }));
 
   it("isolates the same software client/user in two workspaces through refresh and independent disconnect", async () => {
@@ -66,6 +68,36 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
     const rotated = await fresh(() => refreshMcpAccessToken({ clientId, refreshToken: tb.refresh_token, resource: getWorkspaceMcpResource(b) }));
     expect(await resolve(rotated.access_token, b)).not.toBeNull();
     expect(await fresh(() => listMcpWorkspaceConnections(actor, a))).toEqual([expect.objectContaining({ id: oa.id, status: "revoked" })]);
+  });
+  it("defaults canonical activation off across issuance, exchange, refresh, HTTP and workers without breaking legacy", async () => {
+    const canonical = await connect(), pending = await issue(), oa = await origin(canonical.access_token);
+    const root = new URL(getWorkspaceMcpResource(a)).origin;
+    const legacy = await exchange(await issue(b, `${root}/mcp`), b, `${root}/mcp`);
+    const route = await import("../../../apps/web/app/mcp/workspaces/[workspaceId]/route");
+    const metadata = await import("../../../apps/web/app/.well-known/oauth-protected-resource/mcp/workspaces/[workspaceId]/route");
+    vi.stubEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", undefined);
+    expect(getWorkspaceMcpInstallUrl(a)).toBe(`${root}/mcp`);
+    await expect(issue()).rejects.toMatchObject({ status: 503, code: "MCP_WORKSPACE_CONNECTIONS_DISABLED" });
+    await expect(exchange(pending)).rejects.toMatchObject({ status: 503 });
+    await expect(fresh(() => refreshMcpAccessToken({ clientId, refreshToken: canonical.refresh_token }))).rejects.toMatchObject({ status: 503 });
+    expect(await resolve(canonical.access_token)).toBeNull();
+    const handler = vi.fn(async () => true);
+    await expect(fresh(() => withMcpConnectionExecution({ workspaceId: a, mcpOrigin: oa }, handler))).rejects.toMatchObject({ status: 503 });
+    expect(handler).not.toHaveBeenCalled();
+    const context = { params: Promise.resolve({ workspaceId: a }) };
+    for (const method of ["GET", "POST", "DELETE"] as const) {
+      const response = await route[method](new NextRequest(getWorkspaceMcpResource(a), { method,
+        headers: { authorization: `Bearer ${canonical.access_token}` } }), context);
+      expect(response.status).toBe(503);
+    }
+    expect((await metadata.GET(new NextRequest(getWorkspaceMcpResource(a)), context)).status).toBe(503);
+    expect((await fresh(() => listMcpWorkspaceConnections(actor, a)))[0].status).toBe("paused");
+    expect(await fresh(() => resolveMcpOAuthAccessToken(legacy.access_token, `${root}/mcp`))).not.toBeNull();
+    await expect(fresh(() => refreshMcpAccessToken({ clientId, refreshToken: legacy.refresh_token }))).resolves.toHaveProperty("access_token");
+    await expect(exchange(await issue(b, `${root}/mcp`), b, `${root}/mcp`)).resolves.toHaveProperty("access_token");
+    vi.stubEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", "true");
+    expect(await resolve(canonical.access_token)).not.toBeNull();
+    await expect(exchange(pending)).resolves.toHaveProperty("access_token");
   });
   it("does not permit an explicit foreign connection id and preserves endpoint identity across rename", async () => {
     const ta = await connect(); const oa = await origin(ta.access_token);
@@ -197,6 +229,14 @@ describe("workspace MCP connection contract on real PostgreSQL", () => {
   });
   it("binds agent delegated work to the issued credential, not a later rotation/regrant", async () => {
     const issued = await fresh(() => issueAgentCredential(actor, { workspaceId: a, label: "Synthetic MCP agent", scopes: ["workspace:read"] }));
+    const { authenticateMcpRequest } = await import("../../mcp/src/auth");
+    const canonicalSession = await fresh(() => authenticateMcpRequest(`Bearer ${issued.token}`, { workspaceId: a, resourceUrl: getWorkspaceMcpResource(a) }));
+    expect(canonicalSession.mcpOrigin).toMatchObject({ kind: "agent", workspaceId: a, canonical: true });
+    vi.stubEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", "false");
+    await expect(fresh(() => authenticateMcpRequest(`Bearer ${issued.token}`, { workspaceId: a, resourceUrl: getWorkspaceMcpResource(a) }))).rejects.toMatchObject({ status: 503 });
+    await expect(fresh(() => withMcpConnectionExecution({ workspaceId: a, mcpOrigin: canonicalSession.mcpOrigin }, async () => true))).rejects.toMatchObject({ status: 503 });
+    await expect(fresh(() => authenticateMcpRequest(`Bearer ${issued.token}`))).resolves.toMatchObject({ workspaceId: a });
+    vi.stubEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", "true");
     const agent = await fresh(() => resolveAgentActorFromBearer(issued.token));
     if (agent?.kind !== "agent") throw new Error("Expected agent");
     const mcpOrigin: McpOrigin = { kind: "agent", id: agent.credentialId!, workspaceId: a, credentialVersion: agent.credentialVersion };

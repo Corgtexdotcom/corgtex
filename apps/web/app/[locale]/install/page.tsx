@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { buildInstallerPath } from "@/lib/install-helpers";
 
@@ -73,7 +73,7 @@ const TILES = [
 export default async function InstallIndexPage({ searchParams }: { searchParams: Promise<{ workspaceId?: string }> }) {
   const { workspaceId } = await searchParams;
   if (!workspaceId) return <WorkspacePicker path="/install" />;
-  const connectorUrl = getWorkspaceMcpResource(workspaceId);
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
 
   return (
     <main className="min-h-screen bg-[var(--bg)] px-4 py-10 sm:py-16">

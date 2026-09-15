@@ -298,7 +298,7 @@ export default async function CatalogItemPage({
   const host = headersList.get("host") || "localhost:3000";
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
-  const connectorUrl = getWorkspaceMcpResource(workspaceId);
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
   const integrationMessage = integrationStatusMessage({
     provider: search?.integration,
     status: search?.integrationStatus,
@@ -654,4 +654,4 @@ export default async function CatalogItemPage({
     </section>
   );
 }
-import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";

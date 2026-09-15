@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { withOAuthWorkspaceAuthorization } from "./oauth-workspace-authorization";
 import { requireWorkspaceMembership } from "./auth";
 import { lockWorkspaceMembership, supportCapabilityVersion } from "./workspace-support-access";
-import { validateMcpConsentResource, workspaceFromMcpResource } from "./mcp-resource";
+import { validateMcpConsentResource, workspaceFromMcpResource, requireWorkspaceMcpActivation } from "./mcp-resource";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
@@ -942,6 +942,7 @@ export async function exchangeMcpAuthorizationCode(params: {
       throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
     }
     if (authCode.resource && workspaceFromMcpResource(authCode.resource)) {
+      requireWorkspaceMcpActivation();
       invariant(params.resource === authCode.resource && workspaceFromMcpResource(authCode.resource) === authCode.workspaceId,
         400, "INVALID_MCP_RESOURCE", "The canonical workspace resource is required.");
     }
@@ -1019,6 +1020,7 @@ export async function refreshMcpAccessToken(params: {
     if (!token || token.revokedAt) {
       throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
     }
+    if (workspaceFromMcpResource(token.resource ?? "")) requireWorkspaceMcpActivation();
     invariant(!params.resource || (token.resource !== null && params.resource === token.resource),
       400, "INVALID_MCP_RESOURCE", "Resource parameter mismatch.");
     invariant(!params.scopes || (params.scopes.every(scope => token.scopes.includes(scope))
@@ -1105,6 +1107,7 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
     return null;
   }
   const scopedResource = workspaceFromMcpResource(expectedResource ?? "");
+  if ((scopedResource || workspaceFromMcpResource(token.resource ?? "")) && !env.MCP_WORKSPACE_CONNECTIONS_ENABLED) return null;
   if (scopedResource && (token.workspaceId !== scopedResource || token.resource !== expectedResource)) return null;
   if (expectedResource && token.resource && !areEquivalentMcpResources(token.resource, expectedResource)) {
     return null;
@@ -1153,7 +1156,8 @@ export async function listMcpWorkspaceConnections(actor: AppActor, workspaceId: 
   return rows.map(row => ({ id: row.id, workspaceId, clientName: row.client.name, resource: row.resource,
     scopes: row.scopes, createdAt: row.createdAt.toISOString(),
     legacy: !workspaceFromMcpResource(row.resource ?? ""),
-    status: row.revokedAt ? "revoked" as const : !row.client.isActive || (row.refreshExpiresAt && row.refreshExpiresAt <= new Date())
+    status: row.revokedAt ? "revoked" as const : workspaceFromMcpResource(row.resource ?? "") && !env.MCP_WORKSPACE_CONNECTIONS_ENABLED
+      ? "paused" as const : !row.client.isActive || (row.refreshExpiresAt && row.refreshExpiresAt <= new Date())
       ? "expired" as const : "connected" as const }));
 }
 

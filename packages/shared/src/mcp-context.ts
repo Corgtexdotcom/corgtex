@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Prisma } from "@prisma/client";
 import { createHash } from "node:crypto";
 
-export type McpOrigin = { kind: "oauth" | "agent"; id: string; workspaceId: string; credentialVersion?: string };
+export type McpOrigin = { kind: "oauth" | "agent"; id: string; workspaceId: string; credentialVersion?: string; canonical?: true };
 const context = new AsyncLocalStorage<McpOrigin | undefined>();
 export const getMcpOrigin = () => context.getStore();
 export const mcpCredentialVersion = (tokenHash: string) => createHash("sha256").update(tokenHash).digest("hex");
@@ -13,10 +13,12 @@ export function parseMcpOrigin(value: unknown): McpOrigin {
   const row = value as McpOrigin | null;
   if (!row || !["oauth", "agent"].includes(row.kind) || typeof row.id !== "string" || !row.id
     || typeof row.workspaceId !== "string" || !row.workspaceId
+    || (row.canonical !== undefined && row.canonical !== true)
     || (row.kind === "agent" && !/^[a-f0-9]{64}$/.test(row.credentialVersion ?? ""))) {
     throw new Error("MCP_AUTHORIZATION_REVOKED");
   }
   return { kind: row.kind, id: row.id, workspaceId: row.workspaceId,
+    ...(row.canonical ? { canonical: true } : {}),
     ...(row.kind === "agent" ? { credentialVersion: row.credentialVersion } : {}) };
 }
 

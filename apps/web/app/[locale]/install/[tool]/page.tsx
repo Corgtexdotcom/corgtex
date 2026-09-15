@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { WorkspacePicker } from "../WorkspacePicker";
 import { installerProviderSlug, type InstallerProviderKey } from "@/lib/install-helpers";
 import { GuidedProviderInstaller } from "./GuidedProviderInstaller";
@@ -60,7 +60,7 @@ export default async function GuidedInstallPage({
 
   const workspaceId = firstParam(search.workspaceId);
   if (!workspaceId) return <WorkspacePicker path={`/install/${providerKey}`} />;
-  const connectorUrl = getWorkspaceMcpResource(workspaceId);
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
   const returnTo = safeReturnTo(search.returnTo);
 
   return (

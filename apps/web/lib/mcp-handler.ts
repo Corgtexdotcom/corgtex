@@ -3,7 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { handleRouteError } from "@/lib/http";
 import { getPublicOrigin, getPublicRequestUrl } from "@/lib/public-origin";
 import { createCorgtexMcpServer, authenticateMcpRequest, McpInsufficientScopeError } from "@corgtex/mcp";
-import { AppError, MCP_CONNECTOR_DEFAULT_SCOPES, MCP_TOOL_CAPABILITIES, getMcpPublicUrl, getWorkspaceMcpResource, getWorkspaceMcpMetadataUrl, withMcpConnectionExecution } from "@corgtex/domain";
+import { AppError, MCP_CONNECTOR_DEFAULT_SCOPES, MCP_TOOL_CAPABILITIES, getMcpPublicUrl, getWorkspaceMcpResource, getWorkspaceMcpMetadataUrl, withMcpConnectionExecution, requireWorkspaceMcpActivation } from "@corgtex/domain";
 import { beginAuthorizationContext } from "@corgtex/shared";
 
 function protectedResourceMetadataUrl(request: NextRequest, workspaceId?: string) {
@@ -193,6 +193,7 @@ export function assertBoundWorkspace(request: Request, body: unknown, workspaceI
 }
 
 export function assertCanonicalMcpEndpoint(request: Request, workspaceId: string) {
+  requireWorkspaceMcpActivation();
   if (getPublicRequestUrl(request) !== getWorkspaceMcpResource(workspaceId)) {
     throw new AppError(400, "INVALID_MCP_RESOURCE", "Use the exact canonical workspace MCP endpoint.");
   }

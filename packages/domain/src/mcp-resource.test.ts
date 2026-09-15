@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-vi.mock("@corgtex/shared", () => ({ env: { APP_URL: "https://app.example.test", MCP_PUBLIC_URL: undefined } }));
+vi.mock("@corgtex/shared", () => ({ env: { APP_URL: "https://app.example.test", MCP_PUBLIC_URL: undefined, MCP_WORKSPACE_CONNECTIONS_ENABLED: true } }));
 import { getWorkspaceMcpResource, getWorkspaceMcpMetadataUrl, validateMcpConsentResource, workspaceFromMcpResource } from "./mcp-resource";
 
 describe("canonical workspace MCP resource", () => {

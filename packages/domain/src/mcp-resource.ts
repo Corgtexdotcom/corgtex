@@ -1,6 +1,15 @@
 import { env } from "@corgtex/shared";
 import { invariant } from "./errors";
 
+export function requireWorkspaceMcpActivation() {
+  invariant(env.MCP_WORKSPACE_CONNECTIONS_ENABLED, 503, "MCP_WORKSPACE_CONNECTIONS_DISABLED", "Workspace MCP connections are not active on this deployment.");
+}
+
+export function getWorkspaceMcpInstallUrl(workspaceId: string) {
+  return env.MCP_WORKSPACE_CONNECTIONS_ENABLED ? getWorkspaceMcpResource(workspaceId)
+    : `${getMcpCanonicalOrigin()}/mcp`;
+}
+
 export function getMcpCanonicalOrigin() {
   return new URL(env.MCP_PUBLIC_URL ?? env.APP_URL).origin;
 }
@@ -23,6 +32,7 @@ export function validateMcpConsentResource(resource: string, workspaceId?: strin
   invariant(bound ? !workspaceId || bound === workspaceId
     : resource === `${origin}/mcp` || resource === `${origin}/api/mcp`,
   400, "INVALID_MCP_RESOURCE", "The MCP resource must identify exactly the requested workspace on this deployment.");
+  if (bound) requireWorkspaceMcpActivation();
   return bound;
 }
 

@@ -86,6 +86,7 @@ type Env = {
   readonly MCP_PUBLIC_URL: string | undefined;
   readonly MCP_INSTANCE_REGISTRY: string | undefined;
   readonly MCP_DEFAULT_INSTANCE_SLUG: string | undefined;
+  readonly MCP_WORKSPACE_CONNECTIONS_ENABLED: boolean;
   readonly ENTERPRISE_ACCOUNT_DIRECTORY_JSON: string | undefined;
   readonly CONTROL_PLANE_MODE: boolean;
   readonly CONTROL_PLANE_AGENT_API_KEY: string | undefined;
@@ -189,6 +190,9 @@ export const env: Env = {
   },
   get MCP_DEFAULT_INSTANCE_SLUG() {
     return optional("MCP_DEFAULT_INSTANCE_SLUG");
+  },
+  get MCP_WORKSPACE_CONNECTIONS_ENABLED() {
+    return booleanFromEnv("MCP_WORKSPACE_CONNECTIONS_ENABLED", false);
   },
   get ENTERPRISE_ACCOUNT_DIRECTORY_JSON() {
     return optional("ENTERPRISE_ACCOUNT_DIRECTORY_JSON");

@@ -165,7 +165,7 @@ export default async function SettingsPage({
   const host = headersList.get("host") || "localhost:3000";
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
-  const connectorUrl = getWorkspaceMcpResource(workspaceId);
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
   const t = await getTranslations("settings");
   const format = await getFormatter();
   const aiWorkspaceProviders = listAiWorkspaceToolProviders().map((provider) => ({
@@ -432,4 +432,4 @@ export default async function SettingsPage({
     </>
   );
 }
-import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";

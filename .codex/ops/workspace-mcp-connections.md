@@ -41,12 +41,37 @@ flight; subsequent central authorization boundaries and queued work fail closed.
 
 ## Transition and rollout
 
-1. Apply the additive migration through the existing migration-before-worker
+**Runtime activation control:** `MCP_WORKSPACE_CONNECTIONS_ENABLED` is a
+server-only environment setting, default **false** when absent. There is no tenant
+API or UI that enables it. Canonical metadata, endpoint authentication (OAuth and
+persistent agents), consent, code exchange and refresh enforce the gate; existing
+canonical tokens cannot resolve while disabled. Queued canonical OAuth/agent work
+also checks it. Setup/install URLs fall back to the legacy `/mcp` URL and existing
+canonical grants display paused. Legacy endpoint/token/refresh behavior remains
+available. Explicit disconnect remains available for paused grants.
+
+The flag is an operator-controlled activation fence, **not automatic proof of
+worker compatibility**. It does not inspect provider state or infer readiness from
+web health. Nothing in the release runner, Bicep or this change automatically sets
+it true. The normal initial web-first rollout therefore leaves canonical access
+disabled. Only the authorized release owner enables it after retained matching
+worker/revision and old-worker-drain proof. Configure it consistently for web and
+worker; do not enable it on the initial web update.
+
+1. Leave `MCP_WORKSPACE_CONNECTIONS_ENABLED` absent or false on web and worker.
+   Apply the additive migration through the existing migration-before-worker
    release contract. It adds nullable support epochs on MCP codes/tokens and
    nullable MCP origin on Event/WorkflowJob; no live migration is part of local QA.
 2. Deploy the matching web and worker code. Do not enable new canonical clients
-   while old workers that ignore MCP provenance are still executing. Retain the
-   existing release writer and deployment readiness/rollback controls.
+   while old workers that ignore MCP provenance are still executing. The release
+   owner must retain immutable worker-image/revision proof and evidence that all
+   incompatible old workers have stopped/drained. The existing worker health
+   response has release metadata and phase, but one healthy new worker does not
+   prove fleet-wide drain. Retain the existing release writer and deployment
+   readiness/rollback controls. With those prerequisites satisfied, separately
+   set `MCP_WORKSPACE_CONNECTIONS_ENABLED=true` on the matching workers, then web,
+   through the authorized configuration/release process; verify readback and
+   scoped acceptance. Missing proof means leave it off, not a new inferred gate.
 3. Existing `/mcp` and `/api/mcp` clients remain explicit legacy endpoints. Old
    null/global-resource tokens are never accepted at a canonical endpoint. New
    workspace installs use canonical URLs and unique config names. Reconnect each
@@ -59,8 +84,14 @@ flight; subsequent central authorization boundaries and queued work fail closed.
 5. Predeployment Event/WorkflowJob records without MCP origin cannot be attributed
    retrospectively. Confirm old-worker overlap and existing pending work before
    claiming connection-specific cancellation for the rollout. Do not bulk purge
-   or invent provenance. Rollback to old worker code loses the new check and
-   requires an explicit release decision, not an automatic security guarantee.
+   or invent provenance. Before rollback to pre-provenance workers, disable the
+   flag on web, prove new canonical ingress has stopped, and resolve/drain pending
+   canonical work with compatible workers under the release owner's authority.
+   Disabling the flag on compatible workers denies queued canonical execution
+   through normal job retry/failure handling; it is not a resumable queue-pause
+   mechanism. The flag cannot fence an old binary that does not read it. Therefore
+   do not roll old workers back onto unresolved canonical jobs or claim the flag
+   alone makes that rollback safe. No automatic queue purge or rollback is added.
 
 The UI selects a workspace explicitly and displays its stable ID, scoped URL and
 individual connection status. Native Claude/ChatGPT acceptance must separately

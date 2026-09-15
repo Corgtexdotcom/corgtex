@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { WorkspacePicker } from "../WorkspacePicker";
 import { ClaudeInstaller } from "./ClaudeInstaller";
 
@@ -24,7 +24,7 @@ export default async function ConnectClaudePage({
   const search = await searchParams;
   const workspaceId = Array.isArray(search.workspaceId) ? search.workspaceId[0] : search.workspaceId ?? null;
   if (!workspaceId) return <WorkspacePicker path="/install/claude" />;
-  const connectorUrl = getWorkspaceMcpResource(workspaceId);
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
   const returnTo = safeReturnTo(search.returnTo);
 
   return (

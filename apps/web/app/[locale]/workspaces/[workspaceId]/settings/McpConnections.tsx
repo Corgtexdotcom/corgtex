@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Copy, RefreshCw, Unplug } from "lucide-react";
 
 type Connection = { id: string; clientName: string; resource: string | null; legacy: boolean;
-  status: "connected" | "revoked" | "expired"; createdAt: string };
+  status: "connected" | "revoked" | "expired" | "paused"; createdAt: string };
 export function McpConnections({ workspaceId, connectorUrl }: { workspaceId: string; connectorUrl: string }) {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,7 +53,7 @@ export function McpConnections({ workspaceId, connectorUrl }: { workspaceId: str
           <code className="block break-all text-xs text-[var(--text-muted)]">{connection.id}</code>
           <p className="text-sm">{connection.status}{connection.legacy ? " - Legacy endpoint: reconnect with this workspace URL" : ""}</p>
         </div>
-        {connection.status === "connected" ? <button type="button" className="button secondary shrink-0"
+        {connection.status === "connected" || connection.status === "paused" ? <button type="button" className="button secondary shrink-0"
           aria-label={`Disconnect ${connection.clientName} ${connection.id}`} title="Disconnect this connection"
           disabled={pending !== null} onClick={() => void disconnect(connection.id)}><Unplug size={16} /></button> : null}
       </li>)}

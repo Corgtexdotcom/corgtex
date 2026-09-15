@@ -4,16 +4,19 @@ import { requireWorkspaceMembership } from "./auth";
 import { supportCapabilityVersion } from "./workspace-support-access";
 import { invariant } from "./errors";
 import { getMcpConnectorInstance } from "./mcp-connector";
+import { workspaceFromMcpResource, requireWorkspaceMcpActivation } from "./mcp-resource";
 
 export async function withMcpConnectionExecution<T>(record: { workspaceId: string | null; mcpOrigin?: unknown }, run: () => PromiseLike<T>): Promise<T> {
   if (record.mcpOrigin == null) return runWithMcpOrigin(undefined, run);
   const origin = parseMcpOrigin(record.mcpOrigin);
+  if (origin.canonical) requireWorkspaceMcpActivation();
   invariant(record.workspaceId === origin.workspaceId, 403, "MCP_AUTHORIZATION_REVOKED", "MCP connection authorization is unavailable.");
   await assertMcpOriginActive(prisma, origin, origin.workspaceId);
   let actor: AppActor;
   let userId: string | null, version: number | null;
   if (origin.kind === "oauth") {
     const token = await prisma.mcpOAuthAccessToken.findUniqueOrThrow({ where: { id: origin.id }, include: { user: true } });
+    if (workspaceFromMcpResource(token.resource ?? "")) requireWorkspaceMcpActivation();
     invariant(getMcpConnectorInstance(token.instanceSlug), 403, "MCP_AUTHORIZATION_REVOKED", "MCP connection authorization is unavailable.");
     actor = { kind: "user", user: token.user };
     userId = token.userId; version = token.supportGrantVersion;
