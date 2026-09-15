@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { prisma } from "@corgtex/shared";
-import { assertDemoCredentialsScoped, revokeDemoCredentials } from "../../../scripts/lib/demo-credentials.mjs";
+import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, revokeDemoCredentials } from "../../../scripts/lib/demo-credentials.mjs";
 
 describe("demo legacy credential retirement", () => {
   it("revokes access and refresh credentials, consumes codes, and refuses credentials outside the target", async () => {
@@ -13,6 +13,16 @@ describe("demo legacy credential retirement", () => {
     let clientId: string | undefined;
     let definitionId: string | undefined;
     try {
+      const sso = await prisma.workspaceSsoConfig.create({ data: { workspaceId: workspace.id, provider: "GOOGLE", clientId: "synthetic", clientSecretEnc: "synthetic", allowedDomains: ["example.test"], isEnabled: true } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("external access");
+      await prisma.workspaceSsoConfig.delete({ where: { id: sso.id } });
+      const transcript = await prisma.meetingTranscriptSourceConnection.create({ data: { workspaceId: workspace.id, provider: "FATHOM", authMode: "WEBHOOK", webhookSecretEnc: "synthetic" } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("external access");
+      await prisma.meetingTranscriptSourceConnection.delete({ where: { id: transcript.id } });
+      const anonymousAgent = await prisma.agentCredential.create({ data: { workspaceId: workspace.id, label: "Synthetic bootstrap", tokenHash: `bootstrap-${key}`, scopes: [] } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id, [user.id])).rejects.toThrow("non-fixture credentials");
+      await prisma.agentCredential.delete({ where: { id: anonymousAgent.id } });
+      await assertDemoWorkspaceDisconnected(prisma, workspace.id);
       const app = await prisma.oAuthApp.create({ data: { workspaceId: workspace.id, clientId: key, clientSecret: "unused", name: "Synthetic legacy app", redirectUris: [], scopes: [] } });
       const client = await prisma.mcpOAuthClient.create({ data: { clientId: key, name: "Synthetic legacy client", redirectUris: [], scopes: [] } });
       clientId = client.id;
@@ -32,6 +42,9 @@ describe("demo legacy credential retirement", () => {
       expect((await prisma.oAuthAccessToken.findUniqueOrThrow({ where: { id: oauth.id } })).revokedAt).toBeNull();
       expect((await prisma.agentCredential.findUniqueOrThrow({ where: { id: outside.id } })).isActive).toBe(true);
       await prisma.agentCredential.delete({ where: { id: outside.id } });
+      const ssoIdentity = await prisma.userSsoIdentity.create({ data: { userId: user.id, provider: "GOOGLE", providerSubjectId: key, email: user.email } });
+      await expect(assertDemoCredentialsScoped(prisma, workspace.id, [user.id])).rejects.toThrow("personal SSO");
+      await prisma.userSsoIdentity.delete({ where: { id: ssoIdentity.id } });
       const external = await prisma.externalMcpConnection.create({ data: { workspaceId: workspace.id, userId: user.id, providerKey: "synthetic", displayName: "Synthetic provider", serverUrl: "https://example.test", accessTokenEnc: "synthetic" } });
       await expect(assertDemoCredentialsScoped(prisma, workspace.id, [user.id])).rejects.toThrow("personal provider");
       await prisma.externalMcpConnection.delete({ where: { id: external.id } });

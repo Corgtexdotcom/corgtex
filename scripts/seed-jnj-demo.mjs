@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { randomBytes, scryptSync } from "node:crypto";
 
-import { assertDemoCredentialsScoped, revokeDemoCredentials } from "./lib/demo-credentials.mjs";
+import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, revokeDemoCredentials } from "./lib/demo-credentials.mjs";
 
 const prisma = new PrismaClient();
 
@@ -2351,6 +2351,7 @@ async function main() {
   if (existingWorkspace && await prisma.member.count({ where: { workspaceId: existingWorkspace.id, user: { email: { notIn: TEAM_MEMBERS.map((member) => member.email) } } } })) {
     throw new Error("Existing demo has non-fixture members; review ownership before refresh");
   }
+  await assertDemoWorkspaceDisconnected(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
   await assertDemoCredentialsScoped(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
 
   // 1. Create Workspace
