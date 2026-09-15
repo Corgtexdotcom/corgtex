@@ -144,6 +144,27 @@ Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real R
 - The migration job also receives `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `bootstrapAdminEmail` and the `admin-password` Key Vault secret so the production bootstrap seed can complete.
 - The worker runs from the existing worker image and exposes `/health` on `WORKER_HEALTH_PORT`.
 
+### Routine fleet releases
+
+The separate `scripts/release/fleet-release-runner.mjs` Azure update path sets web
+startup to `migrate-and-web`. It imports both release-tagged images, updates web,
+waits for the exact new web revision/image to be ready, and then polls the public
+`/api/health` for `status=ok`, `database=up`, `schema=ready` and the intended Git SHA
+and image tag. Web startup applies and verifies all bundled migrations before
+starting Next.js; health also checks the bundled migration ledger. Provider Ready
+alone, an old healthy web release, or a stale schema cannot admit the worker update.
+Only after this proof may worker secrets/image be updated and its exact revision
+awaited. Normal post-deployment health, OAuth and release recording still follow.
+
+On web failure the existing worker is untouched. This is not worker quiescence:
+the old worker continues during migrations and can overlap new web traffic. Review
+schema, job payload and authorization compatibility for each release; withhold new
+support grants/work until all consuming workers enforce the new policy. Incompatible
+changes require a separately coordinated writer fence, not an automatic scale-to-zero.
+Retain previous images and use the existing serialized fleet release workflow.
+No automatic rollback, revision deactivation, scale or traffic change is added;
+image rollback does not reverse migrations or restore revoked credentials.
+
 ## Validation
 
 ```bash
