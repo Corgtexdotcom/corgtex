@@ -169,11 +169,18 @@ async function waitState(api, wanted, deadline, c, intent) {
 async function reconcileFirewall(api, i, c) {
   // A timed-out CLI may have submitted the write. Never submit it a second time.
   while (c.now() < i.workDeadline) {
-    await api.identity(); await api.boundary();
-    const s = validateServer(await api.server(), true);
-    const rules = validateRules(await api.rules(), i);
-    if (c.now() >= i.workDeadline) break;
-    if (s.state === "Ready" && rules.length === 1) return;
+    try {
+      await api.identity(); await api.boundary();
+      const rules = validateRules(await api.rules(), i);
+      // Rule creation can start Updating after an earlier Ready read.
+      const s = validateServer(await api.server(), true);
+      if (c.now() >= i.workDeadline) break;
+      if (s.state === "Ready" && rules.length === 1) return;
+    } catch (error) {
+      if (error.code === "AZURE_OPERATION_DEADLINE"
+        || (c.now() >= i.workDeadline && /^AZURE_[A-Z_]+_FAILED$/u.test(error.code ?? ""))) break;
+      throw error;
+    }
     await c.sleep(Math.min(5000, i.workDeadline - c.now()));
   }
   throw new ProbeError("FIREWALL_CREATE_UNPROVEN");

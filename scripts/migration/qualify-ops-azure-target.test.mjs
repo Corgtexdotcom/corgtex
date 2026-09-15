@@ -108,6 +108,44 @@ describe("target qualification lifecycle", () => {
     await qualify(api, i, async () => { events.push("probe"); }, async () => {}, c);
     expect(c.time - i.createdAt).toBe(10000); expect(events.filter(e => e === "submitted")).toHaveLength(1);
   });
+  it("requires fresh Ready after the owned rule read starts a nine-minute Updating transition", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    const rules = api.rules; let transitioned = false;
+    api.rules = async () => {
+      const result = await rules();
+      if (result.length && !transitioned) { transitioned = true; api.current.state = "Updating"; }
+      return result;
+    };
+    c.sleep = async ms => { c.time += ms; if (c.time >= i.createdAt + 540000) api.current.state = "Ready"; };
+    await qualify(api, i, async () => {
+      expect(api.current.state).toBe("Ready");
+      expect(c.time - i.createdAt).toBe(540000); events.push("probe");
+    }, async () => {}, c);
+    expect(events.filter(e => e === "create")).toHaveLength(1);
+    expect(events.filter(e => e === "probe")).toHaveLength(1);
+  });
+  it.each(["AZURE_OPERATION_DEADLINE", "AZURE_SERVER_READ_FAILED"])("reports exhausted reconciliation as unproven for %s", async code => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c); const create = api.createRule;
+    api.createRule = async intent => {
+      await create(intent);
+      api.server = async () => { c.time = i.workDeadline; throw new ProbeError(code); };
+    };
+    await expect(qualify(api, i, async () => events.push("probe"), async () => {}, c)).rejects.toThrow("FIREWALL_CREATE_UNPROVEN");
+    expect(events.filter(e => e === "create")).toHaveLength(1); expect(events).not.toContain("probe");
+    expect(api.deadline).toBe(i.workDeadline);
+  });
+  it.each(["AZURE_SERVER_READ_FAILED", "AZURE_PRINCIPAL_MISMATCH"])("preserves nondeadline or identity errors: %s", async code => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c); const create = api.createRule;
+    api.createRule = async intent => {
+      await create(intent);
+      api.identity = async () => {
+        if (code === "AZURE_PRINCIPAL_MISMATCH") c.time = i.workDeadline;
+        throw new ProbeError(code);
+      };
+    };
+    await expect(qualify(api, i, async () => events.push("probe"), async () => {}, c)).rejects.toThrow(code);
+    expect(events.filter(e => e === "create")).toHaveLength(1); expect(events).not.toContain("probe");
+  });
   it.each(["Updating", "missing-rule"])("leaves %s create unproven at the original total work deadline", async mode => {
     const { api, c, events } = setup(); const i = await prepare(api, inputs, c); const create = api.createRule;
     c.time = i.workDeadline - 6001;

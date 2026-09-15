@@ -37,11 +37,16 @@ the remaining window, it reports unresolved rather than successful cleanup.
 Unexpected target identity or foreign access fails closed.
 Firewall CREATE is also submitted once. A failed/timed-out create response is
 not proof that Azure rejected it: readback must establish the exact intent-owned
-rule with identical start/end IPv4 (one /32), and the verified provider must
-return to Ready before the database probe. Missing rule or prolonged Updating
+rule with identical start/end IPv4 (one /32), followed by a fresh provider Ready
+read before the database probe. An earlier Ready read cannot establish readiness
+after rule creation starts Updating. Missing rule or prolonged Updating
 exhausts the original work deadline as `FIREWALL_CREATE_UNPROVEN`; it never
 triggers a second CREATE or a broader rule. Identity, role, boundary and rule
 ownership drift still fail closed during reconciliation.
+The same unproven code covers an Azure operation-deadline rejection or a failed
+Azure read that exhausts the work deadline during this reconciliation. A read
+failure before that deadline retains its specific Azure error; identity or
+ownership validation failures are never relabeled as deadline exhaustion.
 
 Cleanup accepts Updating only within the verified owned execution. It waits for
 the transition to settle before deleting the owned rule, and again before STOP
