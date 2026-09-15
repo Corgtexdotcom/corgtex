@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 import { ProbeError } from "./probe-ops-azure-target.mjs";
 
 export const SOURCE_IMAGE = "sha256:dcb131869da366a7f5a9f38f12e4d57fa19d99e786959d048be67d26470c3b36";
+// The same pinned archive's ARM64 manifest (63ef36b0...) links this config.
+// Classic Docker addresses the config; containerd can address the OCI index.
+export const SOURCE_CONFIG_IMAGE = "sha256:2c90b56d40e03c0f17096231024cdf66897ae0c2b9251dfbf6ce69c43e3917b4";
 export const SOURCE_PINS = {
   "source-image.tar": "b9d445db75b43d2e8d3ee9640572b98d9e0b7024f247866ea19084ec213fae05",
   "synthetic.dump": "a95a642469e99139d36b755585339299af4e9a511356550c3dd230e3b93ca57e",

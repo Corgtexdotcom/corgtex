@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { POSTGRES_CLIENT_IMAGE } from "./run-postgres-restore-rehearsal.mjs";
-import { SOURCE_IMAGE, SOURCE_PINS, verifyBundle, pinnedBytes, readSourceBaseline, check, ATTEST_SQL, assertRuntime, collectCorpus, compareCorpus } from "./synthetic-ops-source.mjs";
+import { SOURCE_IMAGE, SOURCE_CONFIG_IMAGE, SOURCE_PINS, verifyBundle, pinnedBytes, readSourceBaseline, check, ATTEST_SQL, assertRuntime, collectCorpus, compareCorpus } from "./synthetic-ops-source.mjs";
 import { localToolEnvironment } from "./synthetic-subprocess.mjs";
 import { HOST } from "./probe-ops-azure-target.mjs";
 
@@ -36,12 +36,25 @@ export async function withDatabase(config, run) {
 export function dockerTools(supervisor, deadline, env = process.env) {
   return args => supervisor.run("docker", args, { deadline, env: localToolEnvironment(env), maxBytes: 4 * 1024 * 1024 });
 }
+export async function resolveSourceImage(docker) {
+  let images;
+  try { images = JSON.parse(await docker(["image", "inspect", SOURCE_IMAGE])); }
+  catch (error) {
+    if (error.code !== "CHILD_FAILED") throw error;
+    images = JSON.parse(await docker(["image", "inspect", SOURCE_CONFIG_IMAGE]));
+  }
+  check(images.length === 1 && [SOURCE_IMAGE, SOURCE_CONFIG_IMAGE].includes(images[0].Id)
+    && images[0].Architecture === "arm64" && images[0].Os === "linux", "SOURCE_IMAGE_MISMATCH");
+  return images[0].Id;
+}
 export async function inspectSource(docker, owned) {
   check(/^[a-f0-9-]{36}$/u.test(owned.id) && owned.network === `syn-ops-${owned.id}` && owned.container === `syn-source-${owned.id}`, "FIXTURE_IDENTITY_INVALID");
   const [network] = JSON.parse(await docker(["network", "inspect", owned.network]));
   const [container] = JSON.parse(await docker(["inspect", owned.container]));
   check(network.Internal === true && network.EnableIPv6 === false && network.Labels?.[LABEL] === owned.id
-    && container.Config.Labels?.[LABEL] === owned.id && container.Image === SOURCE_IMAGE
+    && container.Config.Labels?.[LABEL] === owned.id
+    && [SOURCE_IMAGE, SOURCE_CONFIG_IMAGE].includes(owned.image ?? SOURCE_IMAGE)
+    && container.Image === (owned.image ?? SOURCE_IMAGE)
     && Object.keys(container.NetworkSettings.Networks).join() === owned.network
     && Object.keys(container.HostConfig.PortBindings ?? {}).length === 0, "FIXTURE_NETWORK_OR_OWNER_DRIFT");
   const address = container.NetworkSettings.Networks[owned.network].IPAddress;
@@ -116,11 +129,10 @@ export async function bootstrapSource({ bundle, directory, evidenceDirectory, su
   phase("LOAD_IMAGE");
   await docker(["load", "--input", resolve(bundle, "source-image.tar")]);
   phase("INSPECT_SOURCE_IMAGE");
-  const [image] = JSON.parse(await docker(["image", "inspect", SOURCE_IMAGE]));
-  check(image.Id === SOURCE_IMAGE && image.Architecture === "arm64" && image.Os === "linux", "SOURCE_IMAGE_MISMATCH");
+  const image = await resolveSourceImage(docker);
   phase("INSPECT_CLIENT_IMAGE");
   await docker(["image", "inspect", POSTGRES_CLIENT_IMAGE]);
-  const id = randomUUID(), owned = { id, network: `syn-ops-${id}`, container: `syn-source-${id}` };
+  const id = randomUUID(), owned = { id, network: `syn-ops-${id}`, container: `syn-source-${id}`, image };
   save(`${directory}/local-owner.json`, owned);
   save(`${evidenceDirectory}/local-owner.json`, owned);
   phase("TLS");
@@ -139,7 +151,7 @@ export async function bootstrapSource({ bundle, directory, evidenceDirectory, su
     "--mount", `type=bind,source=${tls},target=/tls,readonly`,
     "--mount", `type=bind,source=${resolve(bundle, "synthetic.dump")},target=/synthetic.dump,readonly`,
     "-e", "POSTGRES_PASSWORD=synthetic-local-only", "-e", "POSTGRES_INITDB_ARGS=--locale=en_US.utf8 --encoding=UTF8",
-    "--entrypoint", "sh", SOURCE_IMAGE, "-c",
+    "--entrypoint", "sh", image, "-c",
     "cp /tls/server.crt /tmp/server.crt && cp /tls/server.key /tmp/server.key && chown postgres:postgres /tmp/server.* && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key"]);
   phase("INSPECT_NETWORK");
   const { address } = await inspectSource(docker, owned);
