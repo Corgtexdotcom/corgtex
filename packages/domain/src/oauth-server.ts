@@ -1,4 +1,5 @@
 import { prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
+import { withOAuthWorkspaceAuthorization } from "./oauth-workspace-authorization";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
@@ -163,20 +164,22 @@ export async function issueAuthorizationCode(actor: AppActor, params: {
 
   const code = `code_${randomOpaqueToken()}`;
 
-  await prisma.oAuthAuthorizationCode.create({
-    data: {
-      appId: app.id,
-      userId: actor.user.id,
-      workspaceId: params.workspaceId,
-      code: sha256(code),
-      redirectUri: params.redirectUri,
-      scopes,
-      // Short expiry (10 mins) as per OAuth best practices
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-    },
-  });
+  return withOAuthWorkspaceAuthorization(actor.user.id, params.workspaceId, async tx => {
+    await tx.oAuthAuthorizationCode.create({
+      data: {
+        appId: app.id,
+        userId: actor.user.id,
+        workspaceId: params.workspaceId,
+        code: sha256(code),
+        redirectUri: params.redirectUri,
+        scopes,
+        // Short expiry (10 mins) as per OAuth best practices
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
 
-  return code;
+    return code;
+  });
 }
 
 export async function exchangeAuthorizationCode(params: {
@@ -192,84 +195,89 @@ export async function exchangeAuthorizationCode(params: {
   }
 
   const codeHash = sha256(params.code);
-  const authCode = await prisma.oAuthAuthorizationCode.findUnique({
-    where: { code: codeHash },
-  });
+  const candidate = await prisma.oAuthAuthorizationCode.findUnique({ where: { code: codeHash } });
+  invariant(candidate, 400, "INVALID_INPUT", "Invalid authorization code.");
+  return withOAuthWorkspaceAuthorization(candidate.userId, candidate.workspaceId, async tx => {
+    const authCode = await tx.oAuthAuthorizationCode.findUnique({
+      where: { code: codeHash },
+    });
 
-  if (!authCode) {
-    throw new AppError(400, "INVALID_INPUT", "Invalid authorization code.");
-  }
+    if (!authCode) {
+      throw new AppError(400, "INVALID_INPUT", "Invalid authorization code.");
+    }
 
-  if (authCode.usedAt) {
-    // Standard OAuth 2.0 security: if a code is used twice, we should
-    // ideally revoke all tokens issued by that code. Keeping it simple below.
-    throw new AppError(400, "INVALID_INPUT", "Authorization code already used.");
-  }
+    if (authCode.usedAt) {
+      // Standard OAuth 2.0 security: if a code is used twice, we should
+      // ideally revoke all tokens issued by that code. Keeping it simple below.
+      throw new AppError(400, "INVALID_INPUT", "Authorization code already used.");
+    }
 
-  if (new Date() > authCode.expiresAt) {
-    throw new AppError(400, "INVALID_INPUT", "Authorization code expired.");
-  }
+    if (new Date() > authCode.expiresAt) {
+      throw new AppError(400, "INVALID_INPUT", "Authorization code expired.");
+    }
 
-  if (authCode.appId !== app.id) {
-    throw new AppError(400, "INVALID_INPUT", "Authorization code not issued for this client.");
-  }
+    if (authCode.appId !== app.id) {
+      throw new AppError(400, "INVALID_INPUT", "Authorization code not issued for this client.");
+    }
 
-  if (authCode.redirectUri !== params.redirectUri) {
-    throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
-  }
+    if (authCode.redirectUri !== params.redirectUri) {
+      throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
+    }
 
-  // Mark code as used
-  await prisma.oAuthAuthorizationCode.update({
-    where: { id: authCode.id },
-    data: { usedAt: new Date() },
-  });
+    // Mark code as used
+    await tx.oAuthAuthorizationCode.update({
+      where: { id: authCode.id },
+      data: { usedAt: new Date() },
+    });
 
-  const accessTokenToken = `at_${randomOpaqueToken()}`;
-  const refreshTokenToken = `rt_${randomOpaqueToken()}`;
+    const accessTokenToken = `at_${randomOpaqueToken()}`;
+    const refreshTokenToken = `rt_${randomOpaqueToken()}`;
 
-  // 1 hour for access token, 30 days for refresh token
-  const expiresInSeconds = 3600;
-  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
-  const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    // 1 hour for access token, 30 days for refresh token
+    const expiresInSeconds = 3600;
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+    const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  const tokenParams = {
-    appId: app.id,
-    userId: authCode.userId,
-    workspaceId: authCode.workspaceId,
-    tokenHash: sha256(accessTokenToken),
-    refreshHash: sha256(refreshTokenToken),
-    scopes: authCode.scopes,
-    expiresAt,
-    refreshExpiresAt,
-  };
-
-  // Find any existing token for this user+app+workspace combination and update or create new
-  const existingToken = await prisma.oAuthAccessToken.findFirst({
-    where: {
+    const tokenParams = {
       appId: app.id,
       userId: authCode.userId,
       workspaceId: authCode.workspaceId,
-    },
+      tokenHash: sha256(accessTokenToken),
+      refreshHash: sha256(refreshTokenToken),
+      scopes: authCode.scopes,
+      expiresAt,
+      refreshExpiresAt,
+      revokedAt: null,
+    };
+
+    // Find any existing token for this user+app+workspace combination and update or create new
+    const existingToken = await tx.oAuthAccessToken.findFirst({
+      where: {
+        appId: app.id,
+        userId: authCode.userId,
+        workspaceId: authCode.workspaceId,
+      },
+    });
+
+    if (existingToken) {
+      await tx.oAuthAccessToken.update({
+        where: { id: existingToken.id },
+        data: tokenParams,
+      });
+    } else {
+      await tx.oAuthAccessToken.create({
+        data: tokenParams,
+      });
+    }
+
+    return {
+      access_token: accessTokenToken,
+      token_type: "bearer",
+      expires_in: expiresInSeconds,
+      refresh_token: refreshTokenToken,
+      scope: authCode.scopes.join(" "),
+    };
   });
-
-  if (existingToken) {
-    await prisma.oAuthAccessToken.update({
-      where: { id: existingToken.id },
-      data: tokenParams,
-    });
-  } else {
-    await prisma.oAuthAccessToken.create({
-      data: tokenParams,
-    });
-  }
-
-  return {
-    access_token: accessTokenToken,
-    token_type: "bearer",
-    expires_in: expiresInSeconds,
-    refresh_token: refreshTokenToken,
-    scope: authCode.scopes.join(" "),
-  };
 }
 
 export async function refreshAccessToken(params: {
@@ -285,46 +293,53 @@ export async function refreshAccessToken(params: {
     throw new AppError(401, "UNAUTHENTICATED", "Invalid client secret.");
   }
 
-  const token = await prisma.oAuthAccessToken.findUnique({
+  const candidate = await prisma.oAuthAccessToken.findUnique({
     where: { refreshHash: sha256(params.refreshToken) },
   });
+  invariant(candidate && !candidate.revokedAt, 401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+  return withOAuthWorkspaceAuthorization(candidate.userId, candidate.workspaceId, async tx => {
+    const token = await tx.oAuthAccessToken.findUnique({
+      where: { refreshHash: sha256(params.refreshToken) },
+    });
 
-  if (!token || token.revokedAt) {
-    throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
-  }
+    if (!token || token.revokedAt) {
+      throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+    }
 
-  if (token.refreshExpiresAt && new Date() > token.refreshExpiresAt) {
-    throw new AppError(401, "UNAUTHENTICATED", "Refresh token expired.");
-  }
+    if (token.refreshExpiresAt && new Date() > token.refreshExpiresAt) {
+      throw new AppError(401, "UNAUTHENTICATED", "Refresh token expired.");
+    }
 
-  if (token.appId !== app.id) {
-    throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
-  }
+    if (token.appId !== app.id) {
+      throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
+    }
 
-  const accessTokenToken = `at_${randomOpaqueToken()}`;
-  const refreshTokenToken = `rt_${randomOpaqueToken()}`; // Optional: rotating refresh tokens
+    const accessTokenToken = `at_${randomOpaqueToken()}`;
+    const refreshTokenToken = `rt_${randomOpaqueToken()}`; // Optional: rotating refresh tokens
 
-  const expiresInSeconds = 3600;
-  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
-  const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const expiresInSeconds = 3600;
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+    const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  await prisma.oAuthAccessToken.update({
-    where: { id: token.id },
-    data: {
-      tokenHash: sha256(accessTokenToken),
-      refreshHash: sha256(refreshTokenToken),
-      expiresAt,
-      refreshExpiresAt,
-    },
+    const rotated = await tx.oAuthAccessToken.updateMany({
+      where: { id: token.id, refreshHash: sha256(params.refreshToken), revokedAt: null },
+      data: {
+        tokenHash: sha256(accessTokenToken),
+        refreshHash: sha256(refreshTokenToken),
+        expiresAt,
+        refreshExpiresAt,
+      },
+    });
+    invariant(rotated.count === 1, 401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+
+    return {
+      access_token: accessTokenToken,
+      token_type: "bearer",
+      expires_in: expiresInSeconds,
+      refresh_token: refreshTokenToken,
+      scope: token.scopes.join(" "),
+    };
   });
-
-  return {
-    access_token: accessTokenToken,
-    token_type: "bearer",
-    expires_in: expiresInSeconds,
-    refresh_token: refreshTokenToken,
-    scope: token.scopes.join(" "),
-  };
 }
 
 export async function resolveOAuthAccessToken(tokenString: string) {

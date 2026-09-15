@@ -19,8 +19,12 @@ afterEach(() => {
 });
 
 function installSharedMock(prismaMock: Record<string, any>, envOverrides: Record<string, string | undefined> = {}) {
+  prismaMock.$transaction ??= (run: (tx: unknown) => unknown) => run(prismaMock);
+  prismaMock.$queryRaw ??= vi.fn().mockResolvedValue([]);
+  prismaMock.workspaceSupportGrant ??= { findUnique: vi.fn().mockResolvedValue(null) };
   vi.doMock("@corgtex/shared", () => ({
     prisma: prismaMock,
+    getSupportAuthorizationContext: () => undefined,
     env: {
       APP_URL: "https://app.test",
       MCP_INSTANCE_REGISTRY: undefined,

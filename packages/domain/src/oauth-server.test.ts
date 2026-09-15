@@ -8,6 +8,10 @@ const {
   sha256Mock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
+    workspaceSupportGrant: { findUnique: vi.fn() },
+    member: { findUnique: vi.fn() },
     oAuthApp: {
       findUnique: vi.fn(),
     },
@@ -22,12 +26,14 @@ const {
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+  getSupportAuthorizationContext: () => undefined,
   randomOpaqueToken: randomOpaqueTokenMock,
   sha256: sha256Mock,
 }));
 
 vi.mock("./auth", () => ({
   requireWorkspaceMembership: requireWorkspaceMembershipMock,
+  requireDeploymentWorkspaceScope: vi.fn(),
 }));
 
 const actor: AppActor = {
@@ -43,6 +49,9 @@ const actor: AppActor = {
 describe("OAuth server domain", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    prismaMock.$transaction.mockImplementation(run => run(prismaMock));
+    prismaMock.workspaceSupportGrant.findUnique.mockResolvedValue(null);
+    prismaMock.member.findUnique.mockResolvedValue({ isActive: true });
     randomOpaqueTokenMock.mockReturnValue("authorization-token");
     requireWorkspaceMembershipMock.mockResolvedValue({
       id: "member-1",
