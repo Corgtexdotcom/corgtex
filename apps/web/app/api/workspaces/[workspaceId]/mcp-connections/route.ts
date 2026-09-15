@@ -6,18 +6,21 @@ import {
   requireWorkspaceMembership,
   type McpOAuthProviderKey,
   verifyAiWorkspaceProviderConnection,
+  listMcpWorkspaceConnections,
+  revokeMcpWorkspaceConnection,
 } from "@corgtex/domain";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError, validateBody } from "@/lib/http";
+import { checkApiDemoGuard } from "@/lib/demo-guard";
 
 type Params = {
   params: Promise<{ workspaceId: string }>;
 };
 
-const connectionActionSchema = z.object({
+const connectionActionSchema = z.discriminatedUnion("action", [z.object({
   action: z.literal("verify"),
   providerKey: z.string().min(1),
-});
+}), z.object({ action: z.literal("revoke"), connectionId: z.string().min(1) })]);
 
 type ConnectionResponse = {
   providerKey: string;
@@ -72,6 +75,7 @@ export async function GET(request: NextRequest, { params }: Params) {
         claude,
         connections,
         signals,
+        grants: actor.kind === "user" ? await listMcpWorkspaceConnections(actor, workspaceId) : [],
       },
       {
         headers: {
@@ -87,9 +91,11 @@ export async function GET(request: NextRequest, { params }: Params) {
 export async function POST(request: NextRequest, { params }: Params) {
   try {
     const { workspaceId } = await params;
+    await checkApiDemoGuard(workspaceId);
     const actor = await resolveRequestActor(request);
     await requireWorkspaceMembership({ actor, workspaceId });
     const parsed = await validateBody(request, connectionActionSchema);
+    if (parsed.action === "revoke") return NextResponse.json(await revokeMcpWorkspaceConnection(actor, workspaceId, parsed.connectionId));
 
     const result = await verifyAiWorkspaceProviderConnection(actor, {
       workspaceId,

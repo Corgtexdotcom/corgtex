@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { McpConnections } from "./McpConnections";
 import {
   buildInstallerPath,
   buildInstallerShareUrl,
@@ -251,6 +252,7 @@ export function CorgtexConnectorManager({ connectorUrl, workspaceName, workspace
 
   return (
     <div className="stack" style={{ gap: 16 }}>
+      {workspaceId ? <McpConnections workspaceId={workspaceId} connectorUrl={connectorUrl} /> : null}
       <div
         className="panel"
         style={{

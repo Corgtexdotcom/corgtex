@@ -1,4 +1,5 @@
 "use client";
+import { McpConnections } from "./McpConnections";
 
 import { useMemo, useState } from "react";
 
@@ -273,6 +274,7 @@ export function AiWorkspaceManager({
 
   return (
     <section className="stack" style={{ gap: 22 }}>
+      <McpConnections workspaceId={workspaceId} connectorUrl={connectorUrl} />
       <div className="panel stack" style={{ border: "1px solid var(--line)", borderRadius: 8, gap: 14, padding: 18 }}>
         <div className="stack" style={{ gap: 6 }}>
           <h2 className="nr-section-header" style={{ margin: 0 }}>Connect an AI app</h2>

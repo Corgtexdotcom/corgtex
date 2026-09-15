@@ -18,6 +18,7 @@ vi.mock("./auth", async (importOriginal) => {
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  getMcpOrigin: () => undefined,
   prisma: {
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),

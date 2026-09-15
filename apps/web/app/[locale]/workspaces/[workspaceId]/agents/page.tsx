@@ -1,5 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
-import { headers } from "next/headers";
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";
 import { AgentRegistryTab } from "./AgentRegistryTab";
 import { AccessControlTab } from "./AccessControlTab";
 import { ObservabilityTab } from "./ObservabilityTab";
@@ -38,11 +38,7 @@ export default async function AgentGovernancePage({
 
   const activeAgentsCount = agents.filter(a => a.enabled).length;
 
-  const headersList = await headers();
-  const host = headersList.get("host") || "localhost:3000";
-  const protocol = host.includes("localhost") ? "http" : "https";
-  const origin = `${protocol}://${host}`;
-  const mcpUrl = `${origin}/api/mcp`;
+  const mcpUrl = getWorkspaceMcpInstallUrl(workspaceId);
 
   return (
     <>

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { mcpConnectionName } from "@/lib/install-helpers";
 
 type Credential = {
   id: string;
@@ -30,6 +31,7 @@ function missingScopes(cred: Credential, defaultScopes: string[]): string[] {
 }
 
 export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials, defaultScopes, scopeRegistry }: Props) {
+  const connectionName = mcpConnectionName(mcpUrl);
   const router = useRouter();
   const [credentials, setCredentials] = useState<Credential[]>(initialCredentials);
   const [loadingProvider, setLoadingProvider] = useState<Provider | null>(null);
@@ -212,40 +214,6 @@ export function AgentConnectionManager({ workspaceId, mcpUrl, initialCredentials
         {provider === "Claude Desktop" && (
           <>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
-              <strong>{t("opt1QuickSetup")}</strong>
-            </p>
-            <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 8 }}>
-              {t("descQuickSetup")}
-            </p>
-            <div style={{ position: "relative", marginBottom: 24 }}>
-              <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
-                <code style={{ fontFamily: "monospace", color: "var(--code-fg)" }}>{`cat > ~/Library/Application\\ Support/Claude/claude_desktop_config.json << 'EOF'
-{
-  "mcpServers": {
-    "corgtex": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote@latest",
-        "${mcpUrl}",
-        "--header",
-        "Authorization: Bearer ${token}"
-      ]
-    }
-  }
-}
-EOF`}</code>
-              </pre>
-              <button
-                onClick={() => handleCopy(`cat > ~/Library/Application\\ Support/Claude/claude_desktop_config.json << 'EOF'\n{\n  "mcpServers": {\n    "corgtex": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "mcp-remote@latest",\n        "${mcpUrl}",\n        "--header",\n        "Authorization: Bearer ${token}"\n      ]\n    }\n  }\n}\nEOF`)}
-                className="button small"
-                style={{ position: "absolute", top: 12, right: 12 }}
-              >
-                {copied ? t("btnCopied") : t("btnCopy")}
-              </button>
-            </div>
-
-            <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
               <strong>{t("opt2ManualSetup")}</strong>
             </p>
             <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 12 }}>
@@ -255,7 +223,7 @@ EOF`}</code>
               <pre style={{ background: "black", padding: 16, borderRadius: 6, fontSize: "0.85rem", overflowX: "auto", border: "1px solid var(--line)", margin: 0 }}>
                 <code style={{ fontFamily: "monospace", color: "var(--code-fg)" }}>{`{
   "mcpServers": {
-    "corgtex": {
+    "${connectionName}": {
       "command": "npx",
       "args": [
         "-y",
@@ -269,7 +237,7 @@ EOF`}</code>
 }`}</code>
               </pre>
               <button
-                onClick={() => handleCopy(`{\n  "mcpServers": {\n    "corgtex": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "mcp-remote@latest",\n        "${mcpUrl}",\n        "--header",\n        "Authorization: Bearer ${token}"\n      ]\n    }\n  }\n}`)}
+                onClick={() => handleCopy(`{\n  "mcpServers": {\n    "${connectionName}": {\n      "command": "npx",\n      "args": [\n        "-y",\n        "mcp-remote@latest",\n        "${mcpUrl}",\n        "--header",\n        "Authorization: Bearer ${token}"\n      ]\n    }\n  }\n}`)}
                 className="button small"
                 style={{ position: "absolute", top: 12, right: 12 }}
               >

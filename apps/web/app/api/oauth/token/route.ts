@@ -20,6 +20,7 @@ export async function POST(request: NextRequest) {
       bodyData = await request.json();
     } else if (contentType.includes("application/x-www-form-urlencoded")) {
       const formData = await request.formData();
+      if (formData.getAll("resource").length > 1) return NextResponse.json({ error: "invalid_target" }, { status: 400 });
       formData.forEach((value, key) => {
         bodyData[key] = value.toString();
       });
@@ -39,6 +40,12 @@ export async function POST(request: NextRequest) {
     }
 
     grantType = bodyData.grant_type;
+    if (bodyData.resource !== undefined && typeof bodyData.resource !== "string") {
+      return NextResponse.json({ error: "invalid_target" }, { status: 400 });
+    }
+    if (bodyData.scope !== undefined && typeof bodyData.scope !== "string") {
+      return NextResponse.json({ error: "invalid_scope" }, { status: 400 });
+    }
 
     if (!clientId) {
       return NextResponse.json({ error: "invalid_client", error_description: "Missing client credentials" }, { status: 401 });
@@ -108,6 +115,8 @@ export async function POST(request: NextRequest) {
         const tokens = await refreshMcpAccessToken({
           refreshToken,
           clientId,
+          resource: bodyData.resource,
+          scopes: bodyData.scope?.split(" ").filter(Boolean),
         });
 
         return NextResponse.json(tokens, {
@@ -141,7 +150,8 @@ export async function POST(request: NextRequest) {
     if (error instanceof AppError) {
       const isRefreshGrant = grantType === "refresh_token";
       const oauthErrorResponse = {
-        error: isRefreshGrant ? "invalid_grant" : error.status === 401 ? "invalid_client" : "invalid_grant",
+        error: error.code === "INVALID_SCOPE" ? "invalid_scope" : error.code === "INVALID_MCP_RESOURCE" ? "invalid_target"
+          : isRefreshGrant ? "invalid_grant" : error.status === 401 ? "invalid_client" : "invalid_grant",
         error_description: error.message
       };
       // Important trick for OAuth token response: Even for failures, some clients expect specific HTTP codes.

@@ -3473,6 +3473,7 @@ model WorkspacePermalink {
 
 model Event {
   id            String      @id @default(uuid())
+  mcpOrigin     Json?
   supportOriginUserId String?
   supportGrantVersion Int?
   workspaceId   String?
@@ -3497,6 +3498,7 @@ model Event {
 
 model WorkflowJob {
   id             String            @id @default(uuid())
+  mcpOrigin      Json?
   supportOriginUserId String?
   supportGrantVersion Int?
   workspaceId    String?
@@ -4970,6 +4972,7 @@ model McpOAuthClient {
 
 model McpOAuthAuthorizationCode {
   id                  String    @id @default(uuid())
+  supportGrantVersion Int?
   clientId            String
   userId              String
   workspaceId         String
@@ -4995,6 +4998,7 @@ model McpOAuthAuthorizationCode {
 
 model McpOAuthAccessToken {
   id               String    @id @default(uuid())
+  supportGrantVersion Int?
   clientId         String
   userId           String
   workspaceId      String

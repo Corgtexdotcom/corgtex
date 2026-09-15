@@ -2,6 +2,7 @@ import { env, parseAllowedWorkspaceIds, prisma, randomOpaqueToken, sha256 } from
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { supportCapabilityVersion } from "./workspace-support-access";
+import { mcpCredentialVersion } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { getOrCreateExternalAgentIdentity } from "./agent-identity";
 
@@ -202,6 +203,7 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
         isActive: true,
         createdBy: { select: { id: true } },
         supportGrantVersion: true,
+        tokenHash: true,
       },
     });
 
@@ -241,6 +243,7 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
       authProvider: "credential",
       supportOrigin,
       credentialId: credential.id,
+      credentialVersion: mcpCredentialVersion(credential.tokenHash),
       catalogItemId: credential.catalogItemId,
       label: credential.label,
       workspaceIds: [credential.workspaceId],

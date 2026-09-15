@@ -13,6 +13,7 @@ export type AgentActor = {
   authProvider: "bootstrap" | "credential" | "control-plane";
   label: string;
   credentialId?: string;
+  credentialVersion?: string;
   catalogItemId?: string | null;
   workspaceIds?: string[];
   scopes?: string[];

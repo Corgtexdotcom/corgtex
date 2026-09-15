@@ -1,7 +1,7 @@
 import type { MemberRole, Prisma } from "@prisma/client";
 import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
-import { getSupportAuthorizationContext, setSupportAuthorizationActor, setSupportAuthorizationGrant } from "@corgtex/shared";
+import { getSupportAuthorizationContext, setSupportAuthorizationActor, setSupportAuthorizationGrant, getMcpOrigin, assertMcpOriginActive } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { systemActorMemberIdentityWhere } from "./member-identity";
 
@@ -178,6 +178,8 @@ export async function requireWorkspaceMembership(params: {
   tx?: Prisma.TransactionClient;
 }) {
   const db = params.tx ?? prisma;
+  const mcpOrigin = getMcpOrigin();
+  if (mcpOrigin) await assertMcpOriginActive(db, mcpOrigin, params.workspaceId);
   setSupportAuthorizationActor(params.actor);
   await requireDeploymentWorkspaceScope(params.workspaceId, db);
 

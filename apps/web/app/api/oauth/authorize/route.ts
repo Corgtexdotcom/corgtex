@@ -15,6 +15,8 @@ import {
 } from "@corgtex/domain";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { z } from "zod";
+import { validateMcpConsentResource } from "@corgtex/domain";
+import { verifyMcpConsent } from "@/lib/mcp-consent";
 
 // This is the endpoint ChatGPT calls to start the OAuth flow.
 // Typically it's a GET, but we'll accept POST too for the user consent submission.
@@ -44,6 +46,7 @@ export async function GET(request: NextRequest) {
     const codeChallenge = url.searchParams.get("code_challenge") || "";
     const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "";
     const resource = url.searchParams.get("resource") || "";
+    if (url.searchParams.getAll("resource").length > 1) return NextResponse.json({ error: "invalid_target" }, { status: 400 });
 
     if (!clientId || !redirectUri || responseType !== "code") {
       return NextResponse.json({ error: "invalid_request", message: "Missing required parameters (client_id, redirect_uri) or invalid response_type" }, { status: 400 });
@@ -51,6 +54,7 @@ export async function GET(request: NextRequest) {
 
     const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
     if (mcpClient) {
+      if (resource) validateMcpConsentResource(resource);
       if (!isAllowedMcpRedirectUri(mcpClient.redirectUris, redirectUri)) {
         return NextResponse.json({ error: "invalid_request", message: "Redirect URI is not registered" }, { status: 400 });
       }
@@ -109,6 +113,7 @@ export async function POST(request: NextRequest) {
 
     if (contentType.includes("application/x-www-form-urlencoded")) {
       const formData = await request.formData();
+      if (formData.getAll("resource").length > 1) return NextResponse.json({ error: "invalid_target" }, { status: 400 });
       bodyData = Object.fromEntries(formData.entries());
     } else {
       // Attempt JSON fallback
@@ -129,6 +134,7 @@ export async function POST(request: NextRequest) {
       codeChallenge: z.string().optional(),
       codeChallengeMethod: z.string().optional(),
       resource: z.string().optional(),
+      consent: z.string().optional(),
     });
 
     const parsed = schema.safeParse(jsBody);
@@ -149,6 +155,11 @@ export async function POST(request: NextRequest) {
       if (scopedWorkspaceError) {
         return scopedWorkspaceError;
       }
+      const scoped = validateMcpConsentResource(body.resource || getMcpPublicUrl(), body.workspaceId);
+      const consent = scoped && actor.kind === "user" ? verifyMcpConsent(body.consent ?? "", actor.user.id, {
+        workspaceId: body.workspaceId, resource: body.resource!, clientId: body.clientId, redirectUri: body.redirectUri,
+        state: body.state ?? "", scopes: body.scopes ?? "", codeChallenge: body.codeChallenge ?? "", codeChallengeMethod: body.codeChallengeMethod ?? "",
+      }) : null;
       code = await issueMcpAuthorizationCode(actor, {
         clientId: body.clientId,
         workspaceId: body.workspaceId,
@@ -157,6 +168,7 @@ export async function POST(request: NextRequest) {
         codeChallenge: body.codeChallenge ?? "",
         codeChallengeMethod: body.codeChallengeMethod ?? "",
         resource: body.resource || getMcpPublicUrl(getPublicOrigin(request)),
+        ...(consent ? { expectedSupportGrantVersion: consent.supportGrantVersion } : {}),
       });
     } else {
       const app = await getOAuthAppByClientId(body.clientId);

@@ -150,7 +150,7 @@ export default async function WorkspaceLayout({
   const host = headersList.get("host") || "localhost:3000";
   const protocol = host.includes("localhost") ? "http" : "https";
   const origin = `${protocol}://${host}`;
-  const connectorUrl = env.MCP_PUBLIC_URL ?? `${origin}/mcp`;
+  const connectorUrl = getWorkspaceMcpInstallUrl(workspaceId);
   const currentBranding = current ? workspaceBranding(current) : { primaryName: "Corgtex", secondaryLabel: "Workspace" };
   const controlPlaneHref = getControlPlaneHref("/control-plane", locale);
   const isDemo = current?.slug === "jnj-demo";
@@ -351,3 +351,4 @@ export default async function WorkspaceLayout({
     </div>
   );
 }
+import { getWorkspaceMcpInstallUrl } from "@corgtex/domain";

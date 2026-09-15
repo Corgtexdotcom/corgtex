@@ -4,6 +4,7 @@ const findMany = vi.fn();
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  getMcpOrigin: () => undefined,
   env: { DEPLOYMENT_WORKSPACE_SCOPE_SLUG: undefined },
   prisma: {
     workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },

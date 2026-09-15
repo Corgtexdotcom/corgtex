@@ -12,7 +12,11 @@ import {
   resolveMcpClientAllowedScopes,
   resolveMcpConnectorInstanceForWorkspace,
   SCOPE_REGISTRY,
+  validateMcpConsentResource,
+  requireWorkspaceMembership,
+  supportCapabilityVersion,
 } from "@corgtex/domain";
+import { signMcpConsent } from "@/lib/mcp-consent";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
@@ -166,6 +170,11 @@ export default async function OAuthAuthorizePage(props: Props) {
   const mcpClient = await getMcpOAuthClientByClientId(clientId).catch(() => null);
 
   if (mcpClient) {
+    let boundWorkspace: string | null = null;
+    try { if (resource) boundWorkspace = validateMcpConsentResource(resource); }
+    catch (error) { return <ErrorPanel>{error instanceof Error && "code" in error && error.code === "MCP_WORKSPACE_CONNECTIONS_DISABLED"
+      ? "Workspace MCP connections are not active on this deployment. Existing legacy connections remain available."
+      : "This connector resource is not a workspace on this deployment."}</ErrorPanel>; }
     if (!isAllowedMcpRedirectUri(mcpClient.redirectUris, redirectUri)) {
       return <ErrorPanel>The connector redirect URL is not registered.</ErrorPanel>;
     }
@@ -175,6 +184,7 @@ export default async function OAuthAuthorizePage(props: Props) {
 
     const allowedWorkspaces = [];
     for (const workspace of userWorkspaces) {
+      if (boundWorkspace && workspace.id !== boundWorkspace) continue;
       const instance = await resolveMcpConnectorInstanceForWorkspace(workspace.id).catch(() => null);
       if (instance) {
         allowedWorkspaces.push({ workspace, instance });
@@ -211,6 +221,14 @@ export default async function OAuthAuthorizePage(props: Props) {
       : "this Corgtex account";
     const currentUserEmail = actor.kind === "user" ? actor.user.email : null;
     const selectedWorkspace = allowedWorkspaces[0];
+    let consent: string | undefined;
+    if (boundWorkspace && actor.kind === "user") {
+      await requireWorkspaceMembership({ actor, workspaceId: boundWorkspace });
+      consent = signMcpConsent({ userId: actor.user.id, workspaceId: boundWorkspace, resource,
+        clientId, redirectUri, state: state ?? "", scopes: effectiveScopes.join(" "), codeChallenge, codeChallengeMethod,
+        supportGrantVersion: await supportCapabilityVersion(actor.user.id, boundWorkspace),
+      });
+    }
     const hasMultipleWorkspaces = allowedWorkspaces.length > 1;
     const redirectHost = redirectHostLabel(redirectUri);
     const usesLoopbackRedirect = isLoopbackRedirectUri(redirectUri);
@@ -279,6 +297,7 @@ export default async function OAuthAuthorizePage(props: Props) {
                     <p className="mt-2 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-strong)]">
                       {selectedWorkspace.workspace.name} ({selectedWorkspace.instance.displayName})
                     </p>
+                    <code className="block break-all text-xs">{selectedWorkspace.workspace.id}</code>
                   </div>
                 )}
                 <p className="mt-2 text-xs text-[var(--text-muted)]">
@@ -301,6 +320,7 @@ export default async function OAuthAuthorizePage(props: Props) {
                 <input type="hidden" name="codeChallenge" value={codeChallenge} />
                 <input type="hidden" name="codeChallengeMethod" value={codeChallengeMethod} />
                 <input type="hidden" name="resource" value={resource} />
+                {consent ? <input type="hidden" name="consent" value={consent} /> : null}
 
                 <button type="submit" className="button w-full py-2.5 text-base">
                   Allow access

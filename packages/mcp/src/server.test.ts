@@ -723,6 +723,7 @@ describe("createCorgtexMcpServer", () => {
       resource: "https://app.test/api/mcp",
       providerKey: "cursor",
       clientName: "Cursor",
+      mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1" },
     });
 
     const response = await (server as any)._registeredTools.get_current_connection.handler({});
@@ -731,6 +732,7 @@ describe("createCorgtexMcpServer", () => {
     expect(vi.mocked(requireScope)).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "workspace:read");
     expect(payload).toEqual({
       authKind: "oauth",
+      connectionId: "connection-A",
       corgtexUser: {
         id: "user-1",
         displayName: "User One",
