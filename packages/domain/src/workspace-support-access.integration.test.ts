@@ -62,6 +62,49 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
     await prisma.user.deleteMany({ where: { id: { in: users } } });
   }));
 
+  isolated("grant-managed member transitions emit events and synchronize current graph state", async () => {
+    await change("SETUP");
+    expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(0);
+    const check = async (type: string, active: boolean, count: number) => {
+      const member = await prisma.member.findUniqueOrThrow({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } });
+      const records = await prisma.event.findMany({ where: { workspaceId, aggregateId: member.id }, orderBy: { createdAt: "asc" } });
+      expect(records).toHaveLength(count);
+      const event = records.at(-1)!;
+      expect(event).toMatchObject({ type, supportOriginUserId: null, supportGrantVersion: null });
+      const derived = deriveJobsForEvent(event).filter(job => job.type === "context-graph.sync");
+      expect(derived).toHaveLength(1);
+      const { dependsOnDedupeKey: _dependency, ...data } = derived[0];
+      const job = await prisma.workflowJob.create({ data });
+      await withWorkspaceSupportExecution(job, () => handleContextGraphSync(job.id, job.payload as { sourceType: string; sourceId: string }, workspaceId));
+      expect(await prisma.contextGraphObject.findFirst({ where: { workspaceId, sourceEntityType: "Member", sourceEntityId: member.id } })).toMatchObject({
+        status: active ? "approved" : "archived", properties: { workspaceRole: "ADMIN", isActive: active },
+      });
+    };
+    await change("FULL", 1);
+    await check("member.created", true, 1);
+    await change("FULL", 2);
+    expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(1);
+    await change("SETUP", 3);
+    await check("member.deactivated", false, 2);
+    await change("SETUP", 4, false);
+    expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(2);
+    await change("FULL", 5);
+    await check("member.reactivated", true, 3);
+    await change("FULL", 6, false);
+    await check("member.deactivated", false, 4);
+  });
+  isolated("grant member event failure rolls back the grant and member together", async () => {
+    const emit = vi.spyOn(events, "appendEvents").mockRejectedValueOnce(new Error("synthetic grant event failure"));
+    try {
+      await expect(change("FULL")).rejects.toThrow("synthetic grant event failure");
+    } finally { emit.mockRestore(); }
+    const where = { workspaceId_userId: { workspaceId, userId: support.user.id } };
+    expect(await prisma.workspaceSupportGrant.findUnique({ where })).toBeNull();
+    expect(await prisma.member.findUnique({ where })).toBeNull();
+    expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(0);
+    await change("FULL");
+    expect(await prisma.event.count({ where: { workspaceId, type: "member.created" } })).toBe(1);
+  });
   isolated("Setup cannot use global role, cached ADMIN, real content loader or self-grant", async () => {
     await change("SETUP");
     expect(await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } })).toBeNull();

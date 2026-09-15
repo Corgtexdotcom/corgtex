@@ -5,6 +5,7 @@ import { AppError, invariant } from "./errors";
 import { requireDeploymentWorkspaceScope } from "./auth";
 import { z } from "zod";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
+import { appendEvents } from "./events";
 
 type Db = Prisma.TransactionClient;
 export async function lockWorkspaceMembership(db: Db, workspaceId: string) {
@@ -156,14 +157,26 @@ export async function changeWorkspaceSupportGrant(actor: AppActor, params: {
       },
     });
     if (params.isActive && params.role === "FULL") {
-      await tx.member.upsert({
+      const managedMember = await tx.member.upsert({
         where,
         create: { workspaceId: params.workspaceId, userId: user.id, role: "ADMIN", kind: "HUMAN", isActive: true },
         update: { role: "ADMIN", kind: "HUMAN", isActive: true },
       });
+      const type = !member ? "member.created" : !member.isActive ? "member.reactivated"
+        : member.role !== "ADMIN" || member.kind !== "HUMAN" ? "member.updated" : null;
+      if (type) await appendEvents(tx, [{
+        workspaceId: params.workspaceId, type, aggregateType: "Member", aggregateId: managedMember.id,
+        payload: !member
+          ? { memberId: managedMember.id, userId: user.id, role: "ADMIN", kind: "HUMAN" }
+          : { memberId: managedMember.id, fields: ["role", "kind", "isActive"] },
+      }]);
     } else if (member) {
       await tx.member.update({ where: { id: member.id }, data: { isActive: false } });
       await closeRoleLifecycleForMember(tx, { workspaceId: params.workspaceId, memberId: member.id, actor });
+      if (member.isActive) await appendEvents(tx, [{
+        workspaceId: params.workspaceId, type: "member.deactivated", aggregateType: "Member", aggregateId: member.id,
+        payload: { memberId: member.id, fields: ["isActive"] },
+      }]);
     }
     // Previously issued capabilities must never revive on a later regrant.
     await tx.agentCredential.updateMany({
