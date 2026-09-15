@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { randomBytes, scryptSync } from "node:crypto";
 
-import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, revokeDemoCredentials } from "./lib/demo-credentials.mjs";
+import { assertDemoCredentialsScoped, assertDemoWorkspaceDisconnected, assertDemoPersonasQuiesced, DISABLED_DEMO_PERSONA_PASSWORD_HASH, revokeDemoCredentials } from "./lib/demo-credentials.mjs";
 
 const prisma = new PrismaClient();
 
@@ -2338,7 +2338,7 @@ async function main() {
   // Refuse shared identities before any fixture or credential writes.
   const existingUsers = await prisma.user.findMany({
     where: { email: { in: TEAM_MEMBERS.map((member) => member.email) } },
-    select: { id: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+    select: { id: true, email: true, passwordHash: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
   });
   if (existingUsers.some((user) => user.globalRole !== "USER" || user.memberships.some((member) => member.workspace.slug !== WORKSPACE_SLUG))) {
     throw new Error("Demo seed identities must not belong to other workspaces");
@@ -2351,15 +2351,19 @@ async function main() {
   if (existingWorkspace && await prisma.member.count({ where: { workspaceId: existingWorkspace.id, user: { email: { notIn: TEAM_MEMBERS.map((member) => member.email) } } } })) {
     throw new Error("Existing demo has non-fixture members; review ownership before refresh");
   }
+  await assertDemoPersonasQuiesced(prisma, existingUsers, "demo@jnj-demo.corgtex.app", existingWorkspace?.id);
   await assertDemoWorkspaceDisconnected(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
   await assertDemoCredentialsScoped(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
 
+  if (process.argv.includes("--preflight")) {
+    console.log("Demo fixture preflight passed without writes");
+    return;
+  }
+
   // 1. Create Workspace
-  const workspace = await prisma.workspace.upsert({
-    where: { slug: WORKSPACE_SLUG },
-    update: { name: WORKSPACE_NAME, description: WORKSPACE_DESC },
-    create: { slug: WORKSPACE_SLUG, name: WORKSPACE_NAME, description: WORKSPACE_DESC }
-  });
+  const workspace = existingWorkspace
+    ? await prisma.workspace.update({ where: { id: existingWorkspace.id, slug: WORKSPACE_SLUG }, data: { name: WORKSPACE_NAME, description: WORKSPACE_DESC } })
+    : await prisma.workspace.create({ data: { slug: WORKSPACE_SLUG, name: WORKSPACE_NAME, description: WORKSPACE_DESC } });
   const wsId = workspace.id;
   console.log(`✅ Workspace created: ${WORKSPACE_NAME}`);
 
@@ -2368,26 +2372,18 @@ async function main() {
   // 2. Create Users & Members
   const memberMappings = {};
   for (const tm of TEAM_MEMBERS) {
-    const user = await prisma.user.upsert({
-      where: { email: tm.email },
-      update: {
-        displayName: tm.name,
-        bio: tm.bio,
-        linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
-        websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
-        // Restore canonical public login; historical persona passwords are invalidated.
-        passwordHash: hashPassword(tm.password || randomBytes(32).toString("hex")),
-      },
-      create: {
-        email: tm.email,
-        displayName: tm.name,
-        bio: tm.bio,
-        linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
-        websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
-        passwordHash: hashPassword(tm.password || randomBytes(32).toString("hex")),
-      }
-    });
-    
+    const existing = existingUsers.find((user) => user.email === tm.email);
+    const data = {
+      displayName: tm.name,
+      bio: tm.bio,
+      linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
+      websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
+      passwordHash: tm.password ? hashPassword(tm.password) : DISABLED_DEMO_PERSONA_PASSWORD_HASH,
+    };
+    const user = existing
+      ? await prisma.user.update({ where: { id: existing.id, email: tm.email, globalRole: "USER", ...(!tm.password ? { passwordHash: DISABLED_DEMO_PERSONA_PASSWORD_HASH } : {}) }, data })
+      : await prisma.user.create({ data: { email: tm.email, ...data } });
+
     const member = await prisma.member.upsert({
       where: { workspaceId_userId: { workspaceId: wsId, userId: user.id } },
       update: { role: tm.role, isActive: true },
@@ -2912,6 +2908,15 @@ async function main() {
     crmContacts: await prisma.crmContact.count({ where: { workspaceId: wsId, archivedAt: null } }),
     crmDeals: await prisma.crmDeal.count({ where: { workspaceId: wsId, archivedAt: null } }),
   };
+
+  const finalUsers = await prisma.user.findMany({ where: { email: { in: TEAM_MEMBERS.map((member) => member.email) } }, select: { id: true, email: true, passwordHash: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } } });
+  if (finalUsers.length !== TEAM_MEMBERS.length || finalUsers.some((user) => user.globalRole !== "USER" || user.memberships.some((member) => member.workspace.slug !== WORKSPACE_SLUG))
+    || await prisma.member.count({ where: { workspaceId: wsId, user: { email: { notIn: TEAM_MEMBERS.map((member) => member.email) } } } })) {
+    throw new Error("Demo postflight identity isolation failed; do not publish readiness");
+  }
+  await assertDemoPersonasQuiesced(prisma, finalUsers, "demo@jnj-demo.corgtex.app", wsId);
+  await assertDemoWorkspaceDisconnected(prisma, wsId, finalUsers.map((user) => user.id));
+  await assertDemoCredentialsScoped(prisma, wsId, finalUsers.map((user) => user.id));
 
   console.log("Demo workspace refreshed:");
   Object.entries(counts).forEach(([key, value]) => {

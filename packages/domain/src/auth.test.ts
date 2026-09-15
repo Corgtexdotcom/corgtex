@@ -34,6 +34,7 @@ vi.mock("@corgtex/shared", () => ({
   getMcpOrigin: () => undefined,
   env: envMock,
   prisma: prismaMock,
+  isPasswordLoginDisabled: (hash: string) => hash.startsWith("disabled$"),
   hashPassword: vi.fn((value: string) => `hash-password:${value}`),
   randomOpaqueToken: vi.fn(() => "plain-token"),
   sha256: vi.fn((value: string) => `hash:${value}`),

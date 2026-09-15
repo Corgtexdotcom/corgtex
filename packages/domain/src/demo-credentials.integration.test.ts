@@ -19,6 +19,13 @@ describe("demo legacy credential retirement", () => {
       const transcript = await prisma.meetingTranscriptSourceConnection.create({ data: { workspaceId: workspace.id, provider: "FATHOM", authMode: "WEBHOOK", webhookSecretEnc: "synthetic" } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("external access");
       await prisma.meetingTranscriptSourceConnection.delete({ where: { id: transcript.id } });
+      const meeting = await prisma.meeting.create({ data: { workspaceId: workspace.id, title: "Synthetic scheduled recorder", source: "synthetic", recordedAt: new Date(), participantIds: [] } });
+      const recording = await prisma.meetingRecording.create({ data: { workspaceId: workspace.id, meetingId: meeting.id, provider: "RECALL_AI", externalBotId: key, meetingUrl: "https://example.test", status: "SCHEDULED" } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("recording authority");
+      await prisma.meetingRecording.delete({ where: { id: recording.id } });
+      const billing = await prisma.workspaceBillingProfile.create({ data: { workspaceId: workspace.id, stripeCustomerId: `synthetic-${key}` } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("billing authority");
+      await prisma.workspaceBillingProfile.delete({ where: { id: billing.id } });
       const anonymousAgent = await prisma.agentCredential.create({ data: { workspaceId: workspace.id, label: "Synthetic bootstrap", tokenHash: `bootstrap-${key}`, scopes: [] } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id, [user.id])).rejects.toThrow("non-fixture credentials");
       await prisma.agentCredential.delete({ where: { id: anonymousAgent.id } });

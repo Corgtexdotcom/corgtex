@@ -26,6 +26,7 @@ vi.mock("@corgtex/shared", () => ({
     },
     $transaction: (...args: unknown[]) => mockTransaction(...args),
   },
+  isPasswordLoginDisabled: (hash: string) => hash.startsWith("disabled$"),
   hashPassword: vi.fn((p: string) => `hashed:${p}`),
   randomOpaqueToken: vi.fn(() => "mock-token-abc123"),
   sha256: vi.fn((v: string) => `sha256:${v}`),
@@ -153,6 +154,7 @@ describe("consumePasswordReset", () => {
       userId: "user-1",
       expiresAt: new Date(Date.now() - 60000),
       usedAt: null,
+      user: { passwordHash: "ordinary-hash" },
     });
 
     await expect(
@@ -166,6 +168,7 @@ describe("consumePasswordReset", () => {
       userId: "user-1",
       expiresAt: new Date(Date.now() + 60000),
       usedAt: null,
+      user: { passwordHash: "ordinary-hash" },
     });
     mockTransaction.mockResolvedValue([]);
 
@@ -176,5 +179,23 @@ describe("consumePasswordReset", () => {
 
     expect(result).toEqual({ success: true });
     expect(mockTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+ describe("disabled account password recovery", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("silently refuses both reset request paths without issuing tokens", async () => {
+    mockFindUnique.mockResolvedValue({ id: "disabled", email: "persona@example.com", displayName: "Persona", passwordHash: "disabled$synthetic-demo-persona", memberships: [{ id: "member" }] });
+    await expect(requestPasswordReset("persona@example.com")).resolves.toBeNull();
+    await expect(requestPasswordResetForActiveMember("persona@example.com")).resolves.toBeNull();
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockUpdateMany).not.toHaveBeenCalled();
+  });
+  it("refuses a previously issued token without changing password or consuming it", async () => {
+    mockFindUnique.mockResolvedValue({ id: "token", userId: "disabled", usedAt: null, expiresAt: new Date(Date.now() + 60000), user: { passwordHash: "disabled$synthetic-demo-persona" } });
+    await expect(consumePasswordReset({ token: "old-token", newPassword: "newpassword" })).rejects.toMatchObject({ code: "INVALID_TOKEN" });
+    expect(mockUserUpdate).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockTransaction).not.toHaveBeenCalled();
   });
 });

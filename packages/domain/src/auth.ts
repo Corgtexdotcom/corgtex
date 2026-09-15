@@ -1,5 +1,5 @@
 import type { MemberRole, Prisma } from "@prisma/client";
-import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword } from "@corgtex/shared";
+import { env, prisma, hashPassword, randomOpaqueToken, sha256, verifyPassword, isPasswordLoginDisabled } from "@corgtex/shared";
 import type { AppActor, MembershipSummary } from "@corgtex/shared";
 import { getSupportAuthorizationContext, setSupportAuthorizationActor, setSupportAuthorizationGrant, getMcpOrigin, assertMcpOriginActive } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -74,6 +74,9 @@ export async function createSession(
   userId: string,
   meta: { ipAddress?: string | null; userAgent?: string | null } = {}
 ) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+  invariant(user && !isPasswordLoginDisabled(user.passwordHash), 401, "UNAUTHENTICATED", "This account cannot sign in.");
+
   const token = randomOpaqueToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
@@ -124,12 +127,13 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
           displayName: true,
           globalRole: true,
           isSupportAccount: true,
+          passwordHash: true,
         },
       },
     },
   });
 
-  if (!session || session.expiresAt <= now) {
+  if (!session || session.expiresAt <= now || isPasswordLoginDisabled(session.user.passwordHash ?? "")) {
     return null;
   }
 
@@ -146,9 +150,10 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
     });
   }
 
+  const { passwordHash: _passwordHash, ...sessionUser } = session.user;
   return {
     kind: "user",
-    user: session.user,
+    user: sessionUser,
   };
 }
 

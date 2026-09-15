@@ -1,4 +1,4 @@
-import { prisma } from "@corgtex/shared";
+import { prisma, isPasswordLoginDisabled } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireWorkspaceMembership } from "./auth";
@@ -122,15 +122,18 @@ export async function linkOrProvisionSsoUser(params: {
     include: { user: true }
   });
 
+  let user = await prisma.user.findUnique({
+    where: { email }
+  });
+
+  invariant(!user || !isPasswordLoginDisabled(user.passwordHash), 401, "UNAUTHENTICATED", "This account cannot sign in.");
+
   if (existingIdentity) {
+    invariant(!isPasswordLoginDisabled(existingIdentity.user.passwordHash), 401, "UNAUTHENTICATED", "This account cannot sign in.");
     await ensureSsoMembership(params.workspaceId, existingIdentity.userId);
 
     return existingIdentity.user;
   }
-
-  let user = await prisma.user.findUnique({
-    where: { email }
-  });
 
   if (!user) {
     const randomHash = "sso$" + randomBytes(32).toString("hex");

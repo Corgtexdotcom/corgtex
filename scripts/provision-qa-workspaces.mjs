@@ -60,6 +60,9 @@ try {
     if (process.env.SEED_RESET_PASSWORDS && process.env.SEED_RESET_PASSWORDS !== "false") {
       throw new Error("QA provisioning must preserve existing passwords");
     }
+    const demoPreflight = spawnSync(process.execPath, ["scripts/seed-jnj-demo.mjs", "--preflight"], { stdio: "inherit", env: process.env });
+    if (demoPreflight.error) throw demoPreflight.error;
+    if (demoPreflight.status !== 0) throw new Error("Demo fixture preflight failed before provisioning writes");
     for (const script of ["scripts/seed-internal-validation-workspace.mjs", "scripts/seed-jnj-demo.mjs"]) {
       const result = spawnSync(process.execPath, [script], { stdio: "inherit", env: process.env });
       if (result.error) throw result.error;

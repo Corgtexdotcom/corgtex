@@ -1,3 +1,32 @@
+export const DISABLED_DEMO_PERSONA_PASSWORD_HASH = "disabled$synthetic-demo-persona";
+
+export async function assertDemoPersonasQuiesced(prisma, users, publicEmail, workspaceId) {
+  const personas = users.filter((user) => user.email !== publicEmail);
+  if (personas.some((user) => user.passwordHash !== DISABLED_DEMO_PERSONA_PASSWORD_HASH)) {
+    throw new Error("Legacy demo personas require separately authorized quarantine before refresh");
+  }
+  const now = new Date();
+  const personaIds = personas.map((user) => user.id);
+  if (personaIds.length && (await prisma.session.count({ where: { userId: { in: personaIds }, expiresAt: { gt: now } } })
+    || await prisma.passwordResetToken.count({ where: { userId: { in: personaIds }, expiresAt: { gt: now }, usedAt: null } }))) {
+    throw new Error("Demo personas still have usable sessions or reset credentials");
+  }
+  const userIds = users.map((user) => user.id);
+  if (!userIds.length) return;
+  for (const model of ["oAuthAuthorizationCode", "mcpOAuthAuthorizationCode", "oAuthAccessToken", "mcpOAuthAccessToken"]) {
+    const where = { userId: { in: userIds }, ...(model.endsWith("AccessToken") ? { revokedAt: null } : { expiresAt: { gt: now } }) };
+    if (await prisma[model].count({ where })) throw new Error("Demo identities retain usable derived credentials");
+  }
+  if (await prisma.appSession.count({ where: { actorUserId: { in: userIds }, revokedAt: null } })
+    || await prisma.agentCredential.count({ where: { createdByUserId: { in: userIds }, isActive: true } })) {
+    throw new Error("Demo identities retain usable derived credentials");
+  }
+  const publicUser = users.find((user) => user.email === publicEmail);
+  if (publicUser && (!workspaceId || await prisma.member.count({ where: { workspaceId, userId: publicUser.id, role: "CONTRIBUTOR", isActive: true } }) !== 1)) {
+    throw new Error("Existing public demo identity must already be a dedicated contributor");
+  }
+}
+
 // Fixture refresh must never adopt a workspace with real external integrations.
 export async function assertDemoWorkspaceDisconnected(prisma, workspaceId, userIds = []) {
   if (!workspaceId) return;
@@ -7,6 +36,15 @@ export async function assertDemoWorkspaceDisconnected(prisma, workspaceId, userI
     if (await prisma[model].count({ where: { workspaceId } })) {
       throw new Error(`Existing demo has ${model}; review external access before refresh`);
     }
+  }
+  if (await prisma.meetingRecording.count({ where: { workspaceId } })) {
+    throw new Error("Existing demo has recording authority; review external access before refresh");
+  }
+  if (await prisma.workspaceBillingProfile.count({ where: { workspaceId, OR: [
+    ...["stripeCustomerId", "stripeSubscriptionId", "stripeSubscriptionItemId", "stripePriceId", "stripeCheckoutSessionId"].map((field) => ({ [field]: { not: null } })),
+    { billingStatus: { not: "NONE" } }, { paymentMethodReady: true },
+  ] } }) || await prisma.aiUsageLedgerEntry.count({ where: { workspaceId } })) {
+    throw new Error("Existing demo has billing authority; review external access before refresh");
   }
   if (await prisma.workspaceToolLink.count({ where: { workspaceId, credentialSecretEnc: { not: null } } })) {
     throw new Error("Existing demo has a credentialed tool; review external access before refresh");

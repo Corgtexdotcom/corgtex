@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, envMock } = vi.hoisted(() => ({
   prismaMock: {
+    user: { findUnique: vi.fn() },
     session: {
+      create: vi.fn(),
       findUnique: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -15,6 +17,7 @@ const { prismaMock, envMock } = vi.hoisted(() => ({
 vi.mock("@corgtex/shared", () => ({
   env: envMock,
   prisma: prismaMock,
+  isPasswordLoginDisabled: (hash: string) => hash.startsWith("disabled$"),
   hashPassword: vi.fn(),
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),
   randomOpaqueToken: vi.fn(() => "token"),
@@ -73,4 +76,25 @@ describe("resolveSessionActor", () => {
       },
     });
   });
+  it("rejects disabled accounts before creating a session", async () => {
+    prismaMock.user.findUnique.mockResolvedValue({ passwordHash: "disabled$synthetic-demo-persona" });
+    const { createSession } = await import("./auth");
+    await expect(createSession("disabled-user")).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
+    expect(prismaMock.session.create).not.toHaveBeenCalled();
+    const { randomOpaqueToken } = await import("@corgtex/shared");
+    expect(randomOpaqueToken).not.toHaveBeenCalled();
+  });
+
+  it("rejects an existing session for a disabled account without refreshing it", async () => {
+    prismaMock.session.findUnique.mockResolvedValue({
+      id: "session-disabled",
+      expiresAt: new Date("2026-04-25T12:00:00.000Z"),
+      lastSeenAt: new Date("2026-04-24T11:00:00.000Z"),
+      user: { id: "disabled-user", passwordHash: "disabled$synthetic-demo-persona" },
+    });
+    const { resolveSessionActor } = await import("./auth");
+    await expect(resolveSessionActor("token")).resolves.toBeNull();
+    expect(prismaMock.session.updateMany).not.toHaveBeenCalled();
+  });
+
 });
