@@ -138,5 +138,7 @@ test("metadata capture gets only remaining work time including bounded disconnec
   assert.ok(Date.now() - started < 1000);
 });
 test("standalone receipt resides under repository artifacts, not script sources", () => {
-  assert.match(standaloneReceiptPath(123).pathname, /\/CORGTEX\/\.artifacts\/target-qualification\/ops-azure-target-metadata-123\.json$/u);
+  const repositoryRoot = new URL("../../", import.meta.url);
+  const expected = new URL(".artifacts/target-qualification/ops-azure-target-metadata-123.json", repositoryRoot);
+  assert.equal(standaloneReceiptPath(123).href, expected.href);
 });
