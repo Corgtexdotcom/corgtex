@@ -31,7 +31,7 @@ export async function resolveInteractiveKnowledgeAccessDomains(
   workspaceId: string,
 ): Promise<KnowledgeAccessDomain[]> {
   if (!actor) {
-    return ["WORKSPACE"];
+    throw new Error("Authenticated actor is required for knowledge access.");
   }
   return resolveKnowledgeAccessDomains(actor, workspaceId);
 }

@@ -186,6 +186,9 @@ export async function assertTrialMemberCapacity(workspaceId: string) {
     where: {
       workspaceId,
       isActive: true,
+      user: {
+        workspaceSupportGrants: { none: { workspaceId, role: "FULL", isActive: true } },
+      },
       NOT: {
         user: {
           email: {

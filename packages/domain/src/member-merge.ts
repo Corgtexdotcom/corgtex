@@ -1,4 +1,5 @@
 import type { MemberRole, Prisma } from "@prisma/client";
+import { lockWorkspaceMembership, requireUnmanagedMember } from "./workspace-support-access";
 import type { AppActor } from "@corgtex/shared";
 import { prisma } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -142,13 +143,20 @@ export async function addMemberEmailAlias(actor: AppActor, params: {
     allowedRoles: ["ADMIN"],
   });
 
-  const alias = await prisma.$transaction((tx) => writeMemberEmailAlias(tx, {
-    workspaceId: params.workspaceId,
-    memberId: params.memberId,
-    email: params.email,
-    source: normalizeOptionalText(params.source) ?? MEMBER_ALIAS_SOURCE_MANUAL,
-    createdByUserId: actorUserId(actor),
-  }));
+  const alias = await prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
+    const member = await tx.member.findUnique({ where: { id: params.memberId }, select: { workspaceId: true, userId: true } });
+    invariant(member?.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
+    return writeMemberEmailAlias(tx, {
+      workspaceId: params.workspaceId,
+      memberId: params.memberId,
+      email: params.email,
+      source: normalizeOptionalText(params.source) ?? MEMBER_ALIAS_SOURCE_MANUAL,
+      createdByUserId: actorUserId(actor),
+    });
+  });
   invariant(alias, 400, "INVALID_INPUT", "Alias email must differ from the member primary email.");
   return alias;
 }
@@ -397,6 +405,8 @@ export async function mergeWorkspaceMembers(actor: AppActor, params: {
   }
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
     const [source, target] = await Promise.all([
       tx.member.findUnique({
         where: { id: params.sourceMemberId },
@@ -409,6 +419,8 @@ export async function mergeWorkspaceMembers(actor: AppActor, params: {
     ]);
     invariant(source && source.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Source member not found.");
     invariant(target && target.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Target member not found.");
+    await requireUnmanagedMember(tx, params.workspaceId, source.userId);
+    await requireUnmanagedMember(tx, params.workspaceId, target.userId);
     invariant(!source.mergedIntoMemberId, 400, "INVALID_STATE", "Source member has already been merged.");
     invariant(!target.mergedIntoMemberId && target.isActive, 400, "INVALID_STATE", "Target member must be active and unmerged.");
     invariant(source.kind === target.kind, 400, "INVALID_INPUT", "Source and target member kinds must match.");

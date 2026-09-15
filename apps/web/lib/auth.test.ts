@@ -4,6 +4,9 @@ const redirect = vi.fn((location: string) => {
   throw new Error(`redirect:${location}`);
 });
 const cookies = vi.fn();
+const headers = vi.fn();
+const requireWorkspaceMembership = vi.fn();
+const getWorkspaceSupportGrant = vi.fn();
 const clearSession = vi.fn();
 const resolveAgentActorFromBearer = vi.fn();
 const resolveControlPlaneAgentFromBearer = vi.fn();
@@ -27,6 +30,7 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("next/headers", () => ({
   cookies,
+  headers,
 }));
 
 vi.mock("@corgtex/domain", () => ({
@@ -35,15 +39,23 @@ vi.mock("@corgtex/domain", () => ({
   resolveAgentActorFromBearer,
   resolveControlPlaneAgentFromBearer,
   resolveSessionActor,
+  requireWorkspaceMembership,
+  getWorkspaceSupportGrant,
+  isGlobalOperator: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  beginAuthorizationContext: vi.fn(),
+  setSupportAuthorizationActor: vi.fn(),
+  env: { CONTROL_PLANE_MODE: false },
   isDatabaseUnavailableError,
   sessionCookieName: () => "corgtex_session",
 }));
 
 beforeEach(() => {
   vi.resetModules();
+  isDatabaseUnavailableError.mockReturnValue(false);
+  headers.mockResolvedValue(new Headers());
 });
 
 afterEach(() => {
@@ -52,6 +64,41 @@ afterEach(() => {
 });
 
 describe("requirePageActor", () => {
+  it("redirects Setup before a server-rendered workspace caller can read content", async () => {
+    cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+    resolveSessionActor.mockResolvedValue({ kind: "user", user: { id: "support", isSupportAccount: true } });
+    headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/ws-1/brain" }));
+    getWorkspaceSupportGrant.mockResolvedValue({ isActive: true, role: "SETUP" });
+    const { requirePageActor } = await import("./auth");
+    await expect(requirePageActor()).rejects.toThrow("redirect:/support/ws-1");
+    expect(requireWorkspaceMembership).not.toHaveBeenCalled();
+  });
+
+  it("rejects replayed server actions even when sent to the setup shell", async () => {
+    cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+    resolveSessionActor.mockResolvedValue({ kind: "user", user: { id: "support", isSupportAccount: true } });
+    headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/support/ws-1", "next-action": "action-id" }));
+    const { requirePageActor } = await import("./auth");
+    await expect(requirePageActor()).rejects.toMatchObject({ code: "SUPPORT_ACCESS_RESTRICTED" });
+  });
+
+  it("fails closed on missing page-path context", async () => {
+    cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+    resolveSessionActor.mockResolvedValue({ kind: "user", user: { id: "support", isSupportAccount: true } });
+    const { requirePageActor } = await import("./auth");
+    await expect(requirePageActor()).rejects.toMatchObject({ code: "AUTHORIZATION_CONTEXT_REQUIRED" });
+  });
+  it("retains ordinary workspace A access even when the user has support access elsewhere", async () => {
+    const actor = { kind: "user", user: { id: "support", isSupportAccount: true } };
+    cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+    resolveSessionActor.mockResolvedValue(actor);
+    headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/ws-a/brain" }));
+    getWorkspaceSupportGrant.mockResolvedValue(null);
+    requireWorkspaceMembership.mockResolvedValue({ role: "ADMIN" });
+    const { requirePageActor } = await import("./auth");
+    await expect(requirePageActor()).resolves.toEqual(actor);
+    expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-a" });
+  });
   it("redirects to the friendly unavailable state when session lookup fails because the database is down", async () => {
     cookies.mockResolvedValue({
       get: () => ({ value: "session-token" }),

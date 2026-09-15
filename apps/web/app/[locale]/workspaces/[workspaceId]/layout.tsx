@@ -24,6 +24,8 @@ import { getMobileCaptureActions } from "@/lib/workspace-add-actions";
 import { getProductFeedbackTargetWorkspace } from "@/lib/product-feedback";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { hasActiveWorkspaceSupport } from "@corgtex/domain";
+import { LifeBuoy } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -77,6 +79,8 @@ function syncSettingsStringList(value: unknown) {
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string; workspaceId: string }> }): Promise<Metadata> {
   const { workspaceId } = await params;
+  const actor = await requirePageActor();
+  await requireWorkspaceMembership({ actor, workspaceId });
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { slug: true, name: true } });
   if (!workspace) return { title: "Corgtex" };
   const branding = workspaceBranding(workspace);
@@ -99,7 +103,7 @@ export default async function WorkspaceLayout({
     redirect(localizedPath(workspaces[0] ? `/workspaces/${workspaces[0].id}` : "/find-account", locale));
   }
 
-  const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget] = await Promise.all([
+  const [unreadCount, conversationsResult, dailyQuestions, featureFlags, membership, invitePolicy, workspaceRuntime, onboardingState, hasInitialKnowledge, googleConnection, productFeedbackTarget, hasSupportAccess] = await Promise.all([
     userId ? countUnreadNotifications(userId, workspaceId) : Promise.resolve(0),
     listConversations(actor, workspaceId, { take: 30 }).catch(() => ({ items: [], total: 0, take: 30, skip: 0 })),
     userId ? listDailyCompanyUnderstandingQuestions(actor, { workspaceId, take: 3 }).catch(() => []) : Promise.resolve([]),
@@ -130,6 +134,7 @@ export default async function WorkspaceLayout({
       },
     }).catch(() => null) : Promise.resolve(null),
     getProductFeedbackTargetWorkspace().catch(() => null),
+    hasActiveWorkspaceSupport(actor),
   ]);
   const conversations = conversationsResult.items;
   const capabilities = buildWorkspaceCapabilities({ featureFlags, role: membership?.role ?? null });
@@ -216,6 +221,10 @@ export default async function WorkspaceLayout({
   }));
   const mobileUtilityActions = (
     <>
+      {hasSupportAccess && <a href={localizedPath("/support", locale)} className="mobile-utility-action">
+        <LifeBuoy className="mobile-more-icon" />
+        <span>Workspace Support</span>
+      </a>}
       {showPlatformAdmin && (
         <a href={controlPlaneHref} className="mobile-utility-action">
           <WorkspaceUtilityIcon name="platformAdmin" className="mobile-more-icon" />
@@ -268,6 +277,10 @@ export default async function WorkspaceLayout({
         />
 
         <div className="ws-sidebar-footer">
+          {hasSupportAccess && <a href={localizedPath("/support", locale)} className="ws-nav-link">
+            <LifeBuoy className="h-4 w-4" />
+            <span>Workspace Support</span>
+          </a>}
           {featureFlags.MULTILINGUAL && <LanguageSwitcher />}
           <ThemeToggle />
           <WorkspaceIntercomMessenger

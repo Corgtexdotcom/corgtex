@@ -3,8 +3,23 @@ import type { AppActor } from "@corgtex/shared";
 import { deleteCircle, listCircleTree, suggestMaturityUpgrade, updateCircle } from "./circles";
 import { prisma } from "@corgtex/shared";
 
+vi.mock("./auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./auth")>();
+  return { ...actual, requireWorkspaceMembership: (params: Parameters<typeof actual.requireWorkspaceMembership>[0]) => {
+    // Operator fixtures also have an explicit ADMIN membership.
+    if (params.actor.kind === "user" && params.actor.user.globalRole === "OPERATOR") {
+      return actual.requireWorkspaceMembership({ ...params, resolvedMembership: {
+        id: "fixture-admin", workspaceId: params.workspaceId, userId: params.actor.user.id, role: "ADMIN", isActive: true,
+      } });
+    }
+    return actual.requireWorkspaceMembership(params);
+  } };
+});
+
 vi.mock("@corgtex/shared", () => ({
+  setSupportAuthorizationActor: vi.fn(),
   prisma: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),
     circle: {
       findMany: vi.fn(),

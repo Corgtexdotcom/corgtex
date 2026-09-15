@@ -1,7 +1,7 @@
-import { prisma } from "@corgtex/shared";
+import { getSupportAuthorizationContext, prisma } from "@corgtex/shared";
 import { searchIndexedKnowledge } from "@corgtex/knowledge";
 import { defaultModelGateway, IncrementalJsonStringDecoder } from "@corgtex/models";
-import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, storeAgentMemory } from "@corgtex/domain";
+import { AppError, buildRoleOnboardingContextForConversation, checkBudget, loadRelevantMemories, requireWorkspaceMembership, storeAgentMemory, supportCapabilityVersion } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import type { ChatMessage, ModelTool, ToolCall } from "@corgtex/models";
 import { checkCalendarAvailabilityTool, scheduleMeetingTool, checkCalendarAvailability, scheduleMeeting } from "./tools/calendar";
@@ -872,7 +872,15 @@ function throwIfConversationCanceled(ctx: ConversationContext, error?: unknown) 
   throw new Error("Conversation stream canceled.");
 }
 
-export async function processConversationTurn(ctx: ConversationContext): Promise<{
+export async function processConversationTurn(ctx: ConversationContext) {
+  await requireWorkspaceMembership({ actor: requireConversationToolActor(ctx), workspaceId: ctx.workspaceId });
+  const origin = getSupportAuthorizationContext()?.origin;
+  const result = await processConversationTurnContent(ctx);
+  if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
+  return result;
+}
+
+async function processConversationTurnContent(ctx: ConversationContext): Promise<{
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
 }> {
@@ -1162,7 +1170,23 @@ export async function processConversationTurn(ctx: ConversationContext): Promise
   };
 }
 
-export async function* processConversationTurnStream(ctx: ConversationContext): AsyncGenerator<string, {
+export async function* processConversationTurnStream(ctx: ConversationContext) {
+  await requireWorkspaceMembership({ actor: requireConversationToolActor(ctx), workspaceId: ctx.workspaceId });
+  const origin = getSupportAuthorizationContext()?.origin;
+  const iterator = processConversationTurnStreamContent(ctx);
+  try {
+    while (true) {
+      const result = await iterator.next();
+      if (origin) await supportCapabilityVersion(origin.userId, origin.workspaceId, origin.version);
+      if (result.done) return result.value;
+      yield result.value;
+    }
+  } finally {
+    await iterator.return({ assistantMessage: "", contextUsed: {} });
+  }
+}
+
+async function* processConversationTurnStreamContent(ctx: ConversationContext): AsyncGenerator<string, {
   assistantMessage: string;
   contextUsed: ConversationContextUsed;
 }> {

@@ -8,6 +8,7 @@ const {
   sendSlackMessageMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     notification: {
       findMany: vi.fn(),
       count: vi.fn(),
@@ -36,7 +37,21 @@ const {
   sendSlackMessageMock: vi.fn(),
 }));
 
+vi.mock("./auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./auth")>();
+  return { ...actual, requireWorkspaceMembership: (params: Parameters<typeof actual.requireWorkspaceMembership>[0]) => {
+    // Operator fixtures also have an explicit ADMIN membership.
+    if (params.actor.kind === "user" && params.actor.user.globalRole === "OPERATOR") {
+      return actual.requireWorkspaceMembership({ ...params, resolvedMembership: {
+        id: "fixture-admin", workspaceId: params.workspaceId, userId: params.actor.user.id, role: "ADMIN", isActive: true,
+      } });
+    }
+    return actual.requireWorkspaceMembership(params);
+  } };
+});
+
 vi.mock("@corgtex/shared", () => ({
+  setSupportAuthorizationActor: vi.fn(),
   prisma: prismaMock,
   sendEmail: sendEmailMock,
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),

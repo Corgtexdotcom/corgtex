@@ -27,7 +27,7 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
     "RoleVersion", "Tension", "TensionUpvote", "UserWorkspaceOnboardingState", "WebhookDelivery", "WebhookEndpoint", "WorkItemEvidence", "WorkItemVersion", "WorkspaceAgentConfig",
     "WorkspaceArchiveRecord", "WorkspaceBillingProfile", "WorkspaceBriefing", "WorkspaceEnterpriseService", "WorkspaceExternalResource", "WorkspaceExternalResourceAttachment",
     "WorkspaceExternalResourceMention", "WorkspaceFeatureFlag", "WorkspaceIntegrationBinding", "WorkspaceMeetingRecorderConfig", "WorkspaceModuleAccessRequest", "WorkspaceModuleGrant",
-    "WorkspacePermalink", "WorkspaceRecorderCalendarSource", "WorkspaceSsoConfig", "WorkspaceToolLink", "WorkspaceToolLinkCircleTag",
+    "WorkspacePermalink", "WorkspaceRecorderCalendarSource", "WorkspaceSsoConfig", "WorkspaceSupportAccessRequest", "WorkspaceSupportGrant", "WorkspaceToolLink", "WorkspaceToolLinkCircleTag",
   ],
   SET_NULL_EXPLICIT_CLEANUP: ["CommunicationInboundEvent", "CustomerDeploymentEvent", "Event", "MeetingRecorderProviderEvent", "SupportOperation", "WorkflowJob"],
   RESTRICT_BLOCKER: ["ClientMigrationIdMap", "ClientMigrationRun", "ProviderCutover"],
@@ -104,6 +104,8 @@ CustomerReleaseTarget|deployment|CustomerDeployment||deploymentId|id|0|0|Cascade
 ClientMigrationRun|destinationDeployment|CustomerDeployment|ClientMigrationDestinationDeployment|destinationDeploymentId|id|1|1|SetNull|Cascade;CustomerDeploymentAccess|deployment|CustomerDeployment||deploymentId|id|0|0|Cascade|Cascade;SupportOperation|deployment|CustomerDeployment||deploymentId|id|1|1|SetNull|Cascade;ProcurementSetupSession|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 ProcurementBillingHandoff|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade;ProcurementTrial|workspace|Workspace||workspaceId|id|1|1|Cascade|Cascade;ProviderCutover|account|CustomerAccount||customerAccountId|id|0|0|Restrict|Restrict;ProviderCutover|sourceDeployment|CustomerDeployment|SourceDeployment|sourceDeploymentId,customerAccountId|id,customerAccountId|0|00|Restrict|Restrict
 ProviderCutover|destinationDeployment|CustomerDeployment|DestinationDeployment|destinationDeploymentId,customerAccountId|id,customerAccountId|1|10|Restrict|Restrict
+WorkspaceSupportGrant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
+WorkspaceSupportAccessRequest|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 `;
 
 export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPurgeDirectRelation[] {
@@ -121,7 +123,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}1010`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

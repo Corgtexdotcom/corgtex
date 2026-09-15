@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { appendEvents } from "./events";
 import { requireWorkspaceMembership } from "./auth";
+import { lockWorkspaceMembership } from "./workspace-support-access";
 import { archiveFilterWhere, type ArchiveFilter } from "./archive";
 import { invariant } from "./errors";
 import {
@@ -451,6 +452,8 @@ export async function assignRole(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["FACILITATOR", "ADMIN"], tx });
     await lockRoleAssignments(tx, [{ roleId: params.roleId, memberId: params.memberId }]);
 
     const role = await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
@@ -483,6 +486,8 @@ export async function unassignRole(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["FACILITATOR", "ADMIN"], tx });
     await lockRoleAssignments(tx, [{ roleId: params.roleId, memberId: params.memberId }]);
     await loadRoleForAssignment(tx, params.workspaceId, params.roleId);
 
@@ -511,6 +516,8 @@ export async function reassignRole(actor: AppActor, params: {
   invariant(params.fromMemberId !== params.toMemberId, 400, "INVALID_INPUT", "Choose a different member to reassign this role.");
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["FACILITATOR", "ADMIN"], tx });
     await lockRoleAssignments(tx, [
       { roleId: params.roleId, memberId: params.fromMemberId },
       { roleId: params.roleId, memberId: params.toMemberId },

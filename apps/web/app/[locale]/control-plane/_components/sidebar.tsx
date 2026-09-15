@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Link } from "@/i18n/routing";
 import { useTranslations } from "next-intl";
+import { LifeBuoy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { controlPlaneNavGroups, isControlPlaneNavItemActive } from "../control-plane-nav";
 
@@ -36,6 +37,9 @@ export function ControlPlaneSidebar({ className, onNavigate }: SidebarProps) {
       </div>
 
       <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-4 scrollbar-thin" aria-label="Control plane">
+        <Link href="/control-plane/support" onClick={onNavigate} className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted hover:bg-surface hover:text-text">
+          <LifeBuoy size={16} aria-hidden="true" />Workspace support
+        </Link>
         {controlPlaneNavGroups.map((group) => (
           <div key={group.key} className="space-y-1">
             <h3 className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-muted">

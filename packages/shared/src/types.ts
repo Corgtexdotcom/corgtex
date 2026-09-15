@@ -4,6 +4,7 @@ export type HumanActor = {
   kind: "user";
   user: Pick<User, "id" | "email" | "displayName"> & {
     globalRole?: GlobalRole;
+    isSupportAccount?: boolean;
   };
 };
 
@@ -16,6 +17,7 @@ export type AgentActor = {
   workspaceIds?: string[];
   scopes?: string[];
   agentIdentityId?: string;
+  supportOrigin?: { userId: string; workspaceId: string; version: number };
 };
 
 export type AppActor = HumanActor | AgentActor;

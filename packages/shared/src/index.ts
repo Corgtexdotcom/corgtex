@@ -13,3 +13,4 @@ export * from "./redis";
 export * from "./telemetry";
 export * from "./release-metadata";
 export * from "./logger";
+export * from "./support-context";

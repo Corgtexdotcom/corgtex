@@ -38,6 +38,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   return {
     ...actual,
     prisma: {
+      workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
       $transaction: vi.fn(),
       member: {
         findMany: vi.fn(),

@@ -6,6 +6,7 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
   sha256Mock: vi.fn((value: string) => `hash:${value}`),
   toInputJsonMock: vi.fn((value: unknown) => value),
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(),
     workspaceToolLink: {
       findMany: vi.fn(),
@@ -63,6 +64,7 @@ const actorUserIdForWorkspace = vi.hoisted(() => vi.fn());
 const recordAudit = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
+  getSupportAuthorizationContext: vi.fn(() => undefined),
   env: {
     get SLACK_CLIENT_ID() { return process.env.SLACK_CLIENT_ID; },
     get SLACK_CLIENT_SECRET() { return process.env.SLACK_CLIENT_SECRET; },

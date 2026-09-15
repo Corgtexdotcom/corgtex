@@ -4,6 +4,7 @@ import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from 
 import { AppError, invariant } from "./errors";
 import { appendEvents } from "./events";
 import { isGlobalOperator, requireWorkspaceMembership } from "./auth";
+import { lockWorkspaceMembership, requireUnmanagedMember } from "./workspace-support-access";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { privacyFilter } from "./privacy";
 import { closeRoleLifecycleForMember } from "./role-onboarding";
@@ -126,7 +127,7 @@ function parseInvitePolicy(config: unknown): MemberInvitePolicy {
   return "ADMINS_ONLY";
 }
 
-async function issueSetupToken(tx: any, userId: string) {
+export async function issueSetupToken(tx: any, userId: string) {
   await tx.passwordResetToken.updateMany({
     where: {
       userId,
@@ -376,6 +377,10 @@ export async function createMember(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     const randomPassword = randomOpaqueToken();
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    if (!params.skipAdminCheck) {
+      await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
+    }
     const user = await tx.user.upsert({
       where: { email },
       update: {
@@ -393,6 +398,7 @@ export async function createMember(actor: AppActor, params: {
       },
     });
 
+    await requireUnmanagedMember(tx, params.workspaceId, user.id);
     const member = await tx.member.upsert({
       where: {
         workspaceId_userId: {
@@ -491,6 +497,8 @@ export async function updateMember(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
     const member = await tx.member.findUnique({
       where: { id: params.memberId },
       include: {
@@ -507,6 +515,7 @@ export async function updateMember(actor: AppActor, params: {
     });
 
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
 
     const memberData: Record<string, unknown> = {};
     if (params.role !== undefined) memberData.role = params.role;
@@ -673,12 +682,15 @@ export async function resendMemberAccessLink(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await lockWorkspaceMembership(tx, params.workspaceId);
+    await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId, allowedRoles: ["ADMIN"], tx });
     const member = await tx.member.findUnique({
       where: { id: params.memberId },
       include: { user: { select: { id: true, email: true, displayName: true } } },
     });
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
 
+    await requireUnmanagedMember(tx, params.workspaceId, member.userId);
     const token = await issueSetupToken(tx, member.userId);
     await tx.auditLog.create({
       data: {
