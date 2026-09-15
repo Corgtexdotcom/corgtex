@@ -5129,11 +5129,14 @@ export async function listControlPlaneSupportOperations(actor: AppActor, deploym
   return operations.map((operation) => compactControlPlaneSupportOperation(operation as unknown as Record<string, unknown>));
 }
 
-async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymentId: string) {
+const releaseAccountSelect = { id: true, primaryDeploymentId: true } satisfies Prisma.CustomerAccountSelect;
+
+async function getControlPlaneDeploymentWithWorkspace(actor: AppActor, deploymentId: string, options: { releaseAccount?: boolean } = {}) {
   await requireControlPlaneAccess(actor, { deploymentId });
   const deployment = await prisma.customerDeployment.findUnique({
     where: { id: deploymentId },
     include: {
+      ...(options.releaseAccount ? { customerAccount: { select: releaseAccountSelect } } : {}),
       managedWorkspace: {
         select: managedWorkspaceSelect,
       },
@@ -9054,6 +9057,9 @@ export function isControlPlaneRailwayDeployConfigured() {
 }
 
 function releasePreflightForDeployment(deployment: {
+  id: string;
+  customerAccountId?: string | null;
+  customerAccount?: { id: string; primaryDeploymentId: string | null } | null;
   label?: string | null;
   url?: string | null;
   customerSlug?: string | null;
@@ -9087,7 +9093,28 @@ function releasePreflightForDeployment(deployment: {
   const targetConfigDetail = cloudProvider === "AZURE"
     ? "Set CONTROL_PLANE_AZURE_LATEST_WEB_IMAGE, CONTROL_PLANE_AZURE_LATEST_WORKER_IMAGE, and CONTROL_PLANE_AZURE_LATEST_RELEASE_GIT_SHA."
     : "Set CONTROL_PLANE_RAILWAY_LATEST_WEB_IMAGE and CONTROL_PLANE_RAILWAY_LATEST_WORKER_IMAGE, or the legacy CONTROL_PLANE_LATEST_* Railway target.";
+  const isCurrentAccountTarget = Boolean(deployment.customerAccountId
+    && deployment.customerAccount?.id === deployment.customerAccountId
+    && deployment.customerAccount.primaryDeploymentId === deployment.id);
+  const isRetainedHistory = deployment.deploymentStatus === "RETIRED"
+    || ["archived", "retired"].includes(deployment.provisioningStatus ?? "");
   const baseChecks: ControlPlaneReleasePreflightCheck[] = [
+    {
+      key: "current_account_target",
+      label: "Deployment is the account's current target",
+      ok: isCurrentAccountTarget,
+      detail: isCurrentAccountTarget
+        ? "Customer account explicitly designates this deployment as primary."
+        : "Current release target is unproven or superseded. Verify the customer account's explicit primary deployment before rollout.",
+    },
+    {
+      key: "not_retired",
+      label: "Deployment is not retained history",
+      ok: !isRetainedHistory,
+      detail: isRetainedHistory
+        ? "Retired or archived deployments are not rollout targets."
+        : "Deployment is not marked retired or archived.",
+    },
     {
       key: "target_configured",
       label: "Latest release configured",
@@ -9217,7 +9244,7 @@ function canBypassDeployLatestPreflight(preflight: { checks: ControlPlaneRelease
 }
 
 export async function getControlPlaneDeployLatestPreflight(actor: AppActor, deploymentId: string) {
-  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId, { releaseAccount: true });
   const target = getControlPlaneLatestReleaseTarget({
     cloudProvider: controlPlaneDeploymentCloudProvider(deployment),
   });
@@ -9230,7 +9257,7 @@ export async function getControlPlaneDeployLatestPreflight(actor: AppActor, depl
 
 export async function validateControlPlaneRailwayReleaseExecutor(actor: AppActor, deploymentId: string, railwayClient?: RailwayClient) {
   requireControlPlaneScope(actor, CONTROL_PLANE_READ_SCOPE);
-  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId);
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, deploymentId, { releaseAccount: true });
   const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
   const target = getControlPlaneLatestReleaseTarget({ cloudProvider });
   const railwayConfigured = Boolean(railwayClient) || isControlPlaneRailwayDeployConfigured();
@@ -9317,7 +9344,8 @@ export async function deployLatestControlPlaneRelease(actor: AppActor, params: {
   requireControlPlaneScope(actor, "control-plane:releases:write");
   const reason = requireMutationReason(params.reason);
   await requireControlPlaneDeploymentWriteAccess(actor, params.deploymentId);
-  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId);
+  // Reload the primary binding at execution; a queued job is not current-target proof.
+  const deployment = await getControlPlaneDeploymentWithWorkspace(actor, params.deploymentId, { releaseAccount: true });
   const cloudProvider = controlPlaneDeploymentCloudProvider(deployment);
   const target = params.target ?? getControlPlaneLatestReleaseTarget({ cloudProvider });
   const preflight = releasePreflightForDeployment(deployment, target, { railwayDeployConfigured: Boolean(railwayClient) || isControlPlaneRailwayDeployConfigured() });
@@ -9519,10 +9547,12 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
     ? await prisma.customerDeployment.findMany({
       where: { id: { in: requestedIds } },
       orderBy: { label: "asc" },
+      include: { customerAccount: { select: releaseAccountSelect } },
     })
     : await prisma.customerDeployment.findMany({
       where: {
         customerAccountId: { not: null },
+        primaryForAccount: { isNot: null },
         deploymentStatus: { notIn: ["RETIRED", "SUSPENDED"] },
       },
       orderBy: [
@@ -9530,6 +9560,7 @@ export async function enqueueControlPlaneDeployLatestRollout(actor: AppActor, pa
         { label: "asc" },
       ],
       take: limit,
+      include: { customerAccount: { select: releaseAccountSelect } },
     });
   if (requestedIds.length) {
     const foundIds = new Set(deployments.map((deployment) => deployment.id));
