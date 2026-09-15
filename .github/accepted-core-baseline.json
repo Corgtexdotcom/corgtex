@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "target": "backup-app",
+  "targetSha256": "0a8d44d089ad7b3b4ce3878a84d9b3755c9fdc5b4b124d786cfb1654a417b74b",
+  "sourceSha": "d0a3896ef917b50f2fec2d797908f29aa026a058",
+  "verifierSha": "424b65801ffd783fa3cad7e7068d77523467fd78",
+  "receiptSha256": "2d1075566d08221970e4c5ca8411dc1d5846094c78a19acac089d2782b9a8909",
+  "run": {
+    "id": 34931209548,
+    "attempt": 1,
+    "workflowId": 357276730,
+    "workflowSha": "424b65801ffd783fa3cad7e7068d77523467fd78"
+  },
+  "artifact": {
+    "id": 10380924284,
+    "name": "accepted-core-baseline-34931209548-1",
+    "sha256": "2aee9088f60aa4b64a7db4dd901e083f6cb2beb6f4b4ce45c02e9da25d1f8830"
+  }
+}
