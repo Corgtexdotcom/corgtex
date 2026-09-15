@@ -1,3 +1,4 @@
+import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import type { MemberInviteRequestStatus, MemberKind, MemberRole } from "@prisma/client";
 import type { AppActor } from "@corgtex/shared";
 import { env, prisma, hashPassword, randomOpaqueToken, sendEmail, sha256 } from "@corgtex/shared";
@@ -370,6 +371,7 @@ export async function createMember(actor: AppActor, params: {
   }
 
   const email = normalizeEmail(params.email);
+  requireUnreservedPublicDemoEmail(email);
   const displayName = normalizeDisplayName(params.displayName);
   const kind = params.kind ?? inferMemberKindFromUserIdentity({ email, displayName });
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
@@ -515,6 +517,8 @@ export async function updateMember(actor: AppActor, params: {
     });
 
     invariant(member && member.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Member not found.");
+    requireUnreservedPublicDemoEmail(member.user.email);
+    if (params.email !== undefined && params.email !== null) requireUnreservedPublicDemoEmail(params.email);
     await requireUnmanagedMember(tx, params.workspaceId, member.userId);
 
     const memberData: Record<string, unknown> = {};
@@ -728,6 +732,7 @@ export async function requestMemberInvite(actor: AppActor, params: {
   }
 
   const email = normalizeEmail(params.email);
+  requireUnreservedPublicDemoEmail(email);
   invariant(email.length > 0, 400, "INVALID_INPUT", "Email is required.");
 
   const [existingActiveMember, existingPendingRequest] = await Promise.all([

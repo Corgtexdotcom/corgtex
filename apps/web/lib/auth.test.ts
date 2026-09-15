@@ -152,3 +152,42 @@ describe("resolveRequestActor", () => {
     });
   });
 });
+
+describe("public demo write fence", () => {
+  const actor = { kind: "user", user: { id: "demo", email: "demo@jnj-demo.corgtex.app" } };
+
+  it("rejects direct API mutations for the public identity", async () => {
+    resolveSessionActor.mockResolvedValue(actor);
+    const { resolveRequestActor } = await import("./auth");
+    const request = {
+      method: "POST",
+      headers: new Headers(),
+      cookies: { get: () => ({ value: "token" }) },
+      nextUrl: { pathname: "/api/workspaces/demo/actions" },
+    };
+    await expect(resolveRequestActor(request as never)).rejects.toMatchObject({ code: "DEMO_MODE" });
+  });
+
+  it.each(["/api/oauth/authorize", "/api/integrations/google/callback", "/oauth/authorize"])("rejects page-auth credential routes %s", async (pathname) => {
+    cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+    resolveSessionActor.mockResolvedValue(actor);
+    headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": pathname }));
+    const { requirePageActor } = await import("./auth");
+    await expect(requirePageActor()).rejects.toMatchObject({ code: "DEMO_MODE" });
+  });
+
+  it.each(["/api/integrations/google/connect", "/api/workspaces/demo/intercom-token", "/api/workspaces/demo/onboarding/google-drive"])("rejects GET side effects %s", async (pathname) => {
+    resolveSessionActor.mockResolvedValue(actor);
+    const { resolveRequestActor } = await import("./auth");
+    const request = { method: "GET", headers: new Headers(), cookies: { get: () => ({ value: "token" }) }, nextUrl: { pathname } };
+    await expect(resolveRequestActor(request as never)).rejects.toMatchObject({ code: "DEMO_MODE" });
+  });
+
+  it("rejects replayed server actions for the public identity", async () => {
+    cookies.mockResolvedValue({ get: () => ({ value: "token" }) });
+    resolveSessionActor.mockResolvedValue(actor);
+    headers.mockResolvedValue(new Headers({ "x-corgtex-pathname": "/en/workspaces/demo", "next-action": "id" }));
+    const { requirePageActor } = await import("./auth");
+    await expect(requirePageActor()).rejects.toMatchObject({ code: "DEMO_MODE" });
+  });
+});

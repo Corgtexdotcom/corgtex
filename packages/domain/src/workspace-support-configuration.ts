@@ -1,3 +1,4 @@
+import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import { Prisma } from "@prisma/client";
 import { isDeepStrictEqual } from "node:util";
 import { prisma, hashPassword, randomOpaqueToken } from "@corgtex/shared";
@@ -49,7 +50,7 @@ async function accessChange(db: Db, workspaceId: string, command: SupportConfigu
     return { approval: true, state: { userId: user?.id ?? null } };
   }
   if (command.kind === "member") {
-    const member = await db.member.findFirst({ where: { workspaceId, id: command.memberId, kind: "HUMAN" }, select: { id: true, userId: true, role: true, isActive: true } });
+    const member = await db.member.findFirst({ where: { workspaceId, id: command.memberId, kind: "HUMAN" }, select: { id: true, userId: true, role: true, isActive: true, user: { select: { email: true } } } });
     invariant(member, 404, "MEMBER_UNAVAILABLE", "Member not found.");
     await requireUnmanagedMember(db, workspaceId, member.userId);
     return { approval: (!member.isActive && command.isActive) || command.role !== member.role, state: member };
@@ -106,6 +107,7 @@ export async function getSupportConfiguration(actor: AppActor, workspaceId: stri
 
 export async function changeSupportConfiguration(actor: AppActor, workspaceId: string, expectedVersion: number, input: unknown) {
   const command = supportConfigurationCommand.parse(input);
+  if (command.kind === "addMember") requireUnreservedPublicDemoEmail(command.email);
   invariant(Number.isSafeInteger(expectedVersion) && expectedVersion > 0, 400, "INVALID_INPUT", "A grant version is required.");
   const delivery: { email: string; token: string }[] = [];
   const result = await prisma.$transaction(async tx => {
@@ -137,9 +139,11 @@ async function applyConfiguration(tx: Db, actor: AppActor, workspaceId: string, 
       await tx.workspaceFeatureFlag.upsert({ where: { workspaceId_flag: { workspaceId, flag: "MEMBER_INVITES" } }, create: { workspaceId, flag: "MEMBER_INVITES", ...data }, update: data });
     } else if (command.kind === "member" || command.kind === "addMember") {
       const target = command.kind === "member"
-        ? await tx.member.findFirst({ where: { workspaceId, id: command.memberId, kind: "HUMAN" }, select: { id: true, userId: true, role: true, isActive: true } })
+        ? await tx.member.findFirst({ where: { workspaceId, id: command.memberId, kind: "HUMAN" }, select: { id: true, userId: true, role: true, isActive: true, user: { select: { email: true } } } })
         : null;
       const email = command.kind === "addMember" ? command.email.trim().toLowerCase() : null;
+      if (email) requireUnreservedPublicDemoEmail(email);
+      requireUnreservedPublicDemoEmail(target?.user?.email);
       let user = email ? await tx.user.findUnique({ where: { email }, select: { id: true, isSupportAccount: true } }) : null;
       invariant(command.kind === "member" ? target : !user?.isSupportAccount, 400, "MEMBER_UNAVAILABLE", "Named member account is unavailable.");
       if (email && !user) {

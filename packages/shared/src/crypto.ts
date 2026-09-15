@@ -46,6 +46,10 @@ export function hashPassword(password: string) {
   return `scrypt$${salt}$${hash}`;
 }
 
+export function isPasswordLoginDisabled(storedHash: string) {
+  return storedHash.startsWith("disabled$");
+}
+
 export function verifyPassword(password: string, storedHash: string) {
   const [algorithm, salt, hash] = storedHash.split("$");
   if (algorithm !== "scrypt" || !salt || !hash) {

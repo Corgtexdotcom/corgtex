@@ -13,3 +13,7 @@ describe("internal validation workspace seed", () => {
     expect(validationSeedConfig.featureFlags).not.toHaveProperty("SLICING_PIE");
   });
 });
+
+it("keeps the validation administrator outside global operations", () => {
+  expect(validationSeedConfig.bootstrapGlobalRole).toBe("USER");
+});

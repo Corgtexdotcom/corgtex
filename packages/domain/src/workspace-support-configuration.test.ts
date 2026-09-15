@@ -20,6 +20,10 @@ beforeEach(() => {
   tx.workspaceSupportGrant.findUnique.mockResolvedValue({ id: "grant", version: 1, isActive: true, role: "SETUP" });
 });
 describe("configuration concurrent-owner decisions", () => {
+  it("refuses reserved demo support invitations before approval or membership writes", async () => {
+    await expect(changeSupportConfiguration(actor, "ws", 1, { kind: "addMember", email: "demo@jnj-demo.corgtex.app", role: "CONTRIBUTOR" })).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(tx.$queryRaw).not.toHaveBeenCalled(); expect(tx.auditLog.create).not.toHaveBeenCalled();
+  });
   it("does not overwrite a concurrent disconnect or consent change", async () => {
     tx.oAuthConnection.findFirst.mockResolvedValue({ id: "connection", provider: "GOOGLE", scopes: [], status: "ACTIVE", syncSettings: {}, updatedAt });
     tx.oAuthConnection.updateMany.mockResolvedValue({ count: 0 });

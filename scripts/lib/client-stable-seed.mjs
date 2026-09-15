@@ -493,7 +493,7 @@ export async function seedStableClient(config) {
             where: { email: adminEmail },
             data: {
               displayName: firstEnv([`${envPrefix}_ADMIN_DISPLAY_NAME`, "CLIENT_ADMIN_DISPLAY_NAME", "ADMIN_DISPLAY_NAME"]) ?? existingAdmin.displayName ?? `${workspaceName} Admin`,
-              globalRole: "OPERATOR",
+              globalRole: config.bootstrapGlobalRole ?? "OPERATOR",
               ...(resetPasswords ? { passwordHash: hashPassword(adminPassword) } : {}),
             },
           })
@@ -502,7 +502,7 @@ export async function seedStableClient(config) {
               email: adminEmail,
               displayName: firstEnv([`${envPrefix}_ADMIN_DISPLAY_NAME`, "CLIENT_ADMIN_DISPLAY_NAME", "ADMIN_DISPLAY_NAME"]) ?? `${workspaceName} Admin`,
               passwordHash: hashPassword(adminPassword),
-              globalRole: "OPERATOR",
+              globalRole: config.bootstrapGlobalRole ?? "OPERATOR",
             },
           });
 

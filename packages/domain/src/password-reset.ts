@@ -1,4 +1,4 @@
-import { prisma, hashPassword, randomOpaqueToken, sha256 } from "@corgtex/shared";
+import { prisma, hashPassword, randomOpaqueToken, sha256, isPasswordLoginDisabled } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 
 const RESET_TOKEN_TTL_MS = 1000 * 60 * 15; // 15 minutes
@@ -39,15 +39,15 @@ export async function requestPasswordReset(email: string) {
 
   const user = await prisma.user.findUnique({
     where: { email: normalizedEmail },
-    select: { id: true, email: true, displayName: true },
+    select: { id: true, email: true, displayName: true, passwordHash: true },
   });
 
-  if (!user) {
+  if (!user || isPasswordLoginDisabled(user.passwordHash ?? "")) {
     // Silently return null — caller should still return 200 to prevent enumeration
     return null;
   }
 
-  return issuePasswordResetToken(user);
+  return issuePasswordResetToken({ id: user.id, email: user.email, displayName: user.displayName });
 }
 
 export async function requestPasswordResetForActiveMember(email: string) {
@@ -60,6 +60,7 @@ export async function requestPasswordResetForActiveMember(email: string) {
       id: true,
       email: true,
       displayName: true,
+      passwordHash: true,
       memberships: {
         where: { isActive: true },
         select: { id: true },
@@ -68,7 +69,7 @@ export async function requestPasswordResetForActiveMember(email: string) {
     },
   });
 
-  if (!user || user.memberships.length === 0) {
+  if (!user || isPasswordLoginDisabled(user.passwordHash ?? "") || user.memberships.length === 0) {
     return null;
   }
 
@@ -96,6 +97,7 @@ export async function consumePasswordReset(params: { token: string; newPassword:
       userId: true,
       expiresAt: true,
       usedAt: true,
+      user: { select: { passwordHash: true } },
     },
   });
 
@@ -110,6 +112,8 @@ export async function consumePasswordReset(params: { token: string; newPassword:
   if (resetToken.expiresAt <= new Date()) {
     throw new AppError(400, "TOKEN_EXPIRED", "This reset link has expired. Please request a new one.");
   }
+
+  invariant(!isPasswordLoginDisabled(resetToken.user.passwordHash), 400, "INVALID_TOKEN", "This reset link is invalid or has expired.");
 
   // Update password, mark token as used, and invalidate all sessions in a transaction
   await prisma.$transaction([

@@ -136,6 +136,22 @@ describe("members domain", () => {
     selfServeOpsMock.maybeCaptureSelfServeSetupEmail.mockResolvedValue(null);
   });
 
+  it.each([false, true])("refuses reserved demo invitations before writes (skipAdminCheck=%s)", async skipAdminCheck => {
+    const { createMember } = await import("./members");
+    await expect(createMember(actor, { workspaceId: "client", email: "  DEMO@JNJ-DEMO.CORGTEX.APP ", role: "CONTRIBUTOR", skipAdminCheck })).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(prismaMock.user.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.member.upsert).not.toHaveBeenCalled();
+    expect(prismaMock.passwordResetToken.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["existing", "renamed"])("refuses reserved demo membership %s edits before writes", async source => {
+    prismaMock.member.findUnique.mockResolvedValue({ id: "member-demo", workspaceId: "demo", userId: "user-demo", role: "CONTRIBUTOR", isActive: true, user: { id: "user-demo", email: source === "existing" ? "demo@jnj-demo.corgtex.app" : "ordinary@example.com", displayName: "Member", ssoIdentities: [], _count: { memberships: 1 } } });
+    const { updateMember } = await import("./members");
+    await expect(updateMember(actor, { workspaceId: "demo", memberId: "member-demo", role: "ADMIN", ...(source === "renamed" ? { email: "demo@jnj-demo.corgtex.app" } : {}) })).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(prismaMock.user.update).not.toHaveBeenCalled(); expect(prismaMock.member.update).not.toHaveBeenCalled(); expect(prismaMock.member.upsert).not.toHaveBeenCalled();
+  });
+
   it("listMembers returns active members ordered by join date", async () => {
     prismaMock.member.findMany.mockResolvedValue([{ id: "member-1" }]);
 

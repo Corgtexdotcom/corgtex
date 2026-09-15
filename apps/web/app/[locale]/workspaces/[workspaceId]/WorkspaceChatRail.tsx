@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 import { usePathname } from "next/navigation";
 import { ChatInterface } from "./chat/ChatInterface";
 import {
@@ -47,12 +48,15 @@ export function WorkspaceChatRail({
   conversations,
   companyQuestions,
   aiWorkspaceState,
+  readOnly = false,
 }: {
   workspaceId: string;
   conversations: ConversationSummary[];
   companyQuestions: CompanyQuestionSummary[];
   aiWorkspaceState: AiWorkspaceLaunchState;
+  readOnly?: boolean;
 }) {
+  const tDemo = useTranslations("demo");
   const pathname = usePathname() ?? "";
   const defaultCollapsed = useMemo(() => !isWorkspaceHome(pathname, workspaceId), [pathname, workspaceId]);
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
@@ -151,20 +155,26 @@ export function WorkspaceChatRail({
         <span className="ws-agent-toggle-text">AI</span>
       </button>
       <div className="ws-agent-chat-shell" hidden={isCollapsed} aria-hidden={isCollapsed}>
-        <AiWorkspaceLaunchPanel
-          workspaceId={workspaceId}
-          initialState={aiWorkspaceState}
-          variant="rail"
-        />
-        <ChatInterface
-          workspaceId={workspaceId}
-          conversations={conversations}
-          companyQuestions={companyQuestions}
-          activeSessionId={null}
-          compact={true}
-          pageContext={pageContext}
-          openSignal={openSignal}
-        />
+        {readOnly ? (
+          <p className="demo-tour-briefing-copy">{tDemo("readOnlyBanner")}</p>
+        ) : (
+          <>
+            <AiWorkspaceLaunchPanel
+              workspaceId={workspaceId}
+              initialState={aiWorkspaceState}
+              variant="rail"
+            />
+            <ChatInterface
+              workspaceId={workspaceId}
+              conversations={conversations}
+              companyQuestions={companyQuestions}
+              activeSessionId={null}
+              compact={true}
+              pageContext={pageContext}
+              openSignal={openSignal}
+            />
+          </>
+        )}
       </div>
     </aside>
   );

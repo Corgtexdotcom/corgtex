@@ -174,6 +174,11 @@ describe("procurement trials", () => {
     prismaMock.document.findMany.mockResolvedValue([]);
   });
 
+  it("refuses reserved demo trial admin before provisioning writes", async () => {
+    const { createProcurementTrial } = await import("./procurement-trials");
+    await expect(createProcurementTrial({ input: { companyName: "Demo", adminEmail: "demo@jnj-demo.corgtex.app", adminName: "Demo", acceptedTermsVersion: "2026-04" }, idempotencyKey: "reserved-demo" })).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled(); expect(prismaMock.user.upsert).not.toHaveBeenCalled(); expect(prismaMock.member.upsert).not.toHaveBeenCalled();
+  });
   it("creates an active capped trial for a business domain and returns a connector token", async () => {
     const { createProcurementTrial } = await import("./procurement-trials");
 

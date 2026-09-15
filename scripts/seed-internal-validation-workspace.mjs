@@ -73,6 +73,7 @@ function assertValidationSeedEnvironmentPinned() {
 
 export const validationSeedConfig = {
   envPrefix: "VALIDATION",
+  bootstrapGlobalRole: "USER",
   defaultLocale: "en",
   workspace: {
     slug: INTERNAL_VALIDATION_WORKSPACE_SLUG,
@@ -406,6 +407,28 @@ async function upsertRelationshipFixtures() {
 export async function main() {
   pinValidationSeedEnvironment();
   assertValidationSeedEnvironmentPinned();
+  const preflight = new PrismaClient();
+  try {
+    const existingWorkspace = await preflight.workspace.findUnique({ where: { slug: INTERNAL_VALIDATION_WORKSPACE_SLUG }, select: { id: true } });
+    if ((existingWorkspace || process.env.QA_EXPECTED_VALIDATION_WORKSPACE_ID) && process.env.QA_EXPECTED_VALIDATION_WORKSPACE_ID !== existingWorkspace?.id) {
+      throw new Error("Confirm QA_EXPECTED_VALIDATION_WORKSPACE_ID before refreshing validation fixtures");
+    }
+    const admin = await preflight.user.findUnique({
+      where: { email: process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL },
+      select: { id: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+    });
+    if (admin && admin.globalRole !== "USER") {
+      throw new Error("Use a validation administrator without global operator access");
+    }
+    if (admin?.memberships.some((member) => member.workspace.slug !== INTERNAL_VALIDATION_WORKSPACE_SLUG)) {
+      throw new Error("Use a dedicated validation administrator without other workspace memberships");
+    }
+    if (admin && await preflight.workspaceSupportGrant.count({ where: { userId: admin.id, isActive: true, ...(existingWorkspace ? { workspaceId: { not: existingWorkspace.id } } : {}) } })) {
+      throw new Error("Validation administrator must not have outside support access");
+    }
+  } finally {
+    await preflight.$disconnect();
+  }
   await seedStableClient(validationSeedConfig);
   await upsertRelationshipFixtures();
 }

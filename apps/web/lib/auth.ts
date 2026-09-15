@@ -85,6 +85,9 @@ export async function resolveRequestActor(request: NextRequest) {
 
   assertAllowedInControlPlaneMode(actor);
   setSupportAuthorizationActor(actor);
+  if (actor.kind === "user" && actor.user.email === "demo@jnj-demo.corgtex.app" && (!["GET", "HEAD", "OPTIONS"].includes(request.method) || isWorkspaceAuthorizedProviderRoute(request.nextUrl.pathname) || /^\/api\/workspaces\/[^/]+\/(?:intercom-token|onboarding\/google-drive)$/.test(request.nextUrl.pathname))) {
+    throw new AppError(403, "DEMO_MODE", "This is a read-only demo environment. Modifications are disabled.");
+  }
   await requireSupportRequestAccess(actor, request.nextUrl.pathname);
   return actor;
 }
@@ -137,6 +140,9 @@ export async function requirePageActor() {
 
   const requestHeaders = await headers();
   const pathname = requestHeaders.get("x-corgtex-pathname") ?? "";
+  if (actor.kind === "user" && actor.user.email === "demo@jnj-demo.corgtex.app" && (requestHeaders.has("next-action") || pathname.startsWith("/api/") || /^\/(?:en\/|es\/)?oauth\/authorize$/.test(pathname))) {
+    throw new AppError(403, "DEMO_MODE", "This is a read-only demo environment. Modifications are disabled.");
+  }
   const workspaceId = workspaceIdFromPath(pathname);
   if (!pathname) throw new AppError(403, "AUTHORIZATION_CONTEXT_REQUIRED", "Page authorization context is unavailable.");
   if (actor.kind === "user") {

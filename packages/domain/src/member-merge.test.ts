@@ -137,6 +137,14 @@ describe("member merge domain", () => {
     }
   });
 
+  it.each(["source", "target"])("refuses merging reserved demo %s before rewiring or membership writes", async which => {
+    const source = { ...sourceMember, user: { ...sourceMember.user, email: which === "source" ? "demo@jnj-demo.corgtex.app" : sourceMember.user.email } };
+    const target = { ...targetMember, user: { ...targetMember.user, email: which === "target" ? "demo@jnj-demo.corgtex.app" : targetMember.user.email } };
+    prismaMock.member.findUnique.mockResolvedValueOnce(source).mockResolvedValueOnce(target);
+    const { mergeWorkspaceMembers } = await import("./member-merge");
+    await expect(mergeWorkspaceMembers(actor, { workspaceId: "workspace-1", sourceMemberId: source.id, targetMemberId: target.id })).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(prismaMock.member.update).not.toHaveBeenCalled(); expect(prismaMock.memberEmailAlias.upsert).not.toHaveBeenCalled(); expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+  });
   it("adds a normalized alias for a workspace member", async () => {
     prismaMock.member.findUnique.mockResolvedValue({
       id: "member-1",

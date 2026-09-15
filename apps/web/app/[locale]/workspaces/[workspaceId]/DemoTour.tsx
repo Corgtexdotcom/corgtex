@@ -84,11 +84,11 @@ export function DemoTour({ workspaceId }: { workspaceId: string }) {
       },
     },
     {
-      path: "/",
-      element: ".ws-assistant-launch",
+      path: "/meetings",
+      element: ".ws-main-content",
       popover: {
-        title: t("askTitle"),
-        description: t("askDescription"),
+        title: t("meetingsTitle"),
+        description: t("meetingsDescription"),
         side: "top",
       },
     },
