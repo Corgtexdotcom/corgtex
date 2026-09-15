@@ -226,6 +226,26 @@ describe("target qualification lifecycle", () => {
     expect(events.filter(e => e === "delete-attempt")).toHaveLength(1);
     expect(events.filter(e => e === "stop")).toHaveLength(1);
   });
+  it.each([4, 5])("deletes an owned rule first observed on pre-STOP rules read %s", async visibleRead => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = visibleRead === 5 ? "Starting" : "Ready";
+    const read = api.rules, create = api.createRule, remove = api.deleteRule;
+    let reads = 0;
+    api.rules = async () => {
+      if (++reads === visibleRead) { await create(i); api.current.state = "Ready"; }
+      return read();
+    };
+    api.deleteRule = async intent => {
+      expect(api.current.state).toBe("Ready");
+      await remove(intent); api.current.state = "Updating";
+    };
+    c.sleep = async ms => { c.time += ms; api.current.state = "Ready"; };
+    const result = await cleanup(api, i, c);
+    expect(result.firewallAbsent && result.serverStopped).toBe(true);
+    expect(events.filter(e => e === "delete")).toHaveLength(1);
+    expect(events.filter(e => e === "stop")).toHaveLength(1);
+    expect(events.indexOf("delete")).toBeLessThan(events.indexOf("stop"));
+  });
   it.each(["identity", "boundary", "rules", "server"])("normalizes expired cleanup polling %s reads without more writes", async method => {
     const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
     api.current.state = "Updating";

@@ -238,26 +238,42 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   api.deadline = cleanupDeadline;
   await api.identity(); await api.boundary();
   let observedStopping = validateServer(await api.server(), true).state === "Stopping";
-  validateRules(await api.rules(), i);
+  let ruleObserved = validateRules(await api.rules(), i).length > 0;
   // Updating is admitted only inside this owned execution, never at prepare/start.
   const settled = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
   observedStopping ||= settled.state === "Stopping";
+  ruleObserved ||= settled.ownedRules.length > 0;
   const rules = validateRules(await api.rules(), i);
+  ruleObserved ||= rules.length > 0;
+  let deleteAttempted = false;
   // A failed CLI response may follow an accepted write. Reconcile readbacks,
   // and still stop owned compute if removal of the owned firewall rule fails.
-  if (rules.length) {
+  if (ruleObserved) {
     // A late rule read can itself reveal an in-flight CREATE. Settle again,
     // using the owned rules read before that fresh state, not another late read.
     const beforeDelete = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
     observedStopping ||= beforeDelete.state === "Stopping";
-    if (beforeDelete.ownedRules.length) {
-      try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
-    }
+    deleteAttempted = true;
+    try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
   }
   let s = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
   // Stopped can be the pre-transition readback of an accepted START. It is not
   // terminal evidence unless this owned cleanup already observed STOP in flight.
-  if (s.state === "Starting" || (s.state === "Stopped" && !observedStopping)) s = await waitState(api, "Ready", cleanupDeadline, c, i);
+  for (;;) {
+    observedStopping ||= s.state === "Stopping";
+    if (s.ownedRules.length && !deleteAttempted) {
+      // Every settled pre-STOP read can first reveal our accepted CREATE.
+      deleteAttempted = true;
+      try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
+      s = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
+      continue;
+    }
+    if (s.state === "Starting" || (s.state === "Stopped" && !observedStopping)) {
+      s = await waitState(api, "Ready", cleanupDeadline, c, i);
+      continue;
+    }
+    break;
+  }
   assert(s.state === "Ready" || s.state === "Stopping" || (s.state === "Stopped" && observedStopping), "START_TERMINAL_UNPROVEN");
   if (s.state === "Ready") {
     try { await api.stop(); } catch { /* Bounded state polling resolves an ambiguous response. */ }

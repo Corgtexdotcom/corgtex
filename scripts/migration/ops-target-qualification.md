@@ -60,7 +60,11 @@ unresolved failure, not proof that access or compute was removed.
 If a late cleanup rule read reveals the accepted CREATE while Azure enters
 Updating, cleanup obtains another owned-rule read followed by a fresh settled
 state before its sole DELETE attempt. It uses that paired readback without
-another intervening rule read. Polling reads that exhaust the cleanup deadline
+another intervening rule read. Every settled pre-STOP read, including readiness
+after Starting, handles an owned rule first observed there before proceeding to
+STOP. Earlier observed ownership is retained across an absent read, and DELETE
+is attempted at most once, followed by settled-state reconciliation.
+Polling reads that exhaust the cleanup deadline
 report `ABSOLUTE_DEADLINE_EXCEEDED`, including Azure operation-deadline and
 operation-failure errors. Earlier read failures and semantic identity, role,
 ownership or target-drift errors retain their original codes.
