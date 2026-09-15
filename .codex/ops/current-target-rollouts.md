@@ -18,9 +18,10 @@ history, suspended, backup, Azure, or shared-workspace exclusions. A legitimatel
 designated live Railway legacy target remains eligible under existing checks.
 Deployments remains an infrastructure inventory; visibility is not eligibility.
 
-This is an execution-time recheck, not cancellation of an already-started provider
-operation. Continue serializing target reassignment/retirement against active
-release writers. External fleet/recovery scripts and monitor selection are not
+This is an execution-time recheck, not a lease or cancellation mechanism. A
+concurrent reassignment after the check can race even before the first provider
+call. Serialize target reassignment/retirement against the entire release writer,
+from its preflight read through completion. External fleet/recovery scripts and monitor selection are not
 changed by this Ops Deploy Latest policy. No schema migration or retirement-data
 rewrite is required. Keep existing authorization guards when integrating workspace
 administration changes; primary designation never grants actor permissions.
