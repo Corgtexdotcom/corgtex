@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma, runWithSupportOrigin } from "@corgtex/shared";
+import { getSupportAuthorizationContext, prisma, runWithSupportOrigin } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
 import { changeWorkspaceSupportGrant, getSupportSetup, updateSupportSetup, withWorkspaceSupportExecution } from "./workspace-support-access";
@@ -12,8 +12,25 @@ import { requireSupportRequestAccess } from "../../../apps/web/lib/support-reque
 import { deriveJobsForEvent } from "../../workflows/src/derive-jobs";
 import { handleContextGraphSync } from "../../workflows/src/handlers/context-graph-sync";
 import * as events from "./events";
+import { issueAgentCredential, rotateAgentCredential } from "./agent-auth";
+import { assertTrialMemberCapacity } from "./trial-entitlements";
 
 const { setupEmail } = vi.hoisted(() => ({ setupEmail: vi.fn() }));
+const capabilityLookup = vi.hoisted(() => ({ model: "", run: undefined as (() => Promise<void>) | undefined }));
+vi.mock("@corgtex/shared", async importOriginal => {
+  const actual = await importOriginal<typeof import("@corgtex/shared")>();
+  return { ...actual, prisma: actual.prisma.$extends({ query: { $allModels: {
+    async $allOperations({ model, operation, args, query }) {
+      const result = await query(args);
+      if (capabilityLookup.run && model === capabilityLookup.model && ["findFirst", "findUnique"].includes(operation)) {
+        const run = capabilityLookup.run;
+        capabilityLookup.run = undefined;
+        await run();
+      }
+      return result;
+    },
+  } } }) };
+});
 vi.mock("./members", async importOriginal => ({
   ...await importOriginal<typeof import("./members")>(),
   sendMemberSetupEmail: setupEmail,
@@ -126,6 +143,50 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
     await change("SETUP");
     await expect(requireWorkspaceMembership({ actor: support, workspaceId: other.id })).resolves.toMatchObject({ role: "ADMIN" });
     await expect(requireWorkspaceMembership({ actor: support, workspaceId })).rejects.toMatchObject({ code: "SUPPORT_CONTENT_RESTRICTED" });
+  });
+  for (const kind of ["user", "agent"] as const) for (const operation of ["issue", "rotate"] as const) {
+    isolated(`${kind} ${operation} cannot persist a credential for a grant renewed during its lookup`, async () => {
+      await change("FULL");
+      const actor: AppActor = kind === "user" ? support : { kind: "agent", label: "Synthetic delegation", authProvider: "credential", workspaceIds: [workspaceId], scopes: ["support:write"], supportOrigin: { userId: support.user.id, workspaceId, version: 1 } };
+      const catalog = await prisma.catalogItem.create({ data: { workspaceId, type: "TOOL", title: "Synthetic capability", slug: randomUUID() } });
+      const credential = await prisma.agentCredential.create({ data: { workspaceId, createdByUserId: support.user.id, supportGrantVersion: 1, label: "Synthetic original", tokenHash: randomUUID(), scopes: ["brain:read"] } });
+      const renewGrant = async () => {
+        expect(getSupportAuthorizationContext()?.origin).toEqual({ userId: support.user.id, workspaceId, version: 1 });
+        await change("FULL", 1, false);
+        await change("FULL", 2);
+      };
+      capabilityLookup.model = operation === "issue" ? "CatalogItem" : "AgentCredential";
+      capabilityLookup.run = renewGrant;
+      try {
+        await expect(runWithSupportOrigin(undefined, () => operation === "issue"
+          ? issueAgentCredential(actor, { workspaceId, label: "Stale request", catalogItemId: catalog.id })
+          : rotateAgentCredential(actor, { workspaceId, credentialId: credential.id }))).rejects.toMatchObject({ code: "SUPPORT_AUTHORIZATION_REVOKED" });
+      } finally {
+        capabilityLookup.run = undefined;
+      }
+      expect(await prisma.agentCredential.count({ where: { workspaceId } })).toBe(1);
+      expect(await prisma.agentCredential.findUnique({ where: { id: credential.id } })).toMatchObject({ tokenHash: credential.tokenHash, supportGrantVersion: 1, isActive: false });
+      expect(await prisma.workspaceSupportGrant.findUnique({ where: { workspaceId_userId: { workspaceId, userId: support.user.id } } })).toMatchObject({ version: 3, role: "FULL", isActive: true });
+    });
+  }
+  isolated("named Full support does not consume the final customer trial seat, but its ordinary membership elsewhere does", async () => {
+    const trial = (id: string) => prisma.procurementTrial.create({ data: {
+      workspaceId: id, status: "ACTIVE", companyName: "Synthetic seat trial", adminEmail: `trial-${id}@example.test`,
+      emailDomain: `${id}.example.test`, acceptedTermsVersion: "synthetic", trialExpiresAt: new Date(Date.now() + 60_000), memberLimit: 2,
+    } });
+    await trial(workspaceId);
+    await change("FULL");
+    expect(await prisma.member.count({ where: { workspaceId, isActive: true } })).toBe(2);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: support.user.id } })).isSupportAccount).toBe(false);
+    await expect(assertTrialMemberCapacity(workspaceId)).resolves.toBeUndefined();
+    const customer = await prisma.user.create({ data: { email: `customer-seat-${randomUUID()}@example.test`, passwordHash: "synthetic" } }); users.push(customer.id);
+    await createMember(owner, { workspaceId, email: customer.email, role: "CONTRIBUTOR" });
+    await expect(assertTrialMemberCapacity(workspaceId)).rejects.toMatchObject({ code: "TRIAL_MEMBER_LIMIT_EXCEEDED" });
+
+    const other = await prisma.workspace.create({ data: { slug: randomUUID(), name: "Ordinary membership seat fixture", supportOwnerUserId: owner.user.id } }); workspaces.push(other.id);
+    await prisma.member.createMany({ data: [owner, support].map(actor => ({ workspaceId: other.id, userId: actor.user.id, role: "ADMIN", kind: "HUMAN" })) });
+    await trial(other.id);
+    await expect(assertTrialMemberCapacity(other.id)).rejects.toMatchObject({ code: "TRIAL_MEMBER_LIMIT_EXCEEDED" });
   });
   isolated("Setup changes actual workspace settings, invitation policy and budget without reading content", async () => {
     await change("SETUP");

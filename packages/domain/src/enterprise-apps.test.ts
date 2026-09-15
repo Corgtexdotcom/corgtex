@@ -54,6 +54,7 @@ const recordAudit = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+  getSupportAuthorizationContext: vi.fn(() => undefined),
   randomOpaqueToken: randomOpaqueTokenMock,
   sha256: sha256Mock,
   toInputJson: toInputJsonMock,

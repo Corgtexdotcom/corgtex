@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { env, prisma, runWithSupportOrigin } from "@corgtex/shared";
+import { env, getSupportAuthorizationContext, prisma, runWithSupportOrigin } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
 import { requireDeploymentWorkspaceScope } from "./auth";
@@ -43,7 +43,18 @@ function safePreparations(value: unknown) {
 }
 
 export async function supportCapabilityVersion(userId: string | null | undefined, workspaceId: string, expectedVersion?: number | null) {
-  if (!userId) return null;
+  if (expectedVersion === undefined) {
+    const origin = getSupportAuthorizationContext()?.origin;
+    invariant(!origin || (origin.userId === userId && origin.workspaceId === workspaceId),
+      403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
+    // Issuance uses the grant already authorized by this request, never a newer grant.
+    // Explicit versions remain the contract for agents and persisted session redemption.
+    expectedVersion = origin?.version ?? null;
+  }
+  if (!userId) {
+    invariant(expectedVersion == null, 403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
+    return null;
+  }
   const grant = await prisma.workspaceSupportGrant.findUnique({
     where: { workspaceId_userId: { workspaceId, userId } },
     select: { isActive: true, role: true, version: true },
@@ -52,7 +63,7 @@ export async function supportCapabilityVersion(userId: string | null | undefined
     invariant(expectedVersion == null, 403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
     return null;
   }
-  invariant(grant.isActive && grant.role === "FULL" && (expectedVersion === undefined || expectedVersion === grant.version),
+  invariant(grant.isActive && grant.role === "FULL" && expectedVersion === grant.version,
     403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
   return grant.version;
 }

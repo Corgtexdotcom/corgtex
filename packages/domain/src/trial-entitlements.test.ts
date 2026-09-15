@@ -74,7 +74,7 @@ describe("trial entitlements", () => {
     prismaMock.document.findMany.mockResolvedValue([]);
   });
 
-  it("excludes internal support members from trial member capacity", async () => {
+  it("excludes legacy support and active Full grants only in the counted workspace", async () => {
     const { assertTrialMemberCapacity } = await import("./trial-entitlements");
 
     await expect(assertTrialMemberCapacity("workspace-1")).resolves.toBeUndefined();
@@ -83,6 +83,9 @@ describe("trial entitlements", () => {
       where: {
         workspaceId: "workspace-1",
         isActive: true,
+        user: {
+          workspaceSupportGrants: { none: { workspaceId: "workspace-1", role: "FULL", isActive: true } },
+        },
         NOT: {
           user: {
             email: {
