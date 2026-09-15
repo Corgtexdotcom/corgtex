@@ -28,6 +28,16 @@ PR1 adds no MCP connection transport, registration, installer, OAuth consent flo
 new global credential, or external connection machinery. Existing connection
 configuration and capability revocation reuse the application's existing tables.
 
+Support Brain source downloads stream through the server, never a client-visible
+signed URL or a whole-file buffer. They bind the already captured support epoch
+and recheck membership, workspace/source/storage-key and access domains before
+headers, then every 4 MiB or before the next delivery after one second. Idle
+downloads do not poll the database. Revocation stops subsequent delivery at that
+bounded checkpoint; it cannot retract bytes already sent. Client cancellation,
+access denial and provider errors close the upstream body. Ordinary memberships
+retain their signed-URL redirect. The 25 MiB extraction limit is not a file-upload
+or download limit; build-artifact uploads separately enforce 50 MiB.
+
 ## Configuration boundaries
 
 Configuration writes lock the workspace and recheck the current grant version in

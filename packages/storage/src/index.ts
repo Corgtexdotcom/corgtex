@@ -6,6 +6,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl as getS3SignedUrl } from "@aws-sdk/s3-request-presigner";
 import { DefaultAzureCredential } from "@azure/identity";
+import { Readable } from "node:stream";
 import {
   BlobSASPermissions,
   BlobServiceClient,
@@ -20,6 +21,7 @@ export interface StorageProvider {
     opts?: { contentType?: string }
   ): Promise<{ key: string; size: number }>;
   get(key: string, opts?: { maxBytes: number }): Promise<{ data: Buffer; contentType?: string } | null>;
+  getStream(key: string, opts?: { signal?: AbortSignal }): Promise<{ body: ReadableStream<Uint8Array>; contentType?: string } | null>;
   getSignedUrl(key: string, expiresInSec?: number): Promise<string>;
   delete(key: string): Promise<void>;
 }
@@ -203,6 +205,28 @@ function validateReadLimit(maxBytes?: number) {
   }
 }
 
+function downloadStream(stream: NodeJS.ReadableStream | undefined, signal?: AbortSignal) {
+  if (!stream) return null;
+  const readable = stream as Readable;
+  // Byte-based backpressure avoids interpreting a 64 KiB high-water mark as
+  // 65536 queued chunks. Cancellation of the web stream destroys the SDK body.
+  const body = Readable.toWeb(readable, { strategy: {
+    highWaterMark: 64 * 1024,
+    size: (chunk: Uint8Array) => chunk.byteLength,
+  } }) as ReadableStream<Uint8Array>;
+  const abort = () => readable.destroy(new Error("Storage download aborted."));
+  const detach = () => signal?.removeEventListener("abort", abort);
+  readable.once("close", detach);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  return body;
+}
+
+function storageObjectMissing(error: unknown) {
+  const value = error as { $metadata?: { httpStatusCode?: number }; statusCode?: number; name?: string } | null;
+  return value?.$metadata?.httpStatusCode === 404 || value?.statusCode === 404 || value?.name === "NoSuchKey";
+}
+
 async function streamToBuffer(stream: NodeJS.ReadableStream | null | undefined, maxBytes?: number, contentLength?: number) {
   if (!stream) return null;
   const chunks: Buffer[] = [];
@@ -295,6 +319,19 @@ export class S3StorageProvider implements StorageProvider {
       Key: key,
     });
     return getS3SignedUrl(this.client, command, { expiresIn: expiresInSec });
+  }
+
+  async getStream(key: string, opts?: { signal?: AbortSignal }) {
+    this.ensureConfigured("read");
+    try {
+      const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }), { abortSignal: opts?.signal });
+      const body = downloadStream(result.Body as NodeJS.ReadableStream | undefined, opts?.signal);
+      return body ? { body, contentType: result.ContentType } : null;
+    } catch (error) {
+      if (storageObjectMissing(error)) return null;
+      // Provider errors can contain credential-bearing request URLs.
+      throw new Error("Storage download failed.");
+    }
   }
 
   async delete(key: string) {
@@ -398,6 +435,18 @@ export class AzureBlobStorageProvider implements StorageProvider {
       );
 
     return `${this.containerClient().getBlobClient(key).url}?${sas.toString()}`;
+  }
+
+  async getStream(key: string, opts?: { signal?: AbortSignal }) {
+    this.ensureConfigured("read");
+    try {
+      const result = await this.containerClient().getBlobClient(key).download(0, undefined, { abortSignal: opts?.signal });
+      const body = downloadStream(result.readableStreamBody, opts?.signal);
+      return body ? { body, contentType: result.contentType } : null;
+    } catch (error) {
+      if (storageObjectMissing(error)) return null;
+      throw new Error("Storage download failed.");
+    }
   }
 
   async delete(key: string) {

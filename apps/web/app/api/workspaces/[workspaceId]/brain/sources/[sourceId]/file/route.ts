@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, getWorkspaceSupportGrant, resolveKnowledgeAccessDomains, requireWorkspaceMembership } from "@corgtex/domain";
-import { prisma } from "@corgtex/shared";
+import { AppError, getWorkspaceSupportGrant, resolveKnowledgeAccessDomains } from "@corgtex/domain";
+import { getSupportAuthorizationContext, prisma, runWithSupportOrigin } from "@corgtex/shared";
 import { defaultStorage } from "@corgtex/storage";
 import { resolveRequestActor } from "@/lib/auth";
 import { handleRouteError } from "@/lib/http";
+import { authorizedDownloadStream } from "@/lib/authorized-download-stream";
 
 export async function GET(
   request: NextRequest,
@@ -13,6 +14,7 @@ export async function GET(
     const actor = await resolveRequestActor(request);
     const { workspaceId, sourceId } = await params;
     const accessDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+    const origin = getSupportAuthorizationContext()?.origin ?? (actor.kind === "agent" ? actor.supportOrigin : undefined);
 
     const source = await prisma.brainSource.findFirst({
       where: {
@@ -29,11 +31,21 @@ export async function GET(
       throw new AppError(404, "NOT_FOUND", "File not found for this source.");
     }
 
-    if ((actor.kind === "user" && await getWorkspaceSupportGrant(actor, workspaceId)) || (actor.kind === "agent" && actor.supportOrigin)) {
-      const file = await defaultStorage.get(source.fileStorageKey, { maxBytes: 64 * 1024 * 1024 });
+    if (origin || (actor.kind === "user" && await getWorkspaceSupportGrant(actor, workspaceId))) {
+      if (!origin || origin.workspaceId !== workspaceId || (actor.kind === "user" && origin.userId !== actor.user.id)) {
+        throw new AppError(403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
+      }
+      const file = await defaultStorage.getStream(source.fileStorageKey, { signal: request.signal });
       if (!file) throw new AppError(404, "NOT_FOUND", "File not found.");
-      await requireWorkspaceMembership({ actor, workspaceId });
-      return new NextResponse(new Uint8Array(file.data), { headers: {
+      const body = await authorizedDownloadStream(file.body, () => runWithSupportOrigin(origin, async () => {
+        const currentDomains = await resolveKnowledgeAccessDomains(actor, workspaceId);
+        const currentSource = await prisma.brainSource.findFirst({
+          where: { id: sourceId, workspaceId, fileStorageKey: source.fileStorageKey, accessDomain: { in: currentDomains } },
+          select: { fileStorageKey: true },
+        });
+        if (!currentSource) throw new AppError(404, "NOT_FOUND", "File not found for this source.");
+      }), request.signal);
+      return new NextResponse(body, { headers: {
         "Content-Type": "application/octet-stream", "Content-Disposition": "attachment",
         "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
       } });
