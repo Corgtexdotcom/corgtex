@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   clearSession,
+  countSupportGrants,
   isDatabaseUnavailableError,
   listActorWorkspaces,
   loginUserWithPassword,
 } = vi.hoisted(() => ({
   clearSession: vi.fn(),
+  countSupportGrants: vi.fn(),
   isDatabaseUnavailableError: vi.fn(),
   listActorWorkspaces: vi.fn(),
   loginUserWithPassword: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return {
     ...actual,
+    prisma: { workspaceSupportGrant: { count: countSupportGrants } },
     isDatabaseUnavailableError,
     sessionCookieName: () => "corgtex_session",
   };
@@ -48,6 +51,7 @@ async function clearRateLimits() {
 
 beforeEach(async () => {
   vi.resetModules();
+  countSupportGrants.mockResolvedValue(0);
   process.env.NEXT_PUBLIC_APP_URL = "";
   await clearRateLimits();
 });

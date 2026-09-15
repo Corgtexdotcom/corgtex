@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertServingRelease, executionTemplate } from "./provision-qa-azure.mjs";
+import { assertServingRelease, executionTemplate, isTerminalExecution } from "./provision-qa-azure.mjs";
 
 const sha = "a".repeat(40);
 const image = `acrcorgtexssstgwus3.azurecr.io/corgtex/web@sha256:${"b".repeat(64)}`;
@@ -34,4 +34,9 @@ describe("serving release proof", () => {
   it.each([{ ...health, status: "degraded" }, { ...health, release: { gitSha: "c".repeat(40) } }, { ...health, release: { gitSha: sha, drift: { gitSha: true } } }])("refuses unhealthy, mismatched, or drifted release proof", (bad) => {
     expect(() => assertServingRelease(web, bad, sha, image)).toThrow("expected serving release");
   });
+});
+
+it("treats canceled jobs as terminal without treating active jobs as settled", () => {
+  expect(isTerminalExecution("Canceled")).toBe(true);
+  expect(isTerminalExecution("Running")).toBe(false);
 });

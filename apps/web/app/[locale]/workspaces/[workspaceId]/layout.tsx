@@ -257,6 +257,7 @@ export default async function WorkspaceLayout({
         aiWorkspaceState={aiWorkspaceState}
         captureActions={captureActions}
         utilityActions={mobileUtilityActions}
+        readOnly={isDemo}
       />
       <aside className="ws-sidebar">
         <div className="ws-sidebar-header">
@@ -315,6 +316,7 @@ export default async function WorkspaceLayout({
       </main>
 
       <WorkspaceChatRail
+        readOnly={isDemo}
         workspaceId={workspaceId}
         conversations={conversationSummaries}
         companyQuestions={dailyQuestions.map((question) => ({

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { validationEmails } from "./lib/qa-identities.mjs";
+import { validationEmails, validateQaPasswords } from "./lib/qa-identities.mjs";
 
 if (process.env.QA_EXPECTED_RELEASE_SHA) {
   const build = JSON.parse(readFileSync(new URL("../release-build.json", import.meta.url), "utf8"));
@@ -43,17 +43,19 @@ try {
     }
     const { adminEmail, memberEmail } = validationEmails(process.env);
     process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL = adminEmail;
-    if (!process.env.QA_VALIDATION_MEMBER_PASSWORD?.trim()) {
-      throw new Error("Set QA_VALIDATION_MEMBER_PASSWORD for the ordinary QA account");
-    }
+    validateQaPasswords(process.env);
     const existingMember = await prisma.user.findUnique({ where: { email: memberEmail },
-      select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+      select: { id: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
     });
     if (existingMember && existingMember.globalRole !== "USER") {
       throw new Error("QA member must not have global operator access");
     }
     if (existingMember?.memberships.some((member) => member.workspace.slug !== "corgtex-validation")) {
       throw new Error("QA member must not belong to other workspaces");
+    }
+    const validationTarget = workspaces.find((item) => item.slug === "corgtex-validation");
+    if (existingMember && await prisma.workspaceSupportGrant.count({ where: { userId: existingMember.id, isActive: true, ...(validationTarget ? { workspaceId: { not: validationTarget.id } } : {}) } })) {
+      throw new Error("QA member must not have outside support access");
     }
     if (process.env.SEED_RESET_PASSWORDS && process.env.SEED_RESET_PASSWORDS !== "false") {
       throw new Error("QA provisioning must preserve existing passwords");

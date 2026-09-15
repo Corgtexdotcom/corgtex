@@ -1,5 +1,5 @@
 import { loginUserWithPassword, listActorWorkspaces, clearSession } from "@corgtex/domain";
-import { sessionCookieName } from "@corgtex/shared";
+import { prisma, sessionCookieName } from "@corgtex/shared";
 import { NextRequest, NextResponse } from "next/server";
 
 const DEMO_EMAIL = "demo@jnj-demo.corgtex.app";
@@ -25,20 +25,27 @@ export async function issueDemoSession(): Promise<DemoSession> {
     user: result.user,
   };
 
-  const workspaces = await listActorWorkspaces(actor);
-  const targetWorkspace =
-    workspaces.find((workspace) => workspace.slug === DEMO_WORKSPACE_SLUG);
+  try {
+    const workspaces = await listActorWorkspaces(actor);
+    const targetWorkspace =
+      workspaces.find((workspace) => workspace.slug === DEMO_WORKSPACE_SLUG);
 
-  if (!targetWorkspace || workspaces.length !== 1 || result.user.globalRole !== "USER") {
+    const outsideSupport = await prisma.workspaceSupportGrant.count({
+      where: { userId: result.user.id, isActive: true, ...(targetWorkspace ? { workspaceId: { not: targetWorkspace.id } } : {}) },
+    });
+    if (!targetWorkspace || workspaces.length !== 1 || result.user.globalRole !== "USER" || outsideSupport > 0) {
+      throw new Error("Demo account must belong exclusively to the demo workspace");
+    }
+
+    return {
+      token: result.token,
+      expiresAt: result.expiresAt,
+      workspaceId: targetWorkspace.id,
+    };
+  } catch (error) {
     await clearSession(result.token);
-    throw new Error("Demo account must belong exclusively to the demo workspace");
+    throw error;
   }
-
-  return {
-    token: result.token,
-    expiresAt: result.expiresAt,
-    workspaceId: targetWorkspace.id,
-  };
 }
 
 export function normalizeDemoLocale(locale?: string | null): DemoLocale {

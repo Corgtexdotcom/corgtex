@@ -2348,6 +2348,9 @@ async function main() {
   if ((existingWorkspace || process.env.QA_EXPECTED_DEMO_WORKSPACE_ID) && process.env.QA_EXPECTED_DEMO_WORKSPACE_ID !== existingWorkspace?.id) {
     throw new Error("Confirm QA_EXPECTED_DEMO_WORKSPACE_ID before refreshing an existing demo workspace");
   }
+  if (existingWorkspace && await prisma.member.count({ where: { workspaceId: existingWorkspace.id, user: { email: { notIn: TEAM_MEMBERS.map((member) => member.email) } } } })) {
+    throw new Error("Existing demo has non-fixture members; review ownership before refresh");
+  }
   await assertDemoCredentialsScoped(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
 
   // 1. Create Workspace
@@ -2371,8 +2374,8 @@ async function main() {
         bio: tm.bio,
         linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
         websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
-        // Historical fixture passwords were public; invalidate them on refresh.
-        ...(tm.password ? {} : { passwordHash: hashPassword(randomBytes(32).toString("hex")) }),
+        // Restore canonical public login; historical persona passwords are invalidated.
+        passwordHash: hashPassword(tm.password || randomBytes(32).toString("hex")),
       },
       create: {
         email: tm.email,

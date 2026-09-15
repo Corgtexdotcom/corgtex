@@ -415,13 +415,16 @@ export async function main() {
     }
     const admin = await preflight.user.findUnique({
       where: { email: process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL },
-      select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+      select: { id: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
     });
     if (admin && admin.globalRole !== "USER") {
       throw new Error("Use a validation administrator without global operator access");
     }
     if (admin?.memberships.some((member) => member.workspace.slug !== INTERNAL_VALIDATION_WORKSPACE_SLUG)) {
       throw new Error("Use a dedicated validation administrator without other workspace memberships");
+    }
+    if (admin && await preflight.workspaceSupportGrant.count({ where: { userId: admin.id, isActive: true, ...(existingWorkspace ? { workspaceId: { not: existingWorkspace.id } } : {}) } })) {
+      throw new Error("Validation administrator must not have outside support access");
     }
   } finally {
     await preflight.$disconnect();

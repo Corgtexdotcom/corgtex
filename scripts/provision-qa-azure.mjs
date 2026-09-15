@@ -10,6 +10,10 @@ const JOB = "caj-corgtex-ss-prod-migrate";
 const REGISTRY = "acrcorgtexssstgwus3.azurecr.io";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export function isTerminalExecution(status) {
+  return ["Succeeded", "Failed", "Stopped", "Canceled"].includes(status);
+}
+
 export function executionTemplate(template, image, sha, mode, env) {
   if (!/^[a-f0-9]{40}$/.test(sha) || !["preflight", "apply"].includes(mode)) throw new Error("Invalid release SHA or provisioning mode");
   if (!new RegExp(`^${REGISTRY.replaceAll(".", "\\.")}\/corgtex\/web@sha256:[a-f0-9]{64}$`).test(image)) throw new Error("Use the confirmed immutable selfserve image");
@@ -69,7 +73,7 @@ export async function main(env = process.env) {
   const backup = az(["postgres", "flexible-server", "show", "--name", "corgtex-ss-prod-pg", "--resource-group", GROUP]);
   if (backup.state !== "Ready" || !Number.isInteger(backup.backup?.backupRetentionDays) || backup.backup?.backupRetentionDays < 7 || !backup.backup?.earliestRestoreDate) throw new Error("Verify selfserve database recovery before provisioning");
   const executions = az(["containerapp", "job", "execution", "list", "--name", JOB, "--resource-group", GROUP]);
-  if (executions.some((item) => !["Succeeded", "Failed", "Stopped"].includes(item.properties.status))) throw new Error("Another selfserve database execution is active; do not duplicate it");
+  if (executions.some((item) => !isTerminalExecution(item.properties.status))) throw new Error("Another selfserve database execution is active; do not duplicate it");
   const digest = az(["acr", "repository", "show", "--name", "acrcorgtexssstgwus3", "--image", `corgtex/web:sha-${sha}`]).digest;
   const image = `${REGISTRY}/corgtex/web@${digest}`;
   const web = az(["containerapp", "show", "--name", "ca-corgtex-ss-prod-web", "--resource-group", GROUP]);
@@ -92,7 +96,7 @@ export async function main(env = process.env) {
     if (state !== previous) console.log(JSON.stringify({ execution: execution.name, status: state }));
     previous = state;
     if (state === "Succeeded") return;
-    if (["Failed", "Stopped"].includes(state)) throw new Error(`QA execution ${execution.name} ${state}; inspect it before any retry`);
+    if (isTerminalExecution(state)) throw new Error(`QA execution ${execution.name} ${state}; inspect it before any retry`);
     await sleep(30_000);
   }
   throw new Error(`QA execution ${execution.name} has no terminal proof; do not start another writer`);

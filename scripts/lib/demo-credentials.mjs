@@ -8,7 +8,12 @@ export async function assertDemoCredentialsScoped(prisma, workspaceId, userIds) 
       throw new Error("Demo identities have credentials outside the confirmed demo workspace");
     }
   }
-  if (await prisma.oAuthConnection.count({ where: { userId: { in: userIds } } })) {
+  if (await prisma.workspaceSupportGrant.count({ where: { userId: { in: userIds }, isActive: true, ...(workspaceId ? { workspaceId: { not: workspaceId } } : {}) } })) {
+    throw new Error("Demo identities have support access outside the confirmed demo workspace");
+  }
+  if (await prisma.oAuthConnection.count({ where: { userId: { in: userIds } } })
+    || await prisma.externalMcpConnection.count({ where: { userId: { in: userIds } } })
+    || await prisma.aiWorkspaceConnection.count({ where: { OR: [{ ownerUserId: { in: userIds } }, { createdByUserId: { in: userIds } }] } })) {
     throw new Error("Demo identities must not own personal provider connections");
   }
 }
