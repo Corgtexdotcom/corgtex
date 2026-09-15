@@ -8,6 +8,10 @@ import { createMember, updateMember } from "./members";
 import { listSources as listBrainSources } from "./brain";
 import { handleSlackCommand } from "./communication";
 import { changeSupportConfiguration, decideSupportAccessRequest, getSupportConfiguration, listSupportAccessRequests } from "./workspace-support-configuration";
+import { requireSupportRequestAccess } from "../../../apps/web/lib/support-request-access";
+import { deriveJobsForEvent } from "../../workflows/src/derive-jobs";
+import { handleContextGraphSync } from "../../workflows/src/handlers/context-graph-sync";
+import * as events from "./events";
 
 const { setupEmail } = vi.hoisted(() => ({ setupEmail: vi.fn() }));
 vi.mock("./members", async importOriginal => ({
@@ -269,6 +273,74 @@ describe("workspace admin support contract on migrated PostgreSQL", () => {
     expect(await changeSupportConfiguration(support, workspaceId, 1, { kind: "invitePolicy", policy: "MEMBERS_CAN_INVITE" })).toMatchObject({ saved: true });
     expect(await prisma.workspaceSupportAccessRequest.count({ where: { workspaceId } })).toBe(0);
     expect(JSON.stringify(await listBrainSources({ kind: "user", user: ordinary }, { workspaceId }))).toContain("synthetic-content-canary");
+  });
+  isolated("event failure rolls back the owner-approved membership and leaves the request retryable", async () => {
+    await change("SETUP");
+    const ordinary = await prisma.user.create({ data: { email: `rollback-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    users.push(ordinary.id);
+    const request = await changeSupportConfiguration(support, workspaceId, 1, { kind: "addMember", email: ordinary.email, role: "CONTRIBUTOR" });
+    const emit = vi.spyOn(events, "appendEvents").mockRejectedValueOnce(new Error("synthetic event failure"));
+    try {
+      await expect(decideSupportAccessRequest(owner, workspaceId, request.requestId!, true)).rejects.toThrow("synthetic event failure");
+    } finally {
+      emit.mockRestore();
+    }
+    expect(await prisma.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: ordinary.id } } })).toBeNull();
+    expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { workspaceId, action: { in: ["support.access.approved", "support.configuration.addMember"] } } })).toBe(0);
+    expect(await prisma.workspaceSupportAccessRequest.findUnique({ where: { id: request.requestId! } })).toMatchObject({ status: "PENDING" });
+    await decideSupportAccessRequest(owner, workspaceId, request.requestId!, true);
+    expect(await prisma.event.count({ where: { workspaceId, type: "member.created" } })).toBe(1);
+  });
+  for (const role of ["FULL", "SETUP"] as const) isolated(`${role} member lifecycle reaches context sync through existing event and job authorization`, async () => {
+    await change(role);
+    const ordinary = await prisma.user.create({ data: { email: `lifecycle-${randomUUID()}@example.test`, passwordHash: "synthetic" } });
+    users.push(ordinary.id);
+    const configure = (command: Parameters<typeof changeSupportConfiguration>[3]) => runWithSupportOrigin(undefined, async () => {
+      // Same request boundary as the sanitized configuration API; no invented Full origin.
+      await requireSupportRequestAccess(support, `/api/workspaces/${workspaceId}/support-configuration`);
+      return changeSupportConfiguration(support, workspaceId, 1, command);
+    });
+    const apply = async (command: Parameters<typeof changeSupportConfiguration>[3]) => {
+      const before = await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } });
+      const result = await configure(command);
+      if (result.approvalRequired) {
+        expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(before);
+        await runWithSupportOrigin(undefined, async () => {
+          await requireSupportRequestAccess(owner, `/api/workspaces/${workspaceId}/support-access-requests`);
+          await decideSupportAccessRequest(owner, workspaceId, result.requestId!, true);
+        });
+      }
+      expect(await prisma.event.count({ where: { workspaceId, aggregateType: "Member" } })).toBe(before + 1);
+    };
+    const sync = async (memberId: string, type: string, expectedRole: string, active: boolean) => {
+      const event = await prisma.event.findFirstOrThrow({ where: { workspaceId, aggregateId: memberId, type } });
+      expect(event).toMatchObject({ aggregateType: "Member", supportOriginUserId: null, supportGrantVersion: null, payload: { memberId } });
+      const job = await withWorkspaceSupportExecution(event, async () => {
+        const derived = deriveJobsForEvent(event).filter(job => job.type === "context-graph.sync");
+        expect(derived).toHaveLength(1);
+        const { dependsOnDedupeKey: _dependency, ...data } = derived[0];
+        return prisma.workflowJob.create({ data });
+      });
+      await withWorkspaceSupportExecution(job, () => handleContextGraphSync(job.id, job.payload as { sourceType: string; sourceId: string }, workspaceId));
+      expect(await prisma.contextGraphObject.findFirst({ where: { workspaceId, sourceEntityType: "Member", sourceEntityId: memberId } })).toMatchObject({
+        status: active ? "approved" : "archived", properties: { workspaceRole: expectedRole, isActive: active },
+      });
+    };
+    await apply({ kind: "addMember", email: ordinary.email, role: "CONTRIBUTOR" });
+    const member = await prisma.member.findUniqueOrThrow({ where: { workspaceId_userId: { workspaceId, userId: ordinary.id } } });
+    await sync(member.id, "member.created", "CONTRIBUTOR", true);
+    await apply({ kind: "member", memberId: member.id, role: "FACILITATOR", isActive: true });
+    await sync(member.id, "member.updated", "FACILITATOR", true);
+    await apply({ kind: "member", memberId: member.id, role: "FACILITATOR", isActive: false });
+    await sync(member.id, "member.deactivated", "FACILITATOR", false);
+    await apply({ kind: "member", memberId: member.id, role: "FACILITATOR", isActive: true });
+    await sync(member.id, "member.reactivated", "FACILITATOR", true);
+    if (role === "SETUP") {
+      expect(await prisma.auditLog.count({ where: { workspaceId, actorUserId: owner.user.id, action: "support.access.approved" } })).toBe(3);
+      expect(await prisma.auditLog.count({ where: { workspaceId, actorUserId: support.user.id, action: "support.configuration.member" } })).toBe(1);
+      await expect(listBrainSources(support, { workspaceId })).rejects.toMatchObject({ code: "SUPPORT_CONTENT_RESTRICTED" });
+    }
   });
   isolated("owner decisions bind tenant and policy state, serialize once, and reject non-owner admins", async () => {
     await change("SETUP");

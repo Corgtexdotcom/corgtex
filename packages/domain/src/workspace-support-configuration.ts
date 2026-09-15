@@ -9,6 +9,7 @@ import { lockWorkspaceMembership, requireSupportOwner, requireUnmanagedMember } 
 import { closeRoleLifecycleForMember } from "./role-onboarding";
 import { assertTrialMemberCapacity } from "./trial-entitlements";
 import { issueSetupToken, sendMemberSetupEmail } from "./members";
+import { appendEvents } from "./events";
 
 const role = z.enum(["CONTRIBUTOR", "FACILITATOR", "FINANCE_STEWARD", "ADMIN"]);
 export const supportConfigurationCommand = z.discriminatedUnion("kind", [
@@ -153,6 +154,10 @@ async function applyConfiguration(tx: Db, actor: AppActor, workspaceId: string, 
         invariant(!await tx.member.findUnique({ where: { workspaceId_userId: { workspaceId, userId: targetUserId } }, select: { id: true } }), 409, "EXISTING_MEMBERSHIP", "Use the existing membership controls.");
         await assertTrialMemberCapacity(workspaceId);
         entityId = (await tx.member.create({ data: { workspaceId, userId: targetUserId, role: command.role, kind: "HUMAN" } })).id;
+        await appendEvents(tx, [{
+          workspaceId, type: "member.created", aggregateType: "Member", aggregateId: entityId,
+          payload: { memberId: entityId, userId: targetUserId, role: command.role, kind: "HUMAN" },
+        }]);
       } else {
         if (!target!.isActive && command.isActive) await assertTrialMemberCapacity(workspaceId);
         if (target!.role === "ADMIN" && target!.isActive && (command.role !== "ADMIN" || !command.isActive)) {
@@ -161,6 +166,13 @@ async function applyConfiguration(tx: Db, actor: AppActor, workspaceId: string, 
         await tx.member.update({ where: { id: target!.id }, data: { role: command.role, isActive: command.isActive } });
         if (target!.isActive && !command.isActive) await closeRoleLifecycleForMember(tx, { workspaceId, memberId: target!.id, actor });
         entityId = target!.id;
+        const action = target!.isActive && !command.isActive
+          ? "member.deactivated"
+          : !target!.isActive && command.isActive ? "member.reactivated" : "member.updated";
+        await appendEvents(tx, [{
+          workspaceId, type: action, aggregateType: "Member", aggregateId: entityId,
+          payload: { memberId: entityId, fields: ["role", "isActive"] },
+        }]);
       }
     } else if (command.kind === "oauth") {
       const connection = await tx.oAuthConnection.findFirst({ where: { id: command.connectionId, workspaceId }, select: { id: true, provider: true, scopes: true, status: true, syncSettings: true, updatedAt: true } });
