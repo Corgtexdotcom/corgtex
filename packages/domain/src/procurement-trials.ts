@@ -1,3 +1,4 @@
+import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import type { MemberRole, Prisma } from "@prisma/client";
 import {
   decryptSecret,
@@ -290,6 +291,7 @@ async function createTrialAdmin(tx: Tx, params: {
   email: string;
   displayName: string | null;
 }) {
+  requireUnreservedPublicDemoEmail(params.email);
   const randomPassword = randomOpaqueToken();
   const user = await tx.user.upsert({
     where: { email: params.email },
@@ -1114,6 +1116,7 @@ export async function createProcurementTrial(params: {
   origin?: string;
 }) {
   const normalized = normalizeInput(params.input);
+  requireUnreservedPublicDemoEmail(normalized.adminEmail);
   const idempotencyKey = params.idempotencyKey.trim();
   invariant(idempotencyKey.length > 0, 400, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required.");
 

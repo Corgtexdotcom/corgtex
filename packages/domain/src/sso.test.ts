@@ -10,6 +10,15 @@ import { linkOrProvisionSsoUser } from "./sso";
 const params = { workspaceId: "workspace", provider: "GOOGLE", providerSubjectId: "subject", email: "persona@example.com" };
 describe("disabled SSO accounts", () => {
   beforeEach(() => { vi.clearAllMocks(); mocks.identity.mockResolvedValue(null); mocks.user.mockResolvedValue(null); mocks.transaction.mockImplementation(async callback => callback({ workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) }, member: { upsert: mocks.member } })); });
+  it("refuses the reserved demo email before identity lookup or writes", async () => {
+    await expect(linkOrProvisionSsoUser({ ...params, email: "  DEMO@JNJ-DEMO.CORGTEX.APP " })).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(mocks.identity).not.toHaveBeenCalled(); expect(mocks.link).not.toHaveBeenCalled(); expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+  it("refuses a linked demo identity even if provider returns a different email", async () => {
+    mocks.identity.mockResolvedValue({ userId: "demo", user: { id: "demo", email: "demo@jnj-demo.corgtex.app", passwordHash: "ordinary-hash" } });
+    await expect(linkOrProvisionSsoUser(params)).rejects.toMatchObject({ code: "RESERVED_IDENTITY" });
+    expect(mocks.link).not.toHaveBeenCalled(); expect(mocks.transaction).not.toHaveBeenCalled();
+  });
   it.each(["email", "identity", "email-with-identity"])("rejects disabled %s before linking or membership writes", async source => {
     const disabled = { id: "disabled", passwordHash: "disabled$synthetic-demo-persona" };
     if (source !== "identity") mocks.user.mockResolvedValue(disabled);

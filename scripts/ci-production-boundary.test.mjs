@@ -14,6 +14,13 @@ function job(name) {
 describe("automatic production CI boundary", () => {
   const observationTargets = job("observe-prod").match(/--targets ([^\s]+)/)?.[1];
 
+  it("serializes QA fixture writes with fleet and direct Azure production releases", () => {
+    for (const name of ["qa-workspaces.yml", "fleet-release.yml", "azure-selfserve-production.yml"]) {
+      const source = readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), "utf8");
+      expect(source).toMatch(/^concurrency:\n  group: fleet-release\n  cancel-in-progress: false$/m);
+    }
+  });
+
   it("observes exactly the three live release targets collected by main CI", () => {
     const observe = job("observe-prod");
     const manifests = [...observe.matchAll(/\{ target: "([^"]+)"/g)].map((match) => match[1]);

@@ -1,3 +1,4 @@
+import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import { prisma, isPasswordLoginDisabled } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
@@ -112,6 +113,7 @@ export async function linkOrProvisionSsoUser(params: {
   displayName?: string | null;
 }) {
   const email = params.email.trim().toLowerCase();
+  requireUnreservedPublicDemoEmail(email);
   const existingIdentity = await prisma.userSsoIdentity.findUnique({
     where: {
       provider_providerSubjectId: {
@@ -129,6 +131,7 @@ export async function linkOrProvisionSsoUser(params: {
   invariant(!user || !isPasswordLoginDisabled(user.passwordHash), 401, "UNAUTHENTICATED", "This account cannot sign in.");
 
   if (existingIdentity) {
+    requireUnreservedPublicDemoEmail(existingIdentity.user.email);
     invariant(!isPasswordLoginDisabled(existingIdentity.user.passwordHash), 401, "UNAUTHENTICATED", "This account cannot sign in.");
     await ensureSsoMembership(params.workspaceId, existingIdentity.userId);
 

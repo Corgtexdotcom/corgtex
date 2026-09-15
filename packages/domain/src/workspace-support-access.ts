@@ -1,3 +1,4 @@
+import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import { Prisma } from "@prisma/client";
 import { env, getSupportAuthorizationContext, prisma, runWithSupportOrigin } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
@@ -131,6 +132,7 @@ export async function changeWorkspaceSupportGrant(actor: AppActor, params: {
   invariant(params.role === "SETUP" || params.role === "FULL", 400, "INVALID_INPUT", "Invalid support role.");
   invariant(Number.isSafeInteger(params.expectedVersion) && params.expectedVersion >= 0, 400, "INVALID_INPUT", "A grant version is required.");
   const email = params.email.trim().toLowerCase();
+  if (params.isActive) requireUnreservedPublicDemoEmail(email);
   invariant(email.length > 0, 400, "INVALID_INPUT", "A named account is required.");
   return prisma.$transaction(async (tx) => {
     // Serialize grant changes with ownership and membership changes.

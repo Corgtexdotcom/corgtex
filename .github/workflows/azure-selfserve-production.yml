@@ -61,7 +61,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: azure-selfserve-production
+  group: fleet-release
   cancel-in-progress: false
 
 jobs:

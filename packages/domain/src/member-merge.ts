@@ -1,3 +1,4 @@
+import { requireUnreservedPublicDemoEmail } from "./public-demo-identity";
 import type { MemberRole, Prisma } from "@prisma/client";
 import { lockWorkspaceMembership, requireUnmanagedMember } from "./workspace-support-access";
 import type { AppActor } from "@corgtex/shared";
@@ -419,6 +420,8 @@ export async function mergeWorkspaceMembers(actor: AppActor, params: {
     ]);
     invariant(source && source.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Source member not found.");
     invariant(target && target.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Target member not found.");
+    requireUnreservedPublicDemoEmail(source.user.email);
+    requireUnreservedPublicDemoEmail(target.user.email);
     await requireUnmanagedMember(tx, params.workspaceId, source.userId);
     await requireUnmanagedMember(tx, params.workspaceId, target.userId);
     invariant(!source.mergedIntoMemberId, 400, "INVALID_STATE", "Source member has already been merged.");
