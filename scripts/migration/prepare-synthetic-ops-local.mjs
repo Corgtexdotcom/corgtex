@@ -5,12 +5,19 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { SOURCE_PINS, verifyBundle, check } from "./synthetic-ops-source.mjs";
-import { save, cleanupLocal, dockerTools } from "./bootstrap-synthetic-ops.mjs";
+import { save, cleanupLocal, dockerTools, SOURCE_PHASES } from "./bootstrap-synthetic-ops.mjs";
 import { SyntheticSubprocesses } from "./synthetic-subprocess.mjs";
 
 const worker = fileURLToPath(new URL("./synthetic-ops-worker.mjs", import.meta.url));
 const temporaryPath = id => resolve(tmpdir(), `corgtex-synthetic-local-${id}`);
 const code = error => /^[A-Z][A-Z0-9_]+$/u.test(error?.code ?? "") ? error.code : "LOCAL_PREPARATION_FAILED";
+
+export function readSourcePhase(directory) {
+  try {
+    const { phase } = JSON.parse(readFileSync(resolve(directory, "source-phase.json"), "utf8"));
+    return SOURCE_PHASES.includes(phase) ? phase : "UNPROVEN";
+  } catch { return "UNPROVEN"; }
+}
 
 export function localPreparationEnvironment(temp, env = process.env) {
   // Native local Docker CLI only: no remote daemon/context, provider config,
@@ -69,7 +76,7 @@ export async function prepareLocal(bundle, directory, env = process.env, supervi
   }
   // This is the only CI-uploadable output. Full owner/source receipts stay local.
   const summary = { status: failure ? "LOCAL_PREPARATION_FAILED" : "LOCAL_PREPARATION_PASS", sourceHead: head ?? null,
-    failure: failure ? code(failure) : null, inputPins: SOURCE_PINS, runtime: ready?.runtime ?? null,
+    failure: failure ? code(failure) : null, sourcePhase: readSourcePhase(directory), inputPins: SOURCE_PINS, runtime: ready?.runtime ?? null,
     sourceComparison: ready ? { observationsEqual: ready.comparison.observationsEqual, indexesValid: ready.comparison.indexesValid,
       scope: "48-string representative synthetic corpus only", zeroDivergenceRequired: true } : null,
     clientTransport: ready ? { status: ready.clientTransport.status, tlsVerified: ready.tlsVerified,

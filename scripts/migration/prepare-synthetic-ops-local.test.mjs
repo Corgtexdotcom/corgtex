@@ -7,7 +7,7 @@ import { parse } from "yaml";
 
 vi.mock("./synthetic-ops-source.mjs", async original => ({ ...await original(), verifyBundle: vi.fn() }));
 import { SOURCE_PINS, verifyBundle } from "./synthetic-ops-source.mjs";
-import { prepareLocal, cleanupPreparation, localPreparationEnvironment } from "./prepare-synthetic-ops-local.mjs";
+import { prepareLocal, cleanupPreparation, localPreparationEnvironment, readSourcePhase } from "./prepare-synthetic-ops-local.mjs";
 import { SyntheticSubprocesses } from "./synthetic-subprocess.mjs";
 import { LABEL } from "./bootstrap-synthetic-ops.mjs";
 
@@ -56,6 +56,17 @@ afterEach(() => {
 });
 
 describe("provider-free native preparation entrypoint", () => {
+  it("publishes only allowlisted phase markers, not arbitrary child diagnostics", () => {
+    mkdirSync(directory);
+    const path = resolve(directory, "source-phase.json");
+    expect(readSourcePhase(directory)).toBe("UNPROVEN");
+    writeFileSync(path, JSON.stringify({ phase: "LOAD_IMAGE", stderr: "private-content" }));
+    expect(readSourcePhase(directory)).toBe("LOAD_IMAGE");
+    for (const value of ['{"phase":"PRIVATE_CONTENT"}', 'null', 'invalid']) {
+      writeFileSync(path, value);
+      expect(readSourcePhase(directory)).toBe("UNPROVEN");
+    }
+  });
   it("runs the shared source worker with deadlines, cleans owned resources and emits only minimized evidence", async () => {
     const result = await prepareLocal(root, directory, { PATH: process.env.PATH, AZURE_CONFIG_DIR: "/private", GITHUB_TOKEN: "private", DOCKER_HOST: "tcp://remote" });
     expect(result).toMatchObject({ status: "LOCAL_PREPARATION_PASS", cleanup: "LOCAL_CLEANED", azureComparison: "NOT_RUN", providerEffects: 0, productionAccepted: false });
