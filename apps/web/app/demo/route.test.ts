@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  clearSession,
   isDatabaseUnavailableError,
   listActorWorkspaces,
   loginUserWithPassword,
 } = vi.hoisted(() => ({
+  clearSession: vi.fn(),
   isDatabaseUnavailableError: vi.fn(),
   listActorWorkspaces: vi.fn(),
   loginUserWithPassword: vi.fn(),
@@ -23,6 +25,7 @@ class MockAppError extends Error {
 
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
+  clearSession,
   listActorWorkspaces,
   loginUserWithPassword,
 }));
@@ -75,11 +78,11 @@ describe("GET /demo", () => {
       user: {
         id: "user-1",
         email: "demo@jnj-demo.corgtex.app",
+        globalRole: "USER",
       },
     });
     listActorWorkspaces.mockResolvedValue([
       { id: "workspace-1", slug: "jnj-demo" },
-      { id: "workspace-2", slug: "other" },
     ]);
     isDatabaseUnavailableError.mockReturnValue(false);
 
@@ -104,6 +107,7 @@ describe("GET /demo", () => {
       user: {
         id: "user-1",
         email: "demo@jnj-demo.corgtex.app",
+        globalRole: "USER",
       },
     });
     listActorWorkspaces.mockResolvedValue([{ id: "workspace-1", slug: "jnj-demo" }]);
@@ -132,6 +136,7 @@ describe("GET /demo", () => {
       user: {
         id: "user-1",
         email: "demo@jnj-demo.corgtex.app",
+        globalRole: "USER",
       },
     });
     listActorWorkspaces.mockResolvedValue([{ id: "workspace-1", slug: "jnj-demo" }]);
@@ -159,6 +164,7 @@ describe("GET /demo", () => {
       user: {
         id: "user-1",
         email: "demo@jnj-demo.corgtex.app",
+        globalRole: "USER",
       },
     });
     listActorWorkspaces.mockResolvedValue([{ id: "workspace-1", slug: "jnj-demo" }]);
@@ -176,6 +182,26 @@ describe("GET /demo", () => {
 
     expect(response.status).toBe(307);
     expect(response.headers.get("location")).toBe("http://localhost:3000/workspaces/workspace-1");
+  });
+
+  it("rejects a demo identity with another workspace and clears its session", async () => {
+    loginUserWithPassword.mockResolvedValue({
+      token: "unsafe-demo-token",
+      expiresAt: new Date("2026-04-13T00:00:00.000Z"),
+      user: { id: "user-1", email: "demo@jnj-demo.corgtex.app", globalRole: "USER" },
+    });
+    listActorWorkspaces.mockResolvedValue([
+      { id: "workspace-1", slug: "jnj-demo" },
+      { id: "workspace-2", slug: "other" },
+    ]);
+    isDatabaseUnavailableError.mockReturnValue(false);
+
+    const { GET } = await import("./route");
+    const response = await GET(new Request("http://localhost/demo") as never);
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("set-cookie")).toBeNull();
+    expect(clearSession).toHaveBeenCalledWith("unsafe-demo-token");
   });
 
   it("returns a service unavailable response when the database is down", async () => {
