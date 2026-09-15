@@ -66,7 +66,7 @@ const DEMO_LINKEDIN_URL = "https://www.linkedin.com/company/johnson-&-johnson/";
 const DEMO_WEBSITE_URL = "https://www.jnj.com/";
 
 const TEAM_MEMBERS = [
-  { email: "demo@jnj-demo.corgtex.app", name: "Demo User", role: "ADMIN", password: "demo1234", title: "Observer", bio: "Demo workspace observer used to review member, role, circle, proposal, tension, and meeting navigation." },
+  { email: "demo@jnj-demo.corgtex.app", name: "Demo User", role: "CONTRIBUTOR", password: "demo1234", title: "Observer", bio: "Demo workspace observer used to review member, role, circle, proposal, tension, and meeting navigation." },
   { email: "jduato@jnj.demo.corgtex.app", name: "Joaquin Duato", role: "ADMIN", title: "Chairman & CEO", bio: "Enterprise leader focused on portfolio strategy, operating cadence, and cross-segment governance." },
   { email: "jwolk@jnj.demo.corgtex.app", name: "Joseph J. Wolk", role: "FINANCE_STEWARD", title: "EVP, CFO", bio: "Finance steward for capital allocation, audit readiness, and performance reporting." },
   { email: "jtaubert@jnj.demo.corgtex.app", name: "Jennifer L. Taubert", role: "FACILITATOR", title: "Worldwide Chairman, Innovative Medicine", bio: "Facilitates Innovative Medicine priorities across oncology, immunology, and commercial strategy." },
@@ -2333,6 +2333,15 @@ async function refreshAdviceDeliberationEntries(proposal, records) {
 async function main() {
   console.log("Starting J&J Demo Workspace Seed...");
 
+  // Refuse shared identities before any fixture or credential writes.
+  const existingUsers = await prisma.user.findMany({
+    where: { email: { in: TEAM_MEMBERS.map((member) => member.email) } },
+    select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+  });
+  if (existingUsers.some((user) => user.globalRole !== "USER" || user.memberships.some((member) => member.workspace.slug !== WORKSPACE_SLUG))) {
+    throw new Error("Demo seed identities must not belong to other workspaces");
+  }
+
   // 1. Create Workspace
   const workspace = await prisma.workspace.upsert({
     where: { slug: WORKSPACE_SLUG },
@@ -2352,7 +2361,8 @@ async function main() {
         bio: tm.bio,
         linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
         websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
-        passwordHash: hashPassword(tm.password || "jnj12345"),
+        // Historical fixture passwords were public; invalidate them on refresh.
+        ...(tm.password ? {} : { passwordHash: hashPassword(randomBytes(32).toString("hex")) }),
       },
       create: {
         email: tm.email,
@@ -2360,10 +2370,13 @@ async function main() {
         bio: tm.bio,
         linkedinUrl: tm.linkedinUrl || DEMO_LINKEDIN_URL,
         websiteUrl: tm.websiteUrl || DEMO_WEBSITE_URL,
-        passwordHash: hashPassword(tm.password || "jnj12345"),
+        passwordHash: hashPassword(tm.password || randomBytes(32).toString("hex")),
       }
     });
     
+    if (!tm.password) {
+      await prisma.session.deleteMany({ where: { userId: user.id } });
+    }
     const member = await prisma.member.upsert({
       where: { workspaceId_userId: { workspaceId: wsId, userId: user.id } },
       update: { role: tm.role, isActive: true },
@@ -2894,7 +2907,7 @@ async function main() {
     console.log(`  ${key.padEnd(18)} ${value}`);
   });
 
-  console.log("✅ Seed complete! You can log in with: demo@jnj-demo.corgtex.app / demo1234");
+  console.log("Demo fixtures ready; use the public Explore Live Demo entry.");
 }
 
 main()

@@ -27,10 +27,10 @@ export async function issueDemoSession(): Promise<DemoSession> {
 
   const workspaces = await listActorWorkspaces(actor);
   const targetWorkspace =
-    workspaces.find((workspace) => workspace.slug === DEMO_WORKSPACE_SLUG) ?? workspaces[0];
+    workspaces.find((workspace) => workspace.slug === DEMO_WORKSPACE_SLUG);
 
-  if (!targetWorkspace) {
-    throw new Error("Demo workspace not found");
+  if (!targetWorkspace || workspaces.length !== 1) {
+    throw new Error("Demo account must belong exclusively to the demo workspace");
   }
 
   return {

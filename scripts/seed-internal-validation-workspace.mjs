@@ -73,6 +73,7 @@ function assertValidationSeedEnvironmentPinned() {
 
 export const validationSeedConfig = {
   envPrefix: "VALIDATION",
+  bootstrapGlobalRole: "USER",
   defaultLocale: "en",
   workspace: {
     slug: INTERNAL_VALIDATION_WORKSPACE_SLUG,
@@ -406,6 +407,21 @@ async function upsertRelationshipFixtures() {
 export async function main() {
   pinValidationSeedEnvironment();
   assertValidationSeedEnvironmentPinned();
+  const preflight = new PrismaClient();
+  try {
+    const admin = await preflight.user.findUnique({
+      where: { email: process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL },
+      select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+    });
+    if (admin && admin.globalRole !== "USER") {
+      throw new Error("Use a validation administrator without global operator access");
+    }
+    if (admin?.memberships.some((member) => member.workspace.slug !== INTERNAL_VALIDATION_WORKSPACE_SLUG)) {
+      throw new Error("Use a dedicated validation administrator without other workspace memberships");
+    }
+  } finally {
+    await preflight.$disconnect();
+  }
   await seedStableClient(validationSeedConfig);
   await upsertRelationshipFixtures();
 }
