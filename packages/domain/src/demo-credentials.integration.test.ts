@@ -64,9 +64,16 @@ describe("demo legacy credential retirement", () => {
       const external = await prisma.externalMcpConnection.create({ data: { workspaceId: workspace.id, userId: user.id, providerKey: "synthetic", displayName: "Synthetic provider", serverUrl: "https://example.test", accessTokenEnc: "synthetic" } });
       await expect(assertDemoCredentialsScoped(prisma, workspace.id, [user.id])).rejects.toThrow("personal provider");
       await prisma.externalMcpConnection.delete({ where: { id: external.id } });
-      const support = await prisma.workspaceSupportGrant.create({ data: { workspaceId: other.id, userId: user.id, grantedByUserId: user.id, role: "SETUP" } });
-      await expect(assertDemoCredentialsScoped(prisma, workspace.id, [user.id])).rejects.toThrow("support access");
-      await prisma.workspaceSupportGrant.delete({ where: { id: support.id } });
+      for (const state of [
+        { workspaceId: other.id, role: "SETUP" as const, isActive: true },
+        { workspaceId: workspace.id, role: "SETUP" as const, isActive: true },
+        { workspaceId: workspace.id, role: "FULL" as const, isActive: false },
+      ]) {
+        const support = await prisma.workspaceSupportGrant.create({ data: { ...state, userId: user.id, grantedByUserId: user.id } });
+        await expect(assertDemoCredentialsScoped(prisma, workspace.id, [user.id])).rejects.toThrow("support grants");
+        expect(await prisma.workspaceSupportGrant.findUnique({ where: { id: support.id } })).not.toBeNull();
+        await prisma.workspaceSupportGrant.delete({ where: { id: support.id } });
+      }
       await assertDemoCredentialsScoped(prisma, workspace.id, [user.id]);
       await revokeDemoCredentials(prisma, workspace.id, [user.id]);
       expect((await prisma.oAuthAccessToken.findUniqueOrThrow({ where: { id: oauth.id } })).revokedAt).not.toBeNull();

@@ -74,8 +74,8 @@ export async function assertDemoCredentialsScoped(prisma, workspaceId, userIds) 
       throw new Error("Demo identities have credentials outside the confirmed demo workspace");
     }
   }
-  if (await prisma.workspaceSupportGrant.count({ where: { userId: { in: userIds }, isActive: true, ...(workspaceId ? { workspaceId: { not: workspaceId } } : {}) } })) {
-    throw new Error("Demo identities have support access outside the confirmed demo workspace");
+  if (await prisma.workspaceSupportGrant.count({ where: { userId: { in: userIds } } })) {
+    throw new Error("Demo identities must not retain support grants");
   }
   if (await prisma.userSsoIdentity.count({ where: { userId: { in: userIds } } })) {
     throw new Error("Demo identities must not retain personal SSO identities");
