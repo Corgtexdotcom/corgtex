@@ -18,6 +18,16 @@ const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 const ROLES = ["web", "worker"];
 const ARTIFACT_DIR = ".artifacts/core-baseline";
+// Explicit historical disposition, not an input-controlled checksum allowlist.
+export const CORE_HISTORICAL_LEDGER = Object.freeze({
+  sourceSha: "d0a3896ef917b50f2fec2d797908f29aa026a058",
+  manifestSha256: "a5d5fa95e7569cf05113b57d8917135fff171633e144ea453924202771b00fed",
+  datamodelSha256: "af7ad71cad045dcb2c41358fbf5e13160e2e77b220208b70420fadbd7e21ac03",
+  migration: "20260617120000_drop_legacy_proposal_reactions",
+  sourceChecksum: "614cdf040b15f381255592683128686d90904182721ca117ba43975dd1927e26",
+  appliedChecksum: "570ac368fa8994eb9c6ff751eb40172bfb03aeabc511d7d063de0fe93925caa1",
+  historicalRowCorrectnessCertified: false,
+});
 const fail = (code) => { throw new Error(`CORE_BASELINE_${code}`); };
 const requireThat = (condition, code) => { if (!condition) fail(code); };
 export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -99,9 +109,7 @@ export function validateReceipt(receipt, pin) {
   keys(receipt, ["schemaVersion", "kind", "accepted", "evidence", "schema", "acceptance"]);
   requireThat(receipt.schemaVersion === 1 && receipt.kind === "accepted-core-baseline" && receipt.accepted === true, "NOT_ACCEPTED");
   validateEvidence(receipt.evidence);
-  keys(receipt.schema, ["manifestSha256", "datamodelSha256", "exactLedgerMatch", "supportedSchemaMatch"]);
-  requireThat(HASH.test(receipt.schema.manifestSha256) && HASH.test(receipt.schema.datamodelSha256)
-    && receipt.schema.exactLedgerMatch === true && receipt.schema.supportedSchemaMatch === true, "SCHEMA_NOT_ACCEPTED");
+  validateSchemaAcceptance(receipt.schema, receipt.evidence.sourceSha);
   keys(receipt.acceptance, ["repository", "workflowPath", "workflowSha", "runId", "runAttempt", "acceptedAt", "evidenceSha256"]);
   const acceptance = receipt.acceptance;
   requireThat(acceptance.repository === REPOSITORY && acceptance.workflowPath === BASELINE_WORKFLOW
@@ -200,15 +208,37 @@ export function migrationManifest(sourceDir) {
   return { migrations, manifestSha256: identityHash(migrations), datamodelSha256: sha256(git(["show", "HEAD:prisma/schema.prisma"])) };
 }
 
-export function verifyLedger(manifest, rows) {
+function historicalSource(manifest, sourceSha) {
+  return sourceSha === CORE_HISTORICAL_LEDGER.sourceSha
+    && manifest.manifestSha256 === CORE_HISTORICAL_LEDGER.manifestSha256
+    && manifest.datamodelSha256 === CORE_HISTORICAL_LEDGER.datamodelSha256;
+}
+
+function validateSchemaAcceptance(schema, sourceSha) {
+  keys(schema, ["manifestSha256", "datamodelSha256", "exactLedgerMatch", "supportedSchemaMatch",
+    ...(Object.hasOwn(schema, "historicalLedgerException") ? ["historicalLedgerException"] : [])]);
+  const historical = schema.exactLedgerMatch === false && historicalSource(schema, sourceSha)
+    && canonical(schema.historicalLedgerException) === canonical(CORE_HISTORICAL_LEDGER);
+  requireThat(HASH.test(schema.manifestSha256) && HASH.test(schema.datamodelSha256)
+    && schema.supportedSchemaMatch === true
+    && (historical || (schema.exactLedgerMatch === true && !Object.hasOwn(schema, "historicalLedgerException"))), "SCHEMA_NOT_ACCEPTED");
+}
+
+export function verifyLedger(manifest, rows, sourceSha) {
   requireThat(Array.isArray(rows) && rows.length <= 10000, "LEDGER_UNBOUNDED");
   const applied = rows.filter((row) => row.finished_at != null && row.rolled_back_at == null);
   requireThat(rows.every((row) => row.finished_at != null || row.rolled_back_at != null)
     && applied.length === manifest.migrations.length && new Set(applied.map((row) => row.migration_name)).size === applied.length,
   "LEDGER_NOT_EXACT");
   const checksums = new Map(applied.map((row) => [row.migration_name, row.checksum]));
-  // A historical checksum variance is a nonaccepted result, not an implicit allowlist.
-  requireThat(manifest.migrations.every((item) => checksums.get(item.name) === item.checksum), "LEDGER_NOT_EXACT");
+  const mismatches = manifest.migrations.filter((item) => checksums.get(item.name) !== item.checksum);
+  if (mismatches.length === 0) return { exactLedgerMatch: true };
+  const exception = CORE_HISTORICAL_LEDGER;
+  requireThat(historicalSource(manifest, sourceSha) && identityHash(manifest.migrations) === exception.manifestSha256
+    && rows.length === applied.length && mismatches.length === 1
+    && mismatches[0].name === exception.migration && mismatches[0].checksum === exception.sourceChecksum
+    && checksums.get(exception.migration) === exception.appliedChecksum, "LEDGER_NOT_EXACT");
+  return { exactLedgerMatch: false, historicalLedgerException: { ...exception } };
 }
 
 export function databaseIdentity(url) {
@@ -307,7 +337,8 @@ export async function checkBaseline(evidence, { sourceDir, expectedSchema, boots
   const provider = deps.provider ?? verifyProvider;
   await provider(evidence, env);
   const schema = await (deps.database ?? verifyDatabase)(evidence, sourceDir, expectedSchema, env);
-  requireThat(schema.exactLedgerMatch === true && schema.supportedSchemaMatch === true, "SCHEMA_NOT_ACCEPTED");
+  validateSchemaAcceptance(schema, evidence.sourceSha);
+  if (expectedSchema) requireThat(canonical(schema) === canonical(expectedSchema), "SOURCE_SCHEMA_MISMATCH");
   if (bootstrap) await (deps.retainedAuth ?? verifyRetainedAuth)(evidence, env);
   else await (deps.smoke ?? smoke)(evidence, sourceDir, env);
   await provider(evidence, env);
@@ -325,6 +356,7 @@ async function verifyDatabase(evidence, sourceDir, expectedSchema, env = process
   url.searchParams.set("options", "-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000");
   const { default: pg } = await import("pg");
   const client = new pg.Client({ connectionString: url.toString(), connectionTimeoutMillis: 10000 });
+  let ledger;
   try {
     await client.connect();
     await client.query("BEGIN READ ONLY");
@@ -332,7 +364,7 @@ async function verifyDatabase(evidence, sourceDir, expectedSchema, env = process
     requireThat(settings.rows[0]?.database === decodeURIComponent(url.pathname.slice(1)) && settings.rows[0]?.schema === "public"
       && settings.rows[0]?.default_read_only === "on" && settings.rows[0]?.read_only === "on", "DATABASE_READ_GUARD_FAILED");
     const rows = await client.query("SELECT migration_name, checksum, finished_at, rolled_back_at FROM _prisma_migrations ORDER BY migration_name LIMIT 10001");
-    verifyLedger(manifest, rows.rows);
+    ledger = verifyLedger(manifest, rows.rows, evidence.sourceSha);
   } finally {
     await client.query("ROLLBACK").catch(() => {});
     await client.end();
@@ -347,7 +379,7 @@ async function verifyDatabase(evidence, sourceDir, expectedSchema, env = process
       PRISMA_ENGINES_MIRROR: "http://127.0.0.1:9" },
   });
   return { manifestSha256: manifest.manifestSha256, datamodelSha256: manifest.datamodelSha256,
-    exactLedgerMatch: true, supportedSchemaMatch: true };
+    ...ledger, supportedSchemaMatch: true };
 }
 
 export async function preparedSchemaEngine(sourceDir) {
