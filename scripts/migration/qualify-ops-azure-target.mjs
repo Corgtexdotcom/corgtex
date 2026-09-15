@@ -42,7 +42,7 @@ export function validateIntent(i, run, attempt) {
   return i;
 }
 
-export function validateServer(s) {
+export function validateServer(s, allowUpdating = false) {
   assert(s?.id?.toLowerCase() === RESOURCE.toLowerCase() && s.name === SERVER && s.fullyQualifiedDomainName === HOST
     && s.administratorLogin === "corgtexadmin" && s.version === "18" && s.location?.replaceAll(" ", "").toLowerCase() === "westus3"
     && s.sku?.name === "Standard_D2ds_v5" && s.sku?.tier === "GeneralPurpose" && s.storage?.storageSizeGb === 128
@@ -50,7 +50,7 @@ export function validateServer(s) {
     && s.network?.publicNetworkAccess === "Enabled" && !s.network.delegatedSubnetResourceId
     && !s.network.privateDnsZoneArmResourceId && sameKeys(s.tags, Object.keys(tags))
     && Object.entries(tags).every(([k, v]) => s.tags?.[k] === v), "TARGET_DRIFT");
-  assert(["Stopped", "Ready", "Starting", "Stopping"].includes(s.state), "TARGET_STATE_UNEXPECTED");
+  assert(["Stopped", "Ready", "Starting", "Stopping", ...(allowUpdating ? ["Updating"] : [])].includes(s.state), "TARGET_STATE_UNEXPECTED");
   return s;
 }
 
@@ -155,13 +155,28 @@ export class Azure {
 
 export const clock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 const remaining = (deadline, c) => assert(c.now() < deadline, "ABSOLUTE_DEADLINE_EXCEEDED");
-async function waitState(api, wanted, deadline, c) {
+async function waitState(api, wanted, deadline, c, intent) {
   while (true) {
     remaining(deadline, c);
-    const s = validateServer(await api.server());
-    if (s.state === wanted) return s;
-    await c.sleep(5000);
+    if (intent) { await api.identity(); await api.boundary(); validateRules(await api.rules(), intent); }
+    const s = validateServer(await api.server(), Boolean(intent));
+    remaining(deadline, c);
+    if ([wanted].flat().includes(s.state)) return s;
+    await c.sleep(Math.min(5000, deadline - c.now()));
   }
+}
+
+async function reconcileFirewall(api, i, c) {
+  // A timed-out CLI may have submitted the write. Never submit it a second time.
+  while (c.now() < i.workDeadline) {
+    await api.identity(); await api.boundary();
+    const s = validateServer(await api.server(), true);
+    const rules = validateRules(await api.rules(), i);
+    if (c.now() >= i.workDeadline) break;
+    if (s.state === "Ready" && rules.length === 1) return;
+    await c.sleep(Math.min(5000, i.workDeadline - c.now()));
+  }
+  throw new ProbeError("FIREWALL_CREATE_UNPROVEN");
 }
 
 export async function prepare(api, { runId, runAttempt, ipv4 }, c = clock) {
@@ -187,8 +202,9 @@ export async function qualify(api, i, probe, markAttempt, c = clock) {
   await api.start();
   await waitState(api, "Ready", i.workDeadline, c);
   remaining(i.workDeadline, c);
-  await api.createRule(i);
-  assert(validateRules(await api.rules(), i).length === 1, "FIREWALL_CREATE_UNPROVEN");
+  try { await api.createRule(i); }
+  catch (error) { if (error.code !== "AZURE_FIREWALL_CREATE_FAILED") throw error; }
+  await reconcileFirewall(api, i, c);
   remaining(i.workDeadline, c);
   const result = await probe({ deadline: i.workDeadline });
   remaining(i.workDeadline, c);
@@ -206,23 +222,28 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   const cleanupDeadline = recovery || c.now() >= i.deadline ? c.now() + RESERVE : i.deadline;
   api.deadline = cleanupDeadline;
   await api.identity(); await api.boundary();
-  validateServer(await api.server());
+  let observedStopping = validateServer(await api.server(), true).state === "Stopping";
+  validateRules(await api.rules(), i);
+  // Updating is admitted only inside this owned execution, never at prepare/start.
+  const settled = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
+  observedStopping ||= settled.state === "Stopping";
   const rules = validateRules(await api.rules(), i);
   // A failed CLI response may follow an accepted write. Reconcile readbacks,
   // and still stop owned compute if removal of the owned firewall rule fails.
   if (rules.length) {
     try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
   }
-  let s = validateServer(await api.server());
+  let s = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
   // Stopped can be the pre-transition readback of an accepted START. It is not
-  // terminal evidence. Without observing Ready, leave this execution unresolved.
-  if (s.state === "Starting" || s.state === "Stopped") s = await waitState(api, "Ready", cleanupDeadline, c);
-  assert(s.state === "Ready" || s.state === "Stopping", "START_TERMINAL_UNPROVEN");
+  // terminal evidence unless this owned cleanup already observed STOP in flight.
+  if (s.state === "Starting" || (s.state === "Stopped" && !observedStopping)) s = await waitState(api, "Ready", cleanupDeadline, c, i);
+  assert(s.state === "Ready" || s.state === "Stopping" || (s.state === "Stopped" && observedStopping), "START_TERMINAL_UNPROVEN");
   if (s.state === "Ready") {
     try { await api.stop(); } catch { /* Bounded state polling resolves an ambiguous response. */ }
   }
-  await waitState(api, "Stopped", cleanupDeadline, c);
+  await waitState(api, "Stopped", cleanupDeadline, c, i);
   validateRules(await api.rules(), i, true);
+  remaining(cleanupDeadline, c);
   return { status: "TARGET_QUALIFICATION_CLEANED", resource: RESOURCE, firewallAbsent: true, serverStopped: true,
     runId: i.runId, runAttempt: i.runAttempt, deadline: i.deadline, withinWindow: c.now() <= i.deadline,
     transitionCapUsd: i.transitionCapUsd, actualSpend: "PARENT_ACCOUNTING_REQUIRED", productionAccepted: false };

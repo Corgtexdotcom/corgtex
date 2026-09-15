@@ -35,8 +35,28 @@ ambiguous START followed by Stopped is not cleanup proof. Cleanup waits for Read
 then issues STOP once and verifies Stopped. If Ready cannot be observed within
 the remaining window, it reports unresolved rather than successful cleanup.
 Unexpected target identity or foreign access fails closed.
+Firewall CREATE is also submitted once. A failed/timed-out create response is
+not proof that Azure rejected it: readback must establish the exact intent-owned
+rule with identical start/end IPv4 (one /32), and the verified provider must
+return to Ready before the database probe. Missing rule or prolonged Updating
+exhausts the original work deadline as `FIREWALL_CREATE_UNPROVEN`; it never
+triggers a second CREATE or a broader rule. Identity, role, boundary and rule
+ownership drift still fail closed during reconciliation.
+
+Cleanup accepts Updating only within the verified owned execution. It waits for
+the transition to settle before deleting the owned rule, and again before STOP
+if deletion leaves the server Updating. Every wait shares the original cleanup
+deadline (or the existing bounded recovery reserve), rather than resetting a
+timeout per poll or phase. Rules and target/identity boundaries are rechecked
+while waiting. Prepare and initial START still require Stopped; Updating is not
+permission to adopt someone else's server operation. The ambiguous-START Stopped
+guard and exact recovery provenance requirements are unchanged. Expiry is an
+unresolved failure, not proof that access or compute was removed.
 After the same execution-ownership checks, recovery observing Stopping waits
 directly for Stopped without submitting another STOP. A bare stale intent never
+supplies that observation: Stopping seen earlier in the same owned cleanup call
+remains valid if the next read is already Stopped, even without a polling sleep.
+An intent alone never
 authorizes this path; an initial Stopped after ambiguous START remains unresolved.
 Late cleanup may still recover the resource but explicitly fails the original
 one-hour window. An Azure operation or lost runner can prevent timely cleanup:

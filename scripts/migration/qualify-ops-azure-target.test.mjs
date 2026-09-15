@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse } from "yaml";
-import { RESOURCE, HOST } from "./probe-ops-azure-target.mjs";
+import { RESOURCE, HOST, ProbeError } from "./probe-ops-azure-target.mjs";
 import { Azure, SERVER, prepare, qualify, cleanup, validateIntent, validateServer, validateEnvironment, validIp, validateRecoveryEvidence } from "./qualify-ops-azure-target.mjs";
 
 const baseline = () => ({ id: RESOURCE, name: SERVER, fullyQualifiedDomainName: HOST, administratorLogin: "corgtexadmin", version: "18",
@@ -86,6 +86,112 @@ describe("target qualification lifecycle", () => {
     api.createRule = async (intent) => { await create(intent); throw Error("uncertain"); };
     await expect(qualify(api, i, async () => {}, async () => {}, c)).rejects.toThrow();
     expect((await cleanup(api, i, c)).firewallAbsent).toBe(true);
+  });
+  it("reconciles the accepted create timeout plus nine-minute Updating incident with one write", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    const create = api.createRule;
+    api.createRule = async intent => {
+      await create(intent); c.time += 60000; api.current.state = "Updating";
+      throw new ProbeError("AZURE_FIREWALL_CREATE_FAILED");
+    };
+    c.sleep = async ms => { c.time += ms; if (c.time >= i.createdAt + 600000) api.current.state = "Ready"; };
+    await qualify(api, i, async () => { expect(api.current.state).toBe("Ready"); events.push("probe"); }, async () => {}, c);
+    expect(c.time - i.createdAt).toBe(600000);
+    expect(events.filter(e => e === "create")).toHaveLength(1);
+    expect(events.filter(e => e === "probe")).toHaveLength(1);
+    expect((await cleanup(api, i, c)).serverStopped).toBe(true);
+  });
+  it("waits for exact /32 readback after a timeout even if Ready is visible first", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c); const create = api.createRule;
+    api.createRule = async () => { events.push("submitted"); throw new ProbeError("AZURE_FIREWALL_CREATE_FAILED"); };
+    c.sleep = async ms => { c.time += ms; if (c.time === i.createdAt + 10000) await create(i); };
+    await qualify(api, i, async () => { events.push("probe"); }, async () => {}, c);
+    expect(c.time - i.createdAt).toBe(10000); expect(events.filter(e => e === "submitted")).toHaveLength(1);
+  });
+  it.each(["Updating", "missing-rule"])("leaves %s create unproven at the original total work deadline", async mode => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c); const create = api.createRule;
+    c.time = i.workDeadline - 6001;
+    api.createRule = async intent => {
+      events.push("submitted");
+      if (mode === "Updating") { await create(intent); api.current.state = "Updating"; }
+      throw new ProbeError("AZURE_FIREWALL_CREATE_FAILED");
+    };
+    await expect(qualify(api, i, async () => events.push("probe"), async () => {}, c)).rejects.toThrow("FIREWALL_CREATE_UNPROVEN");
+    expect(c.time).toBe(i.workDeadline); expect(api.deadline).toBe(i.workDeadline);
+    expect(events.filter(e => e === "submitted")).toHaveLength(1); expect(events).not.toContain("probe");
+  });
+  it.each(["foreign-rule", "wrong-ip", "target", "identity"])("rejects %s drift during create reconciliation without a second write or probe", async mode => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c); const create = api.createRule;
+    api.createRule = async intent => { await create(intent); api.current.state = "Updating"; throw new ProbeError("AZURE_FIREWALL_CREATE_FAILED"); };
+    c.sleep = async ms => {
+      c.time += ms; api.current.state = "Ready";
+      if (mode === "foreign-rule") api.setRules([{ name: "foreign" }]);
+      if (mode === "wrong-ip") api.setRules([{ id: `${RESOURCE}/firewallRules/${i.firewallName}`, name: i.firewallName, startIpAddress: i.ipv4, endIpAddress: "203.0.113.8" }]);
+      if (mode === "target") api.current.id = "foreign";
+      if (mode === "identity") api.identity = async () => { throw new ProbeError("AZURE_PRINCIPAL_MISMATCH"); };
+    };
+    await expect(qualify(api, i, async () => events.push("probe"), async () => {}, c)).rejects.toThrow();
+    expect(events.filter(e => e === "create")).toHaveLength(1); expect(events).not.toContain("probe");
+  });
+  it("cleanup waits through Updating before delete and again before STOP within one total budget", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    await qualify(api, i, async () => {}, async () => {}, c);
+    api.current.state = "Updating"; const remove = api.deleteRule;
+    api.deleteRule = async intent => { expect(api.current.state).toBe("Ready"); await remove(intent); api.current.state = "Updating"; };
+    c.sleep = async ms => { c.time += ms; if (c.time === i.createdAt + 540000 || c.time === i.createdAt + 600000) api.current.state = "Ready"; };
+    const result = await cleanup(api, i, c);
+    expect(result.serverStopped && result.firewallAbsent).toBe(true); expect(c.time - i.createdAt).toBe(600000);
+    expect(events.filter(e => e === "delete")).toHaveLength(1); expect(events.filter(e => e === "stop")).toHaveLength(1);
+    expect(api.deadline).toBe(i.deadline);
+  });
+  it.each(["foreign", "identity", "deadline"])("denies cleanup during Updating on %s without mutation", async mode => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    await qualify(api, i, async () => {}, async () => {}, c); events.length = 0; api.current.state = "Updating";
+    c.time = i.deadline - 6001;
+    c.sleep = async ms => {
+      c.time += ms;
+      if (mode === "foreign") api.setRules([{ name: "foreign" }]);
+      if (mode === "identity") api.identity = async () => { throw new ProbeError("AZURE_PRINCIPAL_MISMATCH"); };
+    };
+    await expect(cleanup(api, i, c)).rejects.toThrow(mode === "deadline" ? "ABSOLUTE_DEADLINE_EXCEEDED" : undefined);
+    expect(events).not.toContain("delete"); expect(events).not.toContain("stop");
+    if (mode === "deadline") expect(c.time).toBe(i.deadline);
+  });
+  it("does not reset the cleanup budget after deleting the rule", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    await qualify(api, i, async () => {}, async () => {}, c);
+    c.time = i.deadline - 6000; api.current.state = "Updating";
+    const remove = api.deleteRule;
+    api.deleteRule = async intent => { await remove(intent); api.current.state = "Updating"; };
+    c.sleep = async ms => { c.time += ms; if (c.time === i.deadline - 1000) api.current.state = "Ready"; };
+    await expect(cleanup(api, i, c)).rejects.toThrow("ABSOLUTE_DEADLINE_EXCEEDED");
+    expect(c.time).toBe(i.deadline); expect(events.filter(e => e === "delete")).toHaveLength(1);
+    expect(events).not.toContain("stop");
+  });
+  it("reconciles owned Updating to Stopping to Stopped without a second STOP", async () => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Updating"; api.verifyRecovery = async () => events.push("owned");
+    c.sleep = async ms => { c.time += ms; api.current.state = c.time === i.createdAt + 5000 ? "Stopping" : "Stopped"; };
+    events.length = 0;
+    expect((await cleanup(api, i, c, true)).serverStopped).toBe(true);
+    expect(events[0]).toBe("owned"); expect(events).not.toContain("stop");
+  });
+  it.each([["Updating", "Stopping", "Stopped"], ["Stopping", "Stopped", "Stopped"]])("retains an owned STOP transition advancing between reads: %j", async (...states) => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.verifyRecovery = async () => events.push("owned");
+    const sequence = [...states];
+    api.server = async () => { events.push("server"); return { ...baseline(), state: sequence.shift() ?? "Stopped" }; };
+    c.sleep = async () => { throw Error("unexpected readiness wait after observed STOP"); };
+    events.length = 0;
+    const result = await cleanup(api, i, c, true);
+    expect(result.serverStopped && result.firewallAbsent).toBe(true);
+    expect(events[0]).toBe("owned"); expect(events).not.toContain("stop"); expect(events).not.toContain("delete");
+    expect(c.time).toBe(i.createdAt);
+  });
+  it("still rejects Updating at preflight instead of adopting someone else's lifecycle", async () => {
+    const { api, c, events } = setup(); api.current.state = "Updating";
+    await expect(prepare(api, inputs, c)).rejects.toThrow("TARGET_STATE_UNEXPECTED");
+    expect(events).not.toContain("start");
   });
   it("still stops owned compute if firewall delete fails, but rejects cleanup", async () => {
     const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
