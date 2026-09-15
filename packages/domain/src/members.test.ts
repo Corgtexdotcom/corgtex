@@ -80,6 +80,7 @@ const { prismaMock, selfServeOpsMock, sendEmailMock, sharedEnv } = vi.hoisted(()
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  getMcpOrigin: () => undefined,
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash:${value}`),
   randomOpaqueToken: vi.fn(() => "opaque-token"),

@@ -64,6 +64,7 @@ vi.mock("@corgtex/domain", () => ({
   },
   AppError: MockAppError,
   getMcpPublicUrl: (origin: string) => `${origin}/mcp`,
+  withMcpConnectionExecution: (_record: unknown, run: () => Promise<unknown>) => run(),
 }));
 
 vi.mock("@corgtex/mcp", () => ({

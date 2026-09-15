@@ -1,4 +1,4 @@
-import type { AppActor } from "@corgtex/shared";
+import type { AppActor, McpOrigin } from "@corgtex/shared";
 import { env } from "@corgtex/shared";
 import { resolveAgentActorFromBearer, describeScope, requireWorkspaceMembership, resolveMcpOAuthAccessToken, requireTrialMcpAccess } from "@corgtex/domain";
 import type { McpOAuthProviderKey } from "@corgtex/domain";
@@ -17,6 +17,7 @@ export type McpSessionContext = {
   clientId?: string;
   clientName?: string | null;
   providerKey?: McpOAuthProviderKey;
+  mcpOrigin?: McpOrigin;
 };
 
 export class McpInsufficientScopeError extends AppError {
@@ -61,7 +62,7 @@ function settingsUrl(workspaceId: string): string {
  */
 export async function authenticateMcpRequest(
   authorizationHeader: string | null,
-  options: { resourceUrl?: string } = {},
+  options: { resourceUrl?: string; workspaceId?: string } = {},
 ): Promise<McpSessionContext> {
   if (!authorizationHeader?.startsWith("Bearer ")) {
     throw new AppError(401, "UNAUTHENTICATED", "Missing or invalid Authorization header. Use: Bearer <token>");
@@ -89,6 +90,9 @@ export async function authenticateMcpRequest(
       );
     }
     const [workspaceId] = workspaceIds;
+    if (options.workspaceId && (options.workspaceId !== workspaceId || !agentActor.credentialId || !agentActor.credentialVersion)) {
+      throw new AppError(403, "MCP_WORKSPACE_SCOPE_REQUIRED", "This endpoint requires a connection for exactly this workspace.");
+    }
     await requireWorkspaceMembership({ actor: agentActor, workspaceId });
     if (agentActor.authProvider !== "bootstrap") {
       await requireTrialMcpAccess(workspaceId);
@@ -99,11 +103,17 @@ export async function authenticateMcpRequest(
       workspaceId,
       authKind: "agent",
       scopes: agentActor.scopes,
+      ...(agentActor.credentialId && agentActor.credentialVersion ? { mcpOrigin: {
+        kind: "agent" as const, id: agentActor.credentialId, workspaceId, credentialVersion: agentActor.credentialVersion,
+      } } : {}),
     };
   }
 
   const oauthSession = await resolveMcpOAuthAccessToken(token, options.resourceUrl);
   if (oauthSession) {
+    if (options.workspaceId && oauthSession.workspaceId !== options.workspaceId) {
+      throw new AppError(403, "MCP_WORKSPACE_SCOPE_REQUIRED", "Connection workspace mismatch.");
+    }
     await requireWorkspaceMembership({ actor: oauthSession.actor, workspaceId: oauthSession.workspaceId });
     await requireTrialMcpAccess(oauthSession.workspaceId);
     return {
@@ -116,6 +126,7 @@ export async function authenticateMcpRequest(
       clientId: oauthSession.clientId,
       clientName: oauthSession.clientName,
       providerKey: oauthSession.providerKey,
+      mcpOrigin: { kind: "oauth", id: oauthSession.connectionId, workspaceId: oauthSession.workspaceId },
     };
   }
 

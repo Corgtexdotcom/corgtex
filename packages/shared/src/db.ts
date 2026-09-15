@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { env } from "./env";
 import { getSupportAuthorizationContext } from "./support-context";
+import { getMcpOrigin, assertMcpOriginActive } from "./mcp-context";
 
 const createClient = () => {
   const client = new PrismaClient({
@@ -14,6 +15,24 @@ const createClient = () => {
   const extended = client.$extends({ query: { $allModels: { async $allOperations({ model, operation, args, query }) {
     const params = { model, action: operation, args: args as Record<string, any> };
     const context = getSupportAuthorizationContext();
+    const mcpOrigin = getMcpOrigin();
+    if (mcpOrigin && ["Event", "WorkflowJob"].includes(model)
+      && ["create", "createMany", "upsert", "update", "updateMany"].includes(operation)) {
+      if (["upsert", "update", "updateMany"].includes(operation)) {
+        // Bind the existing row atomically, including id-only updates and upserts.
+        params.args.where = { ...params.args.where, AND: [params.args.where, { workspaceId: mcpOrigin.workspaceId }] };
+      }
+      const rows = operation === "upsert" ? [params.args.create, params.args.update]
+        : Array.isArray(params.args.data) ? params.args.data : [params.args.data];
+      for (const row of rows) {
+        if (operation === "upsert" && row === params.args.update && Object.keys(row).length === 0) continue;
+        const workspaceId = row.workspaceId ?? row.workspace?.connect?.id
+          ?? (["update", "updateMany"].includes(operation) || row === params.args.update ? mcpOrigin.workspaceId : undefined);
+        if (typeof workspaceId !== "string") throw new Error("MCP_AUTHORIZATION_REVOKED");
+        await assertMcpOriginActive(client, mcpOrigin, workspaceId);
+        row.mcpOrigin = mcpOrigin;
+      }
+    }
     if (!context?.supportUserId || !["Event", "WorkflowJob"].includes(params.model ?? "")
       || !["create", "createMany", "upsert", "update", "updateMany"].includes(params.action)) return query(args);
     const rows = params.action === "upsert"

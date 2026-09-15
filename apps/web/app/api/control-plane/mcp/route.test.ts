@@ -141,7 +141,6 @@ describe("/api/control-plane/mcp", () => {
       "list_customers",
       "list_self_serve_customers",
       "record_self_serve_smoke_run",
-      "create_self_serve_support_session",
       "approve_self_serve_trial_request",
       "reject_self_serve_trial_request",
       "create_client",

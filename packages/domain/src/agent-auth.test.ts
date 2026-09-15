@@ -110,6 +110,7 @@ describe("credentialAgentAuthProvider", () => {
 
     vi.mocked(prisma.agentCredential.findUnique).mockResolvedValue({
       id: "cred-1",
+      tokenHash: "synthetic-hash",
       workspaceId: "ws-1",
       catalogItemId: "catalog-1",
       label: "My Agent",
@@ -127,6 +128,7 @@ describe("credentialAgentAuthProvider", () => {
       kind: "agent",
       authProvider: "credential",
       credentialId: "cred-1",
+      credentialVersion: expect.stringMatching(/^[a-f0-9]{64}$/),
       catalogItemId: "catalog-1",
       label: "My Agent",
       workspaceIds: ["ws-1"],

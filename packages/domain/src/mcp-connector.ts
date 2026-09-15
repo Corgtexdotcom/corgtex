@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { withOAuthWorkspaceAuthorization } from "./oauth-workspace-authorization";
+import { requireWorkspaceMembership } from "./auth";
+import { lockWorkspaceMembership, supportCapabilityVersion } from "./workspace-support-access";
+import { validateMcpConsentResource, workspaceFromMcpResource } from "./mcp-resource";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
@@ -716,26 +719,6 @@ function verifyPkce(params: {
   }
 }
 
-async function hasActiveMcpWorkspaceMembership(params: {
-  userId: string;
-  workspaceId: string;
-}) {
-  const membership = await prisma.member.findUnique({
-    where: {
-      workspaceId_userId: {
-        workspaceId: params.workspaceId,
-        userId: params.userId,
-      },
-    },
-    select: {
-      id: true,
-      isActive: true,
-    },
-  });
-
-  return Boolean(membership?.isActive);
-}
-
 export function isAllowedMcpRedirectUri(registeredRedirectUris: string[], redirectUri: string) {
   if (registeredRedirectUris.includes(redirectUri)) return true;
 
@@ -882,10 +865,12 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
   codeChallenge: string;
   codeChallengeMethod: string;
   resource?: string | null;
+  expectedSupportGrantVersion?: number | null;
 }) {
   if (actor.kind !== "user") {
     throw new AppError(403, "FORBIDDEN", "Only users can complete MCP connector OAuth flows.");
   }
+  await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
 
   const client = await getMcpOAuthClientByClientId(params.clientId);
 
@@ -898,10 +883,11 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
 
   const instance = await resolveMcpConnectorInstanceForWorkspace(params.workspaceId);
   const resource = params.resource ? normalizeMcpResource(params.resource) : getMcpPublicUrl();
+  validateMcpConsentResource(params.resource ?? resource, params.workspaceId);
   const scopes = requestedScopes(params.scopes, client.scopes);
   const code = `${MCP_CODE_PREFIX}${randomOpaqueToken()}`;
 
-  return withOAuthWorkspaceAuthorization(actor.user.id, params.workspaceId, async tx => {
+  return withOAuthWorkspaceAuthorization(actor.user.id, params.workspaceId, async (tx, supportGrantVersion) => {
     await tx.mcpOAuthAuthorizationCode.create({
       data: {
         clientId: client.id,
@@ -912,6 +898,7 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
         redirectUri: params.redirectUri,
         scopes,
         resource,
+        supportGrantVersion,
         codeChallenge: params.codeChallenge,
         codeChallengeMethod: params.codeChallengeMethod,
         expiresAt: new Date(Date.now() + 10 * 60 * 1000),
@@ -919,7 +906,7 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
     });
 
     return code;
-  });
+  }, params.expectedSupportGrantVersion);
 }
 
 export async function exchangeMcpAuthorizationCode(params: {
@@ -954,6 +941,10 @@ export async function exchangeMcpAuthorizationCode(params: {
     if (authCode.redirectUri !== params.redirectUri) {
       throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
     }
+    if (authCode.resource && workspaceFromMcpResource(authCode.resource)) {
+      invariant(params.resource === authCode.resource && workspaceFromMcpResource(authCode.resource) === authCode.workspaceId,
+        400, "INVALID_MCP_RESOURCE", "The canonical workspace resource is required.");
+    }
     if (params.resource && authCode.resource && !areEquivalentMcpResources(authCode.resource, params.resource)) {
       throw new AppError(400, "INVALID_INPUT", "Resource parameter mismatch.");
     }
@@ -980,15 +971,6 @@ export async function exchangeMcpAuthorizationCode(params: {
     const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
     const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    const existingToken = await tx.mcpOAuthAccessToken.findFirst({
-      where: {
-        clientId: client.id,
-        userId: authCode.userId,
-        workspaceId: authCode.workspaceId,
-        instanceSlug: authCode.instanceSlug,
-      },
-    });
-
     const tokenParams = {
       clientId: client.id,
       userId: authCode.userId,
@@ -998,21 +980,15 @@ export async function exchangeMcpAuthorizationCode(params: {
       refreshHash: sha256(refreshToken),
       scopes: authCode.scopes,
       resource: authCode.resource,
+      supportGrantVersion: authCode.supportGrantVersion,
       expiresAt,
       refreshExpiresAt,
       revokedAt: null,
     };
 
-    if (existingToken) {
-      await tx.mcpOAuthAccessToken.update({
-        where: { id: existingToken.id },
-        data: tokenParams,
-      });
-    } else {
-      await tx.mcpOAuthAccessToken.create({
-        data: tokenParams,
-      });
-    }
+    // Fresh consent is a new connection, never resurrection of an old row whose
+    // identity may still be referenced by delegated jobs.
+    await tx.mcpOAuthAccessToken.create({ data: tokenParams });
 
     return {
       access_token: accessToken,
@@ -1021,12 +997,14 @@ export async function exchangeMcpAuthorizationCode(params: {
       refresh_token: refreshToken,
       scope: authCode.scopes.join(" "),
     };
-  });
+  }, candidate.supportGrantVersion);
 }
 
 export async function refreshMcpAccessToken(params: {
   refreshToken: string;
   clientId: string;
+  resource?: string | null;
+  scopes?: string[];
 }) {
   const client = await getMcpOAuthClientByClientId(params.clientId);
   const candidate = await prisma.mcpOAuthAccessToken.findUnique({
@@ -1041,6 +1019,11 @@ export async function refreshMcpAccessToken(params: {
     if (!token || token.revokedAt) {
       throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
     }
+    invariant(!params.resource || (token.resource !== null && params.resource === token.resource),
+      400, "INVALID_MCP_RESOURCE", "Resource parameter mismatch.");
+    invariant(!params.scopes || (params.scopes.every(scope => token.scopes.includes(scope))
+      && token.scopes.every(scope => params.scopes!.includes(scope))),
+      400, "INVALID_SCOPE", "Refresh preserves connection permissions. Authorize a new connection to change scopes.");
     if (token.clientId !== client.id) {
       throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
     }
@@ -1075,7 +1058,7 @@ export async function refreshMcpAccessToken(params: {
       refresh_token: refreshToken,
       scope: token.scopes.join(" "),
     };
-  });
+  }, candidate.supportGrantVersion);
 }
 
 export async function revokeMcpToken(params: {
@@ -1095,9 +1078,14 @@ export async function revokeMcpToken(params: {
     if (token.clientId !== client.id) return;
   }
 
-  await prisma.mcpOAuthAccessToken.update({
-    where: { id: token.id },
-    data: { revokedAt: new Date() },
+  await prisma.$transaction(async tx => {
+    await lockWorkspaceMembership(tx, token.workspaceId);
+    // Pending consent codes for this client/workspace cannot resurrect a disconnect.
+    await tx.mcpOAuthAuthorizationCode.updateMany({
+      where: { userId: token.userId, workspaceId: token.workspaceId, clientId: token.clientId, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    await tx.mcpOAuthAccessToken.update({ where: { id: token.id }, data: { revokedAt: new Date() } });
   });
 }
 
@@ -1116,18 +1104,15 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
   if (new Date() > token.expiresAt) {
     return null;
   }
+  const scopedResource = workspaceFromMcpResource(expectedResource ?? "");
+  if (scopedResource && (token.workspaceId !== scopedResource || token.resource !== expectedResource)) return null;
   if (expectedResource && token.resource && !areEquivalentMcpResources(token.resource, expectedResource)) {
     return null;
   }
   if (!getMcpConnectorInstance(token.instanceSlug)) {
     return null;
   }
-  if (!(await hasActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId }))) {
-    return null;
-  }
-
-  return {
-    actor: {
+  const actor: AppActor = {
       kind: "user" as const,
       user: {
         id: token.user.id,
@@ -1135,7 +1120,18 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
         displayName: token.user.displayName,
         globalRole: token.user.globalRole,
       },
-    },
+    };
+  try {
+    await supportCapabilityVersion(token.userId, token.workspaceId, token.supportGrantVersion);
+    await requireWorkspaceMembership({ actor, workspaceId: token.workspaceId });
+  } catch (error) {
+    if (error instanceof AppError && error.status === 403) return null;
+    throw error;
+  }
+  return {
+    actor,
+    connectionId: token.id,
+    supportGrantVersion: token.supportGrantVersion,
     workspaceId: token.workspaceId,
     scopes: token.scopes,
     instanceSlug: token.instanceSlug,
@@ -1144,4 +1140,34 @@ export async function resolveMcpOAuthAccessToken(tokenString: string, expectedRe
     clientName: token.client.name,
     providerKey: inferMcpOAuthProviderKey(token.client),
   };
+}
+
+export async function listMcpWorkspaceConnections(actor: AppActor, workspaceId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "A named user is required.");
+  const rows = await prisma.mcpOAuthAccessToken.findMany({
+    where: { workspaceId, userId: actor.user.id }, orderBy: { createdAt: "desc" }, take: 100,
+    select: { id: true, resource: true, scopes: true, createdAt: true, revokedAt: true, refreshExpiresAt: true,
+      client: { select: { name: true, isActive: true } } },
+  });
+  return rows.map(row => ({ id: row.id, workspaceId, clientName: row.client.name, resource: row.resource,
+    scopes: row.scopes, createdAt: row.createdAt.toISOString(),
+    legacy: !workspaceFromMcpResource(row.resource ?? ""),
+    status: row.revokedAt ? "revoked" as const : !row.client.isActive || (row.refreshExpiresAt && row.refreshExpiresAt <= new Date())
+      ? "expired" as const : "connected" as const }));
+}
+
+export async function revokeMcpWorkspaceConnection(actor: AppActor, workspaceId: string, connectionId: string) {
+  await requireWorkspaceMembership({ actor, workspaceId });
+  invariant(actor.kind === "user", 403, "FORBIDDEN", "A named user is required.");
+  await prisma.$transaction(async tx => {
+    await lockWorkspaceMembership(tx, workspaceId);
+    const token = await tx.mcpOAuthAccessToken.findFirst({ where: { id: connectionId, workspaceId, userId: actor.user.id } });
+    invariant(token, 404, "NOT_FOUND", "Connection not found.");
+    await tx.mcpOAuthAccessToken.update({ where: { id: token.id }, data: { revokedAt: new Date() } });
+    await tx.mcpOAuthAuthorizationCode.updateMany({
+      where: { userId: token.userId, workspaceId, clientId: token.clientId, usedAt: null }, data: { usedAt: new Date() },
+    });
+  });
+  return { id: connectionId, revoked: true };
 }

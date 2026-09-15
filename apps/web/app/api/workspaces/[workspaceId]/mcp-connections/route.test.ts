@@ -8,6 +8,7 @@ const {
   requireWorkspaceMembership,
   resolveRequestActor,
   verifyAiWorkspaceProviderConnection,
+  listMcpWorkspaceConnections, revokeMcpWorkspaceConnection, checkApiDemoGuard,
 } = vi.hoisted(() => ({
   handleRouteError: vi.fn((error: unknown) => NextResponse.json({ error: String(error) }, { status: 500 })),
   listAiWorkspaceToolProviders: vi.fn(),
@@ -15,6 +16,7 @@ const {
   requireWorkspaceMembership: vi.fn(),
   resolveRequestActor: vi.fn(),
   verifyAiWorkspaceProviderConnection: vi.fn(),
+  listMcpWorkspaceConnections: vi.fn(), revokeMcpWorkspaceConnection: vi.fn(), checkApiDemoGuard: vi.fn(),
 }));
 
 class MockAppError extends Error {
@@ -34,7 +36,9 @@ vi.mock("@corgtex/domain", () => ({
   listMcpOAuthConnectionStatuses,
   requireWorkspaceMembership,
   verifyAiWorkspaceProviderConnection,
+  listMcpWorkspaceConnections, revokeMcpWorkspaceConnection,
 }));
+vi.mock("@/lib/demo-guard", () => ({ checkApiDemoGuard }));
 
 vi.mock("@/lib/auth", () => ({
   resolveRequestActor,
@@ -65,6 +69,8 @@ function request(workspaceId = "workspace-1", init?: ConstructorParameters<typeo
 describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    listMcpWorkspaceConnections.mockResolvedValue([]);
+    checkApiDemoGuard.mockResolvedValue(undefined);
     resolveRequestActor.mockResolvedValue({
       kind: "user",
       user: {
@@ -127,6 +133,7 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
       workspaceId: "workspace-1",
     });
     expect(body).toEqual({
+      grants: [],
       claude: {
         connected: true,
         connectedAt: "2026-05-20T16:00:00.000Z",
@@ -293,6 +300,23 @@ describe("GET /api/workspaces/[workspaceId]/mcp-connections", () => {
     });
   });
 
+  it("disconnects only the supplied workspace connection through domain authorization", async () => {
+    revokeMcpWorkspaceConnection.mockResolvedValue({ revoked: true });
+    const { POST } = await import("./route");
+    const response = await POST(request("workspace-1", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "revoke", connectionId: "connection-A" }) }), context());
+    expect(response.status).toBe(200);
+    expect(checkApiDemoGuard).toHaveBeenCalledWith("workspace-1");
+    expect(revokeMcpWorkspaceConnection).toHaveBeenCalledWith(expect.objectContaining({ kind: "user" }), "workspace-1", "connection-A");
+  });
+  it("never calls a mutation when the demo guard denies", async () => {
+    checkApiDemoGuard.mockRejectedValueOnce(new MockAppError(403, "DEMO_READ_ONLY", "Demo"));
+    const { POST } = await import("./route");
+    await POST(request("workspace-1", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "revoke", connectionId: "connection-A" }) }), context());
+    expect(revokeMcpWorkspaceConnection).not.toHaveBeenCalled();
+    expect(verifyAiWorkspaceProviderConnection).not.toHaveBeenCalled();
+  });
   it("rejects the deprecated manual mark-connected action", async () => {
     const { POST } = await import("./route");
     const response = await POST(

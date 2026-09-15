@@ -14,3 +14,4 @@ export * from "./telemetry";
 export * from "./release-metadata";
 export * from "./logger";
 export * from "./support-context";
+export * from "./mcp-context";

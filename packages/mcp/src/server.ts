@@ -670,14 +670,15 @@ function deliberationEntryResult(entry: {
  */
 export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer {
   const server = new McpServer({
-    name: "corgtex",
+    name: `corgtex-${sessionCtx.workspaceId}`,
+    title: `Corgtex - ${sessionCtx.workspaceId}`,
     version: "1.0.0",
   });
 
   const { actor, workspaceId } = sessionCtx;
-  const sessionActorId = actor.kind === "user"
+  const sessionActorId = sessionCtx.mcpOrigin?.id ?? (actor.kind === "user"
     ? actor.user.id
-    : actor.credentialId ?? actor.agentIdentityId ?? actor.label ?? actor.authProvider;
+    : actor.credentialId ?? actor.agentIdentityId ?? actor.label ?? actor.authProvider);
   const hasToolCapability = (name: string): name is keyof typeof TOOL_CAPABILITIES =>
     Object.prototype.hasOwnProperty.call(TOOL_CAPABILITIES, name);
   const requireToolCapability = (name: keyof typeof TOOL_CAPABILITIES) => {
@@ -1286,6 +1287,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       });
       return structuredJsonResult({
         authKind: sessionCtx.authKind,
+        connectionId: sessionCtx.mcpOrigin?.id ?? null,
         corgtexUser: actor.kind === "user"
           ? {
             id: actor.user.id,

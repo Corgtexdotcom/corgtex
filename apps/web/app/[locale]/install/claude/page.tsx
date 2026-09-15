@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { getMcpPublicUrl } from "@corgtex/domain";
+import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { WorkspacePicker } from "../WorkspacePicker";
 import { ClaudeInstaller } from "./ClaudeInstaller";
 
 export const dynamic = "force-dynamic";
@@ -21,8 +22,9 @@ export default async function ConnectClaudePage({
   searchParams: Promise<{ workspaceId?: string | string[]; returnTo?: string | string[] }>;
 }) {
   const search = await searchParams;
-  const connectorUrl = getMcpPublicUrl();
   const workspaceId = Array.isArray(search.workspaceId) ? search.workspaceId[0] : search.workspaceId ?? null;
+  if (!workspaceId) return <WorkspacePicker path="/install/claude" />;
+  const connectorUrl = getWorkspaceMcpResource(workspaceId);
   const returnTo = safeReturnTo(search.returnTo);
 
   return (

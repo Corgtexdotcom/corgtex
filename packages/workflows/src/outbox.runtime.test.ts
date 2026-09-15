@@ -34,6 +34,7 @@ const {
   runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
   prismaMock: {
+    mcpOAuthAccessToken: { findUnique: vi.fn() },
     workspaceSupportGrant: { findUnique: vi.fn() },
     $transaction: vi.fn(),
     workflowJob: {
@@ -109,6 +110,7 @@ const {
 
 vi.mock("@corgtex/shared", async () => ({
   ...(await import("../../shared/src/support-context")),
+  ...(await import("../../shared/src/mcp-context")),
   logger: loggerMock,
   prisma: prismaMock,
   toInputJson: (value: unknown) => value,
@@ -140,6 +142,7 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/domain", async () => ({
   withWorkspaceSupportExecution: (await import("../../domain/src/workspace-support-access")).withWorkspaceSupportExecution,
+  withMcpConnectionExecution: (await import("../../domain/src/mcp-execution")).withMcpConnectionExecution,
   recordGovernanceScore: vi.fn(),
   createWebhookDeliveries: vi.fn(),
   deliverWebhook: vi.fn(),
@@ -223,6 +226,19 @@ afterEach(() => {
 });
 
 describe("runPendingJobs", () => {
+  it.each([null, { workspaceId: "ws-1", revokedAt: new Date(), client: { isActive: true } },
+    { workspaceId: "foreign", revokedAt: null, client: { isActive: true } },
+    { workspaceId: "ws-1", revokedAt: null, client: { isActive: false } }])("rejects disconnected MCP provenance before the actual worker handler %j", async token => {
+    prismaMock.mcpOAuthAccessToken.findUnique.mockResolvedValue(token);
+    txMock.$queryRaw.mockResolvedValueOnce([{ id: "mcp-job", workspaceId: "ws-1", type: "agent.meeting-summary",
+      payload: { meetingId: "meeting-1" }, attempts: 1, mcpOrigin: { kind: "oauth", id: "connection-A", workspaceId: "ws-1" } }]);
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+    expect(runAgentWorkflowJobMock).not.toHaveBeenCalled();
+    expect(recordMeetingTranscriptProcessingStageMock).not.toHaveBeenCalled();
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "mcp-job" }, data: expect.objectContaining({ status: "FAILED" }),
+    }));
+  });
   it.each([null, { isActive: false, role: "FULL", version: 1 }, { isActive: true, role: "SETUP", version: 1 },
     { isActive: true, role: "FULL", version: 3 }])("rejects revoked support provenance before handler/progress %j", async (grant) => {
     prismaMock.workspaceSupportGrant.findUnique.mockResolvedValue(grant);

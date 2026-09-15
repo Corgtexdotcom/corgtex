@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { getMcpPublicUrl } from "@corgtex/domain";
+import { getWorkspaceMcpResource } from "@corgtex/domain";
+import { WorkspacePicker } from "../WorkspacePicker";
 import { ClaudeCodeInstaller } from "./ClaudeCodeInstaller";
 import { buildClaudeCodeCommand } from "@/lib/install-helpers";
 
@@ -10,15 +11,15 @@ export const metadata: Metadata = {
   description: "Add Corgtex as an MCP server in Claude Code with one terminal command.",
 };
 
-export default function ConnectClaudeCodePage({ params }: { params: Promise<{ locale: string }> }) {
-  // Await for compatibility but locale only affects the back-link path
-  void params;
-  const connectorUrl = getMcpPublicUrl();
+export default async function ConnectClaudeCodePage({ searchParams }: { searchParams: Promise<{ workspaceId?: string }> }) {
+  const { workspaceId } = await searchParams;
+  if (!workspaceId) return <WorkspacePicker path="/install/claude-code" />;
+  const connectorUrl = getWorkspaceMcpResource(workspaceId);
   const command = buildClaudeCodeCommand(connectorUrl);
 
   return (
     <main className="min-h-screen bg-[var(--bg)] px-4 py-10 sm:py-16">
-      <ClaudeCodeInstaller command={command} fallbackInstallHref="../claude" />
+      <ClaudeCodeInstaller command={command} fallbackInstallHref={`../claude?workspaceId=${encodeURIComponent(workspaceId)}`} />
     </main>
   );
 }

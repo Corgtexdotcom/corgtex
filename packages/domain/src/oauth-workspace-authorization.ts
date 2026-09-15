@@ -9,11 +9,14 @@ import { lockWorkspaceMembership } from "./workspace-support-access";
 export async function withOAuthWorkspaceAuthorization<T>(
   userId: string,
   workspaceId: string,
-  run: (tx: Prisma.TransactionClient) => Promise<T>,
+  run: (tx: Prisma.TransactionClient, supportGrantVersion: number | null) => Promise<T>,
+  expectedVersion?: number | null,
 ) {
   const origin = getSupportAuthorizationContext()?.origin;
   const where = { workspaceId_userId: { workspaceId, userId } };
   const captured = await prisma.workspaceSupportGrant.findUnique({ where });
+  invariant(expectedVersion === undefined || expectedVersion === (captured?.version ?? null),
+    403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
   invariant(!origin || (origin.userId === userId && origin.workspaceId === workspaceId && origin.version === captured?.version),
     403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
   invariant(!captured || (captured.isActive && captured.role === "FULL"),
@@ -27,6 +30,6 @@ export async function withOAuthWorkspaceAuthorization<T>(
     403, "SUPPORT_AUTHORIZATION_REVOKED", "Support authorization is unavailable.");
     const member = await tx.member.findUnique({ where, select: { isActive: true } });
     invariant(member?.isActive, 403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
-    return run(tx);
+    return run(tx, current?.version ?? null);
   });
 }

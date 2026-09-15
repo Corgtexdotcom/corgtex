@@ -83,6 +83,7 @@ vi.mock("./auth", async (importOriginal) => {
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  getMcpOrigin: () => undefined,
   prisma: prismaMock,
   sendEmail: vi.fn(),
   parseAllowedWorkspaceIds: vi.fn(() => new Set<string>()),

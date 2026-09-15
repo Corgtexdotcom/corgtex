@@ -31,6 +31,7 @@ const { prismaMock, envMock, verifyPasswordMock } = vi.hoisted(() => ({
 
 vi.mock("@corgtex/shared", () => ({
   setSupportAuthorizationActor: vi.fn(),
+  getMcpOrigin: () => undefined,
   env: envMock,
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash-password:${value}`),

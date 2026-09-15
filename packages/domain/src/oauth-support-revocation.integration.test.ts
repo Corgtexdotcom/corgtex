@@ -150,7 +150,7 @@ describe.each(["mcp", "legacy"] as const)("%s OAuth support revocation on Postgr
     const code = operation !== "refresh" ? await issue() : "";
     const gate = pause(operation === "refresh" ? tokenModel : codeModel, "findUnique", true);
     const pending = operation === "refresh" ? refresh(old!.refresh_token) : exchange(code);
-    const checked = expect(pending).rejects.toMatchObject({ status: operation === "refresh" ? 401 : 400 });
+    const checked = expect(pending).rejects.toMatchObject({ status: kind === "mcp" ? 403 : operation === "refresh" ? 401 : 400 });
     await gate.entered;
     try { await change(1, false); await change(2, true); }
     finally { gate.release(); }
@@ -162,7 +162,7 @@ describe.each(["mcp", "legacy"] as const)("%s OAuth support revocation on Postgr
     const old = operation === "refresh" || operation === "exchange-existing" ? await exchange(await issue()) : null;
     const code = operation.startsWith("exchange") ? await issue() : "";
     const gate = operation === "issue" ? pause(codeModel, "create")
-      : pause(tokenModel, operation === "refresh" ? "updateMany" : "findFirst");
+      : pause(tokenModel, operation === "refresh" ? "updateMany" : kind === "mcp" ? "create" : "findFirst");
     const pending = operation === "issue" ? issue() : operation === "refresh" ? refresh(old!.refresh_token) : exchange(code);
     await gate.entered;
     const revocation = change(1, false).then(() => change(2, true));
@@ -197,11 +197,19 @@ describe.each(["mcp", "legacy"] as const)("%s OAuth support revocation on Postgr
     const old = await exchange(await issue());
     const gate = pause(tokenModel, "updateMany");
     const pending = refresh(old.refresh_token);
-    const checked = expect(pending).rejects.toMatchObject({ status: 401 });
     await gate.entered;
-    try { await revokeMcpToken({ token: old.access_token, clientId }); }
+    const revocation = fresh(() => revokeMcpToken({ token: old.access_token, clientId }));
+    try {
+      await expect.poll(async () => {
+        const rows = await prisma.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%Workspace%FOR UPDATE%'`;
+        return Number(rows[0].n);
+      }, { timeout: 2000 }).toBeGreaterThan(0);
+    }
     finally { gate.release(); }
-    await checked;
+    const rotated = await pending;
+    await revocation;
+    expect(await resolve(rotated.access_token)).toBeNull();
+    await expect(refresh(rotated.refresh_token)).rejects.toMatchObject({ status: 401 });
     expect(await resolve(old.access_token)).toBeNull();
     expect((await tokens())[0].revokedAt).not.toBeNull();
   });
