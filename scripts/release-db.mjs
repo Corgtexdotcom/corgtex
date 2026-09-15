@@ -2,7 +2,8 @@
 
 process.env.CORGTEX_STARTUP_MODE = "migrate-and-seed";
 process.env.CORGTEX_AUTO_SEED_JNJ_DEMO = "false";
-process.env.CORGTEX_AUTO_SEED_INTERNAL_VALIDATION = "true";
+// QA fixtures are provisioned explicitly with dedicated identities.
+process.env.CORGTEX_AUTO_SEED_INTERNAL_VALIDATION = "false";
 process.env.SEED_SCRIPTS = "";
 
 const { main } = await import("./start-web.mjs");
