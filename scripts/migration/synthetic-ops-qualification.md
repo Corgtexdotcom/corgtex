@@ -14,6 +14,54 @@ preparation receipt before requesting an actual target run. The outer job timeou
 includes pre-START dependency preparation; it does not extend the one-hour Azure
 intent or its cleanup reserve.
 
+## Premerge Native Preparation
+
+The existing CI workflow has a separate, PR-only `Synthetic Native ARM64
+Preparation` job on `ubuntu-24.04-arm`. A read-only scope job compares the tested
+merge tree to the PR base, including deletions. It covers synthetic harness files,
+PostgreSQL runner/validator/schema dependencies, qualification dependencies,
+migration-foundation inputs, both workflows and package/runtime-test manifests.
+Customer application changes alone do not select this check. This adds no main,
+merge-group or production execution path and changes no protected Azure ref gate.
+
+Both jobs have only `contents: read`, no environment, secrets, OIDC or provider
+credentials, and checkout does not persist credentials. The native job anonymously
+downloads only the four fixed PUBLIC assets below, checks their exact hashes,
+installs locked dependencies without lifecycle scripts, and caches the digest-pinned
+official client. Missing/unpublished inputs fail closed, not skip-green. Publication
+and actual hosted execution remain parent-owned gates; keep acceptance pending
+until a real native run passes. macOS tests do not establish native Linux proof.
+
+The bounded entrypoint is:
+
+```sh
+node scripts/migration/prepare-synthetic-ops-local.mjs prepare /absolute/public-bundle /absolute/new-evidence
+node scripts/migration/prepare-synthetic-ops-local.mjs cleanup /absolute/new-evidence
+```
+
+Preparation rejects non-Linux/arm64 hosts. It invokes the existing source worker
+and actual Docker client/relay probe, not the Azure orchestrator with a fabricated
+ref. Child tools receive only PATH and a newly owned HOME/TMPDIR; no inherited
+Docker remote context, provider configuration or Node options. The native Docker
+daemon is local to the ephemeral hosted runner; no Docker socket is mounted into
+a fixture. Work has a ten-minute deadline with a two-minute cleanup reserve.
+
+Intent and label-owned resource receipts are retained outside credential temp
+storage before resource creation, allowing a separate bounded cleanup retry.
+In-process cleanup verifies absence and removes private temp files; an `always()`
+step retries owned cleanup after failures/interruption. It never drops an unowned
+database or changes a provider resource. A missing summary is an error, not cleanup
+success. Cancellation/host loss can prevent `always()` and upload from running:
+then cleanup is UNPROVEN, and only ephemeral host-local resources are implicated.
+A previously written successful local summary proves that completed cleanup, not
+successful completion of a subsequently cancelled CI job.
+
+Only `public-summary.json` is uploaded (seven-day retention): source code SHA,
+fixed input pins, source runtime, bounded comparison/transport booleans, cleanup
+status and `azureComparison: NOT_RUN`. Full source/ownership receipts, certificates,
+keys, manifest and binary inputs stay on the ephemeral host and are not artifacts.
+The summary is not source-data acceptance or Azure execution evidence.
+
 ## Inputs And Local Bootstrap
 
 The parent must first audit and publish four reviewed fixture assets under the
