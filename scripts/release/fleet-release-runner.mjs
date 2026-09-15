@@ -1242,9 +1242,13 @@ async function deployAzureTarget(target, manifest, deps) {
     ], deps);
   }
   const webRevision = updateAzureContainerApp(target.azure.webAppName, manifest.acrWebImage, target, manifest, deps);
+  const readyWebRevision = await waitForAzureRevision(target.azure.webAppName, webRevision, manifest.acrWebImage, target, deps);
+  // Provider readiness alone is not migration proof. The new web's health contract
+  // verifies its bundled migrations, database and exact release before worker mutation.
+  await pollHealth(target.url, manifest, deps);
   const workerRevision = updateAzureContainerApp(target.azure.workerAppName, manifest.acrWorkerImage, target, manifest, deps);
   return {
-    webRevision: await waitForAzureRevision(target.azure.webAppName, webRevision, manifest.acrWebImage, target, deps),
+    webRevision: readyWebRevision,
     workerRevision: await waitForAzureRevision(target.azure.workerAppName, workerRevision, manifest.acrWorkerImage, target, deps),
   };
 }
