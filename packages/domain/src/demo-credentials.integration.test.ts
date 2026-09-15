@@ -13,6 +13,15 @@ describe("demo legacy credential retirement", () => {
     let clientId: string | undefined;
     let definitionId: string | undefined;
     try {
+      const pendingEvent = await prisma.event.create({ data: { workspaceId: workspace.id, type: "synthetic.pending", payload: {} } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      await prisma.event.delete({ where: { id: pendingEvent.id } });
+      const runningJob = await prisma.workflowJob.create({ data: { workspaceId: workspace.id, type: "synthetic.running", payload: {}, status: "RUNNING", lockedBy: "synthetic-qa" } });
+      await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("asynchronous authority");
+      await prisma.workflowJob.delete({ where: { id: runningJob.id } });
+      const completedJob = await prisma.workflowJob.create({ data: { workspaceId: workspace.id, type: "synthetic.completed", payload: {}, status: "COMPLETED" } });
+      await assertDemoWorkspaceDisconnected(prisma, workspace.id);
+      await prisma.workflowJob.delete({ where: { id: completedJob.id } });
       const sso = await prisma.workspaceSsoConfig.create({ data: { workspaceId: workspace.id, provider: "GOOGLE", clientId: "synthetic", clientSecretEnc: "synthetic", allowedDomains: ["example.test"], isEnabled: true } });
       await expect(assertDemoWorkspaceDisconnected(prisma, workspace.id)).rejects.toThrow("external access");
       await prisma.workspaceSsoConfig.delete({ where: { id: sso.id } });

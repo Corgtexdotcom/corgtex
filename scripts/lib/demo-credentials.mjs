@@ -37,6 +37,10 @@ export async function assertDemoWorkspaceDisconnected(prisma, workspaceId, userI
       throw new Error(`Existing demo has ${model}; review external access before refresh`);
     }
   }
+  if (await prisma.event.count({ where: { workspaceId } })
+    || await prisma.workflowJob.count({ where: { workspaceId, OR: [{ status: { not: "COMPLETED" } }, { lockedAt: { not: null } }, { lockedBy: { not: null } }] } })) {
+    throw new Error("Existing demo has pending or claimed asynchronous authority; review external access before refresh");
+  }
   if (await prisma.meetingRecording.count({ where: { workspaceId } })) {
     throw new Error("Existing demo has recording authority; review external access before refresh");
   }

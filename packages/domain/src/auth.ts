@@ -7,6 +7,35 @@ import { systemActorMemberIdentityWhere } from "./member-identity";
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
+const PUBLIC_DEMO_EMAIL = "demo@jnj-demo.corgtex.app";
+
+function isPublicDemoUser(user: { email: string }) {
+  return user.email.trim().toLowerCase() === PUBLIC_DEMO_EMAIL;
+}
+
+async function publicDemoWorkspaceId(userId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: {
+      email: true,
+      globalRole: true,
+      memberships: {
+        where: { isActive: true },
+        select: { workspaceId: true, role: true, workspace: { select: { slug: true } } },
+      },
+      workspaceSupportGrants: {
+        where: { isActive: true },
+        select: { workspaceId: true },
+      },
+    },
+  });
+  if (!user || !isPublicDemoUser(user) || user.globalRole !== "USER" || user.memberships.length !== 1) return null;
+  const membership = user.memberships[0];
+  if (membership.workspace.slug !== "jnj-demo" || membership.role !== "CONTRIBUTOR") return null;
+  if (user.workspaceSupportGrants.some(grant => grant.workspaceId !== membership.workspaceId)) return null;
+  return membership.workspaceId;
+}
+
 export async function requireDeploymentWorkspaceScope(workspaceId: string, db: Prisma.TransactionClient | typeof prisma = prisma) {
   const workspaceSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
   if (!workspaceSlug) {
@@ -74,8 +103,11 @@ export async function createSession(
   userId: string,
   meta: { ipAddress?: string | null; userAgent?: string | null } = {}
 ) {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true, email: true } });
   invariant(user && !isPasswordLoginDisabled(user.passwordHash), 401, "UNAUTHENTICATED", "This account cannot sign in.");
+  if (isPublicDemoUser(user)) {
+    invariant(await publicDemoWorkspaceId(userId), 401, "UNAUTHENTICATED", "This demo account is unavailable.");
+  }
 
   const token = randomOpaqueToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
@@ -137,6 +169,8 @@ export async function resolveSessionActor(token: string): Promise<AppActor | nul
     return null;
   }
 
+  if (isPublicDemoUser(session.user) && !await publicDemoWorkspaceId(session.user.id)) return null;
+
   const lastSeenRefreshBefore = new Date(now.getTime() - env.SESSION_LAST_SEEN_WRITE_INTERVAL_MS);
   if (session.lastSeenAt <= lastSeenRefreshBefore) {
     await prisma.session.updateMany({
@@ -187,6 +221,9 @@ export async function requireWorkspaceMembership(params: {
   if (mcpOrigin) await assertMcpOriginActive(db, mcpOrigin, params.workspaceId);
   setSupportAuthorizationActor(params.actor);
   await requireDeploymentWorkspaceScope(params.workspaceId, db);
+  if (params.actor.kind === "user" && isPublicDemoUser(params.actor.user)) {
+    invariant(await publicDemoWorkspaceId(params.actor.user.id, db) === params.workspaceId, 403, "FORBIDDEN", "The public demo is restricted to its dedicated workspace.");
+  }
 
   if (params.actor.kind === "agent") {
     if (params.actor.supportOrigin) {
@@ -300,6 +337,15 @@ export async function actorUserIdForWorkspace(actor: AppActor, workspaceId: stri
 
 export async function listActorWorkspaces(actor: AppActor) {
   const deploymentSlug = env.DEPLOYMENT_WORKSPACE_SCOPE_SLUG;
+  if (actor.kind === "user" && isPublicDemoUser(actor.user)) {
+    const workspaceId = await publicDemoWorkspaceId(actor.user.id);
+    if (!workspaceId || (deploymentSlug && deploymentSlug !== "jnj-demo")) return [];
+    return prisma.workspace.findMany({
+      where: { id: workspaceId, slug: "jnj-demo" },
+      select: { id: true, slug: true, name: true, description: true },
+      orderBy: { name: "asc" },
+    });
+  }
 
   if (actor.kind === "agent") {
     const allowed = new Set(actor.workspaceIds ?? []);
