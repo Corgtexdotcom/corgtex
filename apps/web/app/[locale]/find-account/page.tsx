@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { getTranslations } from "next-intl/server";
-import { listActorWorkspaces, resolveSessionActor } from "@corgtex/domain";
+import { hasActiveWorkspaceSupport, listActorWorkspaces, resolveSessionActor } from "@corgtex/domain";
 import { sessionCookieName } from "@corgtex/shared";
 import { filterWorkspacesForDeploymentScope } from "@/lib/deployment-workspace-scope";
 import { FindAccountForm } from "./FindAccountForm";
@@ -32,6 +32,7 @@ export default async function FindAccountPage({
   const { locale } = await params;
   const t = await getTranslations("auth");
   const actor = await optionalSessionActor();
+  const hasSupportAccess = actor ? await hasActiveWorkspaceSupport(actor) : false;
   const workspaces = actor
     ? filterWorkspacesForDeploymentScope(await listActorWorkspaces(actor).catch(() => []))
     : [];
@@ -66,6 +67,7 @@ export default async function FindAccountPage({
           </div>
         ) : null}
 
+        {hasSupportAccess && <Link href={localizedPath("/support", locale)} className="button-outline">Workspace Support</Link>}
         <FindAccountForm />
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 20, fontSize: 14 }}>

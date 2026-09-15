@@ -1,6 +1,7 @@
 import { env, parseAllowedWorkspaceIds, prisma, randomOpaqueToken, sha256 } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
 import { AppError, invariant } from "./errors";
+import { supportCapabilityVersion } from "./workspace-support-access";
 import { requireWorkspaceMembership } from "./auth";
 import { getOrCreateExternalAgentIdentity } from "./agent-identity";
 
@@ -199,10 +200,25 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
         label: true,
         scopes: true,
         isActive: true,
+        createdBy: { select: { id: true } },
+        supportGrantVersion: true,
       },
     });
 
     if (!credential?.isActive) {
+      return null;
+    }
+    let supportOrigin: { userId: string; workspaceId: string; version: number } | undefined;
+    if (credential.createdBy) {
+      const grant = await prisma.workspaceSupportGrant.findUnique({
+        where: { workspaceId_userId: { workspaceId: credential.workspaceId, userId: credential.createdBy.id } },
+        select: { role: true, isActive: true, version: true },
+      });
+      if (grant) {
+        if (!grant.isActive || grant.role !== "FULL" || credential.supportGrantVersion !== grant.version) return null;
+        supportOrigin = { userId: credential.createdBy.id, workspaceId: credential.workspaceId, version: grant.version };
+      } else if (credential.supportGrantVersion != null) return null;
+    } else if (credential.supportGrantVersion != null) {
       return null;
     }
 
@@ -223,6 +239,7 @@ export const credentialAgentAuthProvider: AgentAuthProvider = {
     return {
       kind: "agent",
       authProvider: "credential",
+      supportOrigin,
       credentialId: credential.id,
       catalogItemId: credential.catalogItemId,
       label: credential.label,
@@ -308,10 +325,13 @@ export async function issueAgentCredential(actor: AppActor, params: {
   }
 
   const secret = randomOpaqueToken();
+  const createdByUserId = actor.kind === "user" ? actor.user.id : actor.supportOrigin?.userId ?? null;
+  const supportGrantVersion = await supportCapabilityVersion(createdByUserId, params.workspaceId, actor.kind === "agent" ? actor.supportOrigin?.version : undefined);
   const credential = await prisma.agentCredential.create({
     data: {
       workspaceId: params.workspaceId,
-      createdByUserId: actor.kind === "user" ? actor.user.id : null,
+      createdByUserId,
+      supportGrantVersion,
       catalogItemId: params.catalogItemId ?? null,
       label,
       tokenHash: sha256(secret),
@@ -360,9 +380,13 @@ export async function rotateAgentCredential(actor: AppActor, params: {
   invariant(credential && credential.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Agent credential not found.");
 
   const secret = randomOpaqueToken();
+  const supportUserId = actor.kind === "user" ? actor.user.id : actor.supportOrigin?.userId;
+  const supportGrantVersion = await supportCapabilityVersion(supportUserId, params.workspaceId, actor.kind === "agent" ? actor.supportOrigin?.version : undefined);
   const rotated = await prisma.agentCredential.update({
     where: { id: credential.id },
     data: {
+      supportGrantVersion,
+      ...(supportUserId ? { createdByUserId: supportUserId } : {}),
       tokenHash: sha256(secret),
       isActive: true,
       lastUsedAt: null,

@@ -23,6 +23,7 @@ import { recordAudit } from "./audit-trail";
 import { AppError, invariant } from "./errors";
 import { getSlackWorkspaceBinding } from "./slack-workspace-bindings";
 import { OPERATIONAL_ARTIFACT_FILTER } from "./operational-artifacts";
+import { supportCapabilityVersion } from "./workspace-support-access";
 
 const CREDENTIAL_PREFIX = "agentc-";
 const CATALOG_ADMIN_ROLES = new Set(["ADMIN"]);
@@ -1020,12 +1021,15 @@ export async function decideCatalogRequest(actor: AppActor, params: {
 
     if (params.status === "APPROVED" && request.type === "API_KEY") {
       invariant(request.catalogItem, 400, "INVALID_INPUT", "API key requests require a catalog item.");
+      const supportUserId = actor.kind === "user" ? actor.user.id : actor.supportOrigin?.userId;
+      const supportGrantVersion = await supportCapabilityVersion(supportUserId, params.workspaceId, actor.kind === "agent" ? actor.supportOrigin?.version : undefined);
       const secret = randomOpaqueToken();
       issuedToken = `${CREDENTIAL_PREFIX}${secret}`;
       await tx.agentCredential.create({
         data: {
           workspaceId: params.workspaceId,
-          createdByUserId: request.requesterUserId,
+          createdByUserId: supportGrantVersion == null ? request.requesterUserId : supportUserId,
+          supportGrantVersion,
           catalogItemId: request.catalogItem.id,
           label: `${request.catalogItem.title} API key`,
           tokenHash: sha256(secret),

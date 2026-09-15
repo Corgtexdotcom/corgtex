@@ -390,3 +390,68 @@ describe("bounded storage reads", () => {
     });
   }
 });
+
+describe("streaming storage reads", () => {
+  beforeEach(() => {
+    blobMocks.containerClient.getBlobClient.mockReturnValue(blobMocks.blobClient);
+    blobMocks.serviceClient.getContainerClient.mockReturnValue(blobMocks.containerClient);
+  });
+  for (const provider of ["s3", "azure"] as const) {
+    async function fixture(body: Readable | null, error?: unknown) {
+      const { S3StorageProvider, AzureBlobStorageProvider } = await import("./index");
+      const request = vi.fn();
+      if (error) request.mockRejectedValue(error);
+      else request.mockResolvedValue(provider === "s3" ? { Body: body, ContentType: "text/plain" } : { readableStreamBody: body, contentType: "text/plain" });
+      if (provider === "s3") {
+        s3ClientMock.mockImplementation(function () { return { send: request }; });
+        return { request, storage: new S3StorageProvider({ bucket: "synthetic", region: "auto", forcePathStyle: false, configured: true, missing: [] }) };
+      }
+      blobMocks.blobClient.download.mockImplementation(request);
+      return { request, storage: new AzureBlobStorageProvider({ containerName: "synthetic", endpoint: "https://synthetic.invalid", authMode: "managed_identity", configured: true, missing: [] }) };
+    }
+
+    it(`${provider} streams a generated 65 MiB object without buffering it or enforcing the extraction limit`, async () => {
+      let produced = 0;
+      const source = Readable.from((function* () {
+        while (produced < 65 * 16) { produced++; yield Buffer.alloc(64 * 1024); }
+      })(), { objectMode: false, highWaterMark: 64 * 1024 });
+      const { storage } = await fixture(source);
+      const file = await storage.getStream("synthetic");
+      await new Promise(r => setImmediate(r));
+      expect(produced).toBeLessThan(10);
+      const reader = file!.body.getReader(); let bytes = 0;
+      for (;;) { const part = await reader.read(); if (part.done) break; bytes += part.value.byteLength; }
+      expect(bytes).toBe(65 * 1024 * 1024); expect(source.destroyed).toBe(true);
+    });
+
+    it(`${provider} cancels the SDK stream when the consumer stops reading`, async () => {
+      const source = new Readable({ read() { this.push(Buffer.alloc(64 * 1024)); }, highWaterMark: 64 * 1024 });
+      const { storage } = await fixture(source);
+      const reader = (await storage.getStream("synthetic"))!.body.getReader();
+      await reader.read(); await reader.cancel(); expect(source.destroyed).toBe(true);
+    });
+
+    it(`${provider} passes request cancellation to the SDK and destroys a pending response body`, async () => {
+      const source = new Readable({ read() {} }), controller = new AbortController();
+      const { storage, request } = await fixture(source);
+      const reader = (await storage.getStream("synthetic", { signal: controller.signal }))!.body.getReader();
+      expect(request.mock.calls[0].at(-1)).toMatchObject({ abortSignal: controller.signal });
+      const next = reader.read(); controller.abort();
+      await expect(next).rejects.toThrow("Storage download aborted."); expect(source.destroyed).toBe(true);
+    });
+
+    it(`${provider} propagates body failure so the route cannot mistake a partial file for completion`, async () => {
+      const source = new Readable({ read() { this.destroy(new Error("upstream failed")); } });
+      const { storage } = await fixture(source);
+      const reader = (await storage.getStream("synthetic"))!.body.getReader();
+      await expect(reader.read()).rejects.toThrow("upstream failed"); expect(source.destroyed).toBe(true);
+    });
+
+    it(`${provider} returns null for missing objects but sanitizes other provider errors`, async () => {
+      const missing = await fixture(null, { statusCode: 404 });
+      expect(await missing.storage.getStream("synthetic")).toBeNull();
+      const failed = await fixture(null, new Error("https://storage.invalid/?credential=private"));
+      await expect(failed.storage.getStream("synthetic")).rejects.toThrow("Storage download failed.");
+    });
+  }
+});

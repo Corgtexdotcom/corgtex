@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, envMock, verifyPasswordMock } = vi.hoisted(() => ({
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     user: {
       findUnique: vi.fn(),
       create: vi.fn(),
@@ -29,6 +30,7 @@ const { prismaMock, envMock, verifyPasswordMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
+  setSupportAuthorizationActor: vi.fn(),
   env: envMock,
   prisma: prismaMock,
   hashPassword: vi.fn((value: string) => `hash-password:${value}`),
@@ -333,12 +335,11 @@ describe("auth domain", () => {
       });
     });
 
-    it("returns an admin membership for a global operator", async () => {
+    it("does not synthesize workspace membership for a global operator", async () => {
+      prismaMock.member.findUnique.mockResolvedValue(null);
       const { requireWorkspaceMembership } = await import("./auth");
-      await expect(requireWorkspaceMembership({ actor: operatorActor, workspaceId: "workspace-1" })).resolves.toMatchObject({
-        id: "global-operator",
-        role: "ADMIN",
-        isActive: true,
+      await expect(requireWorkspaceMembership({ actor: operatorActor, workspaceId: "workspace-1" })).rejects.toMatchObject({
+        code: "NOT_A_MEMBER",
       });
     });
   });
@@ -374,6 +375,7 @@ describe("auth domain", () => {
               isActive: true,
             },
           },
+          supportGrants: { none: { userId: "user-1", OR: [{ isActive: false }, { role: "SETUP" }] } },
         },
         select: {
           id: true,
@@ -421,6 +423,7 @@ describe("auth domain", () => {
       await listActorWorkspaces(operatorActor);
 
       expect(prismaMock.workspace.findMany).toHaveBeenCalledWith({
+        where: { supportGrants: { none: { userId: "operator-1", OR: [{ isActive: false }, { role: "SETUP" }] } } },
         select: {
           id: true,
           slug: true,

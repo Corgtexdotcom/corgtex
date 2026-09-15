@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { withOAuthWorkspaceAuthorization } from "./oauth-workspace-authorization";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { prisma, randomOpaqueToken, sha256, env } from "@corgtex/shared";
@@ -735,15 +736,6 @@ async function hasActiveMcpWorkspaceMembership(params: {
   return Boolean(membership?.isActive);
 }
 
-async function requireActiveMcpWorkspaceMembership(params: {
-  userId: string;
-  workspaceId: string;
-}) {
-  if (!(await hasActiveMcpWorkspaceMembership(params))) {
-    throw new AppError(403, "NOT_A_MEMBER", "You are not an active member of this workspace.");
-  }
-}
-
 export function isAllowedMcpRedirectUri(registeredRedirectUris: string[], redirectUri: string) {
   if (registeredRedirectUris.includes(redirectUri)) return true;
 
@@ -896,7 +888,6 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
   }
 
   const client = await getMcpOAuthClientByClientId(params.clientId);
-  await requireActiveMcpWorkspaceMembership({ userId: actor.user.id, workspaceId: params.workspaceId });
 
   if (!isAllowedMcpRedirectUri(client.redirectUris, params.redirectUri)) {
     throw new AppError(400, "INVALID_INPUT", "Redirect URI is not registered for this MCP client.");
@@ -910,23 +901,25 @@ export async function issueMcpAuthorizationCode(actor: AppActor, params: {
   const scopes = requestedScopes(params.scopes, client.scopes);
   const code = `${MCP_CODE_PREFIX}${randomOpaqueToken()}`;
 
-  await prisma.mcpOAuthAuthorizationCode.create({
-    data: {
-      clientId: client.id,
-      userId: actor.user.id,
-      workspaceId: params.workspaceId,
-      instanceSlug: instance.slug,
-      code: sha256(code),
-      redirectUri: params.redirectUri,
-      scopes,
-      resource,
-      codeChallenge: params.codeChallenge,
-      codeChallengeMethod: params.codeChallengeMethod,
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-    },
-  });
+  return withOAuthWorkspaceAuthorization(actor.user.id, params.workspaceId, async tx => {
+    await tx.mcpOAuthAuthorizationCode.create({
+      data: {
+        clientId: client.id,
+        userId: actor.user.id,
+        workspaceId: params.workspaceId,
+        instanceSlug: instance.slug,
+        code: sha256(code),
+        redirectUri: params.redirectUri,
+        scopes,
+        resource,
+        codeChallenge: params.codeChallenge,
+        codeChallengeMethod: params.codeChallengeMethod,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
 
-  return code;
+    return code;
+  });
 }
 
 export async function exchangeMcpAuthorizationCode(params: {
@@ -937,93 +930,98 @@ export async function exchangeMcpAuthorizationCode(params: {
   resource?: string | null;
 }) {
   const client = await getMcpOAuthClientByClientId(params.clientId);
-  const authCode = await prisma.mcpOAuthAuthorizationCode.findUnique({
+  const candidate = await prisma.mcpOAuthAuthorizationCode.findUnique({
     where: { code: sha256(params.code) },
   });
+  invariant(candidate, 400, "INVALID_INPUT", "Invalid authorization code.");
+  return withOAuthWorkspaceAuthorization(candidate.userId, candidate.workspaceId, async tx => {
+    const authCode = await tx.mcpOAuthAuthorizationCode.findUnique({
+      where: { code: sha256(params.code) },
+    });
 
-  if (!authCode) {
-    throw new AppError(400, "INVALID_INPUT", "Invalid authorization code.");
-  }
-  if (authCode.usedAt) {
-    throw new AppError(400, "INVALID_INPUT", "Authorization code already used.");
-  }
-  if (new Date() > authCode.expiresAt) {
-    throw new AppError(400, "INVALID_INPUT", "Authorization code expired.");
-  }
-  if (authCode.clientId !== client.id) {
-    throw new AppError(400, "INVALID_INPUT", "Authorization code not issued for this client.");
-  }
-  if (authCode.redirectUri !== params.redirectUri) {
-    throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
-  }
-  if (params.resource && authCode.resource && !areEquivalentMcpResources(authCode.resource, params.resource)) {
-    throw new AppError(400, "INVALID_INPUT", "Resource parameter mismatch.");
-  }
+    if (!authCode) {
+      throw new AppError(400, "INVALID_INPUT", "Invalid authorization code.");
+    }
+    if (authCode.usedAt) {
+      throw new AppError(400, "INVALID_INPUT", "Authorization code already used.");
+    }
+    if (new Date() > authCode.expiresAt) {
+      throw new AppError(400, "INVALID_INPUT", "Authorization code expired.");
+    }
+    if (authCode.clientId !== client.id) {
+      throw new AppError(400, "INVALID_INPUT", "Authorization code not issued for this client.");
+    }
+    if (authCode.redirectUri !== params.redirectUri) {
+      throw new AppError(400, "INVALID_INPUT", "Redirect URI mismatch.");
+    }
+    if (params.resource && authCode.resource && !areEquivalentMcpResources(authCode.resource, params.resource)) {
+      throw new AppError(400, "INVALID_INPUT", "Resource parameter mismatch.");
+    }
 
-  verifyPkce({
-    verifier: params.codeVerifier,
-    challenge: authCode.codeChallenge,
-    method: authCode.codeChallengeMethod,
-  });
+    verifyPkce({
+      verifier: params.codeVerifier,
+      challenge: authCode.codeChallenge,
+      method: authCode.codeChallengeMethod,
+    });
 
-  const instance = getMcpConnectorInstance(authCode.instanceSlug);
-  if (!instance) {
-    throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
-  }
-  await requireActiveMcpWorkspaceMembership({ userId: authCode.userId, workspaceId: authCode.workspaceId });
+    const instance = getMcpConnectorInstance(authCode.instanceSlug);
+    if (!instance) {
+      throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
+    }
 
-  await prisma.mcpOAuthAuthorizationCode.update({
-    where: { id: authCode.id },
-    data: { usedAt: new Date() },
-  });
+    await tx.mcpOAuthAuthorizationCode.update({
+      where: { id: authCode.id },
+      data: { usedAt: new Date() },
+    });
 
-  const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
-  const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
-  const expiresInSeconds = 3600;
-  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
-  const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
+    const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
+    const expiresInSeconds = 3600;
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+    const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  const existingToken = await prisma.mcpOAuthAccessToken.findFirst({
-    where: {
+    const existingToken = await tx.mcpOAuthAccessToken.findFirst({
+      where: {
+        clientId: client.id,
+        userId: authCode.userId,
+        workspaceId: authCode.workspaceId,
+        instanceSlug: authCode.instanceSlug,
+      },
+    });
+
+    const tokenParams = {
       clientId: client.id,
       userId: authCode.userId,
       workspaceId: authCode.workspaceId,
       instanceSlug: authCode.instanceSlug,
-    },
+      tokenHash: sha256(accessToken),
+      refreshHash: sha256(refreshToken),
+      scopes: authCode.scopes,
+      resource: authCode.resource,
+      expiresAt,
+      refreshExpiresAt,
+      revokedAt: null,
+    };
+
+    if (existingToken) {
+      await tx.mcpOAuthAccessToken.update({
+        where: { id: existingToken.id },
+        data: tokenParams,
+      });
+    } else {
+      await tx.mcpOAuthAccessToken.create({
+        data: tokenParams,
+      });
+    }
+
+    return {
+      access_token: accessToken,
+      token_type: "bearer",
+      expires_in: expiresInSeconds,
+      refresh_token: refreshToken,
+      scope: authCode.scopes.join(" "),
+    };
   });
-
-  const tokenParams = {
-    clientId: client.id,
-    userId: authCode.userId,
-    workspaceId: authCode.workspaceId,
-    instanceSlug: authCode.instanceSlug,
-    tokenHash: sha256(accessToken),
-    refreshHash: sha256(refreshToken),
-    scopes: authCode.scopes,
-    resource: authCode.resource,
-    expiresAt,
-    refreshExpiresAt,
-    revokedAt: null,
-  };
-
-  if (existingToken) {
-    await prisma.mcpOAuthAccessToken.update({
-      where: { id: existingToken.id },
-      data: tokenParams,
-    });
-  } else {
-    await prisma.mcpOAuthAccessToken.create({
-      data: tokenParams,
-    });
-  }
-
-  return {
-    access_token: accessToken,
-    token_type: "bearer",
-    expires_in: expiresInSeconds,
-    refresh_token: refreshToken,
-    scope: authCode.scopes.join(" "),
-  };
 }
 
 export async function refreshMcpAccessToken(params: {
@@ -1031,48 +1029,53 @@ export async function refreshMcpAccessToken(params: {
   clientId: string;
 }) {
   const client = await getMcpOAuthClientByClientId(params.clientId);
-  const token = await prisma.mcpOAuthAccessToken.findUnique({
+  const candidate = await prisma.mcpOAuthAccessToken.findUnique({
     where: { refreshHash: sha256(params.refreshToken) },
   });
+  invariant(candidate && !candidate.revokedAt, 401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+  return withOAuthWorkspaceAuthorization(candidate.userId, candidate.workspaceId, async tx => {
+    const token = await tx.mcpOAuthAccessToken.findUnique({
+      where: { refreshHash: sha256(params.refreshToken) },
+    });
 
-  if (!token || token.revokedAt) {
-    throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
-  }
-  if (token.clientId !== client.id) {
-    throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
-  }
-  if (token.refreshExpiresAt && new Date() > token.refreshExpiresAt) {
-    throw new AppError(401, "UNAUTHENTICATED", "Refresh token expired.");
-  }
-  if (!getMcpConnectorInstance(token.instanceSlug)) {
-    throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
-  }
-  await requireActiveMcpWorkspaceMembership({ userId: token.userId, workspaceId: token.workspaceId });
+    if (!token || token.revokedAt) {
+      throw new AppError(401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+    }
+    if (token.clientId !== client.id) {
+      throw new AppError(400, "INVALID_INPUT", "Token not issued for this client.");
+    }
+    if (token.refreshExpiresAt && new Date() > token.refreshExpiresAt) {
+      throw new AppError(401, "UNAUTHENTICATED", "Refresh token expired.");
+    }
+    if (!getMcpConnectorInstance(token.instanceSlug)) {
+      throw new AppError(403, "FORBIDDEN", "The target Corgtex instance is no longer registered.");
+    }
 
-  const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
-  const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
-  const expiresInSeconds = 3600;
-  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
-  const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const accessToken = `${MCP_ACCESS_TOKEN_PREFIX}${randomOpaqueToken()}`;
+    const refreshToken = `${MCP_REFRESH_TOKEN_PREFIX}${randomOpaqueToken()}`;
+    const expiresInSeconds = 3600;
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+    const refreshExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  await prisma.mcpOAuthAccessToken.update({
-    where: { id: token.id },
-    data: {
-      tokenHash: sha256(accessToken),
-      refreshHash: sha256(refreshToken),
-      expiresAt,
-      refreshExpiresAt,
-      revokedAt: null,
-    },
+    const rotated = await tx.mcpOAuthAccessToken.updateMany({
+      where: { id: token.id, refreshHash: sha256(params.refreshToken), revokedAt: null },
+      data: {
+        tokenHash: sha256(accessToken),
+        refreshHash: sha256(refreshToken),
+        expiresAt,
+        refreshExpiresAt,
+      },
+    });
+    invariant(rotated.count === 1, 401, "UNAUTHENTICATED", "Invalid or revoked refresh token.");
+
+    return {
+      access_token: accessToken,
+      token_type: "bearer",
+      expires_in: expiresInSeconds,
+      refresh_token: refreshToken,
+      scope: token.scopes.join(" "),
+    };
   });
-
-  return {
-    access_token: accessToken,
-    token_type: "bearer",
-    expires_in: expiresInSeconds,
-    refresh_token: refreshToken,
-    scope: token.scopes.join(" "),
-  };
 }
 
 export async function revokeMcpToken(params: {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const loginUserWithPassword = vi.fn();
 const listActorWorkspaces = vi.fn();
+const hasActiveWorkspaceSupport = vi.fn().mockResolvedValue(false);
 const setSessionCookie = vi.fn();
 
 class MockAppError extends Error {
@@ -21,6 +22,7 @@ vi.mock("@corgtex/domain", () => ({
     actor.kind === "user" && actor.user.globalRole === "OPERATOR"
   ),
   listActorWorkspaces,
+  hasActiveWorkspaceSupport,
   loginUserWithPassword,
 }));
 
@@ -43,6 +45,14 @@ afterEach(() => {
 });
 
 describe("loginAction", () => {
+  it("routes Setup-only users to support while preserving the locale", async () => {
+    const { loginAction } = await import("./actions");
+    const { initialLoginActionState } = await import("./state");
+    loginUserWithPassword.mockResolvedValue({ user: { id: "setup-user", email: "setup@example.test" }, token: "synthetic", expiresAt: new Date() });
+    listActorWorkspaces.mockResolvedValue([]);
+    hasActiveWorkspaceSupport.mockResolvedValueOnce(true);
+    await expect(loginAction(initialLoginActionState, buildFormData("setup@example.test", "password123", "es"))).resolves.toMatchObject({ redirectTo: "/es/support", error: null });
+  });
   it("returns an inline auth error for invalid credentials", async () => {
     const { loginAction } = await import("./actions");
     const { initialLoginActionState } = await import("./state");

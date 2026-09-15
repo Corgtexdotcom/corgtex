@@ -6,6 +6,7 @@ const { prismaMock, randomOpaqueTokenMock, sha256Mock, toInputJsonMock } = vi.ho
   sha256Mock: vi.fn((value: string) => `hash:${value}`),
   toInputJsonMock: vi.fn((value: unknown) => value),
   prismaMock: {
+    workspaceSupportGrant: { findUnique: vi.fn().mockResolvedValue(null) },
     $transaction: vi.fn(async (callback: (tx: typeof prismaMock) => Promise<unknown>) => callback(prismaMock)),
     appDefinition: {
       findMany: vi.fn(),
@@ -53,6 +54,7 @@ const recordAudit = vi.hoisted(() => vi.fn());
 
 vi.mock("@corgtex/shared", () => ({
   prisma: prismaMock,
+  getSupportAuthorizationContext: vi.fn(() => undefined),
   randomOpaqueToken: randomOpaqueTokenMock,
   sha256: sha256Mock,
   toInputJson: toInputJsonMock,

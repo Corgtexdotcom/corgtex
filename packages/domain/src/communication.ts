@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { WebClient } from "@slack/web-api";
-import { Prisma, type CommunicationProvider } from "@prisma/client";
+import { Prisma, type CommunicationInstallation, type CommunicationProvider } from "@prisma/client";
 import {
   decryptSecret,
   encryptSecret,
@@ -8,6 +8,7 @@ import {
   prisma,
   randomOpaqueToken,
   toInputJson,
+  beginAuthorizationContext,
 } from "@corgtex/shared";
 import type { AppActor, HumanActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -304,6 +305,7 @@ export function verifySlackRequest(rawBody: string, headers: Headers | Record<st
         403, "SLACK_TENANT_MISMATCH", "Slack request does not match this workspace configuration.");
     }
   }
+  beginAuthorizationContext();
   return true;
 }
 
@@ -678,7 +680,19 @@ export async function ingestCommunicationEvent(provider: CommunicationProvider, 
   return { inboundEventId: inbound.id, duplicate: false };
 }
 
-async function resolveHumanActorForSlackUser(installationId: string, externalUserId: string): Promise<HumanActor | null> {
+async function resolveHumanActorForSlackUser(installation: Pick<CommunicationInstallation, "id" | "workspaceId" | "provider" | "status" | "botTokenEnc">, externalUserId: string): Promise<HumanActor | null> {
+  const installationId = installation.id;
+  if (installation.provider !== "SLACK" || installation.status !== "ACTIVE") return null;
+  const authorizedActor = async (user: HumanActor["user"]): Promise<HumanActor | null> => {
+    const actor: HumanActor = { kind: "user", user };
+    try {
+      await requireWorkspaceMembership({ actor, workspaceId: installation.workspaceId });
+      return actor;
+    } catch (error) {
+      if (error instanceof AppError && error.status === 403) return null;
+      throw error;
+    }
+  };
   const mapped = await prisma.communicationExternalUser.findUnique({
     where: { installationId_externalUserId: { installationId, externalUserId } },
   });
@@ -686,15 +700,10 @@ async function resolveHumanActorForSlackUser(installationId: string, externalUse
   if (mapped?.userId) {
     const user = await prisma.user.findUnique({
       where: { id: mapped.userId },
-      select: { id: true, email: true, displayName: true, globalRole: true },
+      select: { id: true, email: true, displayName: true, globalRole: true, isSupportAccount: true },
     });
-    if (user) return { kind: "user", user };
+    if (user) return authorizedActor(user);
   }
-
-  const installation = await prisma.communicationInstallation.findUnique({
-    where: { id: installationId },
-  });
-  if (!installation || installation.provider !== "SLACK" || installation.status !== "ACTIVE") return null;
 
   try {
     const profile = await slackClient(encryptedBotToken(installation)).users.info({
@@ -707,7 +716,7 @@ async function resolveHumanActorForSlackUser(installationId: string, externalUse
     const user = email
       ? await prisma.user.findUnique({
         where: { email },
-        select: { id: true, email: true, displayName: true, globalRole: true },
+        select: { id: true, email: true, displayName: true, globalRole: true, isSupportAccount: true },
       })
       : null;
     const member = user
@@ -745,7 +754,7 @@ async function resolveHumanActorForSlackUser(installationId: string, externalUse
       },
     });
 
-    return user ? { kind: "user", user } : null;
+    return user ? await authorizedActor(user) : null;
   } catch {
     return null;
   }
@@ -1576,7 +1585,7 @@ export async function processSlackInboundEvent(inboundEventId: string) {
     } else if (event.type === "app_mention") {
       const token = encryptedBotToken(inbound.installation);
       const externalUserId = asString(event.user);
-      const actor = externalUserId ? await resolveHumanActorForSlackUser(inbound.installation.id, externalUserId) : null;
+      const actor = externalUserId ? await resolveHumanActorForSlackUser(inbound.installation, externalUserId) : null;
       const channelId = asString(event.channel);
       const messageTs = asString(event.ts) || asString(event.event_ts);
       const threadTs = asString(event.thread_ts) || messageTs;
@@ -1853,7 +1862,7 @@ function publishActionBlocks(entityType: string, entityId: string) {
 export async function handleSlackCommand(payload: URLSearchParams) {
   const installation = await commandInstallation(payload);
   const externalUserId = payload.get("user_id") ?? "";
-  const actor = await resolveHumanActorForSlackUser(installation.id, externalUserId);
+  const actor = await resolveHumanActorForSlackUser(installation, externalUserId);
   if (!actor) return slackAccountLinkResponse(installation.workspaceId);
 
   const rawText = (payload.get("text") ?? "").trim();
@@ -1918,7 +1927,7 @@ export async function handleSlackCommand(payload: URLSearchParams) {
 export async function handleSlackInteraction(payload: Record<string, unknown>) {
   const installation = await commandInstallation(payload);
   const externalUserId = isRecord(payload.user) ? asString(payload.user.id) : "";
-  const actor = await resolveHumanActorForSlackUser(installation.id, externalUserId);
+  const actor = await resolveHumanActorForSlackUser(installation, externalUserId);
   if (!actor) return slackAccountLinkResponse(installation.workspaceId);
 
   if (payload.type === "message_action") {
@@ -2296,7 +2305,7 @@ export async function publishSlackHome(installationId: string, externalUserId: s
   });
   invariant(installation, 404, "NOT_FOUND", "Slack installation not found.");
 
-  const actor = await resolveHumanActorForSlackUser(installation.id, externalUserId);
+  const actor = await resolveHumanActorForSlackUser(installation, externalUserId);
   const blocks: any[] = [];
   if (!actor) {
     blocks.push(

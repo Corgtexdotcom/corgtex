@@ -1,6 +1,6 @@
 "use server";
 
-import { AppError, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
+import { AppError, hasActiveWorkspaceSupport, isGlobalOperator, listActorWorkspaces, loginUserWithPassword } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { setSessionCookie } from "@/lib/auth";
 import { filterWorkspacesForDeploymentScope, hasDeploymentWorkspaceScope } from "@/lib/deployment-workspace-scope";
@@ -79,10 +79,12 @@ export async function loginAction(
   }
 
   let workspaces;
+  let supportOnly = false;
   try {
     workspaces = filterWorkspacesForDeploymentScope(
       await withLoginTimeout(listActorWorkspaces(actor), "Workspace lookup"),
     );
+    supportOnly = workspaces.length === 0 && await withLoginTimeout(hasActiveWorkspaceSupport(actor), "Support lookup");
   } catch (error) {
     return loginErrorState(email, messageForLoginError(error));
   }
@@ -100,7 +102,9 @@ export async function loginAction(
         ? "/find-account"
         : workspaces[0]
           ? `/workspaces/${workspaces[0].id}`
-          : hasDeploymentWorkspaceScope()
+          : supportOnly
+            ? "/support"
+            : hasDeploymentWorkspaceScope()
             ? "/find-account"
             : "/workspaces/create",
       locale,

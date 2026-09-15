@@ -6,11 +6,6 @@ import type { AppActor, MembershipSummary } from "@corgtex/shared";
  * and workspace-scoped agents. Non-draft private items remain hidden.
  */
 export function privacyFilter(actor: AppActor, _membership?: MembershipSummary | null) {
-  // Global operators are explicit support actors and may inspect all workspace records.
-  if (actor.kind === "user" && actor.user.globalRole === "OPERATOR") {
-    return {};
-  }
-
   const privateDrafts = { isPrivate: true, status: "DRAFT" as const };
 
   if (actor.kind === "agent") {
