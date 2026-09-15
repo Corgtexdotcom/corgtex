@@ -1,8 +1,16 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { validationEmails } from "./lib/qa-identities.mjs";
+
+if (process.env.QA_EXPECTED_RELEASE_SHA) {
+  const build = JSON.parse(readFileSync(new URL("../release-build.json", import.meta.url), "utf8"));
+  if (build.role !== "web" || build.gitSha !== process.env.QA_EXPECTED_RELEASE_SHA) {
+    throw new Error("Provisioning image does not contain the expected release build");
+  }
+}
 
 // Explicit job only: never attach fixture refresh to web startup.
 const expectedHost = process.env.QA_EXPECTED_DATABASE_HOST?.trim();

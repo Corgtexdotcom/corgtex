@@ -1,0 +1,63 @@
+name: QA Workspaces
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: "Full protected main SHA currently serving on selfserve."
+        required: true
+        type: string
+      mode:
+        description: "Inventory first; apply provisions or refreshes synthetic fixtures."
+        required: true
+        type: choice
+        options: [preflight, apply]
+        default: preflight
+      demo_workspace_id:
+        description: "Reviewed existing jnj-demo ID; leave empty only for initial creation."
+        required: false
+        type: string
+      validation_workspace_id:
+        description: "Reviewed existing corgtex-validation ID; leave empty only for initial creation."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: fleet-release
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: fleet-release-production
+    env:
+      QA_EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+      QA_PROVISION_MODE: ${{ inputs.mode }}
+      QA_EXPECTED_DEMO_WORKSPACE_ID: ${{ inputs.demo_workspace_id }}
+      QA_EXPECTED_VALIDATION_WORKSPACE_ID: ${{ inputs.validation_workspace_id }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Verify protected source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$QA_EXPECTED_RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          git merge-base --is-ancestor "$QA_EXPECTED_RELEASE_SHA" origin/main
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Run serialized selfserve provisioning
+        run: node scripts/provision-qa-azure.mjs
