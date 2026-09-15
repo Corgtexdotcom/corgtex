@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSy
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import net from "node:net";
+import { execFileSync } from "node:child_process";
 import { parse } from "yaml";
 import { SyntheticSubprocesses, localToolEnvironment, supervisedExecFile } from "./synthetic-subprocess.mjs";
 import { SOURCE_PINS, SOURCE_IMAGE, SOURCE_BASELINE_RUNTIME, projectSourceBaseline, validateSourceBaseline, hash, pinnedBytes, assertRuntime, compareCorpus } from "./synthetic-ops-source.mjs";
@@ -205,6 +206,13 @@ describe("local fixture transport and ownership", () => {
 });
 
 describe("protected workflow and recovery compatibility", () => {
+  it("expands runner-local paths at step runtime through GITHUB_ENV", () => {
+    const w = parse(readFileSync(new URL("../../.github/workflows/azure-migration-postgres-rehearsal.yml", import.meta.url), "utf8"));
+    const step = w.jobs["qualify-synthetic"].steps.find(s => s.name === "Set runner-local synthetic paths");
+    const output = resolve(temporary(), "github-env");
+    execFileSync("bash", ["-c", step.run], { env: { PATH: process.env.PATH, RUNNER_TEMP: "/tmp/runner temp", GITHUB_RUN_ID: "12345", GITHUB_RUN_ATTEMPT: "2", GITHUB_ENV: output } });
+    expect(readFileSync(output, "utf8")).toBe("SYNTHETIC_TEMP_DIR=/tmp/runner temp/synthetic-ops-12345-2\nSYNTHETIC_BUNDLE_DIR=/tmp/runner temp/synthetic-bundle-12345-2\n");
+  });
   it("keeps metadata/restore/synthetic jobs disjoint without new environment or permissions", () => {
     const w = parse(readFileSync(new URL("../../.github/workflows/azure-migration-postgres-rehearsal.yml", import.meta.url), "utf8"));
     expect(w.concurrency).toEqual({ group: "azure-migration-postgres-rehearsal", "cancel-in-progress": false });
@@ -218,6 +226,13 @@ describe("protected workflow and recovery compatibility", () => {
     expect(text).not.toMatch(/role assignment create|azure.extensions/u);
     expect(w.jobs["qualify-synthetic"]["runs-on"]).toBe("ubuntu-24.04-arm");
     expect(w.jobs["qualify-synthetic"].if).toContain("inputs.operation == 'prepare-synthetic'");
+    expect(w.jobs["qualify-synthetic"].if).toContain("github.ref == 'refs/heads/main'");
+    for (const job of Object.values(w.jobs)) expect(JSON.stringify(job.env)).not.toMatch(/\$\{\{\s*runner\./u);
+    const paths = w.jobs["qualify-synthetic"].steps.find(s => s.name === "Set runner-local synthetic paths");
+    expect(paths.run).toContain('"$RUNNER_TEMP"');
+    expect(paths.run).toContain('>> "$GITHUB_ENV"');
+    expect(paths.run).toContain("SYNTHETIC_TEMP_DIR=%s/synthetic-ops-%s-%s");
+    expect(paths.run).toContain("SYNTHETIC_BUNDLE_DIR=%s/synthetic-bundle-%s-%s");
     const providerSteps = w.jobs["qualify-synthetic"].steps.filter(s => s.uses === "azure/login@v2" || ["Prepare exact synthetic lifecycle and scratch ownership", "Persist synthetic intent before START", "Start target and compare pinned synthetic source"].includes(s.name));
     expect(providerSteps).toHaveLength(4);
     for (const step of providerSteps) expect(step.if).toBe("inputs.operation == 'qualify-synthetic'");

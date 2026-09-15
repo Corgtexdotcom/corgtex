@@ -65,12 +65,15 @@ jobs:
       TARGET_POSTGRES_HOST: corgtex-mig-reh-restore-pg.postgres.database.azure.com
       TARGET_POSTGRES_ADMIN_USER: corgtexadmin
       SYNTHETIC_DIR: .artifacts/synthetic-qualification/${{ github.run_id }}-${{ github.run_attempt }}
-      SYNTHETIC_TEMP_DIR: ${{ runner.temp }}/synthetic-ops-${{ github.run_id }}-${{ github.run_attempt }}
-      SYNTHETIC_BUNDLE_DIR: ${{ runner.temp }}/synthetic-bundle-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
+      - name: Set runner-local synthetic paths
+        run: |
+          set -euo pipefail
+          printf 'SYNTHETIC_TEMP_DIR=%s/synthetic-ops-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf 'SYNTHETIC_BUNDLE_DIR=%s/synthetic-bundle-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Validate synthetic-only inputs
         timeout-minutes: 1
         run: |
