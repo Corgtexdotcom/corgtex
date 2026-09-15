@@ -246,6 +246,22 @@ describe("target qualification lifecycle", () => {
     expect(events.filter(e => e === "stop")).toHaveLength(1);
     expect(events.indexOf("delete")).toBeLessThan(events.indexOf("stop"));
   });
+  it.each([1, 4])("settles recovery STOP before deleting the rule visible on read %s", async visibleRead => {
+    const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
+    api.current.state = "Stopping"; api.verifyRecovery = async () => {};
+    const read = api.rules, create = api.createRule, remove = api.deleteRule;
+    let reads = 0;
+    api.rules = async () => { if (++reads === visibleRead) await create(i); return read(); };
+    api.deleteRule = async intent => {
+      events.push("delete-attempt");
+      expect(api.current.state).toBe("Stopped");
+      return remove(intent);
+    };
+    c.sleep = async ms => { c.time += ms; api.current.state = "Stopped"; };
+    expect((await cleanup(api, i, c, true)).firewallAbsent).toBe(true);
+    expect(events.filter(e => e === "delete-attempt")).toHaveLength(1);
+    expect(events).not.toContain("stop");
+  });
   it.each(["identity", "boundary", "rules", "server"])("normalizes expired cleanup polling %s reads without more writes", async method => {
     const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
     api.current.state = "Updating";

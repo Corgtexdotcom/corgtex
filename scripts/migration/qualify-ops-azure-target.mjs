@@ -253,6 +253,8 @@ export async function cleanup(api, i, c = clock, recovery = false) {
     // using the owned rules read before that fresh state, not another late read.
     const beforeDelete = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
     observedStopping ||= beforeDelete.state === "Stopping";
+    if (beforeDelete.state === "Stopping") await waitState(api, "Stopped", cleanupDeadline, c, i);
+    if (beforeDelete.state === "Starting") await waitState(api, "Ready", cleanupDeadline, c, i);
     deleteAttempted = true;
     try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }
   }
@@ -261,7 +263,12 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   // terminal evidence unless this owned cleanup already observed STOP in flight.
   for (;;) {
     observedStopping ||= s.state === "Stopping";
-    if (s.ownedRules.length && !deleteAttempted) {
+    if (!deleteAttempted && s.ownedRules.length && ["Starting", "Stopping"].includes(s.state)) {
+      s = await waitState(api, s.state === "Stopping" ? "Stopped" : "Ready", cleanupDeadline, c, i);
+      ruleObserved = true;
+      continue;
+    }
+    if ((ruleObserved || s.ownedRules.length) && !deleteAttempted) {
       // Every settled pre-STOP read can first reveal our accepted CREATE.
       deleteAttempted = true;
       try { await api.deleteRule(i); } catch { /* Final absence readback is authoritative. */ }

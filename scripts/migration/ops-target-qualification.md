@@ -64,6 +64,9 @@ another intervening rule read. Every settled pre-STOP read, including readiness
 after Starting, handles an owned rule first observed there before proceeding to
 STOP. Earlier observed ownership is retained across an absent read, and DELETE
 is attempted at most once, followed by settled-state reconciliation.
+Before DELETE, Starting must reach Ready and an observed Stopping must reach
+Stopped. Recovery never consumes its DELETE attempt during either transition
+and does not submit a second STOP for an already observed stop operation.
 Polling reads that exhaust the cleanup deadline
 report `ABSOLUTE_DEADLINE_EXCEEDED`, including Azure operation-deadline and
 operation-failure errors. Earlier read failures and semantic identity, role,
