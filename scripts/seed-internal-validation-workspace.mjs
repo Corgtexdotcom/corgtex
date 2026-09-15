@@ -409,6 +409,10 @@ export async function main() {
   assertValidationSeedEnvironmentPinned();
   const preflight = new PrismaClient();
   try {
+    const existingWorkspace = await preflight.workspace.findUnique({ where: { slug: INTERNAL_VALIDATION_WORKSPACE_SLUG }, select: { id: true } });
+    if ((existingWorkspace || process.env.QA_EXPECTED_VALIDATION_WORKSPACE_ID) && process.env.QA_EXPECTED_VALIDATION_WORKSPACE_ID !== existingWorkspace?.id) {
+      throw new Error("Confirm QA_EXPECTED_VALIDATION_WORKSPACE_ID before refreshing validation fixtures");
+    }
     const admin = await preflight.user.findUnique({
       where: { email: process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL },
       select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },

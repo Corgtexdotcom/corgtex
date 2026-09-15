@@ -1,4 +1,4 @@
-import { loginUserWithPassword, listActorWorkspaces } from "@corgtex/domain";
+import { loginUserWithPassword, listActorWorkspaces, clearSession } from "@corgtex/domain";
 import { sessionCookieName } from "@corgtex/shared";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -29,7 +29,8 @@ export async function issueDemoSession(): Promise<DemoSession> {
   const targetWorkspace =
     workspaces.find((workspace) => workspace.slug === DEMO_WORKSPACE_SLUG);
 
-  if (!targetWorkspace || workspaces.length !== 1) {
+  if (!targetWorkspace || workspaces.length !== 1 || result.user.globalRole !== "USER") {
+    await clearSession(result.token);
     throw new Error("Demo account must belong exclusively to the demo workspace");
   }
 

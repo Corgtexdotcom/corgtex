@@ -2,29 +2,41 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
+import { validationEmails } from "./lib/qa-identities.mjs";
 
 // Explicit job only: never attach fixture refresh to web startup.
 const expectedHost = process.env.QA_EXPECTED_DATABASE_HOST?.trim();
 if (!expectedHost || new URL(process.env.DATABASE_URL).hostname !== expectedHost) {
   throw new Error("QA_EXPECTED_DATABASE_HOST must match the intended database before provisioning");
 }
+const database = new URL(process.env.DATABASE_URL);
+if (!process.env.QA_EXPECTED_DATABASE_NAME || decodeURIComponent(database.pathname.slice(1)) !== process.env.QA_EXPECTED_DATABASE_NAME
+  || !process.env.QA_EXPECTED_DATABASE_SCHEMA || (database.searchParams.get("schema") || "public") !== process.env.QA_EXPECTED_DATABASE_SCHEMA) {
+  throw new Error("Confirm QA_EXPECTED_DATABASE_NAME and QA_EXPECTED_DATABASE_SCHEMA before provisioning");
+}
 const prisma = new PrismaClient();
 try {
+  const [identity] = await prisma.$queryRaw`SELECT current_database() AS "databaseName", current_schema() AS "schema"`;
+  if (identity.databaseName !== process.env.QA_EXPECTED_DATABASE_NAME || identity.schema !== process.env.QA_EXPECTED_DATABASE_SCHEMA) {
+    throw new Error("Connected database identity does not match the confirmed target");
+  }
   const workspaces = await prisma.workspace.findMany({
     where: { slug: { in: ["jnj-demo", "corgtex-validation"] } },
     select: { id: true, slug: true, name: true },
   });
-  console.log(JSON.stringify({ phase: "preflight", databaseHost: expectedHost, workspaces }));
+  console.log(JSON.stringify({ phase: "preflight", databaseHost: expectedHost, databaseName: process.env.QA_EXPECTED_DATABASE_NAME, schema: process.env.QA_EXPECTED_DATABASE_SCHEMA, workspaces }));
   if (process.argv.includes("--apply")) {
-    if (!process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL?.trim()) {
-      throw new Error("Set an explicit VALIDATION_BOOTSTRAP_ADMIN_EMAIL");
+    for (const [slug, variable] of [["jnj-demo", "QA_EXPECTED_DEMO_WORKSPACE_ID"], ["corgtex-validation", "QA_EXPECTED_VALIDATION_WORKSPACE_ID"]]) {
+      const workspace = workspaces.find((item) => item.slug === slug);
+      const expectedId = process.env[variable];
+      if ((workspace || expectedId) && expectedId !== workspace?.id) {
+        throw new Error(`Confirm ${variable} from the inventory before refreshing fixtures`);
+      }
     }
-    const memberEmail = process.env.QA_VALIDATION_MEMBER_EMAIL?.trim().toLowerCase();
-    if (!memberEmail || !process.env.QA_VALIDATION_MEMBER_PASSWORD?.trim()) {
-      throw new Error("Set QA_VALIDATION_MEMBER_EMAIL and QA_VALIDATION_MEMBER_PASSWORD for the ordinary QA account");
-    }
-    if (memberEmail === process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL.toLowerCase()) {
-      throw new Error("QA member and administrator must be separate identities");
+    const { adminEmail, memberEmail } = validationEmails(process.env);
+    process.env.VALIDATION_BOOTSTRAP_ADMIN_EMAIL = adminEmail;
+    if (!process.env.QA_VALIDATION_MEMBER_PASSWORD?.trim()) {
+      throw new Error("Set QA_VALIDATION_MEMBER_PASSWORD for the ordinary QA account");
     }
     const existingMember = await prisma.user.findUnique({ where: { email: memberEmail },
       select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },

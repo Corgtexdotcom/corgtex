@@ -1,6 +1,8 @@
 import { PrismaClient } from "@prisma/client";
 import { randomBytes, scryptSync } from "node:crypto";
 
+import { assertDemoCredentialsScoped, revokeDemoCredentials } from "./lib/demo-credentials.mjs";
+
 const prisma = new PrismaClient();
 
 const WORKSPACE_SLUG = "jnj-demo";
@@ -2336,11 +2338,17 @@ async function main() {
   // Refuse shared identities before any fixture or credential writes.
   const existingUsers = await prisma.user.findMany({
     where: { email: { in: TEAM_MEMBERS.map((member) => member.email) } },
-    select: { globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
+    select: { id: true, globalRole: true, memberships: { select: { workspace: { select: { slug: true } } } } },
   });
   if (existingUsers.some((user) => user.globalRole !== "USER" || user.memberships.some((member) => member.workspace.slug !== WORKSPACE_SLUG))) {
     throw new Error("Demo seed identities must not belong to other workspaces");
   }
+
+  const existingWorkspace = await prisma.workspace.findUnique({ where: { slug: WORKSPACE_SLUG }, select: { id: true } });
+  if ((existingWorkspace || process.env.QA_EXPECTED_DEMO_WORKSPACE_ID) && process.env.QA_EXPECTED_DEMO_WORKSPACE_ID !== existingWorkspace?.id) {
+    throw new Error("Confirm QA_EXPECTED_DEMO_WORKSPACE_ID before refreshing an existing demo workspace");
+  }
+  await assertDemoCredentialsScoped(prisma, existingWorkspace?.id, existingUsers.map((user) => user.id));
 
   // 1. Create Workspace
   const workspace = await prisma.workspace.upsert({
@@ -2350,6 +2358,8 @@ async function main() {
   });
   const wsId = workspace.id;
   console.log(`✅ Workspace created: ${WORKSPACE_NAME}`);
+
+  await revokeDemoCredentials(prisma, wsId, existingUsers.map((user) => user.id));
 
   // 2. Create Users & Members
   const memberMappings = {};
@@ -2374,9 +2384,6 @@ async function main() {
       }
     });
     
-    if (!tm.password) {
-      await prisma.session.deleteMany({ where: { userId: user.id } });
-    }
     const member = await prisma.member.upsert({
       where: { workspaceId_userId: { workspaceId: wsId, userId: user.id } },
       update: { role: tm.role, isActive: true },
