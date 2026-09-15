@@ -12,6 +12,105 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  synthetic-scope:
+    name: Synthetic Preparation Scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.scope.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect synthetic harness and strict dependencies
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          # Compare the tested merge tree with its base, including deletions.
+          status=0
+          git diff --quiet "$BASE_SHA" HEAD -- \
+            .github/workflows/ci.yml \
+            .github/workflows/azure-migration-postgres-rehearsal.yml \
+            'scripts/migration/*synthetic*' \
+            'scripts/migration/*ops-azure-target*' \
+            'scripts/migration/*postgres*' \
+            'scripts/migration/validate-azure-what-if*' \
+            infra/azure/migration-foundation \
+            package.json package-lock.json .npmrc 'vitest*' || status=$?
+          case "$status" in
+            0) echo 'changed=false' >> "$GITHUB_OUTPUT" ;;
+            1) echo 'changed=true' >> "$GITHUB_OUTPUT" ;;
+            *) exit "$status" ;;
+          esac
+
+  synthetic-preparation:
+    name: Synthetic Native ARM64 Preparation
+    needs: synthetic-scope
+    if: github.event_name == 'pull_request' && needs.synthetic-scope.outputs.changed == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Set isolated runner-local paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'LOCAL_BUNDLE=%s/synthetic-public-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf 'LOCAL_EVIDENCE=%s/synthetic-proof-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Install locked dependencies without lifecycle scripts
+        timeout-minutes: 5
+        run: npm ci --ignore-scripts
+      - name: Download PUBLIC audited fixed-hash synthetic inputs
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$LOCAL_BUNDLE"
+          for asset in source-image.tar synthetic.dump corpus.sql source-baseline.json; do
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              --connect-timeout 10 --max-time 60 --max-filesize 268435456 \
+              "https://github.com/Corgtexdotcom/corgtex/releases/download/ops-synthetic-source-v1/$asset" \
+              --output "$LOCAL_BUNDLE/$asset"
+          done
+          node --input-type=module -e 'import { verifyBundle } from "./scripts/migration/synthetic-ops-source.mjs"; verifyBundle(process.env.LOCAL_BUNDLE);'
+      - name: Cache pinned official PostgreSQL client
+        timeout-minutes: 3
+        run: docker pull postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+      - name: Exercise native local source and actual client transport
+        timeout-minutes: 13
+        run: node scripts/migration/prepare-synthetic-ops-local.mjs prepare "$LOCAL_BUNDLE" "$LOCAL_EVIDENCE"
+      - name: Retry owned local cleanup
+        if: always() && env.LOCAL_EVIDENCE != ''
+        timeout-minutes: 2
+        run: node scripts/migration/prepare-synthetic-ops-local.mjs cleanup "$LOCAL_EVIDENCE"
+      # Missing summary after cancellation is UNPROVEN, never cleanup success.
+      # Full local ownership/TLS/source receipts and payloads are not uploaded.
+      - name: Retain sanitized local preparation summary
+        if: always() && env.LOCAL_EVIDENCE != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-native-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LOCAL_EVIDENCE }}/public-summary.json
+          if-no-files-found: error
+          retention-days: 7
+
   # Keep the PR and merge-queue gate comprehensive, but do not serialize
   # independent checks. This preserves the existing required check names while
   # letting test, migration, and build failures surface in parallel.
