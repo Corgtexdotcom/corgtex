@@ -63,8 +63,20 @@ export function validateRules(rules, intent, requireAbsent = false) {
 }
 
 export class Azure {
-  constructor(env) { this.env = env; }
+  constructor(env, { execute = execFile, sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
+    this.env = env; this.execute = execute; this.sleep = sleep; this.subscriptionSelected = false;
+  }
   async call(args, timeout = 60000) {
+    const operations = [
+      ["account list", "ACCOUNT_REFRESH"], ["account set", "ACCOUNT_SELECT"], ["account show", "ACCOUNT_SHOW"],
+      ["account get-access-token", "TOKEN_READ"], ["role assignment list", "ROLE_READ"], ["group show", "GROUP_READ"],
+      ["network private-endpoint-connection list", "PRIVATE_ENDPOINT_READ"],
+      ["postgres flexible-server show", "SERVER_READ"], ["postgres flexible-server start", "SERVER_START"],
+      ["postgres flexible-server stop", "SERVER_STOP"], ["postgres flexible-server firewall-rule list", "FIREWALL_READ"],
+      ["postgres flexible-server firewall-rule create", "FIREWALL_CREATE"], ["postgres flexible-server firewall-rule delete", "FIREWALL_DELETE"],
+    ];
+    const operation = operations.find(([prefix]) => args.slice(0, prefix.split(" ").length).join(" ") === prefix)?.[1];
+    assert(operation, "AZURE_OPERATION_UNSUPPORTED");
     if (this.deadline !== undefined) {
       timeout = Math.min(timeout, this.deadline - Date.now());
       assert(timeout > 0, "AZURE_OPERATION_DEADLINE");
@@ -72,17 +84,44 @@ export class Azure {
     return new Promise((resolveCall, reject) => {
       const childEnv = { ...process.env, AZURE_CORE_COLLECT_TELEMETRY: "no" };
       for (const key of ["TARGET_POSTGRES_ADMIN_PASSWORD", "TARGET_ADMIN_PASSWORD", "AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD", "GH_TOKEN"]) delete childEnv[key];
-      execFile("az", [...args, "--subscription", SUBSCRIPTION, "--output", "json", "--only-show-errors"],
+      const subscriptionArgs = operation === "ACCOUNT_REFRESH" ? [] : ["--subscription", SUBSCRIPTION];
+      this.execute("az", [...args, ...subscriptionArgs, "--output", "json", "--only-show-errors"],
         { timeout, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, env: childEnv },
         (error, stdout) => {
-          if (error) { reject(new ProbeError("AZURE_COMMAND_FAILED")); return; }
-          try { resolveCall(stdout.trim() ? JSON.parse(stdout) : null); } catch { reject(new ProbeError("AZURE_OUTPUT_INVALID")); }
+          if (error) { reject(new ProbeError(`AZURE_${operation}_FAILED`)); return; }
+          try { resolveCall(stdout.trim() ? JSON.parse(stdout) : null); } catch { reject(new ProbeError(`AZURE_${operation}_OUTPUT_INVALID`)); }
         });
     });
   }
+  async selectSubscription() {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let inventory;
+      try { inventory = await this.call(["account", "list", "--refresh"]); }
+      catch (error) {
+        if (error.code !== "AZURE_ACCOUNT_REFRESH_FAILED" || attempt === 3) throw error;
+      }
+      if (inventory !== undefined) {
+        assert(Array.isArray(inventory), "AZURE_ACCOUNT_INVENTORY_INVALID");
+        const exact = inventory.filter(a => a?.id?.toLowerCase() === SUBSCRIPTION.toLowerCase());
+        assert(exact.length <= 1, "AZURE_ACCOUNT_AMBIGUOUS");
+        if (exact.length === 1) {
+          assert(exact[0].tenantId?.toLowerCase() === TENANT.toLowerCase() && exact[0].state === "Enabled", "AZURE_ACCOUNT_MISMATCH");
+          await this.call(["account", "set"]);
+          return;
+        }
+      }
+      if (attempt < 3) {
+        assert(this.deadline === undefined || Date.now() + 25000 < this.deadline, "AZURE_OPERATION_DEADLINE");
+        await this.sleep(25000);
+      }
+    }
+    throw new ProbeError("AZURE_SUBSCRIPTION_UNAVAILABLE");
+  }
   async identity() {
+    if (!this.subscriptionSelected) await this.selectSubscription();
     const a = await this.call(["account", "show"]);
     assert(a.id === SUBSCRIPTION && a.tenantId === TENANT && a.state === "Enabled", "AZURE_ACCOUNT_MISMATCH");
+    this.subscriptionSelected = true;
     const token = await this.call(["account", "get-access-token", "--resource", "https://management.azure.com/"]);
     let claims;
     try { claims = JSON.parse(Buffer.from(token.accessToken.split(".")[1], "base64url").toString()); } catch { throw new ProbeError("AZURE_TOKEN_IDENTITY_INVALID"); }
