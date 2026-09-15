@@ -11,6 +11,8 @@ on:
           - rehearse
           - recover
           - qualify-target
+          - qualify-synthetic
+          - prepare-synthetic
       recovery_kind:
         description: "Recover a restore intent or a metadata-only target qualification intent."
         required: true
@@ -19,6 +21,7 @@ on:
         options:
           - restore
           - target-qualification
+          - synthetic-qualification
       domain:
         description: "Exactly one Railway PostgreSQL data domain to restore and verify."
         required: true
@@ -45,6 +48,155 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  qualify-synthetic:
+    if: github.ref == 'refs/heads/main' && (inputs.operation == 'qualify-synthetic' || inputs.operation == 'prepare-synthetic')
+    name: Qualify pinned synthetic Ops archive only
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg
+      TARGET_POSTGRES_HOST: corgtex-mig-reh-restore-pg.postgres.database.azure.com
+      TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      SYNTHETIC_DIR: .artifacts/synthetic-qualification/${{ github.run_id }}-${{ github.run_attempt }}
+      SYNTHETIC_TEMP_DIR: ${{ runner.temp }}/synthetic-ops-${{ github.run_id }}-${{ github.run_attempt }}
+      SYNTHETIC_BUNDLE_DIR: ${{ runner.temp }}/synthetic-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate synthetic-only inputs
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$DOMAIN" == ops && -z "$RECOVERY_RUN_ID" && -z "$RECOVERY_RUN_ATTEMPT" ]] || exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+        timeout-minutes: 5
+      - name: Read parent-published pinned synthetic fixture assets
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$SYNTHETIC_BUNDLE_DIR"
+          chmod 700 "$SYNTHETIC_BUNDLE_DIR"
+          gh release download ops-synthetic-source-v1 --repo "$GITHUB_REPOSITORY" \
+            --pattern source-image.tar --pattern synthetic.dump --pattern corpus.sql \
+            --pattern source-baseline.json --dir "$SYNTHETIC_BUNDLE_DIR"
+      - name: Cache pinned public PostgreSQL client before any Azure start
+        timeout-minutes: 3
+        run: docker pull postgres:18.6@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+      - name: Bootstrap and attest pinned local synthetic source
+        id: synthetic_bootstrap
+        timeout-minutes: 12
+        run: node scripts/migration/qualify-synthetic-ops.mjs bootstrap "$SYNTHETIC_DIR"
+      - uses: azure/login@v2
+        if: inputs.operation == 'qualify-synthetic'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Prepare exact synthetic lifecycle and scratch ownership
+        if: inputs.operation == 'qualify-synthetic'
+        id: synthetic_prepare
+        timeout-minutes: 10
+        env:
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+          node scripts/migration/qualify-synthetic-ops.mjs prepare "$SYNTHETIC_DIR"
+      - name: Persist synthetic intent before START
+        if: inputs.operation == 'qualify-synthetic'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-synthetic-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SYNTHETIC_DIR }}/synthetic-intent.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Start target and compare pinned synthetic source
+        if: inputs.operation == 'qualify-synthetic'
+        timeout-minutes: 45
+        env:
+          TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: node scripts/migration/qualify-synthetic-ops.mjs run "$SYNTHETIC_DIR"
+      - name: Remove synthetic scratch databases and stop target
+        if: ${{ always() && steps.synthetic_bootstrap.outcome != 'skipped' }}
+        timeout-minutes: 20
+        run: node scripts/migration/qualify-synthetic-ops.mjs cleanup "$SYNTHETIC_DIR"
+      - name: Apply unchanged strict validator after actual cleanup
+        if: ${{ always() && steps.synthetic_prepare.outcome == 'success' }}
+        timeout-minutes: 2
+        run: node scripts/migration/qualify-synthetic-ops.mjs finalize "$SYNTHETIC_DIR"
+      - name: Upload private synthetic execution and recovery receipts
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-synthetic-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SYNTHETIC_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  recover-synthetic:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'synthetic-qualification'
+    name: Recover exact synthetic qualification resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      SYNTHETIC_DIR: .artifacts/synthetic-recovery/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@v5
+        with:
+          name: azure-synthetic-qualification-${{ inputs.recovery_run_id }}-${{ inputs.recovery_run_attempt }}
+          path: ${{ env.SYNTHETIC_DIR }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recovery_run_id }}
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Recover only proven synthetic scratch and lifecycle ownership
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/migration/qualify-synthetic-ops.mjs recover "$SYNTHETIC_DIR"
+      - name: Upload private synthetic recovery receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-synthetic-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SYNTHETIC_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
   qualify-target:
     if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-target'
     name: Qualify existing Ops target metadata only
@@ -771,7 +923,7 @@ jobs:
           retention-days: 7
 
   recovery:
-    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind != 'target-qualification'
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'restore'
     name: Recover exact resources from persisted intent
     runs-on: ubuntu-latest
     timeout-minutes: 45

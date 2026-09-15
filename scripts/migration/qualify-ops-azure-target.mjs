@@ -301,7 +301,8 @@ export function readIntent(path) {
   } finally { closeSync(fd); }
 }
 
-export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, marker, receipt }) {
+export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, marker, receipt }, kind = "metadata") {
+  assert(["metadata", "synthetic"].includes(kind), "RECOVERY_KIND_INVALID");
   const workflow = ".github/workflows/azure-migration-postgres-rehearsal.yml";
   const repository = "Corgtexdotcom/corgtex";
   const workflowPaths = new Set([workflow, `${repository}/${workflow}`]
@@ -319,11 +320,11 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
     && runs.workflow_runs.every(r => (r.id === source.id && r.run_attempt === source.run_attempt)
       || (r.id === current.id && r.run_attempt === current.run_attempt)), "RECOVERY_SUPERSEDED");
   assert(Array.isArray(jobs?.jobs) && jobs.total_count === jobs.jobs.length && jobs.total_count <= 100, "RECOVERY_JOBS_UNPROVEN");
-  const candidates = jobs.jobs.filter(j => j.name === "Qualify existing Ops target metadata only");
+  const candidates = jobs.jobs.filter(j => j.name === (kind === "metadata" ? "Qualify existing Ops target metadata only" : "Qualify pinned synthetic Ops archive only"));
   assert(candidates.length === 1 && candidates[0].status === "completed", "RECOVERY_JOB_UNPROVEN");
   const steps = candidates[0].steps;
-  const start = steps?.filter(s => s.name === "Start target, open single-IP access and read metadata once");
-  const clean = steps?.filter(s => s.name === "Remove qualification access and return target to Stopped");
+  const start = steps?.filter(s => s.name === (kind === "metadata" ? "Start target, open single-IP access and read metadata once" : "Start target and compare pinned synthetic source"));
+  const clean = steps?.filter(s => s.name === (kind === "metadata" ? "Remove qualification access and return target to Stopped" : "Remove synthetic scratch databases and stop target"));
   assert(start?.length === 1 && start[0].status === "completed" && ["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion)
     && clean?.length === 1 && clean[0].conclusion !== "success", "RECOVERY_NOT_UNRESOLVED");
   assert(sameKeys(marker, ["runId", "runAttempt"]) && marker.runId === i.runId && marker.runAttempt === i.runAttempt, "RECOVERY_START_UNPROVEN");
@@ -332,7 +333,7 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
 
 // Read existing run/activity evidence only. No artifact or intent alone grants
 // authority to stop a later use; any intervening protected workflow run blocks.
-export async function recoveryEvidence(i, env, directory, request = fetch) {
+export async function recoveryEvidence(i, env, directory, request = fetch, kind = "metadata") {
   assert(env.GITHUB_REPOSITORY === "Corgtexdotcom/corgtex" && env.GH_TOKEN, "RECOVERY_GITHUB_IDENTITY_MISSING");
   const get = async (path) => {
     const response = await request(`https://api.github.com/repos/Corgtexdotcom/corgtex/actions/${path}`, {
@@ -354,7 +355,7 @@ export async function recoveryEvidence(i, env, directory, request = fetch) {
   const jobs = await get(`runs/${i.runId}/attempts/${i.runAttempt}/jobs?per_page=100`);
   validateRecoveryEvidence(i, env, { source, current, runs, jobs,
     marker: existsSync(`${directory}/start-attempt.json`) ? readIntent(`${directory}/start-attempt.json`) : null,
-    receipt: existsSync(`${directory}/cleanup.json`) ? readIntent(`${directory}/cleanup.json`) : null });
+    receipt: existsSync(`${directory}/cleanup.json`) ? readIntent(`${directory}/cleanup.json`) : null }, kind);
 }
 function save(path, data) {
   const bytes = JSON.stringify(data, null, 2) + "\n";

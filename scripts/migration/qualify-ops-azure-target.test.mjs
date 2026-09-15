@@ -483,7 +483,7 @@ describe("protected workflow integration", () => {
     expect(w.permissions).toEqual({ actions: "read", contents: "read", "id-token": "write" });
     for (const job of [q, r]) { expect(job.environment).toBe("azure-migration-foundation"); expect(job.if).toContain("github.ref == 'refs/heads/main'"); }
     expect(w.jobs.rehearsal.if).toContain("inputs.operation == 'rehearse'");
-    expect(w.jobs.recovery.if).toContain("inputs.recovery_kind != 'target-qualification'");
+    expect(w.jobs.recovery.if).toContain("inputs.recovery_kind == 'restore'");
     expect(r.if).toContain("inputs.recovery_kind == 'target-qualification'");
   });
   it("isolates source secrets and all scratch/restore effects", () => {
