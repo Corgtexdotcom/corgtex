@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertPg18NotNullSource, readPgNotNullEvidence } from "./pg18-pg16-notnull";
 import { inventorySharedTenantSource, quoteIdentifier } from "./shared-tenant-inventory.mjs";
 import { getWorkspaceModelMetadata, getWorkspaceOwnershipRules, type WorkspaceOwnershipRule } from "./workspace-ownership";
 import { assertTransferTableFieldPolicies, transferScalarFieldKinds } from "./shared-tenant-transfer-contract";
@@ -91,7 +92,8 @@ interface CatalogTable extends Omit<TransferTableData, "sha256"> {
 export async function exportTenantSnapshot(
   client: TransferSqlClient,
   manifest: TenantTransferManifest,
-  { maxRows = 100_000, maxBytes = 128 * 1024 * 1024 }: { maxRows?: number; maxBytes?: number } = {},
+  { maxRows = 100_000, maxBytes = 128 * 1024 * 1024, pg18ToPg16NotNullEvidence = false }:
+  { maxRows?: number; maxBytes?: number; pg18ToPg16NotNullEvidence?: boolean } = {},
 ): Promise<TenantTransferSnapshot> {
   assertManifest(manifest);
   if (!Number.isSafeInteger(maxRows) || maxRows < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < 1) {
@@ -253,6 +255,10 @@ export async function exportTenantSnapshot(
         disposition: manifest.tables[table.name].disposition, reason: manifest.tables[table.name].reason,
       })),
     };
+    if (pg18ToPg16NotNullEvidence) {
+      snapshot.pg18ToPg16NotNullEvidence = await readPgNotNullEvidence(client);
+      assertPg18NotNullSource({ ...snapshot, sha256: "" });
+    }
     if (Buffer.byteLength(canonical(snapshot)) > maxBytes) throw new Error(`Transfer byte limit exceeded (${maxBytes})`);
     const result = { ...snapshot, sha256: hashCanonical(snapshot) };
     if (Buffer.byteLength(canonical(result)) > maxBytes) throw new Error(`Transfer byte limit exceeded (${maxBytes})`);

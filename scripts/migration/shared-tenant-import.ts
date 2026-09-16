@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { assertPg18NotNullSource, readPgNotNullEvidence, verifyPg18ToPg16NotNullComparison, type Pg18ToPg16NotNullComparison } from "./pg18-pg16-notnull";
 import { validateObjectReceipt, type ObjectCopyReceipt } from "./shared-tenant-objects";
 import { hashCanonical, hashFrames } from "./shared-tenant-export";
 import { readSharedTenantSchema, quoteIdentifier } from "./shared-tenant-inventory.mjs";
@@ -20,6 +21,7 @@ export interface TenantImportOptions {
   identityLinks: IdentityLink[];
   // Explicit reviewed target fingerprint; relevant copied columns/FKs are checked below.
   targetSchemaSha256?: string;
+  pg18ToPg16NotNull?: Pg18ToPg16NotNullComparison;
   transforms?: Record<string, Record<string, FieldTransform>>;
   sourceEncryptionKey?: string;
   targetEncryptionKey?: string;
@@ -205,6 +207,11 @@ async function transformedRows(client: TransferSqlClient, snapshot: TenantTransf
 /** Single publication transaction with inactive membership/agents and scheduler marker. Never upserts shared rows or disables constraints. */
 export async function importTenantSnapshot(client: TransferSqlClient, snapshot: TenantTransferSnapshot, options: TenantImportOptions) {
   validateSnapshot(snapshot, options);
+  if ((options.pg18ToPg16NotNull !== undefined || snapshot.pg18ToPg16NotNullEvidence !== undefined)
+    && options.targetSchemaSha256 !== undefined) fail("TRANSFER_PG18_PG16_NOTNULL_OVERRIDE_FORBIDDEN");
+  if (options.pg18ToPg16NotNull !== undefined) {
+    assertPg18NotNullSource(snapshot);
+  }
   await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   try {
     await client.query("SET LOCAL TimeZone = 'UTC'");
@@ -213,12 +220,16 @@ export async function importTenantSnapshot(client: TransferSqlClient, snapshot: 
     await client.query("SET LOCAL bytea_output = 'hex'");
     await client.query("SET LOCAL lock_timeout = '10s'");
     await client.query("SET LOCAL statement_timeout = '120s'");
+    const compatibility = options.pg18ToPg16NotNull === undefined ? undefined
+      : verifyPg18ToPg16NotNullComparison(snapshot, await readPgNotNullEvidence(client), options.pg18ToPg16NotNull);
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`tenant-transfer:${snapshot.manifest.workspaceId}`]);
     const existing = await client.query('SELECT id, slug FROM public."Workspace" WHERE id = $1 OR slug = $2 FOR UPDATE',
       [snapshot.manifest.workspaceId, snapshot.manifest.workspaceSlug]);
     if (existing.rows.length) {
       const marker = (await client.query('SELECT enabled, config FROM public."WorkspaceFeatureFlag" WHERE "workspaceId"=$1 AND flag=$2 FOR UPDATE', [snapshot.manifest.workspaceId, inactiveFlag])).rows[0];
       const receipt = (marker?.config as { transferReceipt?: Record<string, unknown> } | undefined)?.transferReceipt ?? null;
+      if ((compatibility !== undefined || receipt?.pg18ToPg16NotNull !== undefined)
+        && hashCanonical(compatibility ?? null) !== hashCanonical(receipt?.pg18ToPg16NotNull ?? null)) fail("TRANSFER_PG18_PG16_NOTNULL_COMPARISON_MISMATCH");
       if (existing.rows.length !== 1 || existing.rows[0].id !== snapshot.manifest.workspaceId
         || receipt?.sourceSnapshotSha256 !== snapshot.sha256 || receipt?.transferId !== snapshot.manifest.transferId
         || receipt?.identityLinksSha256 !== hashCanonical(options.identityLinks)
@@ -235,7 +246,7 @@ export async function importTenantSnapshot(client: TransferSqlClient, snapshot: 
     // Catalog inspection is read-only but belongs to this serializable import tx.
     // Use a metadata-only schema helper; population is intentionally irrelevant.
     const catalog = await readSharedTenantSchema(client);
-    if (catalog.schemaSha256 !== (options.targetSchemaSha256 ?? snapshot.schemaSha256)) fail("TRANSFER_TARGET_SCHEMA_MISMATCH");
+    if (catalog.schemaSha256 !== (compatibility?.targetRawSchemaSha256 ?? options.targetSchemaSha256 ?? snapshot.schemaSha256)) fail("TRANSFER_TARGET_SCHEMA_MISMATCH");
     validateTableCatalog(snapshot, catalog.schema);
     const tables = await transformedRows(client, snapshot, options);
     assertRelationalClosure(tables, options);
@@ -297,6 +308,7 @@ export async function importTenantSnapshot(client: TransferSqlClient, snapshot: 
       sourceSnapshotSha256: snapshot.sha256, manifestSha256: snapshot.manifestSha256, schemaSha256: snapshot.schemaSha256,
       identityLinksSha256: hashCanonical(options.identityLinks), transformsSha256: hashCanonical(options.transforms ?? {}), objectBindingsSha256: hashCanonical(options.objectBindings ?? []), objectReceiptSha256: options.objectReceipt.sha256,
       importedAt: new Date().toISOString(), phase: "INACTIVE", targetSchemaSha256: catalog.schemaSha256,
+      ...(compatibility === undefined ? {} : { pg18ToPg16NotNull: compatibility }),
       tables: tables.map((table) => ({ name: table.name, rows: inserted.get(table.name) ?? [], sha256: hashFrames(inserted.get(table.name) ?? []) })),
     };
     // Receipt stores keys and digests, never customer values or encrypted tokens.
