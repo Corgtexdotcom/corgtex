@@ -8,17 +8,27 @@ on:
         required: true
         type: string
       mode:
-        description: "Inventory first; apply provisions or refreshes synthetic fixtures."
+        description: "Read-only preflight first; apply performs only the selected operation."
         required: true
         type: choice
         options: [preflight, apply]
         default: preflight
+      operation:
+        description: "Fixture provisioning or guarded ownership adoption without fixture refresh."
+        required: true
+        type: choice
+        options: [fixtures, adopt-validation-owner]
+        default: fixtures
       demo_workspace_id:
         description: "Reviewed existing jnj-demo ID; leave empty only for initial creation."
         required: false
         type: string
       validation_workspace_id:
         description: "Reviewed existing corgtex-validation ID; leave empty only for initial creation."
+        required: false
+        type: string
+      validation_admin_user_id:
+        description: "Reviewed existing dedicated seed admin ID; required for owner adoption apply."
         required: false
         type: string
 
@@ -39,8 +49,16 @@ jobs:
     env:
       QA_EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
       QA_PROVISION_MODE: ${{ inputs.mode }}
+      QA_OPERATION: ${{ inputs.operation }}
       QA_EXPECTED_DEMO_WORKSPACE_ID: ${{ inputs.demo_workspace_id }}
       QA_EXPECTED_VALIDATION_WORKSPACE_ID: ${{ inputs.validation_workspace_id }}
+      QA_EXPECTED_VALIDATION_ADMIN_USER_ID: ${{ inputs.validation_admin_user_id }}
+      QA_EXECUTION_ACTOR: ${{ github.triggering_actor }}
+      QA_EXECUTION_INITIATOR: ${{ github.actor }}
+      QA_EXECUTION_REPOSITORY: ${{ github.repository }}
+      QA_EXECUTION_RUN_ID: ${{ github.run_id }}
+      QA_EXECUTION_RUN_ATTEMPT: ${{ github.run_attempt }}
+      QA_EXECUTION_WORKFLOW_REF: ${{ github.workflow_ref }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -59,5 +77,5 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Run serialized selfserve provisioning
+      - name: Run selected serialized QA operation
         run: node scripts/provision-qa-azure.mjs

@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 const GROUP = "rg-corgtex-selfserve-production-wus3";
 const JOB = "caj-corgtex-ss-prod-migrate";
 const REGISTRY = "acrcorgtexssstgwus3.azurecr.io";
+const VALIDATION_ADMIN_EMAIL = "qa-validation-admin@corgtex.test";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function isTerminalExecution(status) {
@@ -16,13 +17,19 @@ export function isTerminalExecution(status) {
 
 export function executionTemplate(template, image, sha, mode, env) {
   if (!/^[a-f0-9]{40}$/.test(sha) || !["preflight", "apply"].includes(mode)) throw new Error("Invalid release SHA or provisioning mode");
+  const operation = env.QA_OPERATION || "fixtures";
+  if (!["fixtures", "adopt-validation-owner"].includes(operation)) throw new Error("Invalid QA operation");
+  const adoption = operation === "adopt-validation-owner";
+  if (adoption && mode === "apply" && (!env.QA_EXPECTED_VALIDATION_WORKSPACE_ID?.trim() || !env.QA_EXPECTED_VALIDATION_ADMIN_USER_ID?.trim())) {
+    throw new Error("Owner adoption apply requires reviewed validation workspace and admin user IDs");
+  }
   if (!new RegExp(`^${REGISTRY.replaceAll(".", "\\.")}\/corgtex\/web@sha256:[a-f0-9]{64}$`).test(image)) throw new Error("Use the confirmed immutable selfserve image");
   if (template.containers?.length !== 1 || template.initContainers?.length) throw new Error("Unexpected provisioning job template");
   const result = structuredClone(template);
   const container = result.containers[0];
   container.image = image;
   container.command = ["node"];
-  container.args = ["scripts/provision-qa-workspaces.mjs", ...(mode === "apply" ? ["--apply"] : [])];
+  container.args = [adoption ? "scripts/adopt-validation-support-owner.mjs" : "scripts/provision-qa-workspaces.mjs", ...(mode === "apply" ? ["--apply"] : [])];
   container.env = [
     { name: "DATABASE_URL", secretRef: "database-url" },
     { name: "NODE_ENV", value: "production" },
@@ -33,18 +40,25 @@ export function executionTemplate(template, image, sha, mode, env) {
     { name: "QA_EXPECTED_DATABASE_SCHEMA", value: "public" },
     { name: "QA_EXPECTED_RELEASE_SHA", value: sha },
   ];
-  if (mode === "apply") {
+  if (adoption || mode === "apply") container.env.push({ name: "VALIDATION_BOOTSTRAP_ADMIN_EMAIL", value: VALIDATION_ADMIN_EMAIL });
+  if (!adoption && mode === "apply") {
     container.env.push(
-      { name: "VALIDATION_BOOTSTRAP_ADMIN_EMAIL", value: "qa-validation-admin@corgtex.test" },
       { name: "ADMIN_PASSWORD", secretRef: "qa-validation-admin-password" },
       { name: "QA_VALIDATION_MEMBER_EMAIL", value: "qa-validation-member@corgtex.test" },
       { name: "QA_VALIDATION_MEMBER_PASSWORD", secretRef: "qa-validation-member-password" },
     );
   }
-  for (const name of ["QA_EXPECTED_DEMO_WORKSPACE_ID", "QA_EXPECTED_VALIDATION_WORKSPACE_ID"]) {
+  for (const name of adoption ? ["QA_EXPECTED_VALIDATION_WORKSPACE_ID", "QA_EXPECTED_VALIDATION_ADMIN_USER_ID"] : ["QA_EXPECTED_DEMO_WORKSPACE_ID", "QA_EXPECTED_VALIDATION_WORKSPACE_ID"]) {
     const value = env[name]?.trim();
     if (value) {
       if (!/^[a-zA-Z0-9_-]+$/.test(value)) throw new Error("Invalid expected workspace ID");
+      container.env.push({ name, value });
+    }
+  }
+  if (adoption && mode === "apply") {
+    for (const name of ["QA_EXECUTION_ACTOR", "QA_EXECUTION_INITIATOR", "QA_EXECUTION_REPOSITORY", "QA_EXECUTION_RUN_ID", "QA_EXECUTION_RUN_ATTEMPT", "QA_EXECUTION_WORKFLOW_REF"]) {
+      const value = env[name]?.trim();
+      if (!value) throw new Error(`Owner adoption requires ${name}`);
       container.env.push({ name, value });
     }
   }
@@ -69,7 +83,9 @@ function az(args) {
 export async function main(env = process.env) {
   const sha = env.QA_EXPECTED_RELEASE_SHA;
   const mode = env.QA_PROVISION_MODE || "preflight";
+  const operation = env.QA_OPERATION || "fixtures";
   if (!/^[a-f0-9]{40}$/.test(sha ?? "")) throw new Error("Set the full QA_EXPECTED_RELEASE_SHA");
+  if (!["preflight", "apply"].includes(mode) || !["fixtures", "adopt-validation-owner"].includes(operation)) throw new Error("Invalid QA operation or mode");
   const backup = az(["postgres", "flexible-server", "show", "--name", "corgtex-ss-prod-pg", "--resource-group", GROUP]);
   if (backup.state !== "Ready" || !Number.isInteger(backup.backup?.backupRetentionDays) || backup.backup?.backupRetentionDays < 7 || !backup.backup?.earliestRestoreDate) throw new Error("Verify selfserve database recovery before provisioning");
   const executions = az(["containerapp", "job", "execution", "list", "--name", JOB, "--resource-group", GROUP]);
@@ -82,14 +98,14 @@ export async function main(env = process.env) {
   assertServingRelease(web, await response.json(), sha, image);
   const job = az(["containerapp", "job", "show", "--name", JOB, "--resource-group", GROUP]);
   const names = new Set((job.properties.configuration.secrets ?? []).map((secret) => secret.name));
-  if (!names.has("database-url") || (mode === "apply" && ["qa-validation-admin-password", "qa-validation-member-password"].some((name) => !names.has(name)))) {
+  if (!names.has("database-url") || (operation === "fixtures" && mode === "apply" && ["qa-validation-admin-password", "qa-validation-member-password"].some((name) => !names.has(name)))) {
     throw new Error("Set the required database and dedicated QA password secret references before apply");
   }
   const template = executionTemplate(job.properties.template, image, sha, mode, env);
   const file = path.join(tmpdir(), `corgtex-qa-execution-${Date.now()}.json`);
   writeFileSync(file, JSON.stringify(template), { mode: 0o600 });
   const execution = az(["containerapp", "job", "start", "--name", JOB, "--resource-group", GROUP, "--yaml", file]);
-  console.log(JSON.stringify({ execution: execution.name, mode, sha, image, databaseRecoveryAvailable: true }));
+  console.log(JSON.stringify({ execution: execution.name, operation, mode, sha, image, databaseRecoveryAvailable: true }));
   let previous;
   for (let attempt = 0; attempt < 65; attempt++) {
     const state = az(["containerapp", "job", "execution", "show", "--name", JOB, "--resource-group", GROUP, "--job-execution-name", execution.name]).properties.status;

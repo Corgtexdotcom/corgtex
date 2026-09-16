@@ -40,3 +40,28 @@ it("treats canceled jobs as terminal without treating active jobs as settled", (
   expect(isTerminalExecution("Canceled")).toBe(true);
   expect(isTerminalExecution("Running")).toBe(false);
 });
+
+const adoptionEnv = {
+  QA_OPERATION: "adopt-validation-owner", QA_EXPECTED_VALIDATION_WORKSPACE_ID: "validation-id", QA_EXPECTED_VALIDATION_ADMIN_USER_ID: "seed-admin-id",
+  QA_EXECUTION_ACTOR: "rerun-operator", QA_EXECUTION_INITIATOR: "original-operator", QA_EXECUTION_REPOSITORY: "Corgtexdotcom/corgtex",
+  QA_EXECUTION_RUN_ID: "123", QA_EXECUTION_RUN_ATTEMPT: "2", QA_EXECUTION_WORKFLOW_REF: "Corgtexdotcom/corgtex/.github/workflows/qa-workspaces.yml@refs/heads/main",
+};
+
+it.each(["preflight", "apply"])("owner adoption %s never runs fixture seeds or passes passwords", mode => {
+  const result = executionTemplate(source, image, sha, mode, adoptionEnv).containers[0];
+  expect(result.args).toEqual(["scripts/adopt-validation-support-owner.mjs", ...(mode === "apply" ? ["--apply"] : [])]);
+  expect(result.env.filter(item => item.secretRef)).toEqual([{ name: "DATABASE_URL", secretRef: "database-url" }]);
+  expect(result.env).toContainEqual({ name: "VALIDATION_BOOTSTRAP_ADMIN_EMAIL", value: "qa-validation-admin@corgtex.test" });
+  expect(result.env).toContainEqual({ name: "QA_EXPECTED_VALIDATION_ADMIN_USER_ID", value: "seed-admin-id" });
+  expect(result.env.some(item => item.name === "QA_EXPECTED_DEMO_WORKSPACE_ID")).toBe(false);
+  if (mode === "apply") expect(result.env).toContainEqual({ name: "QA_EXECUTION_ACTOR", value: "rerun-operator" });
+});
+
+it("allows owner preflight without reviewed IDs but refuses apply without them", () => {
+  expect(executionTemplate(source, image, sha, "preflight", { QA_OPERATION: "adopt-validation-owner" }).containers[0].args).toEqual(["scripts/adopt-validation-support-owner.mjs"]);
+  for (const field of ["QA_EXPECTED_VALIDATION_WORKSPACE_ID", "QA_EXPECTED_VALIDATION_ADMIN_USER_ID"]) {
+    expect(() => executionTemplate(source, image, sha, "apply", { ...adoptionEnv, [field]: undefined })).toThrow("reviewed");
+  }
+  expect(() => executionTemplate(source, image, sha, "apply", { ...adoptionEnv, QA_EXECUTION_ACTOR: undefined })).toThrow("QA_EXECUTION_ACTOR");
+  expect(() => executionTemplate(source, image, sha, "apply", { QA_OPERATION: "customer-owner" })).toThrow("Invalid QA operation");
+});
