@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { PgNotNullEvidence } from "./pg18-pg16-notnull";
 
 export interface TransferSqlClient {
   query(sql: string, parameters?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
@@ -66,6 +67,8 @@ export interface TenantTransferSnapshot {
   sourceSnapshot: string;
   sourceDatabase: string;
   schemaSha256: string;
+  // Optional fresh-export evidence; absent on legacy/strict snapshots.
+  pg18ToPg16NotNullEvidence?: PgNotNullEvidence;
   tables: TransferTableData[];
   dispositions: { table: string; sourceRows: string; selectedRows: string; disposition: TransferDisposition; reason: string }[];
   sha256: string;
