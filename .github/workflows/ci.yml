@@ -158,6 +158,11 @@ jobs:
 
       - run: npx vitest run --project unit --project integration
 
+      - name: Test guarded validation owner adoption
+        run: node --test scripts/adopt-validation-support-owner.integration.test.mjs
+        env:
+          QA_OWNER_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
+
       - name: Test Azure site image release
         run: node --test scripts/azure-site-image-release.node-test.mjs
 
