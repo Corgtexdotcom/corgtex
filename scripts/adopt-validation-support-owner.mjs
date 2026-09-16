@@ -58,6 +58,8 @@ export async function adoptValidationSupportOwner(prisma, config) {
     }
     // Match the support API's workspace lock; lock the user and memberships too so
     // identity, role, and FK-backed access checks cannot change during adoption.
+    // READ COMMITTED gives checks fresh snapshots after locks: a child insert may
+    // have committed since the identity query without modifying its parent row.
     if (config.apply) await tx.$queryRaw`SELECT id FROM "Workspace" WHERE slug = ${INTERNAL_VALIDATION_WORKSPACE_SLUG} FOR UPDATE`;
     const workspace = await tx.workspace.findUnique({ where: { slug: INTERNAL_VALIDATION_WORKSPACE_SLUG }, select: { id: true, slug: true, name: true, supportOwnerUserId: true } });
     if (!workspace || workspace.name !== INTERNAL_VALIDATION_WORKSPACE_NAME) throw new Error("Existing seeded internal validation workspace required");
@@ -98,7 +100,7 @@ export async function adoptValidationSupportOwner(prisma, config) {
       workspaceId: workspace.id, workspaceSlug: workspace.slug, adminUserId: admin.id, adminEmail: admin.email,
       currentOwnerUserId: config.apply ? admin.id : workspace.supportOwnerUserId, seedAuditId: provenance[0].id,
       releaseSha: config.releaseSha, databaseHost: config.databaseHost, databaseName: config.databaseName, databaseSchema: config.databaseSchema };
-  }, { isolationLevel: config.apply ? "Serializable" : "RepeatableRead", timeout: 15000 });
+  }, { isolationLevel: config.apply ? "ReadCommitted" : "RepeatableRead", timeout: 15000 });
 }
 
 export async function main(env = process.env, argv = process.argv.slice(2)) {

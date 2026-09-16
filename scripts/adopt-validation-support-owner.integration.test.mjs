@@ -33,6 +33,21 @@ async function unchanged() {
   assert.equal(await prisma.auditLog.count({ where: { workspaceId: workspace.id, action: ADOPTION_ACTION } }), 0);
 }
 
+function atLock(table, phase, hook) {
+  return { $transaction: (fn, options) => prisma.$transaction(tx => fn(new Proxy(tx, {
+    get(target, key) {
+      if (key !== "$queryRaw") return Reflect.get(target, key);
+      return async (...args) => {
+        const matches = args[0].join("").includes(`FROM "${table}"`);
+        if (matches && phase === "before") await hook();
+        const result = await target.$queryRaw(...args);
+        if (matches && phase === "after") await hook();
+        return result;
+      };
+    },
+  })), options) };
+}
+
 describe("internal validation owner adoption on migrated PostgreSQL", { concurrency: false }, () => {
   before(async () => {
     assert.equal(await prisma.workspace.count({ where: { slug: INTERNAL_VALIDATION_WORKSPACE_SLUG } }), 0, "Refuse to touch a pre-existing validation fixture");
@@ -141,6 +156,92 @@ describe("internal validation owner adoption on migrated PostgreSQL", { concurre
     await assert.rejects(adopt(true, {}, failing), /synthetic audit failure/);
     await unchanged();
   });
+
+  for (const kind of ["membership", "support grant"]) {
+    it(`refuses an outside ${kind} committed after the initial snapshot but before parent locks`, async () => {
+      const outside = await otherWorkspace();
+      let inserted = false;
+      const interleaved = { $transaction: (fn, options) => prisma.$transaction(tx => fn(new Proxy(tx, {
+        get(target, key) {
+          if (key !== "$queryRaw") return Reflect.get(target, key);
+          return async (...args) => {
+            const result = await target.$queryRaw(...args);
+            if (args[0].join("").includes("current_database()")) {
+              // A separate READ COMMITTED transaction commits before adoption locks
+              // either parent; the original Serializable snapshot cannot see it.
+              await prisma.$transaction(async writer => {
+                if (kind === "membership") {
+                  await writer.member.create({ data: { workspaceId: outside.id, userId: admin.id, isActive: false } });
+                } else {
+                  await writer.workspaceSupportGrant.create({ data: { workspaceId: outside.id, userId: admin.id, grantedByUserId: admin.id, role: "FULL" } });
+                }
+              }, { isolationLevel: "ReadCommitted" });
+              inserted = true;
+            }
+            return result;
+          };
+        },
+      })), options) };
+      await assert.rejects(adopt(true, {}, interleaved), kind === "membership" ? /no other workspace membership/ : /no support grants/);
+      assert.equal(inserted, true);
+      await unchanged();
+    });
+  }
+
+  for (const [name, table, mutate, error] of [
+    ["member deactivation", "Member", tx => tx.member.update({ where: { id: member.id }, data: { isActive: false } }), /active HUMAN ADMIN/],
+    ["member reassignment", "Member", async tx => { const other = await newUser(); await tx.member.update({ where: { id: member.id }, data: { userId: other.id } }); }, /active HUMAN ADMIN/],
+    ["seed update", "AuditLog", tx => tx.auditLog.update({ where: { id: provenance.id }, data: { meta: { sampleDataSeeded: false } } }), /seed provenance/],
+    ["seed deletion", "AuditLog", tx => tx.auditLog.delete({ where: { id: provenance.id } }), /seed provenance/],
+  ]) {
+    it(`rejects ${name} committed before its child lock`, async () => {
+      const client = atLock(table, "before", () => prisma.$transaction(mutate, { isolationLevel: "ReadCommitted" }));
+      await assert.rejects(adopt(true, {}, client), error);
+      await unchanged();
+    });
+  }
+
+  for (const [name, table, mutation] of [
+    ["incoming membership", "User", (tx, outside) => tx.member.create({ data: { workspaceId: outside.id, userId: admin.id } })],
+    ["incoming support grant", "User", (tx, outside) => tx.workspaceSupportGrant.create({ data: { workspaceId: outside.id, userId: admin.id, grantedByUserId: admin.id, role: "SETUP" } })],
+    ["other ownership", "User", (tx, outside) => tx.workspace.update({ where: { id: outside.id }, data: { supportOwnerUserId: admin.id } })],
+    ["member deactivation", "Member", tx => tx.member.update({ where: { id: member.id }, data: { isActive: false } })],
+    ["member reassignment", "Member", (tx, _outside, other) => tx.member.update({ where: { id: member.id }, data: { userId: other.id } })],
+    ["seed update", "AuditLog", tx => tx.auditLog.update({ where: { id: provenance.id }, data: { meta: { sampleDataSeeded: false } } })],
+    ["seed deletion", "AuditLog", tx => tx.auditLog.delete({ where: { id: provenance.id } })],
+    ["duplicate seed insertion", "Workspace", tx => tx.auditLog.create({ data: { workspaceId: workspace.id, actorUserId: admin.id, action: provenance.action, entityType: "Workspace", entityId: workspace.id, meta: { sampleDataSeeded: true } } })],
+  ]) {
+    it(`blocks ${name} until adoption releases its ${table} lock`, async () => {
+      const outside = await otherWorkspace();
+      const other = await newUser();
+      let writer, blocked = false;
+      const client = atLock(table, "after", async () => {
+        let started;
+        const ready = new Promise(resolve => { started = resolve; });
+        writer = prisma.$transaction(async tx => {
+          const [row] = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;
+          started(row.pid);
+          await mutation(tx, outside, other);
+        }, { isolationLevel: "ReadCommitted", timeout: 10000 }).then(() => null, error => error);
+        const pid = await ready;
+        const deadline = Date.now() + 3000;
+        do {
+          const [row] = await prisma.$queryRaw`SELECT cardinality(pg_blocking_pids(${pid}::integer)) > 0 AS blocked`;
+          if (row.blocked) { blocked = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 20));
+        } while (Date.now() < deadline);
+        assert.equal(blocked, true, "Concurrent writer must be waiting on a database lock, not merely scheduled later");
+      });
+      try {
+        assert.equal((await adopt(true, {}, client)).status, "adopted");
+      } finally {
+        if (writer) assert.equal(await writer, null, "Writer completes after adoption releases its locks");
+      }
+      assert.equal(blocked, true);
+      assert.equal((await prisma.workspace.findUniqueOrThrow({ where: { id: workspace.id } })).supportOwnerUserId, admin.id);
+      assert.equal(await prisma.auditLog.count({ where: { workspaceId: workspace.id, action: ADOPTION_ACTION } }), 1);
+    });
+  }
 
   it("serializes concurrent adoption and never duplicates the ownership audit", async () => {
     const results = await Promise.allSettled([adopt(), adopt()]);
