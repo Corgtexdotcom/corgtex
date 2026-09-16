@@ -64,7 +64,7 @@ async function sendInvitationEmail(email: string, displayName: string | null, to
     }
 
     const workspaceName = await workspaceNameForEmail(params.workspaceId);
-    await sendEmail({
+    const delivery = await sendEmail({
       to: email,
       subject: `You've been invited to Corgtex`,
       html: renderAccountSetupEmail({
@@ -73,7 +73,14 @@ async function sendInvitationEmail(email: string, displayName: string | null, to
         workspaceName,
         kind: params.kind ?? "member-invite",
       }),
+      tracking: {
+        emailType: params.kind ?? "member-invite",
+        workspaceId: params.workspaceId,
+      },
     });
+    if (delivery.status === "SKIPPED") {
+      return { sent: false, error: delivery.reason };
+    }
     return { sent: true };
   } catch (error: any) {
     console.error("Failed to send invitation email:", error);
