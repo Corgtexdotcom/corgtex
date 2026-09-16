@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { AppError } from "@corgtex/domain";
 import { isDatabaseUnavailableError } from "@corgtex/shared";
-import { captureErrorTelemetry } from "@corgtex/shared/telemetry";
+import { captureErrorTelemetry } from "@corgtex/shared/telemetry-node";
 import { z } from "zod";
 
 type RouteErrorTelemetryContext = {

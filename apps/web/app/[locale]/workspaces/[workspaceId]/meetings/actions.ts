@@ -30,7 +30,8 @@ import {
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
-import { captureTelemetryEvent, getRedisClient, redisKey } from "@corgtex/shared";
+import { getRedisClient, redisKey } from "@corgtex/shared";
+import { captureTelemetryEvent } from "@corgtex/shared/telemetry-node";
 import {
   parseMeetingDateTimeInput,
   parseOptionalMeetingDateTimeInput,

@@ -11,6 +11,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./release-metadata": "./src/release-metadata.ts",
+    "./release-metadata-node": "./src/release-metadata-node.ts",
+    "./telemetry-node": "./src/telemetry-node.ts",
     "./telemetry": "./src/telemetry.ts"
   }
 }

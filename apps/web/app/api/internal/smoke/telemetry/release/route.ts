@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { AppError } from "@corgtex/domain";
-import { captureTelemetryEvent, env, releaseDriftSummary, resolveReleaseMetadata } from "@corgtex/shared";
+import { env, releaseDriftSummary } from "@corgtex/shared";
+import { captureTelemetryEvent } from "@corgtex/shared/telemetry-node";
+import { resolveNodeReleaseMetadata } from "@corgtex/shared/release-metadata-node";
 import { z } from "zod";
 import { handleRouteError, validateBody } from "@/lib/http";
 
@@ -32,7 +34,7 @@ export async function POST(request: NextRequest) {
   try {
     requireSmokeSecret(request);
     const body = await validateBody(request, telemetrySmokeSchema);
-    const release = resolveReleaseMetadata(process.env, { service: "web" });
+    const release = resolveNodeReleaseMetadata("web");
     if (body.expectedGitSha && release.gitSha !== body.expectedGitSha) {
       throw new AppError(409, "RELEASE_MISMATCH", `Release git SHA ${release.gitSha ?? "missing"} did not match expected ${body.expectedGitSha}.`);
     }

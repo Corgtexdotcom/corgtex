@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { formatReleaseNormalizationLog, normalizeRuntimeReleaseEnv } from "./lib/release-env.mjs";
+import { formatRuntimeReleaseLog } from "./lib/release-env.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -61,7 +61,7 @@ export function workerCommand(root = rootDir) {
 
 export function main() {
   console.log("[start-worker] === Production Worker Startup Sequence ===");
-  console.log(formatReleaseNormalizationLog(normalizeRuntimeReleaseEnv()));
+  console.log(formatRuntimeReleaseLog("worker"));
   runWorker();
 }
 

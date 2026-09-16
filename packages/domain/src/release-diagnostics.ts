@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readReleaseBuildIdentity } from "@corgtex/shared/release-metadata-node";
 import { z } from "zod";
 import { prisma, type AppActor } from "@corgtex/shared";
 import { requireWorkspaceMembership } from "./auth";
@@ -25,11 +25,9 @@ export type ReleaseDiagnosticRequest = z.infer<typeof releaseDiagnosticRequestSc
 // This file is written during image construction, never from runtime configuration.
 // Missing identity in older/local images is an explicit unsupported capability.
 export function readReleaseBuildSha(role: "web" | "worker") {
-  let value: unknown;
-  try { value = JSON.parse(readFileSync("/app/release-build.json", "utf8")); } catch { value = null; }
-  const result = z.object({ schemaVersion: z.literal(1), role: z.literal(role), gitSha: sha }).strict().safeParse(value);
-  invariant(result.success, 409, "RELEASE_BUILD_UNAVAILABLE", "Immutable release build identity is unavailable.");
-  return result.data.gitSha;
+  const identity = readReleaseBuildIdentity(role);
+  invariant(identity, 409, "RELEASE_BUILD_UNAVAILABLE", "Immutable release build identity is unavailable.");
+  return identity.gitSha;
 }
 
 async function requireDiagnosticAccess(actor: AppActor, workspaceId: string, write: boolean) {

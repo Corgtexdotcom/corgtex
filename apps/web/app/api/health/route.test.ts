@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryRaw = vi.fn();
 const fsMock = vi.hoisted(() => ({
+  readFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
   readdirSync: vi.fn((): Array<{ name: string; isDirectory: () => boolean }> => []),
 }));
@@ -17,6 +18,7 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
 });
 
 vi.mock("node:fs", () => ({
+  readFileSync: fsMock.readFileSync,
   existsSync: fsMock.existsSync,
   readdirSync: fsMock.readdirSync,
 }));
@@ -57,6 +59,7 @@ beforeEach(() => {
   delete process.env.APP_URL;
   fsMock.existsSync.mockReturnValue(false);
   fsMock.readdirSync.mockReturnValue([]);
+  fsMock.readFileSync.mockReset();
 });
 
 afterEach(() => {
@@ -64,6 +67,31 @@ afterEach(() => {
 });
 
 describe("GET /api/health", () => {
+  it("prefers the baked web identity and preserves configured drift", async () => {
+    const { GET } = await import("./route");
+    const sha = "a".repeat(40);
+    process.env.CORGTEX_RELEASE_GIT_SHA = "b".repeat(40);
+    fsMock.readFileSync.mockReturnValue(JSON.stringify({ schemaVersion: 1, role: "web", gitSha: sha }));
+    queryRaw.mockResolvedValueOnce([{ ok: 1 }]).mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([]);
+    const response = await GET();
+    expect(response.status).toBe(200);
+    expect((await response.json()).release).toMatchObject({
+      runtime: { gitSha: sha, source: "baked", evidence: "baked" },
+      configured: { gitSha: "b".repeat(40) }, drift: { gitSha: true },
+    });
+  });
+
+  it("does not crash health when the baked file is unreadable", async () => {
+    const { GET } = await import("./route");
+    fsMock.readFileSync.mockImplementation(() => { throw new Error("EACCES"); });
+    queryRaw.mockResolvedValueOnce([{ ok: 1 }]).mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([]);
+    const response = await GET();
+    expect(response.status).toBe(200);
+    expect((await response.json()).release.runtime).toMatchObject({ gitSha: null, evidence: "unavailable" });
+  });
+
   it("returns the Corgtex fingerprint when the database is reachable", async () => {
     process.env.WORKSPACE_SLUG = "corporate-rebels";
     process.env.APP_URL = "https://corporate-rebels.corgtex.com";

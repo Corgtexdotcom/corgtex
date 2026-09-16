@@ -1,3 +1,5 @@
+import { readReleaseBuildIdentity } from "../../packages/shared/src/release-build-node.mjs";
+
 function optional(env, name) {
   const value = env[name]?.trim();
   return value && value.length > 0 ? value : null;
@@ -18,6 +20,26 @@ export function runtimeReleaseGitSha(env = process.env) {
   if (github) return { gitSha: github, source: "github" };
 
   return { gitSha: null, source: "missing" };
+}
+
+export function formatRuntimeReleaseLog(role, env = process.env) {
+  const baked = readReleaseBuildIdentity(role);
+  const runtime = baked ? { gitSha: baked.gitSha, source: "baked" } : runtimeReleaseGitSha(env);
+  const configured = {
+    gitSha: optional(env, "CORGTEX_RELEASE_GIT_SHA"),
+    imageTag: optional(env, "CORGTEX_RELEASE_IMAGE_TAG"),
+    version: optional(env, "CORGTEX_RELEASE_VERSION"),
+  };
+  const sha = runtime.gitSha;
+  return `[release-env] ${JSON.stringify({
+    runtime: { ...runtime, evidence: baked ? "baked" : sha ? "legacy_provider" : "unavailable" },
+    configured,
+    drift: {
+      gitSha: Boolean(sha && configured.gitSha && configured.gitSha !== sha),
+      imageTag: Boolean(sha && configured.imageTag && ![sha, `sha-${sha}`].includes(configured.imageTag)),
+      version: Boolean(sha && configured.version?.startsWith("main-") && configured.version !== releaseVersionForGitSha(sha)),
+    },
+  })}`;
 }
 
 export function normalizeRuntimeReleaseEnv(env = process.env) {

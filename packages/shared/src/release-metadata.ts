@@ -1,6 +1,9 @@
+import { parseReleaseBuildIdentity, type ReleaseBuildRole } from "./release-build.mjs";
+
 type ReleaseProvider = "azure" | "local" | "railway" | "vercel";
 type ReleaseValueSource =
   | "azure"
+  | "baked"
   | "configured"
   | "development"
   | "github"
@@ -29,6 +32,7 @@ export type ReleaseMetadata = {
   runtime: {
     gitSha: string | null;
     source: ReleaseValueSource;
+    evidence: "baked" | "legacy_provider" | "unavailable";
   };
   configured: {
     version: string | null;
@@ -48,6 +52,8 @@ export type ReleaseMetadata = {
 
 type ReleaseMetadataOptions = {
   service?: string;
+  bakedIdentity?: unknown;
+  expectedRole?: ReleaseBuildRole;
 };
 
 function optional(env: NodeJS.ProcessEnv, name: string) {
@@ -186,7 +192,8 @@ export function resolveReleaseMetadata(
   const configuredEnvironment = optional(env, "CORGTEX_ENVIRONMENT") ?? optional(env, "POSTHOG_ENVIRONMENT");
   const configuredService = optional(env, "CORGTEX_SERVICE_NAME") ?? options.service?.trim() ?? null;
   const packageVersion = optional(env, "npm_package_version");
-  const runtime = runtimeGitSha(env);
+  const baked = parseReleaseBuildIdentity(options.bakedIdentity, options.expectedRole ?? options.service);
+  const runtime = baked ? { value: baked.gitSha, source: "baked" as const } : runtimeGitSha(env);
   const imageDerivedGitSha = imageTagSha(configuredImageTag);
   const gitSha = runtime.value ?? configuredGitSha ?? imageDerivedGitSha;
   const gitShaSource = runtime.value
@@ -229,6 +236,7 @@ export function resolveReleaseMetadata(
     runtime: {
       gitSha: runtime.value,
       source: runtime.source,
+      evidence: baked ? "baked" : runtime.value ? "legacy_provider" : "unavailable",
     },
     configured: {
       version: configuredVersion,

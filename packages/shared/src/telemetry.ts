@@ -1,4 +1,4 @@
-import { resolveReleaseMetadata } from "./release-metadata";
+import { resolveReleaseMetadata, type ReleaseMetadata } from "./release-metadata";
 
 type TelemetrySurface = "route" | "server_action" | "render" | "worker";
 type TelemetryProvider = "azure" | "local" | "railway" | "vercel";
@@ -67,8 +67,7 @@ function postHogEnabled(env: NodeJS.ProcessEnv) {
     && Boolean(optional(env, "POSTHOG_PROJECT_TOKEN"));
 }
 
-export function telemetryRuntimeContext(env: NodeJS.ProcessEnv = process.env) {
-  const release = resolveReleaseMetadata(env);
+export function telemetryRuntimeContext(env: NodeJS.ProcessEnv = process.env, release = resolveReleaseMetadata(env)) {
   return {
     environment: release.environment,
     instance_id: release.service,
@@ -82,6 +81,7 @@ export function telemetryRuntimeContext(env: NodeJS.ProcessEnv = process.env) {
     release_git_sha_source: release.source.gitSha,
     release_image_tag: release.imageTag ?? undefined,
     release_runtime_git_sha: release.runtime.gitSha ?? undefined,
+    release_runtime_evidence: release.runtime.evidence,
     release_version: release.version,
   };
 }
@@ -172,11 +172,11 @@ function distinctIdFor(input: ErrorTelemetryInput) {
   return `${input.surface}:${input.action ?? input.route ?? "unknown"}`;
 }
 
-export function buildErrorTelemetryEvent(input: ErrorTelemetryInput, env: NodeJS.ProcessEnv = process.env): TelemetryEventInput {
+export function buildErrorTelemetryEvent(input: ErrorTelemetryInput, env: NodeJS.ProcessEnv = process.env, release?: ReleaseMetadata): TelemetryEventInput {
   const status = errorStatus(input.error, input.status);
   const code = errorCode(input.error, input.code);
   const properties = sanitizeProperties({
-    ...telemetryRuntimeContext(env),
+    ...telemetryRuntimeContext(env, release),
     ...(input.attributes ?? {}),
     action: input.action,
     code,
@@ -288,11 +288,12 @@ async function captureAzure(input: TelemetryEventInput, env: NodeJS.ProcessEnv) 
 export async function captureTelemetryEvent(
   input: TelemetryEventInput,
   env: NodeJS.ProcessEnv = process.env,
+  release?: ReleaseMetadata,
 ): Promise<CaptureTelemetryResult> {
   const event = {
     ...input,
     properties: sanitizeProperties({
-      ...telemetryRuntimeContext(env),
+      ...telemetryRuntimeContext(env, release),
       ...(input.properties ?? {}),
     }),
   };
@@ -308,6 +309,7 @@ export async function captureTelemetryEvent(
 export async function captureErrorTelemetry(
   input: ErrorTelemetryInput,
   env: NodeJS.ProcessEnv = process.env,
+  release?: ReleaseMetadata,
 ): Promise<CaptureTelemetryResult> {
-  return captureTelemetryEvent(buildErrorTelemetryEvent(input, env), env);
+  return captureTelemetryEvent(buildErrorTelemetryEvent(input, env, release), env, release);
 }

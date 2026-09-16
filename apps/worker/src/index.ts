@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { captureErrorTelemetry, prisma, logger, resolveReleaseMetadata } from "@corgtex/shared";
+import { prisma, logger } from "@corgtex/shared";
+import { captureErrorTelemetry } from "@corgtex/shared/telemetry-node";
+import { resolveNodeReleaseMetadata } from "@corgtex/shared/release-metadata-node";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, renderWorkflowJobMetrics, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
@@ -23,7 +25,7 @@ const JOB_BATCH_SIZE = Number(process.env.WORKER_JOB_BATCH_SIZE ?? "25");
 const JOB_CONCURRENCY = Number(process.env.WORKER_JOB_CONCURRENCY ?? "5");
 const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT ?? process.env.PORT ?? "9090");
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? "15000");
-const release = resolveReleaseMetadata(process.env, { service: "worker" });
+const release = resolveNodeReleaseMetadata("worker");
 
 // --- State ---
 
