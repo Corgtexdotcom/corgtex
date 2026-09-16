@@ -50,10 +50,21 @@ vi.mock("@corgtex/knowledge", () => ({
 }));
 
 vi.mock("@corgtex/shared", () => ({
-  captureTelemetryEvent,
   getRedisClient,
   redisKey: (key: string) => `test:${key}`,
 }));
+
+vi.mock("@corgtex/shared/telemetry-node", () => ({ captureTelemetryEvent }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => args[0] === "/app/release-build.json"
+      ? JSON.stringify({ schemaVersion: 1, role: "web", gitSha: "a".repeat(40) })
+      : actual.readFileSync(...args),
+  };
+});
 
 vi.mock("@corgtex/domain", () => ({
   DEFAULT_MEETING_DURATION_MINUTES: 60,
@@ -109,6 +120,36 @@ afterEach(() => {
 });
 
 describe("meeting server actions", () => {
+  it("emits baked release identity while preserving the configured telemetry instance", async () => {
+    const actual = await vi.importActual<typeof import("@corgtex/shared/telemetry-node")>("@corgtex/shared/telemetry-node");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    captureTelemetryEvent.mockImplementationOnce(input => actual.captureTelemetryEvent(input, {
+      NODE_ENV: "test", POSTHOG_ENABLED: "true", POSTHOG_PROJECT_TOKEN: "synthetic-token",
+      POSTHOG_INSTANCE_ID: "synthetic-meetings-instance", CORGTEX_RELEASE_GIT_SHA: "b".repeat(40),
+    }));
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "needs_clarification", message: "Choose a date.", requiredFields: ["recordedAt"],
+      inferred: { title: null, recordedAt: null, participantEmails: [], source: "transcript-upload" }, candidates: [],
+    });
+    try {
+      const { uploadMeetingTranscriptStateAction } = await import("./actions");
+      await uploadMeetingTranscriptStateAction(initialTranscriptState, formData({
+        workspaceId: "workspace-1", transcript: "Synthetic transcript.",
+      }));
+      await captureTelemetryEvent.mock.results[0].value;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+      expect(body.event).toBe("corgtex_meeting_transcript_intake_advisory");
+      expect(body.properties).toMatchObject({
+        instance_id: "synthetic-meetings-instance", release_git_sha: "a".repeat(40),
+        release_git_sha_source: "baked", release_runtime_git_sha: "a".repeat(40),
+        release_runtime_evidence: "baked", release_drift_git_sha: true,
+      });
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("returns inline state and preserves values when manual recorder validation fails", async () => {
     const { scheduleManualMeetingRecordingAction } = await import("./actions");
     sendManualMeetingRecorder.mockRejectedValueOnce(Object.assign(

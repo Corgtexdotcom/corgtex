@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { telemetryRuntimeContext } from "@corgtex/shared/telemetry";
+import { telemetryRuntimeContext } from "@corgtex/shared/telemetry-node";
 
 type CaptureStatus = "disabled" | "sampled" | "sent" | "failed";
 

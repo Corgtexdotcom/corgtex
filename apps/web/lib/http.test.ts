@@ -19,7 +19,7 @@ vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
 }));
 
-vi.mock("@corgtex/shared/telemetry", () => ({
+vi.mock("@corgtex/shared/telemetry-node", () => ({
   captureErrorTelemetry,
 }));
 

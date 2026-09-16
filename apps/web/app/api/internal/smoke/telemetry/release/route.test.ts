@@ -11,9 +11,13 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@corgtex/shared")>();
   return {
     ...actual,
-    captureTelemetryEvent: captureTelemetryEventMock,
     env: sharedEnv,
   };
+});
+
+vi.mock("@corgtex/shared/telemetry-node", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@corgtex/shared/telemetry-node")>();
+  return { ...actual, captureTelemetryEvent: captureTelemetryEventMock };
 });
 
 function smokeRequest(body: Record<string, unknown>, headers: Record<string, string> = {}) {

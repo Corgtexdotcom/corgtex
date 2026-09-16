@@ -12,6 +12,8 @@ export default defineConfig({
       "@corgtex/domain/modules": fileURLToPath(new URL("./packages/domain/src/modules/index.ts", import.meta.url)),
       "@corgtex/domain": fileURLToPath(new URL("./packages/domain/src/index.ts", import.meta.url)),
       "@corgtex/shared/telemetry": fileURLToPath(new URL("./packages/shared/src/telemetry.ts", import.meta.url)),
+      "@corgtex/shared/telemetry-node": fileURLToPath(new URL("./packages/shared/src/telemetry-node.ts", import.meta.url)),
+      "@corgtex/shared/release-metadata-node": fileURLToPath(new URL("./packages/shared/src/release-metadata-node.ts", import.meta.url)),
       "@corgtex/shared": fileURLToPath(new URL("./packages/shared/src/index.ts", import.meta.url)),
       "@corgtex/agents": fileURLToPath(new URL("./packages/agents/src/index.ts", import.meta.url)),
       "@corgtex/models": fileURLToPath(new URL("./packages/models/src/index.ts", import.meta.url)),

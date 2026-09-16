@@ -1,7 +1,8 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { env, prisma, resolveReleaseMetadata } from "@corgtex/shared";
+import { env, prisma } from "@corgtex/shared";
+import { resolveNodeReleaseMetadata } from "@corgtex/shared/release-metadata-node";
 import {
   resolveAzureBlobStorageRuntimeConfig,
   resolveStorageProviderName,
@@ -29,7 +30,7 @@ function handleRouteError(error: unknown) {
 }
 
 function releaseFingerprint() {
-  return resolveReleaseMetadata(process.env, { service: "web" });
+  return resolveNodeReleaseMetadata("web");
 }
 
 function runtimeFingerprint() {

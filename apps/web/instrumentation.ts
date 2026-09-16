@@ -17,7 +17,7 @@ export async function register() {
   }
 }
 
-export const onRequestError = (error: unknown, request: unknown, context: unknown) => {
+export const onRequestError = async (error: unknown, request: unknown, context: unknown) => {
   Sentry.captureRequestError(
     error as Parameters<typeof Sentry.captureRequestError>[0],
     request as Parameters<typeof Sentry.captureRequestError>[1],
@@ -26,7 +26,10 @@ export const onRequestError = (error: unknown, request: unknown, context: unknow
 
   const requestLike = request as { path?: string; method?: string; url?: string } | undefined;
   const contextLike = context as { routePath?: string; routeType?: string; routerKind?: string } | undefined;
-  void captureErrorTelemetry({
+  const capture = process.env.NEXT_RUNTIME === "nodejs"
+    ? (await import("@corgtex/shared/telemetry-node")).captureErrorTelemetry
+    : captureErrorTelemetry;
+  void capture({
     attributes: {
       next_route_type: contextLike?.routeType,
       router_kind: contextLike?.routerKind,
