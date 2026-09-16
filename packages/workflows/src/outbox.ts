@@ -1226,6 +1226,7 @@ export async function scheduleDripCampaigns() {
 
   const pendingLeads = await prisma.demoLead.findMany({
     where: {
+      workspace: { featureFlags: { none: { flag: OPERATOR_IMPORT_INACTIVE_FLAG, enabled: true } } },
       convertedAt: null,
       followUpCount: { lt: maxFollowUps },
       OR: [
