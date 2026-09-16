@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
-import { scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
+import { scheduleDailyJobs, scheduleDripCampaigns, schedulePeriodicJobs } from "./outbox";
 
 const workspaceIds: string[] = [];
 
@@ -16,9 +16,56 @@ describe("operator import scheduler exclusion", () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     await prisma.workflowJob.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.workspace.deleteMany({ where: { id: { in: workspaceIds } } });
     workspaceIds.length = 0;
+  });
+
+  it.each(["absent", "disabled"])("excludes inactive imports from enabled drip while an active tenant with %s marker progresses", async (marker) => {
+    vi.stubEnv("CRM_DRIP_ENABLED", "true");
+    vi.stubEnv("CRM_DRIP_INTERVAL_DAYS", "3");
+    vi.stubEnv("CRM_DRIP_MAX_FOLLOWUPS", "3");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-14T10:15:00Z"));
+    const inertId = randomUUID();
+    const activeId = randomUUID();
+    workspaceIds.push(inertId, activeId);
+    const leads = await prisma.$transaction(async (tx) => {
+      const created = [];
+      for (const [id, inactive] of [[inertId, true], [activeId, false]] as const) {
+        await tx.workspace.create({ data: {
+          id, name: "Synthetic drip fixture", slug: `drip-${id}`,
+          ...(inactive || marker === "disabled" ? {
+            featureFlags: { create: { flag: "operator_import_inactive", enabled: inactive } },
+          } : {}),
+        } });
+        created.push(await tx.demoLead.create({ data: {
+          workspaceId: id, email: `lead-${id}@example.invalid`,
+          createdAt: new Date("2026-09-01T00:00:00Z"), followUpCount: 1,
+        } }));
+      }
+      return created;
+    });
+
+    expect(await scheduleDripCampaigns()).toBe(1);
+    expect(await prisma.workflowJob.count({ where: { workspaceId: inertId } })).toBe(0);
+    const activeJobs = await prisma.workflowJob.findMany({ where: { workspaceId: activeId } });
+    expect(activeJobs).toHaveLength(1);
+    expect(activeJobs[0]).toMatchObject({
+      type: "agent.crm-drip-followup", status: "PENDING",
+      payload: { demoLeadId: leads[1].id, followUpNumber: 2 },
+      dedupeKey: `${activeId}:drip:${leads[1].id}:2026-09-14`,
+    });
+    await scheduleDripCampaigns();
+    expect(await prisma.workflowJob.findMany({ where: { workspaceId: activeId } })).toEqual(activeJobs);
+    expect(await prisma.workflowJob.count({ where: { workspaceId: inertId } })).toBe(0);
+    expect((await prisma.workspaceFeatureFlag.findUniqueOrThrow({
+      where: { workspaceId_flag: { workspaceId: inertId, flag: "operator_import_inactive" } },
+    })).enabled).toBe(true);
+    for (const lead of leads) {
+      expect(await prisma.demoLead.findUniqueOrThrow({ where: { id: lead.id } })).toEqual(lead);
+    }
   });
 
   it("enqueues no due work for an atomically marked import while another workspace progresses", async () => {
