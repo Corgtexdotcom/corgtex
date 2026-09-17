@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parse } from "yaml";
+import { finalizeIsolatedCatalog } from "./selfserve-validation-isolated.mjs";
 import { CATALOG_ALGORITHM, CATALOG_QUERIES, UNSUPPORTED_CATALOG_SQL, collectSchemaCatalog, expectedCatalogArtifact,
   assertExpectedCatalog, compareSchemaCatalog, validateCatalog } from "./lib/selfserve-schema-catalog.mjs";
 
@@ -55,6 +59,36 @@ describe("catalog artifact binding and safe comparison", () => {
 });
 
 describe("workflow integration", () => {
+  it("finalizes a readable but non-writable container proof without changing its binding", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "catalog-finalize-"));
+    const file = join(directory, "expected-catalog.json");
+    try {
+      const pending = expectedCatalogArtifact(catalog(), binding);
+      await writeFile(file, JSON.stringify(pending), { mode: 0o444 });
+      if (process.getuid?.() !== 0) {
+        await expect(writeFile(file, "overwrite")).rejects.toMatchObject({ code: "EACCES" });
+      }
+      await finalizeIsolatedCatalog(directory, binding);
+      expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ ...pending, cleanup: "completed" });
+      expect(await readdir(directory)).toEqual(["expected-catalog.json"]);
+    } finally {
+      await chmod(file, 0o600).catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("leaves a misbound catalog unchanged without publishing a completed proof", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "catalog-misbound-"));
+    const file = join(directory, "expected-catalog.json");
+    const original = JSON.stringify({ ...expectedCatalogArtifact(catalog(), binding), runId: "456" });
+    try {
+      await writeFile(file, original);
+      await expect(finalizeIsolatedCatalog(directory, binding)).rejects.toThrow("CATALOG_ARTIFACT_MISBOUND");
+      expect(await readFile(file, "utf8")).toBe(original);
+      expect(await readdir(directory)).toEqual(["expected-catalog.json"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it("downloads only same-run isolation before live catalog verification", () => {
     const workflow = parse(readFileSync(new URL("../.github/workflows/production-validation.yml", import.meta.url), "utf8"));
     const live = workflow.jobs["selfserve-live"];
