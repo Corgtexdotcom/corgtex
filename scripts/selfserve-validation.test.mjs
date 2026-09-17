@@ -162,7 +162,8 @@ describe("mode, accepted release and required artifacts", () => {
     gitSha: SHA, runId: "123", runAttempt: "2", scope: lane.endsWith("-isolated") ? "isolated-synthetic" : "live-read-only",
     status: "passed", cleanup: "completed", navigationPassed: true, identityVerified: true, servingSha: SHA,
     origin: target.origin, workspaceId: target.workspaceId, ownerUserId: target.ownerUserId,
-    exactLedgerMatch: true, supportedSchemaMatch: true, manifestSha256: "c".repeat(64), datamodelSha256: "d".repeat(64) }));
+    exactLedgerMatch: true, supportedSchemaMatch: true, manifestSha256: "c".repeat(64), datamodelSha256: "d".repeat(64),
+    catalogAlgorithm: "SELFSERVE_PUBLIC_PG16_V1", expectedCatalogSha256: "e".repeat(64), actualCatalogSha256: "e".repeat(64) }));
   const binding = { expectedSha: SHA, runId: "123", runAttempt: "2" };
   it("requires every named live/schema/isolated artifact, not any one passing matrix", () => {
     expect(() => assertSelfserveEvidence(receipts(), binding)).not.toThrow();
@@ -178,7 +179,7 @@ describe("mode, accepted release and required artifacts", () => {
     expect(() => assertSelfserveEvidence(data, binding)).toThrow("NAVIGATION");
   });
   it("does not accept weak schema proof or another named identity in a passing artifact", () => {
-    for (const [index, key, value] of [[1, "exactLedgerMatch", false], [1, "manifestSha256", ""], [0, "ownerUserId", "other"], [0, "origin", "https://app.corgtex.com"]]) {
+    for (const [index, key, value] of [[1, "actualCatalogSha256", "f".repeat(64)], [1, "catalogAlgorithm", undefined], [1, "exactLedgerMatch", false], [1, "manifestSha256", ""], [0, "ownerUserId", "other"], [0, "origin", "https://app.corgtex.com"]]) {
       const data = receipts(); data[index][key] = value;
       expect(() => assertSelfserveEvidence(data, binding)).toThrow();
     }
