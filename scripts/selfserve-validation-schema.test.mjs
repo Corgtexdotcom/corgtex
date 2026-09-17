@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -67,6 +67,28 @@ describe("secret-safe schema failure boundary", () => {
 });
 
 describe("actual verifier stage routing", () => {
+  it("preserves exact error codes from the real baseline helpers", async () => {
+    const real = await vi.importActual("./accepted-core-baseline.mjs");
+    const directory = await mkdtemp(join(tmpdir(), "schema-helper-"));
+    try {
+      await mkdir(join(directory, "node_modules/@prisma/engines"), { recursive: true });
+      const cases = [
+        ["source", "CORE_BASELINE_SOURCE_MIGRATIONS_INVALID", () => real.migrationManifest(directory)],
+        ["prepared-engine", "CORE_BASELINE_PRISMA_ENGINE_NOT_PREPARED", () => real.preparedSchemaEngine(directory)],
+        ["ledger", "CORE_BASELINE_LEDGER_NOT_EXACT", () => real.verifyLedger({ migrations: [{ name: "expected", checksum: "a" }] }, [], sha)],
+        ["ledger", "CORE_BASELINE_LEDGER_UNBOUNDED", () => real.verifyLedger({}, null, sha)],
+        ["configuration", "CORE_BASELINE_DATABASE_URL_INVALID", () => real.databaseIdentity("https://localhost/db")],
+        ["configuration", "CORE_BASELINE_DATABASE_SCHEMA_UNSUPPORTED", () => real.databaseIdentity("postgresql://localhost/db?schema=private")],
+      ];
+      for (const [stage, code, invoke] of cases) {
+        const error = await Promise.resolve().then(invoke).catch(e => e);
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).toBe(code);
+        expect(classifySchemaFailure(stage, error)).toMatchObject({ stage, code });
+        expect(classifySchemaFailure(stage, new Error(`${code}:${secret}`)).code).toBe("UNCLASSIFIED_FAILURE");
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("preserves passing receipt and strict subprocess isolation", async () => {
     expect(await verifySelfserveSchema(env)).toMatchObject({ status: "passed", exactLedgerMatch: true, supportedSchemaMatch: true });
     const call = mocks.exec.mock.calls.find(([file]) => file.endsWith("/prisma"));
@@ -77,7 +99,7 @@ describe("actual verifier stage routing", () => {
   });
   it.each([
     ["source", "SCHEMA_SOURCE_MISMATCH", () => mocks.exec.mockReturnValue("wrong")],
-    ["source", "SOURCE_MIGRATIONS_INVALID", () => mocks.manifest.mockImplementation(() => { throw new Error("SOURCE_MIGRATIONS_INVALID"); })],
+    ["source", "CORE_BASELINE_SOURCE_MIGRATIONS_INVALID", () => mocks.manifest.mockImplementation(() => { throw new Error("CORE_BASELINE_SOURCE_MIGRATIONS_INVALID"); })],
     ["prepared-engine", "ENOENT", () => mocks.engine.mockRejectedValue(Object.assign(poison(), { code: "ENOENT" }))],
     ["connection-tls", "ECONNREFUSED", () => mocks.connect.mockRejectedValue(Object.assign(poison(), { code: "ECONNREFUSED" }))],
     ["connection-tls", "ERR_TLS_CERT_ALTNAME_INVALID", () => mocks.connect.mockRejectedValue(Object.assign(poison(), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }))],
@@ -86,7 +108,7 @@ describe("actual verifier stage routing", () => {
       const original = mocks.query.getMockImplementation();
       mocks.query.mockImplementation(sql => sql.includes("AS can_write") ? { rows: [{ can_write: true }] } : original(sql));
     }],
-    ["ledger", "LEDGER_NOT_EXACT", () => mocks.ledger.mockImplementation(() => { throw new Error("LEDGER_NOT_EXACT"); })],
+    ["ledger", "CORE_BASELINE_LEDGER_NOT_EXACT", () => mocks.ledger.mockImplementation(() => { throw new Error("CORE_BASELINE_LEDGER_NOT_EXACT"); })],
     ["introspection", "SCHEMA_DIFF_DETECTED", () => {
       const original = mocks.exec.getMockImplementation();
       mocks.exec.mockImplementation((file, args) => { if (file.endsWith("/prisma")) throw Object.assign(poison(), { status: 2 }); return original(file, args); });
