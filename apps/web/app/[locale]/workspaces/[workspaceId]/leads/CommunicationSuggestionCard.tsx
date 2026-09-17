@@ -60,11 +60,13 @@ export function CommunicationSuggestionCard({
   suggestion,
   labels,
   formatDate,
+  readOnly = false,
 }: {
   workspaceId: string;
   suggestion: CommunicationSuggestion;
   labels: Labels;
   formatDate: (value: Date | string) => string;
+  readOnly?: boolean;
 }) {
   const isFinal = suggestion.status === "SENT" || suggestion.status === "DECLINED";
   const statusLabel = labels.status[suggestion.status] ?? suggestion.status;
@@ -123,7 +125,7 @@ export function CommunicationSuggestionCard({
         {suggestion.failedAt && <span className="tag-sm">{labels.failedAt}: {formatDate(suggestion.failedAt)}</span>}
       </div>
 
-      {!isFinal && (
+      {!readOnly && !isFinal && (
         <details>
           <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>{labels.edit}</summary>
           <form action={updateCommunicationSuggestionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
@@ -144,7 +146,7 @@ export function CommunicationSuggestionCard({
       )}
 
       <div className="row" style={{ justifyContent: "flex-start", gap: 8, flexWrap: "wrap" }}>
-        {!isFinal && (
+        {!readOnly && !isFinal && (
           <>
             <form action={requestCommunicationSuggestionExecutionAction}>
               <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -165,7 +167,7 @@ export function CommunicationSuggestionCard({
         )}
       </div>
 
-      {!isFinal && (
+      {!readOnly && !isFinal && (
         <details>
           <summary className="link-button small" style={{ cursor: "pointer", width: "fit-content" }}>{labels.fail}</summary>
           <form action={failCommunicationSuggestionAction} className="stack nr-form-section" style={{ marginTop: 12 }}>

@@ -3,6 +3,7 @@ import {
   listArchivedWorkspaceArtifacts,
   listNewspaperDeliveryDetails,
   listNewspaperDeliverySummaries,
+  requireWorkspaceMembership,
 } from "@corgtex/domain";
 import { requirePageActor } from "@/lib/auth";
 import { getTranslations } from "next-intl/server";
@@ -54,8 +55,11 @@ export default async function AuditPage({
   const { workspaceId } = await params;
   const search = await searchParams;
   const actor = await requirePageActor();
+  const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const canViewArchive = membership?.role === "ADMIN";
   const t = await getTranslations("audit");
   const tab = search.tab ?? "audit";
+  if (tab === "archive" && !canViewArchive) notFound();
   const featureFlags = await getWorkspaceFeatureFlags(workspaceId);
   if (!featureFlags.AGENT_GOVERNANCE && (tab === "agents" || tab === "costs" || search.agentRunId)) {
     notFound();
@@ -67,11 +71,11 @@ export default async function AuditPage({
     entityId: search.entityId,
   });
 
-  const archivedArtifacts = await listArchivedWorkspaceArtifacts(actor, {
+  const archivedArtifacts = tab === "archive" && canViewArchive ? await listArchivedWorkspaceArtifacts(actor, {
     workspaceId,
     entityType: search.archiveEntityType,
     take: 100,
-  });
+  }) : [];
   const [newspaperSummaries, newspaperDetails] = tab === "newspapers"
     ? await Promise.all([
       listNewspaperDeliverySummaries(actor, workspaceId, { take: 20 }),
@@ -111,12 +115,12 @@ export default async function AuditPage({
         >
           {t("tabAudit")}
         </a>
-        <a
+        {canViewArchive && <a
           href={`/workspaces/${workspaceId}/audit?tab=archive`}
           className={`nr-tab ${tab === "archive" ? "nr-tab-active" : ""}`}
         >
           {t("tabArchive")}
-        </a>
+        </a>}
         <a
           href={`/workspaces/${workspaceId}/audit?tab=newspapers`}
           className={`nr-tab ${tab === "newspapers" ? "nr-tab-active" : ""}`}
