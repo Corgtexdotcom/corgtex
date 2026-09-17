@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
+import { checkServerIdentity, TLSSocket } from "node:tls";
 import pg from "pg";
 import { exportTenantSnapshot, hashCanonical, hashFrames } from "./shared-tenant-export";
 import { importTenantSnapshot, type TenantImportOptions } from "./shared-tenant-import";
@@ -7,16 +9,40 @@ import { inventorySharedTenantSource, quoteIdentifier } from "./shared-tenant-in
 import { prepareCoreCrmContinuity, restoreCoreQualificationTokens } from "./core-crm-continuity";
 import { transferScalarFieldKinds, type TenantTransferManifest, type TenantTransferSnapshot } from "./shared-tenant-transfer-contract";
 
-function url(side: "source" | "target") {
+function url(side: "source" | "target" | "clone") {
   const input = process.env[`CORE_CONTINUITY_${side.toUpperCase()}_URL`];
   if (!input) throw new Error("Explicit isolated synthetic database required");
   const value = new URL(input);
-  if (!["localhost", "127.0.0.1"].includes(value.hostname) || value.pathname !== `/continuity_${side}_test`) throw new Error("Isolated continuity test database required");
+  if (!["localhost", "127.0.0.1"].includes(value.hostname) || value.pathname !== `/continuity_${side === "clone" ? "target" : side}_test`
+    || value.search) throw new Error("Isolated continuity test database required");
   return input;
 }
+const ca = readFileSync(process.env.CORE_CONTINUITY_TLS_CA!);
+const ssl = { ca, rejectUnauthorized: true };
 const source = new pg.Client({ connectionString: url("source") });
-const target = new pg.Client({ connectionString: url("target") });
-assert.equal(process.env.DATABASE_URL, url("target"));
+const target = new pg.Client({ connectionString: url("target"), ssl });
+const clone = new pg.Client({ connectionString: url("clone"), ssl });
+const prismaUrl = new URL(url("target"));
+prismaUrl.searchParams.set("sslmode", "require");
+prismaUrl.searchParams.set("sslcert", process.env.CORE_CONTINUITY_TLS_CA!);
+prismaUrl.searchParams.set("sslaccept", "strict");
+assert.equal(process.env.DATABASE_URL, prismaUrl.href);
+assert.equal(process.env.CORE_CONTINUITY_CONSUMER_HOLD_READY, "true");
+const endpoint = (input: string) => { const value = new URL(input); return { host: value.hostname, port: Number(value.port || 5432) }; };
+function stream(client: pg.Client) {
+  return (client as pg.Client & { connection: { stream: TLSSocket } }).connection.stream;
+}
+async function spyQueries(client: pg.Client, intercept: (sql: string) => void, run: () => Promise<unknown>,
+  afterQuery?: (sql: string, params?: unknown[]) => void) {
+  const original = client.query;
+  client.query = (async (sql: string, params?: unknown[]) => {
+    intercept(sql);
+    const result = await original.call(client, sql, params);
+    afterQuery?.(sql, params);
+    return result;
+  }) as typeof client.query;
+  try { await run(); } finally { client.query = original; }
+}
 const workspace = "synthetic-core-corgtex", other = "synthetic-existing-target", actor = "synthetic-core-actor";
 const states = ["sent", "skipped", "pending"];
 const insert = async (db: pg.Client, table: string, row: Record<string, unknown>) => {
@@ -85,8 +111,8 @@ function options(snapshot: TenantTransferSnapshot, removeTokens = true): TenantI
     objectStorageBinding: { sourceStoreId: body.sourceStoreId, targetStoreId: body.targetStoreId },
     transforms: removeTokens ? { DemoLead: { qualifyToken: { kind: "null", reason: "Generic import never transfers qualification capability" } } } : {} };
 }
-before(async () => { await source.connect(); await target.connect(); await seed(); });
-after(async () => { await source.end(); await target.end(); const { prisma } = await import("../../packages/shared/src/db"); await prisma.$disconnect(); });
+before(async () => { await source.connect(); await target.connect(); await clone.connect(); await seed(); });
+after(async () => { await source.end(); await target.end(); await clone.end(); const { prisma } = await import("../../packages/shared/src/db"); await prisma.$disconnect(); });
 
 test("rejects a real export that excludes populated queues through operator-control", async () => {
   const policy = await manifest();
@@ -122,13 +148,98 @@ test("actual CRM export/publication/import and explicit qualification continuity
   await assert.rejects(importTenantSnapshot(target, snapshot, options(snapshot)), /TRANSFER_SOURCE_WORK_NOT_DRAINED/);
   await assert.rejects(importTenantSnapshot(target, publication, options(publication, false)), /TRANSFER_QUALIFICATION_TOKEN_MUST_BE_REMOVED/);
   const imported = await importTenantSnapshot(target, publication, options(publication));
-  const binding = { execute: true as const, target: { database: "continuity_target_test", user: "postgres" }, expectedImportReceiptSha256: hashCanonical(imported.receipt) };
+  const binding = { execute: true as const, target: { database: "continuity_target_test", user: "postgres", endpoint: endpoint(url("target")) }, expectedImportReceiptSha256: hashCanonical(imported.receipt) };
   const restore = () => restoreCoreQualificationTokens(target, bundle, binding);
   const readTokens = async () => (await target.query('SELECT id,"qualifyToken" FROM "DemoLead" WHERE "workspaceId"=$1 ORDER BY id', [workspace])).rows;
   const nullTokens = await readTokens();
   assert.ok(nullTokens.every(row => row.qualifyToken === null));
   const marker = async () => (await target.query('SELECT enabled,config FROM "WorkspaceFeatureFlag" WHERE "workspaceId"=$1 AND flag=$2', [workspace, "operator_import_inactive"])).rows[0];
   const initialMarker = await marker();
+  async function rejectBeforeSql(client: pg.Client, expected: string, override = binding) {
+    let queries = 0;
+    await spyQueries(client, () => { queries++; }, async () =>
+      assert.rejects(restoreCoreQualificationTokens(client, bundle, override), { message: `CORE_CONTINUITY_${expected}` }));
+    assert.equal(queries, 0, "transport rejection must precede BEGIN and token UPDATE");
+  }
+  await t.test("a TLS clone with identical DB/user/import receipt at another endpoint rejects before SQL", async () => {
+    await importTenantSnapshot(clone, publication, options(publication));
+    await clone.query('UPDATE "WorkspaceFeatureFlag" SET config=$2::jsonb WHERE "workspaceId"=$1 AND flag=$3',
+      [workspace, JSON.stringify(initialMarker.config), "operator_import_inactive"]);
+    assert.deepEqual((await clone.query("SELECT current_database() AS database, current_user AS user")).rows,
+      (await target.query("SELECT current_database() AS database, current_user AS user")).rows);
+    const cloned = (await clone.query('SELECT config FROM "WorkspaceFeatureFlag" WHERE "workspaceId"=$1 AND flag=$2', [workspace, "operator_import_inactive"])).rows[0];
+    assert.equal(hashCanonical(cloned.config.transferReceipt), binding.expectedImportReceiptSha256);
+    assert.notDeepEqual(endpoint(url("clone")), binding.target.endpoint);
+    for (const client of [target, clone]) {
+      assert.equal(stream(client).authorized, true);
+      for (const host of ["localhost", "127.0.0.1"]) assert.equal(checkServerIdentity(host, stream(client).getPeerCertificate()), undefined);
+    }
+    await rejectBeforeSql(clone, "ENDPOINT_MISMATCH");
+    assert.equal((await clone.query('SELECT count(*) FROM "DemoLead" WHERE "qualifyToken" IS NOT NULL')).rows[0].count, "0");
+  });
+  await t.test("missing endpoint, wrong host/port, query wrappers and pools reject before SQL", async () => {
+    await rejectBeforeSql(target, "ENDPOINT_REQUIRED", { ...binding, target: { ...binding.target, endpoint: undefined! } });
+    for (const changed of [{ ...binding.target.endpoint, port: binding.target.endpoint.port + 1 }, { ...binding.target.endpoint, host: "elsewhere.invalid" }]) {
+      await rejectBeforeSql(target, "ENDPOINT_MISMATCH", { ...binding, target: { ...binding.target, endpoint: changed } });
+    }
+    let calls = 0;
+    const wrapper = { query: async () => { calls++; throw new Error("must not query"); } };
+    await assert.rejects(restoreCoreQualificationTokens(wrapper as unknown as pg.Client, bundle, binding), /CLIENT_REQUIRED/);
+    assert.equal(calls, 0);
+    const pool = new pg.Pool({ connectionString: url("target"), ssl });
+    try { await assert.rejects(restoreCoreQualificationTokens(pool as unknown as pg.Client, bundle, binding), /CLIENT_REQUIRED/); }
+    finally { await pool.end(); }
+    await rejectBeforeSql(new pg.Client({ connectionString: url("target"), ssl }), "CONNECTION_REQUIRED");
+  });
+  for (const [name, config, code, host] of [
+    ["plaintext", { ssl: false }, "TLS_REQUIRED"],
+    ["untrusted CA with rejection disabled", { ssl: { rejectUnauthorized: false } }, "TLS_REQUIRED"],
+    ["trusted CA but rejection disabled", { ssl: { ca, rejectUnauthorized: false } }, "TLS_REQUIRED"],
+    ["URL SSL override", { connectionString: url("target") + "?sslmode=no-verify", ssl }, "TLS_REQUIRED"],
+    ["custom callback bypassing wrong hostname", { connectionString: undefined, host: "127.0.0.2", port: binding.target.endpoint.port,
+      user: "postgres", password: new URL(url("target")).password, database: binding.target.database,
+      ssl: { ...ssl, checkServerIdentity: () => undefined } }, "TLS_HOSTNAME_MISMATCH", "127.0.0.2"],
+  ] as const) {
+    await t.test(`rejects real connected ${name} before BEGIN`, async () => {
+      const client = new pg.Client({ connectionString: url("target"), ...config });
+      try {
+        await client.connect();
+        if (host) assert.equal(stream(client).authorized, true, "custom callback alone does not prove hostname");
+        await rejectBeforeSql(client, code, host ? { ...binding, target: { ...binding.target, endpoint: { ...binding.target.endpoint, host } } } : binding);
+      } finally { await client.end(); }
+    });
+  }
+  await t.test("untrusted CA is rejected by the actual TLS handshake", async () => {
+    const client = new pg.Client({ connectionString: url("target"), ssl: { rejectUnauthorized: true } });
+    try { await assert.rejects(client.connect()); } finally { await client.end(); }
+  });
+  await t.test("revalidates the same live socket and remote port immediately before token writes", async () => {
+    const replacement = new pg.Client({ connectionString: url("target"), ssl });
+    await replacement.connect();
+    const connection = (target as pg.Client & { connection: { stream: TLSSocket } }).connection;
+    const original = connection.stream;
+    const lastTable = imported.receipt.tables.filter(table => table.primaryKeys.length > 0).at(-1)!;
+    let changed = false, writes = 0;
+    try {
+      await spyQueries(target, sql => {
+        if (sql.startsWith('UPDATE public."DemoLead"')) writes++;
+        if (sql === "ROLLBACK") connection.stream = original;
+      }, async () => assert.rejects(restore(), /SOCKET_CHANGED/), (sql, params) => {
+        if (sql.includes(`::text AS row FROM public."${lastTable.name}"`)
+          && JSON.stringify(params) === JSON.stringify(lastTable.primaryKeys.at(-1))) {
+          connection.stream = stream(replacement); changed = true;
+        }
+      });
+    } finally { connection.stream = original; await target.query("ROLLBACK"); await replacement.end(); }
+    assert.equal(changed, true); assert.equal(writes, 0);
+    // Spoofed pg endpoint metadata must not mask a different TCP peer port.
+    const client = target as pg.Client & { connectionParameters: { port: number } };
+    const port = client.port;
+    try {
+      client.port = client.connectionParameters.port = port + 1;
+      await rejectBeforeSql(client, "TLS_REQUIRED", { ...binding, target: { ...binding.target, endpoint: { ...binding.target.endpoint, port: port + 1 } } });
+    } finally { client.port = client.connectionParameters.port = port; }
+  });
   await t.test("CRM IDs, links and historical fields survive publication and import", async () => {
     for (const table of snapshot.tables.filter(entry => entry.name.startsWith("Crm"))) {
       for (const row of table.rows) {
@@ -177,17 +288,16 @@ test("actual CRM export/publication/import and explicit qualification continuity
   });
   await t.test("failure after token write rolls back all tokens and receipt without leaking SQL details", async () => {
     let writes = 0;
-    const interrupted = { query: async (sql: string, params?: unknown[]) => {
+    await spyQueries(target, sql => {
       if (sql.startsWith('UPDATE public."DemoLead"') && ++writes === 2) throw new Error("synthetic raw-token-detail must not escape");
-      return target.query(sql, params);
-    } };
-    await assert.rejects(restoreCoreQualificationTokens(interrupted, bundle, binding), (error: Error) => error.message === "CORE_CONTINUITY_RESTORE_FAILED");
+    }, async () => assert.rejects(restore(), (error: Error) => error.message === "CORE_CONTINUITY_RESTORE_FAILED"));
     assert.equal(writes, 2); assert.deepEqual(await readTokens(), nullTokens); assert.deepEqual(await marker(), initialMarker);
-    const late = { query: async (sql: string, params?: unknown[]) => {
+    await spyQueries(target, sql => {
       if (sql === "COMMIT") throw new Error("synthetic failure before commit");
-      return target.query(sql, params);
-    } };
-    await assert.rejects(restoreCoreQualificationTokens(late, bundle, binding), /RESTORE_FAILED/);
+    }, async () => assert.rejects(restore(), /RESTORE_FAILED/));
+    await spyQueries(target, sql => {
+      if (sql.startsWith("BEGIN")) throw new Error("CORE_CONTINUITY_SYNTHETIC_SECRET");
+    }, async () => assert.rejects(restore(), { message: "CORE_CONTINUITY_RESTORE_FAILED" }));
     assert.deepEqual(await readTokens(), nullTokens); assert.deepEqual(await marker(), initialMarker);
   });
   await t.test("restore only original qualification capabilities; verify exact idempotent retry", async () => {
@@ -195,6 +305,10 @@ test("actual CRM export/publication/import and explicit qualification continuity
     assert.equal(first.alreadyRestored, false); assert.equal(first.held, true);
     assert.equal(JSON.stringify(first).includes("synthetic-only-token"), false);
     assert.deepEqual(await restore(), { ...first, alreadyRestored: true });
+    assert.equal(first.receipt.targetSha256, hashCanonical(binding.target));
+    assert.deepEqual(await restoreCoreQualificationTokens(target, bundle, { ...binding, target: { ...binding.target,
+      endpoint: { ...binding.target.endpoint, host: binding.target.endpoint.host.toUpperCase() + "." } } }),
+    { ...first, alreadyRestored: true });
     assert.equal((await marker()).enabled, true);
     assert.deepEqual((await marker()).config.transferReceipt, initialMarker.config.transferReceipt);
     assert.deepEqual((await target.query('SELECT "passwordHash","globalRole" FROM "User" WHERE id=$1', [actor])).rows[0],
@@ -204,6 +318,13 @@ test("actual CRM export/publication/import and explicit qualification continuity
     try { await assert.rejects(restore(), /LEAD_STATE_MISMATCH/); }
     finally { await target.query('UPDATE "DemoLead" SET "qualifyToken"=$1 WHERE id=$2', ["synthetic-only-token-pending", "lead-pending"]); }
     const restoredConfig = (await marker()).config;
+    const legacy = structuredClone(restoredConfig);
+    const { sha256: _legacyDigest, ...legacyBody } = legacy.coreQualificationContinuity;
+    legacyBody.targetSha256 = hashCanonical({ database: binding.target.database, user: binding.target.user });
+    legacy.coreQualificationContinuity = { ...legacyBody, sha256: hashCanonical(legacyBody) };
+    await target.query('UPDATE "WorkspaceFeatureFlag" SET config=$2::jsonb WHERE "workspaceId"=$1', [workspace, JSON.stringify(legacy)]);
+    try { await assert.rejects(restore(), /RESTORE_RECEIPT_MISMATCH/); }
+    finally { await target.query('UPDATE "WorkspaceFeatureFlag" SET config=$2::jsonb WHERE "workspaceId"=$1', [workspace, JSON.stringify(restoredConfig)]); }
     await target.query('UPDATE "DemoLead" SET "visitCount"=99 WHERE id=$1', ["lead-pending"]);
     const leadTable = publication.tables.find(table => table.name === "DemoLead")!;
     const frames = [];
@@ -234,7 +355,7 @@ test("actual CRM export/publication/import and explicit qualification continuity
     assert.equal((await target.query('SELECT count(*) FROM "Event" WHERE "workspaceId"=$1 AND status=\'PENDING\'', [workspace])).rows[0].count, "2");
     assert.equal((await restore()).alreadyRestored, true);
   });
-  await t.test("new intake events remain unclaimed after consumer-hold integration", { skip: process.env.CORE_CONTINUITY_CONSUMER_HOLD_READY !== "true" }, async () => {
+  await t.test("new intake events remain unclaimed after consumer-hold integration", async () => {
     const { runPendingJobs, dispatchPendingEvents } = await import("../../packages/workflows/src/outbox");
     assert.equal(await dispatchPendingEvents("synthetic-held"), 0);
     assert.equal(await runPendingJobs("synthetic-held"), 0);

@@ -1,8 +1,11 @@
+import { isIP } from "node:net";
+import { checkServerIdentity, TLSSocket } from "node:tls";
+import pg from "pg";
 import { hashCanonical, hashFrames } from "./shared-tenant-export";
 import { verifyImportedTenant } from "./shared-tenant-import";
 import { quoteIdentifier, readSharedTenantSchema } from "./shared-tenant-inventory.mjs";
 import { prepareTenantPublication, type PublicationRowSelection } from "./shared-tenant-publication";
-import type { TenantTransferSnapshot, TransferSqlClient, TransferTableData } from "./shared-tenant-transfer-contract";
+import type { TenantTransferSnapshot, TransferTableData } from "./shared-tenant-transfer-contract";
 
 const rule = "core-crm-continuity-v1" as const;
 const inactiveFlag = "operator_import_inactive";
@@ -16,10 +19,56 @@ export interface CoreCrmContinuityBundle {
 }
 export interface CoreQualificationRestoreBinding {
   execute: true;
-  target: { database: string; user: string };
+  // Approved independently of the connected client, never discovered from it.
+  target: { database: string; user: string; endpoint: { host: string; port: number } };
   expectedImportReceiptSha256: string;
 }
-function fail(code: string): never { throw new Error(`CORE_CONTINUITY_${code}`); }
+class CoreContinuityError extends Error {}
+function fail(code: string): never { throw new CoreContinuityError(`CORE_CONTINUITY_${code}`); }
+function normalizeHost(host: unknown): string {
+  if (typeof host !== "string" || !host || host !== host.trim()) fail("ENDPOINT_REQUIRED");
+  if (isIP(host) === 6) return new URL(`https://[${host}]`).hostname.slice(1, -1);
+  if (isIP(host)) return host;
+  const normalized = host.toLowerCase().replace(/\.$/, "");
+  if (normalized.length > 253 || !normalized.split(".").every(label =>
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) fail("ENDPOINT_REQUIRED");
+  return normalized;
+}
+function approvedTarget(binding: CoreQualificationRestoreBinding) {
+  const target = binding.target;
+  if (!target.endpoint || !Number.isInteger(target.endpoint.port)
+    || target.endpoint.port < 1 || target.endpoint.port > 65535) fail("ENDPOINT_REQUIRED");
+  return { database: target.database, user: target.user,
+    endpoint: { host: normalizeHost(target.endpoint.host), port: target.endpoint.port } };
+}
+// pg 8 exposes the effective connection and Node 22 records certificate rejection
+// on its TLSSocket. Inspect both, not the caller's pre-URL SSL configuration.
+function boundSocket(client: pg.Client, target: ReturnType<typeof approvedTarget>, same?: TLSSocket): TLSSocket {
+  try {
+    if (!(client instanceof pg.Client)) fail("CLIENT_REQUIRED");
+    const live = client as pg.Client & {
+      _connected: boolean; _ending: boolean; _ended: boolean; _queryable: boolean;
+      connectionParameters: { host: string; port: number };
+      connection: { stream: TLSSocket & { _rejectUnauthorized?: boolean }; ssl: boolean | { rejectUnauthorized?: boolean } };
+    };
+    if (!live._connected || live._ending || live._ended || !live._queryable) fail("CONNECTION_REQUIRED");
+    if (normalizeHost(live.host) !== target.endpoint.host || live.port !== target.endpoint.port
+      || normalizeHost(live.connectionParameters.host) !== target.endpoint.host
+      || live.connectionParameters.port !== target.endpoint.port) fail("ENDPOINT_MISMATCH");
+    const socket = live.connection.stream;
+    if (!(socket instanceof TLSSocket) || socket.encrypted !== true || socket.authorized !== true
+      || socket._rejectUnauthorized !== true || !live.connection.ssl
+      || (typeof live.connection.ssl === "object" && live.connection.ssl.rejectUnauthorized === false)
+      || socket.destroyed || !socket.readable || !socket.writable || socket.connecting
+      || socket.remotePort !== target.endpoint.port) fail("TLS_REQUIRED");
+    if (same && socket !== same) fail("SOCKET_CHANGED");
+    if (checkServerIdentity(target.endpoint.host, socket.getPeerCertificate())) fail("TLS_HOSTNAME_MISMATCH");
+    return socket;
+  } catch (error) {
+    if (error instanceof CoreContinuityError) throw error;
+    fail("TLS_REQUIRED");
+  }
+}
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -139,20 +188,24 @@ export function verifyCoreCrmContinuity(bundle: CoreCrmContinuityBundle) {
 /** Purpose-scoped capability restoration ONLY. Caller owns source fencing,
  * private custody and routing authority. This never activates or replays work.
  * The held result reports the marker, not deployment of the consumer-hold code.
+ * TLS binds the approved network endpoint, not an immutable physical cluster.
  * Do not expose this API as an unauthenticated application route.
  */
-export async function restoreCoreQualificationTokens(client: TransferSqlClient, bundle: CoreCrmContinuityBundle, binding: CoreQualificationRestoreBinding) {
+export async function restoreCoreQualificationTokens(client: pg.Client, bundle: CoreCrmContinuityBundle, binding: CoreQualificationRestoreBinding) {
   try { verifyCoreCrmContinuity(bundle); } catch { fail("BUNDLE_INVALID"); }
-  if (binding?.execute !== true || !binding.target?.database || !binding.target.user
+  if (binding?.execute !== true || typeof binding.target?.database !== "string" || !binding.target.database
+    || typeof binding.target.user !== "string" || !binding.target.user
     || !/^[a-f0-9]{64}$/.test(binding.expectedImportReceiptSha256)) fail("EXPLICIT_BINDING_REQUIRED");
+  const approved = approvedTarget(binding);
+  const socket = boundSocket(client, approved);
   const snapshot = bundle.publication.publicationSnapshot;
   const { table, entries } = leads(snapshot);
   const workspaceId = snapshot.manifest.workspaceId;
   const tokenBindingsSha256 = hashCanonical(entries);
   const identity = { bundleSha256: bundle.sha256, importReceiptSha256: binding.expectedImportReceiptSha256,
-    targetSha256: hashCanonical(binding.target), tokenBindingsSha256 };
-  await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    targetSha256: hashCanonical(approved), tokenBindingsSha256 };
   try {
+    await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
     await client.query("SET LOCAL TimeZone = 'UTC'");
     await client.query("SET LOCAL DateStyle = 'ISO, YMD'");
     await client.query("SET LOCAL extra_float_digits = 3");
@@ -160,7 +213,7 @@ export async function restoreCoreQualificationTokens(client: TransferSqlClient, 
     await client.query("SET LOCAL lock_timeout = '10s'");
     await client.query("SET LOCAL statement_timeout = '120s'");
     const target = (await client.query("SELECT current_database() AS database, current_user AS user")).rows[0];
-    if (!target || hashCanonical(target) !== identity.targetSha256) fail("TARGET_MISMATCH");
+    if (!target || target.database !== approved.database || target.user !== approved.user) fail("TARGET_MISMATCH");
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`tenant-transfer:${workspaceId}`]);
     const found = (await client.query('SELECT id, slug FROM public."Workspace" WHERE id=$1 OR slug=$2 FOR UPDATE', [workspaceId, "corgtex"])).rows;
     if (found.length !== 1 || found[0].id !== workspaceId || found[0].slug !== "corgtex") fail("WORKSPACE_MISMATCH");
@@ -234,8 +287,10 @@ export async function restoreCoreQualificationTokens(client: TransferSqlClient, 
       verifiedLeadReceipt.sha256 = prior.leadRowsSha256;
     }
     await verifyImportedTenant(client, snapshot, verification);
+    boundSocket(client, approved, socket);
     if (prior !== undefined) { await client.query("COMMIT"); return { alreadyRestored: true, held: true, receipt: prior }; }
     for (const entry of entries.filter((entry) => entry.token !== null)) {
+      boundSocket(client, approved, socket);
       const updated = await client.query('UPDATE public."DemoLead" SET "qualifyToken"=$1 WHERE id=$2 AND "workspaceId"=$3 AND "qualifyToken" IS NULL RETURNING id', [entry.token, entry.id, workspaceId]);
       if (updated.rows.length !== 1) fail("LEAD_STATE_MISMATCH");
     }
@@ -251,7 +306,7 @@ export async function restoreCoreQualificationTokens(client: TransferSqlClient, 
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     // PostgreSQL uniqueness errors can contain the raw bearer token in detail.
-    if (error instanceof Error && /^CORE_CONTINUITY_[A-Z_]+$/.test(error.message)) throw error;
+    if (error instanceof CoreContinuityError) throw error;
     fail("RESTORE_FAILED");
   }
 }

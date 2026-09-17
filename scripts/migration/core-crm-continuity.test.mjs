@@ -115,4 +115,25 @@ describe("Core-specific continuity preparation", () => {
     await expect(restoreCoreQualificationTokens(client, bundle, {})).rejects.toThrow("BUNDLE_INVALID");
     expect(calls).toBe(0);
   });
+  it.each([undefined, {}, { host: "localhost" }, { host: "/tmp", port: 5432 },
+    { host: " localhost", port: 5432 }, { host: "", port: 5432 }, { host: "bad..host", port: 5432 },
+    { host: "localhost", port: "5432" }, { host: "localhost", port: 0 },
+    { host: "localhost", port: 65536 }, { host: "localhost", port: 1.5 }])(
+    "requires an independent unambiguous network endpoint: %j", async endpoint => {
+      let calls = 0;
+      const client = { query: async () => { calls++; return { rows: [] }; } };
+      await expect(restoreCoreQualificationTokens(client, prepareCoreCrmContinuity(fixture()), {
+        execute: true, target: { database: "synthetic", user: "postgres", endpoint },
+        expectedImportReceiptSha256: "a".repeat(64),
+      })).rejects.toThrow("ENDPOINT_REQUIRED");
+      expect(calls).toBe(0);
+    },
+  );
+  it("does not accept a query-only adapter with an otherwise valid binding", async () => {
+    const client = { query: () => { throw new Error("SQL must not run"); } };
+    await expect(restoreCoreQualificationTokens(client, prepareCoreCrmContinuity(fixture()), {
+      execute: true, target: { database: "synthetic", user: "postgres", endpoint: { host: "localhost", port: 5432 } },
+      expectedImportReceiptSha256: "a".repeat(64),
+    })).rejects.toThrow("CLIENT_REQUIRED");
+  });
 });

@@ -32,9 +32,22 @@ jobs:
           --cpus 1 --memory 1g --memory-swap 1g
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d continuity_source_test"
           --health-interval 5s --health-timeout 5s --health-retries 12
+      clone:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: continuity_target_test
+        ports:
+          - 127.0.0.1:5433:5432
+        options: >-
+          --cpus 1 --memory 1g --memory-swap 1g
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d continuity_target_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       CORE_CONTINUITY_SOURCE_URL: postgresql://postgres:postgres@127.0.0.1:5432/continuity_source_test
       CORE_CONTINUITY_TARGET_URL: postgresql://postgres:postgres@127.0.0.1:5432/continuity_target_test
+      CORE_CONTINUITY_CLONE_URL: postgresql://postgres:postgres@localhost:5433/continuity_target_test
 
     steps:
       - uses: actions/checkout@v5
@@ -46,6 +59,19 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
+      - name: Configure ephemeral trusted TLS on both target endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/migration/core-continuity-tls-fixture.sh "$RUNNER_TEMP/core-continuity-tls"
+          for container in "${{ job.services.postgres.id }}" "${{ job.services.clone.id }}"; do
+            docker cp "$RUNNER_TEMP/core-continuity-tls" "$container:/tmp/core-continuity-tls"
+            docker exec "$container" chown postgres:postgres /tmp/core-continuity-tls/server.key
+            docker exec "$container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "ALTER SYSTEM SET ssl_cert_file='/tmp/core-continuity-tls/server.crt'" \
+              -c "ALTER SYSTEM SET ssl_key_file='/tmp/core-continuity-tls/server.key'" \
+              -c "ALTER SYSTEM SET ssl=on" -c "SELECT pg_reload_conf()"
+          done
       - name: Generate Prisma and migrate both synthetic databases
         shell: bash
         run: |
@@ -54,7 +80,7 @@ jobs:
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test \
             DATABASE_URL="$CORE_CONTINUITY_TARGET_URL" \
             node node_modules/prisma/build/index.js generate
-          for database_url in "$CORE_CONTINUITY_SOURCE_URL" "$CORE_CONTINUITY_TARGET_URL"; do
+          for database_url in "$CORE_CONTINUITY_SOURCE_URL" "$CORE_CONTINUITY_TARGET_URL" "$CORE_CONTINUITY_CLONE_URL"; do
             env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test DATABASE_URL="$database_url" \
               node node_modules/prisma/build/index.js migrate deploy
           done
@@ -64,10 +90,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          database_url="$(node -e 'const u = new URL(process.env.CORE_CONTINUITY_TARGET_URL); u.searchParams.set("sslmode", "require"); u.searchParams.set("sslcert", process.env.RUNNER_TEMP + "/core-continuity-tls/ca.crt"); u.searchParams.set("sslaccept", "strict"); console.log(u.href)')"
           env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test \
             APP_URL=http://example.invalid NEXT_PUBLIC_SITE_URL=http://example.invalid \
-            DATABASE_URL="$CORE_CONTINUITY_TARGET_URL" \
+            DATABASE_URL="$database_url" \
             CORE_CONTINUITY_SOURCE_URL="$CORE_CONTINUITY_SOURCE_URL" \
             CORE_CONTINUITY_TARGET_URL="$CORE_CONTINUITY_TARGET_URL" \
+            CORE_CONTINUITY_CLONE_URL="$CORE_CONTINUITY_CLONE_URL" \
+            CORE_CONTINUITY_TLS_CA="$RUNNER_TEMP/core-continuity-tls/ca.crt" \
             CORE_CONTINUITY_CONSUMER_HOLD_READY=true \
             npm run test:migration:core-continuity
+      - name: Remove ephemeral TLS keys
+        if: always()
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/core-continuity-tls"
