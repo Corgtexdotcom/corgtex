@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { buildObservationSummary, normalizeObservationTargets, runObservationGate } from "./post-deploy-observation-gate.mjs";
 
@@ -28,6 +29,40 @@ describe("automatic production CI boundary", () => {
     expect([...normalizeObservationTargets(observationTargets)]).toEqual(manifests);
     expect(observe).toContain('OBSERVATION_REQUIRE_SOURCE: "true"');
     expect(observe).toContain("environment: fleet-release-production");
+  });
+
+  function workflowManifest(mode) {
+    const script = job("observe-prod").match(/node -e '\n(\s+const targetManifests = [\s\S]*?)\n\s*'/)?.[1];
+    expect(script).toBeTruthy();
+    return JSON.parse(execFileSync(process.execPath, ["-e", script], { encoding: "utf8", env: {
+      PRODUCTION_VALIDATION_TARGET: mode, GITHUB_SHA: "a".repeat(40),
+      SELFSERVE_GIT_SHA: "b".repeat(40), APP_GIT_SHA: "a".repeat(40), OPS_GIT_SHA: "c".repeat(40),
+    } }));
+  }
+
+  it("keeps Core observation rooted in the source SHA", () => {
+    expect(workflowManifest("core").gitSha).toBe("a".repeat(40));
+    expect(workflowManifest("").gitSha).toBe("a".repeat(40));
+  });
+
+  it("runs sequence ACL regression on the existing isolated CI database", () => {
+    expect(job("check")).toContain("node --test scripts/selfserve-validation-schema.integration.test.mjs");
+    expect(job("check")).toContain("QA_SCHEMA_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}");
+  });
+
+  it.each(["corgtex_route_error", "corgtex_route_response"])("blocks accepted selfserve %s, not stale source failures", (event) => {
+    const manifest = workflowManifest("selfserve-validation");
+    expect(manifest.gitSha).toBe("b".repeat(40));
+    expect(manifest.targetManifests.map((entry) => entry.target)).toEqual(["azure-selfserve", "ops"]);
+    const failure = (sha) => ({ source: "azure_monitor", provider: "azure", instance_id: "azure-selfserve",
+      event, status: "500", route: "/api/example", release_git_sha: sha });
+    const summarize = (rows) => buildObservationSummary({ manifest, rows, targets: "azure-selfserve,ops",
+      since: new Date("2026-09-13T04:00:00Z") });
+    const summary = summarize([failure(manifest.gitSha), failure("a".repeat(40))]);
+    expect(summary.status).toBe("blocked");
+    expect(summary.blockingFailures.map((row) => row.release_git_sha)).toEqual([manifest.gitSha]);
+    expect(summary.advisoryFailures.map((row) => row.release_git_sha)).toEqual(["a".repeat(40)]);
+    expect(summarize([failure("a".repeat(40))]).status).toBe("passed");
   });
 
   it.each([

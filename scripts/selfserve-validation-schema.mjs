@@ -43,6 +43,9 @@ SELECT EXISTS (
     OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','f')
       AND (c.relowner = r.oid OR has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')))
+    OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind = 'S'
+      AND (c.relowner = r.oid OR has_sequence_privilege(r.oid, c.oid, 'USAGE,UPDATE')))
   )
 ) AS can_write`;
 

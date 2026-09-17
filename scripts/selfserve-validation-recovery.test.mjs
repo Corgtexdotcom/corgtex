@@ -35,6 +35,12 @@ describe("fresh baked recovery proof", () => {
       cache: "no-store", redirect: "error", headers: { "cache-control": "no-cache" },
     })]);
   });
+  it.each(["core", "selfserve-validation", ""])("retains immutable selfserve attribution after mode changes to %s", async (mode) => {
+    expect(workflow("auto-revert").jobs["selfserve-fleet-recovery"].if).not.toContain("PRODUCTION_VALIDATION_TARGET");
+    expect(await recoveryIntent({ ...env, PRODUCTION_VALIDATION_TARGET: mode },
+      async () => new Response(JSON.stringify(health()))))
+      .toMatchObject({ action: "fleet-release", failedSha: SHA, sourceRevert: false });
+  });
   it.each([
     ["configured-only", (h) => { delete h.release.runtime; }],
     ["provider fallback", (h) => { h.release.runtime.evidence = "legacy-provider"; }],
@@ -94,7 +100,7 @@ describe("failed-run routing, not current repository mode", () => {
   });
   it("does not schedule protected recovery for failed CI, schedules, or non-explicit validation", () => {
     const gate = workflow("auto-revert").jobs["selfserve-fleet-recovery"].if;
-    expect(gate).toContain("&& github.event.workflow_run.name == 'Production Validation' &&");
+    expect(gate).toContain("github.event.workflow_run.name == 'Production Validation' &&");
     expect(gate).toContain("&& github.event.workflow_run.event == 'workflow_dispatch' &&");
     expect(gate).toContain("&& github.event.workflow_run.conclusion == 'failure' &&");
     expect(gate).not.toContain("||");

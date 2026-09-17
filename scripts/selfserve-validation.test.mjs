@@ -447,6 +447,12 @@ describe("workflow and fixture secret isolation", () => {
     expect(AUDITOR_PRIVILEGES_SQL).toContain("pg_has_role");
     expect(AUDITOR_PRIVILEGES_SQL).toContain("INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER");
   });
+  it("checks sequence writes and ownership for reachable roles across non-system schemas, not SELECT", () => {
+    expect(AUDITOR_PRIVILEGES_SQL).toContain("pg_has_role(current_user, r.oid, 'MEMBER')");
+    expect(AUDITOR_PRIVILEGES_SQL).toContain("n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind = 'S'");
+    expect(AUDITOR_PRIVILEGES_SQL).toContain("c.relowner = r.oid OR has_sequence_privilege(r.oid, c.oid, 'USAGE,UPDATE')");
+    expect(AUDITOR_PRIVILEGES_SQL).not.toMatch(/has_sequence_privilege\([^)]*SELECT/);
+  });
 });
 
 describe("explicit internal-only parity guard", () => {
