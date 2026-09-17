@@ -14,12 +14,23 @@ export function failedCoreSmokeJob({ event, repository, jobs }) {
     && matches[0].run_id === run.id && matches[0].run_attempt === run.run_attempt && matches[0].head_sha === run.head_sha;
 }
 
-export async function recoveryIntent(env = process.env, fetchImpl = fetch) {
+export async function recoveryAttribution(env = process.env) {
   const event = JSON.parse(await readFile(env.GITHUB_EVENT_PATH, "utf8"));
-  const receipt = event.workflow_run?.name === "CI" ? null
-    : JSON.parse(await readFile(".artifacts/selfserve-recovery/outcome.json", "utf8"));
-  const intent = selfserveRecoveryAttribution({ event, repository: env.GITHUB_REPOSITORY,
+  let receipt = null;
+  if (event.workflow_run?.name !== "CI") {
+    try {
+      receipt = JSON.parse(await readFile(".artifacts/selfserve-recovery/outcome.json", "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return { action: "none", reason: "no-selfserve-outcome" };
+      throw error;
+    }
+  }
+  return selfserveRecoveryAttribution({ event, repository: env.GITHUB_REPOSITORY,
     receipt, acceptedSha: env.SELFSERVE_VALIDATION_ACCEPTED_SHA });
+}
+
+export async function recoveryIntent(env = process.env, fetchImpl = fetch) {
+  const intent = await recoveryAttribution(env);
   if (intent.action !== "fleet-release") return intent;
   const response = await fetchImpl(`${SELFSERVE_VALIDATION_TARGET.origin}/api/health`, {
     redirect: "error", cache: "no-store", headers: { "cache-control": "no-cache" }, signal: AbortSignal.timeout(30000),
@@ -42,7 +53,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, `trigger=${trigger}\n`);
       console.log(`Exact failed Core smoke in triggering attempt: ${trigger}`);
     } else {
-      const intent = await recoveryIntent();
+      const intent = process.argv.includes("--attribute-only") ? await recoveryAttribution() : await recoveryIntent();
       if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT,
         `action=${intent.action}\nrelease=${intent.release || ""}\nfailed_sha=${intent.failedSha || ""}\n`);
       console.log(JSON.stringify(intent));

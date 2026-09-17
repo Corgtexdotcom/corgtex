@@ -23,6 +23,11 @@ export function fullReleaseSha(value) {
   return value;
 }
 
+export function validationRunTarget({ eventName, pinnedTarget, configuredTarget }) {
+  requireValidation(eventName !== "push" || Boolean(pinnedTarget), "VALIDATION_PINNED_TARGET_REQUIRED");
+  return validationTarget(pinnedTarget || configuredTarget);
+}
+
 export function assertSelfserveOrigin(value) {
   requireValidation(value === SELFSERVE_VALIDATION_TARGET.origin, "VALIDATION_ORIGIN_MISMATCH");
   return value;
@@ -50,6 +55,8 @@ export function selfserveReadRequestAllowed(url, method = "GET") {
   if (!["GET", "HEAD"].includes(method)) return false;
   let pathname;
   try { pathname = decodeURIComponent(parsed.pathname); } catch { return false; }
+  if (pathname.startsWith("/_next/static/")) return !pathname.includes("\\")
+    && !pathname.split("/").some((segment) => segment === "." || segment === "..");
   const workspace = pathname.match(/\/workspaces\/([^/]+)/);
   return !workspace || workspace[1] === SELFSERVE_VALIDATION_TARGET.workspaceId;
 }

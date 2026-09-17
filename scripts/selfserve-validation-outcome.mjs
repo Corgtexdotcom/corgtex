@@ -41,7 +41,7 @@ export async function selfserveOutcome(env = process.env) {
   const live = boundLiveReceipt(receipts, { expectedSha: env.SELFSERVE_VALIDATION_EXPECTED_SHA,
     runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT });
   const liveFailure = live?.status === "failed" && live.identityVerified === true
-    && live.servingSha === env.SELFSERVE_VALIDATION_EXPECTED_SHA;
+    && live.servingSha === env.SELFSERVE_VALIDATION_EXPECTED_SHA && live.failureKind === "confirmed-route";
   const report = { schemaVersion: 1, target: target.name, origin: target.origin, workspaceId: target.workspaceId,
     status, blocker, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
     expectedSha: env.SELFSERVE_VALIDATION_EXPECTED_SHA, servingSha: live?.servingSha,

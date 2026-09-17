@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { recoveryIntent, failedCoreSmokeJob } from "./selfserve-validation-recovery.mjs";
+import { recoveryAttribution, recoveryIntent, failedCoreSmokeJob } from "./selfserve-validation-recovery.mjs";
 import { SELFSERVE_VALIDATION_TARGET as target } from "./lib/selfserve-validation-target.mjs";
 import { resolveProductionValidationContext, requiresProductionAppRelease } from "./production-validation-context.mjs";
 
@@ -36,10 +36,36 @@ describe("fresh baked recovery proof", () => {
     })]);
   });
   it.each(["core", "selfserve-validation", ""])("retains immutable selfserve attribution after mode changes to %s", async (mode) => {
-    expect(workflow("auto-revert").jobs["selfserve-fleet-recovery"].if).not.toContain("PRODUCTION_VALIDATION_TARGET");
+    expect(workflow("auto-revert").jobs["selfserve-recovery-attribution"].if).not.toContain("PRODUCTION_VALIDATION_TARGET");
     expect(await recoveryIntent({ ...env, PRODUCTION_VALIDATION_TARGET: mode },
       async () => new Response(JSON.stringify(health()))))
       .toMatchObject({ action: "fleet-release", failedSha: SHA, sourceRevert: false });
+  });
+  it("attributes without a live request before allowing the protected job", async () => {
+    expect(await recoveryAttribution(env)).toMatchObject({ action: "fleet-release", failedSha: SHA });
+    const jobs = workflow("auto-revert").jobs;
+    expect(jobs["selfserve-recovery-attribution"].environment).toBeUndefined();
+    expect(jobs["selfserve-recovery-attribution"].steps.at(-1).run).toContain("--attribute-only");
+    expect(jobs["selfserve-fleet-recovery"].needs).toBe("selfserve-recovery-attribution");
+    expect(jobs["selfserve-fleet-recovery"].if).toBe("needs.selfserve-recovery-attribution.outputs.action == 'fleet-release'");
+  });
+  it("manual Core without a selfserve artifact cannot request protected recovery", async () => {
+    mocks.readFile.mockImplementation(async (path) => {
+      if (path === "event.json") return JSON.stringify({ workflow_run: run() });
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    });
+    const fetch = vi.fn();
+    expect(await recoveryAttribution(env)).toEqual({ action: "none", reason: "no-selfserve-outcome" });
+    expect(await recoveryIntent(env, fetch)).toMatchObject({ action: "none" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([{ target: "core" }, { runAttempt: "1" }, { liveFailure: false }, { servingSha: ACCEPTED }])("rejects unbound outcomes before protection (%j)", async (overrides) => {
+    const original = mocks.readFile.getMockImplementation();
+    mocks.readFile.mockImplementation(async (path) => {
+      const json = JSON.parse(await original(path));
+      return JSON.stringify(path === "event.json" ? json : { ...json, ...overrides });
+    });
+    await expect(recoveryAttribution(env)).rejects.toThrow("RECOVERY_RELEASE_NOT_ATTRIBUTED");
   });
   it.each([
     ["configured-only", (h) => { delete h.release.runtime; }],
@@ -99,7 +125,7 @@ describe("failed-run routing, not current repository mode", () => {
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
   it("does not schedule protected recovery for failed CI, schedules, or non-explicit validation", () => {
-    const gate = workflow("auto-revert").jobs["selfserve-fleet-recovery"].if;
+    const gate = workflow("auto-revert").jobs["selfserve-recovery-attribution"].if;
     expect(gate).toContain("github.event.workflow_run.name == 'Production Validation' &&");
     expect(gate).toContain("&& github.event.workflow_run.event == 'workflow_dispatch' &&");
     expect(gate).toContain("&& github.event.workflow_run.conclusion == 'failure' &&");

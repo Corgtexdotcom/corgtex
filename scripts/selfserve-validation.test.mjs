@@ -219,7 +219,7 @@ describe("outcome attribution binding", () => {
   const live = () => ({ schemaVersion: 1, lane: "selfserve-live-read-only", target: target.name,
     origin: target.origin, workspaceId: target.workspaceId, ownerUserId: target.ownerUserId,
     gitSha: MAIN, runId: "123", runAttempt: "2", scope: "live-read-only", status: "failed",
-    identityVerified: true, servingSha: MAIN, cleanup: "completed" });
+    identityVerified: true, servingSha: MAIN, cleanup: "completed", failureKind: "confirmed-route" });
   async function outcome(receipts) {
     const directory = await mkdtemp(join(tmpdir(), "selfserve-outcome-test-"));
     try {
@@ -253,6 +253,9 @@ describe("outcome attribution binding", () => {
       event: { workflow_run: { id: 123, run_attempt: 2, name: "Production Validation", event: "workflow_dispatch",
         conclusion: "failure", head_branch: "main", head_repository: { full_name: "Corgtexdotcom/corgtex" } } } }).action).toBe("fleet-release");
   });
+  it.each([undefined, "infrastructure-unattributed", "timeout", "tooling"])("never attributes harness failure %s to the live release", async (failureKind) => {
+    expect(await outcome([{ ...live(), failureKind }])).toMatchObject({ liveFailure: false, failureKind: "infrastructure-unattributed" });
+  });
 });
 
 describe("workflow and fixture secret isolation", () => {
@@ -260,8 +263,8 @@ describe("workflow and fixture secret isolation", () => {
   const ci = workflow("ci"), validation = workflow("production-validation"), recovery = workflow("auto-revert");
   it("preserves Core job identity/defaults and keeps new mode opt-in", () => {
     expect(ci.jobs["smoke-prod"].name).toBe("Production Smoke Test");
-    expect(ci.jobs["smoke-prod"].if).toContain("vars.PRODUCTION_VALIDATION_TARGET == ''");
-    expect(ci.jobs["smoke-selfserve"].if).toContain("vars.PRODUCTION_VALIDATION_TARGET == 'selfserve-validation'");
+    expect(ci.jobs["smoke-prod"].if).toContain("needs.smoke-target.outputs.target == 'core'");
+    expect(ci.jobs["smoke-selfserve"].if).toContain("needs.smoke-target.outputs.target == 'selfserve-validation'");
     expect(recovery.jobs.revert.if).not.toContain("vars.PRODUCTION_VALIDATION_TARGET");
   });
   it("exposes only dedicated credentials to reusable selfserve validation, no broad DB/ADMIN fallback", () => {
@@ -449,7 +452,9 @@ describe("workflow and fixture secret isolation", () => {
   });
   it("checks sequence writes and ownership for reachable roles across non-system schemas, not SELECT", () => {
     expect(AUDITOR_PRIVILEGES_SQL).toContain("pg_has_role(current_user, r.oid, 'MEMBER')");
-    expect(AUDITOR_PRIVILEGES_SQL).toContain("n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' AND c.relkind = 'S'");
+    expect(AUDITOR_PRIVILEGES_SQL).toContain("left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind = 'S'");
+    expect(AUDITOR_PRIVILEGES_SQL).toContain("left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind IN");
+    expect(AUDITOR_PRIVILEGES_SQL).not.toContain("NOT LIKE 'pg_%'");
     expect(AUDITOR_PRIVILEGES_SQL).toContain("c.relowner = r.oid OR has_sequence_privilege(r.oid, c.oid, 'USAGE,UPDATE')");
     expect(AUDITOR_PRIVILEGES_SQL).not.toMatch(/has_sequence_privilege\([^)]*SELECT/);
   });

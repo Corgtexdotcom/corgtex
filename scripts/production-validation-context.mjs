@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import { collectProductionValidationPrNumbers } from "./production-validation-pr-numbers.mjs";
 import { readPin, resolveBaseline } from "./accepted-core-baseline.mjs";
-import { validationTarget, SELFSERVE_VALIDATION_TARGET, selfserveExpectedRelease, assertSelfserveOrigin } from "./lib/selfserve-validation-target.mjs";
+import { validationTarget, validationRunTarget, SELFSERVE_VALIDATION_TARGET, selfserveExpectedRelease, assertSelfserveOrigin } from "./lib/selfserve-validation-target.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_RECORDER_DEPLOYMENTS = "";
@@ -72,6 +72,7 @@ const NON_APP_RELEASE_FILES = new Set([
   "scripts/selfserve-validation-parity.mjs",
   "scripts/selfserve-validation-recovery.mjs",
   "scripts/selfserve-validation-recovery.test.mjs",
+  "scripts/selfserve-validation-control-flow.test.mjs",
   "scripts/selfserve-validation-schema.mjs",
   "scripts/selfserve-validation-schema.integration.test.mjs",
   "scripts/selfserve-validation-smoke.mjs",
@@ -413,7 +414,8 @@ async function main() {
   const eventName = process.env.GITHUB_EVENT_NAME;
   const automaticTrusted = process.env.GITHUB_REPOSITORY === "Corgtexdotcom/corgtex" && process.env.GITHUB_REF === "refs/heads/main"
     && (eventName === "schedule" || (eventName === "workflow_run" && workflowRunIsTrusted(event, process.env.GITHUB_REPOSITORY)));
-  const target = validationTarget(process.env.PRODUCTION_VALIDATION_TARGET);
+  const target = validationRunTarget({ eventName, pinnedTarget: process.env.PRODUCTION_VALIDATION_PINNED_TARGET,
+    configuredTarget: process.env.PRODUCTION_VALIDATION_TARGET });
   const acceptedBaseline = automaticTrusted && target === "core" ? await resolveBaseline(await readPin()) : null;
   const changedFiles = await changedFilesForEvent({
     eventName,

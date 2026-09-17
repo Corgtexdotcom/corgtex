@@ -2,6 +2,10 @@ name: Production Validation
 
 on:
   workflow_call:
+    inputs:
+      validation_target:
+        type: string
+        required: true
     secrets:
       SELFSERVE_VALIDATION_EMAIL:
         required: false
@@ -29,6 +33,8 @@ on:
       PRODUCTION_VALIDATION_RECORDER_MEETING_URL:
         required: false
     outputs:
+      target:
+        value: ${{ jobs.validation-context.outputs.target }}
       smoke_proof:
         value: ${{ jobs.selfserve-outcome.outputs.available }}
       observation_since:
@@ -169,10 +175,11 @@ jobs:
         shell: bash
         env:
           PRODUCTION_VALIDATION_TARGET: ${{ vars.PRODUCTION_VALIDATION_TARGET || 'core' }}
+          PRODUCTION_VALIDATION_PINNED_TARGET: ${{ inputs.validation_target }}
           SELFSERVE_PARITY_INPUT: ${{ inputs.selfserve_parity_smoke }}
           SELFSERVE_CRM_INPUT: ${{ inputs.selfserve_crm_smoke }}
           SELFSERVE_VALIDATION_ACCEPTED_SHA: ${{ vars.SELFSERVE_VALIDATION_ACCEPTED_SHA }}
-          PRODUCTION_VALIDATION_BASE_URL_INPUT: ${{ inputs.base_url || (vars.PRODUCTION_VALIDATION_TARGET == 'selfserve-validation' && 'https://selfserve.corgtex.com') || 'https://app.corgtex.com' }}
+          PRODUCTION_VALIDATION_BASE_URL_INPUT: ${{ inputs.base_url || '' }}
           PRODUCTION_VALIDATION_EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha || '' }}
           PRODUCTION_VALIDATION_PR_NUMBERS_INPUT: ${{ inputs.pr_numbers || '' }}
           PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS: ${{ vars.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS || vars.PRODUCTION_VALIDATION_CRM_BASELINE_PR_NUMBERS || '696' }}
@@ -353,6 +360,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: fleet-release-production
     timeout-minutes: 15
+    concurrency:
+      group: production-validation-work-item-parity-corgtex-validation
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:

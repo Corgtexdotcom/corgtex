@@ -95,11 +95,13 @@ export async function runSelfserveSmoke(env = process.env) {
     receipt.status = "passed";
   } catch (error) {
     receipt.blocker = /^VALIDATION_[A-Z_]+$/.test(error.message) ? error.message : "VALIDATION_REQUEST_FAILED";
+    receipt.failureKind = receipt.identityVerified && error.message === "VALIDATION_PAGE_FAILED"
+      ? "confirmed-route" : "infrastructure-unattributed";
     receipt.cleanup = error.message === "VALIDATION_LOGOUT_FAILED" ? "failed" : "completed";
     throw error;
   } finally {
     try { if (session) { await session.close(); receipt.cleanup = "completed"; } }
-    catch { receipt.status = "failed"; receipt.cleanup = "failed"; }
+    catch { receipt.status = "failed"; receipt.cleanup = "failed"; receipt.failureKind = "infrastructure-unattributed"; }
     await writeFile(`${outDir}/live.receipt.json`, `${JSON.stringify(receipt, null, 2)}\n`);
   }
   requireValidation(receipt.status === "passed", "VALIDATION_LIVE_FAILED");

@@ -12,14 +12,16 @@ if (!["localhost", "127.0.0.1"].includes(url.hostname) || url.pathname !== "/cor
 
 // Exercise PostgreSQL's actual ACL/role semantics. Every fixture, including
 // cluster roles, is transactional and rolled back; no application rows change.
-for (const namespace of ["public", "private"]) {
+for (const [kind, privileges] of [["SEQUENCE", ["SELECT", "USAGE", "UPDATE", "OWNER"]],
+  ["TABLE", ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "TRIGGER", "OWNER"]]]) {
+for (const namespace of ["public", "private", "pgdata"]) {
   for (const reachable of [false, true]) {
-    for (const access of ["SELECT", "USAGE", "UPDATE", "OWNER"]) {
-      test(`${namespace} sequence ${access}, ${reachable ? "SET ROLE reachable" : "direct"} principal`, async () => {
+    for (const access of privileges) {
+      test(`${namespace} ${kind} ${access}, ${reachable ? "SET ROLE reachable" : "direct"} principal`, async () => {
         const client = new pg.Client({ connectionString: url.href, connectionTimeoutMillis: 5000 });
         const suffix = randomUUID().replaceAll("-", "");
         const auditor = `qa_auditor_${suffix}`, delegate = `qa_delegate_${suffix}`;
-        const schema = namespace === "public" ? "public" : `qa_schema_${suffix}`;
+        const schema = namespace === "public" ? "public" : `${namespace === "pgdata" ? "pgdata" : "qa_schema"}_${suffix}`;
         const sequence = `${schema}.qa_sequence_${suffix}`;
         try {
           await client.connect();
@@ -30,22 +32,25 @@ for (const namespace of ["public", "private"]) {
           await client.query(`CREATE ROLE ${delegate} NOLOGIN NOINHERIT`);
           if (namespace !== "public") await client.query(`CREATE SCHEMA ${schema}`);
           await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${auditor}, ${delegate}`);
-          await client.query(`CREATE SEQUENCE ${sequence}`);
+          await client.query(`CREATE ${kind} ${sequence}${kind === "TABLE" ? " (id integer)" : ""}`);
           if (reachable) await client.query(`GRANT ${delegate} TO ${auditor}`);
           await client.query(`SET LOCAL ROLE ${auditor}`);
           assert.equal((await client.query(AUDITOR_PRIVILEGES_SQL)).rows[0].can_write, false, "fixture must start read-only");
           await client.query("RESET ROLE");
           const principal = reachable ? delegate : auditor;
-          if (access === "OWNER") await client.query(`ALTER SEQUENCE ${sequence} OWNER TO ${principal}`);
-          else await client.query(`GRANT ${access} ON SEQUENCE ${sequence} TO ${principal}`);
+          if (access === "OWNER") await client.query(`ALTER ${kind} ${sequence} OWNER TO ${principal}`);
+          else await client.query(`GRANT ${access} ON ${kind} ${sequence} TO ${principal}`);
           await client.query(`SET LOCAL ROLE ${auditor}`);
           if (reachable) {
             const roles = await client.query("SELECT pg_has_role(current_user, $1, 'MEMBER') AS reachable, pg_has_role(current_user, $1, 'USAGE') AS inherited", [delegate]);
             assert.deepEqual(roles.rows[0], { reachable: true, inherited: false });
           }
-          const original = AUDITOR_PRIVILEGES_SQL.replace(/\n    OR EXISTS \(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace\n      WHERE n.nspname NOT LIKE 'pg_%'[\s\S]*?'USAGE,UPDATE'\)\)\)/, "");
+          const original = kind === "SEQUENCE"
+            ? AUDITOR_PRIVILEGES_SQL.replace(/\n    OR EXISTS \(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace\n      WHERE left\(n.nspname, 3\) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind = 'S'\n      AND \(c.relowner = r.oid OR has_sequence_privilege\(r.oid, c.oid, 'USAGE,UPDATE'\)\)\)/, "")
+            : AUDITOR_PRIVILEGES_SQL.replace("left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind IN", "n.nspname = 'public' AND c.relkind IN");
           assert.notEqual(original, AUDITOR_PRIVILEGES_SQL);
-          assert.equal((await client.query(original)).rows[0].can_write, false, "original query misses sequence writes");
+          assert.equal((await client.query(original)).rows[0].can_write,
+            kind === "TABLE" && namespace === "public" && access !== "SELECT", "original query misses sequence/non-public table writes");
           assert.equal((await client.query(AUDITOR_PRIVILEGES_SQL)).rows[0].can_write, access !== "SELECT");
         } finally {
           await client.query("ROLLBACK").catch(() => {});
@@ -54,4 +59,5 @@ for (const namespace of ["public", "private"]) {
       });
     }
   }
+}
 }
