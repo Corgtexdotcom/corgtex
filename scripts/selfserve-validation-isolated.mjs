@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, writeFile, readFile, mkdtemp, rm, chmod } from "node:fs/promises";
+import { mkdir, writeFile, readFile, mkdtemp, rm, chmod, rename } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -266,15 +266,26 @@ export async function runIsolatedValidation(env = process.env) {
     await writeFile(join(output, "cleanup.json"), JSON.stringify({ scope, containers: names, remaining: [], expired }));
   }
   requireValidation(completed && !expired, "ISOLATED_VALIDATION_INCOMPLETE");
-  const catalogFile = join(output, "expected-catalog.json");
-  const catalog = JSON.parse(await readFile(catalogFile, "utf8"));
-  const completedCatalog = { ...catalog, cleanup: "completed" };
-  assertExpectedCatalog(completedCatalog, binding);
-  await writeFile(catalogFile, `${JSON.stringify(completedCatalog)}\n`);
+  await finalizeIsolatedCatalog(output, binding);
   for (const lane of ["source-intake-isolated", "briefing-fixture-isolated"]) {
     const file = join(output, `${lane}.receipt.json`);
     const receipt = JSON.parse(await readFile(file, "utf8"));
     await writeFile(file, `${JSON.stringify({ ...receipt, cleanup: "completed" }, null, 2)}\n`);
+  }
+}
+
+export async function finalizeIsolatedCatalog(output, binding) {
+  const catalogFile = join(output, "expected-catalog.json");
+  const catalog = JSON.parse(await readFile(catalogFile, "utf8"));
+  const completedCatalog = { ...catalog, cleanup: "completed" };
+  assertExpectedCatalog(completedCatalog, binding);
+  // The container owns the original file on Linux; replace it in the runner-owned directory.
+  const temporary = join(output, `.expected-catalog-${randomBytes(6).toString("hex")}.json`);
+  try {
+    await writeFile(temporary, `${JSON.stringify(completedCatalog)}\n`, { flag: "wx", mode: 0o600 });
+    await rename(temporary, catalogFile);
+  } finally {
+    await rm(temporary, { force: true });
   }
 }
 
