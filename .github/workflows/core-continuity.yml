@@ -1,0 +1,73 @@
+name: Core Continuity
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-continuity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-continuity:
+    name: Core CRM Continuity Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: continuity_source_test
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --cpus 1 --memory 1g --memory-swap 1g
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d continuity_source_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      CORE_CONTINUITY_SOURCE_URL: postgresql://postgres:postgres@127.0.0.1:5432/continuity_source_test
+      CORE_CONTINUITY_TARGET_URL: postgresql://postgres:postgres@127.0.0.1:5432/continuity_target_test
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Generate Prisma and migrate both synthetic databases
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "${{ job.services.postgres.id }}" createdb -U postgres continuity_target_test
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test \
+            DATABASE_URL="$CORE_CONTINUITY_TARGET_URL" \
+            node node_modules/prisma/build/index.js generate
+          for database_url in "$CORE_CONTINUITY_SOURCE_URL" "$CORE_CONTINUITY_TARGET_URL"; do
+            env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test DATABASE_URL="$database_url" \
+              node node_modules/prisma/build/index.js migrate deploy
+          done
+      # Unit coverage and the complete transfer helper typecheck use existing CI.
+      # Do not inherit provider, email, or other external-call configuration.
+      - name: Test Core continuity including real consumer hold
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" NODE_ENV=test \
+            APP_URL=http://example.invalid NEXT_PUBLIC_SITE_URL=http://example.invalid \
+            DATABASE_URL="$CORE_CONTINUITY_TARGET_URL" \
+            CORE_CONTINUITY_SOURCE_URL="$CORE_CONTINUITY_SOURCE_URL" \
+            CORE_CONTINUITY_TARGET_URL="$CORE_CONTINUITY_TARGET_URL" \
+            CORE_CONTINUITY_CONSUMER_HOLD_READY=true \
+            npm run test:migration:core-continuity
