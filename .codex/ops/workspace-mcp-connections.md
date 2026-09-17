@@ -58,6 +58,11 @@ disabled. Only the authorized release owner enables it after retained matching
 worker/revision and old-worker-drain proof. Configure it consistently for web and
 worker; do not enable it on the initial web update.
 
+For an already accepted compatible selfserve release, the explicit protected
+[configuration workflow](workspace-mcp-config.md) provides worker-first activation
+under the existing fleet lock and a web-only ingress-disable recovery boundary.
+It does not perform native connections or replace consent and pending-work gates.
+
 1. Leave `MCP_WORKSPACE_CONNECTIONS_ENABLED` absent or false on web and worker.
    Apply the additive migration through the existing migration-before-worker
    release contract. It adds nullable support epochs on MCP codes/tokens and
