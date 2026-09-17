@@ -1,8 +1,50 @@
 name: Production Validation
 
 on:
+  workflow_call:
+    secrets:
+      SELFSERVE_VALIDATION_EMAIL:
+        required: false
+      SELFSERVE_VALIDATION_PASSWORD:
+        required: false
+      SELFSERVE_SCHEMA_AUDITOR_URL:
+        required: false
+      # Legacy Core branches only; the selfserve caller never passes these.
+      SMOKE_EMAIL_CAPTURE_SECRET:
+        required: false
+      CORGTEX_SMOKE_SECRET:
+        required: false
+      PRODUCTION_VALIDATION_ADMIN_EMAIL:
+        required: false
+      ADMIN_EMAIL:
+        required: false
+      PRODUCTION_VALIDATION_ADMIN_PASSWORD:
+        required: false
+      ADMIN_PASSWORD:
+        required: false
+      PRODUCTION_DATABASE_URL:
+        required: false
+      CONTROL_PLANE_AGENT_API_KEY:
+        required: false
+      PRODUCTION_VALIDATION_RECORDER_MEETING_URL:
+        required: false
+    outputs:
+      smoke_proof:
+        value: ${{ jobs.selfserve-outcome.outputs.available }}
+      observation_since:
+        value: ${{ jobs.validation-context.outputs.observation_since }}
+      expected_git_sha:
+        value: ${{ jobs.validation-context.outputs.expected_git_sha }}
   workflow_dispatch:
     inputs:
+      selfserve_parity_smoke:
+        description: Explicit internal-only work-item/MCP mutations and cleanup. Selfserve mode only; never automatic.
+        type: boolean
+        default: false
+      selfserve_crm_smoke:
+        description: Request real-model CRM qualification. Currently blocked until a fixed synthetic model lane is approved; never falls back to live first-account selection.
+        type: boolean
+        default: false
       base_url:
         description: Production app base URL.
         required: true
@@ -80,6 +122,10 @@ jobs:
     name: Production Validation Context
     runs-on: ubuntu-latest
     outputs:
+      target: ${{ steps.context.outputs.target }}
+      selfserve_parity_smoke: ${{ steps.context.outputs.selfserve_parity_smoke }}
+      verifier_sha: ${{ steps.context.outputs.verifier_sha }}
+      observation_since: ${{ steps.window.outputs.since }}
       enabled: ${{ steps.context.outputs.enabled }}
       trusted_ref: ${{ steps.context.outputs.trusted_ref }}
       base_url: ${{ steps.context.outputs.base_url }}
@@ -96,6 +142,8 @@ jobs:
       recorder_readiness_deployments: ${{ steps.context.outputs.recorder_readiness_deployments }}
       recorder_readiness_temp_meetings: ${{ steps.context.outputs.recorder_readiness_temp_meetings }}
     steps:
+      - id: window
+        run: echo "since=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
           ref: main
@@ -120,7 +168,11 @@ jobs:
         id: context
         shell: bash
         env:
-          PRODUCTION_VALIDATION_BASE_URL_INPUT: ${{ inputs.base_url || 'https://app.corgtex.com' }}
+          PRODUCTION_VALIDATION_TARGET: ${{ vars.PRODUCTION_VALIDATION_TARGET || 'core' }}
+          SELFSERVE_PARITY_INPUT: ${{ inputs.selfserve_parity_smoke }}
+          SELFSERVE_CRM_INPUT: ${{ inputs.selfserve_crm_smoke }}
+          SELFSERVE_VALIDATION_ACCEPTED_SHA: ${{ vars.SELFSERVE_VALIDATION_ACCEPTED_SHA }}
+          PRODUCTION_VALIDATION_BASE_URL_INPUT: ${{ inputs.base_url || (vars.PRODUCTION_VALIDATION_TARGET == 'selfserve-validation' && 'https://selfserve.corgtex.com') || 'https://app.corgtex.com' }}
           PRODUCTION_VALIDATION_EXPECTED_GIT_SHA_INPUT: ${{ inputs.expected_git_sha || '' }}
           PRODUCTION_VALIDATION_PR_NUMBERS_INPUT: ${{ inputs.pr_numbers || '' }}
           PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS: ${{ vars.PRODUCTION_VALIDATION_BASELINE_PR_NUMBERS || vars.PRODUCTION_VALIDATION_CRM_BASELINE_PR_NUMBERS || '696' }}
@@ -183,6 +235,175 @@ jobs:
             printf -- '- Recorder readiness deployments: %s\n' "$RECORDER_READINESS_DEPLOYMENTS_SUMMARY"
             printf -- '- Recorder readiness temp meetings: %s\n' "$RECORDER_READINESS_TEMP_MEETINGS_SUMMARY"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  selfserve-live:
+    name: Selfserve Named Owner Read-only Acceptance
+    needs: validation-context
+    if: needs.validation-context.outputs.target == 'selfserve-validation' && needs.validation-context.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.verifier_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.expected_git_sha }}
+          path: .accepted-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require accepted/release source on trusted main ancestry
+        run: git -C .accepted-source merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: npm ci --ignore-scripts
+        working-directory: .accepted-source
+      - run: node node_modules/prisma/build/index.js generate
+        working-directory: .accepted-source
+      - run: npx playwright install --with-deps chromium
+      - name: Exact named-target health, login, session, ownership and navigation
+        env:
+          SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+          SELFSERVE_VALIDATION_EMAIL: ${{ secrets.SELFSERVE_VALIDATION_EMAIL }}
+          SELFSERVE_VALIDATION_PASSWORD: ${{ secrets.SELFSERVE_VALIDATION_PASSWORD }}
+        run: node scripts/selfserve-validation-smoke.mjs
+      - name: Actual read-only schema and migration checksum verification
+        env:
+          SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+          SELFSERVE_SCHEMA_AUDITOR_URL: ${{ secrets.SELFSERVE_SCHEMA_AUDITOR_URL }}
+          SELFSERVE_DATABASE_IDENTITY_SHA256: ${{ vars.SELFSERVE_DATABASE_IDENTITY_SHA256 }}
+        run: node scripts/selfserve-validation-schema.mjs
+      - name: Existing desktop/mobile navigation helper with closed target and read-only browser transport
+        env:
+          PRODUCTION_VALIDATION_TARGET: selfserve-validation
+          SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+          SELFSERVE_VALIDATION_EMAIL: ${{ secrets.SELFSERVE_VALIDATION_EMAIL }}
+          SELFSERVE_VALIDATION_PASSWORD: ${{ secrets.SELFSERVE_VALIDATION_PASSWORD }}
+          CLIENT_READINESS_WORKSPACE_ID: b1702569-4f4f-4d37-a008-da4d0e8c5742
+          CLIENT_READINESS_WORKSPACE_SLUG: corgtex-validation
+          CLIENT_READINESS_ROUTE_NAMES: ${{ needs.validation-context.outputs.client_readiness_routes }}
+        run: node scripts/selfserve-validation-navigation.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selfserve-validation-live
+          path: .artifacts/selfserve-validation
+          if-no-files-found: error
+
+  selfserve-isolated:
+    name: Selfserve Isolated Full Source Intake and Briefing
+    needs: validation-context
+    if: needs.validation-context.outputs.target == 'selfserve-validation' && needs.validation-context.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 45
+    # Preparation may read immutable registry images using existing read access.
+    # Only the repo's short-lived package-read token enters the preparation step.
+    env:
+      SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+      SELFSERVE_ISOLATED_WEB_IMAGE: ${{ vars.SELFSERVE_ISOLATED_WEB_IMAGE }}
+      SELFSERVE_ISOLATED_BROWSER_IMAGE: ${{ vars.SELFSERVE_ISOLATED_BROWSER_IMAGE }}
+      SELFSERVE_ISOLATED_PG_IMAGE: ${{ vars.SELFSERVE_ISOLATED_PG_IMAGE }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.verifier_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.expected_git_sha }}
+          path: .accepted-source
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require accepted/release source on trusted main ancestry
+        run: git -C .accepted-source merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Stage exact immutable images before isolated runtime (existing read access only)
+        timeout-minutes: 10
+        env:
+          SELFSERVE_IMAGE_READ_ACTOR: ${{ github.actor }}
+          SELFSERVE_IMAGE_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/selfserve-validation-isolated.mjs --prepare
+      - run: npm ci --ignore-scripts
+        working-directory: .accepted-source
+      - run: node node_modules/prisma/build/index.js generate
+        working-directory: .accepted-source
+      - name: Isolated full checks, bounded cleanup, no external network or production DB
+        timeout-minutes: 30
+        run: node scripts/selfserve-validation-isolated.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selfserve-validation-isolated
+          path: .artifacts/selfserve-isolated
+          if-no-files-found: error
+
+  selfserve-parity:
+    name: Explicit Internal-only Work-item Parity
+    needs: [validation-context, selfserve-live, selfserve-isolated]
+    if: needs.validation-context.outputs.selfserve_parity_smoke == 'true'
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.verifier_sha }}
+          persist-credentials: false
+      - name: Guard owner/target before scoped internal mutations and verify cleanup
+        env:
+          SELFSERVE_PARITY_ENABLED: "true"
+          SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+          SELFSERVE_VALIDATION_EMAIL: ${{ secrets.SELFSERVE_VALIDATION_EMAIL }}
+          SELFSERVE_VALIDATION_PASSWORD: ${{ secrets.SELFSERVE_VALIDATION_PASSWORD }}
+        run: node scripts/selfserve-validation-parity.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selfserve-validation-parity
+          path: .artifacts/selfserve-parity
+          if-no-files-found: error
+
+  selfserve-outcome:
+    name: Selfserve Required Evidence Outcome
+    needs: [validation-context, selfserve-live, selfserve-isolated, selfserve-parity]
+    if: always() && needs.validation-context.outputs.target == 'selfserve-validation' && needs.validation-context.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      available: ${{ steps.proof.outputs.available }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validation-context.outputs.verifier_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: selfserve-validation-*
+          path: .artifacts/selfserve-validation-collected
+      - name: Require every live and isolated receipt from this exact run/version
+        env:
+          SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}
+          SELFSERVE_LIVE_RESULT: ${{ needs.selfserve-live.result }}
+          SELFSERVE_ISOLATED_RESULT: ${{ needs.selfserve-isolated.result }}
+          SELFSERVE_PARITY_ENABLED: ${{ needs.validation-context.outputs.selfserve_parity_smoke }}
+          SELFSERVE_PARITY_RESULT: ${{ needs.selfserve-parity.result }}
+        run: node scripts/selfserve-validation-outcome.mjs
+      - id: proof
+        run: echo "available=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selfserve-validation-outcome
+          path: .artifacts/selfserve-validation-outcome/outcome.json
+          if-no-files-found: error
 
   telemetry-release-production-smoke:
     name: Telemetry Release Smoke
@@ -1378,7 +1599,7 @@ jobs:
       - work-item-parity-production-smoke
       - briefing-fixture-production-smoke
       - recorder-readiness-production-smoke
-    if: ${{ always() && needs.validation-context.outputs.enabled == 'true' }}
+    if: ${{ always() && needs.validation-context.outputs.enabled == 'true' && needs.validation-context.outputs.target != 'selfserve-validation' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

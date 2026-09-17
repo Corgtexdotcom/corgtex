@@ -11,7 +11,7 @@ name: Auto Revert on Smoke Failure
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["CI", "Production Validation"]
     types: [completed]
     branches: [main]
 
@@ -25,7 +25,7 @@ jobs:
   revert:
     name: Open revert PR
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.name == 'CI' && (vars.PRODUCTION_VALIDATION_TARGET == '' || vars.PRODUCTION_VALIDATION_TARGET == 'core') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -256,3 +256,44 @@ jobs:
             --title "auto-revert: ${SUBJECT} (${SHORT})" \
             --label auto-revert \
             --body "Production smoke test failed after the merge of \`${SHORT}\` (\"${SUBJECT}\"), and the current production health probe did not recover on that SHA. This PR reverts that change. Failed CI run: ${RUN_URL}"
+
+  selfserve-fleet-recovery:
+    name: Attributed Selfserve Fleet Recovery (Never Source Revert)
+    if: vars.PRODUCTION_VALIDATION_TARGET == 'selfserve-validation' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: github.event.workflow_run.name == 'Production Validation' && github.event.workflow_run.event == 'workflow_dispatch'
+        with:
+          name: selfserve-validation-outcome
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: .artifacts/selfserve-recovery
+      - name: Bind failure to named target, explicit release, run attempt and still-serving version
+        id: attribution
+        env:
+          SELFSERVE_VALIDATION_ACCEPTED_SHA: ${{ vars.SELFSERVE_VALIDATION_ACCEPTED_SHA }}
+        run: node scripts/selfserve-validation-recovery.mjs
+      - name: Require operator handoff to existing fleet recovery (no source revert)
+        if: steps.attribution.outputs.action == 'fleet-release'
+        env:
+          ACCEPTED_SHA: ${{ steps.attribution.outputs.release }}
+          FAILED_SHA: ${{ steps.attribution.outputs.failed_sha }}
+          FAILED_RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          {
+            echo "## Attributed selfserve recovery requires the existing protected fleet workflow"
+            echo "Failed run: $FAILED_RUN; failed serving SHA: $FAILED_SHA; accepted recovery SHA: $ACCEPTED_SHA"
+            echo "Automatic dispatch is blocked until Fleet Release can compare the failed serving SHA under its release lease."
+            echo 'After reviewing current fleet state, use the existing Fleet Release workflow, not a source revert:'
+            printf 'gh workflow run fleet-release.yml --ref main -f release=%s -f targets=selfserve -f dry_run=false -f concurrency=1 -f force_after_failure=false -f reason="Reviewed selfserve recovery from %s after validation run %s"\n' "$ACCEPTED_SHA" "$FAILED_SHA" "$FAILED_RUN"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

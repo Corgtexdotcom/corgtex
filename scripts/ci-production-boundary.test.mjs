@@ -12,7 +12,7 @@ function job(name) {
 }
 
 describe("automatic production CI boundary", () => {
-  const observationTargets = job("observe-prod").match(/--targets ([^\s]+)/)?.[1];
+  const observationTargets = job("observe-prod").match(/observation_targets=([^\s]+)/)?.[1];
 
   it("serializes QA fixture writes with fleet and direct Azure production releases", () => {
     for (const name of ["qa-workspaces.yml", "fleet-release.yml", "azure-selfserve-production.yml"]) {
@@ -30,7 +30,10 @@ describe("automatic production CI boundary", () => {
     expect(observe).toContain("environment: fleet-release-production");
   });
 
-  it("does not query legacy customers during main observation but retains full-fleet failure", async () => {
+  it.each([
+    [observationTargets, ["backup-app", "ops"]],
+    ["azure-selfserve,ops", ["ops"]],
+  ])("observes only selected providers for %s but retains full-fleet failure", async (targets, expectedServices) => {
     const queriedServices = [];
     const target = (id) => ({ id, label: id, provider: "railway",
       railway: { projectId: "project", environmentId: "production", webServiceId: id } });
@@ -58,10 +61,10 @@ describe("automatic production CI boundary", () => {
     };
     const options = { manifest: { gitSha: "a".repeat(40) },
       since: new Date("2026-09-13T04:00:00Z"), env, deps };
-    const summary = await runObservationGate({ ...options, targets: observationTargets });
+    const summary = await runObservationGate({ ...options, targets });
     expect(summary.status).toBe("passed");
     expect(summary.missingRequiredSources).toEqual([]);
-    expect(queriedServices.sort()).toEqual(["backup-app", "ops"]);
+    expect(queriedServices.sort()).toEqual(expectedServices);
     await expect(runObservationGate({ ...options, targets: "all" }))
       .rejects.toThrow("No Railway deployment found for legacy-customer");
   });
