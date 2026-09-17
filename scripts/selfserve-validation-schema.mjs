@@ -42,7 +42,8 @@ SELECT EXISTS (
       AND (n.nspowner = r.oid OR has_schema_privilege(r.oid, n.oid, 'CREATE')))
     OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f')
-      AND (c.relowner = r.oid OR has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')))
+      AND (c.relowner = r.oid OR has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+        OR has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE')))
     OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind = 'S'
       AND (c.relowner = r.oid OR has_sequence_privilege(r.oid, c.oid, 'USAGE,UPDATE')))

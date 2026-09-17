@@ -450,6 +450,10 @@ describe("workflow and fixture secret isolation", () => {
     expect(AUDITOR_PRIVILEGES_SQL).toContain("pg_has_role");
     expect(AUDITOR_PRIVILEGES_SQL).toContain("INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER");
   });
+  it("rejects column-only INSERT/UPDATE without treating column SELECT as a write", () => {
+    expect(AUDITOR_PRIVILEGES_SQL).toContain("OR has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE')");
+    expect(AUDITOR_PRIVILEGES_SQL).not.toMatch(/has_any_column_privilege\([^)]*SELECT/);
+  });
   it("checks sequence writes and ownership for reachable roles across non-system schemas, not SELECT", () => {
     expect(AUDITOR_PRIVILEGES_SQL).toContain("pg_has_role(current_user, r.oid, 'MEMBER')");
     expect(AUDITOR_PRIVILEGES_SQL).toContain("left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' AND c.relkind = 'S'");
