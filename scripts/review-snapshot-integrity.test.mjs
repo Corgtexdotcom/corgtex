@@ -70,7 +70,13 @@ describe("merge-group delivery policy", () => {
     const prHeadSha = "61318e4996acde8a5a84f5b78df3871a25db1589";
     const group = { head_sha: headSha, base_sha: baseSha, base_ref: "refs/heads/main" };
     const entry = { position: 1, baseCommit: { oid: baseSha }, headCommit: { oid: headSha }, pullRequest: { number: 888, state: "OPEN", headRefOid: prHeadSha, baseRefOid: baseSha } };
-    expect(resolveMergeGroupMembers(group, { nodes: [entry], pageInfo: { hasPreviousPage: false, hasNextPage: false } }, [{ baseSha, headSha, prHeadSha }])).toEqual([{ number: 888, headSha: prHeadSha }]);
+    expect(resolveMergeGroupMembers(group, { nodes: [entry], pageInfo: { hasPreviousPage: false, hasNextPage: false } }, [{ baseSha, headSha, prHeadSha }])).toEqual([{ number: 888, headSha: prHeadSha, baseSha }]);
+  });
+  it("allows a PR base snapshot to predate the moving merge-group base", () => {
+    const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
+    const step = { baseSha: group.base_sha, headSha: group.head_sha, prHeadSha: "c".repeat(40) };
+    const entry = { position: 1, baseCommit: { oid: step.baseSha }, headCommit: { oid: step.headSha }, pullRequest: { number: 1146, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: "d".repeat(40) } };
+    expect(resolveMergeGroupMembers(group, { nodes: [entry], pageInfo: { hasPreviousPage: false, hasNextPage: false } }, [step])).toEqual([{ number: 1146, headSha: step.prHeadSha, baseSha: entry.pullRequest.baseRefOid }]);
   });
   it("rejects partial, duplicate, malformed, closed, or ambiguous merge-queue membership", () => {
     const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
@@ -89,8 +95,8 @@ describe("merge-group delivery policy", () => {
       { ...good.nodes[1], baseCommit: { oid: "e".repeat(40) } },
       { ...good.nodes[1], headCommit: { oid: "e".repeat(40) } },
       { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, headRefOid: "e".repeat(40) } },
-      { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, baseRefOid: "e".repeat(40) } },
     ]) expect(() => resolveMergeGroupMembers(group, { ...good, nodes: [good.nodes[0], bad] }, steps)).toThrow();
+    expect(() => resolveMergeGroupMembers(group, { ...good, nodes: [good.nodes[0], { ...good.nodes[1], pullRequest: { ...good.nodes[1].pullRequest, baseRefOid: "bad" } }] }, steps)).toThrow();
     expect(() => resolveMergeGroupMembers(group, { ...good, nodes: [good.nodes[0], { ...good.nodes[1], position: 0 }] }, steps)).toThrow();
     expect(() => resolveMergeGroupMembers(group, good, [...steps].reverse())).toThrow();
     const unrelated = { position: 3, baseCommit: { oid: "e".repeat(40) }, headCommit: { oid: "f".repeat(40) }, pullRequest: { number: 3, state: "OPEN", headRefOid: "0".repeat(40), baseRefOid: "9".repeat(40) } };
@@ -101,7 +107,7 @@ describe("merge-group delivery policy", () => {
     const step = { baseSha: group.base_sha, headSha: group.head_sha, prHeadSha: "c".repeat(40) };
     const selected = { position: 1, baseCommit: { oid: step.baseSha }, headCommit: { oid: step.headSha }, pullRequest: { number: 1, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: group.base_sha } };
     const unrelated = { position: 2, baseCommit: { oid: "d".repeat(40) }, headCommit: { oid: "e".repeat(40) }, pullRequest: { number: 2, state: "OPEN", headRefOid: step.prHeadSha, baseRefOid: "f".repeat(40) } };
-    expect(resolveMergeGroupMembers(group, { nodes: [selected, unrelated], pageInfo: { hasPreviousPage: false, hasNextPage: false } }, [step])).toEqual([{ number: 1, headSha: step.prHeadSha }]);
+    expect(resolveMergeGroupMembers(group, { nodes: [selected, unrelated], pageInfo: { hasPreviousPage: false, hasNextPage: false } }, [step])).toEqual([{ number: 1, headSha: step.prHeadSha, baseSha: selected.pullRequest.baseRefOid }]);
   });
   it("allows distinct selected queue PRs to share a PR head commit", () => {
     const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main" };
@@ -153,15 +159,15 @@ describe("merge-group live validation", () => {
   const group = { head_sha: "a".repeat(40), base_sha: "b".repeat(40), base_ref: "refs/heads/main", head_ref: "refs/heads/gh-readonly-queue/main/pr-2-tail" };
   const event = { action: "checks_requested", repository: { full_name: repo }, merge_group: group };
   const queueEntries = (numbers) => numbers.map((number, index) => { const prHead = String(number + 10).padStart(40, "0"); return { position: index + 1, baseCommit: { oid: String(number + 100).padStart(40, "0") }, headCommit: { oid: String(number + 200).padStart(40, "0") }, pullRequest: { number, state: "OPEN", headRefOid: prHead, baseRefOid: group.base_sha } }; });
-  const queuePr = (number) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: group.base_sha, ref: "main", repo: { full_name: repo } } });
-  const stub = (entries, { truncateFiles = false, fileOverride = null, paginatedProtectedFile = false, reviewOverrides = {}, finalLabelDriftPr = null, finalHeadDriftPr = null, finalBaseDrift = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false } = {}) => {
+  const queuePr = (number, { baseSha = group.base_sha, baseRef = "main", baseRepo = repo } = {}) => makePr({ number, updated_at: "2026-01-02T00:00:00Z", head: { sha: String(number + 10).padStart(40, "0"), repo: { full_name: `fork${number}/r` } }, base: { sha: baseSha, ref: baseRef, repo: { full_name: baseRepo } } });
+  const stub = (entries, { truncateFiles = false, fileOverride = null, paginatedProtectedFile = false, reviewOverrides = {}, finalLabelDriftPr = null, finalHeadDriftPr = null, finalBaseDrift = false, driftPr = null, finalBodyDriftPr = null, finalReviewDriftPr = null, memberCount = entries.length, malformedGroupCommit = false, prBaseSha = group.base_sha, queueBaseSha = prBaseSha, prBaseRef = "main", prBaseRepo = repo } = {}) => {
     const seen = [];
     const pullReads = new Map();
     const groupCommits = new Map(); let base = group.base_sha;
     const liveEntries = entries.map((entry, index) => {
       if (index >= memberCount) return entry;
       const sha = index + 1 === memberCount ? group.head_sha : String(index + 1).padStart(40, "0");
-      const live = { ...entry, baseCommit: { oid: base }, headCommit: { oid: sha } };
+      const live = { ...entry, baseCommit: { oid: base }, headCommit: { oid: sha }, pullRequest: { ...entry.pullRequest, baseRefOid: queueBaseSha } };
       groupCommits.set(sha, { sha, parents: malformedGroupCommit && index === 0 ? [{ sha: base }] : [{ sha: base }, { sha: entry.pullRequest.headRefOid }] }); base = sha;
       return live;
     });
@@ -171,10 +177,10 @@ describe("merge-group live validation", () => {
       if (u.endsWith("/graphql")) {
         const query = JSON.parse(opts.body).query;
         if (query.includes("mergeQueue")) return reply({ data: { repository: { mergeQueue: { entries: { nodes: liveEntries, pageInfo: { hasPreviousPage: false, hasNextPage: false } } } } } });
-        return reply({ data: { repository: Object.fromEntries(liveEntries.slice(0, memberCount).map((entry, index) => { const pr = queuePr(entry.pullRequest.number); const review = approvalFor(pr, entry.pullRequest.number === finalReviewDriftPr ? { state: "CHANGES_REQUESTED" } : {}); return [`p${index}`, { number: pr.number, state: "OPEN", isDraft: pr.draft, body: pr.number === finalBodyDriftPr ? `${pr.body}drift` : pr.body, headRefOid: pr.number === finalHeadDriftPr ? "c".repeat(40) : entry.pullRequest.headRefOid, baseRefOid: finalBaseDrift ? "d".repeat(40) : group.base_sha, labels: { nodes: pr.number === finalLabelDriftPr ? [...pr.labels, { name: "halt-agents" }] : pr.labels, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, reviews: { nodes: [{ fullDatabaseId: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commit: { oid: review.commit_id }, author: review.user }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }]; })) } });
+        return reply({ data: { repository: Object.fromEntries(liveEntries.slice(0, memberCount).map((entry, index) => { const pr = queuePr(entry.pullRequest.number, { baseSha: prBaseSha, baseRef: prBaseRef, baseRepo: prBaseRepo }); const review = approvalFor(pr, entry.pullRequest.number === finalReviewDriftPr ? { state: "CHANGES_REQUESTED" } : {}); return [`p${index}`, { number: pr.number, state: "OPEN", isDraft: pr.draft, body: pr.number === finalBodyDriftPr ? `${pr.body}drift` : pr.body, headRefOid: pr.number === finalHeadDriftPr ? "c".repeat(40) : entry.pullRequest.headRefOid, baseRefOid: finalBaseDrift ? "d".repeat(40) : prBaseSha, labels: { nodes: pr.number === finalLabelDriftPr ? [...pr.labels, { name: "halt-agents" }] : pr.labels, pageInfo: { hasPreviousPage: false, hasNextPage: false } }, reviews: { nodes: [{ fullDatabaseId: String(review.id), state: review.state, submittedAt: review.submitted_at, body: review.body, commit: { oid: review.commit_id }, author: review.user }], pageInfo: { hasPreviousPage: false, hasNextPage: false } } }]; })) } });
       }
       if (u.includes("/git/commits/")) return reply(groupCommits.get(u.split("/").at(-1)));
-      const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number);
+      const number = Number(u.match(/\/pulls\/(\d+)/)?.[1]); const pr = queuePr(number, { baseSha: prBaseSha, baseRef: prBaseRef, baseRepo: prBaseRepo });
       if (u.endsWith(`/pulls/${number}`)) { const reads = (pullReads.get(number) ?? 0) + 1; pullReads.set(number, reads); return reply(number === driftPr && reads > 1 ? { ...pr, body: `${pr.body}drift` } : pr); }
       if (u.includes(`/pulls/${number}/files`)) {
         if (fileOverride) return reply(fileOverride);
@@ -202,6 +208,23 @@ describe("merge-group live validation", () => {
     expect(seen.filter((r) => r.u.includes("/pulls/") && !r.u.includes("/files") && !r.u.includes("/reviews")).map((r) => r.u)).toEqual(["https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2", "https://api.github.com/repos/o/r/pulls/1", "https://api.github.com/repos/o/r/pulls/2"]);
     expect(seen.every((r) => r.method === "GET" || (r.u.endsWith("/graphql") && r.method === "POST" && JSON.parse(r.body).query.startsWith("query(")))).toBe(true);
     expect(seen.some((r) => /statuses|dismissals/.test(r.u) || /mutation/i.test(r.body ?? ""))).toBe(false);
+    vi.unstubAllGlobals();
+  });
+  it("accepts an older PR base snapshot after main advances while preserving target identity", async () => {
+    stub(queueEntries([1146]), { prBaseSha: "d".repeat(40) });
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).resolves.toMatchObject({ failed: false, prNumbers: [1146] });
+    vi.unstubAllGlobals();
+  });
+  it("still rejects a PR targeting another branch or repository", async () => {
+    for (const options of [{ prBaseRef: "release" }, { prBaseRepo: "other/r" }]) {
+      stub(queueEntries([1]), options);
+      await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("unexpected merge-group PR state");
+      vi.unstubAllGlobals();
+    }
+  });
+  it("still rejects disagreement between the queue and PR base snapshots", async () => {
+    stub(queueEntries([1]), { prBaseSha: "d".repeat(40), queueBaseSha: "e".repeat(40) });
+    await expect(evaluateMergeGroup(repo, event, group.head_sha)).rejects.toThrow("unexpected merge-group PR state");
     vi.unstubAllGlobals();
   });
   it("classifies a protected rename source returned by the live Files API", async () => {
