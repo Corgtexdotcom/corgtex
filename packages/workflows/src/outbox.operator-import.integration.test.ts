@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "@corgtex/shared";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
-import { scheduleDailyJobs, scheduleDripCampaigns, schedulePeriodicJobs } from "./outbox";
+import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, scheduleDripCampaigns, schedulePeriodicJobs } from "./outbox";
 
 const workspaceIds: string[] = [];
+const globalJobIds: string[] = [];
+const globalEventIds: string[] = [];
 
 describe("operator import scheduler exclusion", () => {
   beforeAll(() => {
@@ -18,8 +20,81 @@ describe("operator import scheduler exclusion", () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     await prisma.workflowJob.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
+    await prisma.workflowJob.deleteMany({ where: { id: { in: globalJobIds } } });
+    await prisma.event.deleteMany({ where: { OR: [{ workspaceId: { in: workspaceIds } }, { id: { in: globalEventIds } }] } });
     await prisma.workspace.deleteMany({ where: { id: { in: workspaceIds } } });
     workspaceIds.length = 0;
+    globalJobIds.length = 0;
+    globalEventIds.length = 0;
+  });
+
+  it.each(["delete", "disable"])("holds consumers without mutating rows until the owner explicitly chooses to %s the marker", async (release) => {
+    const held = randomUUID(), active = randomUUID(), disabled = randomUUID();
+    workspaceIds.push(held, active, disabled);
+    for (const id of workspaceIds) await prisma.workspace.create({ data: {
+      id, slug: `consumer-${id}`, name: "Synthetic consumer fixture",
+      ...(id === active ? {} : { featureFlags: { create: { flag: "operator_import_inactive", enabled: id === held } } }),
+    } });
+    const past = new Date("2020-01-01T00:00:00Z");
+    const future = new Date("2099-01-01T00:00:00Z");
+    // Unknown synthetic types exercise the real claims and completion paths but
+    // have no handler, provider, notification or email side effects.
+    const event = async (workspaceId: string | null, leased = false) => {
+      const row = await prisma.event.create({ data: {
+        workspaceId, type: "synthetic.consumer-hold", payload: { preserved: true },
+        availableAt: past, createdAt: workspaceId === held ? past : new Date(), attempts: 2, error: "preserve while held",
+        ...(leased ? { lockedAt: past, lockedBy: "synthetic-old-worker" } : {}),
+      } });
+      if (workspaceId === null) globalEventIds.push(row.id);
+      return row;
+    };
+    const job = async (workspaceId: string | null, status: "PENDING" | "RUNNING" | "FAILED" = "PENDING", dependsOnJobId?: string) => {
+      const row = await prisma.workflowJob.create({ data: {
+        workspaceId, type: "synthetic.consumer-hold", payload: { preserved: true }, status,
+        dedupeKey: randomUUID(), dependsOnJobId, runAfter: past, attempts: 2, error: "preserve while held",
+        createdAt: workspaceId === held ? past : new Date(),
+        ...(status === "RUNNING" ? { lockedAt: past, lockedBy: "synthetic-old-worker", startedAt: past } : {}),
+      } });
+      if (workspaceId === null) globalJobIds.push(row.id);
+      return row;
+    };
+    await event(held); await event(held, true);
+    const parent = await job(held);
+    const stale = await job(held, "RUNNING");
+    const child = await job(held, "PENDING", parent.id);
+    const failed = await job(held, "FAILED");
+    const blocked = await job(held, "PENDING", failed.id);
+    const notDue = await job(held);
+    await prisma.workflowJob.update({ where: { id: notDue.id }, data: { runAfter: future } });
+    const freshLease = await job(held, "RUNNING");
+    await prisma.workflowJob.update({ where: { id: freshLease.id }, data: { lockedAt: future } });
+    const heldEvents = await prisma.event.findMany({ where: { workspaceId: held }, orderBy: { id: "asc" } });
+    const heldJobs = await prisma.workflowJob.findMany({ where: { workspaceId: held }, orderBy: { id: "asc" } });
+    const controls = [];
+    for (const workspaceId of [active, disabled, null]) {
+      controls.push({ event: await event(workspaceId), pending: await job(workspaceId), stale: await job(workspaceId, "RUNNING") });
+    }
+    // Held oldest rows must not consume a batch slot or starve another tenant.
+    for (let i = 0; i < 3; i++) expect(await dispatchPendingEvents("synthetic-consumer", 1)).toBe(1);
+    expect(await dispatchPendingEvents("synthetic-consumer", 1)).toBe(0);
+    for (let i = 0; i < 6; i++) expect(await runPendingJobs("synthetic-consumer", 1, 1)).toBe(1);
+    expect(await runPendingJobs("synthetic-consumer", 1, 1)).toBe(0);
+    for (const control of controls) {
+      expect(await prisma.event.findUniqueOrThrow({ where: { id: control.event.id } })).toMatchObject({ status: "DISPATCHED", attempts: 3, lockedAt: null, lockedBy: null });
+      for (const row of [control.pending, control.stale]) expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ status: "COMPLETED", attempts: 3, lockedAt: null, lockedBy: null });
+    }
+    expect(await prisma.event.findMany({ where: { workspaceId: held }, orderBy: { id: "asc" } })).toEqual(heldEvents);
+    expect(await prisma.workflowJob.findMany({ where: { workspaceId: held }, orderBy: { id: "asc" } })).toEqual(heldJobs);
+    const where = { workspaceId_flag: { workspaceId: held, flag: "operator_import_inactive" } };
+    expect((await prisma.workspaceFeatureFlag.findUniqueOrThrow({ where })).enabled).toBe(true);
+    if (release === "delete") await prisma.workspaceFeatureFlag.delete({ where });
+    else await prisma.workspaceFeatureFlag.update({ where, data: { enabled: false } });
+    expect(await dispatchPendingEvents("synthetic-consumer", 10)).toBe(2);
+    expect(await runPendingJobs("synthetic-consumer", 10, 1)).toBe(2);
+    expect(await runPendingJobs("synthetic-consumer", 10, 1)).toBe(1);
+    expect(await runPendingJobs("synthetic-consumer", 10, 1)).toBe(0);
+    for (const row of [parent, stale, child]) expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ status: "COMPLETED", attempts: 3 });
+    for (const id of [failed.id, blocked.id, notDue.id, freshLease.id]) expect(await prisma.workflowJob.findUniqueOrThrow({ where: { id } })).toEqual(heldJobs.find((row) => row.id === id));
   });
 
   it.each(["absent", "disabled"])("excludes inactive imports from enabled drip while an active tenant with %s marker progresses", async (marker) => {

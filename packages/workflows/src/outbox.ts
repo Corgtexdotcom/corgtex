@@ -324,6 +324,11 @@ async function claimPendingEvents(workerId: string, batchSize: number) {
         WHERE event.status = 'PENDING'
           AND event."availableAt" <= NOW()
           AND (event."lockedAt" IS NULL OR event."lockedAt" < ${staleBefore})
+          AND NOT EXISTS (
+            SELECT 1 FROM "WorkspaceFeatureFlag" AS flag
+            WHERE flag."workspaceId" = event."workspaceId"
+              AND flag.flag = ${OPERATOR_IMPORT_INACTIVE_FLAG} AND flag.enabled = true
+          )
         ORDER BY event."createdAt" ASC
         LIMIT ${batchSize}
         FOR UPDATE SKIP LOCKED
@@ -477,6 +482,11 @@ async function claimPendingJobs(workerId: string, batchSize: number) {
           OR (job.status = 'RUNNING' AND job."lockedAt" IS NOT NULL AND job."lockedAt" < ${staleBefore})
         )
         AND (job."dependsOnJobId" IS NULL OR dep.status = 'COMPLETED')
+        AND NOT EXISTS (
+          SELECT 1 FROM "WorkspaceFeatureFlag" AS flag
+          WHERE flag."workspaceId" = job."workspaceId"
+            AND flag.flag = ${OPERATOR_IMPORT_INACTIVE_FLAG} AND flag.enabled = true
+        )
         ORDER BY job."createdAt" ASC
         LIMIT ${batchSize}
         FOR UPDATE OF job SKIP LOCKED
@@ -1401,8 +1411,8 @@ export async function schedulePeriodicJobs() {
 }
 
 // Internal operator import marker, written atomically with a new workspace.
-// This suppresses all-workspace and recurrence scheduling; integrations and
-// pending work must be staged separately before an import is published.
+// Suppresses scheduling and new consumer claims, not already-claimed work.
+// Integrations and pending source work still require separate import staging.
 const OPERATOR_IMPORT_INACTIVE_FLAG = "operator_import_inactive";
 
 export async function scheduleDailyJobs() {
