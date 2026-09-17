@@ -43,6 +43,14 @@ All other retained web/worker revisions must be inactive, Stopped and zero repli
 unknown counts or stopped traffic alone do not qualify. No old revision is stopped
 automatically by this runner.
 
+App-to-revision comparison normalizes only provider representation differences:
+empty secret-reference values, default container image type, null metrics settings,
+default scaling intervals and CPU-derived Consumption ephemeral storage. The full
+app preservation hash remains unchanged and strict before/after writes. Unknown
+fields, changed secret references and nondefault values still fail comparison.
+Defaults: [scaling](https://learn.microsoft.com/en-us/azure/container-apps/scale-app)
+and [ephemeral storage](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts).
+
 Activation sets only the compatible worker flag first. It waits for the exact
 run-bound revision, rechecks unchanged configuration/replica health and old-worker
 stop proof, then refreshes both roles immediately before enabling web. After web
