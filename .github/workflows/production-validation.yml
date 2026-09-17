@@ -245,7 +245,7 @@ jobs:
 
   selfserve-live:
     name: Selfserve Named Owner Read-only Acceptance
-    needs: validation-context
+    needs: [validation-context, selfserve-isolated]
     if: needs.validation-context.outputs.target == 'selfserve-validation' && needs.validation-context.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     environment: fleet-release-production
@@ -272,6 +272,11 @@ jobs:
       - run: node node_modules/prisma/build/index.js generate
         working-directory: .accepted-source
       - run: npx playwright install --with-deps chromium
+      - name: Download expected catalog from this run's successful isolation
+        uses: actions/download-artifact@v4
+        with:
+          name: selfserve-validation-isolated
+          path: .artifacts/selfserve-catalog
       - name: Exact named-target health, login, session, ownership and navigation
         env:
           SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.validation-context.outputs.expected_git_sha }}

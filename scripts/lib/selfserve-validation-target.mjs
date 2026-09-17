@@ -83,7 +83,9 @@ export function assertSelfserveEvidence(receipts, { expectedSha, runId, runAttem
       && receipt.ownerUserId === SELFSERVE_VALIDATION_TARGET.ownerUserId, "REQUIRED_LIVE_NAVIGATION_EVIDENCE");
     if (lane === "selfserve-schema-read-only") requireValidation(receipt.exactLedgerMatch === true
       && receipt.supportedSchemaMatch === true && /^[a-f0-9]{64}$/.test(receipt.manifestSha256 || "")
-      && /^[a-f0-9]{64}$/.test(receipt.datamodelSha256 || ""), "REQUIRED_EXACT_SCHEMA_EVIDENCE");
+      && /^[a-f0-9]{64}$/.test(receipt.datamodelSha256 || "") && receipt.catalogAlgorithm === "SELFSERVE_PUBLIC_PG16_V1"
+      && /^[a-f0-9]{64}$/.test(receipt.expectedCatalogSha256 || "")
+      && receipt.expectedCatalogSha256 === receipt.actualCatalogSha256, "REQUIRED_EXACT_SCHEMA_EVIDENCE");
   }
 }
 

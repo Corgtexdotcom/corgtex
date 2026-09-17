@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { fullReleaseSha, requireValidation, SELFSERVE_VALIDATION_TARGET } from "./lib/selfserve-validation-target.mjs";
 import { loadValidationMatrices, evaluateValidationMatrices } from "./production-validation-outcome-gate.mjs";
+import { migrationManifest } from "./accepted-core-baseline.mjs";
+import { catalogBinding, assertExpectedCatalog } from "./lib/selfserve-schema-catalog.mjs";
 
 export function isolatedInputs(env) {
   const expectedSha = fullReleaseSha(env.SELFSERVE_VALIDATION_EXPECTED_SHA);
@@ -109,6 +111,8 @@ export async function runIsolatedValidation(env = process.env) {
   const source = resolve(env.SELFSERVE_VALIDATION_SOURCE_DIR || ".accepted-source");
   const scripts = resolve("scripts");
   const output = resolve(env.SELFSERVE_VALIDATION_OUT_DIR || ".artifacts/selfserve-isolated");
+  const binding = { expectedSha, manifest: migrationManifest(source), runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT };
+  catalogBinding(binding);
   const scope = `selfserve-validation-${randomBytes(6).toString("hex")}`;
   const label = `corgtex.validation.scope=${scope}`;
   const names = ["identity", "pg", "init", "web", "relay", "runner"].map((suffix) => `${scope}-${suffix}`);
@@ -124,6 +128,7 @@ export async function runIsolatedValidation(env = process.env) {
     catch { throw new Error(`ISOLATED_CACHED_${role}_IMAGE_UNAVAILABLE`); }
   }
   await mkdir(output, { recursive: true });
+  await writeFile(join(output, "catalog-source.json"), JSON.stringify({ manifest: binding.manifest }));
   const password = randomBytes(24).toString("hex");
   const db = `postgresql://synthetic:${password}@fixture-pg:5432/selfserve_validation_synthetic?schema=public`;
   const envArgs = (values) => Object.entries(values).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
@@ -207,8 +212,10 @@ export async function runIsolatedValidation(env = process.env) {
     }
     requireValidation(ready, "ISOLATED_PG_NOT_READY");
     await run(["run", "--name", init, "--network", scope, "--platform", platforms.WEB, ...resources, ...envArgs(fixtureEnv),
+      ...envArgs({ SELFSERVE_VALIDATION_EXPECTED_SHA: expectedSha, GITHUB_RUN_ID: String(env.GITHUB_RUN_ID), GITHUB_RUN_ATTEMPT: String(env.GITHUB_RUN_ATTEMPT) }),
       "-v", `${scripts}/selfserve-validation-fixture.mjs:/app/scripts/selfserve-validation-fixture.mjs:ro`,
-      "--entrypoint", "sh", images.WEB, "-ec", "node node_modules/prisma/build/index.js migrate deploy && node --import tsx scripts/selfserve-validation-fixture.mjs"]);
+      "-v", `${scripts}:/app/validation-scripts:ro`, "-v", `${output}:/proof`,
+      "--entrypoint", "sh", images.WEB, "-ec", "node node_modules/prisma/build/index.js migrate deploy && node validation-scripts/selfserve-validation-catalog-fixture.mjs && node --import tsx scripts/selfserve-validation-fixture.mjs"]);
     docker(["run", "-d", "--name", web, "--network", scope, "--network-alias", "fixture-app", "--platform", platforms.WEB, ...resources,
       ...envArgs(fixtureEnv), "--entrypoint", "node", images.WEB,
       "node_modules/next/dist/bin/next", "start", "apps/web", "-p", "3000", "-H", "0.0.0.0"]);
@@ -259,6 +266,11 @@ export async function runIsolatedValidation(env = process.env) {
     await writeFile(join(output, "cleanup.json"), JSON.stringify({ scope, containers: names, remaining: [], expired }));
   }
   requireValidation(completed && !expired, "ISOLATED_VALIDATION_INCOMPLETE");
+  const catalogFile = join(output, "expected-catalog.json");
+  const catalog = JSON.parse(await readFile(catalogFile, "utf8"));
+  const completedCatalog = { ...catalog, cleanup: "completed" };
+  assertExpectedCatalog(completedCatalog, binding);
+  await writeFile(catalogFile, `${JSON.stringify(completedCatalog)}\n`);
   for (const lane of ["source-intake-isolated", "briefing-fixture-isolated"]) {
     const file = join(output, `${lane}.receipt.json`);
     const receipt = JSON.parse(await readFile(file, "utf8"));
