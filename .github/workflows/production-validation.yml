@@ -46,9 +46,9 @@ on:
         type: boolean
         default: false
       base_url:
-        description: Production app base URL.
-        required: true
-        default: https://app.corgtex.com
+        description: Production app base URL. Empty selects the configured target's origin.
+        required: false
+        default: ""
       expected_git_sha:
         description: Expected production release SHA. Manual dispatch defaults to the workflow ref SHA.
         required: false

@@ -262,7 +262,7 @@ describe("workflow and fixture secret isolation", () => {
     expect(ci.jobs["smoke-prod"].name).toBe("Production Smoke Test");
     expect(ci.jobs["smoke-prod"].if).toContain("vars.PRODUCTION_VALIDATION_TARGET == ''");
     expect(ci.jobs["smoke-selfserve"].if).toContain("vars.PRODUCTION_VALIDATION_TARGET == 'selfserve-validation'");
-    expect(recovery.jobs.revert.if).toContain("vars.PRODUCTION_VALIDATION_TARGET == 'core'");
+    expect(recovery.jobs.revert.if).not.toContain("vars.PRODUCTION_VALIDATION_TARGET");
   });
   it("exposes only dedicated credentials to reusable selfserve validation, no broad DB/ADMIN fallback", () => {
     expect(Object.keys(ci.jobs["smoke-selfserve"].secrets).sort()).toEqual(["SELFSERVE_SCHEMA_AUDITOR_URL", "SELFSERVE_VALIDATION_EMAIL", "SELFSERVE_VALIDATION_PASSWORD"]);
