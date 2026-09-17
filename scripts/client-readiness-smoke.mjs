@@ -2,6 +2,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
+import { openSelfserveValidationSession } from "./selfserve-validation-smoke.mjs";
+import { SELFSERVE_VALIDATION_TARGET, selfserveReadRequestAllowed } from "./lib/selfserve-validation-target.mjs";
 
 import {
   DEMO_WORKSPACE_SLUG,
@@ -597,6 +599,7 @@ async function main() {
   await mkdir(outDir, { recursive: true });
 
   let browser;
+  let closedSession;
   let activeRouteLabel = "startup";
   globalThis.__corgtexClientReadinessSetRouteLabel = (label) => {
     activeRouteLabel = String(label || "unknown");
@@ -607,6 +610,16 @@ async function main() {
   try {
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    if (process.env.PRODUCTION_VALIDATION_TARGET === SELFSERVE_VALIDATION_TARGET.name) {
+      closedSession = await openSelfserveValidationSession({ origin: baseUrl,
+        expectedSha: process.env.SELFSERVE_VALIDATION_EXPECTED_SHA,
+        email: process.env.SELFSERVE_VALIDATION_EMAIL, password: process.env.SELFSERVE_VALIDATION_PASSWORD });
+      await page.context().route("**/*", (route) => selfserveReadRequestAllowed(route.request().url(), route.request().method())
+        ? route.continue() : route.abort("blockedbyclient"));
+      const separator = closedSession.cookie.indexOf("=");
+      await page.context().addCookies([{ name: closedSession.cookie.slice(0, separator), value: closedSession.cookie.slice(separator + 1),
+        url: baseUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
+    }
     page.setDefaultNavigationTimeout(90000);
     let expectedNotFoundRoute = false;
 
@@ -626,6 +639,9 @@ async function main() {
     });
 
     setActiveRouteLabel("login");
+    if (closedSession) {
+      await page.goto(`${baseUrl}/en/workspaces/${SELFSERVE_VALIDATION_TARGET.workspaceId}`, { waitUntil: "domcontentloaded" });
+    } else {
     await page.goto(`${baseUrl}${await resolveLoginPath()}`, { waitUntil: "domcontentloaded" });
     await waitForPageSettled(page);
     await captureScreenshot(page, "00-login.png");
@@ -634,11 +650,15 @@ async function main() {
     await submitLoginForm(page);
     await waitForPageSettled(page);
     await captureScreenshot(page, "01-after-login.png");
+    }
 
     const locale = localePrefixFromUrl(page.url());
     const initialWorkspacePath = workspacePathFromUrl(page.url());
     const selectedWorkspace = await resolveSelectedWorkspace(page, initialWorkspacePath);
     const workspacePath = selectedWorkspace.workspacePath;
+    if (closedSession && workspacePath !== `/workspaces/${SELFSERVE_VALIDATION_TARGET.workspaceId}`) {
+      throw new Error("VALIDATION_WORKSPACE_MISMATCH");
+    }
     if (workspacePath !== initialWorkspacePath) {
       await page.goto(routeUrl(locale, workspacePath, ""), { waitUntil: "domcontentloaded" });
       await waitForPageSettled(page);
@@ -715,6 +735,7 @@ async function main() {
   } finally {
     delete globalThis.__corgtexClientReadinessSetRouteLabel;
     await browser?.close().catch(() => null);
+    await closedSession?.close();
   }
 }
 

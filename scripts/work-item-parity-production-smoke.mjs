@@ -242,8 +242,10 @@ export class WorkItemParitySmoke {
     authEmail,
     authPassword,
     prNumbers,
+    fetchImpl = fetch,
   }) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+    this.fetchImpl = fetchImpl;
     this.outDir = path.resolve(outDir || DEFAULT_OUT_DIR);
     this.expectedGitSha = expectedGitSha || null;
     this.workspaceSelector = workspaceSelector ?? validationWorkspaceSelectorFromEnv(process.env, "WORK_ITEM_PARITY_SMOKE");
@@ -293,7 +295,7 @@ export class WorkItemParitySmoke {
     const headers = new Headers(init.headers ?? {});
     if (this.cookie) headers.set("cookie", this.cookie);
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-    const response = await fetch(url, { ...init, headers });
+    const response = await this.fetchImpl(url, { ...init, headers });
     const text = await response.text();
     let body = null;
     if (text) {
@@ -306,7 +308,7 @@ export class WorkItemParitySmoke {
   }
 
   async mcpRpc(method, params) {
-    const response = await fetch(`${this.baseUrl}/api/mcp`, {
+    const response = await this.fetchImpl(`${this.baseUrl}/api/mcp`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.mcpToken}`,
@@ -340,7 +342,7 @@ export class WorkItemParitySmoke {
 
   async login() {
     assert(this.authEmail && this.authPassword, "Work-item parity smoke requires WORK_ITEM_PARITY_SMOKE_EMAIL/PASSWORD or production validation admin credentials.");
-    const login = await fetch(`${this.baseUrl}/api/auth/login`, {
+    const login = await this.fetchImpl(`${this.baseUrl}/api/auth/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email: this.authEmail, password: this.authPassword }),

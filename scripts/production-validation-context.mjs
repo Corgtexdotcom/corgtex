@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 
 import { collectProductionValidationPrNumbers } from "./production-validation-pr-numbers.mjs";
 import { readPin, resolveBaseline } from "./accepted-core-baseline.mjs";
+import { validationTarget, validationRunTarget, SELFSERVE_VALIDATION_TARGET, selfserveExpectedRelease, assertSelfserveOrigin } from "./lib/selfserve-validation-target.mjs";
 
 const DEFAULT_BASE_URL = "https://app.corgtex.com";
 const DEFAULT_RECORDER_DEPLOYMENTS = "";
@@ -59,6 +60,23 @@ const NON_APP_RELEASE_FILES = new Set([
   "scripts/accepted-core-baseline.mjs",
   "scripts/accepted-core-baseline.test.mjs",
   "scripts/ci-production-boundary.test.mjs",
+  "scripts/client-readiness-smoke.mjs",
+  "scripts/work-item-parity-production-smoke.mjs",
+  "scripts/lib/selfserve-validation-target.mjs",
+  "scripts/selfserve-validation-fixture.mjs",
+  "scripts/selfserve-validation-browser.mjs",
+  "scripts/selfserve-validation-relay.mjs",
+  "scripts/selfserve-validation-isolated.mjs",
+  "scripts/selfserve-validation-navigation.mjs",
+  "scripts/selfserve-validation-outcome.mjs",
+  "scripts/selfserve-validation-parity.mjs",
+  "scripts/selfserve-validation-recovery.mjs",
+  "scripts/selfserve-validation-recovery.test.mjs",
+  "scripts/selfserve-validation-control-flow.test.mjs",
+  "scripts/selfserve-validation-schema.mjs",
+  "scripts/selfserve-validation-schema.integration.test.mjs",
+  "scripts/selfserve-validation-smoke.mjs",
+  "scripts/selfserve-validation.test.mjs",
 ]);
 
 function boolOutput(value) {
@@ -261,10 +279,38 @@ export function resolveProductionValidationContext({
   smokeInputs = {},
   changedFiles = [],
   acceptedBaseline = null,
+  targetInput,
+  acceptedSelfserveSha,
+  selfserveParityInput,
+  selfserveCrmInput,
 }) {
+  const target = validationTarget(targetInput);
   const allowed = eventName === "workflow_run"
     ? workflowRunIsTrusted(event, githubRepository)
     : true;
+
+  if (target === SELFSERVE_VALIDATION_TARGET.name) {
+    const trusted = githubRepository === "Corgtexdotcom/corgtex"
+      && (githubRef === "refs/heads/main" || (eventName === "workflow_run" && allowed));
+    if (!trusted || !allowed) throw new Error("SELFSERVE_VALIDATION_TRUSTED_MAIN_REQUIRED");
+    const origin = assertSelfserveOrigin(baseUrlInput || SELFSERVE_VALIDATION_TARGET.origin);
+    if (booleanWorkflowInput(selfserveCrmInput)) {
+      throw new Error("SELFSERVE_CRM_BLOCKED: real-model CRM requires a fixed synthetic account and a separately approved model lane; the no-egress fixture cannot provide this proof.");
+    }
+    return {
+      enabled: boolOutput(eventName !== "workflow_run"), target,
+      validation_mode: eventName === "workflow_dispatch" ? "explicit-release" : "accepted-serving",
+      trusted_ref: "true", base_url: origin,
+      expected_git_sha: selfserveExpectedRelease({ eventName, expectedSha: expectedGitShaInput, acceptedSha: acceptedSelfserveSha }),
+      pr_numbers: collectProductionValidationPrNumbers({ baseline: baselinePrNumbers, explicit: prNumbersInput, event }).join(","),
+      // None of the legacy production-writer helpers may inherit this target.
+      crm_smoke: "false", telemetry_release_smoke: "false", client_readiness_smoke: "false",
+      client_readiness_routes: normalizeClientReadinessRoutes(clientReadinessRoutesInput),
+      source_intake_smoke: "false", work_item_parity_smoke: "false", briefing_fixture_smoke: "false",
+      recorder_readiness_smoke: "false", recorder_readiness_deployments: "", recorder_readiness_temp_meetings: "false",
+      selfserve_parity_smoke: boolOutput(eventName === "workflow_dispatch" && booleanWorkflowInput(selfserveParityInput)),
+    };
+  }
 
   // Source CI already validates the accepted Core baseline. Its completion (or
   // a schedule) is not authority to import new-main fixtures into that runtime.
@@ -368,7 +414,9 @@ async function main() {
   const eventName = process.env.GITHUB_EVENT_NAME;
   const automaticTrusted = process.env.GITHUB_REPOSITORY === "Corgtexdotcom/corgtex" && process.env.GITHUB_REF === "refs/heads/main"
     && (eventName === "schedule" || (eventName === "workflow_run" && workflowRunIsTrusted(event, process.env.GITHUB_REPOSITORY)));
-  const acceptedBaseline = automaticTrusted ? await resolveBaseline(await readPin()) : null;
+  const target = validationRunTarget({ eventName, pinnedTarget: process.env.PRODUCTION_VALIDATION_PINNED_TARGET,
+    configuredTarget: process.env.PRODUCTION_VALIDATION_TARGET });
+  const acceptedBaseline = automaticTrusted && target === "core" ? await resolveBaseline(await readPin()) : null;
   const changedFiles = await changedFilesForEvent({
     eventName,
     event,
@@ -398,7 +446,14 @@ async function main() {
     },
     changedFiles,
     acceptedBaseline,
+    targetInput: target,
+    acceptedSelfserveSha: process.env.SELFSERVE_VALIDATION_ACCEPTED_SHA,
+    selfserveParityInput: process.env.SELFSERVE_PARITY_INPUT,
+    selfserveCrmInput: process.env.SELFSERVE_CRM_INPUT,
   });
+  if (target === SELFSERVE_VALIDATION_TARGET.name) {
+    context.verifier_sha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  }
 
   if (args.output) {
     await writeFile(args.output, `${formatGithubOutput(context)}\n`, { flag: "a" });

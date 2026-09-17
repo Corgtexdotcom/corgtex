@@ -163,6 +163,11 @@ jobs:
         env:
           QA_OWNER_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
 
+      - name: Test read-only schema auditor relation privileges
+        run: node --test scripts/selfserve-validation-schema.integration.test.mjs
+        env:
+          QA_SCHEMA_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
+
       - name: Test Azure site image release
         run: node --test scripts/azure-site-image-release.node-test.mjs
 
@@ -378,15 +383,31 @@ jobs:
         if: github.event_name == 'merge_group'
         run: echo "Client Data Scan passed on pull_request before merge queue entry."
 
+  smoke-target:
+    name: Pin Production Validation Target
+    needs: [check, db-sync, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository == 'Corgtexdotcom/corgtex'
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.target.outputs.target }}
+    steps:
+      - id: target
+        env:
+          TARGET: ${{ vars.PRODUCTION_VALIDATION_TARGET || 'core' }}
+        run: |
+          case "$TARGET" in core|selfserve-validation) ;; *) exit 1 ;; esac
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
   smoke-prod:
     name: Production Smoke Test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository == 'Corgtexdotcom/corgtex'
+    if: needs.smoke-target.outputs.target == 'core'
     environment: fleet-release-production
     permissions:
       contents: read
       actions: read
     runs-on: ubuntu-latest
     needs:
+      - smoke-target
       - check
       - db-sync
       - build
@@ -546,12 +567,62 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check-secrets.outputs.skip != 'true'
         run: echo "available=true" >> "$GITHUB_OUTPUT"
 
+  smoke-selfserve:
+    name: Selfserve Validation
+    needs: [smoke-target, check, db-sync, build]
+    if: needs.smoke-target.outputs.target == 'selfserve-validation'
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+      pull-requests: read
+    uses: ./.github/workflows/production-validation.yml
+    with:
+      validation_target: ${{ needs.smoke-target.outputs.target }}
+    secrets:
+      SELFSERVE_VALIDATION_EMAIL: ${{ secrets.SELFSERVE_VALIDATION_EMAIL }}
+      SELFSERVE_VALIDATION_PASSWORD: ${{ secrets.SELFSERVE_VALIDATION_PASSWORD }}
+      SELFSERVE_SCHEMA_AUDITOR_URL: ${{ secrets.SELFSERVE_SCHEMA_AUDITOR_URL }}
+
+  smoke-mode-gate:
+    name: Production Validation Mode Gate
+    needs: [smoke-target, smoke-prod, smoke-selfserve]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository == 'Corgtexdotcom/corgtex'
+    runs-on: ubuntu-latest
+    outputs:
+      smoke_proof: ${{ needs.smoke-prod.outputs.smoke_proof || needs.smoke-selfserve.outputs.smoke_proof }}
+      skip_release_match: ${{ needs.smoke-prod.outputs.skip_release_match || 'true' }}
+      observation_since: ${{ needs.smoke-prod.outputs.observation_since || needs.smoke-selfserve.outputs.observation_since }}
+      baseline_enabled: ${{ needs.smoke-prod.outputs.baseline_enabled }}
+      baseline_source_sha: ${{ needs.smoke-prod.outputs.baseline_source_sha }}
+      baseline_receipt_sha256: ${{ needs.smoke-prod.outputs.baseline_receipt_sha256 }}
+      selfserve_expected_sha: ${{ needs.smoke-selfserve.outputs.expected_git_sha }}
+      selected_target: ${{ steps.mode.outputs.selected_target }}
+    steps:
+      - name: Require the selected mode; unknown targets fail closed
+        id: mode
+        env:
+          TARGET: ${{ needs.smoke-target.outputs.target }}
+          CORE_RESULT: ${{ needs.smoke-prod.result }}
+          SELFSERVE_RESULT: ${{ needs.smoke-selfserve.result }}
+          SELFSERVE_PROOF: ${{ needs.smoke-selfserve.outputs.smoke_proof }}
+          SELFSERVE_TARGET: ${{ needs.smoke-selfserve.outputs.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            core) test "$CORE_RESULT" = success && test "$SELFSERVE_RESULT" = skipped || exit 1 ;;
+            selfserve-validation) test "$SELFSERVE_RESULT" = success && test "$SELFSERVE_PROOF" = true && test "$CORE_RESULT" = skipped && test "$SELFSERVE_TARGET" = "$TARGET" || exit 1 ;;
+            *) exit 1 ;;
+          esac
+          echo "selected_target=$TARGET" >> "$GITHUB_OUTPUT"
+
   observe-prod:
     name: Post-deploy Observation Gate
     runs-on: ubuntu-latest
     needs:
       - smoke-prod
-    if: github.ref == 'refs/heads/main' && needs.smoke-prod.outputs.smoke_proof == 'true'
+      - smoke-mode-gate
+    if: always() && github.ref == 'refs/heads/main' && needs.smoke-mode-gate.result == 'success' && needs.smoke-mode-gate.outputs.smoke_proof == 'true'
     environment: fleet-release-production
     permissions:
       contents: read
@@ -572,8 +643,10 @@ jobs:
       OPS_GITHUB_REPOSITORY: ${{ github.repository }}
       OBSERVATION_REQUIRE_SOURCE: "true"
       OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
-      OBSERVATION_SINCE: ${{ needs.smoke-prod.outputs.observation_since }}
-      SMOKE_SKIP_RELEASE_MATCH: ${{ needs.smoke-prod.outputs.skip_release_match }}
+      OBSERVATION_SINCE: ${{ needs.smoke-mode-gate.outputs.observation_since }}
+      SMOKE_SKIP_RELEASE_MATCH: ${{ needs.smoke-mode-gate.outputs.skip_release_match }}
+      PRODUCTION_VALIDATION_TARGET: ${{ needs.smoke-mode-gate.outputs.selected_target }}
+      SELFSERVE_VALIDATION_EXPECTED_SHA: ${{ needs.smoke-mode-gate.outputs.selfserve_expected_sha }}
       ACCEPTED_CORE_BASELINE: ${{ needs.smoke-prod.outputs.baseline_enabled }}
       ACCEPTED_CORE_SOURCE_SHA: ${{ needs.smoke-prod.outputs.baseline_source_sha }}
       ACCEPTED_CORE_RECEIPT_SHA256: ${{ needs.smoke-prod.outputs.baseline_receipt_sha256 }}
@@ -632,10 +705,20 @@ jobs:
           read_health_release() {
             local health_url="$1"
             local health_json
-            health_json="$(curl --connect-timeout 10 --max-time 30 -fsS "$health_url")"
-            node -e '
-              const fs = require("fs");
+            local curl_args=(--connect-timeout 10 --max-time 30 -fsS)
+            if [[ -n "${2:-}" ]]; then curl_args+=(-H "Cache-Control: no-cache"); fi
+            health_json="$(curl "${curl_args[@]}" "$health_url")" || return 1
+            EXPECTED_BAKED_SHA="${2:-}" node --input-type=module -e '
+              import fs from "node:fs";
+              import { healthPayloadMismatch, healthReleaseValidationMismatch } from "./scripts/railway-smoke.mjs";
               const health = JSON.parse(fs.readFileSync(0, "utf8"));
+              const expected = process.env.EXPECTED_BAKED_SHA;
+              if (expected && (!/^[a-f0-9]{40}$/.test(expected)
+                || healthPayloadMismatch({ ok: true }, health)
+                || healthReleaseValidationMismatch(health, expected, { requireConfiguredMatch: true })
+                || health?.release?.runtime?.gitSha !== expected || health.release.runtime.evidence !== "baked")) {
+                throw new Error("OBSERVATION_BAKED_RUNTIME_UNPROVEN");
+              }
               const gitSha = health?.release?.gitSha || process.env.GITHUB_SHA;
               const imageTag = health?.release?.imageTag || `sha-${gitSha}`;
               const version = health?.release?.version || `main-${gitSha.slice(0, 12)}`;
@@ -645,11 +728,14 @@ jobs:
             ' <<< "$health_json"
           }
 
+          app_git_sha=""; app_image_tag=""; app_version=""
+          if [[ "$PRODUCTION_VALIDATION_TARGET" != "selfserve-validation" ]]; then
           {
             read -r app_git_sha
             read -r app_image_tag
             read -r app_version
           } < <(read_health_release "https://app.corgtex.com/api/health")
+          fi
 
           if [[ "$ACCEPTED_CORE_BASELINE" == "true" ]]; then
             test "$app_git_sha" = "$ACCEPTED_CORE_SOURCE_SHA"
@@ -657,11 +743,22 @@ jobs:
             app_image_tag="sha-$ACCEPTED_CORE_SOURCE_SHA"
           fi
 
-          {
-            read -r selfserve_git_sha
-            read -r selfserve_image_tag
-            read -r selfserve_version
-          } < <(read_health_release "https://selfserve.corgtex.com/api/health")
+          if [[ "$PRODUCTION_VALIDATION_TARGET" == "selfserve-validation" ]]; then
+            test -n "$SELFSERVE_VALIDATION_EXPECTED_SHA"
+            selfserve_release="$(read_health_release "https://selfserve.corgtex.com/api/health" "$SELFSERVE_VALIDATION_EXPECTED_SHA")"
+            {
+              read -r selfserve_git_sha
+              read -r selfserve_image_tag
+              read -r selfserve_version
+            } <<< "$selfserve_release"
+            test "$selfserve_git_sha" = "$SELFSERVE_VALIDATION_EXPECTED_SHA"
+          else
+            {
+              read -r selfserve_git_sha
+              read -r selfserve_image_tag
+              read -r selfserve_version
+            } < <(read_health_release "https://selfserve.corgtex.com/api/health")
+          fi
 
           {
             read -r ops_git_sha
@@ -684,8 +781,10 @@ jobs:
                 { target: "backup-app", gitSha: process.env.APP_GIT_SHA, imageTag: process.env.APP_IMAGE_TAG, releaseVersion: process.env.APP_VERSION },
                 { target: "azure-selfserve", gitSha: process.env.SELFSERVE_GIT_SHA, imageTag: process.env.SELFSERVE_IMAGE_TAG, releaseVersion: process.env.SELFSERVE_VERSION },
                 { target: "ops", gitSha: process.env.OPS_GIT_SHA, imageTag: process.env.OPS_IMAGE_TAG, releaseVersion: process.env.OPS_VERSION },
-              ];
-              console.log(JSON.stringify({ gitSha: process.env.GITHUB_SHA, targetManifests }));
+              ].filter((entry) => process.env.PRODUCTION_VALIDATION_TARGET !== "selfserve-validation" || entry.target !== "backup-app");
+              const gitSha = process.env.PRODUCTION_VALIDATION_TARGET === "selfserve-validation"
+                ? process.env.SELFSERVE_GIT_SHA : process.env.GITHUB_SHA;
+              console.log(JSON.stringify({ gitSha, targetManifests }));
             '
           )"
           echo "Observation uses live target releases from app, selfserve, and ops health"
@@ -693,9 +792,13 @@ jobs:
           if [[ "$ACCEPTED_CORE_BASELINE" == "true" ]]; then
             observation_script=".baseline/verifier/scripts/post-deploy-observation-gate.mjs"
           fi
+          observation_targets=backup-app,azure-selfserve,ops
+          if [[ "$PRODUCTION_VALIDATION_TARGET" == "selfserve-validation" ]]; then
+            observation_targets=azure-selfserve,ops
+          fi
           node "$observation_script" \
             --manifest-json "$manifest_json" \
-            --targets backup-app,azure-selfserve,ops \
+            --targets "$observation_targets" \
             --since "$OBSERVATION_SINCE" \
             --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
             --publish-advisories
