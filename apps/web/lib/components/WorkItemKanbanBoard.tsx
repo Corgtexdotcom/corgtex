@@ -71,6 +71,7 @@ export function WorkItemKanbanBoard({
   sortDateLabel,
   sortAlphaLabel,
   dragUnavailableLabel,
+  readOnly = false,
 }: {
   columns: WorkItemKanbanColumn[];
   storageKey: string;
@@ -89,6 +90,7 @@ export function WorkItemKanbanBoard({
   sortDateLabel: string;
   sortAlphaLabel: string;
   dragUnavailableLabel: string;
+  readOnly?: boolean;
 }) {
   const defaultOrder = useMemo(() => columns.map((column) => column.id), [columns]);
   const [columnOrder, setColumnOrder] = useState(defaultOrder);
@@ -161,7 +163,7 @@ export function WorkItemKanbanBoard({
   }
 
   function handleDrop(targetStatus: string) {
-    if (!draggedItem || draggedItem.status === targetStatus) {
+    if (readOnly || !draggedItem || draggedItem.status === targetStatus) {
       setDraggedItem(null);
       return;
     }
@@ -274,7 +276,7 @@ export function WorkItemKanbanBoard({
               {sortedItems(column).map((item) => (
                 <div
                   className="nr-kanban-draggable"
-                  draggable
+                  draggable={!readOnly}
                   key={item.id}
                   onDragStart={(event) => {
                     event.dataTransfer.effectAllowed = "move";

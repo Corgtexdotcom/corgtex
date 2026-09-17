@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -59,6 +60,11 @@ export default async function AccountDetailPage({
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   const membership = await requireWorkspaceMembership({ actor, workspaceId });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true, name: true },
+  });
+  const readOnly = workspace ? workspaceBranding(workspace).isDemo : false;
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -97,7 +103,7 @@ export default async function AccountDetailPage({
   const communicationSummary = splitCommunicationSuggestions(communicationSuggestionResult.items);
   const nextCommunicationSuggestions = communicationSummary.open.slice(0, 3);
   const isClientAccount = account.relationshipType === "CLIENT" && account.lifecycleStage === "ACTIVE";
-  const canConvertToClient = !isClientAccount;
+  const canConvertToClient = !readOnly && !isClientAccount;
   const memberNames = new Map(members.map((member) => [
     member.user.id,
     member.user.displayName || member.user.email,
@@ -337,11 +343,13 @@ export default async function AccountDetailPage({
                       </div>
                     )}
                   </div>
-                  <form action={completeActivityAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="activityId" value={activity.id} />
-                    <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
-                  </form>
+                  {!readOnly && (
+                    <form action={completeActivityAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="activityId" value={activity.id} />
+                      <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                    </form>
+                  )}
                 </div>
               ))}
             </div>
@@ -440,7 +448,7 @@ export default async function AccountDetailPage({
               </div>
             </div>
 
-            <details>
+            {!readOnly && <details>
               <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnEditAccount")}</summary>
               <form action={updateCrmAccountAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
                 <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -478,7 +486,7 @@ export default async function AccountDetailPage({
                   {t("btnArchiveAccount")}
                 </ConfirmSubmitButton>
               </form>
-            </details>
+            </details>}
           </div>
         )}
 
@@ -498,13 +506,15 @@ export default async function AccountDetailPage({
                   </div>
                   <div className="row" style={{ marginLeft: "auto", gap: 8 }}>
                     <span className="tag">{contact.source}</span>
-                    <form action={archiveContactAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="contactId" value={contact.id} />
-                      <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveContact")}>
-                        {t("btnArchiveContact")}
-                      </ConfirmSubmitButton>
-                    </form>
+                    {!readOnly && (
+                      <form action={archiveContactAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="contactId" value={contact.id} />
+                        <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveContact")}>
+                          {t("btnArchiveContact")}
+                        </ConfirmSubmitButton>
+                      </form>
+                    )}
                   </div>
                 </div>
               </div>
@@ -515,6 +525,7 @@ export default async function AccountDetailPage({
         {view === "pipeline" && (
           <div className="stack">
             <DealPipelineBoard
+              readOnly={readOnly}
               workspaceId={workspaceId}
               deals={account.deals}
               members={members}
@@ -581,7 +592,7 @@ export default async function AccountDetailPage({
                     {activity.ownerUserId && <span className="tag-sm">{t("pipelineOwner")}: {ownerText(activity.ownerUserId)}</span>}
                   </div>
                   {activity.bodyMd && <MarkdownRenderer markdown={activity.bodyMd} variant="compact" />}
-                  {activity.type === "TASK" && !activity.completedAt && (
+                  {!readOnly && activity.type === "TASK" && !activity.completedAt && (
                     <form action={completeActivityAction} style={{ marginTop: 12 }}>
                       <input type="hidden" name="workspaceId" value={workspaceId} />
                       <input type="hidden" name="activityId" value={activity.id} />
@@ -600,6 +611,7 @@ export default async function AccountDetailPage({
               <p className="muted">{t("accountNoSuggestions")}</p>
             ) : communicationSummary.all.map((suggestion) => (
               <CommunicationSuggestionCard
+                readOnly={readOnly}
                 key={suggestion.id}
                 workspaceId={workspaceId}
                 suggestion={suggestion}

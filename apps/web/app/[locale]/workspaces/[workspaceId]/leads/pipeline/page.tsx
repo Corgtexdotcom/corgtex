@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
@@ -63,6 +64,11 @@ export default async function RelationshipPipelinePage({
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true, name: true },
+  });
+  const readOnly = workspace ? workspaceBranding(workspace).isDemo : false;
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -249,13 +255,15 @@ export default async function RelationshipPipelinePage({
         const nav = accountNavigationState(workspaceId, deal.account);
         return (
           <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
-            <form action={archiveDealAction}>
-              <input type="hidden" name="workspaceId" value={workspaceId} />
-              <input type="hidden" name="dealId" value={deal.id} />
-              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
-                {t("btnArchiveDeal")}
-              </ConfirmSubmitButton>
-            </form>
+            {!readOnly && (
+              <form action={archiveDealAction}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="dealId" value={deal.id} />
+                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
+                  {t("btnArchiveDeal")}
+                </ConfirmSubmitButton>
+              </form>
+            )}
             {nav.href && (
               <a
                 href={`${nav.href}?view=pipeline`}
@@ -354,6 +362,7 @@ export default async function RelationshipPipelinePage({
 
         {viewMode === "kanban" ? (
           <DealPipelineBoard
+            readOnly={readOnly}
             workspaceId={workspaceId}
             deals={dealResult.items}
             members={members}
@@ -423,13 +432,15 @@ export default async function RelationshipPipelinePage({
                   })()}</span>
                 </div>
                 <div className="row" style={{ gap: 8 }}>
-                  <form action={archiveDealAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="dealId" value={deal.id} />
-                    <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
-                      {t("btnArchiveDeal")}
-                    </ConfirmSubmitButton>
-                  </form>
+                  {!readOnly && (
+                    <form action={archiveDealAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="dealId" value={deal.id} />
+                      <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
+                        {t("btnArchiveDeal")}
+                      </ConfirmSubmitButton>
+                    </form>
+                  )}
                   {(() => {
                     const nav = accountNavigationState(workspaceId, deal.account);
                     return nav.href ? (

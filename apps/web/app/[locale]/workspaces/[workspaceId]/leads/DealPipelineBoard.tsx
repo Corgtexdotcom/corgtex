@@ -62,6 +62,7 @@ export function DealPipelineBoard({
   workItemLabels,
   accountFallback,
   addStageHrefs,
+  readOnly = false,
 }: {
   workspaceId: string;
   deals: PipelineDeal[];
@@ -89,6 +90,7 @@ export function DealPipelineBoard({
   workItemLabels: WorkItemLabels;
   accountFallback?: PipelineAccount | null;
   addStageHrefs?: Partial<Record<string, string>>;
+  readOnly?: boolean;
 }) {
   const groupedDeals = dealsGroupedByStage(deals);
   const ownerNames = new Map(
@@ -121,7 +123,7 @@ export function DealPipelineBoard({
   const creatableStageSet = new Set<string>(CRM_CREATABLE_DEAL_STAGES);
   const columns: WorkItemKanbanColumn[] = CRM_DEAL_STAGES.map((stage) => {
     const stageDeals = groupedDeals[stage] ?? [];
-    const addHref = creatableStageSet.has(stage) ? addStageHrefs?.[stage] : undefined;
+    const addHref = !readOnly && creatableStageSet.has(stage) ? addStageHrefs?.[stage] : undefined;
     return {
       id: stage,
       label: stageLabels[stage] ?? labelFromCrmCode(stage),
@@ -177,7 +179,7 @@ export function DealPipelineBoard({
                   ? `${followUp.title}${followUp.dueAt ? ` (${formatDate(followUp.dueAt)})` : ""}`
                   : labels.noNextFollowUp}
               </div>
-              <div style={{ marginTop: 12, display: "flex", gap: 4, alignItems: "center" }}>
+              {!readOnly && <div style={{ marginTop: 12, display: "flex", gap: 4, alignItems: "center" }}>
                 <DealStageSelect workspaceId={workspaceId} dealId={deal.id} currentStage={deal.stage} />
                 <form action={archiveDealAction}>
                   <input type="hidden" name="workspaceId" value={workspaceId} />
@@ -186,8 +188,8 @@ export function DealPipelineBoard({
                     {labels.archiveDeal}
                   </ConfirmSubmitButton>
                 </form>
-              </div>
-              <div aria-hidden="true" style={{ display: "none" }}>
+              </div>}
+              {!readOnly && <div aria-hidden="true" style={{ display: "none" }}>
                 {CRM_DEAL_STAGES.filter((targetStage) => targetStage !== deal.stage).map((targetStage) => (
                   <form
                     action={updateDealAction}
@@ -200,7 +202,7 @@ export function DealPipelineBoard({
                     <button type="submit">{stageLabels[targetStage] ?? labelFromCrmCode(targetStage)}</button>
                   </form>
                 ))}
-              </div>
+              </div>}
             </div>
           ),
         };
@@ -210,6 +212,7 @@ export function DealPipelineBoard({
 
   return (
     <WorkItemKanbanBoard
+      readOnly={readOnly}
       columns={columns}
       storageKey={storageKey}
       visibleColumnIds={visibleColumnIds}

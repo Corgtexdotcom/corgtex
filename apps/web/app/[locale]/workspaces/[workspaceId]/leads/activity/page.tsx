@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
@@ -75,6 +76,11 @@ export default async function RelationshipActivityPage({
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true, name: true },
+  });
+  const readOnly = workspace ? workspaceBranding(workspace).isDemo : false;
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -160,20 +166,22 @@ export default async function RelationshipActivityPage({
   const tableSortDirection = sort === "recent" ? "desc" : sortDirection;
   const renderCompleteAction = (activity: (typeof activities)[number]) => (
     <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
-      {!activity.completedAt && (
+      {!readOnly && !activity.completedAt && (
         <form action={completeActivityAction}>
           <input type="hidden" name="workspaceId" value={workspaceId} />
           <input type="hidden" name="activityId" value={activity.id} />
           <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
         </form>
       )}
-      <form action={archiveActivityAction}>
-        <input type="hidden" name="workspaceId" value={workspaceId} />
-        <input type="hidden" name="activityId" value={activity.id} />
-        <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
-          {t("btnArchiveActivity")}
-        </ConfirmSubmitButton>
-      </form>
+      {!readOnly && (
+        <form action={archiveActivityAction}>
+          <input type="hidden" name="workspaceId" value={workspaceId} />
+          <input type="hidden" name="activityId" value={activity.id} />
+          <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
+            {t("btnArchiveActivity")}
+          </ConfirmSubmitButton>
+        </form>
+      )}
     </div>
   );
   const activityTableColumns: WorkItemTableColumn[] = [
