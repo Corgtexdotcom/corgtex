@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemKanbanBoard, type WorkItemKanbanColumn } from "@/lib/components/WorkItemKanbanBoard";
@@ -54,6 +55,11 @@ export default async function RelationshipSuggestionsPage({
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true, name: true },
+  });
+  const readOnly = workspace ? workspaceBranding(workspace).isDemo : false;
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -310,6 +316,7 @@ export default async function RelationshipSuggestionsPage({
           />
         ) : viewMode === "kanban" ? (
           <WorkItemKanbanBoard
+            readOnly={readOnly}
             columns={suggestionColumns}
             storageKey={`relationships:${workspaceId}:suggestions`}
             settingsLabel={tWork("columnSettings")}
@@ -332,6 +339,7 @@ export default async function RelationshipSuggestionsPage({
             <p className="muted">{t("noSuggestions")}</p>
           ) : sortedSuggestions.map((suggestion) => (
             <CommunicationSuggestionCard
+              readOnly={readOnly}
               key={suggestion.id}
               workspaceId={workspaceId}
               suggestion={suggestion}

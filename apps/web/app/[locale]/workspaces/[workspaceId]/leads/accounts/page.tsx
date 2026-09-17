@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { MultiSelectFilter } from "@/lib/components/MultiSelectFilter";
 import { WorkItemToolbar } from "@/lib/components/WorkItemControls";
 import { WorkItemTable, type WorkItemTableColumn, type WorkItemTableRow } from "@/lib/components/WorkItemTable";
@@ -59,6 +60,11 @@ export default async function RelationshipAccountsPage({
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true, name: true },
+  });
+  const readOnly = workspace ? workspaceBranding(workspace).isDemo : false;
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
   const resolvedSearch = searchParams ? await searchParams : {};
@@ -264,13 +270,15 @@ export default async function RelationshipAccountsPage({
             >
               <ExternalLink size={15} aria-hidden="true" />
             </a>
-            <form action={archiveCrmAccountAction} style={{ whiteSpace: "nowrap" }}>
-              <input type="hidden" name="workspaceId" value={workspaceId} />
-              <input type="hidden" name="accountId" value={account.id} />
-              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
-                {t("btnArchiveAccount")}
-              </ConfirmSubmitButton>
-            </form>
+            {!readOnly && (
+              <form action={archiveCrmAccountAction} style={{ whiteSpace: "nowrap" }}>
+                <input type="hidden" name="workspaceId" value={workspaceId} />
+                <input type="hidden" name="accountId" value={account.id} />
+                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                  {t("btnArchiveAccount")}
+                </ConfirmSubmitButton>
+              </form>
+            )}
           </div>
         ),
       },
@@ -400,13 +408,15 @@ export default async function RelationshipAccountsPage({
                   </div>
                   <div className="row" style={{ marginTop: "auto", gap: 6, flexWrap: "wrap" }}>
                     <a href={accountNav.href ?? accountNav.fallbackHref} className="link-button small">{t("openDetail")}</a>
-                    <form action={archiveCrmAccountAction}>
-                      <input type="hidden" name="workspaceId" value={workspaceId} />
-                      <input type="hidden" name="accountId" value={account.id} />
-                      <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
-                        {t("btnArchiveAccount")}
-                      </ConfirmSubmitButton>
-                    </form>
+                    {!readOnly && (
+                      <form action={archiveCrmAccountAction}>
+                        <input type="hidden" name="workspaceId" value={workspaceId} />
+                        <input type="hidden" name="accountId" value={account.id} />
+                        <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                          {t("btnArchiveAccount")}
+                        </ConfirmSubmitButton>
+                      </form>
+                    )}
                   </div>
                 </div>
               );

@@ -1,4 +1,5 @@
 import { requirePageActor } from "@/lib/auth";
+import { prisma, workspaceBranding } from "@corgtex/shared";
 import { requireWorkspaceFeature } from "@/lib/workspace-feature-flags";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { MarkdownRenderer } from "@/lib/components/MarkdownRenderer";
@@ -78,6 +79,11 @@ export default async function LeadsPage({
   await requireWorkspaceFeature(workspaceId, "RELATIONSHIPS");
   const actor = await requirePageActor();
   await requireWorkspaceMembership({ actor, workspaceId });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { slug: true, name: true },
+  });
+  const readOnly = workspace ? workspaceBranding(workspace).isDemo : false;
   const t = await getTranslations("leads");
   const tWork = await getTranslations("workItems");
 
@@ -415,18 +421,22 @@ export default async function LeadsPage({
                       <td data-label={t("colUpdated")} className="muted">{dueText(activity.dueAt)}</td>
                       <td data-label={t("colActions")} className="nr-table-cell-right">
                         <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
-                          <form action={completeActivityAction}>
-                            <input type="hidden" name="workspaceId" value={workspaceId} />
-                            <input type="hidden" name="activityId" value={activity.id} />
-                            <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
-                          </form>
-                          <form action={archiveActivityAction}>
-                            <input type="hidden" name="workspaceId" value={workspaceId} />
-                            <input type="hidden" name="activityId" value={activity.id} />
-                            <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
-                              {t("btnArchiveActivity")}
-                            </ConfirmSubmitButton>
-                          </form>
+                          {!readOnly && (
+                            <form action={completeActivityAction}>
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="activityId" value={activity.id} />
+                              <button type="submit" className="small">{t("btnCompleteFollowUp")}</button>
+                            </form>
+                          )}
+                          {!readOnly && (
+                            <form action={archiveActivityAction}>
+                              <input type="hidden" name="workspaceId" value={workspaceId} />
+                              <input type="hidden" name="activityId" value={activity.id} />
+                              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
+                                {t("btnArchiveActivity")}
+                              </ConfirmSubmitButton>
+                            </form>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -518,13 +528,15 @@ export default async function LeadsPage({
                               <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
                                 <ExternalLink size={15} aria-hidden="true" />
                               </a>
-                              <form action={archiveCrmAccountAction}>
-                                <input type="hidden" name="workspaceId" value={workspaceId} />
-                                <input type="hidden" name="accountId" value={account.id} />
-                                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
-                                  {t("btnArchiveAccount")}
-                                </ConfirmSubmitButton>
-                              </form>
+                              {!readOnly && (
+                                <form action={archiveCrmAccountAction}>
+                                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                                  <input type="hidden" name="accountId" value={account.id} />
+                                  <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                                    {t("btnArchiveAccount")}
+                                  </ConfirmSubmitButton>
+                                </form>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -580,13 +592,15 @@ export default async function LeadsPage({
                                 <ExternalLink size={15} aria-hidden="true" />
                               </a>
                             )}
-                            <form action={archiveDealAction}>
-                              <input type="hidden" name="workspaceId" value={workspaceId} />
-                              <input type="hidden" name="dealId" value={deal.id} />
-                              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
-                                {t("btnArchiveDeal")}
-                              </ConfirmSubmitButton>
-                            </form>
+                            {!readOnly && (
+                              <form action={archiveDealAction}>
+                                <input type="hidden" name="workspaceId" value={workspaceId} />
+                                <input type="hidden" name="dealId" value={deal.id} />
+                                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveDeal")}>
+                                  {t("btnArchiveDeal")}
+                                </ConfirmSubmitButton>
+                              </form>
+                            )}
                           </TableActionGroup>
                         </td>
                       </tr>
@@ -641,13 +655,15 @@ export default async function LeadsPage({
                                 <ExternalLink size={15} aria-hidden="true" />
                               </a>
                             )}
-                            <form action={archiveActivityAction}>
-                              <input type="hidden" name="workspaceId" value={workspaceId} />
-                              <input type="hidden" name="activityId" value={activity.id} />
-                              <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
-                                {t("btnArchiveActivity")}
-                              </ConfirmSubmitButton>
-                            </form>
+                            {!readOnly && (
+                              <form action={archiveActivityAction}>
+                                <input type="hidden" name="workspaceId" value={workspaceId} />
+                                <input type="hidden" name="activityId" value={activity.id} />
+                                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveActivity")}>
+                                  {t("btnArchiveActivity")}
+                                </ConfirmSubmitButton>
+                              </form>
+                            )}
                           </TableActionGroup>
                         </td>
                       </tr>
@@ -751,13 +767,15 @@ export default async function LeadsPage({
                         <a href={accountNav.href ?? accountNav.fallbackHref} className="nr-icon-link nr-table-action" aria-label={t("openDetail")} title={t("openDetail")}>
                           <ExternalLink size={15} aria-hidden="true" />
                         </a>
-                        <form action={archiveCrmAccountAction}>
-                          <input type="hidden" name="workspaceId" value={workspaceId} />
-                          <input type="hidden" name="accountId" value={account.id} />
-                          <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
-                            {t("btnArchiveAccount")}
-                          </ConfirmSubmitButton>
-                        </form>
+                        {!readOnly && (
+                          <form action={archiveCrmAccountAction}>
+                            <input type="hidden" name="workspaceId" value={workspaceId} />
+                            <input type="hidden" name="accountId" value={account.id} />
+                            <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveAccount")}>
+                              {t("btnArchiveAccount")}
+                            </ConfirmSubmitButton>
+                          </form>
+                        )}
                       </div>
                     </div>
                   );
@@ -800,23 +818,25 @@ export default async function LeadsPage({
                           {formatDate(contact.createdAt)}
                         </td>
                         <td style={{ padding: "12px 8px" }}>
-                          <details style={{ position: "relative" }}>
-                            <summary
-                              aria-label={t("titleContactActions")}
-                              style={{ cursor: "pointer", color: "var(--accent)", listStyle: "none" }}
-                            >
-                              {t("btnContactActions")}
-                            </summary>
-                            <div style={{ position: "absolute", right: 0, top: "100%", background: "white", padding: 8, border: "1px solid var(--line)", borderRadius: 8, zIndex: 10, boxShadow: "var(--shadow-md)" }}>
-                              <form action={archiveContactAction} style={{ width: "100%", whiteSpace: "nowrap" }}>
-                                <input type="hidden" name="workspaceId" value={workspaceId} />
-                                <input type="hidden" name="contactId" value={contact.id} />
-                                <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveContact")}>
-                                  {t("btnArchiveContact")}
-                                </ConfirmSubmitButton>
-                              </form>
-                            </div>
-                          </details>
+                          {!readOnly && (
+                            <details style={{ position: "relative" }}>
+                              <summary
+                                aria-label={t("titleContactActions")}
+                                style={{ cursor: "pointer", color: "var(--accent)", listStyle: "none" }}
+                              >
+                                {t("btnContactActions")}
+                              </summary>
+                              <div style={{ position: "absolute", right: 0, top: "100%", background: "white", padding: 8, border: "1px solid var(--line)", borderRadius: 8, zIndex: 10, boxShadow: "var(--shadow-md)" }}>
+                                <form action={archiveContactAction} style={{ width: "100%", whiteSpace: "nowrap" }}>
+                                  <input type="hidden" name="workspaceId" value={workspaceId} />
+                                  <input type="hidden" name="contactId" value={contact.id} />
+                                  <ConfirmSubmitButton className="danger small" confirmMessage={t("confirmArchiveContact")}>
+                                    {t("btnArchiveContact")}
+                                  </ConfirmSubmitButton>
+                                </form>
+                              </div>
+                            </details>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -830,6 +850,7 @@ export default async function LeadsPage({
         {view === "pipeline" && (
           <div>
             <DealPipelineBoard
+              readOnly={readOnly}
               workspaceId={workspaceId}
               deals={deals}
               members={members}
@@ -909,6 +930,7 @@ export default async function LeadsPage({
               <p className="muted">{t("noSuggestions")}</p>
             ) : communicationSummary.all.map((suggestion) => (
               <CommunicationSuggestionCard
+                readOnly={readOnly}
                 key={suggestion.id}
                 workspaceId={workspaceId}
                 suggestion={suggestion}
@@ -936,16 +958,20 @@ export default async function LeadsPage({
                   {qualification.rawEmailReply && <div style={{ gridColumn: "1 / -1" }}><span className="muted">{t("reviewRawReply")}</span> {qualification.rawEmailReply}</div>}
                 </div>
                 <div className="row" style={{ marginTop: 16, justifyContent: "flex-start", gap: 8 }}>
-                  <form action={approveQualificationAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="qualificationId" value={qualification.id} />
-                    <button type="submit" className="small">{t("btnApproveQualification")}</button>
-                  </form>
-                  <form action={rejectQualificationAction}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="qualificationId" value={qualification.id} />
-                    <button type="submit" className="danger small">{t("btnRejectQualification")}</button>
-                  </form>
+                  {!readOnly && (
+                    <form action={approveQualificationAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="qualificationId" value={qualification.id} />
+                      <button type="submit" className="small">{t("btnApproveQualification")}</button>
+                    </form>
+                  )}
+                  {!readOnly && (
+                    <form action={rejectQualificationAction}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="qualificationId" value={qualification.id} />
+                      <button type="submit" className="danger small">{t("btnRejectQualification")}</button>
+                    </form>
+                  )}
                 </div>
               </div>
             ))}
@@ -973,15 +999,17 @@ export default async function LeadsPage({
                   </div>
                 )}
 
-                <details style={{ marginTop: 12 }}>
-                  <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnReplyConversation")}</summary>
-                  <form action={createConversationMessageAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
-                    <input type="hidden" name="workspaceId" value={workspaceId} />
-                    <input type="hidden" name="conversationId" value={conversation.id} />
-                    <MarkdownEditor name="bodyMd" required placeholder={t("formReplyPlaceholder")} rows={3} />
-                    <button type="submit" className="small" style={{ width: "fit-content" }}>{t("btnSendReply")}</button>
-                  </form>
-                </details>
+                {!readOnly && (
+                  <details style={{ marginTop: 12 }}>
+                    <summary className="link-button small" style={{ cursor: "pointer" }}>{t("btnReplyConversation")}</summary>
+                    <form action={createConversationMessageAction} className="stack nr-form-section" style={{ marginTop: 12 }}>
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="conversationId" value={conversation.id} />
+                      <MarkdownEditor name="bodyMd" required placeholder={t("formReplyPlaceholder")} rows={3} />
+                      <button type="submit" className="small" style={{ width: "fit-content" }}>{t("btnSendReply")}</button>
+                    </form>
+                  </details>
+                )}
               </div>
             ))}
           </div>
@@ -990,29 +1018,31 @@ export default async function LeadsPage({
         {view === "instances" && (
           <div className="stack">
             <div style={{ marginBottom: 24, display: "flex", justifyContent: "flex-end" }}>
-              <details style={{ width: "100%" }}>
-                <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
-                  {t("btnProvisionInstance")}
-                </summary>
-                <form action={provisionProspectWorkspaceAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
-                  <input type="hidden" name="workspaceId" value={workspaceId} />
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
-                    <label>
-                      {t("formProspect")}
-                      <select name="demoLeadId" required>
-                        <option value="">{t("selectLead")}</option>
-                        {approvedQualifications.map((qualification) => (
-                          <option key={qualification.demoLeadId} value={qualification.demoLeadId}>
-                            {qualification.companyName || qualification.demoLead?.email || t("unknownLead")}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>{t("formAdminEmail")} <input type="email" name="adminEmail" required /></label>
-                  </div>
-                  <button type="submit" style={{ width: "fit-content" }}>{t("btnProvisionWorkspace")}</button>
-                </form>
-              </details>
+              {!readOnly && (
+                <details style={{ width: "100%" }}>
+                  <summary className="link-button small" style={{ cursor: "pointer", marginLeft: "auto", display: "inline-flex" }}>
+                    {t("btnProvisionInstance")}
+                  </summary>
+                  <form action={provisionProspectWorkspaceAction} className="stack nr-form-section" style={{ marginTop: 16 }}>
+                    <input type="hidden" name="workspaceId" value={workspaceId} />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+                      <label>
+                        {t("formProspect")}
+                        <select name="demoLeadId" required>
+                          <option value="">{t("selectLead")}</option>
+                          {approvedQualifications.map((qualification) => (
+                            <option key={qualification.demoLeadId} value={qualification.demoLeadId}>
+                              {qualification.companyName || qualification.demoLead?.email || t("unknownLead")}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>{t("formAdminEmail")} <input type="email" name="adminEmail" required /></label>
+                    </div>
+                    <button type="submit" style={{ width: "fit-content" }}>{t("btnProvisionWorkspace")}</button>
+                  </form>
+                </details>
+              )}
             </div>
 
             {prospectWorkspaces.length === 0 && <p className="muted">{t("noInstances")}</p>}
