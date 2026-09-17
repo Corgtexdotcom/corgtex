@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const mocks = vi.hoisted(() => ({ exec: vi.fn(), manifest: vi.fn(), engine: vi.fn(), ledger: vi.fn(),
-  connect: vi.fn(), query: vi.fn(), end: vi.fn() }));
+  connect: vi.fn(), query: vi.fn(), end: vi.fn(), readCatalog: vi.fn(), catalog: vi.fn() }));
+vi.mock("node:fs/promises", async original => {
+  const real = await original();
+  return { ...real, readFile: (...args) => String(args[0]).endsWith("selfserve-catalog/expected-catalog.json") ? mocks.readCatalog() : real.readFile(...args) };
+});
+vi.mock("./lib/selfserve-schema-catalog.mjs", async original => ({ ...await original(), collectSchemaCatalog: mocks.catalog }));
 vi.mock("node:child_process", () => ({ execFileSync: mocks.exec }));
 vi.mock("pg", () => ({ default: { Client: class {
   connect = mocks.connect; query = mocks.query; end = mocks.end;
@@ -15,10 +20,13 @@ import { databaseIdentity } from "./accepted-core-baseline.mjs";
 import { classifySchemaFailure, reportSchemaFailure, verifySelfserveSchema } from "./selfserve-validation-schema.mjs";
 import { loadSelfserveReceipts } from "./selfserve-validation-outcome.mjs";
 import { requiresProductionAppRelease } from "./production-validation-context.mjs";
+import { CATALOG_ALGORITHM, CATALOG_QUERIES, expectedCatalogArtifact } from "./lib/selfserve-schema-catalog.mjs";
 
 it("keeps schema diagnostics and their tests runner-only", () => {
   expect(requiresProductionAppRelease([
     "scripts/selfserve-validation-schema.mjs", "scripts/selfserve-validation-schema.test.mjs",
+    "scripts/lib/selfserve-schema-catalog.mjs", "scripts/selfserve-validation-catalog-fixture.mjs",
+    "scripts/selfserve-schema-catalog.test.mjs", "scripts/selfserve-schema-catalog.integration.test.mjs",
   ])).toBe(false);
 });
 
@@ -30,10 +38,16 @@ const url = "postgresql://auditor:synthetic@localhost/corgtex?schema=public&sslm
 const env = { SELFSERVE_VALIDATION_EXPECTED_SHA: sha, SELFSERVE_SCHEMA_AUDITOR_URL: url,
   SELFSERVE_DATABASE_IDENTITY_SHA256: databaseIdentity(url), GITHUB_RUN_ID: "12", GITHUB_RUN_ATTEMPT: "1" };
 
-beforeEach(() => {
+const emptyCatalog = () => ({ algorithm: CATALOG_ALGORITHM, serverMajor: 16,
+  categories: Object.fromEntries(Object.keys(CATALOG_QUERIES).map(key => [key, []])) });
+beforeEach(async () => {
   vi.resetAllMocks();
   mocks.exec.mockImplementation((file, args) => file === "git" ? (args[0] === "rev-parse" ? sha : "") : Buffer.from(""));
   mocks.manifest.mockReturnValue({ manifestSha256: "b".repeat(64), datamodelSha256: "c".repeat(64) });
+  mocks.catalog.mockResolvedValue(emptyCatalog());
+  mocks.readCatalog.mockResolvedValue(JSON.stringify({ ...expectedCatalogArtifact(emptyCatalog(), { expectedSha: sha,
+    manifest: mocks.manifest(), runId: "12", runAttempt: "1" }), cleanup: "completed" }));
+  env.SELFSERVE_VALIDATION_OUT_DIR = await mkdtemp(join(tmpdir(), "catalog-comparison-"));
   mocks.engine.mockResolvedValue("/prepared/schema-engine");
   mocks.ledger.mockReturnValue({ exactLedgerMatch: true });
   mocks.connect.mockResolvedValue(); mocks.end.mockResolvedValue();
@@ -41,7 +55,7 @@ beforeEach(() => {
     ? [{ database: "corgtex", schema: "public", default_read_only: "on", read_only: "on" }]
     : sql.includes("AS can_write") ? [{ can_write: false }] : [] }));
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(async () => { vi.restoreAllMocks(); await rm(env.SELFSERVE_VALIDATION_OUT_DIR, { recursive: true, force: true }); });
 
 describe("secret-safe schema failure boundary", () => {
   it.each(["source", "configuration", "prepared-engine", "connection-tls", "read-only-context", "privilege", "ledger", "cleanup"])("bounds %s errors", (stage) => {
@@ -89,18 +103,16 @@ describe("actual verifier stage routing", () => {
       }
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
-  it("preserves passing receipt and strict subprocess isolation", async () => {
+  it("preserves passing receipt without a live Prisma process", async () => {
     expect(await verifySelfserveSchema(env)).toMatchObject({ status: "passed", exactLedgerMatch: true, supportedSchemaMatch: true });
-    const call = mocks.exec.mock.calls.find(([file]) => file.endsWith("/prisma"));
-    expect(call[2].stdio).toBe("pipe");
-    expect(call[2].env.DATABASE_URL).toContain("sslaccept=strict");
-    expect(call[1].join(" ")).not.toContain("postgresql:");
+    expect(mocks.exec.mock.calls.every(([file]) => file === "git")).toBe(true);
+    expect(mocks.query).toHaveBeenCalledWith("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     expect(mocks.end).toHaveBeenCalledOnce();
   });
   it.each([
     ["source", "SCHEMA_SOURCE_MISMATCH", () => mocks.exec.mockReturnValue("wrong")],
     ["source", "CORE_BASELINE_SOURCE_MIGRATIONS_INVALID", () => mocks.manifest.mockImplementation(() => { throw new Error("CORE_BASELINE_SOURCE_MIGRATIONS_INVALID"); })],
-    ["prepared-engine", "ENOENT", () => mocks.engine.mockRejectedValue(Object.assign(poison(), { code: "ENOENT" }))],
+    ["catalog-artifact", "ENOENT", () => mocks.readCatalog.mockRejectedValue(Object.assign(poison(), { code: "ENOENT" }))],
     ["connection-tls", "ECONNREFUSED", () => mocks.connect.mockRejectedValue(Object.assign(poison(), { code: "ECONNREFUSED" }))],
     ["connection-tls", "ERR_TLS_CERT_ALTNAME_INVALID", () => mocks.connect.mockRejectedValue(Object.assign(poison(), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }))],
     ["read-only-context", "SCHEMA_READ_ONLY_CONTEXT_MISMATCH", () => mocks.query.mockResolvedValue({ rows: [] })],
@@ -109,9 +121,8 @@ describe("actual verifier stage routing", () => {
       mocks.query.mockImplementation(sql => sql.includes("AS can_write") ? { rows: [{ can_write: true }] } : original(sql));
     }],
     ["ledger", "CORE_BASELINE_LEDGER_NOT_EXACT", () => mocks.ledger.mockImplementation(() => { throw new Error("CORE_BASELINE_LEDGER_NOT_EXACT"); })],
-    ["introspection", "SCHEMA_DIFF_DETECTED", () => {
-      const original = mocks.exec.getMockImplementation();
-      mocks.exec.mockImplementation((file, args) => { if (file.endsWith("/prisma")) throw Object.assign(poison(), { status: 2 }); return original(file, args); });
+    ["catalog-compare", "CATALOG_SCHEMA_MISMATCH", () => {
+      const actual = emptyCatalog(); actual.categories.enums.push(["PRIVATE", "VALUE", 1]); mocks.catalog.mockResolvedValue(actual);
     }],
   ])("reports %s/%s without leaking original exception", async (stage, code, setup) => {
     setup();
@@ -129,6 +140,19 @@ describe("actual verifier stage routing", () => {
     await expect(verifySelfserveSchema({ ...env, DATABASE_URL: secret })).rejects.toMatchObject({ diagnostic: { stage: "configuration", code: "SCHEMA_WRITER_ENV_FORBIDDEN" } });
     expect(mocks.connect).not.toHaveBeenCalled();
   });
+  it.each(["gitSha", "manifestSha256", "datamodelSha256", "runId", "runAttempt", "ownerUserId", "origin", "cleanup"])("rejects misbound artifact %s before connecting", async key => {
+    const artifact = JSON.parse(await mocks.readCatalog());
+    artifact[key] = "wrong";
+    mocks.readCatalog.mockResolvedValue(JSON.stringify(artifact));
+    await expect(verifySelfserveSchema(env)).rejects.toMatchObject({ diagnostic: { stage: "catalog-artifact", code: "CATALOG_ARTIFACT_MISBOUND" } });
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.query).not.toHaveBeenCalled();
+  });
+  it("bounds catalog query failures and still closes the connection", async () => {
+    mocks.catalog.mockRejectedValue(Object.assign(poison(), { code: "42501" }));
+    await expect(verifySelfserveSchema(env)).rejects.toMatchObject({ diagnostic: { stage: "catalog-read", code: "42501" } });
+    expect(mocks.end).toHaveBeenCalledOnce();
+  });
   it("keeps ledger permission errors distinct from ledger mismatch", async () => {
     const original = mocks.query.getMockImplementation();
     mocks.query.mockImplementation(sql => {
@@ -142,12 +166,12 @@ describe("actual verifier stage routing", () => {
     const directory = await mkdtemp(join(tmpdir(), "schema-diagnostic-"));
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      mocks.engine.mockRejectedValue(poison());
+      mocks.readCatalog.mockRejectedValue(poison());
       const error = await verifySelfserveSchema(env).catch(e => e);
       await reportSchemaFailure(error, directory);
       expect(await readdir(directory)).toEqual(["schema.failure.json"]);
       const diagnostic = JSON.parse(await readFile(join(directory, "schema.failure.json"), "utf8"));
-      expect(diagnostic).toEqual({ schemaVersion: 1, status: "failed", stage: "prepared-engine", code: "UNCLASSIFIED_FAILURE" });
+      expect(diagnostic).toEqual({ schemaVersion: 1, status: "failed", stage: "catalog-artifact", code: "UNCLASSIFIED_FAILURE" });
       expect(log).toHaveBeenCalledWith(JSON.stringify(diagnostic));
       expect(await loadSelfserveReceipts(directory)).toEqual([]);
     } finally { await rm(directory, { recursive: true, force: true }); }

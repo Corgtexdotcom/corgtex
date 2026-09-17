@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { databaseIdentity, migrationManifest, preparedSchemaEngine, verifyLedger } from "./accepted-core-baseline.mjs";
+import { databaseIdentity, migrationManifest, verifyLedger } from "./accepted-core-baseline.mjs";
+import { assertExpectedCatalog, collectSchemaCatalog, compareSchemaCatalog } from "./lib/selfserve-schema-catalog.mjs";
 import { fullReleaseSha, requireValidation, SELFSERVE_VALIDATION_TARGET } from "./lib/selfserve-validation-target.mjs";
 
 export function schemaAuditConnection(env) {
@@ -51,20 +52,22 @@ SELECT EXISTS (
 ) AS can_write`;
 
 const stages = new Set(["source", "configuration", "prepared-engine", "connection-tls", "read-only-context",
-  "privilege", "ledger", "introspection", "cleanup", "receipt"]);
+  "privilege", "ledger", "introspection", "cleanup", "receipt", "catalog-artifact", "catalog-read", "catalog-compare"]);
 const knownCodes = new Set(["SCHEMA_SOURCE_MISMATCH", "VALIDATION_SHA_REQUIRED", "SCHEMA_WRITER_ENV_FORBIDDEN",
   "DEDICATED_READ_ONLY_SCHEMA_AUDITOR_REQUIRED", "SCHEMA_DUPLICATE_CONNECTION_OPTION",
   "SCHEMA_DATABASE_IDENTITY_MISMATCH", "SCHEMA_VERIFIED_TLS_REQUIRED", "CORE_BASELINE_DATABASE_URL_INVALID",
   "CORE_BASELINE_DATABASE_SCHEMA_UNSUPPORTED", "CORE_BASELINE_PRISMA_ENGINE_NOT_PREPARED", "SCHEMA_READ_ONLY_CONTEXT_MISMATCH",
   "CORE_BASELINE_SOURCE_MIGRATIONS_INVALID", "SCHEMA_AUDITOR_HAS_WRITE_PRIVILEGES", "SCHEMA_LEDGER_NOT_EXACT",
-  "CORE_BASELINE_LEDGER_NOT_EXACT", "CORE_BASELINE_LEDGER_UNBOUNDED"]);
+  "CORE_BASELINE_LEDGER_NOT_EXACT", "CORE_BASELINE_LEDGER_UNBOUNDED",
+  "CATALOG_VERSION_UNSUPPORTED", "CATALOG_SHAPE_INVALID", "CATALOG_DUPLICATE_ROW", "CATALOG_EXTENSION_UNSUPPORTED",
+  "CATALOG_SNAPSHOT_REQUIRED", "CATALOG_OBJECT_UNSUPPORTED", "CATALOG_BINDING_INVALID", "CATALOG_ARTIFACT_MISBOUND",
+  "CATALOG_ARTIFACT_DIGEST_MISMATCH", "CATALOG_ARTIFACT_TOO_LARGE", "CATALOG_SCHEMA_MISMATCH"]);
 const connectionCodes = new Set(["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET",
   "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID",
   "28P01", "28000", "42501", "3D000", "53300", "57014", "57P01"]);
 
-// Never serialize an exception, SQL, child output, path, URL, or connection option.
-// Only exact allowlisted codes cross the diagnostic boundary.
+// Keep PR1141's exact-code boundary, including the real CORE_BASELINE_ helper codes.
 export function classifySchemaFailure(stage, error) {
   const safeStage = stages.has(stage) ? stage : "unknown";
   let code = "UNCLASSIFIED_FAILURE";
@@ -75,7 +78,6 @@ export function classifySchemaFailure(stage, error) {
     if (error?.status === 2) code = "SCHEMA_DIFF_DETECTED";
     else if (error?.code === "ETIMEDOUT" || error?.signal) code = "ENGINE_INTERRUPTED";
     else {
-      // Prisma CLI's Error: Pnnnn header is inspected privately; no stderr text is emitted.
       const header = String(error?.stderr || "").replace(/\u001b\[[0-9;]*m/g, "")
         .match(/^Error: (P1000|P1001|P1002|P1003|P1010|P1011|P1012|P1017|P4001|P4002)\b/m)?.[1];
       code = header || "ENGINE_FAILURE";
@@ -102,7 +104,6 @@ export async function reportSchemaFailure(error, directory) {
   console.error(JSON.stringify(diagnostic));
   try {
     await mkdir(directory, { recursive: true });
-    // Deliberately not *.receipt.json: a diagnostic is never acceptance evidence.
     await writeFile(join(directory, "schema.failure.json"), `${JSON.stringify(diagnostic, null, 2)}\n`);
   } catch {
     console.error(JSON.stringify({ schemaVersion: 1, status: "failed", stage: "receipt", code: "DIAGNOSTIC_WRITE_FAILED" }));
@@ -116,16 +117,22 @@ export async function verifySelfserveSchema(env = process.env) {
   await atStage("source", () => requireValidation(git("rev-parse", "HEAD") === expectedSha && !git("status", "--porcelain", "--untracked-files=no"), "SCHEMA_SOURCE_MISMATCH"));
   const url = await atStage("configuration", () => schemaAuditConnection(env));
   const manifest = await atStage("source", () => migrationManifest(source));
-  const engine = await atStage("prepared-engine", () => preparedSchemaEngine(source));
+  const binding = { expectedSha, manifest, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT };
+  const expectedCatalog = await atStage("catalog-artifact", async () => {
+    const rawCatalog = await readFile(env.SELFSERVE_VALIDATION_EXPECTED_CATALOG || ".artifacts/selfserve-catalog/expected-catalog.json", "utf8");
+    requireValidation(rawCatalog.length <= 17 * 1024 * 1024, "CATALOG_ARTIFACT_TOO_LARGE");
+    return assertExpectedCatalog(JSON.parse(rawCatalog), binding);
+  });
   const client = await atStage("connection-tls", async () => {
     const { default: pg } = await import("pg");
     return new pg.Client({ connectionString: url.href, connectionTimeoutMillis: 10000 });
   });
+  let comparison;
   let failure;
   try {
     await atStage("connection-tls", () => client.connect());
     await atStage("read-only-context", async () => {
-      await client.query("BEGIN READ ONLY");
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const settings = await client.query("SELECT current_database() AS database, current_schema() AS schema, current_setting('default_transaction_read_only') AS default_read_only, current_setting('transaction_read_only') AS read_only");
       requireValidation(settings.rows[0]?.database === decodeURIComponent(url.pathname.slice(1)) && settings.rows[0]?.schema === "public"
         && settings.rows[0]?.default_read_only === "on" && settings.rows[0]?.read_only === "on", "SCHEMA_READ_ONLY_CONTEXT_MISMATCH");
@@ -138,6 +145,14 @@ export async function verifySelfserveSchema(env = process.env) {
       const rows = await client.query("SELECT migration_name, checksum, finished_at, rolled_back_at FROM public._prisma_migrations ORDER BY migration_name LIMIT 10001");
       requireValidation(verifyLedger(manifest, rows.rows, expectedSha).exactLedgerMatch === true, "SCHEMA_LEDGER_NOT_EXACT");
     });
+    const actual = await atStage("catalog-read", () => collectSchemaCatalog(client));
+    await atStage("catalog-compare", async () => {
+      comparison = compareSchemaCatalog(expectedCatalog, actual);
+      const output = env.SELFSERVE_VALIDATION_OUT_DIR || ".artifacts/selfserve-validation";
+      await mkdir(output, { recursive: true });
+      await writeFile(join(output, "schema.catalog-comparison.json"), `${JSON.stringify(comparison)}\n`);
+      requireValidation(comparison.supportedSchemaMatch, "CATALOG_SCHEMA_MISMATCH");
+    });
   } catch (error) {
     failure = error;
   } finally {
@@ -146,15 +161,12 @@ export async function verifySelfserveSchema(env = process.env) {
     catch (error) { failure ||= error; }
   }
   if (failure) throw failure;
-  await atStage("introspection", () => execFileSync(join(source, "node_modules/.bin/prisma"), ["migrate", "diff", "--from-schema-datasource", "prisma/schema.prisma",
-    "--to-schema-datamodel", "prisma/schema.prisma", "--exit-code"], { cwd: source, timeout: 60000, stdio: "pipe", env: {
-    PATH: env.PATH, HOME: env.HOME, DATABASE_URL: schemaAuditPrismaConnection(url).href, PRISMA_SCHEMA_ENGINE_BINARY: engine,
-    CHECKPOINT_DISABLE: "1", PRISMA_HIDE_UPDATE_MESSAGE: "1", PRISMA_ENGINES_MIRROR: "http://127.0.0.1:9",
-  } }));
   return { schemaVersion: 1, lane: "selfserve-schema-read-only", target: SELFSERVE_VALIDATION_TARGET.name,
     gitSha: expectedSha, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
     scope: "live-read-only", status: "passed", cleanup: "completed", manifestSha256: manifest.manifestSha256,
-    datamodelSha256: manifest.datamodelSha256, exactLedgerMatch: true, supportedSchemaMatch: true };
+    datamodelSha256: manifest.datamodelSha256, exactLedgerMatch: true, supportedSchemaMatch: true,
+    catalogAlgorithm: comparison.algorithm, expectedCatalogSha256: comparison.expectedCatalogSha256,
+    actualCatalogSha256: comparison.actualCatalogSha256 };
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
