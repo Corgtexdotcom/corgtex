@@ -74,6 +74,7 @@ const NON_APP_RELEASE_FILES = new Set([
   "scripts/selfserve-validation-recovery.test.mjs",
   "scripts/selfserve-validation-control-flow.test.mjs",
   "scripts/selfserve-validation-schema.mjs",
+  "scripts/selfserve-validation-schema.test.mjs",
   "scripts/selfserve-validation-schema.integration.test.mjs",
   "scripts/selfserve-validation-smoke.mjs",
   "scripts/selfserve-validation.test.mjs",

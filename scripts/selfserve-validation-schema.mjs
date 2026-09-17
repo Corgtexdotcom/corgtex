@@ -50,35 +50,106 @@ SELECT EXISTS (
   )
 ) AS can_write`;
 
+const stages = new Set(["source", "configuration", "prepared-engine", "connection-tls", "read-only-context",
+  "privilege", "ledger", "introspection", "cleanup", "receipt"]);
+const knownCodes = new Set(["SCHEMA_SOURCE_MISMATCH", "VALIDATION_SHA_REQUIRED", "SCHEMA_WRITER_ENV_FORBIDDEN",
+  "DEDICATED_READ_ONLY_SCHEMA_AUDITOR_REQUIRED", "SCHEMA_DUPLICATE_CONNECTION_OPTION",
+  "SCHEMA_DATABASE_IDENTITY_MISMATCH", "SCHEMA_VERIFIED_TLS_REQUIRED", "DATABASE_URL_INVALID",
+  "DATABASE_SCHEMA_UNSUPPORTED", "PRISMA_ENGINE_NOT_PREPARED", "SCHEMA_READ_ONLY_CONTEXT_MISMATCH",
+  "SOURCE_MIGRATIONS_INVALID", "SCHEMA_AUDITOR_HAS_WRITE_PRIVILEGES", "SCHEMA_LEDGER_NOT_EXACT", "LEDGER_NOT_EXACT", "LEDGER_UNBOUNDED"]);
+const connectionCodes = new Set(["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET",
+  "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID",
+  "28P01", "28000", "42501", "3D000", "53300", "57014", "57P01"]);
+
+// Never serialize an exception, SQL, child output, path, URL, or connection option.
+// Only exact allowlisted codes cross the diagnostic boundary.
+export function classifySchemaFailure(stage, error) {
+  const safeStage = stages.has(stage) ? stage : "unknown";
+  let code = "UNCLASSIFIED_FAILURE";
+  if (knownCodes.has(error?.message)) code = error.message;
+  else if (connectionCodes.has(error?.code)) code = error.code;
+  else if (["ENOENT", "EACCES"].includes(error?.code)) code = error.code;
+  else if (safeStage === "introspection") {
+    if (error?.status === 2) code = "SCHEMA_DIFF_DETECTED";
+    else if (error?.code === "ETIMEDOUT" || error?.signal) code = "ENGINE_INTERRUPTED";
+    else {
+      // Prisma CLI's Error: Pnnnn header is inspected privately; no stderr text is emitted.
+      const header = String(error?.stderr || "").replace(/\u001b\[[0-9;]*m/g, "")
+        .match(/^Error: (P1000|P1001|P1002|P1003|P1010|P1011|P1012|P1017|P4001|P4002)\b/m)?.[1];
+      code = header || "ENGINE_FAILURE";
+    }
+  }
+  return { schemaVersion: 1, status: "failed", stage: safeStage, code };
+}
+
+class SchemaAuditFailure extends Error {
+  constructor(stage, error) {
+    const diagnostic = classifySchemaFailure(stage, error);
+    super(`Schema audit failed: ${diagnostic.stage}/${diagnostic.code}`);
+    this.diagnostic = diagnostic;
+  }
+}
+
+async function atStage(stage, operation) {
+  try { return await operation(); }
+  catch (error) { throw new SchemaAuditFailure(stage, error); }
+}
+
+export async function reportSchemaFailure(error, directory) {
+  const diagnostic = error instanceof SchemaAuditFailure ? error.diagnostic : classifySchemaFailure("unknown", error);
+  console.error(JSON.stringify(diagnostic));
+  try {
+    await mkdir(directory, { recursive: true });
+    // Deliberately not *.receipt.json: a diagnostic is never acceptance evidence.
+    await writeFile(join(directory, "schema.failure.json"), `${JSON.stringify(diagnostic, null, 2)}\n`);
+  } catch {
+    console.error(JSON.stringify({ schemaVersion: 1, status: "failed", stage: "receipt", code: "DIAGNOSTIC_WRITE_FAILED" }));
+  }
+}
+
 export async function verifySelfserveSchema(env = process.env) {
-  const expectedSha = fullReleaseSha(env.SELFSERVE_VALIDATION_EXPECTED_SHA);
+  const expectedSha = await atStage("source", () => fullReleaseSha(env.SELFSERVE_VALIDATION_EXPECTED_SHA));
   const source = resolve(env.SELFSERVE_VALIDATION_SOURCE_DIR || ".accepted-source");
   const git = (...args) => execFileSync("git", args, { cwd: source, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  requireValidation(git("rev-parse", "HEAD") === expectedSha && !git("status", "--porcelain", "--untracked-files=no"), "SCHEMA_SOURCE_MISMATCH");
-  const url = schemaAuditConnection(env);
-  const manifest = migrationManifest(source);
-  const engine = await preparedSchemaEngine(source);
-  const { default: pg } = await import("pg");
-  const client = new pg.Client({ connectionString: url.href, connectionTimeoutMillis: 10000 });
+  await atStage("source", () => requireValidation(git("rev-parse", "HEAD") === expectedSha && !git("status", "--porcelain", "--untracked-files=no"), "SCHEMA_SOURCE_MISMATCH"));
+  const url = await atStage("configuration", () => schemaAuditConnection(env));
+  const manifest = await atStage("source", () => migrationManifest(source));
+  const engine = await atStage("prepared-engine", () => preparedSchemaEngine(source));
+  const client = await atStage("connection-tls", async () => {
+    const { default: pg } = await import("pg");
+    return new pg.Client({ connectionString: url.href, connectionTimeoutMillis: 10000 });
+  });
+  let failure;
   try {
-    await client.connect();
-    await client.query("BEGIN READ ONLY");
-    const settings = await client.query("SELECT current_database() AS database, current_schema() AS schema, current_setting('default_transaction_read_only') AS default_read_only, current_setting('transaction_read_only') AS read_only");
-    requireValidation(settings.rows[0]?.database === decodeURIComponent(url.pathname.slice(1)) && settings.rows[0]?.schema === "public"
-      && settings.rows[0]?.default_read_only === "on" && settings.rows[0]?.read_only === "on", "SCHEMA_READ_ONLY_CONTEXT_MISMATCH");
-    const privileges = await client.query(AUDITOR_PRIVILEGES_SQL);
-    requireValidation(privileges.rows[0]?.can_write === false, "SCHEMA_AUDITOR_HAS_WRITE_PRIVILEGES");
-    const rows = await client.query("SELECT migration_name, checksum, finished_at, rolled_back_at FROM public._prisma_migrations ORDER BY migration_name LIMIT 10001");
-    requireValidation(verifyLedger(manifest, rows.rows, expectedSha).exactLedgerMatch === true, "SCHEMA_LEDGER_NOT_EXACT");
+    await atStage("connection-tls", () => client.connect());
+    await atStage("read-only-context", async () => {
+      await client.query("BEGIN READ ONLY");
+      const settings = await client.query("SELECT current_database() AS database, current_schema() AS schema, current_setting('default_transaction_read_only') AS default_read_only, current_setting('transaction_read_only') AS read_only");
+      requireValidation(settings.rows[0]?.database === decodeURIComponent(url.pathname.slice(1)) && settings.rows[0]?.schema === "public"
+        && settings.rows[0]?.default_read_only === "on" && settings.rows[0]?.read_only === "on", "SCHEMA_READ_ONLY_CONTEXT_MISMATCH");
+    });
+    await atStage("privilege", async () => {
+      const privileges = await client.query(AUDITOR_PRIVILEGES_SQL);
+      requireValidation(privileges.rows[0]?.can_write === false, "SCHEMA_AUDITOR_HAS_WRITE_PRIVILEGES");
+    });
+    await atStage("ledger", async () => {
+      const rows = await client.query("SELECT migration_name, checksum, finished_at, rolled_back_at FROM public._prisma_migrations ORDER BY migration_name LIMIT 10001");
+      requireValidation(verifyLedger(manifest, rows.rows, expectedSha).exactLedgerMatch === true, "SCHEMA_LEDGER_NOT_EXACT");
+    });
+  } catch (error) {
+    failure = error;
   } finally {
     await client.query("ROLLBACK").catch(() => {});
-    await client.end();
+    try { await atStage("cleanup", () => client.end()); }
+    catch (error) { failure ||= error; }
   }
-  execFileSync(join(source, "node_modules/.bin/prisma"), ["migrate", "diff", "--from-schema-datasource", "prisma/schema.prisma",
+  if (failure) throw failure;
+  await atStage("introspection", () => execFileSync(join(source, "node_modules/.bin/prisma"), ["migrate", "diff", "--from-schema-datasource", "prisma/schema.prisma",
     "--to-schema-datamodel", "prisma/schema.prisma", "--exit-code"], { cwd: source, timeout: 60000, stdio: "pipe", env: {
     PATH: env.PATH, HOME: env.HOME, DATABASE_URL: schemaAuditPrismaConnection(url).href, PRISMA_SCHEMA_ENGINE_BINARY: engine,
     CHECKPOINT_DISABLE: "1", PRISMA_HIDE_UPDATE_MESSAGE: "1", PRISMA_ENGINES_MIRROR: "http://127.0.0.1:9",
-  } });
+  } }));
   return { schemaVersion: 1, lane: "selfserve-schema-read-only", target: SELFSERVE_VALIDATION_TARGET.name,
     gitSha: expectedSha, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
     scope: "live-read-only", status: "passed", cleanup: "completed", manifestSha256: manifest.manifestSha256,
@@ -89,10 +160,12 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   try {
     const receipt = await verifySelfserveSchema();
     const out = process.env.SELFSERVE_VALIDATION_OUT_DIR || ".artifacts/selfserve-validation";
-    await mkdir(out, { recursive: true });
-    await writeFile(join(out, "schema.receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
-  } catch {
-    console.error("Selfserve schema audit failed: dedicated read-only role, verified TLS, pinned database/source and exact ledger/schema are required.");
+    await atStage("receipt", async () => {
+      await mkdir(out, { recursive: true });
+      await writeFile(join(out, "schema.receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+    });
+  } catch (error) {
+    await reportSchemaFailure(error, process.env.SELFSERVE_VALIDATION_OUT_DIR || ".artifacts/selfserve-validation");
     process.exitCode = 1;
   }
 }
