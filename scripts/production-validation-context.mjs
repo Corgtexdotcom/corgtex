@@ -57,6 +57,9 @@ const NON_APP_RELEASE_FILES = new Set([
   // policy QA and live smoke, but no unrelated backup-app image deployment.
   "scripts/production-validation-context.mjs",
   "scripts/production-validation-context.test.mjs",
+  "scripts/release/workspace-mcp-config.mjs",
+  "scripts/release/workspace-mcp-config-azure.mjs",
+  "scripts/release/workspace-mcp-config.test.mjs",
   "scripts/accepted-core-baseline.mjs",
   "scripts/accepted-core-baseline.test.mjs",
   "scripts/ci-production-boundary.test.mjs",
