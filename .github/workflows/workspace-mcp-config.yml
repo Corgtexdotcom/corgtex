@@ -1,0 +1,89 @@
+name: Workspace MCP Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Preflight, worker-first activation, or web-only ingress disable. Never rolls back workers."
+        type: choice
+        required: true
+        default: preflight
+        options: [preflight, activate, disable-ingress]
+      accepted_sha:
+        description: "Exact previously accepted 40-character web/worker SHA; not undeployed main."
+        type: string
+        required: true
+      web_image:
+        description: "Accepted ACR corgtex/web@sha256 immutable index reference."
+        type: string
+        required: true
+      worker_image:
+        description: "Accepted ACR corgtex/worker@sha256 immutable index reference."
+        type: string
+        required: true
+      web_baseline:
+        description: "Exact expected current web revision. Reconcile any previous uncertain operation first."
+        type: string
+        required: true
+      worker_baseline:
+        description: "Exact expected current worker revision."
+        type: string
+        required: true
+      exclusive_writer_ack:
+        description: "Owner handed off all direct writers; accepted pending-work/recovery responsibility."
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: fleet-release
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    if: ${{ github.ref == 'refs/heads/main' && github.run_attempt == 1 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: fleet-release-production
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      MCP_OPERATION: ${{ inputs.operation }}
+      MCP_ACCEPTED_SHA: ${{ inputs.accepted_sha }}
+      MCP_WEB_IMAGE: ${{ inputs.web_image }}
+      MCP_WORKER_IMAGE: ${{ inputs.worker_image }}
+      MCP_WEB_BASELINE: ${{ inputs.web_baseline }}
+      MCP_WORKER_BASELINE: ${{ inputs.worker_baseline }}
+      MCP_EXCLUSIVE_WRITER_ACK: ${{ inputs.exclusive_writer_ack }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Validate closed operation inputs before provider login
+        run: |
+          node --input-type=module -e 'import {inputsFromEnv} from "./scripts/release/workspace-mcp-config-azure.mjs"; import {validateInputs} from "./scripts/release/workspace-mcp-config.mjs"; validateInputs(inputsFromEnv(process.env));'
+      - name: Log in with existing fleet Azure identity
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Governed config operation and exact revision proof
+        run: node scripts/release/workspace-mcp-config-azure.mjs
+      - name: Retain bounded operation and reconciliation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-mcp-config-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/workspace-mcp-config/receipt.json
+          if-no-files-found: error
+          retention-days: 30
