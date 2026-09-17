@@ -3,7 +3,7 @@ import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { TARGET, FLAG, appName, validateInputs, assertIdentity, configHash, assertFleet, assertRuntime, runConfig } from "./workspace-mcp-config.mjs";
+import { TARGET, FLAG, appName, validateInputs, assertIdentity, configHash, revisionTemplateHash, assertFleet, assertRuntime, runConfig } from "./workspace-mcp-config.mjs";
 import { acceptance, createAzureIO, inputsFromEnv, parseRuntimeOutput, runtimeProbeSource } from "./workspace-mcp-config-azure.mjs";
 import { productionAppReleaseRelevantPath } from "../production-validation-context.mjs";
 
@@ -64,6 +64,66 @@ function model(options = {}) {
 }
 
 describe("governed MCP config sequence", () => {
+  function providerViews() {
+    const m = model({ input: { operation: "preflight" } });
+    for (const app of Object.values(m.apps)) {
+      app.properties.workloadProfileName = "Consumption";
+      const template = app.properties.template;
+      template.customMetricsSettings = null;
+      Object.assign(template.scale, { cooldownPeriod: 300, pollingInterval: 30 });
+      template.containers[0].imageType = "ContainerImage";
+      template.containers[0].resources.ephemeralStorage = "4Gi";
+      template.containers[0].env.find(e => e.secretRef).value = "";
+    }
+    m.io.revision = async (role, revision) => {
+      const template = structuredClone(m.apps[role].properties.template);
+      template.revisionSuffix = null;
+      delete template.customMetricsSettings;
+      Object.assign(template.scale, { cooldownPeriod: null, pollingInterval: null });
+      delete template.containers[0].imageType;
+      delete template.containers[0].resources.ephemeralStorage;
+      delete template.containers[0].env.find(e => e.secretRef).value;
+      return { name: revision, properties: { template } };
+    };
+    return m;
+  }
+  it("accepts observed app/revision provider defaults without any writes", async () => {
+    const m = providerViews();
+    expect((await runConfig(m.args, m.io)).status).toBe("PREFLIGHT_ONLY");
+    expect(m.events.some(e => e.startsWith("write:"))).toBe(false);
+  });
+  it.each([
+    ["secret reference", t => { t.containers[0].env.find(e => e.secretRef).secretRef = "different"; }],
+    ["secret literal", t => { t.containers[0].env.find(e => e.secretRef).value = "unexpected"; }],
+    ["plain environment", t => { t.containers[0].env[0].value = "changed"; }],
+    ["CPU", t => { t.containers[0].resources.cpu = 0.5; }],
+    ["memory", t => { t.containers[0].resources.memory = "2Gi"; }],
+    ["storage", t => { t.containers[0].resources.ephemeralStorage = "8Gi"; }],
+    ["cooldown", t => { t.scale.cooldownPeriod = 301; }],
+    ["polling", t => { t.scale.pollingInterval = 31; }],
+    ["image type", t => { t.containers[0].imageType = "Artifact"; }],
+    ["metrics", t => { t.customMetricsSettings = { enabled: true }; }],
+    ["unknown field", t => { t.unrecognized = true; }],
+  ])("still rejects real revision %s drift", async (_name, change) => {
+    const m = providerViews(), original = m.io.revision;
+    m.io.revision = async (...args) => { const r = await original(...args); change(r.properties.template); return r; };
+    await expect(runConfig(m.args, m.io)).rejects.toThrow("REVISION_CONFIG_DRIFT");
+    expect(m.events.some(e => e.startsWith("write:"))).toBe(false);
+  });
+  it("keeps the original app-preservation hash strict", () => {
+    const app = providerViews().apps.worker;
+    const original = configHash(app), other = structuredClone(app);
+    delete other.properties.template.containers[0].resources.ephemeralStorage;
+    expect(revisionTemplateHash(other)).toBe(revisionTemplateHash(app));
+    expect(configHash(other)).not.toBe(original);
+  });
+  it("does not infer storage for an unknown workload profile", () => {
+    const app = providerViews().apps.worker;
+    app.properties.workloadProfileName = "Other";
+    const revision = structuredClone(app.properties.template);
+    delete revision.containers[0].resources.ephemeralStorage;
+    expect(revisionTemplateHash(app, revision)).not.toBe(revisionTemplateHash(app));
+  });
   it("accepts a healthy RunningAtMaxScale worker baseline", async () => {
     const m = model();
     m.revisions.worker[0].properties.runningState = "RunningAtMaxScale";

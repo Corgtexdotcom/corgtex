@@ -49,6 +49,31 @@ export function configHash(app) {
     managedEnvironmentId: p.managedEnvironmentId, workloadProfileName: p.workloadProfileName };
   return createHash("sha256").update(JSON.stringify(canonical(preserved))).digest("hex");
 }
+export function revisionTemplateHash(app, source = app.properties.template) {
+  const template = structuredClone(source);
+  delete template.revisionSuffix;
+  if (template.customMetricsSettings === null) delete template.customMetricsSettings;
+  if (template.scale) {
+    template.scale.cooldownPeriod ??= 300;
+    template.scale.pollingInterval ??= 30;
+  }
+  for (const container of template.containers) {
+    if (container.imageType === "ContainerImage") delete container.imageType;
+    container.env = (container.env || []).map(entry => {
+      const env = { ...entry };
+      if (env.secretRef && env.value === "") delete env.value;
+      return env;
+    }).sort((a, b) => a.name.localeCompare(b.name));
+    // Consumption storage is derived from CPU and omitted by the revision API.
+    const resources = container.resources;
+    if (app.properties.workloadProfileName === "Consumption" && resources
+      && Number.isFinite(resources.cpu) && resources.cpu > 0 && resources.cpu <= 4) {
+      resources.ephemeralStorage ??= resources.cpu <= 0.25 ? "1Gi"
+        : resources.cpu <= 0.5 ? "2Gi" : resources.cpu <= 1 ? "4Gi" : "8Gi";
+    }
+  }
+  return createHash("sha256").update(JSON.stringify(canonical(template))).digest("hex");
+}
 export function flagValue(container) {
   const entries = (container.env || []).filter(e => e.name === FLAG);
   requireProof(entries.length <= 1 && !entries[0]?.secretRef, "FLAG_CONFIG_INVALID");
@@ -142,7 +167,7 @@ export async function runConfig(input, io) {
       requireProof(actual.name === wanted.revision && actual.properties?.template?.containers?.length === 1, "REVISION_TEMPLATE_INVALID");
       const container = actual.properties.template.containers[0];
       requireProof(container.name === role && container.image === wanted.image && flagValue(container) === wanted.flag, "REVISION_TEMPLATE_DRIFT");
-      requireProof(configHash({ ...app, properties: { ...app.properties, template: actual.properties.template } }) === hashes[role], "REVISION_CONFIG_DRIFT");
+      requireProof(revisionTemplateHash(app, actual.properties.template) === revisionTemplateHash(app), "REVISION_CONFIG_DRIFT");
       const revisions = await io.revisions(role), replicas = await io.replicas(role, wanted.revision);
       assertFleet(revisions, replicas, role, wanted.revision);
       for (const replica of replicas) assertRuntime(await io.runtime(role, wanted.revision, replica.name), role, input.acceptedSha, wanted.flag);
