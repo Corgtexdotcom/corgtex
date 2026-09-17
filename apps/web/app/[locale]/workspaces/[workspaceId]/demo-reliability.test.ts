@@ -101,13 +101,15 @@ const renderAudit = async (search: Record<string, string> = {}) =>
 const renderLeads = async (view = "dashboard") =>
   renderToStaticMarkup(React.createElement(NextIntlClientProvider, {
     locale: "en", messages, timeZone: "UTC",
-  }, await LeadsPage({ params: params(), searchParams: Promise.resolve({ view }) })));
+    children: await LeadsPage({ params: params(), searchParams: Promise.resolve({ view }) }),
+  }));
 
 const fullPages = { accounts: AccountsPage, activity: ActivityPage, pipeline: PipelinePage, suggestions: SuggestionsPage };
 const renderFullPage = async (section: keyof typeof fullPages, view?: string) =>
   renderToStaticMarkup(React.createElement(NextIntlClientProvider, {
     locale: "en", messages, timeZone: "UTC",
-  }, await fullPages[section]({ params: params(), searchParams: Promise.resolve(view ? { view } : {}) })));
+    children: await fullPages[section]({ params: params(), searchParams: Promise.resolve(view ? { view } : {}) }),
+  }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -131,10 +133,11 @@ const accountDetailViews = ["overview", "contacts", "pipeline", "activity", "sug
 const renderAccountDetail = async (view = "overview") =>
   renderToStaticMarkup(React.createElement(NextIntlClientProvider, {
     locale: "en", messages, timeZone: "UTC",
-  }, await AccountDetailPage({
+    children: await AccountDetailPage({
     params: Promise.resolve({ ...(await params()), accountId: "synthetic-account" }),
     searchParams: Promise.resolve({ view }),
-  })));
+    }),
+  }));
 
 describe("Account detail read-only demo", () => {
   it.each(accountDetailViews)("keeps %s readable without mutations", async (view) => {
