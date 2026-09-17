@@ -33,7 +33,7 @@ describe("Core continuity checked entrypoints", () => {
       expect(url.hostname).toBe("127.0.0.1");
       expect(url.pathname).toBe("/continuity_" + side.toLowerCase() + "_test");
     }
-    expect(job.services.postgres.ports).toEqual(["127.0.0.1:5432:5432"]);
+    expect(job.services.postgres.ports).toEqual(["127.0.0.1:5432:5432", "127.0.0.2:5432:5432"]);
     expect(job.services.postgres.options).toContain("--cpus 1 --memory 1g --memory-swap 1g");
     const setup = job.steps.find(step => step.name === "Generate Prisma and migrate both synthetic databases");
     expect(setup.run).toContain("createdb -U postgres continuity_target_test");

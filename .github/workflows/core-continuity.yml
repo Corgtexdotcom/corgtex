@@ -28,6 +28,8 @@ jobs:
           POSTGRES_DB: continuity_source_test
         ports:
           - 127.0.0.1:5432:5432
+          # Reach the real TLS server under a name absent from its certificate.
+          - 127.0.0.2:5432:5432
         options: >-
           --cpus 1 --memory 1g --memory-swap 1g
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d continuity_source_test"
