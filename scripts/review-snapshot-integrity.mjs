@@ -40,9 +40,9 @@ export function resolveMergeGroupMembers(mergeGroup, connection, groupSteps) {
   invariant(isSha(mergeGroup?.head_sha) && isSha(mergeGroup?.base_sha) && mergeGroup?.base_ref === "refs/heads/main" && Array.isArray(entries) && entries.length > 0 && entries.length <= 100 && connection.pageInfo?.hasPreviousPage === false && connection.pageInfo?.hasNextPage === false && Array.isArray(groupSteps) && groupSteps.length > 0 && groupSteps.length <= 100 && groupSteps.every((step) => isSha(step?.baseSha) && isSha(step?.headSha) && isSha(step?.prHeadSha)), "missing authoritative merge-group membership");
   invariant(groupSteps[0].baseSha === mergeGroup.base_sha && groupSteps.at(-1).headSha === mergeGroup.head_sha && groupSteps.every((step, index) => index === 0 || step.baseSha === groupSteps[index - 1].headSha) && new Set(groupSteps.map((step) => step.headSha)).size === groupSteps.length, "ambiguous authoritative merge-group membership");
   invariant(entries.every((e) => Number.isSafeInteger(e?.position) && e.position >= 0 && isSha(e.baseCommit?.oid) && isSha(e.headCommit?.oid) && Number.isSafeInteger(e.pullRequest?.number) && e.pullRequest.number > 0 && e.pullRequest.state === "OPEN" && isSha(e.pullRequest.headRefOid) && isSha(e.pullRequest.baseRefOid)) && new Set(entries.map((e) => e.position)).size === entries.length && new Set(entries.map((e) => e.headCommit.oid)).size === entries.length && new Set(entries.map((e) => e.pullRequest.number)).size === entries.length, "ambiguous authoritative merge-group membership");
-  const members = groupSteps.map((step) => entries.filter((entry) => entry.baseCommit.oid === step.baseSha && entry.headCommit.oid === step.headSha && entry.pullRequest.headRefOid === step.prHeadSha && entry.pullRequest.baseRefOid === mergeGroup.base_sha));
+  const members = groupSteps.map((step) => entries.filter((entry) => entry.baseCommit.oid === step.baseSha && entry.headCommit.oid === step.headSha && entry.pullRequest.headRefOid === step.prHeadSha));
   invariant(members.every((matches) => matches.length === 1) && members.every((matches, index) => index === 0 || matches[0].position > members[index - 1][0].position), "ambiguous authoritative merge-group membership");
-  const resolved = members.map(([entry]) => ({ number: entry.pullRequest.number, headSha: entry.pullRequest.headRefOid }));
+  const resolved = members.map(([entry]) => ({ number: entry.pullRequest.number, headSha: entry.pullRequest.headRefOid, baseSha: entry.pullRequest.baseRefOid }));
   return resolved;
 }
 export function resolveMergeGroupPrNumbers(mergeGroup, connection, groupSteps) { return resolveMergeGroupMembers(mergeGroup, connection, groupSteps).map((member) => member.number); }
@@ -206,9 +206,9 @@ export async function evaluateMergeGroup(repo, event, runSha) {
   const summary = [];
   const snapshots = [];
   let failed = false;
-  for (const { number, headSha } of members) {
+  for (const { number, headSha, baseSha } of members) {
     const { pr, verdict } = await evaluatePullRequest(repo, number);
-    invariant(pr.number === number && pr.state === "open" && pr.head?.sha === headSha && pr.base?.sha === group.base_sha && pr.base?.ref === "main" && pr.base?.repo?.full_name === repo && typeof pr.head?.repo?.full_name === "string" && Number.isFinite(Date.parse(pr.updated_at)), "unexpected merge-group PR state");
+    invariant(pr.number === number && pr.state === "open" && pr.head?.sha === headSha && pr.base?.sha === baseSha && pr.base?.ref === "main" && pr.base?.repo?.full_name === repo && typeof pr.head?.repo?.full_name === "string" && Number.isFinite(Date.parse(pr.updated_at)), "unexpected merge-group PR state");
     summary.push(`### PR #${number} (event merge_group/checks_requested)`, `- verdict: ${verdict.pass ? "pass" : `FAIL (${verdict.failures.length} reason(s))`}`);
     snapshots.push(JSON.stringify(verdict.snapshot));
     if (!verdict.pass) failed = true;
@@ -219,7 +219,7 @@ export async function evaluateMergeGroup(repo, event, runSha) {
     const finalStates = await readMergeGroupFinalStates(repo, members);
     for (const [index, latest] of latestEvaluations.entries()) {
       const final = finalStates[index];
-      invariant(final.number === members[index].number && final.state === "OPEN" && final.isDraft === latest.pr.draft && final.headRefOid === members[index].headSha && final.baseRefOid === group.base_sha && latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === group.base_sha && JSON.stringify(final.snapshot) === JSON.stringify(latest.verdict.snapshot) && JSON.stringify(final.reviewerReview) === JSON.stringify(reviewIdentity(latest.reviewerReview)) && latest.verdict.pass && !latest.verdict.noop && JSON.stringify(latest.verdict.snapshot) === snapshots[index], "merge-group PR snapshot drifted before success");
+      invariant(final.number === members[index].number && final.state === "OPEN" && final.isDraft === latest.pr.draft && final.headRefOid === members[index].headSha && final.baseRefOid === members[index].baseSha && latest.pr.head?.sha === members[index].headSha && latest.pr.base?.sha === members[index].baseSha && latest.pr.base?.ref === "main" && latest.pr.base?.repo?.full_name === repo && JSON.stringify(final.snapshot) === JSON.stringify(latest.verdict.snapshot) && JSON.stringify(final.reviewerReview) === JSON.stringify(reviewIdentity(latest.reviewerReview)) && latest.verdict.pass && !latest.verdict.noop && JSON.stringify(latest.verdict.snapshot) === snapshots[index], "merge-group PR snapshot drifted before success");
     }
   }
   return { failed, prNumbers, summary };
