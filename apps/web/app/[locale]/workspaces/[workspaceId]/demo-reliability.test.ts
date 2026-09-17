@@ -96,20 +96,18 @@ import SuggestionsPage from "./leads/suggestions/page";
 import AccountDetailPage from "./leads/accounts/[accountId]/page";
 
 const params = () => Promise.resolve({ workspaceId: "synthetic-demo", locale: "en" });
+function renderIntl(children: React.ReactNode) {
+  const props = { locale: "en", messages, timeZone: "UTC", children };
+  return renderToStaticMarkup(React.createElement(NextIntlClientProvider, props));
+}
 const renderAudit = async (search: Record<string, string> = {}) =>
   renderToStaticMarkup(await AuditPage({ params: params(), searchParams: Promise.resolve(search) }));
 const renderLeads = async (view = "dashboard") =>
-  renderToStaticMarkup(React.createElement(NextIntlClientProvider, {
-    locale: "en", messages, timeZone: "UTC",
-    children: await LeadsPage({ params: params(), searchParams: Promise.resolve({ view }) }),
-  }));
+  renderIntl(await LeadsPage({ params: params(), searchParams: Promise.resolve({ view }) }));
 
 const fullPages = { accounts: AccountsPage, activity: ActivityPage, pipeline: PipelinePage, suggestions: SuggestionsPage };
 const renderFullPage = async (section: keyof typeof fullPages, view?: string) =>
-  renderToStaticMarkup(React.createElement(NextIntlClientProvider, {
-    locale: "en", messages, timeZone: "UTC",
-    children: await fullPages[section]({ params: params(), searchParams: Promise.resolve(view ? { view } : {}) }),
-  }));
+  renderIntl(await fullPages[section]({ params: params(), searchParams: Promise.resolve(view ? { view } : {}) }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -131,12 +129,9 @@ afterEach(() => vi.unstubAllGlobals());
 
 const accountDetailViews = ["overview", "contacts", "pipeline", "activity", "suggestions", "conversations", "instances"];
 const renderAccountDetail = async (view = "overview") =>
-  renderToStaticMarkup(React.createElement(NextIntlClientProvider, {
-    locale: "en", messages, timeZone: "UTC",
-    children: await AccountDetailPage({
+  renderIntl(await AccountDetailPage({
     params: Promise.resolve({ ...(await params()), accountId: "synthetic-account" }),
     searchParams: Promise.resolve({ view }),
-    }),
   }));
 
 describe("Account detail read-only demo", () => {
