@@ -1,0 +1,73 @@
+name: PR 976 Action/Goal Production Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_app_url:
+        description: Fixed production app URL.
+        required: true
+        default: https://app.corgtex.com
+      workspace_slug:
+        description: Fixed internal validation workspace slug.
+        required: true
+        default: corgtex-validation
+      expected_serving_sha:
+        description: Fixed serving SHA for PR 976 release proof.
+        required: true
+        default: 086cec6d25f3457ce7b6858aa8c8f31ceb0cc771
+      pr_number:
+        description: Fixed covered PR number.
+        required: true
+        default: "976"
+      confirmation:
+        description: Type RUN-PR976-ACTION-GOAL-SMOKE-ONCE to confirm the single manual synthetic smoke.
+        required: true
+        default: ""
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: pr976-action-goal-production-smoke
+  cancel-in-progress: false
+
+jobs:
+  action-goal-production-smoke:
+    name: PR 976 Action/Goal Production Smoke
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 15
+    env:
+      PR976_SMOKE_BASE_URL: ${{ inputs.target_app_url }}
+      PR976_SMOKE_WORKSPACE_SLUG: ${{ inputs.workspace_slug }}
+      PR976_SMOKE_EXPECTED_GIT_SHA: ${{ inputs.expected_serving_sha }}
+      PR976_SMOKE_PR_NUMBER: ${{ inputs.pr_number }}
+      PR976_SMOKE_CONFIRMATION: ${{ inputs.confirmation }}
+      PR976_SMOKE_ADMIN_EMAIL: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_EMAIL || secrets.ADMIN_EMAIL }}
+      PR976_SMOKE_ADMIN_PASSWORD: ${{ secrets.PRODUCTION_VALIDATION_ADMIN_PASSWORD || secrets.ADMIN_PASSWORD }}
+      PR976_SMOKE_OUT_DIR: .artifacts/production-validation/pr976-action-goal-production-smoke
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Run manual synthetic Action/Goal smoke
+        shell: bash
+        run: node .github/production-validation/pr976-action-goal-production-smoke.mjs
+
+      - name: Upload sanitized production smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr976-action-goal-production-smoke
+          path: .artifacts/production-validation/pr976-action-goal-production-smoke/
+          if-no-files-found: error
