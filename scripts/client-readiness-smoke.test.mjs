@@ -7,6 +7,8 @@ import {
   activateMobileWorkspaceMode,
   coreRouteCatalog,
   demoAddGuardRouteSuffix,
+  installMobileAnalyticsMock,
+  installSelfserveReadOnlyRouting,
   isFindAccountUrl,
   isWorkspaceUrl,
   labelConsoleEntry,
@@ -196,6 +198,73 @@ describe("client readiness smoke login handling", () => {
   it("does not include deleted Finance subroutes in readiness sweeps", () => {
     expect(coreRouteCatalog).not.toContainEqual(["finance-clients", "/finance/clients"]);
     expect(optionalRouteCatalog).not.toContainEqual(["finance-clients", "/finance/clients"]);
+  });
+
+  it("installs the exact validation telemetry mock before the read-only network guard", async () => {
+    const registrations = [];
+    const context = {
+      route: vi.fn(async (pattern, handler) => {
+        registrations.push({ owner: "context", pattern, handler });
+      }),
+    };
+    const fakePage = {
+      route: vi.fn(async (pattern, handler) => {
+        registrations.push({ owner: "page", pattern, handler });
+      }),
+      context: vi.fn(() => context),
+    };
+
+    await installSelfserveReadOnlyRouting(fakePage);
+
+    expect(registrations.map(({ owner, pattern }) => ({ owner, pattern }))).toEqual([
+      {
+        owner: "page",
+        pattern: "https://selfserve.corgtex.com/api/workspaces/b1702569-4f4f-4d37-a008-da4d0e8c5742/mobile-analytics",
+      },
+      { owner: "context", pattern: "**/*" },
+    ]);
+
+    const telemetryPost = {
+      request: vi.fn(() => ({ method: () => "POST" })),
+      fulfill: vi.fn(async () => null),
+      fallback: vi.fn(async () => null),
+    };
+    await registrations[0].handler(telemetryPost);
+    expect(telemetryPost.fulfill).toHaveBeenCalledWith({ status: 204 });
+    expect(telemetryPost.fallback).not.toHaveBeenCalled();
+
+    const blockedPost = {
+      request: vi.fn(() => ({
+        method: () => "POST",
+        url: () => "https://selfserve.corgtex.com/api/workspaces/customer-workspace/mobile-analytics",
+      })),
+      abort: vi.fn(async () => null),
+      continue: vi.fn(async () => null),
+    };
+    await registrations[1].handler(blockedPost);
+    expect(blockedPost.abort).toHaveBeenCalledWith("blockedbyclient");
+    expect(blockedPost.continue).not.toHaveBeenCalled();
+  });
+
+  it("preserves the generic telemetry mock for non-closed mobile checks", async () => {
+    let registered;
+    const fakePage = {
+      route: vi.fn(async (pattern, handler) => {
+        registered = { pattern, handler };
+      }),
+    };
+
+    await installMobileAnalyticsMock(fakePage);
+    expect(registered.pattern).toBe("**/api/workspaces/*/mobile-analytics");
+
+    const readRequest = {
+      request: vi.fn(() => ({ method: () => "GET" })),
+      fulfill: vi.fn(async () => null),
+      fallback: vi.fn(async () => null),
+    };
+    await registered.handler(readRequest);
+    expect(readRequest.fallback).toHaveBeenCalledOnce();
+    expect(readRequest.fulfill).not.toHaveBeenCalled();
   });
 });
 
