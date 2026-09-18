@@ -110,12 +110,57 @@ describe("governed MCP config sequence", () => {
     await expect(runConfig(m.args, m.io)).rejects.toThrow("REVISION_CONFIG_DRIFT");
     expect(m.events.some(e => e.startsWith("write:"))).toBe(false);
   });
-  it("keeps the original app-preservation hash strict", () => {
+  it("normalizes only equivalent provider defaults in the preservation hash", () => {
     const app = providerViews().apps.worker;
     const original = configHash(app), other = structuredClone(app);
     delete other.properties.template.containers[0].resources.ephemeralStorage;
     expect(revisionTemplateHash(other)).toBe(revisionTemplateHash(app));
+    expect(configHash(other)).toBe(original);
+    other.properties.template.containers[0].resources.cpu = 0.5;
     expect(configHash(other)).not.toBe(original);
+  });
+  it("preserves secret definitions while accepting their ordering", () => {
+    const app = model().apps.worker;
+    app.properties.configuration.secrets = [{ name: "a", keyVaultUrl: "https://vault/a", identity: "existing" }, { name: "b" }];
+    const hash = configHash(app);
+    app.properties.configuration.secrets.reverse();
+    expect(configHash(app)).toBe(hash);
+    app.properties.configuration.secrets[1].keyVaultUrl = "https://vault/other";
+    expect(configHash(app)).not.toBe(hash);
+  });
+  it("accepts provider default materialization after writes", async () => {
+    const m = model({ afterWrite({ role, apps }) {
+      const app = apps[role];
+      app.properties.template.scale.cooldownPeriod = 300;
+      app.properties.template.scale.pollingInterval = 30;
+      app.properties.template.customMetricsSettings = null;
+      app.properties.template.containers[0].imageType = "ContainerImage";
+      app.properties.template.containers[0].env.find(e => e.secretRef).value = "";
+    } });
+    expect((await runConfig(m.args, m.io)).status).toBe("ACTIVATED");
+  });
+  function recovery(options = {}) {
+    const args = input();
+    args.operation = "complete-activation";
+    args.baselines.worker = `${appName("worker")}--mcp-123455-1-worker`;
+    const m = model({ ...options, input: args });
+    m.apps.worker.properties.template.containers[0].env.find(e => e.name === FLAG).value = "true";
+    return m;
+  }
+  it("completes reconciled activation with only a web write", async () => {
+    const m = recovery();
+    expect((await runConfig(m.args, m.io)).status).toBe("ACTIVATED");
+    expect(m.events.filter(e => e.startsWith("write:"))).toEqual(["write:web:true"]);
+    expect(m.receipts.at(-1).intents.map(i => i.role)).toEqual(["web"]);
+  });
+  it.each(["worker-off", "web-on", "old-worker-running", "worker-unhealthy", "unreconciled-baseline"])("rejects unsafe recovery: %s", async defect => {
+    const m = recovery({ workerUnhealthy: defect === "worker-unhealthy" });
+    if (defect === "worker-off") m.apps.worker.properties.template.containers[0].env.find(e => e.name === FLAG).value = "false";
+    if (defect === "web-on") m.apps.web.properties.template.containers[0].env.find(e => e.name === FLAG).value = "true";
+    if (defect === "old-worker-running") m.revisions.worker[1].properties.runningState = "Running";
+    if (defect === "unreconciled-baseline") m.args.baselines.worker = `${appName("worker")}--0000096`;
+    await expect(runConfig(m.args, m.io)).rejects.toThrow();
+    expect(m.events.some(e => e.startsWith("write:"))).toBe(false);
   });
   it("does not infer storage for an unknown workload profile", () => {
     const app = providerViews().apps.worker;
@@ -263,6 +308,17 @@ describe("actual Azure adapter command boundary", () => {
     const args = { ...input(), operation: "disable-ingress" }, io = createAzureIO(args, {}, { output, execFileSync() { count++; return "{}"; } });
     try { await expect(io.update("worker", "suffix", args.images.worker, false)).rejects.toThrow("WRITE_OUTSIDE_OPERATION"); expect(count).toBe(0); }
     finally { rmSync(output, { recursive: true, force: true }); }
+  });
+  it("recovery adapter permits only the web enable write", async () => {
+    const output = mkdtempSync(join(tmpdir(), "mcp-config-test-")); let count = 0;
+    const args = { ...input(), operation: "complete-activation" }, io = createAzureIO(args, {}, { output, execFileSync() { count++; return "{}"; } });
+    try {
+      await expect(io.update("worker", "mcp-123456-1-worker", args.images.worker, true)).rejects.toThrow("WRITE_OUTSIDE_OPERATION");
+      await expect(io.update("web", "mcp-123456-1-web", args.images.web, false)).rejects.toThrow("WRITE_OUTSIDE_OPERATION");
+      expect(count).toBe(0);
+      await io.update("web", "mcp-123456-1-web", args.images.web, true);
+      expect(count).toBe(1);
+    } finally { rmSync(output, { recursive: true, force: true }); }
   });
   for (const defect of ["worker-off", "tag-image", "foreign-suffix"]) it(`adapter blocks ${defect} before submitting`, async () => {
     const output = mkdtempSync(join(tmpdir(), "mcp-config-test-")); let count = 0;
