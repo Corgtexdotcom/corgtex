@@ -459,9 +459,8 @@ async function verifyNoHorizontalOverflow(page, label, findings) {
   }
 }
 
-async function verifyMobileShell(page, locale, workspacePath, findings, routeResults) {
-  let fakeConversationCounter = 0;
-  await page.route("**/api/workspaces/*/mobile-analytics", async (route) => {
+export async function installMobileAnalyticsMock(page, routePattern = "**/api/workspaces/*/mobile-analytics") {
+  await page.route(routePattern, async (route) => {
     if (route.request().method() !== "POST") {
       await route.fallback();
       return;
@@ -469,6 +468,23 @@ async function verifyMobileShell(page, locale, workspacePath, findings, routeRes
 
     await route.fulfill({ status: 204 });
   });
+}
+
+export async function installSelfserveReadOnlyRouting(page) {
+  const target = SELFSERVE_VALIDATION_TARGET;
+  await installMobileAnalyticsMock(
+    page,
+    `${target.origin}/api/workspaces/${target.workspaceId}/mobile-analytics`,
+  );
+  await page.context().route("**/*", (route) => selfserveReadRequestAllowed(
+    route.request().url(),
+    route.request().method(),
+  ) ? route.continue() : route.abort("blockedbyclient"));
+}
+
+async function verifyMobileShell(page, locale, workspacePath, findings, routeResults) {
+  let fakeConversationCounter = 0;
+  await installMobileAnalyticsMock(page);
   await page.route("**/api/workspaces/*/conversations", async (route) => {
     if (route.request().method() !== "POST") {
       await route.fallback();
@@ -614,8 +630,7 @@ async function main() {
       closedSession = await openSelfserveValidationSession({ origin: baseUrl,
         expectedSha: process.env.SELFSERVE_VALIDATION_EXPECTED_SHA,
         email: process.env.SELFSERVE_VALIDATION_EMAIL, password: process.env.SELFSERVE_VALIDATION_PASSWORD });
-      await page.context().route("**/*", (route) => selfserveReadRequestAllowed(route.request().url(), route.request().method())
-        ? route.continue() : route.abort("blockedbyclient"));
+      await installSelfserveReadOnlyRouting(page);
       const separator = closedSession.cookie.indexOf("=");
       await page.context().addCookies([{ name: closedSession.cookie.slice(0, separator), value: closedSession.cookie.slice(separator + 1),
         url: baseUrl, httpOnly: true, secure: true, sameSite: "Lax" }]);
