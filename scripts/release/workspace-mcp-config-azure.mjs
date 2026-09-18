@@ -112,6 +112,7 @@ export function createAzureIO(input, env = process.env, deps = {}) {
     },
     async update(role, suffix, image, enabled) {
       requireProof(["web", "worker"].includes(role) && (input.operation === "activate" && enabled === true
+        || input.operation === "complete-activation" && role === "web" && enabled === true
         || input.operation === "disable-ingress" && role === "web" && enabled === false), "WRITE_OUTSIDE_OPERATION");
       requireProof(image === input.images[role] && suffix === `mcp-${input.runId}-${input.attempt}-${role}`, "WRITE_INTENT_MISMATCH");
       return az(["containerapp", "update", ...targetArgs(role), "--container-name", role, "--revision-suffix", suffix,

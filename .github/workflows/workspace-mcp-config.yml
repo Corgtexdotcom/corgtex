@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Preflight, worker-first activation, or web-only ingress disable. Never rolls back workers."
+        description: "Preflight, activate, complete a reconciled worker-on/web-off activation, or disable web ingress. Never replays/rolls back workers."
         type: choice
         required: true
         default: preflight
-        options: [preflight, activate, disable-ingress]
+        options: [preflight, activate, complete-activation, disable-ingress]
       accepted_sha:
         description: "Exact previously accepted 40-character web/worker SHA; not undeployed main."
         type: string

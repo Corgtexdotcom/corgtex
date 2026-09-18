@@ -14,7 +14,7 @@ export const appName = role => `ca-corgtex-ss-prod-${role}`;
 export function requireProof(condition, code) { if (!condition) throw new Error(code); }
 const shaPattern = /^[a-f0-9]{40}$/;
 export function validateInputs(input) {
-  requireProof(["preflight", "activate", "disable-ingress"].includes(input.operation), "OPERATION_INVALID");
+  requireProof(["preflight", "activate", "complete-activation", "disable-ingress"].includes(input.operation), "OPERATION_INVALID");
   requireProof(shaPattern.test(input.acceptedSha || "") && !/^0+$/.test(input.acceptedSha), "ACCEPTED_SHA_INVALID");
   requireProof(shaPattern.test(input.workflowSha || ""), "WORKFLOW_SHA_INVALID");
   requireProof(/^[1-9][0-9]{0,19}$/.test(input.runId || "") && input.attempt === "1", "FRESH_RUN_REQUIRED");
@@ -23,6 +23,9 @@ export function validateInputs(input) {
     requireProof(new RegExp(`^${TARGET.server.replaceAll(".", "\\.")}/corgtex/${role}@sha256:[a-f0-9]{64}$`).test(input.images?.[role] || ""), "IMMUTABLE_IMAGE_REQUIRED");
     requireProof(new RegExp(`^${appName(role)}--[a-z0-9][a-z0-9-]{0,50}$`).test(input.baselines?.[role] || ""), "BASELINE_REVISION_INVALID");
   }
+  if (input.operation === "complete-activation") requireProof(
+    /^ca-corgtex-ss-prod-worker--mcp-[1-9][0-9]{0,19}-1-worker$/.test(input.baselines.worker),
+    "RECONCILED_WORKER_BASELINE_REQUIRED");
   return input;
 }
 export function assertIdentity(account, clientId) {
@@ -37,19 +40,24 @@ function canonical(value) {
   return value;
 }
 export function configHash(app) {
-  const p = app.properties, template = structuredClone(p.template);
-  delete template.revisionSuffix;
+  const p = app.properties, template = normalizedTemplate(app, p.template);
   for (const c of template.containers) {
     delete c.image;
     c.env = (c.env || []).filter(e => e.name !== FLAG).sort((a, b) => a.name.localeCompare(b.name));
   }
-  // Only image spelling, the one activation flag and revision suffix may change.
-  const preserved = { template, configuration: p.configuration, identity: app.identity,
+  const configuration = structuredClone(p.configuration);
+  // Secret definitions are keyed by name; Azure may reorder them on an update.
+  if (Array.isArray(configuration.secrets)) configuration.secrets.sort((a, b) => a.name.localeCompare(b.name));
+  // Preserve effective settings, including unknown fields and secret references.
+  const preserved = { template, configuration, identity: app.identity,
     tags: app.tags, location: app.location, environmentId: p.environmentId,
     managedEnvironmentId: p.managedEnvironmentId, workloadProfileName: p.workloadProfileName };
   return createHash("sha256").update(JSON.stringify(canonical(preserved))).digest("hex");
 }
 export function revisionTemplateHash(app, source = app.properties.template) {
+  return createHash("sha256").update(JSON.stringify(canonical(normalizedTemplate(app, source)))).digest("hex");
+}
+function normalizedTemplate(app, source) {
   const template = structuredClone(source);
   delete template.revisionSuffix;
   if (template.customMetricsSettings === null) delete template.customMetricsSettings;
@@ -72,7 +80,7 @@ export function revisionTemplateHash(app, source = app.properties.template) {
         : resources.cpu <= 0.5 ? "2Gi" : resources.cpu <= 1 ? "4Gi" : "8Gi";
     }
   }
-  return createHash("sha256").update(JSON.stringify(canonical(template))).digest("hex");
+  return template;
 }
 export function flagValue(container) {
   const entries = (container.env || []).filter(e => e.name === FLAG);
@@ -159,6 +167,8 @@ export async function runConfig(input, io) {
       assertApp(app, role, live[role].revision, image, flags[role], undefined, input.operation !== "disable-ingress");
     }
     if (input.operation === "activate") requireProof(!flags.web && !flags.worker, "ACTIVATION_REQUIRES_BOTH_OFF");
+    if (input.operation === "complete-activation") requireProof(!flags.web && flags.worker,
+      "RECOVERY_REQUIRES_WORKER_ON_WEB_OFF");
     const prove = async role => {
       const wanted = live[role];
       const app = await io.app(role);
@@ -213,6 +223,9 @@ export async function runConfig(input, io) {
     if (input.operation === "activate") {
       await update("worker", true);
       // Worker stop/readiness proof is refreshed again inside the web update boundary.
+      await update("web", true);
+    } else if (input.operation === "complete-activation") {
+      // Explicit operator recovery after reconciliation; never replay a worker write.
       await update("web", true);
     } else if (input.operation === "disable-ingress" && flags.web) {
       await update("web", false);
