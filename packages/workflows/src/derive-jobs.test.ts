@@ -53,6 +53,40 @@ describe("deriveJobsForEvent", () => {
     ]);
   });
 
+  it("derives an idempotent acknowledgement for Corporate Rebels CRM inquiries", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-inquiry-1",
+      type: "crm.inquiry.captured",
+      workspaceId: "ws-1",
+      payload: {
+        source: "corporate_rebels_website",
+        conversationId: "conversation-1",
+      },
+    });
+
+    expect(jobs).toEqual([{
+      workspaceId: "ws-1",
+      eventId: "event-inquiry-1",
+      type: "email.crm-inquiry-acknowledgement",
+      payload: { conversationId: "conversation-1" },
+      dedupeKey: "crm-inquiry-acknowledgement:ws-1:conversation-1",
+    }]);
+  });
+
+  it("does not acknowledge connector CRM inquiries", () => {
+    const jobs = deriveJobsForEvent({
+      id: "event-inquiry-2",
+      type: "crm.inquiry.captured",
+      workspaceId: "ws-1",
+      payload: {
+        source: "partner_connector",
+        conversationId: "conversation-2",
+      },
+    });
+
+    expect(jobs).toEqual([]);
+  });
+
   it("derives a role onboarding intro job for role assignments", () => {
     const jobs = deriveJobsForEvent({
       id: "event-role-1",

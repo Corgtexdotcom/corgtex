@@ -53,6 +53,27 @@ describe("sendEmail", () => {
     expect(emailDeliveryUpsertMock).not.toHaveBeenCalled();
   });
 
+  it("passes CC recipients and an idempotency key to Resend", async () => {
+    const { sendEmail } = await import("./email");
+
+    await sendEmail({
+      to: "lead@example.com",
+      cc: "colleague@example.com",
+      subject: "Inquiry received",
+      html: "<p>Received</p>",
+      idempotencyKey: "crm-inquiry-acknowledgement/conversation-1",
+    });
+
+    expect(emailsSendMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "lead@example.com",
+        cc: "colleague@example.com",
+        subject: "Inquiry received",
+      }),
+      { idempotencyKey: "crm-inquiry-acknowledgement/conversation-1" },
+    );
+  });
+
   it("stores delivery metadata when tracking is provided", async () => {
     const { sendEmail } = await import("./email");
 

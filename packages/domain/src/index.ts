@@ -41,6 +41,7 @@ export * from "./events";
 export * from "./email-templates";
 export * from "./ingestion-guidance";
 export * from "./crm";
+export * from "./crm-inquiry-email";
 export * from "./crm-information-gathering";
 export * from "./crm-extraction";
 export * from "./crm-drip";

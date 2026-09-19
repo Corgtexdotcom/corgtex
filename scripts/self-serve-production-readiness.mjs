@@ -19,6 +19,8 @@ const REQUIRED_ENV = [
   "RESEND_API_KEY",
   "EMAIL_FROM",
   "EMAIL_REPLY_TO",
+  "CRM_INQUIRY_WORKSPACE_SLUG",
+  "CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL",
   "WORKER_POLL_INTERVAL_MS",
   "WORKER_MAX_POLL_INTERVAL_MS",
   "WORKER_EVENT_BATCH_SIZE",
@@ -382,6 +384,15 @@ function checkEmailSenderConfiguration() {
       pass(`EMAIL_REPLY_TO uses ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}`);
     } else {
       fail(`EMAIL_REPLY_TO must use ${REQUIRED_EMAIL_REPLY_TO_ADDRESS}; got ${replyToAddress || "empty"}`);
+    }
+  }
+
+  if (configured("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL")) {
+    const ccAddress = parseEmailAddress(envValue("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL"));
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ccAddress)) {
+      pass("CRM inquiry acknowledgement CC address is valid");
+    } else {
+      fail("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address.");
     }
   }
 }

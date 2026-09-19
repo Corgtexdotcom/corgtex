@@ -15,6 +15,7 @@ const LOCAL_BROWSER_ORIGIN_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\
 const CRM_INQUIRY_RATE_LIMIT = { windowMs: 60_000, limit: 10, failClosed: true } as const;
 const DEFAULT_CRM_WORKSPACE_SLUG = ["cr", "ina"].join("");
 const DEFAULT_CRM_HOST = `${DEFAULT_CRM_WORKSPACE_SLUG}.corgtex.com`;
+const SELF_SERVE_CRM_HOST = "selfserve.corgtex.com";
 const CORGTEX_PUBLIC_HOST_PATTERN = /(^|\.)corgtex\.com$/;
 
 const optionalText = (max = 500) => z.string().trim().min(1).max(max).optional();
@@ -67,26 +68,27 @@ function presentHostname(value: string | null): value is string {
   return Boolean(value);
 }
 
-function isDefaultCrmDeploymentRequest(request: NextRequest) {
+function isCrmInquiryDeploymentRequest(request: NextRequest) {
   const directHostnames = [
     normalizeHostname(request.headers.get("host")),
     normalizeHostname(request.url),
   ].filter(presentHostname);
   const publicDirectHostnames = directHostnames.filter((hostname) => CORGTEX_PUBLIC_HOST_PATTERN.test(hostname));
   if (publicDirectHostnames.length > 0) {
-    return publicDirectHostnames.some((hostname) => hostname === DEFAULT_CRM_HOST);
+    return publicDirectHostnames.some((hostname) => hostname === DEFAULT_CRM_HOST || hostname === SELF_SERVE_CRM_HOST);
   }
 
   const proxyHostnames = [
     normalizeHostname(request.headers.get("x-forwarded-host")),
     normalizeHostname(request.headers.get("x-original-host")),
   ].filter(presentHostname);
-  return [...directHostnames, ...proxyHostnames].some((hostname) => hostname === DEFAULT_CRM_HOST);
+  return [...directHostnames, ...proxyHostnames]
+    .some((hostname) => hostname === DEFAULT_CRM_HOST || hostname === SELF_SERVE_CRM_HOST);
 }
 
 function isAllowedBrowserOrigin(origin: string, request: NextRequest) {
   if (LOCAL_BROWSER_ORIGIN_PATTERN.test(origin)) return true;
-  if (CORPORATE_REBELS_BROWSER_ORIGINS.has(origin)) return isDefaultCrmDeploymentRequest(request);
+  if (CORPORATE_REBELS_BROWSER_ORIGINS.has(origin)) return isCrmInquiryDeploymentRequest(request);
   return false;
 }
 
@@ -97,6 +99,13 @@ function allowedOriginForRequest(request: NextRequest) {
     throw new AppError(403, "ORIGIN_NOT_ALLOWED", "Origin is not allowed.");
   }
   return origin;
+}
+
+function targetWorkspaceSlug(origin: string | null) {
+  if (origin && CORPORATE_REBELS_BROWSER_ORIGINS.has(origin)) {
+    return process.env.CRM_INQUIRY_WORKSPACE_SLUG || DEFAULT_CRM_WORKSPACE_SLUG;
+  }
+  return process.env.WORKSPACE_SLUG || DEFAULT_CRM_WORKSPACE_SLUG;
 }
 
 function corsHeaders(origin: string) {
@@ -166,7 +175,7 @@ export async function POST(request: NextRequest) {
     if (rateLimited) return withCors(rateLimited, origin);
 
     const result = await captureCrmInquiry({
-      workspaceSlug: process.env.WORKSPACE_SLUG || DEFAULT_CRM_WORKSPACE_SLUG,
+      workspaceSlug: targetWorkspaceSlug(origin),
       source: body.source,
       sourceExternalId: body.sourceExternalId,
       persona: body.persona,

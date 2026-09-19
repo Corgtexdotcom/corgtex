@@ -135,6 +135,12 @@ param emailFrom string = 'Corgtex <notifications@auth.corgtex.com>'
 @description('Reply-to address for operational signup emails.')
 param emailReplyTo string = 'support@corgtex.com'
 
+@description('Workspace slug receiving Corporate Rebels public CRM inquiries.')
+param crmInquiryWorkspaceSlug string = ''
+
+@description('Colleague copied on Corporate Rebels CRM inquiry acknowledgements. Required before enabling the website endpoint.')
+param crmInquiryAcknowledgementCcEmail string = ''
+
 @description('Notification email for procurement/self-serve events.')
 param procurementNotifyEmail string = 'support@corgtex.com'
 
@@ -393,6 +399,8 @@ var commonRuntimeEnv = concat([
   { name: 'MODEL_PRICE_OVERRIDES_JSON', secretRef: 'model-price-overrides-json' }
   { name: 'EMAIL_FROM', value: emailFrom }
   { name: 'EMAIL_REPLY_TO', value: emailReplyTo }
+  { name: 'CRM_INQUIRY_WORKSPACE_SLUG', value: crmInquiryWorkspaceSlug }
+  { name: 'CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL', value: crmInquiryAcknowledgementCcEmail }
   { name: 'PROCUREMENT_NOTIFY_EMAIL', value: procurementNotifyEmail }
   { name: 'WORKER_POLL_INTERVAL_MS', value: workerPollIntervalMs }
   { name: 'WORKER_MAX_POLL_INTERVAL_MS', value: workerMaxPollIntervalMs }

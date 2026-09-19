@@ -56,6 +56,12 @@
     "enableResendSecrets": {
       "value": false
     },
+    "crmInquiryWorkspaceSlug": {
+      "value": ""
+    },
+    "crmInquiryAcknowledgementCcEmail": {
+      "value": ""
+    },
     "enableGoogleOauthSecrets": {
       "value": false
     },

@@ -52,6 +52,8 @@ import {
   runMeetingAudioAssetTranscription,
   type ControlPlaneReleaseTarget,
   type SlackAgentJobPayload,
+  CRM_INQUIRY_ACKNOWLEDGEMENT_JOB_TYPE,
+  sendCrmInquiryAcknowledgement,
 } from "@corgtex/domain";
 
 const DEFAULT_BATCH_SIZE = 25;
@@ -716,6 +718,18 @@ async function handleJob(job: ClaimedJob) {
       throw new Error("Notification delivery job is missing deliveryId.");
     }
     await deliverNotificationDelivery(deliveryId);
+    return;
+  }
+
+  if (job.type === CRM_INQUIRY_ACKNOWLEDGEMENT_JOB_TYPE) {
+    const conversationId = (payload as { conversationId?: string }).conversationId;
+    if (!conversationId) {
+      throw new Error("CRM inquiry acknowledgement job is missing conversationId.");
+    }
+    await sendCrmInquiryAcknowledgement({
+      workspaceId: job.workspaceId,
+      conversationId,
+    });
     return;
   }
 

@@ -15,10 +15,12 @@ export type EmailTrackingOptions = {
 
 export async function sendEmail(params: {
   to: string;
+  cc?: string | string[];
   subject: string;
   html: string;
   text?: string;
   replyTo?: string;
+  idempotencyKey?: string;
   tracking?: EmailTrackingOptions;
 }): Promise<EmailSendResult> {
   const apiKey = env.RESEND_API_KEY;
@@ -31,14 +33,18 @@ export async function sendEmail(params: {
   const resend = new Resend(apiKey);
   const replyTo = params.replyTo ?? env.EMAIL_REPLY_TO;
 
-  const { data, error } = await resend.emails.send({
+  const email = {
     from: env.EMAIL_FROM,
     to: params.to,
+    ...(params.cc ? { cc: params.cc } : {}),
     subject: params.subject,
     html: params.html,
     ...(params.text ? { text: params.text } : {}),
     ...(replyTo ? { reply_to: replyTo } : {}),
-  });
+  };
+  const { data, error } = params.idempotencyKey
+    ? await resend.emails.send(email, { idempotencyKey: params.idempotencyKey })
+    : await resend.emails.send(email);
 
   if (error) {
     console.error("[email] Resend API error:", error);
