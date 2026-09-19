@@ -34,7 +34,7 @@ When you launch a fresh Corgtex instance, the database must be seeded with an in
 | `WORKSPACE_NAME` | The display name of the initial workspace (e.g., "Acme Corp"). |
 | `WORKSPACE_SLUG` | The URL-friendly identifier for the workspace (e.g., "acme-corp"). |
 | `CRM_INQUIRY_WORKSPACE_SLUG` | Optional explicit workspace target for the public CRM inquiry route. Corporate Rebels browser submissions use this value instead of the deployment-wide workspace slug. |
-| `CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL` | Colleague copied on CRM inquiry acknowledgement emails. The durable email job fails visibly until this is configured; CRM capture remains committed. |
+| `CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL` | Comma-separated colleague addresses copied on CRM inquiry acknowledgement emails. The durable email job fails visibly until this is configured; CRM capture remains committed. |
 | `ADMIN_EMAIL` | The email address for the initial bootstrap admin user. |
 | `ADMIN_PASSWORD` | The password for the initial bootstrap admin user. |
 | `CONTROL_PLANE_TESTER_EMAIL` | Optional separate global operator email for auditable Control Plane production testing. Must differ from `ADMIN_EMAIL`. |

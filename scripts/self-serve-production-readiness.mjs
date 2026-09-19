@@ -388,11 +388,14 @@ function checkEmailSenderConfiguration() {
   }
 
   if (configured("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL")) {
-    const ccAddress = parseEmailAddress(envValue("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL"));
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ccAddress)) {
-      pass("CRM inquiry acknowledgement CC address is valid");
+    const ccAddresses = envValue("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL")
+      .split(",")
+      .map((value) => parseEmailAddress(value))
+      .filter(Boolean);
+    if (ccAddresses.length > 0 && ccAddresses.every((address) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) {
+      pass("CRM inquiry acknowledgement CC addresses are valid");
     } else {
-      fail("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address.");
+      fail("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a comma-separated list of valid email addresses.");
     }
   }
 }

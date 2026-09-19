@@ -9,7 +9,7 @@ const { appendEventsMock, findConversationMock, sendEmailMock, transactionMock }
 
 vi.mock("@corgtex/shared", () => ({
   env: {
-    CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: "colleague@example.com",
+    CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: " First@example.com,second@example.com,first@example.com ",
   },
   prisma: {
     crmConversation: {
@@ -43,7 +43,7 @@ describe("sendCrmInquiryAcknowledgement", () => {
     transactionMock.mockImplementation(async (callback) => callback({ event: { createMany: vi.fn() } }));
   });
 
-  it("sends an idempotent acknowledgement with the configured colleague copied", async () => {
+  it("sends an idempotent acknowledgement with the configured colleagues copied", async () => {
     const { sendCrmInquiryAcknowledgement } = await import("./crm-inquiry-email");
 
     await expect(sendCrmInquiryAcknowledgement({
@@ -63,7 +63,7 @@ describe("sendCrmInquiryAcknowledgement", () => {
     }));
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       to: "lead@example.com",
-      cc: "colleague@example.com",
+      cc: ["first@example.com", "second@example.com"],
       subject: "We received your Corporate Rebels inquiry",
       html: expect.stringContaining("Ava &lt;Owner&gt;"),
       idempotencyKey: "crm-inquiry-acknowledgement/conversation-1",

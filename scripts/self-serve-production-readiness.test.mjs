@@ -114,7 +114,7 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   MODEL_PROVIDER configured");
     expect(result.stdout).toContain("OK   EMAIL_FROM uses notifications@auth.corgtex.com");
     expect(result.stdout).toContain("OK   EMAIL_REPLY_TO uses support@corgtex.com");
-    expect(result.stdout).toContain("OK   CRM inquiry acknowledgement CC address is valid");
+    expect(result.stdout).toContain("OK   CRM inquiry acknowledgement CC addresses are valid");
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
     expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON includes azure-openai/corgtex-chat-standard");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
@@ -751,6 +751,14 @@ describe("self-serve production readiness", () => {
       CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: "not-an-email",
     }, ["--strict", "--skip-http"]);
     expect(invalid.status).toBe(1);
-    expect(invalid.stderr).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address");
+    expect(invalid.stderr).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a comma-separated list of valid email addresses");
+
+    const multiple = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "fake",
+      CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: "first@example.com, second@example.com",
+    }, ["--strict", "--skip-http"]);
+    expect(multiple.status).toBe(0);
+    expect(multiple.stdout).toContain("CRM inquiry acknowledgement CC addresses are valid");
   });
 });
