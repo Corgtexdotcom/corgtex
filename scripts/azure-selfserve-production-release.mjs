@@ -33,6 +33,7 @@ const dryRun = Boolean(args.dryRun);
 const skipBuild = Boolean(args.skipBuild);
 const skipHealthSmoke = Boolean(args.skipHealthSmoke);
 validateRuntimeObservabilityBooleans();
+validateCrmInquiryRuntimeConfiguration();
 const nextServerActionsEncryptionKey = skipBuild
   ? null
   : dryRun
@@ -188,6 +189,7 @@ async function updateContainerApp(name, image) {
     "CORGTEX_AUTO_SEED_JNJ_DEMO=false",
     "SEED_SCRIPTS=",
     ...runtimeObservabilityEnvArgs(),
+    ...runtimeCrmInquiryEnvArgs(),
     "--output",
     "none",
   ]);
@@ -215,6 +217,31 @@ function validateRuntimeObservabilityBooleans() {
       throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+}
+
+function validateCrmInquiryRuntimeConfiguration() {
+  const workspaceSlug = optionalText(process.env.CRM_INQUIRY_WORKSPACE_SLUG);
+  const ccEmail = optionalText(process.env.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL);
+  if (!workspaceSlug && !ccEmail) return;
+  if (!workspaceSlug || !ccEmail) {
+    throw new Error("CRM_INQUIRY_WORKSPACE_SLUG and CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be configured together.");
+  }
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(workspaceSlug)) {
+    throw new Error("CRM_INQUIRY_WORKSPACE_SLUG must be a lowercase workspace slug.");
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ccEmail)) {
+    throw new Error("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address.");
+  }
+}
+
+function runtimeCrmInquiryEnvArgs() {
+  const workspaceSlug = optionalText(process.env.CRM_INQUIRY_WORKSPACE_SLUG);
+  const ccEmail = optionalText(process.env.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL);
+  if (!workspaceSlug || !ccEmail) return [];
+  return [
+    `CRM_INQUIRY_WORKSPACE_SLUG=${workspaceSlug}`,
+    `CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL=${ccEmail}`,
+  ];
 }
 
 function runtimeObservabilityEnvArgs() {

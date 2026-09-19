@@ -90,6 +90,20 @@ export function deriveJobsForEvent(event: {
     });
   };
 
+  if (event.type === "crm.inquiry.captured" && event.workspaceId) {
+    const source = readPayloadString(event.payload, "source");
+    const conversationId = readPayloadString(event.payload, "conversationId");
+    if (source === "corporate_rebels_website" && conversationId) {
+      jobs.push({
+        workspaceId: event.workspaceId,
+        eventId: event.id,
+        type: "email.crm-inquiry-acknowledgement",
+        payload: { conversationId },
+        dedupeKey: `crm-inquiry-acknowledgement:${event.workspaceId}:${conversationId}`,
+      });
+    }
+  }
+
   if (event.type === "proposal.approved") {
     const payload = event.payload as { subjectId?: string };
     if (payload.subjectId && event.workspaceId) {

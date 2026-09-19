@@ -43,8 +43,10 @@ vi.mock("@/lib/posthog-server", () => ({
 }));
 
 const originalWorkspaceSlug = process.env.WORKSPACE_SLUG;
+const originalCrmInquiryWorkspaceSlug = process.env.CRM_INQUIRY_WORKSPACE_SLUG;
 const targetWorkspaceSlug = ["cr", "ina"].join("");
 const targetCrmHost = `${targetWorkspaceSlug}.corgtex.com`;
+const selfServeHost = "selfserve.corgtex.com";
 
 function inquiryPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -100,6 +102,7 @@ describe("POST /api/public/crm-inquiries", () => {
     vi.resetModules();
     vi.clearAllMocks();
     process.env.WORKSPACE_SLUG = targetWorkspaceSlug;
+    process.env.CRM_INQUIRY_WORKSPACE_SLUG = targetWorkspaceSlug;
     checkRateLimitMock.mockResolvedValue({
       allowed: true,
       remaining: 9,
@@ -117,6 +120,11 @@ describe("POST /api/public/crm-inquiries", () => {
       delete process.env.WORKSPACE_SLUG;
     } else {
       process.env.WORKSPACE_SLUG = originalWorkspaceSlug;
+    }
+    if (originalCrmInquiryWorkspaceSlug === undefined) {
+      delete process.env.CRM_INQUIRY_WORKSPACE_SLUG;
+    } else {
+      process.env.CRM_INQUIRY_WORKSPACE_SLUG = originalCrmInquiryWorkspaceSlug;
     }
   });
 
@@ -159,6 +167,42 @@ describe("POST /api/public/crm-inquiries", () => {
       workspaceSlug: targetWorkspaceSlug,
       sourceExternalId: "submission-123",
     }));
+  });
+
+  it("accepts Corporate Rebels browser origins on self-serve and pins them to the CRM workspace", async () => {
+    process.env.WORKSPACE_SLUG = "shared-self-serve";
+    const { POST } = await import("./route");
+
+    const response = await POST(crmInquiryRequest(inquiryPayload(), {
+      origin: "https://us.corporate-rebels.com",
+    }, selfServeHost));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://us.corporate-rebels.com");
+    expect(captureCrmInquiryMock).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceSlug: targetWorkspaceSlug,
+      sourceExternalId: "submission-123",
+    }));
+  });
+
+  it("accepts the Corporate Rebels CORS preflight on self-serve without touching CRM", async () => {
+    const { OPTIONS } = await import("./route");
+    const request = new Request(`https://${selfServeHost}/api/public/crm-inquiries`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://us.corporate-rebels.com",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
+    });
+
+    const response = await OPTIONS(request as never);
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://us.corporate-rebels.com");
+    expect(response.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+    expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Content-Type");
+    expect(captureCrmInquiryMock).not.toHaveBeenCalled();
   });
 
   it("rejects disallowed browser origins before CRM writes", async () => {

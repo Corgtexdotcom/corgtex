@@ -15,11 +15,14 @@ export type EmailTrackingOptions = {
 
 export async function sendEmail(params: {
   to: string;
+  cc?: string | string[];
   subject: string;
   html: string;
   text?: string;
   replyTo?: string;
+  idempotencyKey?: string;
   tracking?: EmailTrackingOptions;
+  trackingRequired?: boolean;
 }): Promise<EmailSendResult> {
   const apiKey = env.RESEND_API_KEY;
   if (!apiKey) {
@@ -31,14 +34,18 @@ export async function sendEmail(params: {
   const resend = new Resend(apiKey);
   const replyTo = params.replyTo ?? env.EMAIL_REPLY_TO;
 
-  const { data, error } = await resend.emails.send({
+  const email = {
     from: env.EMAIL_FROM,
     to: params.to,
+    ...(params.cc ? { cc: params.cc } : {}),
     subject: params.subject,
     html: params.html,
     ...(params.text ? { text: params.text } : {}),
     ...(replyTo ? { reply_to: replyTo } : {}),
-  });
+  };
+  const { data, error } = params.idempotencyKey
+    ? await resend.emails.send(email, { idempotencyKey: params.idempotencyKey })
+    : await resend.emails.send(email);
 
   if (error) {
     console.error("[email] Resend API error:", error);
@@ -46,14 +53,17 @@ export async function sendEmail(params: {
   }
 
   if (data?.id && params.tracking) {
-    await recordEmailDelivery({
-      providerMessageId: data.id,
-      to: params.to,
-      subject: params.subject,
-      tracking: params.tracking,
-    }).catch((trackingError) => {
+    try {
+      await recordEmailDelivery({
+        providerMessageId: data.id,
+        to: params.to,
+        subject: params.subject,
+        tracking: params.tracking,
+      });
+    } catch (trackingError) {
       console.error("[email] Failed to record email delivery metadata:", trackingError);
-    });
+      if (params.trackingRequired) throw trackingError;
+    }
   }
 
   return { status: "SENT", providerMessageId: data?.id ?? null };

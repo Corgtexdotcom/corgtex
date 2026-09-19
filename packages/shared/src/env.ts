@@ -143,6 +143,8 @@ type Env = {
   readonly RESEND_API_KEY: string | undefined;
   readonly EMAIL_FROM: string;
   readonly EMAIL_REPLY_TO: string | undefined;
+  readonly CRM_INQUIRY_WORKSPACE_SLUG: string | undefined;
+  readonly CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: string | undefined;
   readonly SMOKE_EMAIL_CAPTURE_SECRET: string | undefined;
   readonly SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: string | undefined;
   readonly SMOKE_EMAIL_CAPTURE_TTL_MINUTES: number;
@@ -368,6 +370,12 @@ export const env: Env = {
   },
   get EMAIL_REPLY_TO() {
     return optional("EMAIL_REPLY_TO");
+  },
+  get CRM_INQUIRY_WORKSPACE_SLUG() {
+    return optional("CRM_INQUIRY_WORKSPACE_SLUG");
+  },
+  get CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL() {
+    return optional("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL");
   },
   get SMOKE_EMAIL_CAPTURE_SECRET() {
     return optional("SMOKE_EMAIL_CAPTURE_SECRET");

@@ -30,6 +30,7 @@ const {
   markMeetingTranscriptProcessingReadyMock,
   createNotificationIntentMock,
   deliverNotificationDeliveryMock,
+  sendCrmInquiryAcknowledgementMock,
   runFinanceReportImportExtractionJobMock,
   runFinanceReportImportProposalJobMock,
 } = vi.hoisted(() => ({
@@ -104,6 +105,7 @@ const {
   markMeetingTranscriptProcessingReadyMock: vi.fn(),
   createNotificationIntentMock: vi.fn(),
   deliverNotificationDeliveryMock: vi.fn(),
+  sendCrmInquiryAcknowledgementMock: vi.fn(),
   runFinanceReportImportExtractionJobMock: vi.fn(),
   runFinanceReportImportProposalJobMock: vi.fn(),
 }));
@@ -187,6 +189,8 @@ vi.mock("@corgtex/domain", async () => ({
   createNotificationIntent: createNotificationIntentMock,
   deliverNotificationDelivery: deliverNotificationDeliveryMock,
   NOTIFICATION_DELIVERY_JOB_TYPE: "notification.delivery",
+  CRM_INQUIRY_ACKNOWLEDGEMENT_JOB_TYPE: "email.crm-inquiry-acknowledgement",
+  sendCrmInquiryAcknowledgement: sendCrmInquiryAcknowledgementMock,
   isHumanNewspaperRecipientIdentity: (identity: { kind?: string | null; user?: { email?: string | null; displayName?: string | null } | null; email?: string | null; displayName?: string | null }) => {
     const user = identity.user ?? identity;
     const email = user.email?.trim().toLowerCase() ?? "";
@@ -289,6 +293,10 @@ describe("runPendingJobs", () => {
     recordMeetingTranscriptProcessingStageMock.mockReset().mockResolvedValue(undefined);
     markMeetingTranscriptProcessingReadyMock.mockReset().mockResolvedValue(undefined);
     deliverNotificationDeliveryMock.mockReset().mockResolvedValue({ status: "SENT" });
+    sendCrmInquiryAcknowledgementMock.mockReset().mockResolvedValue({
+      status: "SENT",
+      providerMessageId: "resend-1",
+    });
     createNotificationIntentMock.mockReset().mockResolvedValue({ count: 1 });
     runFinanceReportImportExtractionJobMock.mockReset().mockResolvedValue({ skipped: false });
     getNewspaperLocalDatePartsMock.mockReset().mockReturnValue({
@@ -901,6 +909,29 @@ describe("runPendingJobs", () => {
     await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
 
     expect(deliverNotificationDeliveryMock).toHaveBeenCalledWith("delivery-1");
+    expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
+      where: { id: "job-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+      }),
+    });
+  });
+
+  it("dispatches CRM inquiry acknowledgement jobs", async () => {
+    txMock.$queryRaw.mockResolvedValue([{
+      id: "job-1",
+      workspaceId: "ws-1",
+      type: "email.crm-inquiry-acknowledgement",
+      payload: { conversationId: "conversation-1" },
+      attempts: 1,
+    }]);
+
+    await expect(runPendingJobs("worker-1", 1)).resolves.toBe(1);
+
+    expect(sendCrmInquiryAcknowledgementMock).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      conversationId: "conversation-1",
+    });
     expect(prismaMock.workflowJob.update).toHaveBeenCalledWith({
       where: { id: "job-1" },
       data: expect.objectContaining({

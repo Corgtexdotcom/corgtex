@@ -22,6 +22,8 @@ const STRICT_BASE_ENV = {
   RESEND_API_KEY: "resend-api-placeholder",
   EMAIL_FROM: "Corgtex <notifications@auth.corgtex.com>",
   EMAIL_REPLY_TO: "support@corgtex.com",
+  CRM_INQUIRY_WORKSPACE_SLUG: "crm-target",
+  CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: "colleague@example.com",
   WORKER_POLL_INTERVAL_MS: "1000",
   WORKER_MAX_POLL_INTERVAL_MS: "5000",
   WORKER_EVENT_BATCH_SIZE: "10",
@@ -112,6 +114,7 @@ describe("self-serve production readiness", () => {
     expect(result.stdout).toContain("OK   MODEL_PROVIDER configured");
     expect(result.stdout).toContain("OK   EMAIL_FROM uses notifications@auth.corgtex.com");
     expect(result.stdout).toContain("OK   EMAIL_REPLY_TO uses support@corgtex.com");
+    expect(result.stdout).toContain("OK   CRM inquiry acknowledgement CC address is valid");
     expect(result.stdout).toContain("OK   MODEL_BASE_URL configured");
     expect(result.stdout).toContain("OK   MODEL_PRICE_OVERRIDES_JSON includes azure-openai/corgtex-chat-standard");
     expect(result.stdout).toContain("OK   AZURE_OPENAI_AUTH_MODE configured for managed identity");
@@ -729,5 +732,25 @@ describe("self-serve production readiness", () => {
     }, ["--strict", "--skip-http"]);
     expect(wrongReplyTo.status).toBe(1);
     expect(wrongReplyTo.stderr).toContain("EMAIL_REPLY_TO must use support@corgtex.com");
+  });
+
+  it("requires a valid CRM inquiry workspace and acknowledgement CC in strict mode", () => {
+    const missing = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "fake",
+      CRM_INQUIRY_WORKSPACE_SLUG: "",
+      CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: "",
+    }, ["--strict", "--skip-http"]);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("CRM_INQUIRY_WORKSPACE_SLUG missing");
+    expect(missing.stderr).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL missing");
+
+    const invalid = runReadiness({
+      ...STRICT_BASE_ENV,
+      MODEL_PROVIDER: "fake",
+      CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: "not-an-email",
+    }, ["--strict", "--skip-http"]);
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address");
   });
 });

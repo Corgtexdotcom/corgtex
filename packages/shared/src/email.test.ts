@@ -53,6 +53,27 @@ describe("sendEmail", () => {
     expect(emailDeliveryUpsertMock).not.toHaveBeenCalled();
   });
 
+  it("passes CC recipients and an idempotency key to Resend", async () => {
+    const { sendEmail } = await import("./email");
+
+    await sendEmail({
+      to: "lead@example.com",
+      cc: "colleague@example.com",
+      subject: "Inquiry received",
+      html: "<p>Received</p>",
+      idempotencyKey: "crm-inquiry-acknowledgement/conversation-1",
+    });
+
+    expect(emailsSendMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "lead@example.com",
+        cc: "colleague@example.com",
+        subject: "Inquiry received",
+      }),
+      { idempotencyKey: "crm-inquiry-acknowledgement/conversation-1" },
+    );
+  });
+
   it("stores delivery metadata when tracking is provided", async () => {
     const { sendEmail } = await import("./email");
 
@@ -119,6 +140,27 @@ describe("sendEmail", () => {
     });
 
     expect(result).toEqual({ status: "SENT", providerMessageId: "email-1" });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[email] Failed to record email delivery metadata:",
+      expect.any(Error),
+    );
+  });
+
+  it("fails when required delivery tracking cannot be stored", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    emailDeliveryUpsertMock.mockRejectedValueOnce(new Error("database unavailable"));
+    const { sendEmail } = await import("./email");
+
+    await expect(sendEmail({
+      to: "lead@example.com",
+      subject: "Inquiry received",
+      html: "<p>Received</p>",
+      tracking: {
+        emailType: "crm_inquiry_acknowledgement",
+      },
+      trackingRequired: true,
+    })).rejects.toThrow("database unavailable");
+
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "[email] Failed to record email delivery metadata:",
       expect.any(Error),

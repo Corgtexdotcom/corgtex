@@ -102,6 +102,8 @@ jobs:
       OPS_GITHUB_REPOSITORY: ${{ github.repository }}
       OBSERVATION_REQUIRE_SOURCE: "true"
       OBSERVATION_WINDOW_MINUTES: ${{ vars.OBSERVATION_WINDOW_MINUTES || '20' }}
+      CRM_INQUIRY_WORKSPACE_SLUG: ${{ vars.CRM_INQUIRY_WORKSPACE_SLUG || '' }}
+      CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: ${{ vars.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL || '' }}
 
     steps:
       - name: Validate workflow configuration
