@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "status": "UNRESOLVED_REGRESSION",
+  "sourceAttempt": "R7",
+  "lifecycle": "reused-page",
+  "reactCode": "418",
+  "completedSamplesBeforeFailure": 19,
+  "applicationImagesChangedInPassingAttempt": false,
+  "passingMode": "fresh-page",
+  "acceptance": "Fresh-page qualification passing does not establish that the reused-page hydration mismatch is fixed."
+}
