@@ -239,8 +239,9 @@ jobs:
             fi
             node - "$CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL" <<'NODE'
           const [value] = process.argv.slice(2);
-          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-            console.error("::error::CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address.");
+          const addresses = value.split(",").map((address) => address.trim()).filter(Boolean);
+          if (addresses.length === 0 || !addresses.every((address) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) {
+            console.error("::error::CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a comma-separated list of valid email addresses.");
             process.exit(1);
           }
           NODE

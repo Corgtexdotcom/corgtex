@@ -229,8 +229,9 @@ function validateCrmInquiryRuntimeConfiguration() {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(workspaceSlug)) {
     throw new Error("CRM_INQUIRY_WORKSPACE_SLUG must be a lowercase workspace slug.");
   }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ccEmail)) {
-    throw new Error("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address.");
+  const ccAddresses = ccEmail.split(",").map((value) => value.trim()).filter(Boolean);
+  if (ccAddresses.length === 0 || !ccAddresses.every((value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) {
+    throw new Error("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a comma-separated list of valid email addresses.");
   }
 }
 

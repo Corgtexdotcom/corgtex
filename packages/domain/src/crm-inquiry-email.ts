@@ -4,6 +4,13 @@ import { appendEvents } from "./events";
 export const CRM_INQUIRY_ACKNOWLEDGEMENT_JOB_TYPE = "email.crm-inquiry-acknowledgement";
 const CRM_INQUIRY_SOURCE = "corporate_rebels_website";
 
+function acknowledgementCcRecipients(value: string | undefined) {
+  return [...new Set((value ?? "")
+    .split(",")
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean))];
+}
+
 function escapeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -42,8 +49,8 @@ export async function sendCrmInquiryAcknowledgement(params: {
   workspaceId: string;
   conversationId: string;
 }) {
-  const ccEmail = env.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL;
-  if (!ccEmail) {
+  const ccRecipients = acknowledgementCcRecipients(env.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL);
+  if (ccRecipients.length === 0) {
     throw new Error("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL is not configured.");
   }
 
@@ -71,7 +78,7 @@ export async function sendCrmInquiryAcknowledgement(params: {
   const content = acknowledgementContent(conversation.contact.name ?? "");
   const result = await sendEmail({
     to: conversation.contact.email,
-    cc: ccEmail,
+    cc: ccRecipients,
     subject: content.subject,
     html: content.html,
     text: content.text,
