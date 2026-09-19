@@ -1121,6 +1121,16 @@ describe("fleet release runner", () => {
     expect(workerBuild).toContain("`GITHUB_SHA=${releaseGitSha}`");
   });
 
+  it("manages CRM inquiry runtime settings in the standalone production release", () => {
+    const source = readFileSync(new URL("../azure-selfserve-production-release.mjs", import.meta.url), "utf8");
+    const workflow = readFileSync(new URL("../../.github/workflows/azure-selfserve-production.yml", import.meta.url), "utf8");
+    expect(source).toContain("...runtimeCrmInquiryEnvArgs()");
+    expect(source).toContain("CRM_INQUIRY_WORKSPACE_SLUG=${workspaceSlug}");
+    expect(source).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL=${ccEmail}");
+    expect(workflow).toContain("CRM_INQUIRY_WORKSPACE_SLUG: ${{ vars.CRM_INQUIRY_WORKSPACE_SLUG || '' }}");
+    expect(workflow).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: ${{ vars.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL || '' }}");
+  });
+
   it("prints a dry-run plan without mutating providers", async () => {
     const outputs = {};
     const runCommand = vi.fn();

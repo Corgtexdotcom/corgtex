@@ -145,4 +145,25 @@ describe("sendEmail", () => {
       expect.any(Error),
     );
   });
+
+  it("fails when required delivery tracking cannot be stored", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    emailDeliveryUpsertMock.mockRejectedValueOnce(new Error("database unavailable"));
+    const { sendEmail } = await import("./email");
+
+    await expect(sendEmail({
+      to: "lead@example.com",
+      subject: "Inquiry received",
+      html: "<p>Received</p>",
+      tracking: {
+        emailType: "crm_inquiry_acknowledgement",
+      },
+      trackingRequired: true,
+    })).rejects.toThrow("database unavailable");
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[email] Failed to record email delivery metadata:",
+      expect.any(Error),
+    );
+  });
 });

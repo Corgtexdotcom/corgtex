@@ -828,6 +828,14 @@ describe("managed Azure single-target transaction", () => {
       expect(block).toContain("GITHUB_SHA=${{ github.sha }}");
     }
   });
+
+  it("passes managed CRM inquiry settings to both staging deployment operations", () => {
+    const workflow = readFileSync(new URL("../../.github/workflows/azure-selfserve-staging.yml", import.meta.url), "utf8");
+    expect(workflow).toContain("CRM_INQUIRY_WORKSPACE_SLUG: ${{ vars.CRM_INQUIRY_WORKSPACE_SLUG || '' }}");
+    expect(workflow).toContain("CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: ${{ vars.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL || '' }}");
+    expect(workflow.match(/crmInquiryWorkspaceSlug=\$CRM_INQUIRY_WORKSPACE_SLUG/g)).toHaveLength(2);
+    expect(workflow.match(/crmInquiryAcknowledgementCcEmail=\$CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL/g)).toHaveLength(2);
+  });
 });
 
 describe("managed Azure Container Apps transport", () => {

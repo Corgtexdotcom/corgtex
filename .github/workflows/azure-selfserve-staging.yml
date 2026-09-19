@@ -156,6 +156,8 @@ jobs:
       SMOKE_EMAIL_CAPTURE_SECRET: ${{ secrets.AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_CAPTURE_SECRET }}
       SELF_SERVE_SMOKE_EMAIL_DOMAIN: ${{ vars.AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_DOMAIN }}
       NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
+      CRM_INQUIRY_WORKSPACE_SLUG: ${{ vars.CRM_INQUIRY_WORKSPACE_SLUG || '' }}
+      CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: ${{ vars.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL || '' }}
       REGISTRY_USERNAME: corgtex-deploy
 
     steps:
@@ -226,6 +228,22 @@ jobs:
 
           if [[ "$OPERATION" == "deploy" && "$DEPLOY_CONTAINER_APPS" == "true" ]]; then
             require NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
+          fi
+
+          if [[ -n "$CRM_INQUIRY_WORKSPACE_SLUG" || -n "$CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL" ]]; then
+            require CRM_INQUIRY_WORKSPACE_SLUG
+            require CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL
+            if [[ "$ENABLE_RESEND_SECRETS" != "true" ]]; then
+              echo "::error::CRM inquiry acknowledgement requires enable_resend_secrets=true."
+              exit 1
+            fi
+            node - "$CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL" <<'NODE'
+          const [value] = process.argv.slice(2);
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+            console.error("::error::CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL must be a valid email address.");
+            process.exit(1);
+          }
+          NODE
           fi
 
           if [[ "$RUN_BROWSER_SMOKE" == "true" ]]; then
@@ -358,6 +376,8 @@ jobs:
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
             "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
+            "crmInquiryWorkspaceSlug=$CRM_INQUIRY_WORKSPACE_SLUG"
+            "crmInquiryAcknowledgementCcEmail=$CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL"
             "enableStripeSecrets=$ENABLE_STRIPE_SECRETS"
             "enableResendSecrets=$ENABLE_RESEND_SECRETS"
             "enableGoogleOauthSecrets=$ENABLE_GOOGLE_OAUTH_SECRETS"
@@ -393,6 +413,8 @@ jobs:
             "azureOpenAiAuthMode=$AZURE_OPENAI_AUTH_MODE"
             "allowAzureServicePostgresFirewall=$ALLOW_AZURE_SERVICE_POSTGRES_FIREWALL"
             "smokeEmailCaptureAllowedDomains=$SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS"
+            "crmInquiryWorkspaceSlug=$CRM_INQUIRY_WORKSPACE_SLUG"
+            "crmInquiryAcknowledgementCcEmail=$CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL"
             "enableStripeSecrets=$ENABLE_STRIPE_SECRETS"
             "enableResendSecrets=$ENABLE_RESEND_SECRETS"
             "enableGoogleOauthSecrets=$ENABLE_GOOGLE_OAUTH_SECRETS"

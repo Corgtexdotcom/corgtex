@@ -22,6 +22,7 @@ export async function sendEmail(params: {
   replyTo?: string;
   idempotencyKey?: string;
   tracking?: EmailTrackingOptions;
+  trackingRequired?: boolean;
 }): Promise<EmailSendResult> {
   const apiKey = env.RESEND_API_KEY;
   if (!apiKey) {
@@ -52,14 +53,17 @@ export async function sendEmail(params: {
   }
 
   if (data?.id && params.tracking) {
-    await recordEmailDelivery({
-      providerMessageId: data.id,
-      to: params.to,
-      subject: params.subject,
-      tracking: params.tracking,
-    }).catch((trackingError) => {
+    try {
+      await recordEmailDelivery({
+        providerMessageId: data.id,
+        to: params.to,
+        subject: params.subject,
+        tracking: params.tracking,
+      });
+    } catch (trackingError) {
       console.error("[email] Failed to record email delivery metadata:", trackingError);
-    });
+      if (params.trackingRequired) throw trackingError;
+    }
   }
 
   return { status: "SENT", providerMessageId: data?.id ?? null };

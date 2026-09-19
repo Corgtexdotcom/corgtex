@@ -84,6 +84,7 @@ export async function sendCrmInquiryAcknowledgement(params: {
         sourceExternalId: conversation.sourceExternalId,
       },
     },
+    trackingRequired: true,
   });
   if (result.status !== "SENT") {
     throw new Error(`CRM inquiry acknowledgement was skipped: ${result.reason}`);

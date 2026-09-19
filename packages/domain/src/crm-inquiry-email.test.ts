@@ -71,6 +71,7 @@ describe("sendCrmInquiryAcknowledgement", () => {
         emailType: "crm_inquiry_acknowledgement",
         workspaceId: "workspace-1",
       }),
+      trackingRequired: true,
     }));
     expect(appendEventsMock).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
       workspaceId: "workspace-1",
