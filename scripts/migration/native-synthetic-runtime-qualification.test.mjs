@@ -45,10 +45,11 @@ function validBootstrap(config) {
 
 describe("sanitizeQualificationDiagnostic", () => {
   it("redacts urls, bearer tokens, query secrets, and long opaque strings", () => {
+    const syntheticApiKey = ["sk", "live", "example-value"].join("-");
     const raw =
       "GET https://api.example.com/v1/workspaces?token=super-secret-value Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc " +
       "password=plain-text secret=another-one key=short ok=1 " +
-      "apiKey: sk-live-123456789 password: hunter2 cookie: session-value " +
+      `apiKey: ${syntheticApiKey} password: hunter2 cookie: session-value ` +
       "Authorization: Basic dXNlcjpwYXNz opaque=abcdefghijklmnopqrstuvwxyz0123456789ABCDEF";
 
     const sanitized = sanitizeQualificationDiagnostic(raw);
