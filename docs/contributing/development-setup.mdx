@@ -7,39 +7,46 @@ Welcome to the Corgtex engineering team. Follow this guide to set up your local 
 
 ## Prerequisites
 
-- Node.js version 22
-- Docker and Docker Compose (Desktop)
-- A GitHub account and local SSH keys configured
+- Node.js `>=22.22.0` and `<23` (root `package.json` `engines.node`)
+- npm `>=10` (root `engines.npm`; the repo pins `packageManager` `npm@10.9.4`)
+- Docker and Docker Compose, used for local Postgres (`docker-compose.yml`) and integration-test Postgres (`docker-compose.test.yml`)
+- Git
 
 ## 1. Clone and Install
 
 ```bash
-git clone https://github.com/corgtex/corgtex.git
+git clone https://github.com/Corgtexdotcom/corgtex.git
 cd corgtex
 npm install
 ```
 
+This is an npm workspaces monorepo (`apps/site`, `apps/web`, `apps/worker`, `packages/*`). Install from the repository root.
+
 ## 2. Infrastructure (Database)
 
-We use Docker Compose to run the local PostgreSQL database seamlessly alongside development.
+Local npm development talks to Postgres on `localhost:5432`. In the default `docker-compose.yml` that service is named **`db`** (image `pgvector/pgvector:pg16`), not `postgres`.
 
 ```bash
-docker compose up -d postgres
+docker compose up -d db
 ```
+
+Do not start the full default compose file while using `npm run dev`: it also starts a `web` container on port `3000` and a second `worker`. `docker-compose.selfhost.yml` is the packaged self-host stack (`postgres` + `web` + `worker`), not the contributor `npm run dev` path. `docker-compose.test.yml` is only for integration tests (host port `5433`).
+
+The default compose file also defines a `redis` service. Local `.env.example` does not set `REDIS_URL`; npm `dev` does not start Redis.
 
 ## 3. Environment Variables
 
-Copy the example file to set up your local `.env`. Ensure your database URL points to `localhost` (the default in the example).
+Copy the public template. Point `DATABASE_URL` at local Postgres (the example already uses `localhost`).
 
 ```bash
 cp .env.example .env
 ```
 
-If you plan to test AI completions locally, you will need to add a valid `MODEL_API_KEY` (e.g., an OpenRouter or OpenAI token) and configure the relevant `MODEL_PROVIDER` in your `.env`.
+`.env.example` includes `ADMIN_EMAIL` / `ADMIN_PASSWORD` for the bootstrap admin, `SESSION_COOKIE_SECRET`, and optional `MODEL_PROVIDER` / `MODEL_API_KEY` for hosted models. If you plan to test AI completions locally, set a valid `MODEL_API_KEY` and matching `MODEL_PROVIDER`. Never commit `.env` files.
 
 ## 4. Prisma Setup
 
-Before you start the Next.js server, you must compile the Prisma Client and apply any pending database schema migrations.
+Before you start the Next.js server, generate the Prisma Client and apply pending migrations. Use migrate deploy locally; do not use `prisma db push` or `npm run prisma:push`.
 
 ```bash
 # Generate the TypeScript client based on the current schema
@@ -68,12 +75,29 @@ The J&J demo seed is refreshable and includes public-safe showcase data for curr
 
 ## 5. Run the Application
 
-Start the local development server:
+Root `npm run dev` starts **both** processes with `concurrently`:
+
+- `npm run dev:web` → `@corgtex/web` (`next dev` with `../../.env`), typically [http://localhost:3000](http://localhost:3000)
+- `npm run dev:worker` → `@corgtex/worker` (`tsx watch` with the same `.env`)
 
 ```bash
 npm run dev
 ```
 
-This command leverages turborepo or standard npm workspaces to boot both the Next.js web application (usually on port `3000`) and the background worker process. 
+To run one process:
 
-Open [http://localhost:3000](http://localhost:3000) to view the application. Log in using the credentials defined in your `ADMIN_EMAIL` and `ADMIN_PASSWORD` `.env` variables.
+```bash
+npm run dev:web
+npm run dev:worker
+```
+
+Log in with `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `.env`. The marketing app (`npm run dev:site`, Next.js on port `3008` in `apps/site`) is not started by `npm run dev`.
+
+## 6. Checks while developing
+
+```bash
+npm run check
+npm run test:unit
+```
+
+Integration tests and the database-independent production build are documented in [Testing](/contributing/testing).

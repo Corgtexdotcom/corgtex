@@ -5,31 +5,53 @@ description: "How to run and write tests in Corgtex."
 
 We use Vitest for unit and integration tests and the Agent API for
 broader end-to-end coverage. The canonical list of commands lives in
-[`AGENTS.md`](https://github.com/corgtex/corgtex/blob/main/AGENTS.md)
+[`AGENTS.md`](https://github.com/Corgtexdotcom/corgtex/blob/main/AGENTS.md)
 — this page documents the "why" and the E2E setup.
 
 ## Running Tests
 
 ```bash
-# Static checks (lint + typecheck + prisma validate)
+# Static checks: lint, typecheck, prisma validate, public docs,
+# private-boundary, and contrast-audit
 npm run check
 
-# Unit tests
+# Docs-only policy checks (no application build)
+node scripts/check-public-docs.mjs
+node scripts/check-private-boundary.mjs
+
+# Unit tests (Vitest project `unit`; no test Postgres required)
 npm run test:unit
 
-# Integration tests (spins up docker-compose.test.yml, runs, tears down)
+# Integration tests: docker compose -f docker-compose.test.yml up,
+# Vitest project `integration`, then tear down the test database
 npm run test:integration
 
-# Everything (unit + integration)
+# Unit + integration (same test-db up/down wrapper)
 npm run test:all
+
+# Database-independent production web build
+env -u DATABASE_URL npm run build
 
 # A single test file
 npx vitest run packages/domain/src/runtime.test.ts
 ```
 
+`npm test` is an alias of `npm run test:unit`.
+
 Unit tests live next to source (`packages/**/*.test.ts`,
-`apps/**/*.test.ts`). Integration tests live under the Vitest
-`integration` project and require the test Postgres container.
+`apps/**/*.test.ts`, plus `scripts/**/*.test.mjs`). Integration tests
+are `*.integration.test.ts` under the Vitest `integration` project.
+`npm run test:integration` starts `docker-compose.test.yml` (service
+`postgres`, image `pgvector/pgvector:pg16`, host port **5433**, database
+`corgtex_test`) and tears it down afterward. Do not point integration
+tests at the local-dev `db` service on port `5432`.
+
+An exported `DATABASE_URL` overrides the integration-test default. Unset it before
+using the local test commands, or explicitly point it to the disposable test
+database on port `5433`. Never run these tests against a shared or production database.
+
+Do not use `prisma db push` / `npm run prisma:push` to prepare a test or
+dev database; apply migrations with `npm run prisma:migrate:deploy`.
 
 ## What QA expects
 
@@ -53,7 +75,7 @@ Summary:
 1. Set `AGENT_API_KEY` in `.env`.
 2. Run `npm run prisma:seed` to create the production bootstrap workspace/admin baseline.
 3. Run `npm run seed:e2e` to create the E2E UI user from `AGENT_E2E_EMAIL` / `AGENT_E2E_PASSWORD`.
-4. Start the server (`npm run dev`).
+4. Start web and worker with `npm run dev` (or `npm run dev:web` if you only need the HTTP API).
 5. Call `/api/...` with `Authorization: Bearer agent-<AGENT_API_KEY>`.
 
 <Warning>
