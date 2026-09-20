@@ -4,18 +4,44 @@ Corgtex accepts changes through protected pull requests. Start by reading
 [`AGENTS.md`](AGENTS.md); it contains the repository's engineering invariants and
 agent operating model.
 
+## Prerequisites
+
+- Node.js `>=22.22.0 <23` and npm `>=10` (see root `package.json` `engines` /
+  `packageManager`)
+- Docker with Compose, for local Postgres and integration tests
+- A copy of `.env.example` as `.env` (never commit real `.env` files)
+
+Full clone, database, Prisma, and process-startup steps are in
+[Development setup](docs/contributing/development-setup.mdx).
+
 ## Local setup
 
 ```bash
+git clone https://github.com/Corgtexdotcom/corgtex.git
+cd corgtex
 npm install
+cp .env.example .env
+docker compose up -d db
 npm run prisma:generate
+npm run prisma:migrate:deploy
+npm run prisma:seed
 npm run check
 npm run test:unit
 ```
 
+Apply committed migrations with `npm run prisma:migrate:deploy`. Do not use
+`prisma db push` or `npm run prisma:push`.
+
+`npm run dev` starts both `apps/web` (Next.js, typically `http://localhost:3000`)
+and `apps/worker`. Use `npm run dev:web` or `npm run dev:worker` to run one
+process. The marketing site is separate (`npm run dev:site`) and is not started
+by `npm run dev`.
+
 Use the targeted tests relevant to your change. Database-backed integration tests
 run with `npm run test:integration`; the database-independent production build is
-`env -u DATABASE_URL npm run build`.
+`env -u DATABASE_URL npm run build`. Policy and docs-only changes can use
+`node scripts/check-public-docs.mjs` and `node scripts/check-private-boundary.mjs`.
+See [Testing](docs/contributing/testing.mdx).
 
 ## Pull requests
 

@@ -43,7 +43,7 @@ You can spin up a fully operational Corgtex instance with sample data in a few m
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/corgtex/corgtex.git
+git clone https://github.com/Corgtexdotcom/corgtex.git
 cd corgtex
 ```
 
@@ -96,7 +96,7 @@ See the [Configuration Repo Template docs](CONTRIBUTING.md) for more details.
 
 ## Contributing
 
-We welcome community contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for instructions on local development setup, PR expectations, and code style.
+We welcome community contributions! Local development uses Node.js 22 (`>=22.22.0 <23`), npm 10 or later, and Docker for Postgres. Start the web app and worker together with `npm run dev`. See [CONTRIBUTING.md](CONTRIBUTING.md) and [Development setup](docs/contributing/development-setup.mdx).
 
 ## License
 
