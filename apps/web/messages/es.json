@@ -2586,6 +2586,7 @@
     "sectionAdviceRequests": "Solicitudes de consejo",
     "sectionDeliberation": "Discusión",
     "discussionEmpty": "Aún no hay discusión.",
+    "postDecisionDiscussionNote": "Esta propuesta está resuelta. Añade un comentario de reacción para registrar contexto posterior.",
     "decisionAbstain": "Abstenerse",
     "decisionAdvisoryBody": "Esta entrada es orientativa. La propuesta solo se finaliza cuando alguien la resuelve.",
     "decisionAgree": "Aceptar",

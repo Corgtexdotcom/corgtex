@@ -2586,6 +2586,7 @@
     "sectionAdviceRequests": "Advice requests",
     "sectionDeliberation": "Discussion",
     "discussionEmpty": "No discussion yet.",
+    "postDecisionDiscussionNote": "This proposal is resolved. Add a reaction comment to record follow-up context.",
     "decisionAbstain": "Abstain",
     "decisionAdvisoryBody": "This is advisory input. The proposal is only finalized when someone resolves it.",
     "decisionAgree": "Agree",

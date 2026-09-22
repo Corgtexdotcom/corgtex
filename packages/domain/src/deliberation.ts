@@ -57,6 +57,34 @@ function validateEntryType(entryType: string) {
   invariant(VALID_ENTRY_TYPES.includes(entryType), 400, "INVALID_INPUT", `Invalid entryType: ${entryType}`);
 }
 
+async function assertDeliberationAllowedForParent(tx: Prisma.TransactionClient, params: {
+  workspaceId: string;
+  parentType: string;
+  parentId: string;
+  entryType: string;
+}) {
+  if (params.parentType !== "PROPOSAL") return;
+
+  const parent = await tx.proposal.findFirst({
+    where: { id: params.parentId, workspaceId: params.workspaceId },
+    select: { status: true, archivedAt: true },
+  });
+  invariant(parent, 404, "NOT_FOUND", "Proposal not found.");
+  invariant(!parent.archivedAt, 400, "INVALID_STATE", "Archived proposals cannot accept new deliberation.");
+  invariant(
+    parent.status === "OPEN" || parent.status === "RESOLVED",
+    400,
+    "INVALID_STATE",
+    "Deliberation is only available on open or resolved proposals.",
+  );
+  invariant(
+    parent.status !== "RESOLVED" || params.entryType === "REACTION",
+    400,
+    "INVALID_STATE",
+    "Resolved proposals only accept reaction comments.",
+  );
+}
+
 function actorLabel(actor: AppActor) {
   if (actor.kind === "user") {
     return actor.user.displayName || actor.user.email || "Someone";
@@ -461,6 +489,13 @@ export async function postDeliberationEntry(actor: AppActor, params: {
       });
       skipManualMentionParsing = true;
     }
+    await assertDeliberationAllowedForParent(tx, {
+      workspaceId: params.workspaceId,
+      parentType: params.parentType,
+      parentId: params.parentId,
+      entryType: params.entryType,
+    });
+
     const parentVersion = await getParentWorkItemVersion(tx, {
       workspaceId: params.workspaceId,
       parentType: params.parentType,

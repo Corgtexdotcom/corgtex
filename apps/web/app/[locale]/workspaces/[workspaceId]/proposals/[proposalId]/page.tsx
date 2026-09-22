@@ -20,6 +20,7 @@ import { canActorReplyToAdviceRequest } from "@/lib/advice-request-audience";
 import { canOpenPrivateDraft } from "@/lib/governance-open-guards";
 import { createProposalObjectionAction, decideProposalApprovalAction, editProposalAction, requestProposalAdviceAction, resolveProposalAction, resolveProposalObjectionAction, returnProposalToDraftAction, submitProposalAction } from "../actions";
 import { ProposalDraftFields } from "../ProposalDraftFields";
+import { resolveProposalDeliberationComposer } from "../proposal-deliberation";
 import { getFormatter, getTranslations } from "next-intl/server";
 import { formatWorkItemPriority, type WorkItemPriorityLabels } from "@/lib/work-item-priority";
 
@@ -272,6 +273,15 @@ export default async function ProposalDetailPage({
   const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? "";
   const proposalUrl = `${appBaseUrl}${proposalPath}`;
   const deliberationApiEndpoint = `/api/workspaces/${workspaceId}/deliberation-entries`;
+  const deliberationComposer = resolveProposalDeliberationComposer({
+    isArchived,
+    status: proposal.status,
+  });
+  const deliberationEntryTypeOptions = deliberationComposer.entryTypes.map((entryType) => ({
+    value: entryType,
+    label: entryType === "OBJECTION" ? t("entryObjection") : t("entryReaction"),
+    variant: entryType === "OBJECTION" ? "danger" as const : "secondary" as const,
+  }));
   const externalResourcesApiEndpoint = `/api/workspaces/${workspaceId}/external-resources`;
   const copyableRequestMessage = (request: (typeof adviceRequests)[number]) => [
     t("adviceCopyableSubject", { title: proposal.title }),
@@ -491,16 +501,18 @@ export default async function ProposalDetailPage({
               emptyMessage={t("discussionEmpty")}
             />
 
-            {!isArchived && proposal.status === "OPEN" && (
-              <DeliberationComposer
-                apiEndpoint={deliberationApiEndpoint}
-                hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId }}
-                targetOptions={targetOptions}
-                entryTypes={[
-                  { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
-                  { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
-                ]}
-              />
+            {deliberationComposer.visible && (
+              <>
+                {deliberationComposer.mode === "post-decision" && (
+                  <p className="nr-meta mb-3">{t("postDecisionDiscussionNote")}</p>
+                )}
+                <DeliberationComposer
+                  apiEndpoint={deliberationApiEndpoint}
+                  hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId }}
+                  targetOptions={targetOptions}
+                  entryTypes={deliberationEntryTypeOptions}
+                />
+              </>
             )}
           </WorkItemConversationSurface>
         </article>
