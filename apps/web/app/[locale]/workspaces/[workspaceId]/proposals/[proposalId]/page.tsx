@@ -490,6 +490,7 @@ export default async function ProposalDetailPage({
 
           <WorkItemConversationSurface title={t("sectionDeliberation")}>
             <DeliberationThread
+              allowObjections={proposal.status === "OPEN" && !isArchived}
               entries={discussionEntries.map((entry) => ({
                 ...entry,
                 canEdit: canManageEntry(entry),

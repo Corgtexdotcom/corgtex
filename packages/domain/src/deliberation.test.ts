@@ -790,6 +790,34 @@ describe("deliberation", () => {
     })).rejects.toThrow(/Resolved proposals only accept reaction comments/);
   });
 
+  it("allows editing a resolved proposal reaction but rejects converting it to an objection", async () => {
+    state.proposals.get(proposalId)!.status = "RESOLVED";
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "REACTION", bodyMd: "Follow-up note.",
+    });
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId, entryId: entry.id, entryType: "OBJECTION", bodyMd: "New objection.",
+    })).rejects.toThrow(/Resolved proposals only accept reaction comments/);
+    expect(state.entries.find((item) => item.id === entry.id)).toMatchObject({
+      entryType: "REACTION", bodyMd: "Follow-up note.",
+    });
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId, entryId: entry.id, entryType: "REACTION", bodyMd: "Corrected follow-up.",
+    })).resolves.toMatchObject({ entryType: "REACTION", bodyMd: "Corrected follow-up." });
+  });
+
+  it("preserves text editing of an existing objection after the proposal is resolved", async () => {
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "OBJECTION", bodyMd: "Original concern.",
+    });
+    state.proposals.get(proposalId)!.status = "RESOLVED";
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId, entryId: entry.id, entryType: "OBJECTION", bodyMd: "Clarified historical concern.",
+    })).resolves.toMatchObject({ entryType: "OBJECTION", bodyMd: "Clarified historical concern." });
+  });
+
   it("rejects deliberation on draft proposals", async () => {
     state.proposals.set(proposalId, {
       id: proposalId,

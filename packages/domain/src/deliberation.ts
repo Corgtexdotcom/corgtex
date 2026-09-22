@@ -707,6 +707,14 @@ export async function updateDeliberationEntry(actor: AppActor, params: {
     const data: Record<string, string> = {};
     if (params.entryType !== undefined) {
       validateEntryType(params.entryType);
+      if (params.entryType !== entry.entryType) {
+        await assertDeliberationAllowedForParent(tx, {
+          workspaceId: params.workspaceId,
+          parentType: entry.parentType,
+          parentId: entry.parentId,
+          entryType: params.entryType,
+        });
+      }
       data.entryType = params.entryType;
     }
     if (params.bodyMd !== undefined) {
