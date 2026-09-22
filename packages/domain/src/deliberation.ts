@@ -7,7 +7,7 @@ import { appendEvents } from "./events";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { createNotificationIntent } from "./notifications";
 import { activeRoleAssignmentWhere } from "./role-assignment-activity";
-import { getParentWorkItemVersion } from "./work-item-versions";
+import { acquireWorkItemAdvisoryLock, getParentWorkItemVersion } from "./work-item-versions";
 
 const VALID_ENTRY_TYPES = ["REACTION", "OBJECTION"];
 const VALID_PARENT_TYPES = ["PROPOSAL", "TENSION", "MEETING", "BRAIN_ARTICLE", "ACTION"];
@@ -65,6 +65,7 @@ async function assertDeliberationAllowedForParent(tx: Prisma.TransactionClient, 
 }) {
   if (params.parentType !== "PROPOSAL") return;
 
+  await acquireWorkItemAdvisoryLock(tx, "Proposal", params.parentId);
   const parent = await tx.proposal.findFirst({
     where: { id: params.parentId, workspaceId: params.workspaceId },
     select: { status: true, archivedAt: true },

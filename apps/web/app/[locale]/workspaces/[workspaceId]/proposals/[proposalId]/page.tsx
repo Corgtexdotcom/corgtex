@@ -307,6 +307,7 @@ export default async function ProposalDetailPage({
       linkedRepliesCount: linkedReplies.length,
       replyThread: linkedReplies.length > 0 ? (
         <DeliberationThread
+          allowObjections={proposal.status === "OPEN" && !isArchived}
           entries={linkedReplies.map((entry) => ({
             ...entry,
             canEdit: canManageEntry(entry),
@@ -317,15 +318,13 @@ export default async function ProposalDetailPage({
           hiddenFields={{ workspaceId, proposalId }}
         />
       ) : null,
-      replyForm: !isArchived && proposal.status === "OPEN" && request.status === "ACTIVE" && canReplyToAdviceRequest(request) ? (
+      replyForm: deliberationComposer.visible && request.status === "ACTIVE" && canReplyToAdviceRequest(request) ? (
         <DeliberationComposer
+          key={deliberationComposer.mode}
           apiEndpoint={deliberationApiEndpoint}
           hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId, adviceRequestId: request.id }}
           targetOptions={targetOptions}
-          entryTypes={[
-            { value: "REACTION", label: t("entryReaction"), variant: "secondary" },
-            { value: "OBJECTION", label: t("entryObjection"), variant: "danger" },
-          ]}
+          entryTypes={deliberationEntryTypeOptions}
         />
       ) : null,
     };
@@ -508,6 +507,7 @@ export default async function ProposalDetailPage({
                   <p className="nr-meta mb-3">{t("postDecisionDiscussionNote")}</p>
                 )}
                 <DeliberationComposer
+                  key={deliberationComposer.mode}
                   apiEndpoint={deliberationApiEndpoint}
                   hiddenFields={{ parentType: "PROPOSAL", parentId: proposalId }}
                   targetOptions={targetOptions}

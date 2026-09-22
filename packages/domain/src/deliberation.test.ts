@@ -90,6 +90,7 @@ const { prismaMock, state } = vi.hoisted(() => {
   }
 
   const tx = {
+    $executeRaw: vi.fn(async () => 1),
     member: {
       findUnique: vi.fn(async ({ where }: any) => store.members.get(where.id) ?? null),
       findFirst: vi.fn(async ({ where }: any) => {
@@ -835,6 +836,21 @@ describe("deliberation", () => {
       entryType: "REACTION",
       bodyMd: "Draft comment.",
     })).rejects.toThrow(/only available on open or resolved proposals/);
+  });
+
+  it.each(["RESOLVED", "DRAFT", "ARCHIVED"])("checks proposal state after a concurrent %s transition releases its lock", async (status) => {
+    prismaMock.$executeRaw.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      const proposal = state.proposals.get(proposalId)!;
+      if (status === "ARCHIVED") proposal.archivedAt = new Date();
+      else proposal.status = status;
+      return 1;
+    });
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "OBJECTION", bodyMd: "Concurrent objection.",
+    })).rejects.toThrow(/Resolved proposals only|only available on open|Archived proposals/);
+    expect(state.entries).toHaveLength(0);
   });
 
   it.each([
