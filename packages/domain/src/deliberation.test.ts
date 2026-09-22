@@ -31,7 +31,16 @@ const { prismaMock, state } = vi.hoisted(() => {
   const store = {
     users: new Map<string, UserRecord>(),
     members: new Map<string, MemberRecord>(),
-    proposals: new Map<string, { id: string; workspaceId: string; authorUserId: string; version: number; isPrivate?: boolean }>(),
+    proposals: new Map<string, {
+      id: string;
+      workspaceId: string;
+      authorUserId: string;
+      version: number;
+      status?: string;
+      archivedAt?: Date | null;
+      resolutionOutcome?: string | null;
+      isPrivate?: boolean;
+    }>(),
     tensions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; title: string; version: number; isPrivate?: boolean }>(),
     actions: new Map<string, { id: string; workspaceId: string; authorUserId: string; assigneeMemberId: string | null; version: number; isPrivate?: boolean }>(),
     circles: new Map<string, { id: string; workspaceId: string; archivedAt: Date | null }>(),
@@ -81,6 +90,7 @@ const { prismaMock, state } = vi.hoisted(() => {
   }
 
   const tx = {
+    $executeRaw: vi.fn(async () => 1),
     member: {
       findUnique: vi.fn(async ({ where }: any) => store.members.get(where.id) ?? null),
       findFirst: vi.fn(async ({ where }: any) => {
@@ -291,7 +301,7 @@ describe("deliberation", () => {
     state.members.set("admin-member", { id: "admin-member", workspaceId, userId: "admin-user", role: "ADMIN", isActive: true });
     state.members.set(memberId, { id: memberId, workspaceId, userId: "member-user", role: "CONTRIBUTOR", isActive: true });
     state.members.set("other-member", { id: "other-member", workspaceId, userId: "other-user", role: "CONTRIBUTOR", isActive: true });
-    state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", version: 1 });
+    state.proposals.set(proposalId, { id: proposalId, workspaceId, authorUserId: "admin-user", version: 1, status: "OPEN", archivedAt: null });
     state.tensions.set("tension-1", { id: "tension-1", workspaceId, authorUserId: "admin-user", assigneeMemberId: null, title: "Clarify launch owner", version: 1 });
     state.actions.set(actionId, { id: actionId, workspaceId, authorUserId: "admin-user", assigneeMemberId: memberId, version: 1 });
     state.adviceRequests.set("request-1", {
@@ -547,7 +557,7 @@ describe("deliberation", () => {
   });
 
   it("lists deliberation entries for multiple parents in one grouped read", async () => {
-    state.proposals.set("proposal-2", { id: "proposal-2", workspaceId, authorUserId: "admin-user", version: 1 });
+    state.proposals.set("proposal-2", { id: "proposal-2", workspaceId, authorUserId: "admin-user", version: 1, status: "OPEN", archivedAt: null });
     const firstEntry = await postDeliberationEntry(memberActor, {
       workspaceId,
       parentType: "PROPOSAL",
@@ -738,5 +748,266 @@ describe("deliberation", () => {
       entryId: entry.id,
       resolvedNote: "Not allowed",
     })).rejects.toThrow(/Only the entry author, target, parent owner, assigned member, or a workspace admin can resolve/);
+  });
+
+  it("allows reaction comments on resolved proposals", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 2,
+      status: "RESOLVED",
+      archivedAt: null,
+    });
+
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Approved with one follow-up note.",
+    });
+
+    expect(entry.entryType).toBe("REACTION");
+    expect(entry.bodyMd).toBe("Approved with one follow-up note.");
+  });
+
+  it("rejects objections on resolved proposals", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 2,
+      status: "RESOLVED",
+      archivedAt: null,
+    });
+
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "OBJECTION",
+      bodyMd: "Too late to object.",
+    })).rejects.toThrow(/Resolved proposals only accept reaction comments/);
+  });
+
+  it("allows editing a resolved proposal reaction but rejects converting it to an objection", async () => {
+    state.proposals.get(proposalId)!.status = "RESOLVED";
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "REACTION", bodyMd: "Follow-up note.",
+    });
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId, entryId: entry.id, entryType: "OBJECTION", bodyMd: "New objection.",
+    })).rejects.toThrow(/Resolved proposals only accept reaction comments/);
+    expect(state.entries.find((item) => item.id === entry.id)).toMatchObject({
+      entryType: "REACTION", bodyMd: "Follow-up note.",
+    });
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId, entryId: entry.id, entryType: "REACTION", bodyMd: "Corrected follow-up.",
+    })).resolves.toMatchObject({ entryType: "REACTION", bodyMd: "Corrected follow-up." });
+  });
+
+  it("preserves text editing of an existing objection after the proposal is resolved", async () => {
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "OBJECTION", bodyMd: "Original concern.",
+    });
+    state.proposals.get(proposalId)!.status = "RESOLVED";
+    await expect(updateDeliberationEntry(memberActor, {
+      workspaceId, entryId: entry.id, entryType: "OBJECTION", bodyMd: "Clarified historical concern.",
+    })).resolves.toMatchObject({ entryType: "OBJECTION", bodyMd: "Clarified historical concern." });
+  });
+
+  it("rejects deliberation on draft proposals", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 1,
+      status: "DRAFT",
+      archivedAt: null,
+    });
+
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Draft comment.",
+    })).rejects.toThrow(/only available on open or resolved proposals/);
+  });
+
+  it.each(["RESOLVED", "DRAFT", "ARCHIVED"])("checks proposal state after a concurrent %s transition releases its lock", async (status) => {
+    prismaMock.$executeRaw.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      const proposal = state.proposals.get(proposalId)!;
+      if (status === "ARCHIVED") proposal.archivedAt = new Date();
+      else proposal.status = status;
+      return 1;
+    });
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId, parentType: "PROPOSAL", parentId: proposalId,
+      entryType: "OBJECTION", bodyMd: "Concurrent objection.",
+    })).rejects.toThrow(/Resolved proposals only|only available on open|Archived proposals/);
+    expect(state.entries).toHaveLength(0);
+  });
+
+  it.each([
+    ["OPEN"],
+    ["RESOLVED"],
+  ] as const)("rejects deliberation on archived %s proposals without creating entries", async (status) => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 2,
+      status,
+      archivedAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Should not post.",
+    })).rejects.toThrow(/Archived proposals cannot accept new deliberation/);
+
+    expect(state.entries).toHaveLength(0);
+  });
+
+  it("resolved reaction preserves proposal status, resolution, version, and stores parentVersion", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 3,
+      status: "RESOLVED",
+      archivedAt: null,
+      resolutionOutcome: "ADOPTED",
+    });
+
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Approved with one follow-up note.",
+    });
+
+    const proposal = state.proposals.get(proposalId)!;
+    expect(proposal.status).toBe("RESOLVED");
+    expect(proposal.resolutionOutcome).toBe("ADOPTED");
+    expect(proposal.version).toBe(3);
+    expect(entry.parentVersion).toBe(3);
+  });
+
+  it("completes an active advice request when a recipient reacts on a resolved proposal", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 2,
+      status: "RESOLVED",
+      archivedAt: null,
+    });
+    state.adviceRequests.set("request-resolved", {
+      id: "request-resolved",
+      workspaceId,
+      status: "ACTIVE",
+      requestedByUserId: "admin-user",
+      audienceType: "MEMBERS",
+      targetCircleId: null,
+      processId: "process-1",
+      recipients: [{ memberId }],
+      process: {
+        subjectType: "PROPOSAL",
+        subjectId: proposalId,
+      },
+      completedAt: null,
+    });
+
+    const entry = await postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Post-decision follow-up.",
+      adviceRequestId: "request-resolved",
+    });
+
+    expect(entry.adviceRequestId).toBe("request-resolved");
+    expect(state.adviceRequests.get("request-resolved")).toMatchObject({
+      status: "COMPLETED",
+      completedAt: expect.any(Date),
+    });
+    expect(state.events).toContainEqual(expect.objectContaining({
+      type: "advice.request.completed",
+      aggregateId: "request-resolved",
+    }));
+  });
+
+  it("does not complete an active advice request when a non-recipient reacts on a resolved proposal", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId,
+      authorUserId: "admin-user",
+      version: 2,
+      status: "RESOLVED",
+      archivedAt: null,
+    });
+    state.adviceRequests.set("request-resolved", {
+      id: "request-resolved",
+      workspaceId,
+      status: "ACTIVE",
+      requestedByUserId: "admin-user",
+      audienceType: "MEMBERS",
+      targetCircleId: null,
+      processId: "process-1",
+      recipients: [{ memberId }],
+      process: {
+        subjectType: "PROPOSAL",
+        subjectId: proposalId,
+      },
+      completedAt: null,
+    });
+
+    const entry = await postDeliberationEntry(otherActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Outside audience follow-up.",
+      adviceRequestId: "request-resolved",
+    });
+
+    expect(entry.adviceRequestId).toBe("request-resolved");
+    expect(state.adviceRequests.get("request-resolved")).toMatchObject({
+      status: "ACTIVE",
+      completedAt: null,
+    });
+    expect(state.events.some((event) => event.type === "advice.request.completed")).toBe(false);
+  });
+
+  it("rejects deliberation when the proposal belongs to another workspace", async () => {
+    state.proposals.set(proposalId, {
+      id: proposalId,
+      workspaceId: "ws-2",
+      authorUserId: "admin-user",
+      version: 1,
+      status: "OPEN",
+      archivedAt: null,
+    });
+
+    await expect(postDeliberationEntry(memberActor, {
+      workspaceId,
+      parentType: "PROPOSAL",
+      parentId: proposalId,
+      entryType: "REACTION",
+      bodyMd: "Cross-workspace comment.",
+    })).rejects.toThrow(/Proposal not found/);
+
+    expect(state.entries).toHaveLength(0);
   });
 });

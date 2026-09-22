@@ -24,6 +24,7 @@ type DeliberationEntry = {
 type DeliberationThreadProps = {
   entries: DeliberationEntry[];
   canResolve: boolean;
+  allowObjections?: boolean;
   resolveAction?: (formData: FormData) => Promise<void>;
   updateAction?: (formData: FormData) => Promise<void>;
   apiEndpoint?: string;
@@ -59,7 +60,7 @@ function focusEntry(entryId: string) {
   window.setTimeout(focus, 250);
 }
 
-export function DeliberationThread({ entries, canResolve, resolveAction, updateAction, apiEndpoint, hiddenFields, emptyMessage }: DeliberationThreadProps) {
+export function DeliberationThread({ entries, canResolve, allowObjections = true, resolveAction, updateAction, apiEndpoint, hiddenFields, emptyMessage }: DeliberationThreadProps) {
   const t = useTranslations("deliberation");
   const tCommon = useTranslations("common");
   const format = useFormatter();
@@ -243,7 +244,7 @@ export function DeliberationThread({ entries, canResolve, resolveAction, updateA
                       {t("entryType")}
                       <select value={editType} onChange={(event) => setEditType(event.target.value)} disabled={isApiEntryDisabled}>
                         <option value="REACTION">{t("entryReaction")}</option>
-                        <option value="OBJECTION">{t("entryObjection")}</option>
+                        {(allowObjections || entry.entryType === "OBJECTION") && <option value="OBJECTION">{t("entryObjection")}</option>}
                       </select>
                     </label>
                     <MarkdownEditor name="bodyMd" value={editBody} onValueChange={setEditBody} rows={4} disabled={isApiEntryDisabled} />
@@ -275,7 +276,7 @@ export function DeliberationThread({ entries, canResolve, resolveAction, updateA
                     {t("entryType")}
                     <select name="entryType" defaultValue={entry.entryType}>
                       <option value="REACTION">{t("entryReaction")}</option>
-                      <option value="OBJECTION">{t("entryObjection")}</option>
+                      {(allowObjections || entry.entryType === "OBJECTION") && <option value="OBJECTION">{t("entryObjection")}</option>}
                     </select>
                   </label>
                   <MarkdownEditor name="bodyMd" defaultValue={entry.bodyMd ?? ""} resetKey={`${entry.id}:${entry.bodyMd ?? ""}`} rows={4} />
