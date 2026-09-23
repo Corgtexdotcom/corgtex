@@ -66,6 +66,18 @@ describe("managed web migration startup", () => {
 });
 
 describe("exact immutable revision projection", () => {
+  it.each([[0.25, "0.5Gi", "1Gi"], [1, "2Gi", "4Gi"], [2, "4Gi", "8Gi"]])("accepts only derived storage omissions at %s CPU", (cpu, memory, ephemeralStorage) => {
+    const expected = template(); expected.containers[0].resources = { cpu, memory, ephemeralStorage };
+    const actual = revisionProjection(expected);
+    expect(assertManagedAzureRevisionProjection(expected, actual, "web-app", "web-app--old")).toBe(true);
+    actual.containers[0].resources.ephemeralStorage = null;
+    expect(assertManagedAzureRevisionProjection(expected, actual, "web-app", "web-app--old")).toBe(true);
+    actual.containers[0].resources.cpu = cpu + 0.25;
+    expect(() => assertManagedAzureRevisionProjection(expected, actual, "web-app", "web-app--old")).toThrow("AZURE_REVISION_TEMPLATE_DRIFT");
+    actual.containers[0].resources.cpu = cpu;
+    actual.containers[0].resources.ephemeralStorage = "100Gi";
+    expect(() => assertManagedAzureRevisionProjection(expected, actual, "web-app", "web-app--old")).toThrow("AZURE_REVISION_TEMPLATE_DRIFT");
+  });
   it("accepts only observed default omissions without changing the canonical template", () => {
     const expected = template(); const before = structuredClone(expected);
     expect(assertManagedAzureRevisionProjection(expected, revisionProjection(expected), "web-app", "web-app--old")).toBe(true);

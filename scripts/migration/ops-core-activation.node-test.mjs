@@ -152,6 +152,17 @@ test("bootstrap records write boundary then verifies web before worker, fresh fi
 
 for (const [cpu, memory, ephemeralStorage] of [[0.25, "0.5Gi", "1Gi"], [0.5, "1Gi", "2Gi"],
   [0.75, "1.5Gi", "4Gi"], [1, "2Gi", "4Gi"], [1.25, "2.5Gi", "8Gi"], [4, "8Gi", "8Gi"]]) {
+  for (const omission of ["absent", "null"]) test(`activation accepts ${omission} default storage at ${cpu} vCPU`, async () => {
+    const f = fixture({ mutatePlan(p) { p.roles.web.resources = { cpu, memory }; },
+      mutateRead(q, r) {
+        if (q.resourceId.endsWith("/revisions")) for (const revision of r.body?.value ?? []) {
+          const resources = revision.properties.template.containers[0].resources;
+          if (omission === "absent") delete resources.ephemeralStorage;
+          else resources.ephemeralStorage = null;
+        }
+      } });
+    assert.equal((await createOpsCoreActivation(f.options).activate()).phase, "TARGET_ACTIVE");
+  });
   test(`activation preserves independent role allocations at ${cpu} vCPU`, async () => {
     const f = fixture({ mutatePlan(p) { p.roles.web.resources = { cpu, memory }; } });
     await createOpsCoreActivation(f.options).activate();
@@ -320,6 +331,7 @@ for (const [name, mutateRead] of [
   ["command drift", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.containers[0].command = ["other"]; }],
   ["scale drift", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.scale.maxReplicas = 2; }],
   ["app resource drift", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.containers[0].resources.memory = "2Gi"; }],
+  ["explicit storage drift", (q, r) => { if (q.resourceId.endsWith("/revisions")) for (const revision of r.body?.value ?? []) revision.properties.template.containers[0].resources.ephemeralStorage = "4Gi"; }],
   ["revision resource drift", (q, r) => { if (q.resourceId.endsWith("/revisions")) for (const revision of r.body?.value ?? []) revision.properties.template.containers[0].resources.cpu = 1; }],
 ]) test(`${name} stops activation before worker`, async () => {
   const f = fixture({ mutateRead }); await assert.rejects(createOpsCoreActivation(f.options).activate());

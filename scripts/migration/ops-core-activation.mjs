@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
-import { assertManagedAzureRevisionProjection } from "../release/managed-azure-container-app-transport.mjs";
+import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 
 const ARM = "https://management.azure.com";
@@ -130,7 +130,7 @@ function appBody(plan, role, suffix) {
         secrets: runtime.secrets.map(s => ({ ...s, identity: plan.managedIdentityId })) },
       template: { revisionSuffix: suffix, terminationGracePeriodSeconds: 30,
         containers: [{ name: role, image: runtime.image, env, resources: { ...runtime.resources,
-          ephemeralStorage: runtime.resources.cpu <= 0.25 ? "1Gi" : runtime.resources.cpu <= 0.5 ? "2Gi" : runtime.resources.cpu <= 1 ? "4Gi" : "8Gi" },
+          ephemeralStorage: managedAzureConsumptionEphemeralStorage(runtime.resources.cpu) },
           probes: [
             { type: "Startup", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 60, successThreshold: 1 },
             { type: "Readiness", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3, successThreshold: 1 },
