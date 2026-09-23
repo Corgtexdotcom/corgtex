@@ -50,33 +50,39 @@ function postgres(input, session) {
  * connection URLs and arbitrary provider response fields are not descriptors.
  */
 export function validateSourceOperationDescriptor(kind, input) {
-  if (kind === "RAILWAY_DISABLE_AUTODEPLOY") {
+  if (["RAILWAY_DISABLE_AUTODEPLOY", "RAILWAY_RESTORE_AUTODEPLOY"].includes(kind)) {
     exact(input, "projectId,environmentId,serviceId,enabled,sourceLinkSha256");
     requireValue(ID.test(input.projectId) && ID.test(input.environmentId) && ID.test(input.serviceId)
-      && input.enabled === false && HASH.test(input.sourceLinkSha256));
-  } else if (["RAILWAY_STAGE_SOURCE_TRIGGERS", "RAILWAY_COMMIT_SOURCE_TRIGGERS"].includes(kind)) {
-    const commit = kind === "RAILWAY_COMMIT_SOURCE_TRIGGERS";
+      && (kind === "RAILWAY_DISABLE_AUTODEPLOY" ? input.enabled === false : typeof input.enabled === "boolean") && HASH.test(input.sourceLinkSha256));
+  } else if (["RAILWAY_STAGE_SOURCE_TRIGGERS", "RAILWAY_COMMIT_SOURCE_TRIGGERS", "RAILWAY_STAGE_RECOVERY_TRIGGERS", "RAILWAY_COMMIT_RECOVERY_TRIGGERS"].includes(kind)) {
+    const commit = kind.includes("COMMIT_");
     exact(input, commit ? "binding,patchSha256,links,stagedPatchId,skipDeploys" : "binding,patchSha256,links");
     binding(input.binding);
     links(input.links, input.binding.serviceIds);
     requireValue(HASH.test(input.patchSha256) && (!commit || (ID.test(input.stagedPatchId) && input.skipDeploys === true)));
-  } else if (["RAILWAY_STOP_SOURCE_DEPLOYMENT", "RAILWAY_CANCEL_SOURCE_DEPLOYMENT"].includes(kind)) {
+  } else if (["RAILWAY_STOP_SOURCE_DEPLOYMENT", "RAILWAY_CANCEL_SOURCE_DEPLOYMENT", "RAILWAY_RESTART_SOURCE_DEPLOYMENT"].includes(kind)) {
     exact(input, "binding,serviceId,deploymentId,sourceLinkSha256");
     binding(input.binding);
     requireValue(input.binding.serviceIds.includes(input.serviceId) && ID.test(input.deploymentId) && HASH.test(input.sourceLinkSha256));
   } else if (["POSTGRES_ROTATE_RUNTIME_PASSWORD", "POSTGRES_TERMINATE_OLD_RUNTIME_SESSION"].includes(kind)) {
     postgres(input, kind === "POSTGRES_TERMINATE_OLD_RUNTIME_SESSION");
+  } else if (kind === "POSTGRES_RESTORE_RUNTIME_PASSWORD") {
+    const { originalSecretVersion, ...rotation } = input;
+    postgres(rotation, false);
+    requireValue(typeof originalSecretVersion === "string" && originalSecretVersion !== input.retainedSecretVersion
+      && /^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/secrets\/[a-zA-Z0-9-]{1,127}\/[a-f0-9]{32}$/.test(originalSecretVersion));
   } else fail("SOURCE_DESCRIPTOR_KIND_INVALID");
   return { kind, input };
 }
 
 export async function openSourceOperations({ custody, store }) {
   const initial = custody.snapshot();
-  if (initial.pending?.to !== "SOURCE_FENCED") fail("SOURCE_PHASE_REQUIRED");
+  if (!["SOURCE_FENCED", "SOURCE_RECOVERED"].includes(initial.pending?.to)) fail("SOURCE_PHASE_REQUIRED");
+  const phase = initial.pending.to;
   const phaseBinding = { domain: initial.domain, intentSha256: initial.intentSha256,
-    phase: "SOURCE_FENCED", phaseOperationId: initial.pending.operationId };
+    phase, phaseOperationId: initial.pending.operationId };
   const prefix = `operations/${initial.domain}/${initial.intentSha256}/${initial.pending.operationId}/`;
-  const recorder = await openProviderOperationRecorder({ custody, store, phase: "SOURCE_FENCED", signal: custody.signal });
+  const recorder = await openProviderOperationRecorder({ custody, store, phase, signal: custody.signal });
   let uncertain = false;
   let busy = false;
   const check = async () => {
@@ -85,7 +91,7 @@ export async function openSourceOperations({ custody, store }) {
     await custody.assertOwned();
     const current = custody.snapshot();
     if (current.intentSha256 !== initial.intentSha256 || current.domain !== initial.domain
-      || current.pending?.operationId !== initial.pending.operationId || current.pending?.to !== "SOURCE_FENCED") fail("SOURCE_PHASE_CHANGED");
+      || current.pending?.operationId !== initial.pending.operationId || current.pending?.to !== phase) fail("SOURCE_PHASE_CHANGED");
   };
   const guarded = async action => {
     if (busy) fail("SOURCE_OPERATION_CONCURRENT");
@@ -147,9 +153,24 @@ export async function openSourceOperations({ custody, store }) {
       result.push({ descriptor: { kind: record.kind, input: record.input }, operationKey: record.operationKey,
         intent: status.intent, receipt: status.receipt });
     }
+    // A missing/deleted descriptor cannot hide an outstanding provider intent.
+    if (typeof store.listRecords !== "function") fail("SOURCE_COMPLETE_INVENTORY_REQUIRED");
+    const all = await store.listRecords(prefix, custody.signal);
+    await check();
+    if (!Array.isArray(all) || all.length > 15002 || new Set(all).size !== all.length) fail("SOURCE_DESCRIPTOR_LIST_INVALID");
+    const allowed = new Set(result.flatMap(item => ["descriptor", "intent", "receipt"].map(name => `${prefix}${item.operationKey}/${name}.json`)));
+    for (const name of all) if (!allowed.has(name) && name !== `${prefix}phase-plan.json`
+      && !(typeof name === "string" && name.startsWith(prefix) && /^phase-evidence-[a-f0-9]{64}\.json$/.test(name.slice(prefix.length)))) {
+      fail("SOURCE_ORPHAN_OPERATION_RECORD");
+    }
     return result;
   }
   return {
+    readPhaseArtifact: name => guarded(() => {
+      if (name !== "phase-plan") fail("SOURCE_ARTIFACT_NAME_INVALID");
+      return read(`${prefix}${name}.json`);
+    }),
+    readStatus: (...args) => guarded(() => recorder.readStatus(...args)),
     readIntent: (...args) => guarded(() => recorder.readIntent(...args)),
     async runRecordedOperation(operation) {
       return guarded(async () => {

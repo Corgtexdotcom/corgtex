@@ -3772,14 +3772,17 @@ export async function observePostgresDatabase({ config, tempDir, dockerNetwork =
     const { snapshot } = await querySingle(client, "SELECT pg_export_snapshot() AS snapshot", [], "SNAPSHOT_EXPORT_FAILED");
     assertNoControlCharacters(snapshot, "INVALID_SNAPSHOT_ID");
     const sequences = await collectSequences(client);
-    // Only the source service is used for this pg_dump. It may point at either
-    // observed database; preserve that database's verified root certificate.
-    const clientFiles = writeClientFiles(tempDir, { ...config, sourceTlsRootCert: config.sourceTlsRootCert ?? config.targetTlsRootCert },
-      { ...config, sslmode: "disable" }, (...paths) => temporaryFiles.push(...paths));
+    // Select the existing service profile without weakening its TLS contract:
+    // Azure keeps pinned-root + hostname verification; Railway keeps verify-ca.
+    // The unused profile is disabled and is never selected by pg_dump.
+    const service = config.sslmode === "verify-full" ? "target" : "source";
+    const unused = { ...config, sslmode: "disable" };
+    const clientFiles = writeClientFiles(tempDir, service === "source" ? config : unused,
+      service === "target" ? config : unused, (...paths) => temporaryFiles.push(...paths));
     const schemaFile = assertSafePath(`${tempDir}/observed-schema.sql`, tempDir, "INVALID_SCHEMA_PATH");
     temporaryFiles.push(schemaFile);
     await check();
-    await dockerClient({ tempDir, ...clientFiles, service: "source", network: dockerNetwork,
+    await dockerClient({ tempDir, ...clientFiles, service, network: dockerNetwork,
       args: ["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", `--restrict-key=${SCHEMA_RESTRICT_KEY}`,
         "--snapshot", snapshot, "--file", "/work/observed-schema.sql"], code: "RECONCILIATION_SCHEMA_DUMP_FAILED" });
     const schema = analyzeSchemaDump(readFileSync(schemaFile, "utf8"));

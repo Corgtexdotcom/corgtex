@@ -8,14 +8,17 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { AzureCliCredential } from "@azure/identity";
 import { ContainerClient } from "@azure/storage-blob";
-import { archiveEvidenceHash, azureArchiveStore } from "./ops-core-archive.mjs";
+import { archiveEvidenceHash, azureArchiveStore, validateArchiveKeyVersion } from "./ops-core-archive.mjs";
 import { createCutoverJournal, validateCutoverJournal, azureBlobCustodyAdapter, openCutoverCustody } from "./ops-core-custody.mjs";
 import { azureProviderOperationStore } from "./ops-core-provider-operations.mjs";
-import { runOpsCoreSourceFence, assertOpsCoreSourceFenced } from "./ops-core-source-controller.mjs";
-import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer, validateOpsCoreTransferPlan, createOpsCoreTransferContext } from "./ops-core-transfer-controller.mjs";
+import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource } from "./ops-core-source-controller.mjs";
+import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer, validateOpsCoreTransferPlan } from "./ops-core-transfer-controller.mjs";
 import { createOpsCoreActivation, validateOpsCoreActivationPlan } from "./ops-core-activation.mjs";
 import { buildHealthProbeJobDefinition, createHealthJobDispatcher } from "./ops-core-health-job.mjs";
 import { runOpsCoreAcceptance, validateOpsCoreAcceptanceBinding } from "./ops-core-acceptance.mjs";
+import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { runOpsCoreTransferPreflight } from "./ops-core-preflight.mjs";
+import { createOpsCoreSourceHealthObserver, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
 import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
 
@@ -59,6 +62,12 @@ export function validateOperatorPlan(plan) {
   need(p.health?.worker?.appId === workerId && p.health.environmentResourceId === p.azure.environmentId
     && p.health.worker.image === p.activation.roles.worker.image
     && same(p.health.worker.release, p.activation.release), "MIGRATION_HEALTH_BINDING_MISMATCH");
+  const sourcePassword = p.source?.postgres;
+  need(sourcePassword && sourcePassword.originalSecretVersion !== sourcePassword.retainedSecretVersion,
+    "MIGRATION_SOURCE_RECOVERY_BINDING_INVALID");
+  validateArchiveKeyVersion(sourcePassword.originalSecretVersion, sourcePassword.vaultName);
+  validateArchiveKeyVersion(sourcePassword.retainedSecretVersion, sourcePassword.vaultName);
+  validateOpsCoreSourceHealthPlan(p.source.health, p.source.writers?.binding);
   buildHealthProbeJobDefinition(p.health);
   validateOpsCoreTransferPlan(p);
   validateOpsCoreActivationPlan(p.activation);
@@ -119,8 +128,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
   containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact }) {
   let custody;
   try {
-    need(["initialize", "status", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
-      "reconcile-activate", "resume-activate", "record-routing", "accept", "retain-acceptance-evidence"].includes(action), "MIGRATION_ACTION_INVALID");
+    need(["initialize", "status", "preflight", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
+      "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence"].includes(action), "MIGRATION_ACTION_INVALID");
     const plan = validateOperatorPlan(input); const intentSha256 = archiveEvidenceHash(plan);
     await identityCheck(plan);
     const azureCredential = new AzureCliCredential({ processTimeoutInMs: 10_000 });
@@ -152,8 +161,29 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     need(credentials && credentials.sourceConfig && credentials.readerConfig, "MIGRATION_CREDENTIALS_REQUIRED");
     const operationStore = azureProviderOperationStore(custodyContainer);
     const railway = credentials.railwayToken ? { token: credentials.railwayToken } : {};
+    let sourceHealth;
+    const assertSourceHealthy = runtime.assertSourceHealthy ?? (request => {
+      sourceHealth ??= createOpsCoreSourceHealthObserver({ plan, signal: custody.signal,
+        assertOwned: () => custody.assertOwned(), ...railway });
+      return sourceHealth(request);
+    });
     const sourceOptions = { plan, custody, operationStore, sourceConfig: credentials.sourceConfig,
-      readerConfig: credentials.readerConfig, railway };
+      readerConfig: credentials.readerConfig, railway, assertSourceHealthy };
+    if (["recover-source", "reconcile-source-recovery"].includes(action)) {
+      need(!custody.snapshot().destinationMayHaveWritten, "MIGRATION_SOURCE_RECOVERY_FORBIDDEN");
+      const target = createOpsCoreAzureTarget({ binding: plan.azure, custody,
+        ...(runtime.azureTransport ? { transport: runtime.azureTransport } : {}) });
+      const assertTargetInactive = async () => {
+        await custody.assertOwned();
+        need(!custody.snapshot().destinationMayHaveWritten, "MIGRATION_SOURCE_RECOVERY_FORBIDDEN");
+        const evidence = await target.assertInactive();
+        need(evidence.complete === true && evidence.domain === plan.domain && evidence.intentSha256 === intentSha256
+          && evidence.targetBindingSha256 === opsCoreAzureTargetBindingSha256(plan.azure), "MIGRATION_RECOVERY_TARGET_UNPROVEN");
+        return evidence;
+      };
+      return await (runtime.recoverSource ?? recoverOpsCoreSource)({ ...sourceOptions, assertTargetInactive,
+        action: action === "recover-source" ? "apply" : "reconcile" });
+    }
     const transferOptions = () => ({ plan, custody, operationStore, artifactDir, railway,
       sourceCredentials: { sourceConfig: credentials.sourceConfig, readerConfig: credentials.readerConfig },
       targetAdminConfig: credentials.targetAdminConfig, redisSourceCredentials: credentials.redisSource,
@@ -161,16 +191,9 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       objectSource: new RailwayObjectSource({ ...plan.operator.sourceObjects,
         verifiedBinding: plan.operator.sourceObjects, credentials: credentials.objectSource }),
       objectTarget: new AzureBlobObjectStore(container(plan.operator.targetObjectContainerUrl)) });
-    if (action === "fence") {
-      // Prove prepared backing resources and private stores before stopping
-      // source writers. Do not discover a missing target after fencing them.
-      if (runtime.transferPreflight) await runtime.transferPreflight();
-      else {
-        const deps = transferOptions(); const context = createOpsCoreTransferContext(deps);
-        await context.assertTargetInactive();
-        await deps.archiveStore.assertPrivate(); await deps.objectSource.assertPrivate(); await deps.objectTarget.assertPrivate();
-        await context.check();
-      }
+    if (["preflight", "fence"].includes(action)) {
+      const preflight = await (runtime.transferPreflight ?? runOpsCoreTransferPreflight)(transferOptions(), runtime.preflightDependencies);
+      if (action === "preflight") return preflight;
       return await (runtime.fence ?? runOpsCoreSourceFence)(sourceOptions);
     }
     if (["transfer", "reconcile-transfer", "resume-transfer"].includes(action)) {

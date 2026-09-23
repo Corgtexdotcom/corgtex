@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {archiveEvidenceHash as hash} from "./ops-core-archive.mjs";
 import {openProviderOperationRecorder} from "./ops-core-provider-operations.mjs";
-import {buildHealthProbeJobDefinition,createHealthJobDispatcher,createHealthJobTransport} from "./ops-core-health-job.mjs";
+import {buildHealthProbeJobDefinition,createHealthJobDispatcher,createHealthJobTransport,preflightHealthJob} from "./ops-core-health-job.mjs";
 import {HEALTH_PROBE_PREFIX,healthProbeBuildSha256,projectWorkerHealth,runWorkerHealthProbe,runHealthProbeCli} from "./ops-core-health-probe.mjs";
 const base="/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/fixture/providers/";
 const release={gitSha:"a".repeat(40),imageTag:`sha-${"a".repeat(40)}`,version:"main-fixture"};
@@ -370,4 +370,79 @@ test("default migration mode cannot borrow later acceptance phase",async()=>{
 test("acceptance cannot bypass live source fencing",async()=>{
   const f=await fixture({acceptancePhase:"ACCEPTED"});f.state.source=false;
   await assert.rejects(f.run(),/HEALTH_JOB_SOURCE_UNFENCED/);assert.equal(f.state.starts,0);
+});
+
+
+// Standalone preflight deliberately never creates a dispatcher or a pending
+// journal. These traps reject any accidental dependency on source fencing or
+// provider-operation recording before mutation authority is established.
+function standaloneHealthPreflight() {
+  const plan = structuredClone(p), abort = new AbortController(), requests = [];
+  const job = {id:plan.jobResourceId,...buildHealthProbeJobDefinition(plan)};
+  job.properties.provisioningState = "Succeeded";
+  const environment = {id:plan.environmentResourceId,properties:{provisioningState:"Succeeded",defaultDomain:"fixture.eastus.azurecontainerapps.io",
+    vnetConfiguration:{infrastructureSubnetId:plan.infrastructureSubnetId},
+    appLogsConfiguration:{destination:"log-analytics",logAnalyticsConfiguration:{customerId:plan.workspaceId}}}};
+  const logs = {tables:[{name:"PrimaryResult",columns:[{name:"preflight",type:"int"}],rows:[[1]]}]};
+  const state = {owned:0,jobStatus:200,environmentStatus:200,logsStatus:200,afterRequest:null};
+  const options = {plan,signal:abort.signal,assertOwned:async()=>{state.owned++;},
+    get custody() { throw Error("NO_CUSTODY_PHASE_REQUIRED"); },
+    get operations() { throw Error("NO_PROVIDER_RECORD_ALLOWED"); },
+    get assertSourceFenced() { throw Error("NO_SOURCE_FENCE_REQUIRED"); },
+    transport:async request=>{
+      requests.push(structuredClone({method:request.method,path:request.path,body:request.body}));
+      let response;
+      if(request.method==="GET"&&request.path.startsWith(plan.jobResourceId+"?")) response={status:state.jobStatus,body:job};
+      else if(request.method==="GET"&&request.path.startsWith(plan.environmentResourceId+"?")) response={status:state.environmentStatus,body:environment};
+      else if(request.method==="POST"&&request.path===`/v1/workspaces/${plan.workspaceId}/query`) {
+        assert.deepEqual(request.body,{query:"print preflight = 1"});response={status:state.logsStatus,body:logs};
+      } else throw Error("PREFLIGHT_MUST_NOT_START_OR_WRITE");
+      state.afterRequest?.(request); return structuredClone(response);
+    } };
+  return {plan,abort,requests,job,environment,logs,state,options,run:()=>preflightHealthJob(options)};
+}
+test("standalone health preflight validates exact resources and query access before custody phase or fence",async()=>{
+  const f=standaloneHealthPreflight();const proof=await f.run();
+  assert.equal(proof.logQueryAccess,true);assert.equal(proof.workspaceId,f.plan.workspaceId);
+  assert.equal(proof.planSha256,hash(f.plan));assert.equal(proof.definitionSha256,hash(buildHealthProbeJobDefinition(f.plan)));
+  assert.equal(proof.identity.imageDigest,f.plan.image.split("@")[1]);assert.equal(proof.identity.probeSha256,f.plan.probeSha256);
+  assert.deepEqual(f.requests.map(r=>r.method),["GET","GET","POST"]);assert.equal(f.state.owned,6);
+  assert(f.requests.every(r=>!r.path.includes("/start")&&!r.path.includes("/executions")));
+});
+for(const[name,change]of[
+  ["missing job",f=>{f.state.jobStatus=404;}],
+  ["missing environment",f=>{f.state.environmentStatus=404;}],
+  ["foreign job",f=>{f.job.id+="-foreign";}],
+  ["image drift",f=>{f.job.properties.template.containers[0].image="foreign:latest";}],
+  ["platform identity drift",f=>{f.job.properties.configuration.identitySettings[0].identity+="-foreign";}],
+  ["runtime identity enabled",f=>{f.job.properties.configuration.identitySettings[0].lifecycle="All";}],
+  ["VNet drift",f=>{f.environment.properties.vnetConfiguration.infrastructureSubnetId+="-foreign";}],
+  ["log workspace drift",f=>{f.environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId="00000000-0000-4000-8000-000000000099";}],
+  ["runtime secret", f => { f.job.properties.configuration.secrets = [{name:"runtime-secret"}]; }],
+  ["worker hostname", f => { f.environment.properties.defaultDomain = "foreign.eastus.azurecontainerapps.io"; }],
+  ["log access denied",f=>{f.state.logsStatus=403;}],
+  ["log partial error",f=>{f.logs.error={message:"PRIVATE_LOG_ERROR"};}],
+  ["wrong query result",f=>{f.logs.tables[0].rows=[[0]];}],
+  ["unexpected query column",f=>{f.logs.tables[0].columns[0].name="foreign";}],
+  ["multiple query tables",f=>{f.logs.tables.push(structuredClone(f.logs.tables[0]));}],
+])test(`standalone health preflight blocks ${name} without starts or journal writes`,async()=>{
+  const f=standaloneHealthPreflight();change(f);await assert.rejects(f.run(),error=>{assert(!error.message.includes("PRIVATE_LOG_ERROR"));return /HEALTH_JOB_/.test(error.message);});
+  assert(f.requests.every(r=>r.method==="GET"||r.method==="POST"&&r.path.endsWith("/query")));
+});
+test("standalone health preflight requires ownership before requests and after readback",async()=>{
+  for(const after of [false,true]){
+    const f=standaloneHealthPreflight();f.options.assertOwned=async()=>{f.state.owned++;if(!after||f.state.owned===2)throw Error("PRIVATE_LEASE_ERROR");};
+    await assert.rejects(f.run(),/^Error: HEALTH_JOB_PREFLIGHT_FAILED$/);assert.equal(f.requests.length,after?1:0);
+  }
+});
+test("standalone health preflight abort stops before dispatch or after readback",async()=>{
+  for(const after of [false,true]){
+    const f=standaloneHealthPreflight();if(after)f.state.afterRequest=()=>f.abort.abort();else f.abort.abort();
+    await assert.rejects(f.run(),/HEALTH_JOB_PREFLIGHT_FAILED/);assert.equal(f.requests.length,after?1:0);
+  }
+});
+test("standalone health real authenticated transport redacts auth failure and makes no fetch",async()=>{
+  const f=standaloneHealthPreflight();let fetches=0;
+  f.options.transport=createHealthJobTransport(f.plan,{credential:{async getToken(){throw Error("PRIVATE_AUTH_ERROR");}},fetchImpl:async()=>{fetches++;throw Error("NETWORK_FORBIDDEN");}});
+  await assert.rejects(f.run(),error=>{assert(!error.message.includes("PRIVATE_AUTH_ERROR"));return /HEALTH_JOB_/.test(error.message);});assert.equal(fetches,0);
 });

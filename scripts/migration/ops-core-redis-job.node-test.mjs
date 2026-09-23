@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { randomBytes } from "node:crypto";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
-import { buildRedisProbeJobDefinition, createRedisJobDispatcher, createRedisJobTransport } from "./ops-core-redis-job.mjs";
+import { buildRedisProbeJobDefinition, createRedisJobDispatcher, createRedisJobTransport, preflightRedisJob } from "./ops-core-redis-job.mjs";
 import { REDIS_PROBE_PREFIX, redisProbeBuildSha256, runRedisProbeCli } from "./ops-core-redis-probe.mjs";
 import { assertOpsCoreRedisEmpty, redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
 
@@ -295,4 +295,79 @@ test("unlocatable retained start blocks new nonce with no second POST",async()=>
   const f=await fixture();f.state.loseStart=true;await assert.rejects(f.run());f.state.executions=[];
   await assert.rejects(f.run(await f.reopen()),/REDIS_JOB_PRIOR_ATTEMPT_REQUIRES_RECONCILIATION/);
   assert.equal(f.state.starts,1);
+});
+
+
+// Standalone preflight deliberately never creates a dispatcher or a pending
+// journal. These traps reject any accidental dependency on source fencing or
+// provider-operation recording before mutation authority is established.
+function standaloneRedisPreflight(value = plan()) {
+  const plan = value, abort = new AbortController(), requests = [];
+  const job = {id:plan.jobResourceId,...buildRedisProbeJobDefinition(plan)};
+  job.properties.provisioningState = "Succeeded";
+  const environment = {id:plan.environmentResourceId,properties:{provisioningState:"Succeeded",
+    vnetConfiguration:{infrastructureSubnetId:plan.infrastructureSubnetId},
+    appLogsConfiguration:{destination:"log-analytics",logAnalyticsConfiguration:{customerId:plan.workspaceId}}}};
+  const logs = {tables:[{name:"PrimaryResult",columns:[{name:"preflight",type:"int"}],rows:[[1]]}]};
+  const state = {owned:0,jobStatus:200,environmentStatus:200,logsStatus:200,afterRequest:null};
+  const options = {plan,signal:abort.signal,assertOwned:async()=>{state.owned++;},
+    get custody() { throw Error("NO_CUSTODY_PHASE_REQUIRED"); },
+    get operations() { throw Error("NO_PROVIDER_RECORD_ALLOWED"); },
+    get assertSourceFenced() { throw Error("NO_SOURCE_FENCE_REQUIRED"); },
+    transport:async request=>{
+      requests.push(structuredClone({method:request.method,path:request.path,body:request.body}));
+      let response;
+      if(request.method==="GET"&&request.path.startsWith(plan.jobResourceId+"?")) response={status:state.jobStatus,body:job};
+      else if(request.method==="GET"&&request.path.startsWith(plan.environmentResourceId+"?")) response={status:state.environmentStatus,body:environment};
+      else if(request.method==="POST"&&request.path===`/v1/workspaces/${plan.workspaceId}/query`) {
+        assert.deepEqual(request.body,{query:"print preflight = 1"});response={status:state.logsStatus,body:logs};
+      } else throw Error("PREFLIGHT_MUST_NOT_START_OR_WRITE");
+      state.afterRequest?.(request); return structuredClone(response);
+    } };
+  return {plan,abort,requests,job,environment,logs,state,options,run:()=>preflightRedisJob(options)};
+}
+test("standalone redis preflight validates exact resources and query access before custody phase or fence",async()=>{
+  const f=standaloneRedisPreflight();const proof=await f.run();
+  assert.equal(proof.logQueryAccess,true);assert.equal(proof.workspaceId,f.plan.workspaceId);
+  assert.equal(proof.planSha256,hash(f.plan));assert.equal(proof.definitionSha256,hash(buildRedisProbeJobDefinition(f.plan)));
+  assert.equal(proof.identity.imageDigest,f.plan.image.split("@")[1]);assert.equal(proof.identity.probeSha256,f.plan.probeSha256);
+  assert.deepEqual(f.requests.map(r=>r.method),["GET","GET","POST"]);assert.equal(f.state.owned,6);
+  assert(f.requests.every(r=>!r.path.includes("/start")&&!r.path.includes("/executions")));
+});
+for(const[name,change]of[
+  ["missing job",f=>{f.state.jobStatus=404;}],
+  ["missing environment",f=>{f.state.environmentStatus=404;}],
+  ["foreign job",f=>{f.job.id+="-foreign";}],
+  ["image drift",f=>{f.job.properties.template.containers[0].image="foreign:latest";}],
+  ["platform identity drift",f=>{f.job.properties.configuration.identitySettings[0].identity+="-foreign";}],
+  ["runtime identity enabled",f=>{f.job.properties.configuration.identitySettings[0].lifecycle="All";}],
+  ["VNet drift",f=>{f.environment.properties.vnetConfiguration.infrastructureSubnetId+="-foreign";}],
+  ["log workspace drift",f=>{f.environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId="00000000-0000-4000-8000-000000000099";}],
+  ["secret version", f => { f.job.properties.configuration.secrets[0].keyVaultUrl = f.plan.redisSecretVersion.replace(/.$/, "d"); }],
+  ["secret identity", f => { f.job.properties.configuration.secrets[0].identity += "-foreign"; }],
+  ["log access denied",f=>{f.state.logsStatus=403;}],
+  ["log partial error",f=>{f.logs.error={message:"PRIVATE_LOG_ERROR"};}],
+  ["wrong query result",f=>{f.logs.tables[0].rows=[[0]];}],
+  ["unexpected query column",f=>{f.logs.tables[0].columns[0].name="foreign";}],
+  ["multiple query tables",f=>{f.logs.tables.push(structuredClone(f.logs.tables[0]));}],
+])test(`standalone redis preflight blocks ${name} without starts or journal writes`,async()=>{
+  const f=standaloneRedisPreflight();change(f);await assert.rejects(f.run(),error=>{assert(!error.message.includes("PRIVATE_LOG_ERROR"));return /REDIS_JOB_/.test(error.message);});
+  assert(f.requests.every(r=>r.method==="GET"||r.method==="POST"&&r.path.endsWith("/query")));
+});
+test("standalone redis preflight requires ownership before requests and after readback",async()=>{
+  for(const after of [false,true]){
+    const f=standaloneRedisPreflight();f.options.assertOwned=async()=>{f.state.owned++;if(!after||f.state.owned===2)throw Error("PRIVATE_LEASE_ERROR");};
+    await assert.rejects(f.run(),/^Error: REDIS_JOB_PREFLIGHT_FAILED$/);assert.equal(f.requests.length,after?1:0);
+  }
+});
+test("standalone redis preflight abort stops before dispatch or after readback",async()=>{
+  for(const after of [false,true]){
+    const f=standaloneRedisPreflight();if(after)f.state.afterRequest=()=>f.abort.abort();else f.abort.abort();
+    await assert.rejects(f.run(),/REDIS_JOB_PREFLIGHT_FAILED/);assert.equal(f.requests.length,after?1:0);
+  }
+});
+test("standalone redis real authenticated transport redacts auth failure and makes no fetch",async()=>{
+  const f=standaloneRedisPreflight();let fetches=0;
+  f.options.transport=createRedisJobTransport(f.plan,{credential:{async getToken(){throw Error("PRIVATE_AUTH_ERROR");}},fetchImpl:async()=>{fetches++;throw Error("NETWORK_FORBIDDEN");}});
+  await assert.rejects(f.run(),error=>{assert(!error.message.includes("PRIVATE_AUTH_ERROR"));return /REDIS_JOB_/.test(error.message);});assert.equal(fetches,0);
 });

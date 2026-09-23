@@ -22,6 +22,28 @@ export function createCutoverJournal({ domain, intentSha256, evidenceSha256 }) {
 }
 
 export function validateCutoverJournal(journal, intentSha256) {
+  // Recovery is a terminal branch, never a reset of the linear cutover history.
+  if (journal?.recovery !== undefined) {
+    const r = journal.recovery;
+    const terminal = journal.phase === "SOURCE_RECOVERED";
+    if (!r || Object.keys(r).sort().join(",") !== "abandonedPending,from,intentSha256,operationId"
+      || !CUTOVER_PHASES.includes(r.from) || CUTOVER_PHASES.indexOf(r.from) >= CUTOVER_PHASES.indexOf("TARGET_ACTIVATING")
+      || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(r.operationId)
+      || !HASH.test(r.intentSha256) || journal.destinationMayHaveWritten !== false) fail("CUTOVER_RECOVERY_INVALID");
+    const base = { ...journal, phase: r.from, pending: r.abandonedPending,
+      sequence: journal.sequence - (terminal ? 2 : 1),
+      history: terminal ? journal.history.slice(0, -1) : journal.history };
+    delete base.recovery;
+    validateCutoverJournal(base, intentSha256);
+    if (terminal) {
+      const last = journal.history.at(-1);
+      if (journal.pending !== null || last?.phase !== "SOURCE_RECOVERED" || !HASH.test(last.evidenceSha256)
+        || last.operationId !== r.operationId || last.intentSha256 !== r.intentSha256) fail("CUTOVER_RECOVERY_INVALID");
+    } else if (journal.phase !== r.from || journal.pending?.from !== r.from
+      || journal.pending?.to !== "SOURCE_RECOVERED" || journal.pending.operationId !== r.operationId
+      || journal.pending.intentSha256 !== r.intentSha256) fail("CUTOVER_RECOVERY_INVALID");
+    return journal;
+  }
   if (journal?.schemaVersion !== 1 || !["ops", "core"].includes(journal.domain)
     || !HASH.test(intentSha256) || journal.intentSha256 !== intentSha256
     || !CUTOVER_PHASES.includes(journal.phase) || !Number.isSafeInteger(journal.sequence)
@@ -52,7 +74,7 @@ export function validateCutoverJournal(journal, intentSha256) {
 
 export function sourceRecoveryAllowed(journal) {
   validateCutoverJournal(journal, journal.intentSha256);
-  return !journal.destinationMayHaveWritten;
+  return !journal.destinationMayHaveWritten && journal.phase !== "SOURCE_RECOVERED";
 }
 
 /**
@@ -142,6 +164,7 @@ export async function openCutoverCustody(blob, intentSha256, { renewIntervalMs =
     async begin(to, operationIntent) {
       return exclusive(async () => {
         const journal = await reload();
+        if (journal.recovery) fail("CUTOVER_SOURCE_RECOVERY_TERMINAL");
         if (journal.pending) fail("CUTOVER_PENDING_RECONCILIATION_REQUIRED");
         if (to !== CUTOVER_PHASES[CUTOVER_PHASES.indexOf(journal.phase) + 1]) fail("CUTOVER_PHASE_ORDER_INVALID");
         if (!HASH.test(operationIntent)) fail("CUTOVER_OPERATION_INTENT_INVALID");
@@ -149,6 +172,18 @@ export async function openCutoverCustody(blob, intentSha256, { renewIntervalMs =
         await write({ ...journal, sequence: journal.sequence + 1, pending,
           destinationMayHaveWritten: journal.destinationMayHaveWritten || to === "TARGET_ACTIVATING" });
         return structuredClone(pending);
+      });
+    },
+    async beginSourceRecovery(operationIntent) {
+      return exclusive(async () => {
+        const journal = await reload();
+        if (!sourceRecoveryAllowed(journal) || journal.recovery) fail("CUTOVER_SOURCE_RECOVERY_FORBIDDEN");
+        if (!HASH.test(operationIntent)) fail("CUTOVER_OPERATION_INTENT_INVALID");
+        const recovery = { operationId: randomUUID(), from: journal.phase, intentSha256: operationIntent,
+          abandonedPending: journal.pending };
+        await write({ ...journal, recovery, sequence: journal.sequence + 1,
+          pending: { operationId: recovery.operationId, from: journal.phase, to: "SOURCE_RECOVERED", intentSha256: operationIntent } });
+        return structuredClone(current.journal.pending);
       });
     },
     async complete(operationId, evidenceSha256) {

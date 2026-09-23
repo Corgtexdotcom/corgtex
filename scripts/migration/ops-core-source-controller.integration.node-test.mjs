@@ -9,7 +9,7 @@ import { test } from "node:test";
 import pg from "pg";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
-import { runOpsCoreSourceFence, assertOpsCoreSourceFenced } from "./ops-core-source-controller.mjs";
+import { runOpsCoreSourceFence, assertOpsCoreSourceFenced, recoverOpsCoreSource } from "./ops-core-source-controller.mjs";
 import { createRailwayPostgresCustody } from "./railway-postgres-custody.mjs";
 import { RailwaySourceFence } from "./railway-source-fence.mjs";
 
@@ -34,15 +34,24 @@ function storesFor(plan, scenario) {
     async read(value) { assert.equal(value, lease); return { text, etag }; },
     async write(next, conditions) {
       assert.equal(conditions.lease, lease); assert.equal(conditions.etag, etag);
-      text = next; return { etag: ++etag };
+      text = next; etag++;
+      if (scenario === "RECOVERY_LOST_COMPLETE_ACK" && JSON.parse(next).phase === "SOURCE_RECOVERED" && !state.completeLost) {
+        state.completeLost = true; throw Error("SYNTHETIC_COMPLETION_ACK_LOSS");
+      }
+      return { etag };
     },
   };
   const store = {
     async assertPrivate() {},
     async readOptional(key) { return records.get(key) ?? null; },
+    async listRecords(prefix) { return [...records.keys()].filter(key => key.startsWith(prefix)).sort(); },
     async listDescriptors(prefix) { return [...records.keys()].filter(key => key.startsWith(prefix) && key.endsWith("/descriptor.json")).sort(); },
     async createOnly(key, value) {
       assert.equal(records.has(key), false); records.set(key, value);
+      if (scenario === "RECOVERY_LOST_PASSWORD_RECEIPT" && !state.receiptLost && key.endsWith("/receipt.json")) {
+        const intent = JSON.parse(records.get(key.replace(/receipt\.json$/, "intent.json")));
+        if (intent.kind === "POSTGRES_RESTORE_RUNTIME_PASSWORD") { state.receiptLost = true; throw Error("SYNTHETIC_RECOVERY_ACK_LOSS"); }
+      }
       if (scenario === "LOST_ROTATION_RECEIPT" && !state.receiptLost && key.endsWith("/receipt.json")) {
         const intent = JSON.parse(records.get(key.replace(/receipt\.json$/, "intent.json")));
         if (intent.kind === "POSTGRES_ROTATE_RUNTIME_PASSWORD") {
@@ -93,10 +102,10 @@ function simulatedRailway(scenario) {
     const operation = /(?:query|mutation) (\w+)/.exec(query)?.[1];
     let data;
     if (query.startsWith("mutation")) {
-      const kind = { FenceAutoDeploy: "RAILWAY_DISABLE_AUTODEPLOY", FenceStage: "RAILWAY_STAGE_SOURCE_TRIGGERS",
+      const kind = { RecoverRestart: "RAILWAY_RESTART_SOURCE_DEPLOYMENT", FenceAutoDeploy: "RAILWAY_DISABLE_AUTODEPLOY", FenceStage: "RAILWAY_STAGE_SOURCE_TRIGGERS",
         FenceCommit: "RAILWAY_COMMIT_SOURCE_TRIGGERS", FenceStop: "RAILWAY_STOP_SOURCE_DEPLOYMENT" }[operation];
       assert.ok(kind, "simulation admits only the intended provider effects");
-      assert.ok([...state.records.values()].some(text => { const value = JSON.parse(text); return value.type === "intent" && value.kind === kind; }),
+      assert.ok([...state.records.values()].some(text => { const value = JSON.parse(text); return value.type === "intent" && (value.kind === kind || value.kind === kind.replace("SOURCE_TRIGGERS", "RECOVERY_TRIGGERS") || (operation === "FenceAutoDeploy" && value.kind === "RAILWAY_RESTORE_AUTODEPLOY")); }),
         "every simulated mutation requires an actual retained intent");
       const target = operation === "FenceStage" ? Object.keys(variables.input.services)[0]
         : operation === "FenceCommit" ? Object.keys(state.staged.patch.services)[0]
@@ -115,21 +124,36 @@ function simulatedRailway(scenario) {
     if (operation === "FenceDeployment") data = { environment: environment(),
       deployment: Object.values(state.deployments).flat().find(value => value.id === variables.id) };
     if (operation === "FenceAutoDeploy") {
-      state.auto[variables.input.serviceId] = false; data = { serviceInstanceAutoDeployUpdate: { enabled: false } };
+      state.auto[variables.input.serviceId] = variables.input.enabled; data = { serviceInstanceAutoDeployUpdate: { enabled: variables.input.enabled } };
     }
     if (operation === "FenceStage") {
       state.staged.patch = structuredClone(variables.input);
-      if (scenario === "LOST_WRITER_STAGE" && !state.stageLost && variables.input.services[WRITER_SERVICE]) {
+      if (["LOST_WRITER_STAGE", "RECOVERY_PARTIAL_STAGE"].includes(scenario) && !state.stageLost && variables.input.services[WRITER_SERVICE]) {
         state.stageLost = true; throw new Error("SYNTHETIC_STAGE_ACKNOWLEDGEMENT_LOSS");
       }
       data = { environmentStageChanges: { id: state.staged.id, environmentId: scope.environmentId } };
+      if (scenario === "RECOVERY_LOST_STAGE_ACK" && !state.recoveryLost
+        && Object.values(variables.input.services).some(item => item.deploy.cronSchedule)) {
+        state.recoveryLost = true; throw Error("SYNTHETIC_RECOVERY_ACK_LOSS");
+      }
     }
     if (operation === "FenceCommit") {
       for (const [serviceId, patch] of Object.entries(state.staged.patch.services)) {
         state.config.services[serviceId].source.autoUpdates = patch.source.autoUpdates;
-        state.config.services[serviceId].deploy.cronSchedule = null;
+        state.config.services[serviceId].deploy.cronSchedule = patch.deploy.cronSchedule;
       }
+      const recovering = Object.values(state.staged.patch.services).some(item => item.deploy.cronSchedule);
       state.staged.patch = {}; data = { environmentPatchCommitStaged: id(10) };
+      if (scenario === "RECOVERY_LOST_COMMIT_ACK" && !state.recoveryLost && recovering) {
+        state.recoveryLost = true; throw Error("SYNTHETIC_RECOVERY_ACK_LOSS");
+      }
+    }
+    if (operation === "RecoverRestart") {
+      const target = Object.values(state.deployments).flat().find(value => value.id === variables.id);
+      assert.equal(target.serviceId, WRITER_SERVICE);
+      target.deploymentStopped = false; target.instances = [{ id: id(120), status: "RUNNING" }];
+      data = { deploymentRestart: true };
+      if (scenario === "RECOVERY_LOST_RESTART_ACK" && !state.recoveryLost) { state.recoveryLost = true; throw Error("SYNTHETIC_RECOVERY_ACK_LOSS"); }
     }
     if (operation === "FenceStop") {
       const target = Object.values(state.deployments).flat().find(value => value.id === variables.id);
@@ -148,7 +172,8 @@ function simulatedRailway(scenario) {
 // All provider identities and startup file hashes below are explicitly synthetic.
 // Only PostgreSQL and Docker are real, bounded to each test's own local container.
 for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECEIPT", "LOST_POSTGRES_STAGE_RECEIPT",
-  "LOST_ROTATION_RECEIPT", "PROVIDER_INCOMPLETE"]) {
+  "LOST_ROTATION_RECEIPT", "PROVIDER_INCOMPLETE", "RECOVERY_LOST_PASSWORD_RECEIPT", "RECOVERY_LOST_RESTART_ACK",
+  "RECOVERY_LOST_STAGE_ACK", "RECOVERY_LOST_COMMIT_ACK", "RECOVERY_DRIFT", "RECOVERY_TARGET_DRIFT", "PREFLIGHT_BAD_ORIGINAL", "PREFLIGHT_BAD_READER", "PREFLIGHT_BAD_READER_GRANTS", "RECOVERY_LOST_COMPLETE_ACK", "RECOVERY_PARTIAL_STAGE", "PREFLIGHT_BAD_HEALTH", "RECOVERY_BAD_HEALTH"]) {
   test(`integrated source controller ${scenario}`, { timeout: 180_000 }, async () => {
     let stage = "SETUP";
     let directory;
@@ -232,18 +257,34 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
         return { binding, expectedSourceLinks: inventory.services.map(({ serviceId, sourceLinkSha256 }) => ({ serviceId, sourceLinkSha256 })) };
       };
       const postgresCustody = createRailwayPostgresCustody({ binding: postgresService, transport: rail.transport, runRemoteRead, signal });
-      const plan = { schemaVersion: 1, domain: "core", source: { writers: await configFor(WRITER_SERVICE),
+      const prefix = `/subscriptions/${id(80)}/resourceGroups/fixture/providers/`;
+      const azure = { domain: "core", subscriptionId: id(80), resourceGroupName: "fixture",
+        environmentId: `${prefix}Microsoft.App/managedEnvironments/fixture`, apps: { web: "web", worker: "worker" },
+        postgres: { resourceId: `${prefix}Microsoft.DBforPostgreSQL/flexibleServers/pg`, host: "fixture.postgres.database.azure.com", major: 18,
+          privateEndpointId: `${prefix}Microsoft.Network/privateEndpoints/pg` },
+        redis: { resourceId: `${prefix}Microsoft.Cache/redisEnterprise/cache`, databaseId: `${prefix}Microsoft.Cache/redisEnterprise/cache/databases/default`,
+          host: "fixture.redis.azure.net", port: 10000, privateEndpointId: `${prefix}Microsoft.Network/privateEndpoints/cache` } };
+      const plan = { schemaVersion: 1, domain: "core", azure, source: { health: { schemaVersion: 1, fixture: "retained-source-health" }, writers: await configFor(WRITER_SERVICE),
         postgresTriggers: await configFor(PG_SERVICE), postgresService, postgres: {
           expected: { domain: "core", connection: { host: sourceConfig.host, port: sourceConfig.port, database: "railway", user: "postgres" },
             systemIdentifier: identity.system_identifier, databaseOid: identity.database_oid, readerRole: "fence_reader",
             databaseServiceSha256: postgresCustody.bindingSha256 },
+          originalSecretVersion: `https://migration-fixture.vault.azure.net/secrets/source-original/${"b".repeat(32)}`,
           retainedSecretVersion: `https://migration-fixture.vault.azure.net/secrets/source-recovery/${"a".repeat(32)}`, vaultName: "migration-fixture",
         } } };
       const stores = storesFor(plan, scenario);
       rail.state.records = stores.records;
       owner = await openCutoverCustody(stores.blob, stores.intentSha256);
       const options = retainedPlan => ({ plan: retainedPlan, custody: owner, operationStore: stores.store,
-        sourceConfig, readerConfig, railway: { transport: rail.transport, runRemoteRead },
+        sourceConfig, readerConfig, resolveOriginalSecret: async () => oldPassword,
+        assertSourceHealthy: async ({ stage: healthStage, baseline, writerBaseline }) => {
+          assert.ok(["baseline", "recovery"].includes(healthStage));
+          assert.equal(writerBaseline.services[0].serviceId, WRITER_SERVICE);
+          if (healthStage === "baseline") { assert.equal(rail.state.effects.size, 0); assert.equal(baseline, null); }
+          else { assert.equal(baseline.complete, true); assert.equal(rail.state.deployments[WRITER_SERVICE][0].deploymentStopped, false); }
+          return { complete: true, domain: "core", intentSha256: stores.intentSha256,
+            sourceHealthBindingSha256: archiveEvidenceHash(plan.source.health), evidenceSha256: "d".repeat(64) };
+        }, railway: { transport: rail.transport, runRemoteRead },
         resolveSecret: async (version, vault) => {
           assert.equal(version, plan.source.postgres.retainedSecretVersion); assert.equal(vault, "migration-fixture");
           return Buffer.from(recoveryBytes);
@@ -251,7 +292,21 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
       stage = "CONTROLLER";
       let result;
       let verifierBeforeRecovery;
-      if (scenario === "COMPLETE") result = await runOpsCoreSourceFence(options(plan));
+      if (scenario === "PREFLIGHT_BAD_READER_GRANTS") {
+        admin = await connect(sourceConfig);
+        await admin.query("REVOKE SELECT ON retained_lifecycle_fixture_id_seq FROM fence_reader");
+        await admin.end(); admin = null;
+      }
+      if (scenario.startsWith("PREFLIGHT_")) {
+        const rejected = options(plan);
+        if (scenario === "PREFLIGHT_BAD_HEALTH") rejected.assertSourceHealthy = async () => ({ complete: false });
+        else if (scenario === "PREFLIGHT_BAD_ORIGINAL") rejected.resolveOriginalSecret = async () => "wrong-original-fixture";
+        else if (scenario === "PREFLIGHT_BAD_READER") rejected.readerConfig = { ...readerConfig, password: "wrong-reader-fixture" };
+        await assert.rejects(runOpsCoreSourceFence(rejected));
+        assert.equal(rail.state.effects.size, 0, "initial PostgreSQL admission must precede every Railway mutation");
+        return;
+      }
+      if (scenario === "COMPLETE" || (scenario.startsWith("RECOVERY_") && scenario !== "RECOVERY_PARTIAL_STAGE")) result = await runOpsCoreSourceFence(options(plan));
       else {
         await assert.rejects(runOpsCoreSourceFence(options(plan)));
         assert.equal(owner.snapshot().phase, "PREPARED");
@@ -266,7 +321,11 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
           assert.equal(rail.state.deployments[PG_SERVICE][0].deploymentStopped, false);
           return;
         }
-        if (scenario === "LOST_ROTATION_RECEIPT") {
+        if (scenario === "RECOVERY_LOST_PASSWORD_RECEIPT" && !state.receiptLost && key.endsWith("/receipt.json")) {
+        const intent = JSON.parse(records.get(key.replace(/receipt\.json$/, "intent.json")));
+        if (intent.kind === "POSTGRES_RESTORE_RUNTIME_PASSWORD") { state.receiptLost = true; throw Error("SYNTHETIC_RECOVERY_ACK_LOSS"); }
+      }
+      if (scenario === "LOST_ROTATION_RECEIPT") {
           assert.equal(stores.state.receiptLost, true);
           admin = await connect({ ...sourceConfig, password: recoveryPassword });
           verifierBeforeRecovery = (await admin.query("SELECT rolpassword FROM pg_authid WHERE rolname='postgres'")).rows[0].rolpassword;
@@ -283,11 +342,21 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
         } else assert.equal(rail.state.stageLost, true);
         const retained = [...stores.records.entries()].find(([key]) => key.endsWith("/phase-plan.json"));
         assert.ok(retained);
-        const recoveredPlan = { schemaVersion: 1, domain: "core", source: JSON.parse(retained[1]).source };
+        const recoveredPlan = { schemaVersion: 1, domain: "core", azure, source: JSON.parse(retained[1]).source };
         assert.equal(archiveEvidenceHash(recoveredPlan), stores.intentSha256);
         await owner.close();
         owner = await openCutoverCustody(stores.blob, stores.intentSha256);
         stage = "REOPEN";
+        if (scenario === "RECOVERY_PARTIAL_STAGE") {
+          const recovered = await recoverOpsCoreSource({ ...options(recoveredPlan), action: "apply",
+            assertTargetInactive: async () => ({ complete: true, domain: "core", intentSha256: stores.intentSha256,
+              targetBindingSha256: archiveEvidenceHash(azure) }) });
+          assert.equal(recovered.status, "SOURCE_RECOVERED");
+          assert.equal(rail.state.effects.get(`RecoverRestart:${id(20)}`), 1);
+          admin = await connect(sourceConfig);
+          assert.equal(rail.state.auto[WRITER_SERVICE], true);
+          return;
+        }
         result = await runOpsCoreSourceFence(options(recoveredPlan));
       }
       stage = "ACCEPTANCE";
@@ -326,6 +395,66 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
       const toc = docker("exec", containerId, "pg_restore", "--list", "/tmp/source-controller-reader.dump");
       assert.ok(toc.includes("TABLE DATA public retained_lifecycle_fixture"));
       assert.ok(toc.includes("SEQUENCE SET public retained_lifecycle_fixture_id_seq"));
+      if (scenario === "COMPLETE" || scenario.startsWith("RECOVERY_")) {
+        stage = "SOURCE_RECOVERY";
+        await admin.end(); admin = null;
+        const abandoned = await owner.begin("CAPTURED", "f".repeat(64));
+        let inactiveChecks = 0;
+        const recoveryOptions = () => ({ ...options(plan), action: "apply",
+          assertTargetInactive: async () => { inactiveChecks++; return { complete: true, domain: "core", intentSha256: stores.intentSha256, targetBindingSha256: archiveEvidenceHash(azure) }; } });
+        if (scenario === "RECOVERY_BAD_HEALTH") {
+          const rejected = recoveryOptions();
+          rejected.assertSourceHealthy = async () => ({ complete: false });
+          await assert.rejects(recoverOpsCoreSource(rejected));
+          assert.equal(owner.snapshot().pending.to, "SOURCE_RECOVERED");
+          assert.equal(rail.state.deployments[WRITER_SERVICE][0].deploymentStopped, false);
+          assert.equal(rail.state.auto[WRITER_SERVICE], false);
+          assert.equal(rail.state.config.services[WRITER_SERVICE].deploy.cronSchedule, null);
+          assert.equal([...stores.records.values()].some(text => JSON.parse(text).kind === "RAILWAY_STAGE_RECOVERY_TRIGGERS"), false);
+          await owner.close(); owner = await openCutoverCustody(stores.blob, stores.intentSha256);
+        }
+        if (scenario === "RECOVERY_DRIFT" || scenario === "RECOVERY_TARGET_DRIFT") {
+          const effectsBefore = archiveEvidenceHash([...rail.state.effects]);
+          const rejected = recoveryOptions();
+          if (scenario === "RECOVERY_DRIFT") rail.state.config.services[WRITER_SERVICE].variables = { NEW_SETTING: "changed" };
+          else rejected.assertTargetInactive = async () => ({ complete: true, domain: "ops", intentSha256: stores.intentSha256, targetBindingSha256: archiveEvidenceHash(azure) });
+          await assert.rejects(recoverOpsCoreSource(rejected));
+          assert.equal(archiveEvidenceHash([...rail.state.effects]), effectsBefore);
+          assert.equal(owner.snapshot().pending.to, "CAPTURED");
+          await assert.rejects(connect(sourceConfig), { code: "28P01" });
+          return;
+        }
+        if (scenario.startsWith("RECOVERY_LOST_")) {
+          await assert.rejects(recoverOpsCoreSource(recoveryOptions()));
+          if (scenario === "RECOVERY_LOST_COMPLETE_ACK") {
+            await assert.rejects(owner.assertOwned(), /CUTOVER_RECONCILIATION_REQUIRED/);
+            await owner.close(); owner = await openCutoverCustody(stores.blob, stores.intentSha256);
+            const effectsBefore = archiveEvidenceHash([...rail.state.effects]);
+            const retained = await recoverOpsCoreSource({ ...recoveryOptions(), action: "reconcile" });
+            assert.equal(retained.status, "SOURCE_RECOVERED"); assert.equal(retained.historical, true);
+            assert.equal(archiveEvidenceHash([...rail.state.effects]), effectsBefore);
+            return;
+          }
+          assert.equal(owner.snapshot().pending.to, "SOURCE_RECOVERED");
+          await owner.close(); owner = await openCutoverCustody(stores.blob, stores.intentSha256);
+          const effectsBefore = archiveEvidenceHash([...rail.state.effects]);
+          await assert.rejects(recoverOpsCoreSource({ ...recoveryOptions(), action: "reconcile" }));
+          assert.equal(archiveEvidenceHash([...rail.state.effects]), effectsBefore, "read-only recovery must not dispatch remaining effects");
+          await owner.close(); owner = await openCutoverCustody(stores.blob, stores.intentSha256);
+        }
+        const recovered = await recoverOpsCoreSource(recoveryOptions());
+        assert.equal(recovered.status, "SOURCE_RECOVERED");
+        assert.deepEqual(owner.snapshot().recovery.abandonedPending, abandoned);
+        assert.ok(inactiveChecks > 10);
+        assert.equal(rail.state.effects.get(`RecoverRestart:${id(20)}`), 1);
+        assert.equal(rail.state.auto[WRITER_SERVICE], true);
+        assert.equal(rail.state.config.services[WRITER_SERVICE].deploy.cronSchedule, "0 * * * *");
+        assert.equal(rail.state.config.services[WRITER_SERVICE].source.autoUpdates.type, "patch");
+        admin = await connect(sourceConfig);
+        await assert.rejects(connect({ ...sourceConfig, password: recoveryPassword }), { code: "28P01" });
+        await assert.rejects(owner.begin("CAPTURED", "e".repeat(64)), /CUTOVER_SOURCE_RECOVERY_TERMINAL/);
+        assert.equal((await recoverOpsCoreSource({ ...options(plan), action: "reconcile", assertTargetInactive: async () => { assert.fail("historical receipt needs no provider effect/read"); } })).historical, true);
+      }
     } catch (error) {
       const diagnostic = /^[A-Z][A-Z0-9_]{2,100}$/.test(error?.message ?? "") ? error.message
         : /^[0-9A-Z]{5}$/.test(error?.code ?? "") ? error.code : "ASSERTION_OR_OPERATION_FAILED";

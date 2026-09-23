@@ -176,15 +176,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     await custody.assertOwned();snapshotCheck();need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");}
   async function request(method,path,signal,body){await check(signal);const r=await send({method,path,signal,...(body===undefined?{}:{body})});await check(signal);
     need(r&&[200,202,404].includes(r.status),"HEALTH_JOB_TRANSPORT_INVALID");return r;}
-  async function prepare(signal=custody.signal){
-    const j=await request("GET",pathFor(p.jobResourceId),signal);need(j.status===200,"HEALTH_JOB_NOT_PREPARED");verifyJob(j.body,p);
-    const e=await request("GET",pathFor(p.environmentResourceId),signal),props=e.body?.properties;
-    need(e.status===200&&equalId(e.body?.id,p.environmentResourceId)&&props?.provisioningState==="Succeeded"
-      &&equalId(props.vnetConfiguration?.infrastructureSubnetId,p.infrastructureSubnetId)&&props.appLogsConfiguration?.destination==="log-analytics"
-      &&props.appLogsConfiguration.logAnalyticsConfiguration?.customerId===p.workspaceId
-      &&p.worker.origin===`https://${p.worker.appId.split("/").at(-1)}.internal.${props.defaultDomain}`,"HEALTH_JOB_ENVIRONMENT_CHANGED");
-    return{identity:identity(p),planSha256:hash(p),definitionSha256:hash(buildHealthProbeJobDefinition(p))};
-  }
+  async function prepare(signal = custody.signal) { return prepareHealthJob(p, request, signal); }
   async function assertWorker(r,signal){
     const a=await request("GET",pathFor(p.worker.appId),signal),ap=a.body?.properties,ingress=ap?.configuration?.ingress;
     need(a.status===200&&equalId(a.body?.id,p.worker.appId)&&equalId(ap?.environmentId??ap?.managedEnvironmentId,p.environmentResourceId)
@@ -297,4 +289,35 @@ export function createHealthJobDispatcher(options) {
   };
   return{identity:identity(p),prepare:async()=> (await get()).prepare(),probeHealth:async args=>(await get()).probeHealth(args),
     readRetainedStart:async()=> (await get()).readRetainedStart(),reconcileStart:async()=> (await get()).reconcileStart()};
+}
+
+async function prepareHealthJob(p, request, signal) {
+    const j=await request("GET",pathFor(p.jobResourceId),signal);need(j.status===200,"HEALTH_JOB_NOT_PREPARED");verifyJob(j.body,p);
+    const e=await request("GET",pathFor(p.environmentResourceId),signal),props=e.body?.properties;
+    need(e.status===200&&equalId(e.body?.id,p.environmentResourceId)&&props?.provisioningState==="Succeeded"
+      &&equalId(props.vnetConfiguration?.infrastructureSubnetId,p.infrastructureSubnetId)&&props.appLogsConfiguration?.destination==="log-analytics"
+      &&props.appLogsConfiguration.logAnalyticsConfiguration?.customerId===p.workspaceId
+      &&p.worker.origin===`https://${p.worker.appId.split("/").at(-1)}.internal.${props.defaultDomain}`,"HEALTH_JOB_ENVIRONMENT_CHANGED");
+    return{identity:identity(p),planSha256:hash(p),definitionSha256:hash(buildHealthProbeJobDefinition(p))};
+
+}
+
+/** Read-only resource and query-access proof before a source fence. No probe
+ * execution, provider intent, synthetic custody phase or runtime effects. */
+export async function preflightHealthJob({plan: value, signal, assertOwned, transport}) {
+  const p = plan(value), send = transport ?? createHealthJobTransport(p);
+  need(signal instanceof AbortSignal && typeof assertOwned === "function", "HEALTH_JOB_CUSTODY_REQUIRED");
+  const check = async () => { signal.throwIfAborted(); await assertOwned(); signal.throwIfAborted(); };
+  const request = async (method, path, signal, body) => {
+    await check(); const response = await send({method,path,signal,...(body === undefined ? {} : {body})});
+    await check(); return response;
+  };
+  try {
+    const prepared = await prepareHealthJob(p, request, signal);
+    const logs = await request("POST", `/v1/workspaces/${p.workspaceId}/query`, signal, {query:"print preflight = 1"});
+    need(logs?.status === 200 && !logs.body?.error && logs.body?.tables?.length === 1
+      && logs.body.tables[0].columns?.length === 1 && logs.body.tables[0].columns[0].name === "preflight"
+      && same(logs.body.tables[0].rows, [[1]]), "HEALTH_JOB_LOG_ACCESS_UNPROVEN");
+    return {...prepared,workspaceId:p.workspaceId,logQueryAccess:true};
+  } catch (error) { throw error instanceof HealthJobError ? error : new HealthJobError("HEALTH_JOB_PREFLIGHT_FAILED"); }
 }

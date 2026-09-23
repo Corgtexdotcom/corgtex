@@ -48,7 +48,7 @@ async function fixture(options = {}) {
         restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 10, drainingSeconds: null, overlapSeconds: null,
         resolvedFileConfig: serviceId === id(3) ? null : { deploymentId: id(21), resolvedAt: "2026-09-22T12:00:00Z",
           fileManifest: { deploy: { cronSchedule: state.fileCron }, irrelevant: "excluded-manifest-canary" } },
-        activeDeployments: [...state.deployments[serviceId].filter((item) => item.status === "SUCCESS" && !item.deploymentStopped), ...state.extraActive],
+        activeDeployments: [...state.deployments[serviceId].filter((item) => item.status === "SUCCESS" && (!item.deploymentStopped || state.includeCompletedScheduled)), ...state.extraActive],
       }, serviceInstanceAutoDeployStatus: { enabled: state.auto[serviceId] } };
     }
     if (operation === "FenceDeployments") {
@@ -58,15 +58,20 @@ async function fixture(options = {}) {
     }
     if (operation === "FenceDeployment") data = { environment: envBinding(),
       deployment: structuredClone(Object.values(state.deployments).flat().find((item) => item.id === variables.id)) };
-    if (operation === "FenceAutoDeploy") { state.auto[variables.input.serviceId] = false; data = { serviceInstanceAutoDeployUpdate: { enabled: false } }; }
+    if (operation === "FenceAutoDeploy") { state.auto[variables.input.serviceId] = variables.input.enabled; data = { serviceInstanceAutoDeployUpdate: { enabled: variables.input.enabled } }; }
     if (operation === "FenceStage") { state.staged.patch = structuredClone(variables.input); data = { environmentStageChanges: { id: state.staged.id, environmentId: binding.environmentId } }; }
     if (operation === "FenceCommit") {
       for (const [serviceId, patch] of Object.entries(state.staged.patch.services)) {
         if (patch.source?.autoUpdates) state.config.services[serviceId].source.autoUpdates = patch.source.autoUpdates;
-        state.config.services[serviceId].deploy.cronSchedule = null;
+        state.config.services[serviceId].deploy.cronSchedule = patch.deploy.cronSchedule;
       }
       state.staged.patch = {};
       data = { environmentPatchCommitStaged: id(10) };
+    }
+    if (operation === "RecoverRestart") {
+      const target = Object.values(state.deployments).flat().find(item => item.id === variables.id);
+      target.deploymentStopped = false; target.status = "SUCCESS"; target.instances = [{ id: id(200), status: "RUNNING" }];
+      data = { deploymentRestart: true };
     }
     if (operation === "FenceCancel" || operation === "FenceStop") {
       const target = Object.values(state.deployments).flat().find((item) => item.id === variables.id);
@@ -476,4 +481,68 @@ test("recovery refuses provider-state matches without an actual durable intent o
     input: { ...descriptor.input, sourceLinkSha256: "f".repeat(64) }, readIntent: f.readIntent }),
   { code: "RAILWAY_RECOVERY_BINDING_MISMATCH" });
   assert.equal(f.state.calls.filter((call) => call.query.startsWith("mutation")).length, before);
+});
+
+
+test("retained recovery baseline restores only owned trigger fields and exact prior deployment IDs", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  await f.adapter.disableTriggers();
+  await f.adapter.stopWriters();
+  await f.adapter.restartBaselineWriters(baseline);
+  await f.adapter.restoreBaselineTriggers(baseline, { readIntent: f.readIntent, recorded: f.state.records });
+  assert.equal(f.state.config.services[id(3)].variables.PRIVATE_VALUE, "excluded-config-canary");
+  assert.equal(f.state.config.services[id(3)].deploy.cronSchedule, "*/5 * * * *");
+  assert.deepEqual(f.state.config.services[id(3)].source.autoUpdates, { type: "patch" });
+  assert.equal(f.state.auto[id(3)], false);
+  assert.equal(f.state.auto[id(4)], true);
+  assert.deepEqual(f.state.calls.filter(item => item.operation === "RecoverRestart").map(item => item.variables.id), [id(20), id(21)]);
+});
+
+test("recovery rejects effective runtime policy drift before any restart", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0].status = "SUCCESS";
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  f.state.mutate = (data, operation) => { if (operation === "FenceService") data.serviceInstance.restartPolicyMaxRetries = 999; };
+  await assert.rejects(f.adapter.restartBaselineWriters(baseline), /RAILWAY_RECOVERY_CONFIG_CHANGED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
+});
+
+test("completed scheduled entries retained in activeDeployments never restart and recover exact cron", async () => {
+  const f = await fixture();
+  f.state.includeCompletedScheduled = true;
+  f.state.deployments[id(4)][0] = deployment(id(4), 21, "SUCCESS", true);
+  f.state.deployments[id(4)][0].instances = [{ id: id(121), status: "EXITED" }];
+  f.state.config.services[id(4)].deploy.cronSchedule = "*/15 * * * *";
+  f.state.fileCron = null;
+  const baseline = await f.adapter.captureRecoveryBaseline();
+  const scheduled = baseline.services.find(item => item.serviceId === id(4));
+  assert.deepEqual(scheduled.activeDeploymentIds, []);
+  assert.deepEqual(scheduled.completedScheduledDeploymentIds, [id(21)]);
+  assert.equal(scheduled.cron.effective, "*/15 * * * *");
+  assert.equal(scheduled.cron.fileSchedule, null);
+  await f.adapter.disableTriggers();
+  await f.adapter.stopWriters();
+  await f.adapter.restartBaselineWriters(baseline);
+  await f.adapter.restoreBaselineTriggers(baseline, { readIntent: f.readIntent, recorded: f.state.records });
+  assert.deepEqual(f.state.calls.filter(item => item.operation === "RecoverRestart").map(item => item.variables.id), [id(20)]);
+  assert.equal(f.state.config.services[id(4)].deploy.cronSchedule, "*/15 * * * *");
+  assert.equal((await f.adapter.assertRecoveryBaseline(baseline, { running: true, restored: true })).complete, true);
+});
+
+
+test("file-only cron without a proven override-removal API is rejected before effects", async () => {
+  const f = await fixture();
+  f.state.deployments[id(4)][0] = deployment(id(4), 21, "SUCCESS", true);
+  f.state.includeCompletedScheduled = true;
+  f.state.fileCron = "*/15 * * * *";
+  f.state.mutate = (data, operation, variables) => {
+    if (operation === "FenceService" && variables.serviceId === id(4)) {
+      data.serviceInstance.cronSchedule = "*/15 * * * *";
+      data.serviceInstance.nextCronRunAt = "2026-09-23T12:15:00Z";
+    }
+  };
+  await assert.rejects(f.adapter.captureRecoveryBaseline(), /RAILWAY_BASELINE_CRON_RESTORATION_UNSUPPORTED/);
+  assert.equal(f.state.calls.filter(item => item.query.startsWith("mutation")).length, 0);
 });

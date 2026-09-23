@@ -241,3 +241,18 @@ test("source descriptors are discovered after reopen and retain content-addresse
     assert.deepEqual(await operations.pendingDescriptors(), []);
   } finally { await next.close(); }
 });
+
+test("pre-fence admission evidence uses immutable content-addressed keys through actual Blob adapter", async () => {
+  const store = azureProviderOperationStore(storage), signal = new AbortController().signal;
+  const evidence = { schemaVersion: 1, type: "MIGRATION_DEPENDENCY_PREFLIGHT", domain: "core", intentSha256,
+    observedAt: new Date().toISOString(), finalAcceptance: false };
+  const evidenceHash = archiveEvidenceHash(evidence);
+  const key = `preflights/core/${intentSha256}/${evidenceHash}.json`;
+  await store.assertPrivate(); assert.equal(await store.readOptional(key, signal), null);
+  await store.createOnly(key, JSON.stringify(evidence), signal);
+  assert.deepEqual(JSON.parse(await store.readOptional(key, signal)), evidence);
+  await assert.rejects(store.createOnly(key, JSON.stringify(evidence), signal));
+  for (const invalid of [key.replace("/core/", "/foreign/"), key.replace(evidenceHash, "short"), `../${key}`]) {
+    await assert.rejects(store.createOnly(invalid, "{}", signal), /PROVIDER_RECORD_KEY_INVALID/);
+  }
+});

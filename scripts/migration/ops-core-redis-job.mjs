@@ -235,16 +235,7 @@ export function createRedisJobDispatcher({ plan: value, custody, assertSourceFen
     await check(signal); const result = await send({method,path,signal,...(body === undefined ? {} : {body})});
     await check(signal); need(result && [200,202,404].includes(result.status),"REDIS_JOB_TRANSPORT_INVALID"); return result;
   }
-  async function prepare(signal = custody.signal) {
-    const job = await request("GET",pathFor(p.jobResourceId),signal);
-    need(job.status === 200,"REDIS_JOB_NOT_PREPARED"); verifyJob(job.body,p);
-    const env = await request("GET",pathFor(p.environmentResourceId),signal);
-    need(env.status === 200 && armSame(env.body?.id, p.environmentResourceId) && env.body.properties?.provisioningState === "Succeeded"
-      && armSame(env.body.properties.vnetConfiguration?.infrastructureSubnetId, p.infrastructureSubnetId)
-      && env.body.properties.appLogsConfiguration?.destination === "log-analytics"
-      && env.body.properties.appLogsConfiguration.logAnalyticsConfiguration?.customerId === p.workspaceId, "REDIS_JOB_ENVIRONMENT_CHANGED");
-    return { identity: identity(p), planSha256: hash(p), definitionSha256: hash(buildRedisProbeJobDefinition(p)) };
-  }
+  async function prepare(signal = custody.signal) { return prepareRedisJob(p, request, signal); }
   async function retain(kind,input,signal) {
     const key = `${prefix}/${hash({kind,inputSha256:hash(input)})}/descriptor.json`;
     const record = {kind,input}; await check(signal); await descriptorStore.assertPrivate();
@@ -419,4 +410,36 @@ export function createRedisJobDispatcher({ plan: value, custody, assertSourceFen
   },runProbe,reconcileStart,readRetainedStart:async()=>{
     try {return await readRetainedStart();} catch(error) {throw error instanceof JobError ? error : new JobError("REDIS_JOB_DESCRIPTOR_MISMATCH");}
   }};
+}
+
+async function prepareRedisJob(p, request, signal) {
+    const job = await request("GET",pathFor(p.jobResourceId),signal);
+    need(job.status === 200,"REDIS_JOB_NOT_PREPARED"); verifyJob(job.body,p);
+    const env = await request("GET",pathFor(p.environmentResourceId),signal);
+    need(env.status === 200 && armSame(env.body?.id, p.environmentResourceId) && env.body.properties?.provisioningState === "Succeeded"
+      && armSame(env.body.properties.vnetConfiguration?.infrastructureSubnetId, p.infrastructureSubnetId)
+      && env.body.properties.appLogsConfiguration?.destination === "log-analytics"
+      && env.body.properties.appLogsConfiguration.logAnalyticsConfiguration?.customerId === p.workspaceId, "REDIS_JOB_ENVIRONMENT_CHANGED");
+    return { identity: identity(p), planSha256: hash(p), definitionSha256: hash(buildRedisProbeJobDefinition(p)) };
+
+}
+
+/** Read-only resource and query-access proof before a source fence. No probe
+ * execution, provider intent, synthetic custody phase or runtime effects. */
+export async function preflightRedisJob({plan: value, signal, assertOwned, transport}) {
+  const p = validatePlan(value), send = transport ?? createRedisJobTransport(p);
+  need(signal instanceof AbortSignal && typeof assertOwned === "function", "REDIS_JOB_CUSTODY_REQUIRED");
+  const check = async () => { signal.throwIfAborted(); await assertOwned(); signal.throwIfAborted(); };
+  const request = async (method, path, signal, body) => {
+    await check(); const response = await send({method,path,signal,...(body === undefined ? {} : {body})});
+    await check(); return response;
+  };
+  try {
+    const prepared = await prepareRedisJob(p, request, signal);
+    const logs = await request("POST", `/v1/workspaces/${p.workspaceId}/query`, signal, {query:"print preflight = 1"});
+    need(logs?.status === 200 && !logs.body?.error && logs.body?.tables?.length === 1
+      && logs.body.tables[0].columns?.length === 1 && logs.body.tables[0].columns[0].name === "preflight"
+      && same(logs.body.tables[0].rows, [[1]]), "REDIS_JOB_LOG_ACCESS_UNPROVEN");
+    return {...prepared,workspaceId:p.workspaceId,logQueryAccess:true};
+  } catch (error) { throw error instanceof JobError ? error : new JobError("REDIS_JOB_PREFLIGHT_FAILED"); }
 }

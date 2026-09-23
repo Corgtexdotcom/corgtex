@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CUTOVER_PHASES } from "./ops-core-custody.mjs";
 import { createHash, randomUUID } from "node:crypto";
+import { azureProviderOperationStore } from "./ops-core-provider-operations.mjs";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { readPrivateMigrationJson, runOpsCoreMigration, fetchWebActivationHealth } from "./run-ops-core-migration.mjs";
 
@@ -30,7 +31,19 @@ function fixture() {
   const job = { environmentResourceId: azure.environmentId, infrastructureSubnetId: `${base}Microsoft.Network/virtualNetworks/fixture/subnets/apps`,
     workspaceId: "00000000-0000-4000-8000-000000000004", identityResourceId: identity, image, probeSha256: "d".repeat(64), location: "westus3" };
   const plan = { schemaVersion: 1, domain, azure,
-    source: { postgres: { expected: { connection: sourceConnection, readerRole: "reader" } } },
+    source: {
+      writers: { binding: { projectId: "00000000-0000-4000-8000-000000000010",
+        environmentId: "00000000-0000-4000-8000-000000000011",
+        serviceIds: ["00000000-0000-4000-8000-000000000012", "00000000-0000-4000-8000-000000000013"] } },
+      health: { schemaVersion: 1, projectId: "00000000-0000-4000-8000-000000000010",
+        environmentId: "00000000-0000-4000-8000-000000000011",
+        services: ["web", "worker"].map((role, index) => ({ role,
+          serviceId: `00000000-0000-4000-8000-00000000001${index + 2}`,
+          deploymentId: `00000000-0000-4000-8000-00000000002${index + 2}`,
+          port: role === "web" ? 3000 : 9090, release: structuredClone(release) })) },
+      postgres: { expected: { connection: sourceConnection, readerRole: "reader" }, vaultName: "fixture-custody",
+      originalSecretVersion: `https://fixture-custody.vault.azure.net/secrets/original/${"1".repeat(32)}`,
+      retainedSecretVersion: `https://fixture-custody.vault.azure.net/secrets/recovery/${"2".repeat(32)}` } },
     activation: { schemaVersion: 1, target: structuredClone(azure), release, roles: { web: role("web"), worker: role("worker") },
       location: "westus3", managedIdentityId: identity, managedIdentityClientId: "00000000-0000-4000-8000-000000000003",
       runtimeVaultUri: "https://fixture.vault.azure.net/", acrServer: "fixture.azurecr.io" },
@@ -106,10 +119,28 @@ describe("Ops/Core executable operator", () => {
     const writes = f.writes(); const current = await runOpsCoreMigration({ ...f.options, action: "status" });
     expect(current).toEqual(first); expect(f.writes()).toBe(writes); expect(f.releases()).toBe(2);
   });
+  it.each(["missing", "mutable", "wrong-vault", "same-version"])("rejects %s original recovery-secret binding before initialization", async kind => {
+    const f=fixture(), pg=f.plan.source.postgres;
+    if(kind==="missing") delete pg.originalSecretVersion;
+    if(kind==="mutable") pg.originalSecretVersion="https://fixture-custody.vault.azure.net/secrets/original";
+    if(kind==="wrong-vault") pg.originalSecretVersion=pg.originalSecretVersion.replace("fixture-custody", "foreign-vault");
+    if(kind==="same-version") pg.originalSecretVersion=pg.retainedSecretVersion;
+    await expect(runOpsCoreMigration({...f.options,action:"initialize"})).rejects.toThrow(/MIGRATION_/);
+    expect(f.writes()).toBe(0);
+  });
   it("checks Azure identity before creating any plan or journal", async () => {
     const f = fixture();
     await expect(runOpsCoreMigration({ ...f.options, action: "initialize", identityCheck: async () => { throw new Error("private token response"); } }))
       .rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
+    expect(f.writes()).toBe(0);
+  });
+  it.each(["missing", "foreign-environment", "foreign-service", "duplicate-role"])("rejects %s source health before retaining a plan", async kind => {
+    const f = fixture();
+    if (kind === "missing") delete f.plan.source.health;
+    if (kind === "foreign-environment") f.plan.source.health.environmentId = randomUUID();
+    if (kind === "foreign-service") f.plan.source.health.services[0].serviceId = randomUUID();
+    if (kind === "duplicate-role") f.plan.source.health.services[1].role = "web";
+    await expect(runOpsCoreMigration({ ...f.options, action: "initialize" })).rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
     expect(f.writes()).toBe(0);
   });
   it("reconciles an existing exact plan before journal creation, then an uncertain initialized journal without overwrites", async () => {
@@ -156,25 +187,27 @@ describe("Ops/Core executable operator", () => {
   });
   it("passes exact global plan and private credentials to source controller and releases custody on failure", async () => {
     const f = fixture(); await runOpsCoreMigration({ ...f.options, action: "initialize" });
-    const credentials = { sourceConfig: { password: randomUUID() }, readerConfig: { password: randomUUID() }, railwayToken: randomUUID() };
-    let preflight = false;
+    const credentials = { sourceConfig: { password: randomUUID() }, readerConfig: { password: randomUUID() }, railwayToken: randomUUID(),
+      objectSource: {accessKeyId:randomUUID(),secretAccessKey:randomUUID()} };
+    let preflight = false, fenced = false;
     await expect(runOpsCoreMigration({ ...f.options, action: "fence", credentials, runtime: {
       transferPreflight: async () => { preflight = true; }, fence: async options => {
-      expect(preflight).toBe(true);
+      fenced = true; expect(preflight).toBe(true);
       expect(options.plan).toEqual(f.plan); expect(options.sourceConfig).toEqual(credentials.sourceConfig);
       expect(options.railway.token).toBe(credentials.railwayToken);
+      expect(typeof options.assertSourceHealthy).toBe("function");
       expect(options.custody.snapshot().intentSha256).toBe(archiveEvidenceHash(f.plan));
       throw new Error(credentials.railwayToken);
     } } })).rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
-    expect(f.releases()).toBe(2);
+    expect(preflight).toBe(true); expect(fenced).toBe(true); expect(f.releases()).toBe(2);
     expect([...f.blobs.values()].some(row => row.text.includes(credentials.railwayToken))).toBe(false);
   });
   it("a failed target preparation check leaves source fencing untouched", async () => {
-    const f = fixture(); await runOpsCoreMigration({ ...f.options, action: "initialize" }); let called = false;
-    await expect(runOpsCoreMigration({ ...f.options, action: "fence", credentials: { sourceConfig: {}, readerConfig: {} }, runtime: {
-      transferPreflight: async () => { throw new Error("target not ready"); }, fence: async () => { called = true; },
+    const f = fixture(); await runOpsCoreMigration({ ...f.options, action: "initialize" }); let called = false, checked = false;
+    await expect(runOpsCoreMigration({ ...f.options, action: "fence", credentials: { sourceConfig: {}, readerConfig: {}, objectSource:{accessKeyId:randomUUID(),secretAccessKey:randomUUID()} }, runtime: {
+      transferPreflight: async () => { checked = true; throw new Error("target not ready"); }, fence: async () => { called = true; },
     } })).rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
-    expect(called).toBe(false); expect(JSON.parse(f.blobs.get("cutovers/core.json").text).phase).toBe("PREPARED");
+    expect(checked).toBe(true); expect(called).toBe(false); expect(JSON.parse(f.blobs.get("cutovers/core.json").text).phase).toBe("PREPARED");
   });
   it("rejects a private health probe for another worker image before journal initialization", async () => {
     const f = fixture(); f.plan.health.worker.image = f.plan.health.worker.image.replace("b".repeat(64), "e".repeat(64));
@@ -213,6 +246,22 @@ describe("Ops/Core executable operator", () => {
       expect(calls).toBe(1);expect(result.complete).toBe(false);
     }
   });
+  it("dispatches explicit source recovery and read-only reconciliation without transfer credentials", async () => {
+    const f=fixture(); await runOpsCoreMigration({...f.options,action:"initialize"}); stage(f,"CAPTURED");
+    for (const [action,expected] of [["recover-source","apply"],["reconcile-source-recovery","reconcile"]]) {
+      let called=false;
+      const result=await runOpsCoreMigration({...f.options,action,credentials:{sourceConfig:{},readerConfig:{}},
+        runtime:{recoverSource:async options=>{called=true;expect(options.action).toBe(expected);
+          expect(typeof options.assertTargetInactive).toBe("function");expect(options.plan).toEqual(f.plan);
+          expect(typeof options.assertSourceHealthy).toBe("function");
+          return{status:"SOURCE_RECOVERED"};}}});
+      expect(called).toBe(true);expect(result.status).toBe("SOURCE_RECOVERED");
+    }
+    stage(f,"TARGET_ACTIVATING");let called=false;
+    await expect(runOpsCoreMigration({...f.options,action:"recover-source",credentials:{sourceConfig:{},readerConfig:{}},
+      runtime:{recoverSource:async()=>{called=true;}}})).rejects.toThrow("MIGRATION_SOURCE_RECOVERY_FORBIDDEN");
+    expect(called).toBe(false);
+  });
   it("reconciliation after committed activation uses the actual acceptance-mode health dispatcher", async () => {
     const f=fixture();await runOpsCoreMigration({...f.options,action:"initialize"});stage(f,"TARGET_ACTIVATING");
     let reachedTransport=false;
@@ -244,4 +293,95 @@ describe("Ops/Core executable operator", () => {
     await expect(runOpsCoreMigration(opts)).rejects.toThrow("MIGRATION_ACCEPTANCE_BINDING_MISMATCH");
   });
 
+});
+
+describe("live transfer dependency admission before source fencing", () => {
+  async function setup() {
+    const f = fixture();
+    const { runOpsCoreTransferPreflight, preflightTargetPostgres } = await import("./ops-core-preflight.mjs");
+    const { buildRedisProbeJobDefinition } = await import("./ops-core-redis-job.mjs");
+    const { buildHealthProbeJobDefinition } = await import("./ops-core-health-job.mjs");
+    const calls = [], controller = new AbortController();
+    const state = { phase: "PREPARED", pending: null, domain: "core", intentSha256: archiveEvidenceHash(f.plan), destinationMayHaveWritten: false };
+    const custody = { signal: controller.signal, snapshot: () => structuredClone(state), assertOwned: async () => {} };
+    const key = Buffer.alloc(32, 7);
+    const config = { ...f.plan.transfer.postgres.target, password: "ephemeral-fixture", sslmode: "verify-full", targetTlsRootCert: "fixture-root" };
+    let pgResult = { database: config.database, role: config.user, version: 180006, recovering: false, can_create_database: true };
+    const client = { async connect() { calls.push("postgres-connect"); }, async end() { calls.push("postgres-close"); },
+      async query(sql) {
+        calls.push(sql);
+        if (sql === "SHOW transaction_read_only") return { rows: [{ transaction_read_only: "on" }] };
+        if (sql.startsWith("SELECT current_database")) return { rows: [pgResult] };
+        return { rows: [] };
+      } };
+    const object = Buffer.from("fixture object");
+    const source = { identity: f.plan.transfer.objects.sourceStoreId, async assertPrivate() {},
+      async inventory() { calls.push("objects-inventory"); return [{ key: "object", etag: "etag", bytes: object.length }]; },
+      async read() { calls.push("objects-read"); return { etag: "etag", bytes: object.length, body: (async function* () { yield object; })() }; } };
+    const transport = p => async ({method,path,body}) => {
+      calls.push({method,path,body});
+      if (path.endsWith("/query")) return { status: 200, body: { tables: [{ columns: [{ name: "preflight", type: "long" }], rows: [[1]] }] } };
+      if (path.startsWith(p.jobResourceId + "?")) {
+        const definition = p.worker ? buildHealthProbeJobDefinition(p) : buildRedisProbeJobDefinition(p);
+        return { status: 200, body: { id: p.jobResourceId, ...definition, properties: { ...definition.properties, provisioningState: "Succeeded" } } };
+      }
+      if (path.startsWith(p.environmentResourceId + "?")) return { status: 200, body: { id: p.environmentResourceId,
+        properties: { provisioningState: "Succeeded", defaultDomain: "environment.westus3.azurecontainerapps.io",
+          vnetConfiguration: { infrastructureSubnetId: p.infrastructureSubnetId }, appLogsConfiguration: { destination: "log-analytics",
+            logAnalyticsConfiguration: { customerId: p.workspaceId } } } } };
+      throw Error("unexpected provider write");
+    };
+    // Use the production adapter so key-path and create-only restrictions apply.
+    const operationStore = azureProviderOperationStore(f.containerFactory(f.plan.operator.custodyContainerUrl));
+    const options = { plan: f.plan, custody, operationStore, targetAdminConfig: config, objectSource: source,
+      sourceCredentials: { readerConfig: { ...f.plan.transfer.postgres.source, sslmode: "require", sourceTlsRootCert: "fixture-root" } },
+      archiveStore: { identity: f.plan.transfer.postgres.archiveStoreId, async assertPrivate() {} },
+      objectTarget: { identity: f.plan.transfer.objects.targetStoreId, async assertPrivate() {} } };
+    const dependencies = { sourcePreflight: async () => {calls.push("source-admission");return {complete:true};}, clientFactory: settings => { expect(settings.ssl.rejectUnauthorized).toBe(true); return client; },
+      resolveKey: async () => { calls.push("archive-key"); return key; },
+      redisTransport: transport(f.plan.redis.job), healthTransport: transport(f.plan.health),
+      contextFactory: () => ({ plan: f.plan, async check() { controller.signal.throwIfAborted(); await custody.assertOwned(); },
+        async assertTargetInactive() { calls.push("target-inactive"); return { complete: true }; } }) };
+    return { f, options, dependencies, calls, state, controller, client, key, source,
+      setPgResult: row => { pgResult = row; },
+      run: () => runOpsCoreTransferPreflight(options, dependencies), preflightTargetPostgres };
+  }
+
+  it("proves TLS SQL auth, key access, bounded object reads and exact probe/log bindings with no runtime writes", async () => {
+    const f = await setup(), before = structuredClone(f.state); const result = await f.run();
+    expect(result.status).toBe("PREFLIGHT_READY"); expect(result.evidence.finalAcceptance).toBe(false);
+    expect(result.evidence.objects.readObjects).toBe(1); expect(result.evidence.postgres.readOnly).toBe(true);
+    expect(f.key.every(byte => byte === 0)).toBe(true); expect(f.state).toEqual(before);
+    expect(f.calls.filter(value => typeof value === "object").every(call => call.method === "GET"
+      || call.method === "POST" && call.path.endsWith("/query") && call.body.query === "print preflight = 1")).toBe(true);
+    expect(f.calls.filter(value => typeof value === "string" && /^(ALTER|CREATE|DROP|UPDATE|INSERT)/.test(value))).toEqual([]);
+  });
+
+  it.each(["source", "postgres", "archive", "object-list", "object-read", "redis-job", "health-logs", "lease", "target-written"])(
+    "rejects unavailable %s before source fencing or any target write", async dependency => {
+      const f = await setup();
+      if (dependency === "source") f.dependencies.sourcePreflight = async () => {throw Error("private source response");};
+      if (dependency === "postgres") f.client.connect = async () => { throw Error("private connection credentials"); };
+      if (dependency === "archive") f.dependencies.resolveKey = async () => { throw Error("private vault response"); };
+      if (dependency === "object-list") f.source.inventory = async () => { throw Error("private bucket response"); };
+      if (dependency === "object-read") f.source.read = async () => null;
+      if (dependency === "redis-job") f.dependencies.redisTransport = async () => ({status:404,body:null});
+      if (dependency === "health-logs") {
+        const transport = f.dependencies.healthTransport;
+        f.dependencies.healthTransport = request => request.path.endsWith("/query") ? {status:403,body:{error:"private"}} : transport(request);
+      }
+      if (dependency === "lease") f.options.custody.assertOwned = async () => { throw Error("lease lost"); };
+      if (dependency === "target-written") f.state.destinationMayHaveWritten = true;
+      await expect(f.run()).rejects.toThrow(/PREFLIGHT_/);
+      expect(f.state.phase).toBe("PREPARED");
+      expect(f.calls.some(value => typeof value === "object" && value.path.includes("/start"))).toBe(false);
+      if (!["source", "postgres", "archive", "lease", "target-written"].includes(dependency)) expect(f.key.every(byte => byte === 0)).toBe(true);
+    });
+
+  it.each(["role", "version", "recovering", "can_create_database"])("rejects PostgreSQL %s drift through actual read-only query path", async field => {
+    const f = await setup(); f.setPgResult({ database: "postgres", role: field === "role" ? "foreign" : "target_admin",
+      version: field === "version" ? 170000 : 180006, recovering: field === "recovering", can_create_database: field !== "can_create_database" });
+    await expect(f.run()).rejects.toThrow("PREFLIGHT_POSTGRES_IDENTITY_UNPROVEN");
+    expect(f.calls).toContain("postgres-close"); expect(f.calls).not.toContain("archive-key");
+  });
 });

@@ -283,6 +283,66 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
       }
       try {
         await check(); const initial = custody.snapshot();
+        if (action === "reconcile" && initial.phase === "TARGET_ACTIVE" && initial.pending === null) {
+          // A committed final journal write can lose its acknowledgement. Read
+          // the exact retained lineage under the current lease; this deliberately
+          // makes no new provider/health claim and never starts a probe or app.
+          requireValue(initial.destinationMayHaveWritten === true, "ACTIVATION_LINEAGE_UNPROVEN");
+          const entries = phase => initial.history?.filter(e => e.phase === phase) ?? [];
+          const activation = entries("TARGET_ACTIVATING"), active = entries("TARGET_ACTIVE");
+          requireValue(activation.length === 1 && active.length === 1
+            && [...activation, ...active].every(e => GUID.test(e.operationId) && e.intentSha256 === planSha256
+              && HASH.test(e.evidenceSha256)), "ACTIVATION_LINEAGE_UNPROVEN");
+          const operationId = activation[0].operationId;
+          const prefix = `operations/${target.domain}/${intentSha256}/${operationId}/`;
+          const read = async (name, limit = 65536) => {
+            await check(); await operationStore.assertPrivate();
+            const text = await operationStore.readOptional(`${prefix}${name}.json`, signal); await check();
+            requireValue(hash(custody.snapshot()) === hash(initial), "ACTIVATION_CUSTODY_MISMATCH");
+            requireValue(typeof text === "string" && Buffer.byteLength(text) <= limit, "ACTIVATION_EVIDENCE_MISMATCH");
+            return JSON.parse(text);
+          };
+          const bodies = Object.fromEntries(ROLES.map(role => [role,
+            appBody(plan, role, `boot-${operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
+          const retainedPlan = await read("phase-plan");
+          requireValue(exact(retainedPlan, "schemaVersion,planSha256,activationOperationId,environmentDomain,bodies")
+            && retainedPlan.schemaVersion === 1 && retainedPlan.planSha256 === planSha256
+            && retainedPlan.activationOperationId === operationId
+            && /^[a-z0-9.-]+\.azurecontainerapps\.io$/.test(retainedPlan.environmentDomain)
+            && hash(retainedPlan.bodies) === hash(bodies), "ACTIVATION_EVIDENCE_MISMATCH");
+          for (const entry of [activation[0], active[0]]) {
+            const evidence = await read(`phase-evidence-${entry.evidenceSha256}`, 32 * 1024 * 1024);
+            requireValue(hash(evidence) === entry.evidenceSha256 && evidence.schemaVersion === 1
+              && evidence.domain === target.domain && evidence.intentSha256 === intentSha256 && evidence.planSha256 === planSha256
+              && evidence.activationOperationId === operationId && evidence.retainedPlanSha256 === hash(retainedPlan), "ACTIVATION_EVIDENCE_MISMATCH");
+            for (const role of ROLES) {
+              const proof = evidence.finalProofs?.[role], value = proof?.evidence;
+              const revision = `${target.apps[role]}--${bodies[role].properties.template.revisionSuffix}`;
+              requireValue(proof?.complete === true && value?.role === role && value.planSha256 === planSha256
+                && value.revisionSha256 === hash(revision) && value.imageSha256 === hash(plan.roles[role].image)
+                && HASH.test(value.healthSha256) && HASH.test(value.probeEvidenceSha256), "ACTIVATION_EVIDENCE_MISMATCH");
+            }
+            const access = evidence.finalProofs?.postgresAccess;
+            requireValue(access?.complete === true && access.domain === target.domain && access.intentSha256 === intentSha256
+              && access.targetBindingSha256 === opsCoreAzureTargetBindingSha256(target)
+              && access.publicNetworkAccess === "Disabled" && access.firewallRules === 0, "ACTIVATION_EVIDENCE_MISMATCH");
+          }
+          // Independently retain the original create intents/receipts as the
+          // causal record. Opening a pending-phase recorder here would invent a
+          // phase; validate its immutable recorded descriptor directly instead.
+          for (const role of ROLES) {
+            const kind = `azure.create.${role}`, inputSha256 = hash({ planSha256, resourceId: appId(role), bodySha256: hash(bodies[role]) });
+            const operationKey = hash({ kind, inputSha256 });
+            const intent = await read(`${operationKey}/intent`), receipt = await read(`${operationKey}/receipt`);
+            requireValue(intent.schemaVersion === 1 && intent.type === "intent" && intent.kind === kind
+              && intent.inputSha256 === inputSha256 && intent.operationKey === operationKey && GUID.test(intent.operationId)
+              && hash(intent.binding) === hash({ domain: target.domain, intentSha256, phase: "TARGET_ACTIVATING", phaseOperationId: operationId })
+              && receipt.schemaVersion === 1 && receipt.type === "receipt" && receipt.operationId === intent.operationId
+              && receipt.intentSha256 === hash(intent) && HASH.test(receipt.evidenceSha256), "ACTIVATION_EVIDENCE_MISMATCH");
+          }
+          return { complete: true, historical: true, freshAcceptance: false, domain: target.domain, phase: "TARGET_ACTIVE",
+            planSha256, evidenceSha256: active[0].evidenceSha256 };
+        }
         const fresh = action === "activate";
         const pendingActivation = initial.phase === "VERIFIED" && initial.pending?.to === "TARGET_ACTIVATING";
         const activated = ["TARGET_ACTIVATING", "TARGET_ACTIVE", "ROUTED", "ACCEPTED"].includes(initial.phase);
@@ -353,7 +413,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         finalProofs.postgresAccess = await guard.assertPostgresPrivate();
         await fenced(); await check();
         const evidence = { schemaVersion: 1, domain: target.domain, intentSha256, planSha256,
-          activationOperationId: pending.operationId, receipts, finalProofs };
+          activationOperationId: pending.operationId, retainedPlanSha256: hash(retainedPlan), receipts, finalProofs };
         const evidenceSha256 = hash(evidence);
         await retain(`phase-evidence-${evidenceSha256}`, evidence);
         if (action === "observe") return { complete: true, domain: target.domain, phase: initial.phase, intentSha256, targetBindingSha256: hash(target), planSha256, evidenceSha256,

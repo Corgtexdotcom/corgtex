@@ -27,6 +27,7 @@ async function setup() {
       records.set(key, value);
       if (f.failSuffix && key.endsWith(f.failSuffix)) throw Error("PRIVATE_PROVIDER_OUTPUT");
     },
+    async listRecords(prefix) { return [...records.keys()].filter(key => key.startsWith(prefix)).sort(); },
     async listDescriptors(prefix) { return [...records.keys()].filter(key => key.startsWith(prefix) && key.endsWith("/descriptor.json")).sort(); },
   };
   f.open = async () => {
@@ -159,6 +160,17 @@ test("lease loss during an empty descriptor listing cannot report settlement", a
   const f = await setup();
   try {
     f.store.listDescriptors = async () => { await f.custody.close(); return []; };
+    await assert.rejects(f.operations.assertSettled(), /SOURCE_OPERATION_RECONCILE_REQUIRED/);
+  } finally { await f.close(); }
+});
+
+
+test("complete inventory rejects an intent whose retained descriptor is missing", async () => {
+  const f = await setup();
+  try {
+    await f.operations.runRecordedOperation({ ...operation, ...f.callbacks });
+    const key = [...f.records.keys()].find(key => key.endsWith("/descriptor.json"));
+    f.records.delete(key);
     await assert.rejects(f.operations.assertSettled(), /SOURCE_OPERATION_RECONCILE_REQUIRED/);
   } finally { await f.close(); }
 });

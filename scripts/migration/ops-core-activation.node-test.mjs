@@ -375,3 +375,67 @@ test("post-activation observer checks exact pair and only explicitly bound custo
   assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
   await assert.rejects(createOpsCoreActivation(f.options).observe({customDomains:["app.corgtex.com"]}));
 });
+
+for (const committed of [false, true]) test(`final TARGET_ACTIVE acknowledgement lost (${committed}) reconciles exact completion`, async () => {
+  const f = fixture(), complete = f.custody.complete;
+  let lost = false;
+  f.custody.complete = async (...args) => {
+    if (!lost && f.journal.pending.to === "TARGET_ACTIVE") {
+      lost = true; if (committed) await complete(...args); throw Error("PRIVATE_FINAL_ACK");
+    }
+    return complete(...args);
+  };
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  const before = [...f.log], records = new Map(f.records);
+  if (committed) {
+    f.options.armTransport = async () => { throw Error("HISTORICAL_READ_MUST_NOT_CONTACT_PROVIDER"); };
+    f.options.healthProbe = async () => { throw Error("HISTORICAL_READ_MUST_NOT_START_PROBE"); };
+    f.options.assertSourceFenced = async () => { throw Error("HISTORICAL_READ_MUST_NOT_CLAIM_FRESH_FENCE"); };
+  }
+  const result = await createOpsCoreActivation(f.options).reconcile();
+  assert.equal(result.phase, "TARGET_ACTIVE"); assert.equal(f.journal.pending, null);
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
+  if (committed) {
+    assert.equal(result.historical, true); assert.equal(result.freshAcceptance, false);
+    assert.equal(result.evidenceSha256, f.journal.history.find(e => e.phase === "TARGET_ACTIVE").evidenceSha256);
+    assert.deepEqual(f.log, before); assert.deepEqual(f.records, records);
+  }
+});
+
+for (const [name, mutate] of [
+  ["missing activation lineage", f => { f.journal.history = f.journal.history.filter(e => e.phase !== "TARGET_ACTIVATING"); }],
+  ["missing active operation ID", f => { delete f.journal.history.find(e => e.phase === "TARGET_ACTIVE").operationId; }],
+  ["wrong active plan hash", f => { f.journal.history.find(e => e.phase === "TARGET_ACTIVE").intentSha256 = "f".repeat(64); }],
+  ["wrong activation operation", f => { f.journal.history.find(e => e.phase === "TARGET_ACTIVATING").operationId = "00000000-0000-4000-8000-000000000099"; }],
+  ["missing full evidence", f => { for (const key of f.records.keys()) if (key.includes("/phase-evidence-")) f.records.delete(key); }],
+  ["corrupted full evidence", f => { for (const key of f.records.keys()) if (key.includes("/phase-evidence-")) f.records.set(key, JSON.stringify({ complete: true })); }],
+  ["changed retained app plan", f => { for (const [key, text] of f.records) if (key.endsWith("/phase-plan.json")) {
+    const value = JSON.parse(text); value.bodies.worker.properties.template.containers[0].image = "foreign:latest"; f.records.set(key, JSON.stringify(value));
+  } }],
+  ["changed retained environment domain", f => { for (const [key, text] of f.records) if (key.endsWith("/phase-plan.json")) {
+    const value = JSON.parse(text); value.environmentDomain = "foreign.westus3.azurecontainerapps.io"; f.records.set(key, JSON.stringify(value));
+  } }],
+  ["missing provider receipt", f => { for (const key of f.records.keys()) if (key.endsWith("/receipt.json")) { f.records.delete(key); break; } }],
+  ["foreign provider binding", f => { for (const [key, text] of f.records) if (key.endsWith("/intent.json")) {
+    const value = JSON.parse(text); value.binding.intentSha256 = "f".repeat(64); f.records.set(key, JSON.stringify(value)); break;
+  } }],
+  ["write boundary cleared", f => { f.journal.destinationMayHaveWritten = false; }],
+]) test(`completed historical reconciliation rejects ${name}`, async () => {
+  const f = fixture(); await createOpsCoreActivation(f.options).activate(); mutate(f);
+  const before = [...f.log];
+  await assert.rejects(createOpsCoreActivation(f.options).reconcile(), error => ["ACTIVATION_LINEAGE_UNPROVEN", "ACTIVATION_EVIDENCE_MISMATCH"].includes(opsCoreActivationDiagnostic(error)));
+  assert.deepEqual(f.log, before);
+});
+
+test("completed historical reconciliation rechecks unchanged custody across evidence reads", async () => {
+  const f = fixture(); await createOpsCoreActivation(f.options).activate(); const read = f.options.operationStore.readOptional;
+  f.options.operationStore.readOptional = async key => { const result = await read(key); f.journal.phase = "ROUTED"; return result; };
+  await rejects(createOpsCoreActivation(f.options).reconcile(), "ACTIVATION_CUSTODY_MISMATCH");
+});
+
+test("completed history does not permit a new activation or resume effect", async () => {
+  const f = fixture(); await createOpsCoreActivation(f.options).activate(); const before = [...f.log];
+  await rejects(createOpsCoreActivation(f.options).activate(), "ACTIVATION_PHASE_INVALID");
+  await rejects(createOpsCoreActivation(f.options).resume(), "ACTIVATION_PHASE_INVALID");
+  assert.deepEqual(f.log, before);
+});

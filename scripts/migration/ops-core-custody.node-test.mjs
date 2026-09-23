@@ -112,3 +112,60 @@ test("concurrent operations by the same owner cannot race a shared ETag", async 
     assert.match(results.find(result => result.status === "rejected").reason.message, /CUTOVER_CONCURRENT_OPERATION/);
   } finally { await owner.close(); }
 });
+
+
+test("source recovery retains interrupted transfer and permanently closes target activation", async () => {
+  const blob = store();
+  const owner = await openCutoverCustody(blob, intent);
+  try {
+    const fence = await owner.begin("SOURCE_FENCED", evidence);
+    await owner.complete(fence.operationId, evidence);
+    const abandoned = await owner.begin("CAPTURED", evidence);
+    const originalHistory = owner.snapshot().history;
+    const recovery = await owner.beginSourceRecovery("c".repeat(64));
+    assert.deepEqual(owner.snapshot().recovery.abandonedPending, abandoned);
+    await assert.rejects(owner.complete(abandoned.operationId, evidence), /CUTOVER_COMPLETION_MISMATCH/);
+    await owner.complete(recovery.operationId, evidence);
+    assert.equal(owner.snapshot().phase, "SOURCE_RECOVERED");
+    assert.deepEqual(owner.snapshot().history.slice(0, -1), originalHistory);
+    assert.equal(sourceRecoveryAllowed(owner.snapshot()), false);
+    await assert.rejects(owner.begin("CAPTURED", evidence), /CUTOVER_SOURCE_RECOVERY_TERMINAL/);
+    await assert.rejects(owner.beginSourceRecovery(evidence), /CUTOVER_SOURCE_RECOVERY_FORBIDDEN/);
+  } finally { await owner.close(); }
+  const reopened = await openCutoverCustody(blob, intent);
+  assert.equal(reopened.snapshot().phase, "SOURCE_RECOVERED");
+  await reopened.close();
+});
+
+test("lost recovery journal acknowledgement is reconciled under a new lease without history reset", async () => {
+  const blob = store();
+  let owner = await openCutoverCustody(blob, intent);
+  const abandoned = await owner.begin("SOURCE_FENCED", evidence);
+  blob.failAcknowledgement = true;
+  await assert.rejects(owner.beginSourceRecovery(evidence), /CUTOVER_WRITE_RECONCILE/);
+  await owner.close();
+  blob.failAcknowledgement = false;
+  owner = await openCutoverCustody(blob, intent);
+  try {
+    assert.deepEqual(owner.snapshot().recovery.abandonedPending, abandoned);
+    await assert.rejects(owner.beginSourceRecovery(evidence), /CUTOVER_SOURCE_RECOVERY_FORBIDDEN/);
+    await owner.complete(owner.snapshot().pending.operationId, evidence);
+    assert.equal(owner.snapshot().phase, "SOURCE_RECOVERED");
+  } finally { await owner.close(); }
+});
+
+test("target write boundary and lease loss both prohibit source recovery", async () => {
+  const blob = store();
+  const owner = await openCutoverCustody(blob, intent);
+  try {
+    for (const phase of CUTOVER_PHASES.slice(1, 5)) {
+      const operation = await owner.begin(phase, evidence);
+      await owner.complete(operation.operationId, evidence);
+    }
+    await owner.begin("TARGET_ACTIVATING", evidence);
+    await assert.rejects(owner.beginSourceRecovery(evidence), /CUTOVER_SOURCE_RECOVERY_FORBIDDEN/);
+    blob.failRenewal = true;
+    await assert.rejects(owner.assertOwned(), /CUTOVER_LEASE_LOST/);
+    await assert.rejects(owner.beginSourceRecovery(evidence), /CUTOVER_LEASE_LOST/);
+  } finally { await owner.close(); }
+});

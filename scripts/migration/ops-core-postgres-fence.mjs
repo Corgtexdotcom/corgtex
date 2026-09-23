@@ -1,5 +1,8 @@
 import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import pg from "pg";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
 import { archiveEvidenceHash, readArchiveKeyVersion, validateArchiveKeyVersion } from "./ops-core-archive.mjs";
 import { nodeClientConfig } from "./run-postgres-restore-rehearsal.mjs";
 
@@ -315,4 +318,91 @@ export async function runPostgresSourceFence(options) {
 export async function assertPostgresSourceFenced(options) {
   try { return await finalCensus(await context(options)); }
   catch (error) { throw error instanceof FenceError ? error : new FenceError("POSTGRES_FENCE_RECONCILIATION_REQUIRED"); }
+}
+
+/** The original runtime credential is retained verbatim in a versioned custody
+ * vault secret. Unlike archive keys it is neither base64-decoded nor trimmed. */
+export async function readOriginalSourcePassword(version, vaultName) {
+  validateArchiveKeyVersion(version, vaultName);
+  try {
+    const { stdout } = await execFileAsync("az", ["keyvault", "secret", "show", "--id", version,
+      "--query", "value", "--output", "json", "--only-show-errors"], { timeout: 30_000, maxBuffer: 65536 });
+    const value = JSON.parse(stdout);
+    if (typeof value !== "string" || !value.length || value.includes("\0")) fail("POSTGRES_ORIGINAL_SECRET_INVALID");
+    return value;
+  } catch { fail("POSTGRES_ORIGINAL_SECRET_UNAVAILABLE"); }
+}
+async function originalPassword(options) {
+  validateArchiveKeyVersion(options.originalSecretVersion, options.vaultName);
+  if (options.originalSecretVersion === options.retainedSecretVersion) fail("POSTGRES_ORIGINAL_SECRET_INVALID");
+  const resolve = options.resolveOriginalSecret ?? readOriginalSourcePassword;
+  const first = await resolve(options.originalSecretVersion, options.vaultName);
+  const second = await resolve(options.originalSecretVersion, options.vaultName);
+  if (typeof first !== "string" || !first.length || first.includes("\0") || first !== second
+    || first !== options.sourceConfig.password) fail("POSTGRES_ORIGINAL_SECRET_MISMATCH");
+  return first;
+}
+
+/** Read-only before any source mutation: authenticates both remote roles and
+ * checks the same grants/identity/TLS policy used by the password fence. */
+export async function preflightOpsCorePostgresSource(options) {
+  try {
+    const { custody } = options;
+    const guard = async () => { custody.signal.throwIfAborted(); await custody.assertOwned(); };
+    const ctx = await context({ ...options, assertProviderFenced: guard,
+      assertDatabaseServiceCustody: options.assertDatabaseServiceCustody ?? guard });
+    await originalPassword(options);
+    if (!(await probe(ctx.sourceConfig, ctx.expected)).accepted
+      || !(await probe(ctx.recoveryConfig, ctx.expected)).rejectedByPassword) fail("POSTGRES_PREFLIGHT_AUTH_UNPROVEN");
+    await connected(ctx.sourceConfig, async client => {
+      const server = await identity(client, ctx.expected, true);
+      await readerPrivileges(client, ctx.expected);
+      await readerProbe(ctx.readerConfig, ctx.expected, server);
+      // Validate suppression capability without issuing a password statement.
+      await suppressSensitiveSql(client);
+    });
+    await ctx.check();
+    return { complete: true, systemIdentifier: ctx.expected.systemIdentifier, databaseOid: ctx.expected.databaseOid,
+      originalSecretVersion: options.originalSecretVersion, retainedSecretVersion: ctx.retainedSecretVersion,
+      readerSnapshotVerified: true, databaseServiceSha256: ctx.expected.databaseServiceSha256 };
+  } catch (error) { throw error instanceof FenceError ? error : new FenceError("POSTGRES_PREFLIGHT_UNPROVEN"); }
+}
+
+/** Reverse only the credential fence. Provider writers remain stopped until the
+ * controller has verified this exact recorded effect. Inherited intents only
+ * authenticate/read back; they never repeat ALTER ROLE. */
+export async function recoverPostgresSourcePassword(options) {
+  try {
+    const ctx = await context(options);
+    if (ctx.custody.snapshot().pending?.to !== "SOURCE_RECOVERED" || !ctx.operations?.runRecordedOperation) {
+      fail("POSTGRES_RECOVERY_CUSTODY_REQUIRED");
+    }
+    const password = await originalPassword(options);
+    const input = { ...ctx.input, originalSecretVersion: options.originalSecretVersion };
+    const verify = async () => {
+      await ctx.check();
+      const old = await probe(ctx.sourceConfig, ctx.expected);
+      const rotated = await probe(ctx.recoveryConfig, ctx.expected);
+      await ctx.check();
+      return { complete: old.accepted && rotated.rejectedByPassword,
+        evidence: { originalSecretVersion: options.originalSecretVersion, originalPasswordAccepted: old.accepted,
+          rotatedPasswordRejected28P01: rotated.rejectedByPassword, systemIdentifier: ctx.expected.systemIdentifier,
+          databaseOid: ctx.expected.databaseOid } };
+    };
+    await ctx.operations.runRecordedOperation({ kind: "POSTGRES_RESTORE_RUNTIME_PASSWORD", input,
+      apply: async () => {
+        if ((await verify()).complete) return;
+        await connected(ctx.recoveryConfig, async client => {
+          await identity(client, ctx.expected, true);
+          await suppressSensitiveSql(client);
+          // Let PostgreSQL apply its own SASLprep for arbitrary original text.
+          await client.query("SET password_encryption = 'scram-sha-256'");
+          await client.query("SET standard_conforming_strings = on");
+          await ctx.check();
+          await client.query(`ALTER ROLE "postgres" PASSWORD '${password.replaceAll("'", "''")}'`);
+          await ctx.check();
+        });
+      }, verify });
+    return (await verify()).evidence;
+  } catch (error) { throw error instanceof FenceError ? error : new FenceError("POSTGRES_RECOVERY_RECONCILIATION_REQUIRED"); }
 }

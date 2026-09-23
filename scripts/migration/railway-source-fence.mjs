@@ -271,6 +271,183 @@ export class RailwaySourceFence {
       pendingWork: environment.pendingWork };
     return freeze(result);
   }
+  #quiet(snapshot) {
+    const work = nodes => nodes.every(node => node.status === "applied" && work(node.children));
+    requireValue(!["APPLYING", "FAILED"].includes(snapshot.staged.status) && work(snapshot.pendingWork), "RAILWAY_RECOVERY_WORK_UNSETTLED");
+    requireValue(snapshot.services.every(service => service.deployments.every(item => !UNFINISHED_STATUSES.has(item.status))), "RAILWAY_RECOVERY_DEPLOYMENT_UNSETTLED");
+  }
+  #stableConfig(config) {
+    const value = structuredClone(config);
+    if (isRecord(value.source)) delete value.source.autoUpdates;
+    if (value.source === null || (isRecord(value.source) && !Object.keys(value.source).length)) delete value.source;
+    if (isRecord(value.deploy)) delete value.deploy.cronSchedule;
+    if (value.deploy === null || (isRecord(value.deploy) && !Object.keys(value.deploy).length)) delete value.deploy;
+    return value;
+  }
+  #runtimePolicy(service) {
+    return { restartPolicyType: service.restartPolicyType, restartPolicyMaxRetries: service.restartPolicyMaxRetries,
+      drainingSeconds: service.drainingSeconds, overlapSeconds: service.overlapSeconds,
+      fileConfig: service.fileConfig === null ? null : { deploymentId: service.fileConfig.deploymentId,
+        manifestSha256: service.fileConfig.manifestSha256 } };
+  }
+  /** Private encrypted-variable config is retained before the first mutation.
+   * Recovery patches only fields the fence changed, never the full config. */
+  async captureRecoveryBaseline() {
+    this.#requireExpectedLinks();
+    const snapshot = await this.read();
+    this.#quiet(snapshot);
+    requireValue(snapshot.staged.empty, "PREEXISTING_RAILWAY_STAGING");
+    const environment = await this.#environment();
+    const services = snapshot.services.map(service => {
+      // This operator restores exact explicit cron values. No provider API has
+      // been proven to remove an override and restore file-only inheritance.
+      // Admit that limitation before stopping any writer or changing a trigger.
+      requireValue(service.cronSchedule === service.configuredCronSchedule,
+        "RAILWAY_BASELINE_CRON_RESTORATION_UNSUPPORTED");
+      const completedScheduled = item => service.cronSchedule !== null && stopped(item);
+      requireValue(service.activeDeployments.every(item => completedScheduled(item) || (item.status === "SUCCESS" && !item.deploymentStopped
+        && item.instances.length > 0 && item.instances.every(instance => instance.status === "RUNNING"))), "RAILWAY_BASELINE_RUNTIME_UNPROVEN");
+      return { serviceId: service.serviceId, sourceKind: service.sourceKind, sourceLinkSha256: service.sourceLinkSha256,
+        runtimePolicy: this.#runtimePolicy(service), config: structuredClone(environment.config.services[service.serviceId]), autoDeployEnabled: service.autoDeployEnabled,
+        cron: { effective: service.cronSchedule, configured: service.configuredCronSchedule,
+          overridePresent: Object.hasOwn(environment.config.services[service.serviceId].deploy ?? {}, "cronSchedule"),
+          fileSchedule: service.fileConfig?.cronSchedule ?? null },
+        activeDeploymentIds: service.activeDeployments.filter(item => !completedScheduled(item)).map(item => item.id).sort(),
+        completedScheduledDeploymentIds: service.activeDeployments.filter(completedScheduled).map(item => item.id).sort(),
+        deploymentIds: service.deployments.map(item => item.id).sort() };
+    });
+    const baseline = { binding: this.#binding, services };
+    await this.assertRecoveryBaseline(baseline);
+    return baseline;
+  }
+  async assertRecoveryBaseline(baseline, { running = false, restored = false, stagedPatchSha256 = null } = {}) {
+    requireValue(isRecord(baseline) && canonical(baseline.binding) === canonical(this.#binding)
+      && Array.isArray(baseline.services) && baseline.services.length === this.#binding.serviceIds.length
+      && new Set(baseline.services.map(item => item.serviceId)).size === baseline.services.length, "RAILWAY_RECOVERY_BASELINE_INVALID");
+    const snapshot = await this.read();
+    this.#quiet(snapshot);
+    requireValue(snapshot.staged.empty || snapshot.staged.patchSha256 === stagedPatchSha256, "RAILWAY_RECOVERY_STAGING_CHANGED");
+    const environment = await this.#environment();
+    for (const original of baseline.services) {
+      const current = snapshot.services.find(item => item.serviceId === original.serviceId);
+      requireValue(current && current.sourceKind === original.sourceKind && current.sourceLinkSha256 === original.sourceLinkSha256
+        && canonical(this.#runtimePolicy(current)) === canonical(original.runtimePolicy)
+        && canonical(this.#stableConfig(environment.config.services[original.serviceId])) === canonical(this.#stableConfig(original.config))
+        && canonical(current.deployments.map(item => item.id).sort()) === canonical(original.deploymentIds), "RAILWAY_RECOVERY_CONFIG_CHANGED");
+      const config = environment.config.services[original.serviceId];
+      const cron = config.deploy?.cronSchedule ?? null;
+      const originalCron = original.config.deploy?.cronSchedule ?? null;
+      const updates = config.source?.autoUpdates ?? null;
+      const originalUpdates = original.config.source?.autoUpdates ?? null;
+      requireValue((cron === originalCron || (!restored && cron === null))
+        && (canonical(updates) === canonical(originalUpdates) || (!restored && canonical(updates) === canonical({ type: "disabled" })))
+        && (current.autoDeployEnabled === original.autoDeployEnabled || (!restored && !current.autoDeployEnabled))
+        && current.activeDeployments.every(item => original.activeDeploymentIds.includes(item.id)
+          || (original.completedScheduledDeploymentIds.includes(item.id) && stopped(item))), "RAILWAY_RECOVERY_POLICY_CHANGED");
+      for (const id of original.completedScheduledDeploymentIds) {
+        requireValue(stopped(current.deployments.find(item => item.id === id)), "RAILWAY_RECOVERY_SCHEDULED_WORK_RESTARTED");
+      }
+      if (running) for (const id of original.activeDeploymentIds) {
+        const item = current.deployments.find(value => value.id === id);
+        requireValue(item && !item.deploymentStopped && item.status === "SUCCESS" && item.instances.length > 0
+          && item.instances.every(instance => instance.status === "RUNNING")
+          && current.activeDeployments.some(value => value.id === id), "RAILWAY_RECOVERY_RUNTIME_UNPROVEN");
+      }
+      if (restored) requireValue(current.cronSchedule === original.cron.effective
+        && (original.cron.effective === null ? current.nextCronRunAt === null : current.nextCronRunAt !== null), "RAILWAY_RECOVERY_CRON_UNPROVEN");
+    }
+    return { complete: true, baselineSha256: digest(baseline), snapshotSha256: digest(snapshot) };
+  }
+  async restartBaselineWriters(baseline, { stagedPatchSha256 = null } = {}) {
+    await this.assertRecoveryBaseline(baseline, { stagedPatchSha256 });
+    for (const service of baseline.services) for (const deploymentId of service.activeDeploymentIds) {
+      const input = { binding: this.#binding, serviceId: service.serviceId, deploymentId,
+        sourceLinkSha256: service.sourceLinkSha256 };
+      const verify = async () => {
+        await this.assertRecoveryBaseline(baseline, { stagedPatchSha256 });
+        const item = await this.#readDeployment(deploymentId, service.serviceId);
+        const complete = !item.deploymentStopped && item.status === "SUCCESS" && item.instances.length > 0
+          && item.instances.every(instance => instance.status === "RUNNING");
+        return { complete, evidence: { deployment: item, baselineSha256: digest(baseline) } };
+      };
+      await this.#operation("RAILWAY_RESTART_SOURCE_DEPLOYMENT", input, async () => {
+        if ((await verify()).complete) return;
+        requireValue(stopped(await this.#readDeployment(deploymentId, service.serviceId)), "RAILWAY_RESTART_STATE_UNPROVEN");
+        await this.#request("mutation RecoverRestart($id:String!) { deploymentRestart(id:$id) }", { id: deploymentId });
+      }, verify);
+    }
+    return this.assertRecoveryBaseline(baseline, { running: true, stagedPatchSha256 });
+  }
+  async restoreBaselineTriggers(baseline, { readIntent, recorded = [] } = {}) {
+    const patch = { services: Object.fromEntries(baseline.services.map(service => [service.serviceId, {
+      ...(service.sourceKind === "image" || service.config.source?.autoUpdates !== undefined
+        ? { source: { autoUpdates: service.config.source?.autoUpdates ?? null } } : {}),
+      deploy: { cronSchedule: service.config.deploy?.cronSchedule ?? null },
+    }])) };
+    const patchSha256 = digest(patch);
+    const links = this.#links();
+    const assertBaseline = () => this.assertRecoveryBaseline(baseline, { running: true, stagedPatchSha256: patchSha256 });
+    await assertBaseline();
+    const stageInput = { binding: this.#binding, patchSha256, links };
+    const stageRecord = recorded.find(item => item.kind === "RAILWAY_STAGE_RECOVERY_TRIGGERS" && digest(item.input) === digest(stageInput));
+    const commitRecord = recorded.find(item => item.kind === "RAILWAY_COMMIT_RECOVERY_TRIGGERS" && item.input.patchSha256 === patchSha256
+      && canonical(item.input.binding) === canonical(this.#binding));
+    const configMatches = async () => {
+      const state = await this.#policyRead();
+      return baseline.services.every(service => {
+        const config = state.environment.config.services[service.serviceId];
+        return (config.deploy?.cronSchedule ?? null) === (service.config.deploy?.cronSchedule ?? null)
+          && canonical(config.source?.autoUpdates ?? null) === canonical(service.config.source?.autoUpdates ?? null);
+      });
+    };
+    const verifyCommit = async () => {
+      await assertBaseline();
+      const snapshot = await this.read();
+      return { complete: snapshot.staged.empty && await configMatches(),
+        evidence: { baselineSha256: digest(baseline), snapshotSha256: digest(snapshot) } };
+    };
+    if (commitRecord) {
+      requireValue(await readIntent(commitRecord.kind, commitRecord.input), "RAILWAY_DURABLE_INTENT_REQUIRED");
+      await this.#operation(commitRecord.kind, commitRecord.input, async () => { throw new RailwaySourceFenceError("RECOVERY_REPLAY_FORBIDDEN"); }, verifyCommit);
+    } else if (!await configMatches() || !(await this.read()).staged.empty || stageRecord) {
+      const verifyStage = async () => {
+        await assertBaseline();
+        const staged = (await this.#environment()).staged;
+        return { complete: staged.status === "STAGED" && digest(staged.patch) === patchSha256,
+          evidence: { stagedPatchId: staged.id, patchSha256 } };
+      };
+      if (stageRecord) requireValue(await readIntent(stageRecord.kind, stageRecord.input), "RAILWAY_DURABLE_INTENT_REQUIRED");
+      await this.#operation("RAILWAY_STAGE_RECOVERY_TRIGGERS", stageInput, async () => {
+        await assertBaseline();
+        requireValue((await this.read()).staged.empty, "PREEXISTING_RAILWAY_STAGING");
+        await this.#request(MUTATIONS.stage, { environmentId: this.#binding.environmentId, input: patch });
+      }, verifyStage);
+      const stagedPatchId = (await verifyStage()).evidence.stagedPatchId;
+      const input = { binding: this.#binding, patchSha256, links, stagedPatchId, skipDeploys: true };
+      await this.#operation("RAILWAY_COMMIT_RECOVERY_TRIGGERS", input, async () => {
+        await assertBaseline();
+        const staged = (await this.#environment()).staged;
+        requireValue(staged.id === stagedPatchId && staged.status === "STAGED" && digest(staged.patch) === patchSha256, "RAILWAY_STAGED_PATCH_CHANGED");
+        await this.#request(MUTATIONS.commit, { environmentId: this.#binding.environmentId });
+      }, verifyCommit);
+    }
+    for (const service of baseline.services) {
+      const input = { projectId: this.#binding.projectId, environmentId: this.#binding.environmentId,
+        serviceId: service.serviceId, enabled: service.autoDeployEnabled, sourceLinkSha256: service.sourceLinkSha256 };
+      const verify = async () => {
+        await assertBaseline();
+        const snapshot = await this.read();
+        const enabled = snapshot.services.find(item => item.serviceId === service.serviceId).autoDeployEnabled;
+        return { complete: enabled === service.autoDeployEnabled, evidence: { serviceId: service.serviceId, enabled } };
+      };
+      await this.#operation("RAILWAY_RESTORE_AUTODEPLOY", input, async () => {
+        if ((await verify()).complete) return;
+        await this.#request(MUTATIONS.autoDeploy, { input: { projectId: input.projectId,
+          environmentId: input.environmentId, serviceId: input.serviceId, enabled: input.enabled } });
+      }, verify);
+    }
+    return this.assertRecoveryBaseline(baseline, { running: true, restored: true });
+  }
   async #operation(kind, input, apply, verify) {
     let dispatched = false;
     try {

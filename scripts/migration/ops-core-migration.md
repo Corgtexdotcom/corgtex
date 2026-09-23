@@ -36,13 +36,31 @@ symlinks. Credentials are separate from the retained plan:
 `sourceConfig`, `readerConfig`, `targetAdminConfig`, `objectSource`, `redisSource`
 and optional `railwayToken`. PostgreSQL objects use the existing rehearsal config
 shape; the Azure connection requires verified TLS. Keep artifacts in a private,
-ignored directory.
+ignored directory. Before fencing, retain the exact original source PostgreSQL
+password in the independent custody vault and bind its immutable version as
+`source.postgres.originalSecretVersion`. Keep `retainedSecretVersion` as the
+separate rotated recovery credential. Admission verifies both references and
+actual source admin/reader access; passwords never enter the retained plan.
+
+Bind `source.health` to the Railway project/environment and exactly one web and
+one worker service. Each service declares its role, service/deployment IDs,
+loopback port and expected `release` (`gitSha`, `imageTag`, `version`). Before fencing,
+the operator retains health proof from the exact running instances via read-only
+Railway SSH, including their baked build SHA/role. Older health endpoints may lack
+baked runtime metadata; the separate build file supplies that identity evidence.
+Recovery checks the same deployments/releases, healthy web database
+and schema, and worker readiness before restoring triggers and completing.
+Completed scheduled deployments remain stopped; recovery never replays them.
+An effective cron schedule must have a matching explicit configured override.
+File-only schedules are rejected before fencing because removing an override to
+restore inherited behavior is not supported by this operator.
 
 ## Execute one domain
 
 ```sh
 npx tsx scripts/migration/run-ops-core-migration.mjs initialize /private/plan.json
 npx tsx scripts/migration/run-ops-core-migration.mjs status /private/plan.json
+npx tsx scripts/migration/run-ops-core-migration.mjs preflight /private/plan.json /private/credentials.json
 npx tsx scripts/migration/run-ops-core-migration.mjs fence /private/plan.json /private/credentials.json
 npx tsx scripts/migration/run-ops-core-migration.mjs transfer /private/plan.json /private/credentials.json /private/evidence
 npx tsx scripts/migration/run-ops-core-migration.mjs activate /private/plan.json /private/credentials.json
@@ -52,8 +70,16 @@ npx tsx scripts/migration/run-ops-core-migration.mjs activate /private/plan.json
 interrupted initialization reuses only matching retained content. Each subsequent
 command acquires that journal's lease and rereads the plan.
 
-`fence` checks prepared target resources and private storage before stopping
-source writers and automatic triggers. It leaves source PostgreSQL running,
+`preflight` checks actual source admin/reader access, target PostgreSQL TLS login,
+identity and restore authority, versioned archive-key access, bounded source
+object inventory/reads, exact prepared probe jobs and their Log Analytics query
+access. It retains a private immutable receipt without stopping writers or
+starting a probe job. It is current admission evidence, not final data parity or
+lasting authority. An inherited partial fence uses its own credential-reconciliation
+guards rather than demanding that the already-rotated original password work.
+
+`fence` repeats dependency admission and retains original deployment and trigger
+baselines before stopping source writers. It leaves source PostgreSQL running,
 rotates the runtime credential to its retained recovery version, terminates old
 runtime sessions and verifies reader/recovery access.
 
@@ -92,6 +118,27 @@ replayed. Production migration markers never authorize the legacy rehearsal
 cleanup command, including after reconciliation or promotion. Activation reconstructs its exact retained app definitions and checks
 fresh revisions, replicas, health and PostgreSQL access closure. Explicit resume
 can create a remaining app only when no intent for that creation exists.
+
+A completed `TARGET_ACTIVE` reconciliation validates the retained phase plan,
+provider receipts and completion lineage and returns historical evidence without
+provider calls. It makes no fresh-health claim.
+
+Before the recorded target-write boundary, an interrupted transfer can explicitly
+recover service on the retained source:
+
+```sh
+npx tsx scripts/migration/run-ops-core-migration.mjs recover-source /private/plan.json /private/credentials.json
+npx tsx scripts/migration/run-ops-core-migration.mjs reconcile-source-recovery /private/plan.json /private/credentials.json
+```
+
+Recovery proves Azure apps inactive, settles owned source-fence effects, restores
+the retained original credential and exact writer/trigger baselines, and records
+terminal `SOURCE_RECOVERED` while preserving interrupted transfer history and
+target evidence. `recover-source` may explicitly continue unattempted recovery
+effects; inherited ambiguous intents only reconcile. `reconcile-source-recovery`
+never starts a new effect. Missing baseline or unknown provider ownership blocks
+recovery. The terminal cutover cannot later activate Azure; do not reset it or
+delete retained databases/archives to reuse the old migration identity.
 
 After the recorded target-write boundary, recover forward on Azure; the retained
 source is no longer a safe automatic routing fallback. Do not reset journals or
