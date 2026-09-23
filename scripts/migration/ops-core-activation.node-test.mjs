@@ -22,6 +22,7 @@ function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
     managedIdentityClientId: "00000000-0000-4000-8000-000000000002", runtimeVaultUri: "https://fixture.vault.azure.net/",
     acrServer: "fixtureacr.azurecr.io", release, roles: Object.fromEntries(["web", "worker"].map(role => [role, {
       image: `fixtureacr.azurecr.io/corgtex/${role}@sha256:${"b".repeat(64)}`,
+      resources: { cpu: 0.5, memory: "1Gi" },
       env: [{ name: "DATABASE_URL", secretRef: "db" }, { name: "REDIS_URL", secretRef: "redis" }],
       secrets: ["db", "redis"].map(name => ({ name, keyVaultUrl: `https://fixture.vault.azure.net/secrets/${name}/${"c".repeat(32)}`, identity })),
     }])) };
@@ -148,6 +149,32 @@ test("bootstrap records write boundary then verifies web before worker, fresh fi
   assert.equal(JSON.stringify(result).includes("fixture"), false);
   await rejects(activation.activate(), "ACTIVATION_ALREADY_ATTEMPTED");
 });
+
+for (const [cpu, memory, ephemeralStorage] of [[0.25, "0.5Gi", "1Gi"], [0.5, "1Gi", "2Gi"],
+  [0.75, "1.5Gi", "4Gi"], [1, "2Gi", "4Gi"], [1.25, "2.5Gi", "8Gi"], [4, "8Gi", "8Gi"]]) {
+  test(`activation preserves independent role allocations at ${cpu} vCPU`, async () => {
+    const f = fixture({ mutatePlan(p) { p.roles.web.resources = { cpu, memory }; } });
+    await createOpsCoreActivation(f.options).activate();
+    assert.deepEqual(f.map.get(f.appId("web")).body.properties.template.containers[0].resources,
+      { cpu, memory, ephemeralStorage });
+    assert.deepEqual(f.map.get(f.appId("worker")).body.properties.template.containers[0].resources,
+      { cpu: 0.5, memory: "1Gi", ephemeralStorage: "2Gi" });
+  });
+}
+
+for (const [name, resources] of [["missing", undefined], ["mismatched memory", { cpu: 1, memory: "1Gi" }],
+  ["string CPU", { cpu: "1", memory: "2Gi" }], ["zero CPU", { cpu: 0, memory: "0Gi" }],
+  ["fractional step", { cpu: 0.6, memory: "1.2Gi" }], ["oversized", { cpu: 4.25, memory: "8.5Gi" }],
+  ["nonfinite", { cpu: Infinity, memory: "InfinityGi" }],
+  ["storage override", { cpu: 1, memory: "2Gi", ephemeralStorage: "100Gi" }]]) {
+  test(`invalid ${name} resources fail before custody or provider effects`, () => {
+    const f = fixture({ mutatePlan(p) { p.roles.worker.resources = resources; } });
+    assert.throws(() => createOpsCoreActivation(f.options), error => opsCoreActivationDiagnostic(error) === "ACTIVATION_RESOURCES_INVALID");
+    assert.deepEqual(f.log, []);
+    assert.equal(f.records.size, 0);
+    assert.equal(f.journal.destinationMayHaveWritten, false);
+  });
+}
 
 for (const [name, mutatePlan] of [
   ["unversioned secret", p => { p.roles.web.secrets[0].keyVaultUrl = "https://fixture.vault.azure.net/secrets/db"; }],
@@ -292,6 +319,8 @@ for (const [name, mutateRead] of [
   ["nondefault probe threshold", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.containers[0].probes[0].successThreshold = 2; }],
   ["command drift", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.containers[0].command = ["other"]; }],
   ["scale drift", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.scale.maxReplicas = 2; }],
+  ["app resource drift", (q, r) => { if (r.body?.properties?.template) r.body.properties.template.containers[0].resources.memory = "2Gi"; }],
+  ["revision resource drift", (q, r) => { if (q.resourceId.endsWith("/revisions")) for (const revision of r.body?.value ?? []) revision.properties.template.containers[0].resources.cpu = 1; }],
 ]) test(`${name} stops activation before worker`, async () => {
   const f = fixture({ mutateRead }); await assert.rejects(createOpsCoreActivation(f.options).activate());
   assert.equal(f.log.includes("put:worker"), false);
@@ -325,6 +354,15 @@ test("lost web acknowledgement reconciles without PUT and exposes only unattempt
   await createOpsCoreActivation(f.options).resume();
   assert.equal(f.journal.phase, "TARGET_ACTIVE");
   assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
+});
+
+test("changing allocation after an uncertain write cannot resume with a new plan", async () => {
+  const f = fixture({ put() { throw Error("lost acknowledgement"); } });
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  f.plan.roles.web.resources = { cpu: 1, memory: "2Gi" };
+  await assert.rejects(createOpsCoreActivation(f.options).reconcile());
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web"]);
+  assert.equal(f.journal.pending.to, "TARGET_ACTIVATING");
 });
 test("inherited app intent with absent target never replays its PUT", async () => {
   const f = fixture({ put() { throw Error("lost acknowledgement"); } });

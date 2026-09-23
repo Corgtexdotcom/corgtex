@@ -31,6 +31,20 @@ binds expected Azure subscription/tenant/principal, independent custody/archive
 containers, target object container and exact Railway source bucket. Runtime
 storage and custody/archive storage use different accounts.
 
+Declare `activation.roles.web.resources` and `activation.roles.worker.resources`
+independently, for example `{ "cpu": 1, "memory": "2Gi" }`. There is no implicit
+allocation: plans missing resources are rejected before effects. Use numeric CPU
+from 0.25 through 4 in quarter-core steps and matching memory at twice that value
+in GiB (canonical strings such as `"1Gi"`, `"1.5Gi"` or `"2Gi"`). These are the
+[Consumption CPU/memory pairs](https://learn.microsoft.com/en-us/azure/container-apps/containers#vcpu-and-memory-allocation-requirements).
+Activation derives [ephemeral storage](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts#ephemeral-storage)
+from CPU and binds the selected resources into the plan hash and exact revision
+readback. Price and qualify startup, migration and representative concurrent work
+at the selected allocation before cutover; quiet average usage is insufficient.
+Adding resources changes the frozen plan: prepare it before custody initialization,
+never rewrite an in-flight plan to bypass reconciliation. This does not resize an
+existing app or prove workload capacity.
+
 Keep plan and credential JSON files owned by the operator with mode0600 and no
 symlinks. Credentials are separate from the retained plan:
 `sourceConfig`, `readerConfig`, `targetAdminConfig`, `objectSource`, `redisSource`
