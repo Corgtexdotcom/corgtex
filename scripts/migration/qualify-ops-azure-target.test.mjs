@@ -29,6 +29,62 @@ const setup = () => {
 };
 
 describe("target qualification lifecycle", () => {
+  it("binds B1ms through prepare, execution and cleanup without changing capacity", async () => {
+    const { api, c, events } = setup();
+    api.current.sku = { name: "Standard_B1ms", tier: "Burstable" };
+    const i = await prepare(api, inputs, c);
+    expect(i).toMatchObject({ schemaVersion: "1.1.0", computeSku: "Standard_B1ms", transitionCapUsd: 5 });
+    await qualify(api, i, async () => ({ status: "metadata" }), async () => {}, c);
+    expect(await cleanup(api, i, c)).toMatchObject({ computeSku: "Standard_B1ms", serverStopped: true, firewallAbsent: true });
+    expect(api.current.sku).toEqual({ name: "Standard_B1ms", tier: "Burstable" });
+    expect(events.filter(event => event === "start")).toHaveLength(1);
+  });
+  it("keeps retained legacy intents valid only for the original D2ds target", async () => {
+    const { api, c, events } = setup();
+    const i = await prepare(api, inputs, c);
+    i.schemaVersion = "1.0.0";
+    delete i.computeSku;
+    expect(validateIntent(i, inputs.runId, inputs.runAttempt)).toBe(i);
+    await qualify(api, i, async () => ({}), async () => {}, c);
+    expect((await cleanup(api, i, c)).serverStopped).toBe(true);
+    api.current.sku = { name: "Standard_B1ms", tier: "Burstable" };
+    events.length = 0;
+    await expect(qualify(api, i, async () => ({}), async () => {}, c)).rejects.toThrow("TARGET_DRIFT");
+    expect(events).not.toContain("start");
+  });
+  it("rejects a capacity change between preparation and START", async () => {
+    const { api, c, events } = setup();
+    const i = await prepare(api, inputs, c);
+    api.current.sku = { name: "Standard_B1ms", tier: "Burstable" };
+    await expect(qualify(api, i, async () => ({}), async () => {}, c)).rejects.toThrow("TARGET_DRIFT");
+    expect(events).not.toContain("start");
+  });
+  it("does not stop or remove a firewall after another owner changes capacity", async () => {
+    const { api, c, events } = setup();
+    api.current.sku = { name: "Standard_B1ms", tier: "Burstable" };
+    const i = await prepare(api, inputs, c);
+    await qualify(api, i, async () => ({}), async () => {}, c);
+    api.current.sku = { name: "Standard_D2ds_v5", tier: "GeneralPurpose" };
+    events.length = 0;
+    await expect(cleanup(api, i, c)).rejects.toThrow("TARGET_DRIFT");
+    expect(events).not.toContain("delete");
+    expect(events).not.toContain("stop");
+  });
+  it("rejects unapproved capacity and mismatched tiers", async () => {
+    const { api, c } = setup();
+    api.current.sku = { name: "Standard_B2s", tier: "Burstable" };
+    await expect(prepare(api, inputs, c)).rejects.toThrow("TARGET_COMPUTE_UNSUPPORTED");
+    api.current.sku = { name: "Standard_B1ms", tier: "GeneralPurpose" };
+    await expect(prepare(api, inputs, c)).rejects.toThrow("TARGET_DRIFT");
+  });
+  it("requires the explicit SKU field in new intents and excludes it from legacy intents", async () => {
+    const { api, c } = setup();
+    const i = await prepare(api, inputs, c);
+    expect(() => validateIntent({ ...i, computeSku: "Standard_B2s" }, inputs.runId, inputs.runAttempt)).toThrow();
+    expect(() => validateIntent({ ...i, schemaVersion: "1.0.0" }, inputs.runId, inputs.runAttempt)).toThrow("INTENT_SHAPE");
+    delete i.computeSku;
+    expect(() => validateIntent(i, inputs.runId, inputs.runAttempt)).toThrow("INTENT_SHAPE");
+  });
   it("prepares a one-hour typed intent using reads only", async () => {
     const { api, c, events } = setup(); const i = await prepare(api, inputs, c);
     expect(events).toEqual(["identity", "boundary", "server", "rules"]);

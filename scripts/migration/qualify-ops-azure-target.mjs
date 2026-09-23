@@ -16,6 +16,8 @@ const HOUR = 3600000, RESERVE = 900000;
 const assert = (v, code) => { if (!v) throw new ProbeError(code); };
 const digest = (v) => createHash("sha256").update(v).digest("hex");
 const tags = { authority: "non-authoritative-restore-target", purpose: "railway-to-azure-migration-foundation", managedBy: "github-oidc" };
+const computeTiers = { Standard_D2ds_v5: "GeneralPurpose", Standard_B1ms: "Burstable" };
+export const intentComputeSku = (intent) => intent?.schemaVersion === "1.1.0" ? intent.computeSku : "Standard_D2ds_v5";
 const numeric = (v) => typeof v === "string" && /^[1-9][0-9]{0,19}$/u.test(v);
 const sameKeys = (v, names) => v && Object.keys(v).sort().join() === [...names].sort().join();
 export const firewallName = (run, attempt) => `corgtex-target-qualification-${run}-${attempt}`;
@@ -32,8 +34,9 @@ export function validateEnvironment(env, recovery = false) {
 }
 
 export function validateIntent(i, run, attempt) {
-  assert(sameKeys(i, ["schemaVersion", "kind", "resource", "host", "database", "runId", "runAttempt", "initialState", "firewallName", "ipv4", "createdAt", "deadline", "workDeadline", "transitionCapUsd"]), "INTENT_SHAPE");
-  assert(i.schemaVersion === "1.0.0" && i.kind === "ops-target-qualification" && i.resource === RESOURCE
+  assert(sameKeys(i, ["schemaVersion", "kind", "resource", "host", "database", "runId", "runAttempt", "initialState", "firewallName", "ipv4", "createdAt", "deadline", "workDeadline", "transitionCapUsd", ...(i?.schemaVersion === "1.1.0" ? ["computeSku"] : [])]), "INTENT_SHAPE");
+  assert(["1.0.0", "1.1.0"].includes(i.schemaVersion) && Object.hasOwn(computeTiers, intentComputeSku(i))
+    && i.kind === "ops-target-qualification" && i.resource === RESOURCE
     && i.host === HOST && i.database === "postgres" && i.initialState === "Stopped" && i.transitionCapUsd === 5, "INTENT_TARGET_MISMATCH");
   assert(numeric(run) && numeric(attempt) && i.runId === run && i.runAttempt === attempt
     && i.firewallName === firewallName(run, attempt) && validIp(i.ipv4), "INTENT_OWNER_MISMATCH");
@@ -42,10 +45,11 @@ export function validateIntent(i, run, attempt) {
   return i;
 }
 
-export function validateServer(s, allowUpdating = false) {
+export function validateServer(s, allowUpdating = false, computeSku = "Standard_D2ds_v5") {
+  assert(Object.hasOwn(computeTiers, computeSku), "TARGET_COMPUTE_UNSUPPORTED");
   assert(s?.id?.toLowerCase() === RESOURCE.toLowerCase() && s.name === SERVER && s.fullyQualifiedDomainName === HOST
     && s.administratorLogin === "corgtexadmin" && s.version === "18" && s.location?.replaceAll(" ", "").toLowerCase() === "westus3"
-    && s.sku?.name === "Standard_D2ds_v5" && s.sku?.tier === "GeneralPurpose" && s.storage?.storageSizeGb === 128
+    && s.sku?.name === computeSku && s.sku?.tier === computeTiers[computeSku] && s.storage?.storageSizeGb === 128
     && s.highAvailability?.mode === "Disabled" && s.backup?.backupRetentionDays === 7
     && s.network?.publicNetworkAccess === "Enabled" && !s.network.delegatedSubnetResourceId
     && !s.network.privateDnsZoneArmResourceId && sameKeys(s.tags, Object.keys(tags))
@@ -161,7 +165,7 @@ async function waitState(api, wanted, deadline, c, intent) {
     try {
       let ownedRules;
       if (intent) { await api.identity(); await api.boundary(); ownedRules = validateRules(await api.rules(), intent); }
-      const s = validateServer(await api.server(), Boolean(intent));
+      const s = validateServer(await api.server(), Boolean(intent), intentComputeSku(intent));
       remaining(deadline, c);
       if ([wanted].flat().includes(s.state)) return { ...s, ownedRules };
     } catch (error) {
@@ -181,7 +185,7 @@ async function reconcileFirewall(api, i, c) {
       await api.identity(); await api.boundary();
       const rules = validateRules(await api.rules(), i);
       // Rule creation can start Updating after an earlier Ready read.
-      const s = validateServer(await api.server(), true);
+      const s = validateServer(await api.server(), true, intentComputeSku(i));
       if (c.now() >= i.workDeadline) break;
       if (s.state === "Ready" && rules.length === 1) return;
     } catch (error) {
@@ -197,10 +201,12 @@ async function reconcileFirewall(api, i, c) {
 export async function prepare(api, { runId, runAttempt, ipv4 }, c = clock) {
   assert(numeric(runId) && numeric(runAttempt) && validIp(ipv4), "PREPARE_INPUT_INVALID");
   await api.identity(); await api.boundary();
-  assert(validateServer(await api.server()).state === "Stopped", "TARGET_NOT_STOPPED");
+  const server = await api.server();
+  const computeSku = server?.sku?.name;
+  assert(validateServer(server, false, computeSku).state === "Stopped", "TARGET_NOT_STOPPED");
   assert((await api.rules()).length === 0, "FIREWALL_NOT_ABSENT");
   const createdAt = c.now();
-  return validateIntent({ schemaVersion: "1.0.0", kind: "ops-target-qualification", resource: RESOURCE, host: HOST, database: "postgres",
+  return validateIntent({ schemaVersion: "1.1.0", computeSku, kind: "ops-target-qualification", resource: RESOURCE, host: HOST, database: "postgres",
     runId, runAttempt, initialState: "Stopped", firewallName: firewallName(runId, runAttempt), ipv4,
     createdAt, deadline: createdAt + HOUR, workDeadline: createdAt + HOUR - RESERVE, transitionCapUsd: 5 }, runId, runAttempt);
 }
@@ -210,12 +216,12 @@ export async function qualify(api, i, probe, markAttempt, c = clock) {
   assert(c.now() >= i.createdAt, "INTENT_FROM_FUTURE");
   api.deadline = i.workDeadline;
   await api.identity(); await api.boundary();
-  assert(validateServer(await api.server()).state === "Stopped", "TARGET_NOT_STOPPED");
+  assert(validateServer(await api.server(), false, intentComputeSku(i)).state === "Stopped", "TARGET_NOT_STOPPED");
   validateRules(await api.rules(), i, true);
   remaining(i.workDeadline, c);
   await markAttempt(); // Durable local marker precedes the first possibly ambiguous effect.
   await api.start();
-  await waitState(api, "Ready", i.workDeadline, c);
+  await waitState(api, "Ready", i.workDeadline, c, i);
   remaining(i.workDeadline, c);
   try { await api.createRule(i); }
   catch (error) { if (error.code !== "AZURE_FIREWALL_CREATE_FAILED") throw error; }
@@ -237,7 +243,7 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   const cleanupDeadline = recovery || c.now() >= i.deadline ? c.now() + RESERVE : i.deadline;
   api.deadline = cleanupDeadline;
   await api.identity(); await api.boundary();
-  let observedStopping = validateServer(await api.server(), true).state === "Stopping";
+  let observedStopping = validateServer(await api.server(), true, intentComputeSku(i)).state === "Stopping";
   let ruleObserved = validateRules(await api.rules(), i).length > 0;
   // Updating is admitted only inside this owned execution, never at prepare/start.
   const settled = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
@@ -290,7 +296,7 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   remaining(cleanupDeadline, c);
   return { status: "TARGET_QUALIFICATION_CLEANED", resource: RESOURCE, firewallAbsent: true, serverStopped: true,
     runId: i.runId, runAttempt: i.runAttempt, deadline: i.deadline, withinWindow: c.now() <= i.deadline,
-    transitionCapUsd: i.transitionCapUsd, actualSpend: "PARENT_ACCOUNTING_REQUIRED", productionAccepted: false };
+    transitionCapUsd: i.transitionCapUsd, computeSku: intentComputeSku(i), actualSpend: "PARENT_ACCOUNTING_REQUIRED", productionAccepted: false };
 }
 
 export function readIntent(path) {
