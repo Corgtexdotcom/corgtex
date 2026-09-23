@@ -28,6 +28,7 @@ import {
   compareKnownCheckStructure,
 } from "./postgres-check-structure.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
+import { runRetainedPostgresCopyFixture } from "./ops-core-postgres-copy-fixture.mjs";
 
 const { Client } = pg;
 const SERVER_IMAGE = "pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a";
@@ -1731,7 +1732,9 @@ const main = async () => {
     await targetReadback.query(`DROP DATABASE "${scratchName}" WITH (FORCE)`);
     await targetReadback.end();
 
-    process.stdout.write(`${JSON.stringify({ ok: true, status: "POSTGRES_18_SYNTHETIC_REHEARSAL_VERIFIED" })}\n`);
+    const retainedCopy = await runRetainedPostgresCopyFixture({ root, sourceConfig, targetAdminConfig,
+      sourceAdminConfig: config(sourcePort, "source"), targetLocalConfig: config(targetPort, "postgres"), network });
+    process.stdout.write(`${JSON.stringify({ ok: true, status: "POSTGRES_18_SYNTHETIC_REHEARSAL_VERIFIED", retainedCopy })}\n`);
   } finally {
     if (sourceStarted) await run("docker", ["rm", "--force", sourceContainer], "SOURCE_CONTAINER_CLEANUP_FAILED").catch(() => {});
     if (targetStarted) await run("docker", ["rm", "--force", targetContainer], "TARGET_CONTAINER_CLEANUP_FAILED").catch(() => {});

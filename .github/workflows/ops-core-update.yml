@@ -1,0 +1,66 @@
+name: Ops and Core Azure Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: Accepted Azure domain
+        type: choice
+        options: [core, ops]
+        required: true
+      action:
+        description: Apply once, reconcile an interrupted attempt, or use approved compatible recovery
+        type: choice
+        options: [apply, reconcile, recover]
+        required: true
+      envelope_sha256:
+        description: Canonical SHA256 of the reviewed immutable update envelope in custody storage
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ops-core-release-${{ inputs.domain }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref == 'refs/heads/main'
+    environment: ops-core-release-${{ inputs.domain }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      OPS_CORE_CUSTODY_CONTAINER_URL: ${{ vars.OPS_CORE_CUSTODY_CONTAINER_URL }}
+      UPDATE_DOMAIN: ${{ inputs.domain }}
+      UPDATE_ACTION: ${{ inputs.action }}
+      UPDATE_ENVELOPE_SHA256: ${{ inputs.envelope_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify immutable authority and execute direct Azure update
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          update_dir="$(mktemp -d "$RUNNER_TEMP/ops-core-update.XXXXXX")"
+          trap 'rm -f "$update_dir/envelope.json"; rmdir "$update_dir"' EXIT
+          node scripts/migration/run-ops-core-update.mjs fetch-envelope "$UPDATE_DOMAIN" "$UPDATE_ENVELOPE_SHA256" "$update_dir/envelope.json"
+          node scripts/migration/run-ops-core-update.mjs "$UPDATE_ACTION" "$update_dir/envelope.json"

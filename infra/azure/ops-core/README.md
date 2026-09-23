@@ -1,0 +1,89 @@
+# Ops and Core backing resources
+
+`main.bicep` is a subscription-scope deployment for new backing resources. It creates
+`rg-<prefix>-hosting` and a separate `rg-<prefix>-migration-custody`. It creates no
+Container Apps, app databases, app secrets, DNS cutover, ACR resources or AI services.
+The existing registry is an input/output reference only; later release setup owns AcrPull.
+
+The hosting group contains one new VNet-integrated ACA workload-profile environment
+with a Consumption profile and external-ingress capability, without running apps.
+Its dedicated `/27` subnet is delegated to `Microsoft.App/environments`; a separate
+nondelegated `/27` subnet hosts private endpoints. Check address overlap before the
+first deployment. One workspace/Application Insights pair reuses the existing module.
+
+Each domain gets its own PG18 `Standard_B2s` Flexible Server (32 GiB, storage autogrow,
+14-day backup/PITR retention, no HA), HA `Balanced_B0` Managed Redis (TLS 1.2, encrypted
+port 10000, EnterpriseCluster, NoEviction), identity, runtime Key Vault and object
+storage account. Both database services use private endpoints with VNet-linked DNS.
+Redis public access is disabled; Redis persistence is disabled, so HA is replication,
+not an archive. No `flexibleServers/databases` resource is created: full restore owns
+database names and promotion. Extension allowlisting is also a restore preflight step.
+
+## Access and custody
+
+- Each app identity has Secrets User on its own runtime vault, Blob Data Contributor
+  on its own `objects` container, and Blob Delegator on that storage account. The
+  latter supports the existing storage package's user-delegation download URLs.
+- The supplied GitHub OIDC migration service principal has Secrets Officer on each
+  runtime vault and the custody vault, and container-scoped Blob Data Contributor
+  on target objects and custody containers. It receives no broad RG/subscription role.
+- Custody has its own vault for retained source recovery passwords and archive
+  encryption keys, and its own account with `source-objects` and `postgres-archives`.
+  No domain app identity is passed into custody or granted access to it. Keep runtime
+  secrets in domain vaults and source-recovery/archive secrets in the custody vault.
+- All storage disables shared-key and anonymous access, requires HTTPS/TLS 1.2, and
+  enables versioning and 14-day soft deletion. Vaults use RBAC and purge protection.
+  Vault/Blob HTTPS endpoints remain publicly routable for authenticated GitHub
+  operators and app download URLs; this does not permit anonymous or account-key
+  access. Custody receives no user-delegation role.
+
+No secrets are created, returned, or embedded in examples. Supply separate PostgreSQL
+admin passwords through protected deployment inputs. The example uses references to
+an existing bootstrap vault, which must support ARM secret references; it cannot
+reference the vaults being created in the same initial deployment. These templates
+do not grant ARM access to that existing vault. Do not store populated parameter files.
+
+## Temporary PostgreSQL restore access
+
+Defaults are public access `Disabled` and no firewall rule. Servers use public-access
+networking mode plus Private Link, with no delegated PostgreSQL subnet. For the
+bounded external Node/Docker restore window, set only the selected domain's
+`*PostgresPublicNetworkAccess` to `Enabled` and `*TemporaryRestoreIpv4` to the actual
+runner outbound IPv4. The rule has identical start/end addresses; `0.0.0.0` is
+explicitly excluded because Azure interprets it as Azure-wide access.
+
+Use the server's normal FQDN with TLS `verify-full`. Complete all external database
+work, then explicitly delete the owned `temporary-migration-operator` firewall rule
+and set public access back to `Disabled`. **Incremental ARM deployment does not delete
+a previously created conditional rule just because the parameter is now empty.**
+Require Ready state, public access Disabled, endpoint Approved, successful private
+ACA connectivity and failed new external connectivity before activation. Creating
+backing resources or compiling this template proves none of those live conditions.
+
+## Local validation and handoff
+
+```sh
+az bicep build --file infra/azure/ops-core/main.bicep --stdout > /dev/null
+```
+
+The checked-in example is intentionally not deployable until its identity/resource
+references are resolved. Deployment requires an independently authorized identity
+with resource creation and scoped role-assignment permissions. Outputs identify the
+environment, VNet/subnets/DNS, each domain's identity/vault/storage/PG/Redis endpoints,
+and the separate custody resources. They contain no passwords or Redis keys.
+
+Official schemas checked for this topology:
+
+- [PG18 and network properties, stable 2025-08-01](https://learn.microsoft.com/en-us/azure/templates/microsoft.dbforpostgresql/2025-08-01/flexibleservers)
+- [PostgreSQL public access with private endpoints](https://learn.microsoft.com/en-us/azure/postgresql/network/how-to-networking-servers-deployed-public-access-enable-public-access)
+- [Managed Redis HA/public access, stable 2025-07-01](https://learn.microsoft.com/en-us/azure/templates/microsoft.cache/2025-07-01/redisenterprise)
+- [Redis database TLS/clustering/eviction](https://learn.microsoft.com/en-us/azure/templates/microsoft.cache/2025-07-01/redisenterprise/databases)
+- [Redis Private Link and DNS](https://learn.microsoft.com/en-us/azure/redis/private-link)
+- [Private endpoint resource schema](https://learn.microsoft.com/en-us/azure/templates/microsoft.network/2024-05-01/privateendpoints)
+- [ACA workload-profile networking](https://learn.microsoft.com/en-us/azure/container-apps/custom-virtual-networks)
+
+PG18/B2s appeared in the subscription's westus3 capability readback on 2026-09-22.
+This is not quota, allocation, Redis regional availability or workload acceptance.
+Burstable CPU-credit behavior and 32-GiB storage are deliberate starting assumptions;
+measure restore/runtime demand before production acceptance. Deployment/provisioning,
+private DNS/connectivity, restore, secret transfer and runtime activation remain separate.

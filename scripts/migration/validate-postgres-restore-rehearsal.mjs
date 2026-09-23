@@ -329,9 +329,15 @@ const validateDatabaseTail = (value, side) => {
 const sumRows = (tables) => tables.reduce((sum, table) => sum + table.rowCount, 0);
 const sumStatuses = (statuses) => statuses.reduce((sum, status) => sum + status.count, 0);
 
-export function validatePostgresRestoreRehearsal(document, cleanup) {
+/** Validates only database evidence. Production callers must require frozen source
+ * sequences and separately prove custody, durable recovery and runtime acceptance.
+ */
+export function validatePostgresDatabaseParity(document, { requireFrozenSourceSequences = false } = {}) {
+  if (typeof requireFrozenSourceSequences !== "boolean") fail("INVALID_PARITY_OPTIONS");
   const representation = document?.schemaVersion === "2.0.0";
-  expectExactKeys(document, ["schemaVersion", "domain", "sourceRef", "targetRef", "source", "destination", "archiveSequences", ...(representation ? ["schemaRepresentation"] : [])], "INVALID_DOCUMENT");
+  const frozenSequences = isRecord(document) && Object.hasOwn(document, "frozenSourceSequences");
+  expectExactKeys(document, ["schemaVersion", "domain", "sourceRef", "targetRef", "source", "destination", "archiveSequences",
+    ...(representation ? ["schemaRepresentation"] : []), ...(frozenSequences ? ["frozenSourceSequences"] : [])], "INVALID_DOCUMENT");
   if (!representation && document.schemaVersion !== "1.0.0") fail("SCHEMA_VERSION_MISMATCH");
   if (!new Set(["core", "ops"]).has(document.domain)) fail("INVALID_DOMAIN");
   validateOpaqueRef(document.sourceRef, "INVALID_SOURCE_REF");
@@ -346,6 +352,11 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
     fail("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
   }
   compareExact(beforeReplay, afterReplay, "ARCHIVE_SEQUENCE_REPLAY_MISMATCH");
+  if (requireFrozenSourceSequences && !frozenSequences) fail("FROZEN_SOURCE_SEQUENCES_REQUIRED");
+  if (frozenSequences) {
+    const sourceSequences = validateSequences(document.frozenSourceSequences, "frozen_source");
+    compareExact(sourceSequences, beforeReplay, "SOURCE_ARCHIVE_SEQUENCE_MISMATCH");
+  }
 
   compareExact(source.server, destination.server, "SERVER_VERSION_MISMATCH");
   if (!isCurrentCollationVersion(source.locale)) fail("SOURCE_COLLATION_VERSION_STALE");
@@ -364,20 +375,10 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
     fail("SOURCE_MIGRATIONS_UNHEALTHY");
   }
 
-  expectExactKeys(cleanup, ["scratchDatabase", "firewallRule", "credentials"], "CLEANUP_EVIDENCE_INVALID");
-  expectExactKeys(cleanup.scratchDatabase, ["nameRef", "dropped"], "DATABASE_CLEANUP_EVIDENCE_INVALID");
-  expectExactKeys(cleanup.firewallRule, ["nameRef", "deleted"], "FIREWALL_CLEANUP_EVIDENCE_INVALID");
-  expectExactKeys(cleanup.credentials, ["shredded"], "CREDENTIAL_CLEANUP_EVIDENCE_INVALID");
-  validateOpaqueRef(cleanup.scratchDatabase.nameRef, "DATABASE_CLEANUP_REF_INVALID");
-  validateOpaqueRef(cleanup.firewallRule.nameRef, "FIREWALL_CLEANUP_REF_INVALID");
-  if (cleanup.scratchDatabase.dropped !== true || cleanup.firewallRule.deleted !== true || cleanup.credentials.shredded !== true) {
-    fail("RECOVERY_REQUIRED");
-  }
-
   const evidenceSha256 = sha256(stableJson(document));
   return {
     schemaVersion: "1.0.0",
-    status: "POSTGRES_REHEARSAL_VERIFIED",
+    status: "POSTGRES_DATABASE_PARITY_VERIFIED",
     ...(representation ? { schemaRepresentation: "PG18_ORDERED_AND_V1" } : {}),
     domainRef: `sha256:${sha256(document.domain).slice(0, 16)}`,
     sourceRef: document.sourceRef,
@@ -389,10 +390,28 @@ export function validatePostgresRestoreRehearsal(document, cleanup) {
     eventCount: sumStatuses(source.queues.event.statuses),
     workflowJobCount: sumStatuses(source.queues.workflowJob.statuses),
     evidenceSha256,
-    cleanup: "VERIFIED",
     postgres: "VERIFIED",
+    sourceSequenceParity: frozenSequences ? "VERIFIED" : "UNPROVEN",
     collationVersionStatus: "SOURCE_AND_TARGET_CURRENT",
     crossRuntimeVersionRelation,
+  };
+}
+
+export function validatePostgresRestoreRehearsal(document, cleanup) {
+  const { sourceSequenceParity: _sourceSequenceParity, ...parity } = validatePostgresDatabaseParity(document);
+  expectExactKeys(cleanup, ["scratchDatabase", "firewallRule", "credentials"], "CLEANUP_EVIDENCE_INVALID");
+  expectExactKeys(cleanup.scratchDatabase, ["nameRef", "dropped"], "DATABASE_CLEANUP_EVIDENCE_INVALID");
+  expectExactKeys(cleanup.firewallRule, ["nameRef", "deleted"], "FIREWALL_CLEANUP_EVIDENCE_INVALID");
+  expectExactKeys(cleanup.credentials, ["shredded"], "CREDENTIAL_CLEANUP_EVIDENCE_INVALID");
+  validateOpaqueRef(cleanup.scratchDatabase.nameRef, "DATABASE_CLEANUP_REF_INVALID");
+  validateOpaqueRef(cleanup.firewallRule.nameRef, "FIREWALL_CLEANUP_REF_INVALID");
+  if (cleanup.scratchDatabase.dropped !== true || cleanup.firewallRule.deleted !== true || cleanup.credentials.shredded !== true) {
+    fail("RECOVERY_REQUIRED");
+  }
+  return {
+    ...parity,
+    status: "POSTGRES_REHEARSAL_VERIFIED",
+    cleanup: "VERIFIED",
     redis: "UNPROVEN",
     objects: "UNPROVEN",
     providerCutoverStatus: "PLANNED",
