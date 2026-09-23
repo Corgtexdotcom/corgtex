@@ -337,6 +337,30 @@ describe("agent policy workflow invariants", () => {
     }
   });
 
+  it("scans policy violations beyond the former 1 MiB subprocess output limit", () => {
+    const cwd = initRepository();
+    try {
+      writeFileSync(path.join(cwd, "README.md"), "repository\n");
+      commitAll(cwd, "initialize repository");
+      const base = git(cwd, ["rev-parse", "HEAD"]).trim();
+      const file = path.join(cwd, "scripts/large.sh");
+      mkdirSync(path.dirname(file), { recursive: true });
+      const padding = `# ${"harmless padding ".repeat(64)}\n`.repeat(1200);
+      expect(Buffer.byteLength(padding)).toBeGreaterThan(1024 * 1024);
+      writeFileSync(file, padding);
+      commitAll(cwd, "add large permitted change");
+      const body = "## Outcome\nComplete outcome\n## Risk tier\nlow\n## Acceptance criteria\n- [x] Works\n## Test plan\nRelevant checks passed\n## Risk and rollback\nRevert\n";
+      const env = { BASE: base, BRANCH: "codex/feature", PR_BODY: body, PR_DRAFT: "false" };
+      expect(runPolicy(cwd, "policy", env)).toMatch(/risk policy checks passed/);
+
+      writeFileSync(file, `${padding}${["prisma", "db", "push"].join(" ")}\n`);
+      commitAll(cwd, "add prohibited command beyond old buffer boundary");
+      expect(() => runPolicy(cwd, "policy", env)).toThrow(/forbidden diff pattern/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     [".env", "LOCAL_SETTING=value", /environment file changes/],
     ["scripts/unsafe.sh", ["prisma", "db", "push"].join(" "), /forbidden diff pattern/],

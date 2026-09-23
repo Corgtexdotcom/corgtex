@@ -54,7 +54,7 @@ const PLAN_SECRET_PATTERNS = [
 
 function sh(cmd, options = {}) {
   const stdio = options.quiet ? ["ignore", "pipe", "pipe"] : undefined;
-  return execSync(cmd, { encoding: "utf8", ...(stdio ? { stdio } : {}) }).trim();
+  return execSync(cmd, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, ...(stdio ? { stdio } : {}) }).trim();
 }
 
 function gitDiffAgainstBase(base, diffArgs) {
