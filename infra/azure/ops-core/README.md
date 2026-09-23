@@ -11,7 +11,8 @@ Its dedicated `/27` subnet is delegated to `Microsoft.App/environments`; a separ
 nondelegated `/27` subnet hosts private endpoints. Check address overlap before the
 first deployment. One workspace/Application Insights pair reuses the existing module.
 
-Each domain gets its own PG18 `Standard_B2s` Flexible Server (32 GiB, storage autogrow,
+Each domain gets its own PG18 `Standard_D2ds_v5` General Purpose Flexible Server by
+default (32 GiB, storage autogrow,
 14-day backup/PITR retention, no HA), HA `Balanced_B0` Managed Redis (TLS 1.2, encrypted
 port 10000, EnterpriseCluster, NoEviction), identity, runtime Key Vault and object
 storage account. Both database services use private endpoints with VNet-linked DNS.
@@ -82,8 +83,17 @@ Official schemas checked for this topology:
 - [Private endpoint resource schema](https://learn.microsoft.com/en-us/azure/templates/microsoft.network/2024-05-01/privateendpoints)
 - [ACA workload-profile networking](https://learn.microsoft.com/en-us/azure/container-apps/custom-virtual-networks)
 
-PG18/B2s appeared in the subscription's westus3 capability readback on 2026-09-22.
-This is not quota, allocation, Redis regional availability or workload acceptance.
-Burstable CPU-credit behavior and 32-GiB storage are deliberate starting assumptions;
-measure restore/runtime demand before production acceptance. Deployment/provisioning,
+The `opsPostgresSkuName` and `corePostgresSkuName` parameters select each database
+independently. Both default to `Standard_D2ds_v5`; the template derives the matching
+`GeneralPurpose` tier. The explicit `Standard_B2s` alternative derives `Burstable`
+and requires an accepted production support/CPU-credit tradeoff plus measured
+restore/runtime capacity before use. Choosing a SKU in this template does not
+establish that approval or capacity evidence.
+
+Refresh PG18/SKU and Redis availability, quota and prices in the actual subscription
+and region before provisioning. General Purpose increases the estimate relative to
+the earlier B2s scenario; price the selected configuration, existing retained
+resources and transition overlap together. No monthly-cost fit is implied. Measure
+restore/runtime demand and recovery with the selected tier and 32-GiB storage before
+production acceptance. Deployment/provisioning,
 private DNS/connectivity, restore, secret transfer and runtime activation remain separate.
