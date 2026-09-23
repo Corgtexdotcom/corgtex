@@ -9,6 +9,8 @@
     },
     "migrationOperatorPrincipalId": { "value": "<github-oidc-service-principal-object-id>" },
     "postgresAdministratorLogin": { "value": "corgtexadmin" },
+    "opsPostgresSkuName": { "value": "Standard_D2ds_v5" },
+    "corePostgresSkuName": { "value": "Standard_D2ds_v5" },
     "opsPostgresAdministratorPassword": {
       "reference": {
         "keyVault": {

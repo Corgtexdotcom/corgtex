@@ -15,6 +15,12 @@ param existingAcrResourceId string
 param migrationOperatorPrincipalId string
 
 param postgresAdministratorLogin string = 'corgtexadmin'
+@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+@description('General Purpose by default. B2s requires an explicitly accepted Burstable production exception and measured capacity.')
+param opsPostgresSkuName string = 'Standard_D2ds_v5'
+@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+@description('General Purpose by default. B2s requires an explicitly accepted Burstable production exception and measured capacity.')
+param corePostgresSkuName string = 'Standard_D2ds_v5'
 @secure()
 param opsPostgresAdministratorPassword string
 @secure()
@@ -64,6 +70,8 @@ module hosting './hosting.bicep' = {
     tags: tags
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
     postgresAdministratorLogin: postgresAdministratorLogin
+    opsPostgresSkuName: opsPostgresSkuName
+    corePostgresSkuName: corePostgresSkuName
     opsPostgresAdministratorPassword: opsPostgresAdministratorPassword
     corePostgresAdministratorPassword: corePostgresAdministratorPassword
     opsPostgresPublicNetworkAccess: opsPostgresPublicNetworkAccess

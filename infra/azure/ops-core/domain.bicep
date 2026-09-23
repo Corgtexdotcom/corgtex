@@ -5,6 +5,8 @@ param namePrefix string
 param tags object
 param migrationOperatorPrincipalId string
 param postgresAdministratorLogin string
+@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+param postgresSkuName string
 @secure()
 param postgresAdministratorPassword string
 @allowed(['Disabled', 'Enabled'])
@@ -49,7 +51,10 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   name: '${namePrefix}-pg'
   location: location
   tags: tags
-  sku: { name: 'Standard_B2s', tier: 'Burstable' }
+  sku: {
+    name: postgresSkuName
+    tier: postgresSkuName == 'Standard_B2s' ? 'Burstable' : 'GeneralPurpose'
+  }
   properties: {
     administratorLogin: postgresAdministratorLogin
     administratorLoginPassword: postgresAdministratorPassword

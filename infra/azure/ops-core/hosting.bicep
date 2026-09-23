@@ -5,6 +5,10 @@ param namePrefix string
 param tags object
 param migrationOperatorPrincipalId string
 param postgresAdministratorLogin string
+@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+param opsPostgresSkuName string
+@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+param corePostgresSkuName string
 @secure()
 param opsPostgresAdministratorPassword string
 @secure()
@@ -127,6 +131,7 @@ module opsDomain './domain.bicep' = {
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
     postgresAdministratorLogin: postgresAdministratorLogin
     postgresAdministratorPassword: opsPostgresAdministratorPassword
+    postgresSkuName: opsPostgresSkuName
     postgresPublicNetworkAccess: opsPostgresPublicNetworkAccess
     temporaryRestoreIpv4: opsTemporaryRestoreIpv4
     privateEndpointsSubnetId: privateEndpointsSubnetId
@@ -144,6 +149,7 @@ module coreDomain './domain.bicep' = {
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
     postgresAdministratorLogin: postgresAdministratorLogin
     postgresAdministratorPassword: corePostgresAdministratorPassword
+    postgresSkuName: corePostgresSkuName
     postgresPublicNetworkAccess: corePostgresPublicNetworkAccess
     temporaryRestoreIpv4: coreTemporaryRestoreIpv4
     privateEndpointsSubnetId: privateEndpointsSubnetId
