@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   validatePostgresRestoreRehearsal,
+  validatePostgresDatabaseParity,
   validateRecoveryIntent,
   validateRehearsalPrincipal,
 } from "./validate-postgres-restore-rehearsal.mjs";
@@ -114,6 +115,53 @@ const cleanup = () => ({
   scratchDatabase: { nameRef: "sha256:1111111111111111", dropped: true },
   firewallRule: { nameRef: "sha256:2222222222222222", deleted: true },
   credentials: { shredded: true },
+});
+
+describe("database-only production parity", () => {
+  const frozenEvidence = () => {
+    const value = evidence();
+    return { ...value, frozenSourceSequences: clone(value.archiveSequences.beforeReplay) };
+  };
+
+  it("proves database and source sequence parity without claiming cleanup or cutover", () => {
+    const input = frozenEvidence();
+    const original = clone(input);
+    const result = validatePostgresDatabaseParity(input, { requireFrozenSourceSequences: true });
+    expect(result).toMatchObject({ status: "POSTGRES_DATABASE_PARITY_VERIFIED", postgres: "VERIFIED", sourceSequenceParity: "VERIFIED", sequenceCount: 1 });
+    for (const field of ["cleanup", "cutoverReady", "providerCutoverStatus", "objects", "redis"]) expect(result).not.toHaveProperty(field);
+    expect(input).toEqual(original);
+    const retained = cleanup();
+    retained.scratchDatabase.dropped = false;
+    expect(() => validatePostgresRestoreRehearsal(input, retained)).toThrow("RECOVERY_REQUIRED");
+  });
+
+  it("does not silently promote legacy archive-only sequence checks into frozen source proof", () => {
+    expect(validatePostgresDatabaseParity(evidence()).sourceSequenceParity).toBe("UNPROVEN");
+    expect(() => validatePostgresDatabaseParity(evidence(), { requireFrozenSourceSequences: true })).toThrow("FROZEN_SOURCE_SEQUENCES_REQUIRED");
+  });
+
+  it.each([
+    (input) => { input.frozenSourceSequences[0].lastValue = "43"; },
+    (input) => { input.frozenSourceSequences[0].isCalled = false; },
+    (input) => { input.frozenSourceSequences = []; },
+    (input) => { input.frozenSourceSequences[0].name = "other_seq"; },
+  ])("rejects source/archive sequence drift %#", (mutate) => {
+    const input = frozenEvidence();
+    mutate(input);
+    expect(() => validatePostgresDatabaseParity(input, { requireFrozenSourceSequences: true })).toThrow("SOURCE_ARCHIVE_SEQUENCE_MISMATCH");
+  });
+
+  it("validates provided source evidence even when the caller did not require it", () => {
+    const input = frozenEvidence();
+    input.frozenSourceSequences[0].lastValue = "private malformed value";
+    expect(() => validatePostgresDatabaseParity(input)).toThrow("FROZEN_SOURCE_SEQUENCE_VALUE_INVALID");
+  });
+
+  it("keeps all database parity checks in the reusable validator", () => {
+    const input = frozenEvidence();
+    input.destination.tables[0].rowCount++;
+    expect(() => validatePostgresDatabaseParity(input, { requireFrozenSourceSequences: true })).toThrow("TABLE_PARITY_MISMATCH");
+  });
 });
 
 const principalInput = () => ({

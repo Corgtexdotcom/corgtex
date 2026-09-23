@@ -171,6 +171,10 @@ jobs:
       - name: Test Azure site image release
         run: node --test scripts/azure-site-image-release.node-test.mjs
 
+      - name: Test Ops and Core migration custody, fences and retained restore
+        timeout-minutes: 15
+        run: npm run test:migration:ops-core
+
       - name: Install PostgreSQL capture client
         run: sudo apt-get update -qq && sudo apt-get install -y postgresql-client-16
 

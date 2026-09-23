@@ -93,6 +93,7 @@
     "check:private-boundary": "node scripts/check-private-boundary.mjs",
     "check:migration-fixtures": "node scripts/check-data-migration-fixtures.mjs",
     "test:migration:postgres-smoke": "node scripts/migration/postgres-restore-rehearsal-smoke.mjs",
+    "test:migration:ops-core": "node --test scripts/migration/ops-core-*.node-test.mjs scripts/migration/railway-source-fence.node-test.mjs scripts/migration/railway-postgres-custody.node-test.mjs scripts/migration/run-ops-core-update.node-test.mjs && npm run test:migration:postgres-smoke",
     "check:seed-fixtures": "node scripts/check-seed-fixtures.mjs",
     "meeting-recorder:cleanup": "node scripts/meeting-recorder-cleanup.mjs",
     "knowledge:azure-search": "tsx scripts/azure-knowledge-search.ts",
@@ -115,6 +116,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1138.0",
+    "@azure/keyvault-secrets": "4.11.2",
     "@eslint/eslintrc": "3.3.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.15",

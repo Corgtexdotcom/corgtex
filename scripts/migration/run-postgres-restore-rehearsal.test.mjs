@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   analyzeSchemaDump,
+  assertFrozenSourceSequences,
   buildCreateDatabaseSql,
   buildConstraintSemanticDiagnostic,
   buildLocaleDiagnostic,
@@ -16,6 +17,7 @@ import {
   collectConstraintCatalogManifest,
   collectReboundSourceCheckDetail,
   collectLargeObjects,
+  createRestoreCustodyBoundary,
   inspectLargeObjectAccess,
   isCurrentCollationVersion,
   localeDefinitionMismatchFields,
@@ -23,6 +25,8 @@ import {
   nodeClientConfig,
   parseSourceDatabaseUrl,
   POSTGRES_CLIENT_IMAGE,
+  runBeforeRestoreCheckpoint,
+  runPostgresRestoreRehearsal,
   runTargetCheckReparseDiagnostic,
   SCHEMA_RESTRICT_KEY,
   SCHEMA_TOKEN_ALGORITHM,
@@ -33,6 +37,70 @@ import {
   validateTargetTlsRootCertificate,
   waitForTargetConnection,
 } from "./run-postgres-restore-rehearsal.mjs";
+
+describe("production restore custody checkpoints", () => {
+  const productionOptions = () => ({ productionMode: true, assertCustody: vi.fn(), beforeRestore: vi.fn(), signal: new AbortController().signal });
+
+  it.each(["assertCustody", "beforeRestore", "signal"])("requires %s before runner effects in production mode", async (field) => {
+    const options = productionOptions();
+    delete options[field];
+    // No paths or database configs provided: guards must reject before using them.
+    await expect(runPostgresRestoreRehearsal({ domain: "core", ...options })).rejects.toMatchObject({ code: "PRODUCTION_CUSTODY_REQUIRED" });
+  });
+
+  it("rejects an already-aborted run before any filesystem or database operation", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("private reason"));
+    const options = { ...productionOptions(), signal: controller.signal };
+    await expect(runPostgresRestoreRehearsal({ domain: "core", ...options })).rejects.toMatchObject({ code: "RESTORE_ABORTED" });
+    expect(options.assertCustody).not.toHaveBeenCalled();
+  });
+
+  it("checks abortion again after custody verification and redacts custody failures", async () => {
+    const controller = new AbortController();
+    const boundary = createRestoreCustodyBoundary({ signal: controller.signal,
+      assertCustody: async () => controller.abort() });
+    await expect(boundary("CREATE_SCRATCH_DATABASE")).rejects.toMatchObject({ code: "RESTORE_ABORTED" });
+    const failing = createRestoreCustodyBoundary({ assertCustody: async () => { throw new Error("private custody details"); } });
+    await expect(failing("CREATE_SCRATCH_DATABASE")).rejects.toThrow("RESTORE_CUSTODY_LOST");
+  });
+
+  it("passes cloned frozen evidence and archive identity before restore and rechecks custody afterwards", async () => {
+    const checkpoint = { dumpFile: "/private/snapshot.dump", sourceRef: "sha256:0123456789abcdef", targetRef: "sha256:fedcba9876543210",
+      sourceEvidence: { tables: [{ rowCount: 1 }] }, sourceSequences: [{ lastValue: "42", isCalled: true }] };
+    const seen = [];
+    const original = structuredClone(checkpoint);
+    await runBeforeRestoreCheckpoint({ checkpoint,
+      assertCustody: async (effect) => { seen.push(effect); },
+      beforeRestore: async (copy) => {
+        expect(copy).toEqual(original);
+        seen.push("ARCHIVE_PERSISTED");
+        copy.sourceEvidence.tables[0].rowCount = 999;
+        copy.sourceSequences[0].lastValue = "99";
+        copy.sourceRef = "changed";
+      },
+    });
+    expect(checkpoint).toEqual(original);
+    expect(seen).toEqual(["BEFORE_RESTORE_CHECKPOINT", "ARCHIVE_PERSISTED", "AFTER_RESTORE_CHECKPOINT"]);
+  });
+
+  it("prevents restore if custody is lost while the archive checkpoint is running", async () => {
+    const controller = new AbortController();
+    const checkpoint = vi.fn(async () => { controller.abort(); });
+    const boundary = createRestoreCustodyBoundary({ signal: controller.signal });
+    await expect(runBeforeRestoreCheckpoint({ checkpoint: {}, beforeRestore: checkpoint, assertCustody: boundary }))
+      .rejects.toMatchObject({ code: "RESTORE_ABORTED" });
+    expect(checkpoint).toHaveBeenCalledOnce();
+  });
+
+  it("detects sequence changes which an MVCC snapshot cannot freeze", () => {
+    const source = [{ schema: "public", name: "id_seq", lastValue: "42", isCalled: true }];
+    expect(() => assertFrozenSourceSequences(source, structuredClone(source))).not.toThrow();
+    for (const changed of [[], [{ ...source[0], lastValue: "43" }], [{ ...source[0], isCalled: false }]]) {
+      expect(() => assertFrozenSourceSequences(source, changed)).toThrow("SOURCE_SEQUENCES_CHANGED");
+    }
+  });
+});
 
 const TEST_SOURCE_CA = `-----BEGIN CERTIFICATE-----
 MIIBrjCCAVOgAwIBAgIUGqAOm5MYGReJildG1O4p80Jd3z4wCgYIKoZIzj0EAwIw
@@ -2178,6 +2246,16 @@ describe("PostgreSQL restore rehearsal runner", () => {
           query_timeout: 15_000,
         });
         expect(JSON.stringify(result)).not.toContain("private");
+      });
+
+      it("guards diagnostic DDL and rolls back when custody disappears immediately before ALTER", async () => {
+        const testCase = await fixture();
+        const custody = vi.fn(async () => { throw new Error("private custody failure"); });
+        await expect(testCase.run({ assertCustody: custody })).rejects.toMatchObject({ code: "RESTORE_CUSTODY_LOST" });
+        expect(custody).toHaveBeenCalledWith({ effect: "TARGET_CHECK_REPARSE_DDL" });
+        expect(testCase.commands.some((sql) => sql.startsWith("ALTER TABLE ONLY"))).toBe(false);
+        expect(testCase.commands.at(-1)).toBe("ROLLBACK");
+        expect(testCase.verifier.query).not.toHaveBeenCalled();
       });
 
       it("fails closed before DDL unless event-trigger suppression is verified", async () => {

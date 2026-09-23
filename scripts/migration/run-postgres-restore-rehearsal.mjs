@@ -176,6 +176,7 @@ class RehearsalError extends Error {
 
 const fail = (code) => { throw new RehearsalError(code); };
 const isRehearsalError = (error) => error instanceof RehearsalError || error instanceof SchemaTokenError;
+export const postgresRestoreErrorCode = (error) => isRehearsalError(error) ? error.code : null;
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const opaqueRef = (value) => `sha256:${sha256(value).slice(0, 16)}`;
@@ -981,8 +982,10 @@ const restoreArchiveSections = async ({
   clientFiles,
   network,
   artifactDir,
+  assertCustody = async () => {},
 }) => {
   for (const section of RESTORE_SECTIONS) {
+    await assertCustody(`RESTORE_${section.replaceAll("-", "_").toUpperCase()}`);
     await dockerClient({
       tempDir,
       ...clientFiles,
@@ -1112,7 +1115,7 @@ export const buildLocaleDiagnostic = (source, target = null) => ({
   crossRuntimeVersionRelation: target === null ? "UNAVAILABLE" : classifyCollationVersionRelation(source, target),
 });
 
-const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir }) => {
+const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, assertCustody = async () => {} }) => {
   const createSql = buildCreateDatabaseSql(scratchName, settings);
   const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
   await client.connect();
@@ -1121,6 +1124,7 @@ const createScratchDatabase = async ({ adminConfig, scratchName, settings, state
     const existing = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [scratchName]);
     if (existing.rowCount !== 0) fail("SCRATCH_DATABASE_ALREADY_EXISTS");
     writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "ABSENCE_VERIFIED" });
+    await assertCustody("CREATE_SCRATCH_DATABASE");
     await client.query(createSql);
     writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "CREATED" });
   } finally {
@@ -2385,7 +2389,10 @@ export const runTargetCheckReparseDiagnostic = async ({
   serverVersionRelation,
   createClient = (config) => new Client(config),
   randomBytesFn = randomBytes,
+  assertCustody = null,
+  signal = null,
 }) => {
+  const custodyBoundary = createRestoreCustodyBoundary({ assertCustody, signal });
   if (serverVersionRelation !== "MATCH") {
     return targetCheckReparseResult("NOT_ELIGIBLE", { reason: "SERVER_VERSION_MISMATCH" });
   }
@@ -2470,6 +2477,7 @@ export const runTargetCheckReparseDiagnostic = async ({
   let stage = "CONNECT";
   let result = null;
   let rollbackFailed = false;
+  let custodyFailure = null;
   try {
     client = createClient(nodeClientConfig(targetConfig, "corgtex_rehearsal_target_check_reparse", 30_000, 65_000));
     await client.connect();
@@ -2578,6 +2586,7 @@ export const runTargetCheckReparseDiagnostic = async ({
     let probeOid = null;
     if (result === null) {
       stage = "ADD_PROBE";
+      await custodyBoundary("TARGET_CHECK_REPARSE_DDL");
       probeDdlAttempted = true;
       await client.query(
         `ALTER TABLE ONLY ${quoteIdentifier(identity[1])}.${quoteIdentifier(identity[2])} ADD CONSTRAINT ${quoteIdentifier(probeName)} CHECK (${sourceExpression}) NO INHERIT NOT VALID`,
@@ -2656,7 +2665,8 @@ export const runTargetCheckReparseDiagnostic = async ({
         }
       }
     }
-  } catch {
+  } catch (error) {
+    if (isRehearsalError(error) && ["RESTORE_ABORTED", "RESTORE_CUSTODY_LOST"].includes(error.code)) custodyFailure = error;
     result = targetCheckReparseResult("UNAVAILABLE", { stage });
   } finally {
     if (transactionOpen) {
@@ -2670,6 +2680,7 @@ export const runTargetCheckReparseDiagnostic = async ({
     await client?.end().catch(() => {});
   }
   if (rollbackFailed) fail("TARGET_REPARSE_ROLLBACK_UNPROVEN");
+  if (custodyFailure !== null) throw custodyFailure;
   if (probeDdlAttempted) {
     let verifier;
     try {
@@ -3693,6 +3704,39 @@ const collectDatabaseEvidence = async (client, schemaEvidence, largeObjectIdenti
   };
 };
 
+/** Gates each new effect. An accepted provider operation is awaited normally;
+ * aborting prevents subsequent effects, never claims to undo an in-flight one.
+ */
+export const createRestoreCustodyBoundary = ({ productionMode = false, assertCustody = null, beforeRestore = null, signal = null }) => {
+  if (typeof productionMode !== "boolean") fail("INVALID_PRODUCTION_MODE");
+  if (assertCustody !== null && typeof assertCustody !== "function") fail("INVALID_CUSTODY_CALLBACK");
+  if (beforeRestore !== null && typeof beforeRestore !== "function") fail("INVALID_RESTORE_CHECKPOINT");
+  if (signal !== null && !(signal instanceof AbortSignal)) fail("INVALID_RESTORE_ABORT_SIGNAL");
+  if (productionMode && (assertCustody === null || beforeRestore === null || signal === null)) {
+    fail("PRODUCTION_CUSTODY_REQUIRED");
+  }
+  return async (effect) => {
+    if (signal?.aborted) fail("RESTORE_ABORTED");
+    if (assertCustody !== null) {
+      try { await assertCustody({ effect }); } catch { fail("RESTORE_CUSTODY_LOST"); }
+    }
+    if (signal?.aborted) fail("RESTORE_ABORTED");
+  };
+};
+
+export const assertFrozenSourceSequences = (before, after) => {
+  if (JSON.stringify(before) !== JSON.stringify(after)) fail("SOURCE_SEQUENCES_CHANGED");
+};
+
+/** Callback can retain the archive and evidence; its mutable copy cannot change
+ * the runner's source proof. No archive retention is implied by this callback.
+ */
+export const runBeforeRestoreCheckpoint = async ({ beforeRestore, assertCustody, checkpoint }) => {
+  await assertCustody("BEFORE_RESTORE_CHECKPOINT");
+  if (beforeRestore !== null) await beforeRestore(structuredClone(checkpoint));
+  await assertCustody("AFTER_RESTORE_CHECKPOINT");
+};
+
 export async function runPostgresRestoreRehearsal(options) {
   const {
     domain,
@@ -3705,8 +3749,12 @@ export async function runPostgresRestoreRehearsal(options) {
     dockerNetwork = null,
     afterSnapshot = null,
     afterArchive = null,
+    beforeRestore = null,
+    productionMode = false,
   } = options;
   if (!REQUIRED_DOMAINS.has(domain)) fail("INVALID_DOMAIN");
+  const assertCustody = createRestoreCustodyBoundary(options);
+  await assertCustody("START_RESTORE_REHEARSAL");
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
   mkdirSync(tempDir, { recursive: true, mode: 0o700 });
   const sourceRef = opaqueRef(`${sourceConfig.host}\0${sourceConfig.database}`);
@@ -3768,6 +3816,11 @@ export async function runPostgresRestoreRehearsal(options) {
       sourceBoundChecks.set(entry.key, await captureBoundCheck(sourceClient, entry));
     }
     if (afterSnapshot !== null) await afterSnapshot({ snapshot });
+    let frozenSourceSequences;
+    if (productionMode) {
+      await assertCustody("CAPTURE_FROZEN_SOURCE_SEQUENCES");
+      frozenSourceSequences = await collectSequences(sourceClient);
+    }
 
     await createScratchDatabase({
       adminConfig: targetAdminConfig,
@@ -3776,6 +3829,7 @@ export async function runPostgresRestoreRehearsal(options) {
       stateFile,
       targetRef,
       artifactDir,
+      assertCustody,
     });
     const targetConfig = { ...targetAdminConfig, database: scratchName };
     const clientFiles = writeClientFiles(
@@ -3805,6 +3859,7 @@ export async function runPostgresRestoreRehearsal(options) {
       code: "SOURCE_DUMP_FAILED",
       network: dockerNetwork,
     });
+    chmodSync(dumpFile, 0o600);
     if (afterArchive !== null) await afterArchive();
     await dockerClient({
       tempDir,
@@ -3844,13 +3899,22 @@ export async function runPostgresRestoreRehearsal(options) {
       sourceLargeObjects,
       "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED",
     );
+    if (productionMode) {
+      await assertCustody("VERIFY_FROZEN_SOURCE_SEQUENCES");
+      assertFrozenSourceSequences(frozenSourceSequences, await collectSequences(sourceClient));
+    }
     await sourceClient.query("COMMIT");
     transactionOpen = false;
+    await runBeforeRestoreCheckpoint({ beforeRestore, assertCustody, checkpoint: {
+      dumpFile, sourceRef, targetRef, sourceEvidence,
+      ...(productionMode ? { sourceSequences: frozenSourceSequences } : {}),
+    } });
     await restoreArchiveSections({
       tempDir,
       clientFiles,
       network: dockerNetwork,
       artifactDir,
+      assertCustody,
     });
     await dockerClient({
       tempDir,
@@ -3961,6 +4025,7 @@ export async function runPostgresRestoreRehearsal(options) {
       if (beforeReplay.length !== sequenceSelection.tocEntryCount) fail("ARCHIVE_SEQUENCE_COVERAGE_MISMATCH");
 
       if (sequenceSelection.tocEntryCount > 0) {
+        await assertCustody("REPLAY_ARCHIVE_SEQUENCES");
         await dockerClient({
           tempDir,
           ...clientFiles,
@@ -4019,6 +4084,7 @@ export async function runPostgresRestoreRehearsal(options) {
         queues: destinationEvidence.queues,
       },
       archiveSequences: destinationEvidence.archiveSequences,
+      ...(productionMode ? { frozenSourceSequences } : {}),
     };
     writePrivateJson(`${artifactDir}/postgres-restore-evidence.json`, evidence);
     return { sourceRef, targetRef, evidence };
