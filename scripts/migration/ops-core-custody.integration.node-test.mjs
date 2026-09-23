@@ -100,7 +100,7 @@ test("promotion callbacks retain independent intent and receipt through the actu
   const record = postgresPromotionDurableRecord(intent);
   const stateFile = join(directory, "promotion-state.json");
   writeFileSync(stateFile, JSON.stringify({ schemaVersion: "1.0.0", scratchName: intent.scratchName,
-    targetRef: record.cleanupState.targetRef, phase: "CREATED" }), { mode: 0o600 });
+    targetRef: record.cleanupState.targetRef, phase: "MIGRATION_RETAINED", scratchOid: intent.scratchOid }), { mode: 0o600 });
   const store = azureProviderOperationStore(storage);
   const options = () => ({ custody: owner, store, stateFile, intent,
     assertSourceFenced: async () => {}, assertTargetInactive: async () => {} });

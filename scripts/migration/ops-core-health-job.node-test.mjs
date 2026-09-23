@@ -15,11 +15,12 @@ const revision="fixture-worker--fixture";
 function body(){return{status:"ok",phase:"running",tickCount:3,lastError:null,lastSuccessfulTickAt:new Date().toISOString(),workerId:"PRIVATE_WORKER_ID",
   release:{...release,service:"worker",runtime:{gitSha:release.gitSha,source:"baked",evidence:"baked"},drift:{gitSha:false,version:false,imageTag:false,details:[]}}};}
 const ready={ready:true,phase:"running"};
-async function fixture({releaseMode=false}={}){
+async function fixture({releaseMode=false,acceptancePhase=null}={}){
   const controller=new AbortController(),records=new Map();
   const journal={domain:"core",intentSha256:"d".repeat(64),phase:releaseMode?"RELEASE_PREPARED":"VERIFIED",...(releaseMode?{}:{destinationMayHaveWritten:true}),
     pending:{to:releaseMode?"RELEASING":"TARGET_ACTIVATING",operationId:"00000000-0000-4000-8000-000000000003"},
     ...(releaseMode?{}:{history:[{phase:"SOURCE_FENCED",evidenceSha256:"e".repeat(64)}]})};
+  if(acceptancePhase){journal.phase=({TARGET_ACTIVE:"TARGET_ACTIVATING",ROUTED:"TARGET_ACTIVE",ACCEPTED:"ROUTED"})[acceptancePhase];journal.pending.to=acceptancePhase;}
   const custody={signal:controller.signal,assertOwned:async()=>{},snapshot:()=>structuredClone(journal)};
   const store={assertPrivate:async()=>{},readOptional:async k=>records.get(k)??null,createOnly:async(k,v)=>{assert(!records.has(k));records.set(k,v);}};
   const state={starts:0,requests:[],runs:[],loseStart:false,source:true,authority:true,authorityCalls:[],sourceCalls:0,authorityMutation:null,jobMutation:null,appMutation:null,revMutation:null,logMutation:null,runMutation:null,omitIds:false};
@@ -57,12 +58,12 @@ async function fixture({releaseMode=false}={}){
         rows:[[run.properties.startTime,"fixture-env",run.name+"-replica1","health-probe",p.image,HEALTH_PROBE_PREFIX+JSON.stringify(receipt),p.environmentResourceId]]}]};state.logMutation?.(logs);return response(logs);
     }throw new Error("UNEXPECTED_REQUEST");
   };
-  const opts={plan:p,custody,descriptorStore:store,transport,pollIntervalMs:0,timeoutMs:10000,
+  const opts={...(acceptancePhase?{mode:"acceptance"}:{}),plan:p,custody,descriptorStore:store,transport,pollIntervalMs:0,timeoutMs:10000,
     ...(releaseMode?{mode:"release",releaseContext:{migrationSourceFenceSha256:"e".repeat(64),acceptedMigrationSha256:"f".repeat(64)},
       assertDeploymentAuthority:async request=>{state.authorityCalls.push(structuredClone(request));const result={complete:state.authority,...request};state.authorityMutation?.(result);return result;}}:{}),
     assertSourceFenced:async()=>{state.sourceCalls++;if(releaseMode)throw new Error("LIVE_SOURCE_OBSERVER_MUST_NOT_RUN");
       return{complete:state.source,domain:journal.domain,intentSha256:journal.intentSha256,sourceFenceSha256:journal.history[0].evidenceSha256};}};
-  async function reopen(){const operations=await openProviderOperationRecorder({custody,store,phase:releaseMode?"RELEASING":"TARGET_ACTIVATING",signal:controller.signal});return createHealthJobDispatcher({...opts,operations});}
+  async function reopen(){const operations=await openProviderOperationRecorder({custody,store,phase:releaseMode?"RELEASING":acceptancePhase??"TARGET_ACTIVATING",signal:controller.signal});return createHealthJobDispatcher({...opts,operations});}
   const dispatcher=await reopen();const args={role:"worker",origin:p.worker.origin,release,appId:p.worker.appId,revisionName:revision,invocationContext:releaseMode?"release-worker":"worker-after-create",signal:controller.signal};
   return{controller,records,journal,custody,store,state,job,env,app,rev,opts,reopen,dispatcher,args,run:d=>(d??dispatcher).probeHealth(args)};
 }
@@ -351,4 +352,22 @@ test("release current lease loss fails safely even with positive authority callb
 test("release worker image/metadata plan must match exact precreated private job",async()=>{
   const f=await fixture({releaseMode:true});f.opts.plan=structuredClone(p);f.opts.plan.worker.image=p.worker.image.replace("b".repeat(64),"a".repeat(64));
   await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_TEMPLATE_CHANGED/);assert.equal(f.state.starts,0);
+});
+
+for(const phase of ["TARGET_ACTIVE","ROUTED","ACCEPTED"])test(`acceptance mode probes under actual pending ${phase} custody`,async()=>{
+  const f=await fixture({acceptancePhase:phase});f.args.invocationContext="worker-final";
+  const d=createHealthJobDispatcher({...f.opts,operationStore:f.store});
+  assert.equal((await f.run(d)).health.status,200);assert(f.state.sourceCalls>0);
+  const record=await d.readRetainedStart();assert.equal(record.input.context.mode,"acceptance");assert.equal(record.input.context.phase,phase);
+  const intent=[...f.records.values()].map(JSON.parse).find(r=>r.type==="intent");assert.equal(intent.binding.phase,phase);
+  f.journal.pending.to="ACCEPTED";f.journal.pending.operationId="00000000-0000-4000-8000-000000000004";
+  await assert.rejects(f.run(d),/HEALTH_JOB_CUSTODY_CHANGED/);assert.equal(f.state.starts,1);
+});
+test("default migration mode cannot borrow later acceptance phase",async()=>{
+  const f=await fixture({acceptancePhase:"ROUTED"});const d=createHealthJobDispatcher({...f.opts,mode:"migration",operationStore:f.store});
+  await assert.rejects(d.prepare(),/HEALTH_JOB_INITIALIZATION_FAILED/);assert.equal(f.state.starts,0);
+});
+test("acceptance cannot bypass live source fencing",async()=>{
+  const f=await fixture({acceptancePhase:"ACCEPTED"});f.state.source=false;
+  await assert.rejects(f.run(),/HEALTH_JOB_SOURCE_UNFENCED/);assert.equal(f.state.starts,0);
 });

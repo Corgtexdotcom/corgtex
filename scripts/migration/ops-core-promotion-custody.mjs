@@ -70,7 +70,7 @@ export async function openPostgresPromotionCustody({ custody, store, stateFile, 
   }
   const prefix = `operations/${initial.domain}/${initial.intentSha256}/${initial.pending.operationId}/`;
   const original = { schemaVersion: "1.0.0", scratchName: intent.scratchName,
-    targetRef: expected.cleanupState.targetRef, phase: "CREATED" };
+    targetRef: expected.cleanupState.targetRef, phase: "MIGRATION_RETAINED", scratchOid: intent.scratchOid };
   async function local(action) {
     const file = await open(stateFile, constants.O_RDWR | constants.O_NOFOLLOW);
     try {

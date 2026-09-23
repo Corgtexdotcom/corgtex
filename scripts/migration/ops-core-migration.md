@@ -71,18 +71,68 @@ fence evidence precede `TARGET_ACTIVE`.
 
 ## Recovery and acceptance
 
-An ambiguous effect retains intent and evidence. Source operations reconcile
-recorded effects. Transfer or activation with an inherited pending phase requires
-explicit reconciliation; repeating a command does not replay the effect. Inspect
-the journal, immutable operation records and actual provider state. After the
-recorded target-write boundary, recover forward on Azure; the retained source is
-no longer a safe automatic routing fallback.
+An ambiguous effect retains intent and evidence. Use the explicit reconciliation
+commands; they read actual provider state and seal only proved results. They do
+not repeat database restores, object copies or app creation. Fresh private probe
+jobs may run to observe health or Redis. Unknown or running probe starts must
+settle before another observation can begin.
 
-`TARGET_ACTIVE` is a startup checkpoint. Domain routing/TLS, callback and login
-continuity, named business workflows, backup/recovery and repeatable direct Azure
-updates require separate acceptance. The accepted cutover journal remains intact
-and must not be reset for future releases. Independent QA and normal protected
-delivery precede production execution.
+```sh
+npx tsx scripts/migration/run-ops-core-migration.mjs reconcile-transfer /private/plan.json /private/credentials.json /private/evidence
+npx tsx scripts/migration/run-ops-core-migration.mjs resume-transfer /private/plan.json /private/credentials.json /private/evidence
+npx tsx scripts/migration/run-ops-core-migration.mjs reconcile-activate /private/plan.json /private/credentials.json
+npx tsx scripts/migration/run-ops-core-migration.mjs resume-activate /private/plan.json /private/credentials.json
+```
+
+Capture and restore retain the exact scratch database OID, archive binding and
+parity evidence independently. A completed capture can continue its first restore
+only into the same proven empty scratch database, with no prior restore intent.
+A partial or ambiguous restore stays preserved; it is never overwritten or
+replayed. Production migration markers never authorize the legacy rehearsal
+cleanup command, including after reconciliation or promotion. Activation reconstructs its exact retained app definitions and checks
+fresh revisions, replicas, health and PostgreSQL access closure. Explicit resume
+can create a remaining app only when no intent for that creation exists.
+
+After the recorded target-write boundary, recover forward on Azure; the retained
+source is no longer a safe automatic routing fallback. Do not reset journals or
+use a new operation identity to bypass an unresolved effect.
+
+`TARGET_ACTIVE` is a startup checkpoint. After separately changing DNS and binding
+TLS domains, record routing through the supported operator:
+
+```sh
+npx tsx scripts/migration/run-ops-core-migration.mjs record-routing /private/plan.json /private/credentials.json /private/evidence /private/routing.json
+npx tsx scripts/migration/run-ops-core-migration.mjs retain-acceptance-evidence /private/plan.json /private/credentials.json /private/evidence /private/workflow-receipt.json
+npx tsx scripts/migration/run-ops-core-migration.mjs accept /private/plan.json /private/credentials.json /private/evidence /private/acceptance.json
+```
+
+Routing and acceptance artifacts have `schemaVersion:1`, `phase` (`ROUTED` or
+`ACCEPTED`), `binding`, UTC `issuedAt`/`expiresAt` (at most24 hours apart), and
+`attestations`. The exact binding contains `domain`, `intentSha256`,
+`targetBindingSha256`, `release`, `sourceFenceSha256` and `routes`. Each route has
+`publicOrigin`, `azureOrigin` and `expectedCname`. Core requires both app and MCP
+origins; Ops requires its Ops origin. Azure origins must match the app's freshly
+observed ARM hostname. DNS must directly name that hostname, and public HTTPS
+health must have valid TLS and the exact release. The operator does not edit DNS.
+
+Routing has an empty attestation list. Acceptance requires six named receipt
+references `{kind,name,evidenceSha256}`, one for each of `workflow`, `data`, `jobs`,
+`callbacks`, `backupRecovery` and `updateRecovery`. Retain each complete receipt
+first using `retain-acceptance-evidence`. Its fields are `schemaVersion:1`, the
+same `binding`, `kind`, `name`, UTC `observedAt`, `outcome:"passed"`,
+`attestationType:"operator-reviewed"`, `reviewedBy`, and nonempty `details`
+containing the actual reviewed evidence. The returned canonical hash becomes the
+reference. These are explicit operator-reviewed workflow and recovery receipts;
+this command does not perform those exercises for you.
+
+The exact artifact and referenced receipts are read back from independent storage
+before advancement. Fresh runtime, source-fence and routing proofs precede journal
+completion. Expiry governs initial admission; an already-pending routing/acceptance action
+keeps the exact retained artifact and can reconcile after expiry through fresh
+observations. Repeating that action with the same artifact reconciles it; a lost completion acknowledgement returns historical evidence and
+makes no fresh-health claim. `ACCEPTED` then provides the retained authority used
+by direct updates. Keep that journal intact for future releases. Independent QA
+and normal protected delivery precede production execution.
 
 ## Direct Azure updates
 

@@ -128,6 +128,9 @@ function query(p,run,c){return`ContainerAppConsoleLogs_CL\n| where TimeGenerated
  * migration evidence; SOURCE_FENCED is HISTORICAL provenance, never a claim that
  * Railway is currently observed or fenced. Baseline/release/recovery contexts
  * and exact static worker plans are bound in distinct version-2 challenges.
+ * Explicit mode:'acceptance' supports only real pending TARGET_ACTIVE, ROUTED
+ * or ACCEPTED custody, retaining the live source observer. It uses the unchanged
+ * worker-final probe request; durable slots also bind the exact current phase.
  * Up to ten immutable sequential attempts support activation's repeat checks.
  * A previous exact start intent must reconcile to a terminal execution before
  * another nonce can start; missing/unknown/running state cannot trigger replay.
@@ -137,8 +140,10 @@ function query(p,run,c){return`ContainerAppConsoleLogs_CL\n| where TimeGenerated
 function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertDeploymentAuthority,
   plan:value,custody,assertSourceFenced,descriptorStore,operations,transport,pollIntervalMs=1000,timeoutMs=180000}){
   const p=plan(value),send=transport??createHealthJobTransport(p),initial=custody?.snapshot?.();
-  const releaseMode=mode==="release",phase=releaseMode?"RELEASING":"TARGET_ACTIVATING";
-  need(["migration","release"].includes(mode),"HEALTH_JOB_MODE_INVALID");
+  const releaseMode=mode==="release",acceptanceMode=mode==="acceptance";
+  const phase=releaseMode?"RELEASING":acceptanceMode?initial.pending?.to:"TARGET_ACTIVATING";
+  const expectedPhase=releaseMode?"RELEASE_PREPARED":acceptanceMode?({TARGET_ACTIVE:"TARGET_ACTIVATING",ROUTED:"TARGET_ACTIVE",ACCEPTED:"ROUTED"})[phase]:"VERIFIED";
+  need(["migration","release","acceptance"].includes(mode),"HEALTH_JOB_MODE_INVALID");
   need(!releaseMode||(exact(releaseContext,"migrationSourceFenceSha256,acceptedMigrationSha256")
     &&HASH.test(releaseContext.migrationSourceFenceSha256)&&HASH.test(releaseContext.acceptedMigrationSha256)),"HEALTH_JOB_RELEASE_CONTEXT_INVALID");
   need(custody?.signal instanceof AbortSignal&&[custody.assertOwned,releaseMode?assertDeploymentAuthority:assertSourceFenced,descriptorStore?.assertPrivate,descriptorStore?.readOptional,
@@ -146,9 +151,9 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     &&Number.isInteger(pollIntervalMs)&&pollIntervalMs>=0&&pollIntervalMs<=5000&&Number.isInteger(timeoutMs)&&timeoutMs>0&&timeoutMs<=300000,"HEALTH_JOB_CUSTODY_REQUIRED");
   const context={domain:initial.domain,intentSha256:initial.intentSha256,
     sourceFenceSha256:releaseMode?releaseContext.migrationSourceFenceSha256:initial.history?.find(x=>x.phase==="SOURCE_FENCED")?.evidenceSha256,
-    phaseOperationId:initial.pending?.operationId,...(releaseMode?{mode,acceptedMigrationSha256:releaseContext.acceptedMigrationSha256}:{})};
+    phaseOperationId:initial.pending?.operationId,...(acceptanceMode?{mode,phase}:{}),...(releaseMode?{mode,acceptedMigrationSha256:releaseContext.acceptedMigrationSha256}:{})};
   need(["core","ops"].includes(context.domain)&&HASH.test(context.intentSha256)&&HASH.test(context.sourceFenceSha256)&&GUID.test(context.phaseOperationId)
-    &&initial.phase===(releaseMode?"RELEASE_PREPARED":"VERIFIED")&&initial.pending?.to===phase
+    &&expectedPhase!==undefined&&initial.phase===expectedPhase&&initial.pending?.to===phase
     &&(releaseMode||initial.destinationMayHaveWritten===true),"HEALTH_JOB_PHASE_INVALID");
   const authority=releaseMode?{mode:"release",acceptedMigrationSha256:context.acceptedMigrationSha256,releaseId:context.phaseOperationId,
     targetSha256:hash(p.worker),sourceFenceProvenance:"historical-migration"}:null;
@@ -156,7 +161,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     targetSha256:hash(p.worker),acceptedMigrationSha256:context.acceptedMigrationSha256,migrationSourceFenceSha256:context.sourceFenceSha256}:null;
   const prefix=`operations/${context.domain}/${context.intentSha256}/${context.phaseOperationId}`;let busy=false;
   function snapshotCheck(){const j=custody.snapshot();need(j.domain===context.domain&&j.intentSha256===context.intentSha256
-    &&j.phase===(releaseMode?"RELEASE_PREPARED":"VERIFIED")&&j.pending?.to===phase&&j.pending?.operationId===context.phaseOperationId
+    &&j.phase===expectedPhase&&j.pending?.to===phase&&j.pending?.operationId===context.phaseOperationId
     &&(releaseMode||(j.destinationMayHaveWritten===true&&j.history?.find(x=>x.phase==="SOURCE_FENCED")?.evidenceSha256===context.sourceFenceSha256)),"HEALTH_JOB_CUSTODY_CHANGED");}
   async function check(signal){need(!signal.aborted&&!custody.signal.aborted,"HEALTH_JOB_ABORTED");await custody.assertOwned();snapshotCheck();
     if(releaseMode){
@@ -279,13 +284,13 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
  * to its own expected release; baseline health is never promoted to forward proof.
  */
 export function createHealthJobDispatcher(options) {
-  const p=plan(options.plan),mode=options.mode??"migration";need(["migration","release"].includes(mode),"HEALTH_JOB_MODE_INVALID");
+  const p=plan(options.plan),mode=options.mode??"migration";need(["migration","release","acceptance"].includes(mode),"HEALTH_JOB_MODE_INVALID");
   let bound=null;let opening=null;
   const get=async()=>{
     if(bound)return bound;
     if(!opening)opening=(async()=>{
       const operationStore=options.operationStore??options.descriptorStore;
-      const operations=options.operations??await openProviderOperationRecorder({custody:options.custody,store:operationStore,phase:mode==="release"?"RELEASING":"TARGET_ACTIVATING",signal:options.custody.signal});
+      const operations=options.operations??await openProviderOperationRecorder({custody:options.custody,store:operationStore,phase:mode==="release"?"RELEASING":mode==="acceptance"?options.custody.snapshot().pending?.to:"TARGET_ACTIVATING",signal:options.custody.signal});
       bound=createBoundHealthJobDispatcher({...options,plan:p,descriptorStore:operationStore,operations});return bound;
     })();
     try{return await opening;}catch{opening=null;throw new HealthJobError("HEALTH_JOB_INITIALIZATION_FAILED");}

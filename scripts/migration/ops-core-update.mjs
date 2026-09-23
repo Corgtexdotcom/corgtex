@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
-import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { createAzureTargetArmTransport, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { createManagedAzureContainerAppTransport, buildManagedAzureReleaseTemplate,
-  managedAzureTemplateDigest } from "../release/managed-azure-container-app-transport.mjs";
+  managedAzureTemplateDigest, managedAzureConfigurationDigest, canonicalizeManagedAzureContainerAppState } from "../release/managed-azure-container-app-transport.mjs";
 import { snapshotManagedAzureExclusiveActivation } from "../release/managed-azure-exclusive-activation.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 import { projectWorkerHealth, validateHealthChallenge } from "./ops-core-health-probe.mjs";
@@ -87,8 +87,9 @@ export async function fetchOpsCoreUpdateWebHealth({ origin, signal }, fetchImpl 
 export async function runOpsCoreUpdate({ plan: input, custody, operationStore: store, action = "apply",
   assertDeploymentAuthority, prepareHealth, workerHealth,
   webHealth = fetchOpsCoreUpdateWebHealth, assertImages = assertOpsCoreUpdateImages,
-  transport = createManagedAzureContainerAppTransport() }) {
+  transport = createManagedAzureContainerAppTransport(), armTransport }) {
   const p = validateOpsCoreUpdatePlan(input), target = opsCoreUpdateTransportTarget(p);
+  const arm = armTransport ?? createAzureTargetArmTransport({ subscriptionId: p.target.subscriptionId });
   need(["apply", "reconcile", "recover"].includes(action) && custody?.signal instanceof AbortSignal
     && [assertDeploymentAuthority, prepareHealth, workerHealth].every(fn => typeof fn === "function"), "UPDATE_CALLBACK_REQUIRED");
   const binding = { domain: p.domain, intentSha256: hash(p), releaseId: p.releaseId,
@@ -243,10 +244,40 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       && Array.isArray(release.drift.details) && release.drift.details.length === 0, "UPDATE_WEB_HEALTH_UNPROVEN");
     return body;
   }
+  async function assertWebOrigin(phase) {
+    await authority();
+    const appId = `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.web}`;
+    const response = await arm({ resourceId: appId, apiVersion: "2024-03-01", signal: custody.signal });
+    await authority();
+    const app = response?.body, properties = app?.properties, configuration = properties?.configuration;
+    const sameId = (a, b) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
+    need(response?.status === 200 && sameId(app?.id, appId)
+      && sameId(app?.type, "Microsoft.App/containerApps") && sameId(app?.name, p.target.apps.web)
+      && sameId(properties?.environmentId ?? properties?.managedEnvironmentId, p.target.environmentId)
+      && properties?.provisioningState === "Succeeded" && configuration?.ingress?.external === true
+      && `https://${configuration.ingress.fqdn}` === p.origins.web,
+    "UPDATE_WEB_ORIGIN_UNPROVEN");
+    need(managedAzureConfigurationDigest(configuration) === ownership.configurationDigests.web,
+      "UPDATE_WEB_ORIGIN_UNPROVEN");
+    if (phase) {
+      const expected = phase === "baseline" ? snapshot.baselines.web : candidates[phase].web;
+      const state = canonicalizeManagedAzureContainerAppState(app, { ...inputFor("web"),
+        release: p[phase].release, imageDigest: p[phase].images.web.split("@")[1] });
+      need(configuration.activeRevisionsMode === "Single" && state.revisionName === expected.revisionName
+        && state.templateDigest === managedAzureTemplateDigest(expected.template), "UPDATE_WEB_ORIGIN_UNPROVEN");
+    }
+  }
+  async function boundWebHealth(phase) {
+    // The plan's hostname syntax is not target evidence. Bind the exact live
+    // app and environment on both sides of each HTTP observation.
+    await assertWebOrigin(phase);
+    const response = await webHealth({ origin: p.origins.web, release: p[phase].release, signal: custody.signal });
+    await assertWebOrigin(phase);
+    return validateWeb(response, phase);
+  }
   async function health(phase, context, revisions) {
     await authority();
-    const web = await webHealth({ origin: p.origins.web, release: p[phase].release, signal: custody.signal });
-    const body = validateWeb(web, phase);
+    const body = await boundWebHealth(phase);
     const worker = await workerHealth({ phase, invocationContext: context, revisionName: revisions.worker,
       release: p[phase].release, origin: p.origins.worker, signal: custody.signal });
     need(worker?.health?.status === 200 && worker.ready?.status === 200 && worker.evidence?.mode === "release"
@@ -297,6 +328,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   need(!decision || action !== "apply", "UPDATE_RECOVERY_ALREADY_STARTED");
   const phase = action === "recover" || decision ? "recovery" : "incoming";
   if (action !== "reconcile") {
+    await assertWebOrigin();
     await authority();
     const images = await assertImages(p, custody.signal);
     need(images?.complete === true && images.imagesSha256 === hash({ incoming: p.incoming.images, recovery: p.recovery.images }), "UPDATE_IMAGE_UNPROVEN");
@@ -369,7 +401,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         } else {
           await selected(phase, "web");
           need(pair.web.mode === "Single", "UPDATE_WEB_HEALTH_UNPROVEN");
-          validateWeb(await webHealth({ origin: p.origins.web, release: p[phase].release, signal: custody.signal }), phase);
+          await boundWebHealth(phase);
           await authority();
           await selected(phase, "web");
           const afterHealth = await inspect();
@@ -386,8 +418,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         () => transport.setRevisionMode({ ...inputFor(role), mode: "Single", onProgress: authority }),
         async () => { const s = (await inspect())[role]; return { complete: s.mode === "Single", evidence: s }; });
       if (role === "web") {
-        const response = await webHealth({ origin: p.origins.web, release: p[phase].release, signal: custody.signal });
-        validateWeb(response, phase);
+        await boundWebHealth(phase);
         await authority();
       }
     }

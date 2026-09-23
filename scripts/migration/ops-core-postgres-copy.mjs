@@ -1,8 +1,10 @@
 import { mkdtemp, mkdir, lstat, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { postgresRestoreErrorCode, runPostgresRestoreRehearsal } from "./run-postgres-restore-rehearsal.mjs";
+import { postgresRestoreErrorCode, runPostgresRestoreRehearsal, restoreRetainedPostgresArchive } from "./run-postgres-restore-rehearsal.mjs";
 import { validatePostgresDatabaseParity } from "./validate-postgres-restore-rehearsal.mjs";
 import { archiveEvidenceHash, postgresArchiveDiagnostic, recoverPostgresArchive, retainPostgresArchive, validateArchiveKeyVersion } from "./ops-core-archive.mjs";
+import { postgresCopyCaptureIntent, postgresCopyRestoreIntent, postgresCopyRecordKey, retainPostgresCopyRecord,
+  prepareRetainedPostgresCopy, reconcileOpsCorePostgresCopy, retainPostgresCopyParity } from "./ops-core-postgres-reconcile.mjs";
 
 class PostgresCopyError extends Error {
   constructor(code) { super(code); this.code = code; Object.freeze(this); }
@@ -26,7 +28,7 @@ export function postgresCopyDiagnostic(error, stage) {
 export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSource, targetAdminConfig: suppliedTarget,
   expectedSource, expectedTarget, scratchName, artifactDir, dockerNetwork = null,
   custody, assertSourceFenced, assertTargetInactive, archiveStore, keyVersion, vaultName, maxArchiveBytes,
-  resolveKey }) {
+  resolveKey, operationStore }) {
   const sourceConfig = structuredClone(suppliedSource);
   const targetAdminConfig = structuredClone(suppliedTarget);
   const initial = custody.snapshot();
@@ -35,7 +37,8 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
     || (sourceConfig.host === targetAdminConfig.host && sourceConfig.port === targetAdminConfig.port)
     || !/^corgtex_rehearsal_[a-z0-9_]+$/.test(scratchName) || scratchName.length > 63
     || targetAdminConfig.database !== "postgres" || typeof assertSourceFenced !== "function"
-    || typeof assertTargetInactive !== "function" || !Number.isSafeInteger(maxArchiveBytes) || maxArchiveBytes < 1) {
+    || typeof assertTargetInactive !== "function" || !Number.isSafeInteger(maxArchiveBytes) || maxArchiveBytes < 1
+    || !operationStore || typeof operationStore.createOnly !== "function" || typeof operationStore.readOptional !== "function") {
     fail("POSTGRES_COPY_INTENT_INVALID");
   }
   validateArchiveKeyVersion(keyVersion, vaultName);
@@ -48,8 +51,8 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
     signal.throwIfAborted();
   };
   await assertCustody();
-  const captureIntent = { domain, source: expectedSource, target: expectedTarget, scratchName,
-    archiveStoreId: archiveStore.identity, keyVersion, maxArchiveBytes };
+  const copyOptions = { domain, expectedSource, expectedTarget, scratchName, archiveStore, keyVersion, maxArchiveBytes, operationStore, custody };
+  const captureIntent = postgresCopyCaptureIntent(copyOptions);
   const capture = await custody.begin("CAPTURED", archiveEvidenceHash(captureIntent));
   // All private files are operation-specific. Never reuse a previous interrupted
   // invocation's working directory or cleanup state as fresh ownership evidence.
@@ -60,6 +63,7 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
   await mkdir(tempDir, { mode: 0o700 });
   await writeEvidence(join(operationDir, "copy-intent.json"), { capture, intent: captureIntent });
   let retainedArchive;
+  let checkpoint;
   let restore;
   let stage = "CAPTURE";
   let checkpointDiagnostic;
@@ -67,6 +71,15 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
   try {
     const result = await runPostgresRestoreRehearsal({ domain, sourceConfig, targetAdminConfig, scratchName,
       artifactDir: operationDir, tempDir, stateFile, dockerNetwork, productionMode: true, signal, assertCustody,
+      async afterScratchCreated({ scratchOid, scratchOwner, sourceRef, targetRef }) {
+        if (scratchOwner !== expectedTarget.user) fail("POSTGRES_COPY_SCRATCH_OWNER_CHANGED");
+        checkpoint = { type: "POSTGRES_COPY_CAPTURE", schemaVersion: 1,
+          binding: { domain, operationId: capture.operationId, intentSha256: initial.intentSha256,
+            sourceFenceSha256: initial.history.find(entry => entry.phase === "SOURCE_FENCED").evidenceSha256, sourceRef, targetRef },
+          captureIntent, captureIntentSha256: capture.intentSha256, scratchOid, scratchOwner };
+        await retainPostgresCopyRecord({ operationStore, key: postgresCopyRecordKey(domain, initial.intentSha256, capture.operationId),
+          value: checkpoint, check: assertCustody, signal });
+      },
       async beforeRestore({ dumpFile, sourceRef, targetRef, sourceEvidence, sourceSequences }) {
         try {
           stage = "RETAIN_ARCHIVE";
@@ -74,6 +87,7 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
           const binding = { domain, operationId: capture.operationId, intentSha256: initial.intentSha256,
             sourceFenceSha256: initial.history.find((entry) => entry.phase === "SOURCE_FENCED").evidenceSha256,
             sourceRef, targetRef };
+          if (!checkpoint || archiveEvidenceHash(checkpoint.binding) !== archiveEvidenceHash(binding)) fail("POSTGRES_COPY_CHECKPOINT_MISSING");
           await writeEvidence(join(operationDir, "source-capture.json"), { binding, sourceEvidence, sourceSequences });
           retainedArchive = await retainPostgresArchive({ dumpFile, sourceEvidence, sourceSequences, binding,
             keyVersion, vaultName, store: archiveStore, assertOwned: assertCustody, signal,
@@ -94,8 +108,12 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
           await rename(recoveryPath, dumpFile);
           await custody.complete(capture.operationId, retainedArchive.sha256);
           stage = "RESTORE";
-          restore = await custody.begin("RESTORED", archiveEvidenceHash({ archiveManifestSha256: retainedArchive.sha256,
-            target: expectedTarget, scratchName }));
+          restore = await custody.begin("RESTORED", archiveEvidenceHash(postgresCopyRestoreIntent(retainedArchive, copyOptions)));
+          await retainPostgresCopyRecord({ operationStore,
+            key: postgresCopyRecordKey(domain, initial.intentSha256, restore.operationId),
+            value: { type: "POSTGRES_COPY_RESTORE", schemaVersion: 1, captureOperationId: capture.operationId,
+              checkpointSha256: archiveEvidenceHash(checkpoint), archiveManifestSha256: retainedArchive.sha256,
+              restoreOperationId: restore.operationId, restoreIntentSha256: restore.intentSha256 }, check: assertCustody, signal });
           await assertCustody();
         } catch (error) { checkpointDiagnostic = diagnostic(error); throw error; }
       },
@@ -105,8 +123,10 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
     await assertCustody();
     const parity = validatePostgresDatabaseParity(result.evidence, { requireFrozenSourceSequences: true });
     await writeEvidence(join(operationDir, "database-parity.json"), parity);
-    await custody.complete(restore.operationId, archiveEvidenceHash({ parity, archiveManifestSha256: retainedArchive.sha256 }));
-    return { operationDir, stateFile, scratchName, archive: retainedArchive, parity, evidence: result.evidence };
+    const proof = await retainPostgresCopyParity({ options: copyOptions, context: { initial, checkpoint,
+      binding: checkpoint.binding, manifest: retainedArchive, check: assertCustody }, restore, evidence: result.evidence, parity });
+    await custody.complete(restore.operationId, proof.evidenceSha256);
+    return { operationDir, stateFile, scratchName, scratchOid: checkpoint.scratchOid, archive: retainedArchive, parity, evidence: result.evidence, ...proof };
   } catch (error) {
     // Partial targets and durable archives remain available. Neither retrying the
     // restore nor dropping/replacing a database is an automatic recovery action.
@@ -117,4 +137,35 @@ export async function runOpsCorePostgresCopy({ domain, sourceConfig: suppliedSou
     failure.diagnostic = failureDiagnostic;
     throw failure;
   }
+}
+
+/** Explicit continuation after CAPTURED completion, before any RESTORED intent.
+ * Never retries an inherited restore. The only database write is the first
+ * restore into this capture's exact, still-empty scratch database.
+ */
+export async function resumeOpsCorePostgresCopy(options, dependencies = {}) {
+  const initial = options.custody.snapshot();
+  if (initial.phase !== "CAPTURED" || initial.pending || initial.destinationMayHaveWritten
+    || initial.history.some(entry => entry.phase === "RESTORED")) fail("POSTGRES_COPY_RESTORE_ALREADY_ATTEMPTED");
+  const c = await prepareRetainedPostgresCopy(options, dependencies);
+  if (!c.scratch.empty) fail("POSTGRES_COPY_SCRATCH_NOT_EMPTY");
+  await c.check();
+  const restore = await options.custody.begin("RESTORED", archiveEvidenceHash(postgresCopyRestoreIntent(c.manifest, options)));
+  const pending = options.custody.snapshot();
+  const check = async () => {
+    options.custody.signal.throwIfAborted(); await options.custody.assertOwned();
+    if (archiveEvidenceHash(options.custody.snapshot()) !== archiveEvidenceHash(pending)) fail("POSTGRES_COPY_PHASE_CHANGED");
+    await options.assertSourceFenced(); await options.assertTargetInactive(); options.custody.signal.throwIfAborted();
+  };
+  await retainPostgresCopyRecord({ operationStore: options.operationStore,
+    key: postgresCopyRecordKey(options.domain, initial.intentSha256, restore.operationId),
+    value: { type: "POSTGRES_COPY_RESTORE", schemaVersion: 1, captureOperationId: c.capture.operationId,
+      checkpointSha256: archiveEvidenceHash(c.checkpoint), archiveManifestSha256: c.manifest.sha256,
+      restoreOperationId: restore.operationId, restoreIntentSha256: restore.intentSha256 }, check, signal: options.custody.signal });
+  const restoreArchive = dependencies.restoreArchive ?? restoreRetainedPostgresArchive;
+  await restoreArchive({ targetConfig: c.targetConfig, tempDir: c.tempDir, artifactDir: c.operationDir,
+    dockerNetwork: options.dockerNetwork ?? null, scratchOid: c.checkpoint.scratchOid, scratchOwner: c.checkpoint.scratchOwner,
+    signal: options.custody.signal, assertCustody: check });
+  await check();
+  return reconcileOpsCorePostgresCopy(options, dependencies);
 }

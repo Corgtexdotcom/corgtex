@@ -28,14 +28,15 @@ function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
   mutatePlan?.(plan);
   let clock = 0;
   const controller = new AbortController(), log = [], map = new Map(), records = new Map();
-  const journal = { domain: "ops", intentSha256: "d".repeat(64), phase: "VERIFIED", pending: null, destinationMayHaveWritten: false };
+  const journal = { domain: "ops", intentSha256: "d".repeat(64), phase: "VERIFIED", pending: null, destinationMayHaveWritten: false, history: [] };
   const custody = { signal: controller.signal, snapshot: () => structuredClone(journal),
     async assertOwned() { controller.signal.throwIfAborted(); },
     async begin(phase, hash) { log.push(`begin:${phase}`); assert.equal(journal.pending, null);
       journal.pending = { to: phase, operationId: "00000000-0000-4000-8000-000000000003", intentSha256: hash };
       if (phase === "TARGET_ACTIVATING") journal.destinationMayHaveWritten = true;
       return structuredClone(journal.pending); },
-    async complete(operationId) { assert.equal(operationId, journal.pending.operationId);
+    async complete(operationId, evidenceSha256) { assert.equal(operationId, journal.pending.operationId);
+      journal.history.push({ phase: journal.pending.to, operationId, intentSha256: journal.pending.intentSha256, evidenceSha256 });
       journal.phase = journal.pending.to; journal.pending = null; log.push(`complete:${journal.phase}`); },
   };
   const set = (key, body) => map.set(key, { status: 200, body });
@@ -310,4 +311,67 @@ test("default transport uses explicit subscription, authenticated bounded GET/PU
   const failTransport = createOpsCoreActivationArmTransport({ subscriptionId: subscription,
     async execFileImpl() { throw Error("sensitive-provider-output"); } });
   await rejects(failTransport(q), "ACTIVATION_ARM_UNCERTAIN");
+});
+
+
+test("lost web acknowledgement reconciles without PUT and exposes only unattempted worker continuation", async () => {
+  let failed = false;
+  const f = fixture({ put({ role }) { if (role === "web" && !failed) { failed = true; throw Error("lost acknowledgement"); }
+    return { status: 202, body: {} }; } });
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  const result = await createOpsCoreActivation(f.options).reconcile();
+  assert.equal(result.status, "CONTINUATION_AVAILABLE"); assert.equal(result.role, "worker");
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web"]);
+  await createOpsCoreActivation(f.options).resume();
+  assert.equal(f.journal.phase, "TARGET_ACTIVE");
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
+});
+test("inherited app intent with absent target never replays its PUT", async () => {
+  const f = fixture({ put() { throw Error("lost acknowledgement"); } });
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  f.map.set(f.appId("web"), missing());
+  await assert.rejects(createOpsCoreActivation(f.options).reconcile());
+  await assert.rejects(createOpsCoreActivation(f.options).resume());
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web"]);
+});
+test("lost worker acknowledgement seals both app receipts and activation without another PUT", async () => {
+  const f = fixture({ put({ role }) { if (role === "worker") throw Error("lost acknowledgement"); return {status:202,body:{}}; } });
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  await createOpsCoreActivation(f.options).reconcile();
+  assert.equal(f.journal.phase, "TARGET_ACTIVE");
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
+});
+for (const committed of [false,true]) test(`activation completion lost acknowledgement (${committed}) resumes journal only`, async () => {
+  const f = fixture(), complete = f.custody.complete;
+  let lost = false;
+  f.custody.complete = async (...args) => {
+    if (!lost && f.journal.pending.to === "TARGET_ACTIVATING") {
+      lost = true; if (committed) await complete(...args); throw Error("lost acknowledgement");
+    }
+    return complete(...args);
+  };
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  await createOpsCoreActivation(f.options).reconcile();
+  assert.equal(f.journal.phase, "TARGET_ACTIVE");
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
+});
+test("phase-plan acknowledgement loss is read back without repeated app effects", async () => {
+  const f = fixture(), create = f.options.operationStore.createOnly;
+  let lost = false;
+  f.options.operationStore.createOnly = async (key,text) => { await create(key,text);
+    if (!lost && key.endsWith("/phase-plan.json")) { lost = true; throw Error("lost acknowledgement"); } };
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  const reconciled = await createOpsCoreActivation(f.options).reconcile();
+  assert.equal(reconciled.nextAction, "resume-activate");
+  assert.equal(f.log.some(x => x.startsWith("put:")), false);
+  await createOpsCoreActivation(f.options).resume(); assert.equal(f.journal.phase,"TARGET_ACTIVE");
+});
+test("post-activation observer checks exact pair and only explicitly bound custom domains", async () => {
+  const f = fixture(); await createOpsCoreActivation(f.options).activate();
+  f.map.get(f.appId("web")).body.properties.configuration.ingress.customDomains = [
+    {name:"ops.corgtex.com",bindingType:"SniEnabled",certificateId:"/fixture/certificate"}];
+  const result = await createOpsCoreActivation(f.options).observe({customDomains:["ops.corgtex.com"]});
+  assert.equal(result.complete,true); assert.equal(result.intentSha256,f.journal.intentSha256);
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web", "put:worker"]);
+  await assert.rejects(createOpsCoreActivation(f.options).observe({customDomains:["app.corgtex.com"]}));
 });

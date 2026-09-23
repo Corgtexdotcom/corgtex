@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, writeFile, rm, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CUTOVER_PHASES } from "./ops-core-custody.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { readPrivateMigrationJson, runOpsCoreMigration, fetchWebActivationHealth } from "./run-ops-core-migration.mjs";
@@ -57,7 +58,7 @@ function fixture() {
   plan.transfer.postgres.archiveStoreId = createHash("sha256").update(plan.operator.archiveContainerUrl).digest("hex");
   plan.transfer.objects.targetStoreId = createHash("sha256").update(plan.operator.targetObjectContainerUrl).digest("hex");
   const blobs = new Map(); let writes = 0; let releases = 0;
-  const containerFactory = () => ({
+  const containerFactory = url => ({ url,
     async getAccessPolicy() { return {}; },
     getBlockBlobClient(key) {
       return {
@@ -84,6 +85,16 @@ function fixture() {
   });
   return { plan, blobs, containerFactory, writes: () => writes, releases: () => releases,
     options: { plan, containerFactory, identityCheck: async () => {} } };
+}
+
+function stage(f, phase) {
+  const index = CUTOVER_PHASES.indexOf(phase), row = f.blobs.get("cutovers/core.json");
+  const journal = JSON.parse(row.text);
+  journal.phase = phase; journal.sequence = index * 2; journal.pending = null;
+  journal.destinationMayHaveWritten = index >= CUTOVER_PHASES.indexOf("TARGET_ACTIVATING");
+  journal.history = CUTOVER_PHASES.slice(0,index+1).map(p=>({phase:p,evidenceSha256:"e".repeat(64),
+    ...(p === "PREPARED" ? {} : {operationId:randomUUID(),intentSha256:archiveEvidenceHash(f.plan.activation)})}));
+  row.text = JSON.stringify(journal); return journal;
 }
 
 describe("Ops/Core executable operator", () => {
@@ -189,4 +200,48 @@ describe("Ops/Core executable operator", () => {
     await expect(readPrivateMigrationJson(link)).rejects.toThrow("MIGRATION_INPUT_INVALID");
     await chmod(path, 0o644); await expect(readPrivateMigrationJson(path)).rejects.toThrow("MIGRATION_INPUT_NOT_PRIVATE");
   });
+  it("dispatches explicit transfer reconcile/resume under the same retained global plan", async () => {
+    const f=fixture(); await runOpsCoreMigration({...f.options,action:"initialize"});
+    const directory=await mkdtemp(join(tmpdir(),"ops-core-dispatch-")); directories.push(directory);
+    for(const [action,method] of [["reconcile-transfer","reconcileTransfer"],["resume-transfer","resumeTransfer"]]) {
+      let calls=0;
+      const result=await runOpsCoreMigration({...f.options,action,artifactDir:directory,
+        credentials:{sourceConfig:{},readerConfig:{},objectSource:{accessKeyId:randomUUID(),secretAccessKey:randomUUID()}},runtime:{[method]:async options=>{
+          calls++;expect(options.plan).toEqual(f.plan);expect(options.operationStore).toBeDefined();
+          return {status:"INCOMPLETE_EFFECTS",complete:false};
+        }}});
+      expect(calls).toBe(1);expect(result.complete).toBe(false);
+    }
+  });
+  it("reconciliation after committed activation uses the actual acceptance-mode health dispatcher", async () => {
+    const f=fixture();await runOpsCoreMigration({...f.options,action:"initialize"});stage(f,"TARGET_ACTIVATING");
+    let reachedTransport=false;
+    await expect(runOpsCoreMigration({...f.options,action:"reconcile-activate",credentials:{sourceConfig:{},readerConfig:{}},
+      runtime:{assertSource:async()=>({domain:"core",intentSha256:archiveEvidenceHash(f.plan),railway:{complete:true}}),
+        healthTransport:async()=>{reachedTransport=true;throw Error("fixture stop before provider effect");},
+        activate:options=>({reconcile:async()=>{
+          await options.custody.begin("TARGET_ACTIVE",archiveEvidenceHash(f.plan.activation));
+          return options.healthProbe({role:"worker",origin:f.plan.health.worker.origin,appId:f.plan.health.worker.appId,
+            revisionName:"fixture-worker--boot-fixture",release:f.plan.activation.release,invocationContext:"worker-final",
+            signal:options.custody.signal});
+        }})}})).rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
+    expect(reachedTransport).toBe(true);
+  });
+  it("retains acceptance evidence in independent custody and binds it to the exact migration", async () => {
+    const f=fixture();await runOpsCoreMigration({...f.options,action:"initialize"});const j=stage(f,"TARGET_ACTIVE");
+    const artifact={schemaVersion:1,binding:{domain:"core",intentSha256:archiveEvidenceHash(f.plan),
+      targetBindingSha256:archiveEvidenceHash(f.plan.azure),release:structuredClone(f.plan.activation.release),
+      sourceFenceSha256:j.history.find(x=>x.phase==="SOURCE_FENCED").evidenceSha256,
+      routes:["app","mcp"].map(name=>({publicOrigin:`https://${name}.corgtex.com`,
+        azureOrigin:"https://fixture-web.environment.westus3.azurecontainerapps.io",
+        expectedCname:"fixture-web.environment.westus3.azurecontainerapps.io"}))},
+      kind:"workflow",details:{result:"fixture"}};
+    const opts={...f.options,action:"retain-acceptance-evidence",credentials:{sourceConfig:{},readerConfig:{}},acceptanceArtifact:artifact};
+    const result=await runOpsCoreMigration(opts);expect(result.status).toBe("EVIDENCE_RETAINED");
+    expect(f.blobs.has(`acceptance/core/${archiveEvidenceHash(f.plan)}/${archiveEvidenceHash(artifact)}.json`)).toBe(true);
+    const writes=f.writes();await runOpsCoreMigration(opts);expect(f.writes()).toBe(writes);
+    artifact.binding.release.version="foreign";
+    await expect(runOpsCoreMigration(opts)).rejects.toThrow("MIGRATION_ACCEPTANCE_BINDING_MISMATCH");
+  });
+
 });

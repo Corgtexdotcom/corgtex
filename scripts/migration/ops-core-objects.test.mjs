@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { captureOpsCoreObjects, copyOpsCoreObjects } from "./ops-core-objects.ts";
+import { captureOpsCoreObjects, copyOpsCoreObjects, verifyOpsCoreObjects } from "./ops-core-objects.ts";
 import { ObjectTransferError, validateObjectReceipt } from "./shared-tenant-objects.ts";
 
 function fixture() {
@@ -101,4 +101,26 @@ describe("Ops/Core whole bucket transfer", () => {
     await expect(f.capture()).rejects.toMatchObject({ code: "OBJECT_BUDGET_EXCEEDED" });
     expect(f.target.writes).toBe(0);
   });
+  it("verifies retained objects without create calls and rejects missing or changed content", async () => {
+    const f=fixture(), snapshot=await f.capture();
+    await copyOpsCoreObjects(f.source,f.target,snapshot,"cutover-objects",f.options);
+    const writes=f.target.writes;
+    const receipt=await verifyOpsCoreObjects(f.source,f.target,snapshot,f.options);
+    expect(receipt.complete).toBe(true);expect(receipt.objectCount).toBe(2);expect(f.target.writes).toBe(writes);
+    f.targetObjects.get("document").data=Buffer.from("modified");
+    await expect(verifyOpsCoreObjects(f.source,f.target,snapshot,f.options)).rejects.toMatchObject({code:"TARGET_OBJECT_MISMATCH"});
+    f.targetObjects.delete("document");
+    await expect(verifyOpsCoreObjects(f.source,f.target,snapshot,f.options)).rejects.toMatchObject({code:"TARGET_OBJECT_MISMATCH"});
+    expect(f.target.writes).toBe(writes);
+  });
+  it("verification catches source inventory drift and fence loss without destination effects", async () => {
+    const f=fixture(), snapshot=await f.capture();
+    await copyOpsCoreObjects(f.source,f.target,snapshot,"cutover-objects",f.options);
+    const writes=f.target.writes;f.sourceObjects.get("document").etag="foreign";
+    await expect(verifyOpsCoreObjects(f.source,f.target,snapshot,f.options)).rejects.toMatchObject({code:"SOURCE_INVENTORY_CHANGED"});
+    f.sourceObjects.get("document").etag="generation-one";f.target.afterRead=f.unfence;
+    await expect(verifyOpsCoreObjects(f.source,f.target,snapshot,f.options)).rejects.toThrow();
+    expect(f.target.writes).toBe(writes);
+  });
+
 });

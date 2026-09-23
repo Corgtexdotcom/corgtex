@@ -38,15 +38,15 @@ async function fixture() {
       assert([...records.keys()].some(k=>k.endsWith("/descriptor.json")));
       assert([...records.values()].some(t=>JSON.parse(t).kind==="AZURE_REDIS_PROBE_START"&&JSON.parse(t).type==="intent"));
       const start = Date.now();
-      state.executions.push({id:`${p.jobResourceId}/executions/fixture-probe-run1`,name:"fixture-probe-run1",type:"Microsoft.App/jobs/executions",
+      state.executions.push({id:`${p.jobResourceId}/executions/fixture-probe-run${state.starts}`,name:`fixture-probe-run${state.starts}`,type:"Microsoft.App/jobs/executions",
         properties:{status:"Succeeded",startTime:new Date(start).toISOString(),endTime:new Date(start).toISOString(),template:structuredClone(body)}});
       if(state.loseStart){state.loseStart=false;throw new Error("PRIVATE_PROVIDER_BODY");}
-      return response({id:state.executions[0].id,name:state.executions[0].name});
+      return response({id:state.executions.at(-1).id,name:state.executions.at(-1).name});
     }
     if(path.startsWith(`${p.jobResourceId}/executions?`))return response({value:state.executions});
-    if(path.startsWith(`${p.jobResourceId}/executions/`)){const copy=structuredClone(state.executions[0]);state.mutateExecution?.(copy);return response(copy);}
+    if(path.startsWith(`${p.jobResourceId}/executions/`)){const copy=structuredClone(state.executions.find(e=>path.startsWith(`${p.jobResourceId}/executions/${e.name}?`)));state.mutateExecution?.(copy);return response(copy);}
     if(path===`/v1/workspaces/${p.workspaceId}/query`){
-      const execution=state.executions[0];const challenge=JSON.parse(execution.properties.template.containers[0].env.find(e=>e.name==="CORGTEX_REDIS_CHALLENGE").value);
+      const execution=state.executions.find(e=>body.query.includes(`'${e.name}-'`));const challenge=JSON.parse(execution.properties.template.containers[0].env.find(e=>e.name==="CORGTEX_REDIS_CHALLENGE").value);
       assert(body.query.includes(`'${execution.name}-'`));assert(body.query.includes(challenge.nonce));assert(!body.query.includes("latest"));
       const receipt={schemaVersion:1,type:"REDIS_TARGET_EMPTY_OBSERVATION",challengeSha256:hash(challenge),nonce:challenge.nonce,
         domain:challenge.domain,intentSha256:challenge.intentSha256,sourceFenceSha256:challenge.sourceFenceSha256,targetBindingSha256:challenge.targetBindingSha256,
@@ -186,6 +186,7 @@ test("transport suppresses raw credentials in provider and fetch errors",async()
 
 test("fresh gate nonce cannot bypass unknown start; retained descriptor permits read-only recovery",async()=>{
   const f=await fixture();f.state.loseStart=true;const c=f.challenge();await assert.rejects(f.run(f.dispatcher,c));
+  f.state.executions[0].properties.status="Running";
   const reopened=await f.reopen();const retained=await reopened.readRetainedStart();assert.deepEqual(retained.input.challenge,c);
   await assert.rejects(f.run(reopened,f.challenge()),/REDIS_JOB_PRIOR_ATTEMPT_REQUIRES_RECONCILIATION/);
   const recovered=await reopened.reconcileStart();assert.equal(recovered.executionResourceId,f.state.executions[0].id);assert.equal(f.state.starts,1);
@@ -272,4 +273,26 @@ test("execution pagination loop cannot silently truncate inventory",async()=>{
 test("foreign active job execution prevents another start",async()=>{
   const f=await fixture();f.state.executions=[{id:`${f.p.jobResourceId}/executions/foreign`,name:"foreign",properties:{status:"Running",template:{containers:[]}}}];
   await assert.rejects(f.run(),/REDIS_JOB_FOREIGN_EXECUTION/);assert.equal(f.state.starts,0);
+});
+
+
+test("terminal retained observations permit sequential fresh nonces without replay",async()=>{
+  const f=await fixture();const first=f.challenge();await f.run(f.dispatcher,first);
+  const second=f.challenge();await f.run(await f.reopen(),second);
+  const third=f.challenge();const latest=await f.reopen();await f.run(latest,third);
+  assert.equal(f.state.starts,3);assert.equal(f.state.executions.length,3);
+  assert.deepEqual((await latest.readRetainedStart()).input.challenge,third);
+  assert.equal([...f.records.keys()].filter(k=>k.endsWith("/receipt.json")).length,3);
+});
+test("expired terminal lost acknowledgement is reconciled before a fresh observation",async()=>{
+  const f=await fixture();f.state.loseStart=true;const c=f.challenge();c.expiresAt=c.issuedAt+1100;
+  await assert.rejects(f.run(f.dispatcher,c));await new Promise(r=>setTimeout(r,Math.max(0,c.expiresAt-Date.now()+5)));
+  const fresh=f.challenge();const result=await f.run(await f.reopen(),fresh);
+  assert.equal(result.receipt.nonce,fresh.nonce);assert.equal(f.state.starts,2);
+  assert.equal([...f.records.keys()].filter(k=>k.endsWith("/receipt.json")).length,2);
+});
+test("unlocatable retained start blocks new nonce with no second POST",async()=>{
+  const f=await fixture();f.state.loseStart=true;await assert.rejects(f.run());f.state.executions=[];
+  await assert.rejects(f.run(await f.reopen()),/REDIS_JOB_PRIOR_ATTEMPT_REQUIRES_RECONCILIATION/);
+  assert.equal(f.state.starts,1);
 });

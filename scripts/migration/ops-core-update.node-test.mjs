@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { runOpsCoreUpdate, opsCoreUpdateDiagnostic, opsCoreUpdateTransportTarget, assertOpsCoreUpdateImages,
-  fetchOpsCoreUpdateWebHealth } from "./ops-core-update.mjs";
+  fetchOpsCoreUpdateWebHealth, validateOpsCoreUpdatePlan } from "./ops-core-update.mjs";
 import { openOpsCoreReleaseCustody } from "./ops-core-release-custody.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
@@ -37,14 +37,15 @@ function fixture(options = {}) {
   const controller = new AbortController(); let finished = null, mode = "apply", probeNumber = 0;
   for (const role of ["web", "worker"]) {
     const name = plan.target.apps[role], suffix = `baseline-${role}`, revision = `${name}--${suffix}`;
-    const configuration = { activeRevisionsMode: "Single", ingress: { external: role === "web", targetPort: role === "web" ? 3000 : 9090,
+    const configuration = { activeRevisionsMode: "Single", ingress: { external: role === "web", fqdn: new URL(plan.origins[role]).hostname, targetPort: role === "web" ? 3000 : 9090,
       traffic: [{ latestRevision: true, weight: 100 }] }, registries: [{ server: "fixtureacr.azurecr.io", identity: "fixture-uami" }], secrets: [{ name: "db", keyVaultUrl: "https://fixture.vault.azure.net/secrets/db/fixture-version", identity: "fixture-uami" }] };
     const template = { revisionSuffix: suffix, containers: [{ name: role, image: plan.baseline.images[role],
       env: [{ name: "CORGTEX_RELEASE_GIT_SHA", value: plan.baseline.release.gitSha }, { name: "CORGTEX_RELEASE_IMAGE_TAG", value: plan.baseline.release.imageTag },
         { name: "CORGTEX_RELEASE_VERSION", value: plan.baseline.release.version }, { name: "DATABASE_URL", secretRef: "db" },
         ...(role === "web" ? [{ name: "CORGTEX_STARTUP_MODE", value: "web" }] : [])], resources: { cpu: 0.5, memory: "1Gi" } }],
       scale: { minReplicas: 1, maxReplicas: 1 } };
-    apps[role] = { location: "westus3", properties: { configuration, template, provisioningState: "Succeeded", latestRevisionName: revision, latestReadyRevisionName: revision } };
+    apps[role] = { id: `${prefix}Microsoft.App/containerApps/${name}`, name, type: "Microsoft.App/containerApps", location: "westus3",
+      properties: { environmentId: plan.target.environmentId, configuration, template, provisioningState: "Succeeded", latestRevisionName: revision, latestReadyRevisionName: revision } };
     revisionState[role] = new Map([[revision, { revisionName: revision, active: true, replicaCount: 1, kind: "READY", template: structuredClone(template) }]]);
   }
   let custody = { signal: controller.signal, get mode() { return mode; },
@@ -115,6 +116,12 @@ function fixture(options = {}) {
     get finished() { return finished; }, reopen() { assert.equal(finished, null); mode = "reconcile"; },
     effects: () => log.filter(item => /^(?:mode:|drain:|patch:)/.test(item)),
     async run(action = "apply") { return runOpsCoreUpdate({ plan, custody, operationStore: store, action, transport,
+      async armTransport(input) {
+        assert.equal(input.resourceId, apps.web.id); assert.equal(input.apiVersion, "2024-03-01");
+        assert.equal(input.signal, custody.signal); log.push("arm:web");
+        const response = { status: 200, body: structuredClone(apps.web) };
+        options.armRead?.(input, response, f); return response;
+      },
       async assertDeploymentAuthority(binding) { options.authority?.(binding, f); return { complete: options.authorityComplete !== false, binding }; },
       async assertImages() { log.push("images"); await options.images?.(f); return { complete: true, imagesSha256: hash({ incoming: plan.incoming.images, recovery: plan.recovery.images }) }; },
       async prepareHealth(input) { log.push(`prepare:${input.phase}`); options.prepare?.(input, f); },
@@ -196,6 +203,79 @@ test("forward update drains worker then web, migrates web before worker, returns
 test("authority failure rejects before provider effects", async () => {
   const f = fixture({ authorityComplete: false });
   await rejected(f.run(), "UPDATE_AUTHORITY_UNPROVEN"); assert.deepEqual(f.effects(), []);
+});
+
+test("same app name at a foreign ACA suffix cannot provide baseline health or authorize writes", async () => {
+  const f = fixture();
+  f.plan.origins.web = "https://fixture-web.foreign.westus3.azurecontainerapps.io";
+  assert.doesNotThrow(() => validateOpsCoreUpdatePlan(f.plan));
+  await rejected(f.run(), "UPDATE_WEB_ORIGIN_UNPROVEN");
+  assert.deepEqual(f.effects(), []);
+  assert.equal(f.log.some(x => x.startsWith("health:")), false);
+  assert.equal(f.finished, null);
+});
+
+for (const [label, mutate] of [
+  ["foreign app", r => { r.body.id += "-foreign"; }],
+  ["foreign environment", r => { r.body.properties.environmentId += "-foreign"; }],
+  ["missing hostname", r => { delete r.body.properties.configuration.ingress.fqdn; }],
+  ["internal ingress", r => { r.body.properties.configuration.ingress.external = false; }],
+  ["unsuccessful ARM read", r => { r.status = 404; }],
+]) test(`fresh web routing proof rejects ${label} before health or runtime writes`, async () => {
+  const f = fixture({ armRead(input, response) { mutate(response); } });
+  await rejected(f.run(), "UPDATE_WEB_ORIGIN_UNPROVEN");
+  assert.deepEqual(f.effects(), []);
+  assert.equal(f.log.some(x => x.startsWith("health:")), false);
+});
+
+test("web routing ARM identity is case insensitive and accepts managedEnvironmentId", async () => {
+  const f = fixture({ armRead(input, response) {
+    const app = response.body;
+    app.id = app.id.toUpperCase(); app.type = app.type.toUpperCase(); app.name = app.name.toUpperCase();
+    app.properties.managedEnvironmentId = app.properties.environmentId.toUpperCase(); delete app.properties.environmentId;
+  } });
+  assert.equal((await f.run()).outcome, "UPDATED");
+});
+
+for (const phase of ["baseline", "incoming", "recovery"]) test(`${phase} health hostname drift is rejected by fresh post-probe ARM read`, async () => {
+  let lose = phase === "recovery", drifted = false;
+  const f = fixture({
+    afterPatch() { if (lose) { lose = false; throw Error("lost incoming acknowledgement"); } },
+    webHealth(input, response, state) {
+      if (input.release.gitSha === state.plan[phase].release.gitSha) {
+        state.apps.web.properties.configuration.ingress.fqdn = "fixture-web.foreign.westus3.azurecontainerapps.io";
+        drifted = true;
+      }
+    },
+  });
+  if (phase === "recovery") { await assert.rejects(f.run()); f.reopen(); }
+  await rejected(f.run(phase === "recovery" ? "recover" : "apply"), "UPDATE_WEB_ORIGIN_UNPROVEN");
+  assert.equal(drifted, true); assert.equal(f.finished, null);
+  if (phase === "baseline") assert.deepEqual(f.effects(), []);
+  else assert.equal(f.log.includes(`patch:${phase}:worker`), false);
+});
+
+test("pre-worker and final incoming web probes each require fresh routing evidence", async () => {
+  for (const probeNumber of [2, 3]) {
+    let probes = 0;
+    const f = fixture({ webHealth(input, response, state) {
+      if (input.release.gitSha === state.plan.incoming.release.gitSha && ++probes === probeNumber) {
+        state.apps.web.properties.configuration.ingress.fqdn = "fixture-web.foreign.westus3.azurecontainerapps.io";
+      }
+    } });
+    if (probeNumber === 2) await assert.rejects(f.run(), /PROVIDER_OPERATION_RECONCILE_REQUIRED/);
+    else await rejected(f.run(), "UPDATE_WEB_ORIGIN_UNPROVEN");
+    assert.equal(probes, probeNumber); assert.equal(f.finished, null);
+    assert.equal(f.log.includes("patch:incoming:worker"), probeNumber === 3);
+  }
+});
+
+test("unchanged reconciliation cannot accept healthy responses at a foreign web origin", async () => {
+  const f = fixture(); f.reopen();
+  f.plan.origins.web = "https://fixture-web.foreign.westus3.azurecontainerapps.io";
+  await rejected(f.run("reconcile"), "UPDATE_WEB_ORIGIN_UNPROVEN");
+  assert.deepEqual(f.effects(), []); assert.equal(f.finished, null);
+  assert.equal(f.log.some(x => x.startsWith("health:")), false);
 });
 
 test("pre-snapshot reconciliation proves unchanged baseline and finishes without runtime writes", async () => {

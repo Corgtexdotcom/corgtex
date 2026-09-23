@@ -27,7 +27,9 @@ export function validateCutoverJournal(journal, intentSha256) {
     || !CUTOVER_PHASES.includes(journal.phase) || !Number.isSafeInteger(journal.sequence)
     || journal.sequence < 0 || typeof journal.destinationMayHaveWritten !== "boolean"
     || !Array.isArray(journal.history) || journal.history.length !== CUTOVER_PHASES.indexOf(journal.phase) + 1
-    || journal.history.some((entry, index) => entry.phase !== CUTOVER_PHASES[index] || !HASH.test(entry.evidenceSha256))) {
+    || journal.history.some((entry, index) => entry.phase !== CUTOVER_PHASES[index] || !HASH.test(entry.evidenceSha256)
+      || ((entry.operationId !== undefined || entry.intentSha256 !== undefined)
+        && (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(entry.operationId) || !HASH.test(entry.intentSha256))))) {
     fail("CUTOVER_JOURNAL_INVALID");
   }
   if (CUTOVER_PHASES.indexOf(journal.phase) >= CUTOVER_PHASES.indexOf("TARGET_ACTIVATING")
@@ -158,7 +160,8 @@ export async function openCutoverCustody(blob, intentSha256, { renewIntervalMs =
         // The caller must reconcile actual provider state before completing an
         // operation inherited from another owner. No provider action is replayed here.
         await write({ ...journal, phase: journal.pending.to, pending: null, sequence: journal.sequence + 1,
-          history: [...journal.history, { phase: journal.pending.to, evidenceSha256 }] });
+          history: [...journal.history, { phase: journal.pending.to, evidenceSha256,
+            operationId: journal.pending.operationId, intentSha256: journal.pending.intentSha256 }] });
         return structuredClone(current.journal);
       });
     },

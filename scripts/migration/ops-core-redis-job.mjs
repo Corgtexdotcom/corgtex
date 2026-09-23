@@ -187,10 +187,10 @@ function logReceipt(response, p, execution, challenge) {
  * A retained start intent permits only execution reconciliation, never POST replay.
  * On uncertain acknowledgement retain the SAME challenge/descriptor. If that
  * challenge expires, reconcile ownership separately; it cannot prove freshness.
- * One immutable attempt slot per job/VERIFIED phase prevents a new nonce from
- * bypassing an uncertain start. readRetainedStart/reconcileStart recover its exact
- * descriptor and execution, even after expiry, without yielding acceptance proof.
- * A replacement attempt requires an explicit new job/phase context from the owner.
+ * Sequential immutable attempt slots prevent a new nonce from bypassing an
+ * uncertain start. Every earlier dispatched observation must be proved terminal
+ * before another slot opens. readRetainedStart/reconcileStart recover the latest
+ * descriptor even after expiry, without yielding acceptance proof.
  * Log Analytics ingestion has no freshness guarantee: missing evidence fails shut.
  * Official completed-log path: learn.microsoft.com/azure/container-apps/jobs-get-started-cli
  * ARM execution templates: learn.microsoft.com/rest/api/resource-manager/containerapps/jobs-executions/list
@@ -209,7 +209,7 @@ export function createRedisJobDispatcher({ plan: value, custody, assertSourceFen
   need(["core","ops"].includes(context.domain) && HASH.test(context.intentSha256) && HASH.test(context.sourceFenceSha256)
     && GUID.test(context.phaseOperationId) && initial.pending.to === "VERIFIED", "REDIS_JOB_PHASE_INVALID");
   const prefix = `operations/${context.domain}/${context.intentSha256}/${context.phaseOperationId}`;
-  const slotKey = `${prefix}/${hash({kind:"AZURE_REDIS_PROBE_SLOT",inputSha256:hash({plan:p,context})})}/descriptor.json`;
+  const slotKey = attempt => `${prefix}/${hash({kind:"AZURE_REDIS_PROBE_SLOT",inputSha256:hash({plan:p,context,...(attempt ? {attempt} : {})})})}/descriptor.json`;
   let busy = false;
   function snapshotCheck() {
     const current = custody.snapshot();
@@ -248,11 +248,37 @@ export function createRedisJobDispatcher({ plan: value, custody, assertSourceFen
   async function retain(kind,input,signal) {
     const key = `${prefix}/${hash({kind,inputSha256:hash(input)})}/descriptor.json`;
     const record = {kind,input}; await check(signal); await descriptorStore.assertPrivate();
-    const retained = await descriptorStore.readOptional(slotKey,signal);
-    if (retained === null) { await check(signal); await descriptorStore.createOnly(slotKey,JSON.stringify(record),signal); }
-    const saved = await descriptorStore.readOptional(slotKey,signal);
-    need(typeof saved === "string" && saved.length < 64 * 1024,"REDIS_JOB_DESCRIPTOR_MISMATCH");
-    need(same(JSON.parse(saved),record),"REDIS_JOB_PRIOR_ATTEMPT_REQUIRES_RECONCILIATION");
+    let slot;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      slot = slotKey(attempt);
+      const retained = await descriptorStore.readOptional(slot,signal);
+      if (retained === null) { await check(signal); await descriptorStore.createOnly(slot,JSON.stringify(record),signal); break; }
+      need(typeof retained === "string" && retained.length < 64 * 1024,"REDIS_JOB_DESCRIPTOR_MISMATCH");
+      const prior = validateDescriptor(JSON.parse(retained));
+      if (same(prior, record)) break;
+      // Only a proved terminal observation (or proved never-dispatched slot)
+      // permits another nonce. No start intent is replayed.
+      const priorIntent = await operations.readIntent(prior.kind, prior.input);
+      const rows = await executions(signal);
+      const matches = rows.filter(row => row.properties?.template?.containers?.some(c => c.env?.some(e =>
+        e.name === "CORGTEX_REDIS_CHALLENGE" && e.value === JSON.stringify(prior.input.challenge))));
+      need(matches.length <= 1, "REDIS_JOB_EXECUTION_AMBIGUOUS");
+      if (priorIntent) {
+        need(matches.length === 1, "REDIS_JOB_PRIOR_ATTEMPT_REQUIRES_RECONCILIATION");
+        const execution = matches[0]; verifyTemplate(execution.properties.template, prior.input.template);
+        need(["Succeeded", "Failed", "Stopped"].includes(execution.properties.status)
+          && Date.parse(execution.properties.startTime) >= prior.input.challenge.issuedAt
+          && Number.isFinite(Date.parse(execution.properties.endTime)), "REDIS_JOB_PRIOR_ATTEMPT_REQUIRES_RECONCILIATION");
+        const final = await request("GET", pathFor(execution.id), signal);
+        need(final.status === 200 && same(normalizeExecution(final.body,p), execution), "REDIS_JOB_EXECUTION_CHANGED");
+        await operations.runRecordedOperation({...prior, apply:async()=>{throw new JobError("REDIS_JOB_REPLAY_DENIED");},
+          verify:async()=>({complete:true,evidence:{executionResourceId:execution.id,
+            challengeSha256:hash(prior.input.challenge),templateSha256:hash(prior.input.template)}})});
+      } else need(matches.length === 0, "REDIS_JOB_FOREIGN_EXECUTION");
+      need(attempt < 99, "REDIS_JOB_ATTEMPT_LIMIT");
+    }
+    const saved = await descriptorStore.readOptional(slot,signal);
+    need(typeof saved === "string" && saved.length < 64 * 1024 && same(JSON.parse(saved),record),"REDIS_JOB_DESCRIPTOR_MISMATCH");
     const old = await descriptorStore.readOptional(key,signal);
     if (old === null) { await check(signal); await descriptorStore.createOnly(key,JSON.stringify(record),signal); }
     const text = await descriptorStore.readOptional(key,signal);
@@ -273,18 +299,24 @@ export function createRedisJobDispatcher({ plan: value, custody, assertSourceFen
     }
     need(new Set(rows.map(r => r.id)).size === rows.length,"REDIS_JOB_EXECUTION_LIST_INVALID"); return rows;
   }
-  async function readRetainedStart() {
-    const signal = custody.signal; await check(signal); await descriptorStore.assertPrivate();
-    const text = await descriptorStore.readOptional(slotKey,signal); await check(signal);
-    if (text === null) return null;
-    need(typeof text === "string" && text.length < 64 * 1024,"REDIS_JOB_DESCRIPTOR_MISMATCH");
-    const record = JSON.parse(text);
+  function validateDescriptor(record) {
     need(exact(record,"kind,input") && record.kind === "AZURE_REDIS_PROBE_START"
       && exact(record.input,"plan,context,challenge,template") && same(record.input.plan,p)
       && same(record.input.context,context),"REDIS_JOB_DESCRIPTOR_MISMATCH");
     challengeCheck(record.input.challenge,p,context,false);
     need(same(record.input.template,template(p,record.input.challenge)),"REDIS_JOB_DESCRIPTOR_MISMATCH");
-    return structuredClone(record);
+    return record;
+  }
+  async function readRetainedStart() {
+    const signal = custody.signal; await check(signal); await descriptorStore.assertPrivate();
+    let latest = null;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const text = await descriptorStore.readOptional(slotKey(attempt),signal); await check(signal);
+      if (text === null) return latest;
+      need(typeof text === "string" && text.length < 64 * 1024,"REDIS_JOB_DESCRIPTOR_MISMATCH");
+      latest = structuredClone(validateDescriptor(JSON.parse(text)));
+    }
+    return latest;
   }
   async function reconcileStart() {
     need(!busy,"REDIS_JOB_CONCURRENT"); busy = true;

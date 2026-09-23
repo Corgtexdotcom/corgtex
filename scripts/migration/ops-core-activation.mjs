@@ -165,9 +165,11 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
   const transport = armTransport ?? createOpsCoreActivationArmTransport({ subscriptionId: target.subscriptionId });
   const appId = role => `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroupName}/providers/Microsoft.App/containerApps/${target.apps[role]}`;
   let used = false;
-  return Object.freeze({ planSha256,
-    async activate() {
+  async function run(action, { customDomains = [] } = {}) {
       requireValue(!used, "ACTIVATION_ALREADY_ATTEMPTED"); used = true;
+      requireValue(["activate", "reconcile", "resume", "observe"].includes(action)
+        && Array.isArray(customDomains) && customDomains.every(name => typeof name === "string" && /^[a-z0-9.-]+$/.test(name))
+        && new Set(customDomains).size === customDomains.length, "ACTIVATION_ACTION_INVALID");
       const signal = AbortSignal.any([custody.signal, AbortSignal.timeout(timeoutMs)]), deadline = now() + timeoutMs;
       const intentSha256 = custody.snapshot().intentSha256;
       requireValue(HASH.test(intentSha256), "ACTIVATION_CUSTODY_MISMATCH");
@@ -226,7 +228,10 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           && ingress?.fqdn === fqdn && ingress.external === (role === "web")
           && ingress.targetPort === (role === "web" ? 3000 : 9090) && ingress.allowInsecure === false
           && ingress.transport === "auto" && canonical(ingress.traffic) === canonical([{ latestRevision: true, weight: 100 }])
-          && !(ingress.customDomains?.length) && !(ingress.ipSecurityRestrictions?.length)
+          && (action === "observe"
+            ? canonical((ingress.customDomains ?? []).map(d => d.name).sort()) === canonical(role === "web" ? [...customDomains].sort() : [])
+              && (ingress.customDomains ?? []).every(d => d.bindingType === "SniEnabled" && typeof d.certificateId === "string")
+            : !(ingress.customDomains?.length)) && !(ingress.ipSecurityRestrictions?.length)
           && p.template?.revisionSuffix === expected.properties.template.revisionSuffix, "ACTIVATION_APP_DRIFT");
         assertBootstrapProjection(expected.properties.template, p.template, target.apps[role], `${target.apps[role]}--${p.template.revisionSuffix}`);
         return p;
@@ -278,49 +283,93 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
       }
       try {
         await check(); const initial = custody.snapshot();
-        requireValue(initial.phase === "VERIFIED" && initial.pending === null && initial.destinationMayHaveWritten === false,
+        const fresh = action === "activate";
+        const pendingActivation = initial.phase === "VERIFIED" && initial.pending?.to === "TARGET_ACTIVATING";
+        const activated = ["TARGET_ACTIVATING", "TARGET_ACTIVE", "ROUTED", "ACCEPTED"].includes(initial.phase);
+        requireValue(fresh ? initial.phase === "VERIFIED" && initial.pending === null && !initial.destinationMayHaveWritten
+          : initial.destinationMayHaveWritten && (pendingActivation || activated), "ACTIVATION_PHASE_INVALID");
+        requireValue(action !== "observe" || activated, "ACTIVATION_PHASE_INVALID");
+        requireValue(fresh || action === "observe" || pendingActivation || initial.phase === "TARGET_ACTIVATING",
           "ACTIVATION_PHASE_INVALID");
+        if (!fresh && action !== "observe" && initial.phase === "TARGET_ACTIVATING" && !initial.pending) {
+          await custody.begin("TARGET_ACTIVE", planSha256);
+        }
         await fenced();
         const guard = createOpsCoreAzureTarget({ binding: target, custody, transport });
-        await guard.assertInactive();
+        if (fresh) { await guard.assertInactive(); await absent("web"); await absent("worker"); }
         await guard.assertPostgresPrivate();
-        await absent("web"); await absent("worker");
         const environment = await request(target.environmentId);
         requireValue(environment.status === 200 && same(environment.body?.id, target.environmentId)
           && environment.body.properties?.provisioningState === "Succeeded"
           && /^[a-z0-9.-]+\.azurecontainerapps\.io$/.test(environment.body.properties.defaultDomain), "ACTIVATION_ENVIRONMENT_INVALID");
         const domain = environment.body.properties.defaultDomain;
         await fenced();
-        const pending = await custody.begin("TARGET_ACTIVATING", planSha256);
-        const recorder = await openProviderOperationRecorder({ custody, store: operationStore, phase: "TARGET_ACTIVATING", signal });
-        const receipts = {}, bodies = {};
+        const pending = fresh ? await custody.begin("TARGET_ACTIVATING", planSha256)
+          : pendingActivation ? initial.pending : initial.history?.find(x => x.phase === "TARGET_ACTIVATING");
+        requireValue(GUID.test(pending?.operationId) && pending.intentSha256 === planSha256, "ACTIVATION_LINEAGE_UNPROVEN");
+        const prefix = `operations/${target.domain}/${intentSha256}/${pending.operationId}/`;
+        const bodies = Object.fromEntries(ROLES.map(role => [role,
+          appBody(plan, role, `boot-${pending.operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
+        const retainedPlan = { schemaVersion: 1, planSha256, activationOperationId: pending.operationId, environmentDomain: domain, bodies };
+        async function retain(name, value) {
+          await check(); await operationStore.assertPrivate();
+          const key = `${prefix}${name}.json`, prior = await operationStore.readOptional(key, signal);
+          if (prior === null) { await operationStore.createOnly(key, JSON.stringify(value), signal); }
+          else requireValue(hash(JSON.parse(prior)) === hash(value), "ACTIVATION_EVIDENCE_MISMATCH");
+          await check();
+          requireValue(hash(JSON.parse(await operationStore.readOptional(key, signal))) === hash(value), "ACTIVATION_EVIDENCE_MISMATCH");
+        }
+        const prior = await operationStore.readOptional(`${prefix}phase-plan.json`, signal);
+        if (prior === null) {
+          // A lost acknowledgement before phase-plan persistence cannot have
+          // dispatched an app. Resume may retain the plan only while both absent.
+          requireValue(fresh || action === "resume", "ACTIVATION_PLAN_UNRETAINED");
+          await absent("web"); await absent("worker"); await retain("phase-plan", retainedPlan);
+        } else requireValue(hash(JSON.parse(prior)) === hash(retainedPlan), "ACTIVATION_EVIDENCE_MISMATCH");
         const fqdn = role => `${target.apps[role]}.${role === "worker" ? "internal." : ""}${domain}`;
-        for (const role of ROLES) {
-          await fenced(); await absent(role);
-          if (role === "web") await absent("worker");
-          else await ready("web", bodies.web, fqdn("web"), "web-before-worker");
-          const suffix = `boot-${pending.operationId.replaceAll("-", "").slice(0, 16)}-${role}`;
-          const body = appBody(plan, role, suffix); bodies[role] = body;
-          receipts[role] = await recorder.runRecordedOperation({ kind: `azure.create.${role}`,
-            input: { planSha256, resourceId: appId(role), bodySha256: hash(body) },
-            async apply() {
-              await guard.assertPostgresPrivate();
-              const result = await request(appId(role), { method: "PUT", body });
-              requireValue([200, 201, 202].includes(result.status), "ACTIVATION_WRITE_UNCERTAIN");
-            }, verify: () => ready(role, body, fqdn(role), `${role}-after-create`) });
+        const receipts = {};
+        if (fresh || pendingActivation) {
+          const recorder = await openProviderOperationRecorder({ custody, store: operationStore, phase: "TARGET_ACTIVATING", signal });
+          for (const role of ROLES) {
+            const body = bodies[role], kind = `azure.create.${role}`;
+            const input = { planSha256, resourceId: appId(role), bodySha256: hash(body) };
+            const status = await recorder.readStatus(kind, input);
+            if (!status.intent && action === "reconcile") return { status: "CONTINUATION_AVAILABLE", complete: false,
+              domain: target.domain, phase: "TARGET_ACTIVATING", role, nextAction: "resume-activate" };
+            await fenced();
+            if (role === "worker") await ready("web", bodies.web, fqdn("web"), "web-before-worker");
+            receipts[role] = await recorder.runRecordedOperation({ kind, input,
+              async apply() {
+                requireValue(action !== "reconcile", "ACTIVATION_REPLAY_FORBIDDEN");
+                await absent(role); if (role === "web") await absent("worker");
+                await guard.assertPostgresPrivate();
+                const result = await request(appId(role), { method: "PUT", body });
+                requireValue([200, 201, 202].includes(result.status), "ACTIVATION_WRITE_UNCERTAIN");
+              }, verify: () => ready(role, body, fqdn(role), `${role}-after-create`) });
+          }
         }
         const finalProofs = {};
         for (const role of ROLES) finalProofs[role] = await ready(role, bodies[role], fqdn(role), `${role}-final`);
         finalProofs.postgresAccess = await guard.assertPostgresPrivate();
         await fenced(); await check();
-        const evidenceSha256 = hash({ receipts, finalProofs });
-        await custody.complete(pending.operationId, evidenceSha256);
-        const active = await custody.begin("TARGET_ACTIVE", planSha256);
-        await custody.complete(active.operationId, evidenceSha256);
+        const evidence = { schemaVersion: 1, domain: target.domain, intentSha256, planSha256,
+          activationOperationId: pending.operationId, receipts, finalProofs };
+        const evidenceSha256 = hash(evidence);
+        await retain(`phase-evidence-${evidenceSha256}`, evidence);
+        if (action === "observe") return { complete: true, domain: target.domain, phase: initial.phase, intentSha256, targetBindingSha256: hash(target), planSha256, evidenceSha256,
+          release: plan.release, origins: Object.fromEntries(ROLES.map(role => [role, `https://${fqdn(role)}`])), images: Object.fromEntries(ROLES.map(role => [role, plan.roles[role].image])), evidence };
+        if (fresh || pendingActivation) await custody.complete(pending.operationId, evidenceSha256);
+        const state = custody.snapshot();
+        if (state.phase === "TARGET_ACTIVATING") {
+          const active = state.pending ?? await custody.begin("TARGET_ACTIVE", planSha256);
+          requireValue(active.to === "TARGET_ACTIVE" && active.intentSha256 === planSha256, "ACTIVATION_PHASE_INVALID");
+          await custody.complete(active.operationId, evidenceSha256);
+        }
         return { complete: true, domain: target.domain, phase: "TARGET_ACTIVE", planSha256, evidenceSha256 };
       } catch (error) {
         throw error instanceof ActivationError ? error : new ActivationError("ACTIVATION_RECONCILIATION_REQUIRED");
       }
-    },
-  });
+    }
+  return Object.freeze({ planSha256, activate: () => run("activate"), reconcile: () => run("reconcile"),
+    resume: () => run("resume"), observe: options => run("observe", options) });
 }

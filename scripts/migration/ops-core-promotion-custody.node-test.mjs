@@ -19,7 +19,7 @@ async function fixture(t) {
     targetIdentity: "target-fixture", parityEvidenceSha256: "a".repeat(64) };
   const intent = { ...body, sha256: archiveEvidenceHash(body) };
   const record = postgresPromotionDurableRecord(intent);
-  const original = { schemaVersion: "1.0.0", scratchName: intent.scratchName, targetRef: record.cleanupState.targetRef, phase: "CREATED" };
+  const original = { schemaVersion: "1.0.0", scratchName: intent.scratchName, targetRef: record.cleanupState.targetRef, phase: "MIGRATION_RETAINED", scratchOid: intent.scratchOid };
   await writeFile(stateFile, JSON.stringify(original), { mode: 0o600 });
   let journal = JSON.stringify(createCutoverJournal({ domain: "core", intentSha256: "b".repeat(64), evidenceSha256: "c".repeat(64) }));
   let etag = 0;
@@ -155,4 +155,15 @@ test("a callback crossing the write boundary cannot return stale final authoriza
   await assert.rejects(adapter.lease.assertHeld(), /PROMOTION_CUSTODY_BINDING_CHANGED/);
   assert.equal(f.custody.snapshot().destinationMayHaveWritten, true);
   assert.equal(f.values.size, 0);
+});
+
+
+test("legacy name-only cleanup marker and foreign scratch OID cannot authorize migration promotion", async t => {
+  for (const change of [value=>{value.phase="CREATED";delete value.scratchOid;},value=>{value.scratchOid="16402";}]) {
+    const f=await fixture(t), marker=structuredClone(f.original);change(marker);
+    await writeFile(f.stateFile,JSON.stringify(marker),{mode:0o600});
+    const adapter=await f.openAdapter();
+    await assert.rejects(adapter.readOperationIntent(),/PROMOTION_CLEANUP_MARKER_UNOWNED/);
+    assert.equal(f.values.size,0);
+  }
 });

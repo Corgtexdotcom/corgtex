@@ -1115,18 +1115,23 @@ export const buildLocaleDiagnostic = (source, target = null) => ({
   crossRuntimeVersionRelation: target === null ? "UNAVAILABLE" : classifyCollationVersionRelation(source, target),
 });
 
-const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, assertCustody = async () => {} }) => {
+const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, productionMode = false, assertCustody = async () => {} }) => {
   const createSql = buildCreateDatabaseSql(scratchName, settings);
   const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
   await client.connect();
+  let scratchOid, scratchOwner;
   try {
-    writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "INTENT" });
+    writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: productionMode ? "MIGRATION_INTENT" : "INTENT" });
     const existing = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [scratchName]);
     if (existing.rowCount !== 0) fail("SCRATCH_DATABASE_ALREADY_EXISTS");
-    writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "ABSENCE_VERIFIED" });
+    writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: productionMode ? "MIGRATION_ABSENCE_VERIFIED" : "ABSENCE_VERIFIED" });
     await assertCustody("CREATE_SCRATCH_DATABASE");
     await client.query(createSql);
-    writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef, phase: "CREATED" });
+    const identity = await querySingle(client, "SELECT oid::text AS oid, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname=$1", [scratchName], "SCRATCH_IDENTITY_UNPROVEN");
+    scratchOid = normalizeLargeObjectOid(identity.oid);
+    scratchOwner = identity.owner;
+    writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef,
+      ...(productionMode ? { phase: "MIGRATION_RETAINED", scratchOid } : { phase: "CREATED" }) });
   } finally {
     await client.end().catch(() => {});
   }
@@ -1146,6 +1151,7 @@ const createScratchDatabase = async ({ adminConfig, scratchName, settings, state
   } finally {
     await readbackClient.end().catch(() => {});
   }
+  return { scratchOid, scratchOwner };
 };
 
 const legacyNormalizeSchemaDump = (content) => content
@@ -3737,6 +3743,163 @@ export const runBeforeRestoreCheckpoint = async ({ beforeRestore, assertCustody,
   await assertCustody("AFTER_RESTORE_CHECKPOINT");
 };
 
+/** Fresh read-only database observation. Uses the same snapshot, SQL-token,
+ * table, job, migration, large-object and sequence collectors as the restore
+ * runner. No CREATE, restore, sequence replay or cleanup of a database occurs.
+ * tempDir must be a fresh private directory owned by this invocation.
+ */
+export async function observePostgresDatabase({ config, tempDir, dockerNetwork = null, signal, assertCustody }) {
+  if (!(signal instanceof AbortSignal) || typeof assertCustody !== "function") fail("PRODUCTION_CUSTODY_REQUIRED");
+  const check = async () => { signal.throwIfAborted(); await assertCustody(); signal.throwIfAborted(); };
+  await check();
+  const client = new Client(nodeClientConfig(config, "corgtex_copy_reconciliation", 30_000, 20 * 60_000));
+  const temporaryFiles = [];
+  const abort = () => { void client.end().catch(() => {}); };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    await client.connect();
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '20min'");
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '20min'");
+    await client.query("SET LOCAL timezone = 'UTC'");
+    await client.query("SET LOCAL client_encoding = 'UTF8'");
+    await client.query("SET LOCAL search_path = pg_catalog");
+    const readOnly = await querySingle(client, "SHOW transaction_read_only", [], "SOURCE_READ_ONLY_UNPROVEN");
+    if (readOnly.transaction_read_only !== "on") fail("SOURCE_READ_ONLY_UNPROVEN");
+    const identity = await querySingle(client, "SELECT oid::text AS oid FROM pg_database WHERE datname=current_database()", [], "SCRATCH_IDENTITY_UNPROVEN");
+    const databaseOid = normalizeLargeObjectOid(identity.oid);
+    const { snapshot } = await querySingle(client, "SELECT pg_export_snapshot() AS snapshot", [], "SNAPSHOT_EXPORT_FAILED");
+    assertNoControlCharacters(snapshot, "INVALID_SNAPSHOT_ID");
+    const sequences = await collectSequences(client);
+    // Only the source service is used for this pg_dump. It may point at either
+    // observed database; preserve that database's verified root certificate.
+    const clientFiles = writeClientFiles(tempDir, { ...config, sourceTlsRootCert: config.sourceTlsRootCert ?? config.targetTlsRootCert },
+      { ...config, sslmode: "disable" }, (...paths) => temporaryFiles.push(...paths));
+    const schemaFile = assertSafePath(`${tempDir}/observed-schema.sql`, tempDir, "INVALID_SCHEMA_PATH");
+    temporaryFiles.push(schemaFile);
+    await check();
+    await dockerClient({ tempDir, ...clientFiles, service: "source", network: dockerNetwork,
+      args: ["pg_dump", "--schema-only", "--format=plain", "--no-owner", "--no-acl", `--restrict-key=${SCHEMA_RESTRICT_KEY}`,
+        "--snapshot", snapshot, "--file", "/work/observed-schema.sql"], code: "RECONCILIATION_SCHEMA_DUMP_FAILED" });
+    const schema = analyzeSchemaDump(readFileSync(schemaFile, "utf8"));
+    const settings = await databaseSettings(client);
+    const constraints = await collectConstraintCatalogManifest(client, "SOURCE_CONSTRAINT_CATALOG_EVIDENCE_FAILED");
+    const checks = {}, deadline = Date.now() + 30_000;
+    const checkEntries = [...constraints.values()].filter(entry => entry.type === "CHECK");
+    if (checkEntries.length <= 64) for (const entry of checkEntries) {
+      if (Date.now() >= deadline) break;
+      checks[entry.key] = await captureBoundCheck(client, entry);
+    }
+    const objects = await inspectLargeObjectAccess(client, "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+    const evidence = await collectDatabaseEvidence(client, { algorithm: schema.algorithm, digest: schema.digest }, objects,
+      "SOURCE_LARGE_OBJECT_EVIDENCE_FAILED");
+    assertFrozenSourceSequences(sequences, await collectSequences(client));
+    await check();
+    await client.query("COMMIT");
+    const current = await querySingle(client, "SELECT oid::text AS oid FROM pg_database WHERE datname=current_database()", [], "SCRATCH_IDENTITY_UNPROVEN");
+    if (current.oid !== databaseOid) fail("SCRATCH_IDENTITY_CHANGED");
+    await check();
+    return { databaseOid, evidence, sequences, schemaContext: { serverVersion: settings.serverVersionNumber,
+      tokens: schema.tokens, manifest: [...constraints.values()].map(({ key, type, semantics }) => ({ key, type, semantics })), checks } };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (isRehearsalError(error)) throw error;
+    fail("POSTGRES_OBSERVATION_UNPROVEN");
+  } finally {
+    signal.removeEventListener("abort", abort);
+    await client.end().catch(() => {});
+    if (!(await Promise.all(temporaryFiles.map(secureDelete))).every(Boolean)) fail("CREDENTIAL_SHRED_FAILED");
+  }
+}
+
+/** Reuses the existing narrowly validated PG18 CHECK representation proof when
+ * fresh SQL tokens differ. There is no generic schema normalization fallback.
+ */
+export function buildObservedPostgresParityEvidence({ domain, sourceRef, targetRef, source, destination, tocEntryCount }) {
+  let schemaRepresentation = null;
+  if (source.evidence.schema.digest !== destination.evidence.schema.digest && source.schemaContext && destination.schemaContext) {
+    const a = source.schemaContext, b = destination.schemaContext;
+    const candidate = findSingleCheckExpressionMismatch(new Map(a.manifest.map(e => [e.key, e])), new Map(b.manifest.map(e => [e.key, e])));
+    if (candidate) schemaRepresentation = buildSchemaRepresentation({ serverVersion: a.serverVersion, tokens: a.tokens,
+      manifest: a.manifest, check: a.checks[candidate.source.key] ?? null }, { serverVersion: b.serverVersion, tokens: b.tokens,
+      manifest: b.manifest, check: b.checks[candidate.destination.key] ?? null }, source.evidence.schema, destination.evidence.schema);
+  }
+  return { schemaVersion: schemaRepresentation === null ? "1.0.0" : "2.0.0",
+    ...(schemaRepresentation === null ? {} : { schemaRepresentation }), domain, sourceRef, targetRef,
+    source: source.evidence, destination: destination.evidence, frozenSourceSequences: source.sequences,
+    archiveSequences: { tocEntryCount, beforeReplay: destination.sequences, afterReplay: destination.sequences } };
+}
+
+export async function inspectPostgresScratch({ config, signal, assertCustody, requireEmpty = false }) {
+  signal.throwIfAborted(); await assertCustody();
+  const client = new Client(nodeClientConfig(config, "corgtex_copy_scratch_identity", 30_000, 30_000));
+  try {
+    await client.connect(); await client.query("BEGIN READ ONLY");
+    const identity = await querySingle(client,
+      "SELECT oid::text AS oid, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname=current_database()",
+      [], "SCRATCH_IDENTITY_UNPROVEN");
+    // Exclude only built-in catalogs and the empty public schema. A retained
+    // relation, function, type, extension, LOB or other session blocks resume.
+    const row = await querySingle(client, `SELECT
+      (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%') +
+      (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')) +
+      (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%') +
+      (SELECT count(*) FROM pg_extension WHERE extname<>'plpgsql') +
+      (SELECT count(*) FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema','public') AND nspname NOT LIKE 'pg_toast%') +
+      (SELECT count(*) FROM pg_largeobject_metadata) AS objects,
+      (SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()) AS other_sessions`,
+    [], "SCRATCH_EMPTY_UNPROVEN");
+    const empty = String(row.objects) === "0" && String(row.other_sessions) === "0";
+    if (requireEmpty && !empty) fail("SCRATCH_NOT_EMPTY");
+    await client.query("COMMIT"); signal.throwIfAborted(); await assertCustody();
+    return { databaseOid: normalizeLargeObjectOid(identity.oid), databaseOwner: identity.owner, empty };
+  } catch (error) {
+    if (isRehearsalError(error)) throw error;
+    fail("SCRATCH_IDENTITY_UNPROVEN");
+  } finally { await client.end().catch(() => {}); }
+}
+
+/** Explicit first restoration of an authenticated retained dump. The caller
+ * must publish a new RESTORED phase intent before invoking this function.
+ * Inherited intents are reconciled by observePostgresDatabase, never here.
+ */
+export async function restoreRetainedPostgresArchive({ targetConfig, tempDir, artifactDir, dockerNetwork = null,
+  scratchOid, scratchOwner, signal, assertCustody }) {
+  const files = [];
+  const check = async () => { signal.throwIfAborted(); await assertCustody(); signal.throwIfAborted(); };
+  await check();
+  const identity = await inspectPostgresScratch({ config: targetConfig, signal, assertCustody, requireEmpty: true });
+  if (identity.databaseOid !== scratchOid || identity.databaseOwner !== scratchOwner) fail("SCRATCH_IDENTITY_CHANGED");
+  try {
+    const clientFiles = writeClientFiles(tempDir, { ...targetConfig, sslmode: "disable" }, targetConfig, (...paths) => files.push(...paths));
+    await restoreArchiveSections({ tempDir, clientFiles, network: dockerNetwork, artifactDir, assertCustody: check });
+    await check();
+  } finally {
+    if (!(await Promise.all(files.map(secureDelete))).every(Boolean)) fail("CREDENTIAL_SHRED_FAILED");
+  }
+}
+
+export async function inspectRetainedArchiveSequences({ config, tempDir, dockerNetwork = null, signal, assertCustody }) {
+  const files = [];
+  signal.throwIfAborted(); await assertCustody();
+  try {
+    const clientFiles = writeClientFiles(tempDir, { ...config, sourceTlsRootCert: config.sourceTlsRootCert ?? config.targetTlsRootCert },
+      { ...config, sslmode: "disable" }, (...paths) => files.push(...paths));
+    const tocFile = assertSafePath(`${tempDir}/recovered.toc`, tempDir, "INVALID_TOC_PATH"); files.push(tocFile);
+    await dockerClient({ tempDir, ...clientFiles, service: "source", network: dockerNetwork,
+      args: ["pg_restore", "--list", "--file", "/work/recovered.toc", "/work/snapshot.dump"], code: "ARCHIVE_TOC_FAILED" });
+    const result = buildSequenceUseList(readFileSync(tocFile, "utf8"));
+    signal.throwIfAborted(); await assertCustody();
+    return { tocEntryCount: result.tocEntryCount };
+  } finally {
+    if (!(await Promise.all(files.map(secureDelete))).every(Boolean)) fail("CREDENTIAL_SHRED_FAILED");
+  }
+}
+
 export async function runPostgresRestoreRehearsal(options) {
   const {
     domain,
@@ -3822,15 +3985,21 @@ export async function runPostgresRestoreRehearsal(options) {
       frozenSourceSequences = await collectSequences(sourceClient);
     }
 
-    await createScratchDatabase({
+    const scratch = await createScratchDatabase({
       adminConfig: targetAdminConfig,
       scratchName,
       settings: sourceSettings,
       stateFile,
       targetRef,
       artifactDir,
+      productionMode,
       assertCustody,
     });
+    if (options.afterScratchCreated) {
+      await assertCustody("RETAIN_SCRATCH_IDENTITY");
+      await options.afterScratchCreated({ ...scratch, sourceRef, targetRef });
+      await assertCustody("SCRATCH_IDENTITY_RETAINED");
+    }
     const targetConfig = { ...targetAdminConfig, database: scratchName };
     const clientFiles = writeClientFiles(
       tempDir,

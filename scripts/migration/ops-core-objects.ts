@@ -160,3 +160,46 @@ export async function copyOpsCoreObjects(source: InventorySource, target: Object
     throw new ObjectTransferError("OBJECT_SNAPSHOT_COPY_FAILED");
   }
 }
+
+/** Fresh verification only. Never invokes createOnly, even for a missing key. */
+export async function verifyOpsCoreObjects(source: InventorySource, target: ObjectStore,
+  suppliedSnapshot: OpsCoreObjectSnapshot, suppliedOptions: OpsCoreObjectOptions) {
+  const options = optionsCopy(suppliedOptions), snapshot = structuredClone(suppliedSnapshot);
+  const { sha256, ...body } = snapshot;
+  check(snapshot.formatVersion === 1 && HASH.test(sha256) && hashCanonical(body) === sha256
+    && snapshot.sourceStoreId === source.identity && source.identity !== target.identity
+    && HASH.test(snapshot.databaseSnapshotSha256) && HASH.test(snapshot.sourceFenceSha256)
+    && Array.isArray(snapshot.objects) && snapshot.objects.length <= options.limits.maxObjects
+    && new Set(snapshot.objects.map(x => x.sourceKey)).size === snapshot.objects.length,
+  "INVALID_OBJECT_SNAPSHOT");
+  await source.assertPrivate(); await target.assertPrivate();
+  await checkInventory(source, snapshot.objects, options);
+  let totalBytes = 0;
+  for (const entry of snapshot.objects) {
+    check(entry.sourceKey === entry.targetKey && HASH.test(entry.sha256)
+      && Number.isSafeInteger(entry.bytes) && entry.bytes >= 0 && entry.bytes <= options.limits.maxObjectBytes,
+    "INVALID_OBJECT_SNAPSHOT");
+    totalBytes += entry.bytes;
+    check(totalBytes <= options.limits.maxTotalBytes, "OBJECT_BUDGET_EXCEEDED");
+    await options.assertSourceFenced();
+    const head = await target.head(entry.targetKey);
+    check(head && head.bytes === entry.bytes && head.contentType === entry.contentType, "TARGET_OBJECT_MISMATCH");
+    const object = await target.read(entry.targetKey, head.etag);
+    check(object && object.etag === head.etag && object.bytes === entry.bytes
+      && object.contentType === entry.contentType, "TARGET_OBJECT_MISMATCH");
+    const digest = createHash("sha256"), iterator = object.body[Symbol.asyncIterator]();
+    let bytes = 0, complete = false;
+    try {
+      for (;;) {
+        const next = await iterator.next(); if (next.done) break;
+        check(next.value instanceof Uint8Array && bytes + next.value.byteLength <= entry.bytes, "OBJECT_SIZE_EXCEEDED");
+        bytes += next.value.byteLength; digest.update(next.value);
+      }
+      check(bytes === entry.bytes && digest.digest("hex") === entry.sha256, "TARGET_OBJECT_MISMATCH");
+      complete = true;
+    } finally { if (!complete) await iterator.return?.(); }
+  }
+  await checkInventory(source, snapshot.objects, options); await options.assertSourceFenced();
+  return { complete: true, sourceSnapshotSha256: snapshot.sha256, targetStoreId: target.identity,
+    objectCount: snapshot.objects.length, totalBytes };
+}

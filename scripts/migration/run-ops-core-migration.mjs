@@ -12,9 +12,10 @@ import { archiveEvidenceHash, azureArchiveStore } from "./ops-core-archive.mjs";
 import { createCutoverJournal, validateCutoverJournal, azureBlobCustodyAdapter, openCutoverCustody } from "./ops-core-custody.mjs";
 import { azureProviderOperationStore } from "./ops-core-provider-operations.mjs";
 import { runOpsCoreSourceFence, assertOpsCoreSourceFenced } from "./ops-core-source-controller.mjs";
-import { runOpsCoreDataTransfer, validateOpsCoreTransferPlan, createOpsCoreTransferContext } from "./ops-core-transfer-controller.mjs";
+import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer, validateOpsCoreTransferPlan, createOpsCoreTransferContext } from "./ops-core-transfer-controller.mjs";
 import { createOpsCoreActivation, validateOpsCoreActivationPlan } from "./ops-core-activation.mjs";
 import { buildHealthProbeJobDefinition, createHealthJobDispatcher } from "./ops-core-health-job.mjs";
+import { runOpsCoreAcceptance, validateOpsCoreAcceptanceBinding } from "./ops-core-acceptance.mjs";
 import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
 
@@ -111,13 +112,15 @@ async function readOptionalBlobJson(blob) {
 /** Actual operator dispatch. The one stable per-domain journal serializes all
  * steps outside Ops. Each invocation reopens its exact retained global plan.
  * initialize is create-only; subsequent actions never overwrite a plan or
- * automatically retry incomplete phases. No routing or retirement action exists.
+ * automatically replay incomplete effects. Routing/acceptance record independently
+ * checked evidence; DNS changes and retirement remain separate operations.
  */
 export async function runOpsCoreMigration({ action, plan: input, credentials, artifactDir, healthProbe,
-  containerFactory, identityCheck = assertAzureIdentity, runtime = {} }) {
+  containerFactory, identityCheck = assertAzureIdentity, runtime = {}, acceptanceArtifact }) {
   let custody;
   try {
-    need(["initialize", "status", "fence", "transfer", "activate"].includes(action), "MIGRATION_ACTION_INVALID");
+    need(["initialize", "status", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
+      "reconcile-activate", "resume-activate", "record-routing", "accept", "retain-acceptance-evidence"].includes(action), "MIGRATION_ACTION_INVALID");
     const plan = validateOperatorPlan(input); const intentSha256 = archiveEvidenceHash(plan);
     await identityCheck(plan);
     const azureCredential = new AzureCliCredential({ processTimeoutInMs: 10_000 });
@@ -170,10 +173,13 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       }
       return await (runtime.fence ?? runOpsCoreSourceFence)(sourceOptions);
     }
-    if (action === "transfer") {
+    if (["transfer", "reconcile-transfer", "resume-transfer"].includes(action)) {
       need(typeof artifactDir === "string" && artifactDir.length > 0, "MIGRATION_ARTIFACT_DIRECTORY_REQUIRED");
       await mkdir(artifactDir, { recursive: true, mode: 0o700 });
-      return await (runtime.transfer ?? runOpsCoreDataTransfer)(transferOptions());
+      const transfer = action === "transfer" ? runtime.transfer ?? runOpsCoreDataTransfer
+        : action === "resume-transfer" ? runtime.resumeTransfer ?? resumeOpsCoreDataTransfer
+          : runtime.reconcileTransfer ?? reconcileOpsCoreDataTransfer;
+      return await transfer(transferOptions());
     }
     const assertSourceFenced = async () => {
       const proof = await (runtime.assertSource ?? assertOpsCoreSourceFenced)(sourceOptions);
@@ -183,24 +189,66 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       need(/^[a-f0-9]{64}$/.test(sourceFenceSha256), "MIGRATION_SOURCE_UNPROVEN");
       return { complete: true, domain: plan.domain, intentSha256, sourceFenceSha256 };
     };
-    const workerHealth = createHealthJobDispatcher({ plan: plan.health, custody, operationStore, assertSourceFenced });
-    const actualHealthProbe = healthProbe ?? (request => request.role === "web"
-      ? fetchWebActivationHealth(request) : workerHealth.probeHealth(request));
-    return await (runtime.activate ?? createOpsCoreActivation)({ plan: plan.activation, custody,
-      operationStore, assertSourceFenced, healthProbe: actualHealthProbe }).activate();
+    let workerHealth;
+    const actualHealthProbe = healthProbe ?? (request => {
+      if (request.role === "web") return fetchWebActivationHealth(request);
+      workerHealth ??= createHealthJobDispatcher({ plan: plan.health, custody, operationStore, assertSourceFenced,
+        mode: custody.snapshot().pending?.to === "TARGET_ACTIVATING" ? "migration" : "acceptance",
+        ...(runtime.healthTransport ? { transport: runtime.healthTransport } : {}) });
+      return workerHealth.probeHealth(request);
+    });
+    const activation = () => (runtime.activate ?? createOpsCoreActivation)({ plan: plan.activation, custody,
+      operationStore, assertSourceFenced, healthProbe: actualHealthProbe });
+    if (["record-routing", "accept", "retain-acceptance-evidence"].includes(action)) {
+      need(acceptanceArtifact, "MIGRATION_ACCEPTANCE_ARTIFACT_REQUIRED");
+      const binding = validateOpsCoreAcceptanceBinding(acceptanceArtifact.binding);
+      const state = custody.snapshot();
+      need(binding.domain === plan.domain && binding.intentSha256 === intentSha256
+        && binding.targetBindingSha256 === archiveEvidenceHash(plan.azure)
+        && same(binding.release, plan.activation.release)
+        && binding.sourceFenceSha256 === state.history.find(x => x.phase === "SOURCE_FENCED")?.evidenceSha256,
+        "MIGRATION_ACCEPTANCE_BINDING_MISMATCH");
+      const evidenceStore = {
+        async assertPrivate() { need(!(await custodyContainer.getAccessPolicy()).blobPublicAccess, "MIGRATION_CUSTODY_PUBLIC"); },
+        async readOptional(key) { validKey(key); const value = await readOptionalBlobJson(custodyContainer.getBlockBlobClient(key));
+          return value === null ? null : JSON.stringify(value); },
+        async createOnly(key,text,signal) { validKey(key); signal.throwIfAborted();
+          need(Buffer.byteLength(text) <= 512 * 1024, "MIGRATION_ACCEPTANCE_EVIDENCE_TOO_LARGE");
+          await custodyContainer.getBlockBlobClient(key).upload(text,Buffer.byteLength(text), { abortSignal:signal,
+            conditions:{ifNoneMatch:"*"},blobHTTPHeaders:{blobContentType:"application/json"} }); },
+      };
+      function validKey(key) { need(new RegExp(`^acceptance/${plan.domain}/${intentSha256}/[a-f0-9]{64}\\.json$`).test(key),
+        "MIGRATION_ACCEPTANCE_KEY_INVALID"); }
+      if (action === "retain-acceptance-evidence") {
+        need(state.destinationMayHaveWritten && ["TARGET_ACTIVE", "ROUTED"].includes(state.phase), "MIGRATION_ACCEPTANCE_PHASE_INVALID");
+        const evidenceSha256 = archiveEvidenceHash(acceptanceArtifact), key = `acceptance/${plan.domain}/${intentSha256}/${evidenceSha256}.json`;
+        await custody.assertOwned(); await evidenceStore.assertPrivate();
+        const prior = await evidenceStore.readOptional(key);
+        if (prior === null) await evidenceStore.createOnly(key, JSON.stringify(acceptanceArtifact), custody.signal);
+        need(archiveEvidenceHash(JSON.parse(await evidenceStore.readOptional(key))) === evidenceSha256, "MIGRATION_ACCEPTANCE_EVIDENCE_CHANGED");
+        await custody.assertOwned(); return {status:"EVIDENCE_RETAINED",domain:plan.domain,evidenceSha256};
+      }
+      return await (runtime.acceptance ?? runOpsCoreAcceptance)({ phase:action === "record-routing" ? "ROUTED" : "ACCEPTED",
+        binding,custody,evidenceStore,artifact:acceptanceArtifact,assertSourceFenced,
+        observeRuntime: options => activation().observe(options) });
+    }
+    const method = action === "reconcile-activate" ? "reconcile" : action === "resume-activate" ? "resume" : "activate";
+    return await activation()[method]();
   } catch (error) { throw error instanceof OperatorError ? error : new OperatorError("MIGRATION_RECONCILIATION_REQUIRED"); }
   finally { await custody?.close(); }
 }
 
 export async function runOpsCoreMigrationCli(argv = process.argv.slice(2)) {
-  need(argv.length >= 2 && argv.length <= 4, "MIGRATION_USAGE_ACTION_PLAN_CREDENTIALS_ARTIFACTS");
-  const [action, planPath, credentialPath, artifacts] = argv;
+  need(argv.length >= 2 && argv.length <= 5, "MIGRATION_USAGE_ACTION_PLAN_CREDENTIALS_ARTIFACTS");
+  const [action, planPath, credentialPath, artifacts, acceptancePath] = argv;
   const plan = await readPrivateMigrationJson(planPath);
   const credentials = credentialPath ? await readPrivateMigrationJson(credentialPath) : undefined;
-  const result = await runOpsCoreMigration({ action, plan, credentials, artifactDir: artifacts && resolve(artifacts) });
+  const result = await runOpsCoreMigration({ action, plan, credentials, artifactDir: artifacts && resolve(artifacts),
+    acceptanceArtifact: acceptancePath ? await readPrivateMigrationJson(acceptancePath) : undefined });
   // Keep customer/provider evidence in the private stores, not CI stdout.
   process.stdout.write(`${JSON.stringify({ status: result.status ?? result.phase, domain: plan.domain,
-    intentSha256: archiveEvidenceHash(plan), evidenceSha256: result.evidenceSha256 ?? null })}\n`);
+    intentSha256: archiveEvidenceHash(plan), evidenceSha256: result.evidenceSha256 ?? null, complete: result.complete ?? null,
+    code: result.code ?? null, nextAction: result.nextAction ?? null, historical: result.historical ?? false })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

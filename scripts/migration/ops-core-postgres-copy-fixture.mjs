@@ -2,9 +2,11 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
 import pg from "pg";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
-import { runOpsCorePostgresCopy } from "./ops-core-postgres-copy.mjs";
+import { runOpsCorePostgresCopy, resumeOpsCorePostgresCopy } from "./ops-core-postgres-copy.mjs";
+import { reconcileOpsCorePostgresCopy } from "./ops-core-postgres-reconcile.mjs";
 import { applyPostgresPromotion, preparePostgresPromotion } from "./ops-core-postgres-promotion.mjs";
 import { openPostgresPromotionCustody } from "./ops-core-promotion-custody.mjs";
 import { cleanupScratchDatabase } from "./run-postgres-restore-rehearsal.mjs";
@@ -12,7 +14,7 @@ import { cleanupScratchDatabase } from "./run-postgres-restore-rehearsal.mjs";
 const { Client } = pg;
 const binding = (config) => ({ host: config.host, port: config.port, database: config.database, user: config.user });
 
-export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targetAdminConfig, sourceAdminConfig, targetLocalConfig, network }) {
+export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targetAdminConfig, sourceAdminConfig, targetLocalConfig, network, interruptAfterCapture = false }) {
   for (const config of [sourceConfig, targetAdminConfig, sourceAdminConfig, targetLocalConfig]) {
     assert.equal(config.host, "127.0.0.1");
     assert.ok(config.port > 1024 && config.port !== 5432);
@@ -64,17 +66,36 @@ export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targe
     async read(key) { assert.ok(objects.has(key)); return (async function* () { yield objects.get(key); })(); },
   };
   const key = randomBytes(32);
+  const copyRecords = new Map();
+  const operationStore = { async assertPrivate() {}, async readOptional(name) { return copyRecords.get(name) ?? null; },
+    async createOnly(name, text) { assert.equal(copyRecords.has(name), false); copyRecords.set(name, text); } };
   try {
     const fence = await custody.begin("SOURCE_FENCED", "c".repeat(64));
     await custody.complete(fence.operationId, "d".repeat(64));
-    const copied = await runOpsCorePostgresCopy({ domain: "ops", sourceConfig, targetAdminConfig,
+    let interrupt = interruptAfterCapture;
+    const copyCustody = { ...custody, async complete(...args) {
+      const capture = custody.snapshot().pending?.to === "CAPTURED";
+      await custody.complete(...args);
+      if (capture && interrupt) { interrupt = false; throw new Error("LOCAL_CAPTURE_ACK_LOST"); }
+    } };
+    const copyOptions = { domain: "ops", sourceConfig, targetAdminConfig,
       expectedSource: binding(sourceConfig), expectedTarget: binding(targetAdminConfig), scratchName: "corgtex_rehearsal_9821_1_ops",
-      artifactDir: join(root, "retained-copy"), dockerNetwork: network, custody, assertSourceFenced, assertTargetInactive,
-      archiveStore, keyVersion: `https://migration-fixture.vault.azure.net/secrets/archive/${randomBytes(16).toString("hex")}`,
-      vaultName: "migration-fixture", maxArchiveBytes: 100 * 1024 * 1024, resolveKey: async () => Buffer.from(key) });
+      artifactDir: join(root, "retained-copy"), dockerNetwork: network, custody: copyCustody, assertSourceFenced, assertTargetInactive,
+      archiveStore, operationStore, keyVersion: `https://migration-fixture.vault.azure.net/secrets/archive/${randomBytes(16).toString("hex")}`,
+      vaultName: "migration-fixture", maxArchiveBytes: 100 * 1024 * 1024, resolveKey: async () => Buffer.from(key) };
+    let copied;
+    if (interruptAfterCapture) {
+      await assert.rejects(runOpsCorePostgresCopy(copyOptions), /RECONCILIATION_REQUIRED/);
+      assert.equal(custody.snapshot().phase, "CAPTURED"); assert.equal(custody.snapshot().pending, null);
+      copied = await resumeOpsCorePostgresCopy(copyOptions);
+      assert.equal(copied.complete, true, copied.code);
+    } else copied = await runOpsCorePostgresCopy(copyOptions);
     assert.equal(custody.snapshot().phase, "RESTORED");
     assert.equal(copied.parity.sourceSequenceParity, "VERIFIED");
     assert.equal(objects.size, 3);
+    const reconciled = await reconcileOpsCorePostgresCopy(copyOptions);
+    assert.equal(reconciled.complete, true, reconciled.code);
+    assert.equal(reconciled.parity.evidenceSha256, copied.parity.evidenceSha256);
     const client = new Client(targetLocalConfig);
     await client.connect();
     try {
@@ -84,7 +105,7 @@ export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targe
         parityEvidenceSha256: copied.parity.evidenceSha256 });
       const promotion = await custody.begin("VERIFIED", intent.sha256);
       const promotionRecords = new Map();
-      const promotionCustody = await openPostgresPromotionCustody({ custody, intent, stateFile: copied.stateFile,
+      const promotionCustody = await openPostgresPromotionCustody({ custody, intent, stateFile: reconciled.stateFile,
         assertSourceFenced, assertTargetInactive, store: {
           async assertPrivate() {},
           async readOptional(key) { return promotionRecords.get(key) ?? null; },
@@ -101,6 +122,17 @@ export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targe
       await client.query(`CREATE DATABASE "${copied.scratchName}"`);
       await assert.rejects(cleanupScratchDatabase({ targetAdminConfig, stateFile: copied.stateFile,
         artifactDir: copied.operationDir, expectedScratchName: copied.scratchName }), /INVALID_CLEANUP_STATE/);
+      await assert.rejects(cleanupScratchDatabase({ targetAdminConfig, stateFile: reconciled.stateFile,
+        artifactDir: reconciled.operationDir, expectedScratchName: copied.scratchName }), /INVALID_CLEANUP_STATE/);
+      const retainedMarker = JSON.parse(await readFile(copied.stateFile, "utf8"));
+      for (const phase of ["MIGRATION_INTENT", "MIGRATION_ABSENCE_VERIFIED", "MIGRATION_RETAINED"]) {
+        const stateFile = join(root, `${phase}.json`);
+        await writeFile(stateFile, JSON.stringify({ schemaVersion: "1.0.0", scratchName: copied.scratchName,
+          targetRef: retainedMarker.targetRef, phase, ...(phase === "MIGRATION_RETAINED" ? { scratchOid: copied.scratchOid } : {}) }),
+        { mode: 0o600, flag: "wx" });
+        await assert.rejects(cleanupScratchDatabase({ targetAdminConfig, stateFile,
+          artifactDir: copied.operationDir, expectedScratchName: copied.scratchName }), /INVALID_CLEANUP_STATE/);
+      }
       assert.equal((await client.query("SELECT count(*)::integer AS count FROM pg_database WHERE datname=$1", [copied.scratchName])).rows[0].count, 1);
       const password = randomBytes(24).toString("hex");
       await client.query(`CREATE ROLE retained_runtime LOGIN PASSWORD '${password}'; GRANT CONNECT ON DATABASE corgtex_ops TO retained_runtime`);
@@ -118,6 +150,7 @@ export async function runRetainedPostgresCopyFixture({ root, sourceConfig, targe
         assert.equal(inserted.rows[0].id, 3);
       } finally { await runtime.end().catch(() => {}); }
     } finally { await client.end().catch(() => {}); }
-    return { status: "RETAINED_POSTGRES_COPY_AND_PROMOTION_VERIFIED", sourceSequenceParity: "VERIFIED", archiveRoundTrip: "VERIFIED", runtimeAccess: "VERIFIED" };
+    return { status: "RETAINED_POSTGRES_COPY_AND_PROMOTION_VERIFIED", sourceSequenceParity: "VERIFIED", archiveRoundTrip: "VERIFIED",
+      runtimeAccess: "VERIFIED", readOnlyReconciliation: "VERIFIED", ...(interruptAfterCapture ? { explicitCapturedContinuation: "VERIFIED" } : {}) };
   } finally { key.fill(0); await custody.close(); }
 }
