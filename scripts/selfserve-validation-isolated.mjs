@@ -105,7 +105,37 @@ export async function prepareIsolatedValidation(env = process.env) {
   }
 }
 
-export async function runIsolatedValidation(env = process.env) {
+// Image extraction and container creation can exceed a metadata probe's five
+// seconds on a fresh runner. They remain bounded by the fixture's overall limit.
+export function isolatedDockerSetup(stage, args, { deadline, record, command = execFileSync, now = Date.now }) {
+  const started = now();
+  const timeoutMs = Math.max(0, Math.min(60_000, deadline - started));
+  const diagnostic = { stage, timeoutMs, elapsedMs: 0, status: "failed", exitCode: null, signal: null };
+  let result;
+  let failure;
+  try {
+    requireValidation(timeoutMs > 0, "ISOLATED_DEADLINE");
+    result = command("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: timeoutMs });
+    requireValidation(now() < deadline, "ISOLATED_DEADLINE");
+    diagnostic.status = "passed";
+    diagnostic.exitCode = 0;
+  } catch (error) {
+    const reason = error.message === "ISOLATED_DEADLINE" ? "DEADLINE"
+      : error.code === "ETIMEDOUT" ? "TIMEOUT" : Number.isInteger(error.status) ? "EXIT" : "SPAWN";
+    diagnostic.reason = reason;
+    diagnostic.exitCode = Number.isInteger(error.status) ? error.status : null;
+    diagnostic.signal = ["SIGTERM", "SIGKILL", "SIGINT"].includes(error.signal) ? error.signal : null;
+    // Never retain raw subprocess errors, command arguments, or stderr: detached
+    // container commands include generated credentials in their environment.
+    failure = new Error(`ISOLATED_SETUP_${stage}_${reason}`);
+  }
+  diagnostic.elapsedMs = Math.max(0, now() - started);
+  record(diagnostic);
+  if (failure) throw failure;
+  return result;
+}
+
+export async function runIsolatedValidation(env = process.env, { command = execFileSync } = {}) {
   requireValidation(!env.SELFSERVE_IMAGE_READ_TOKEN && !env.GITHUB_TOKEN && !env.GH_TOKEN, "ISOLATED_REGISTRY_TOKEN_FORBIDDEN");
   const { expectedSha, images } = isolatedInputs(env);
   const source = resolve(env.SELFSERVE_VALIDATION_SOURCE_DIR || ".accepted-source");
@@ -117,7 +147,7 @@ export async function runIsolatedValidation(env = process.env) {
   const label = `corgtex.validation.scope=${scope}`;
   const names = ["identity", "pg", "init", "web", "relay", "runner"].map((suffix) => `${scope}-${suffix}`);
   const [identity, pg, init, web, relay, runner] = names;
-  const docker = (args, options = {}) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000, ...options });
+  const docker = (args, options = {}) => command("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000, ...options });
   requireValidation(execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim() === expectedSha
     && !execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: source, encoding: "utf8" }).trim(),
     "ISOLATED_SOURCE_SHA_MISMATCH");
@@ -167,6 +197,10 @@ export async function runIsolatedValidation(env = process.env) {
   const onSignal = () => { expired = true; cleanup(); };
   process.once("SIGTERM", onSignal);
   process.once("SIGINT", onSignal);
+  const setupCommands = [];
+  const setup = (stage, args) => isolatedDockerSetup(stage, args, {
+    deadline, command, record: (diagnostic) => setupCommands.push(diagnostic),
+  });
   let commandNumber = 0;
   const run = (args) => new Promise((resolveRun, reject) => {
     requireValidation(!expired && Date.now() < deadline, "ISOLATED_DEADLINE");
@@ -186,8 +220,8 @@ export async function runIsolatedValidation(env = process.env) {
   });
   let completed = false;
   try {
-    docker(["create", "--name", identity, "--network", "none", "--platform", platforms.WEB, ...resources, images.WEB]);
-    docker(["cp", `${identity}:/app/release-build.json`, join(output, "release-build.json")]);
+    setup("IDENTITY_CREATE", ["create", "--name", identity, "--network", "none", "--platform", platforms.WEB, ...resources, images.WEB]);
+    setup("IDENTITY_COPY", ["cp", `${identity}:/app/release-build.json`, join(output, "release-build.json")]);
     const build = JSON.parse(await readFile(join(output, "release-build.json"), "utf8"));
     requireValidation(build.schemaVersion === 1 && build.role === "web" && build.gitSha === expectedSha, "ISOLATED_IMAGE_SHA_MISMATCH");
     tlsDirectory = await mkdtemp(join(tmpdir(), "selfserve-fixture-tls-"));
@@ -198,11 +232,11 @@ export async function runIsolatedValidation(env = process.env) {
     const publicKey = execFileSync("openssl", ["x509", "-pubkey", "-noout", "-in", cert]);
     const der = execFileSync("openssl", ["pkey", "-pubin", "-outform", "DER"], { input: publicKey });
     const pin = createHash("sha256").update(der).digest("base64");
-    docker(["network", "create", "--internal", "--label", label, scope]);
+    setup("NETWORK_CREATE", ["network", "create", "--internal", "--label", label, scope]);
     const internal = docker(["network", "inspect", scope, "--format", "{{.Internal}}"]).trim() === "true";
     requireValidation(internal, "ISOLATED_NETWORK_REQUIRED");
     await writeFile(join(output, "network.json"), `${JSON.stringify({ scope, internal, publishedPorts: [] })}\n`);
-    docker(["run", "-d", "--name", pg, "--network", scope, "--network-alias", "fixture-pg", "--platform", platforms.PG, ...resources,
+    setup("PG_START", ["run", "-d", "--name", pg, "--network", scope, "--network-alias", "fixture-pg", "--platform", platforms.PG, ...resources,
       "--tmpfs", "/var/lib/postgresql:size=512m", "--tmpfs", "/var/lib/postgresql/data:size=512m",
       ...envArgs({ POSTGRES_DB: "selfserve_validation_synthetic", POSTGRES_USER: "synthetic", POSTGRES_PASSWORD: password }), images.PG]);
     let ready = false;
@@ -216,10 +250,10 @@ export async function runIsolatedValidation(env = process.env) {
       "-v", `${scripts}/selfserve-validation-fixture.mjs:/app/scripts/selfserve-validation-fixture.mjs:ro`,
       "-v", `${scripts}:/app/validation-scripts:ro`, "-v", `${output}:/proof`,
       "--entrypoint", "sh", images.WEB, "-ec", "node node_modules/prisma/build/index.js migrate deploy && node validation-scripts/selfserve-validation-catalog-fixture.mjs && node --import tsx scripts/selfserve-validation-fixture.mjs"]);
-    docker(["run", "-d", "--name", web, "--network", scope, "--network-alias", "fixture-app", "--platform", platforms.WEB, ...resources,
+    setup("WEB_START", ["run", "-d", "--name", web, "--network", scope, "--network-alias", "fixture-app", "--platform", platforms.WEB, ...resources,
       ...envArgs(fixtureEnv), "--entrypoint", "node", images.WEB,
       "node_modules/next/dist/bin/next", "start", "apps/web", "-p", "3000", "-H", "0.0.0.0"]);
-    docker(["run", "-d", "--name", relay, "--network", scope, "--network-alias", "fixture-web", "--platform", platforms.WEB, ...resources,
+    setup("RELAY_START", ["run", "-d", "--name", relay, "--network", scope, "--network-alias", "fixture-web", "--platform", platforms.WEB, ...resources,
       "-e", "SELFSERVE_ISOLATED_FIXTURE=true", "-v", `${tlsDirectory}:/fixture-tls:ro`,
       "-v", `${scripts}/selfserve-validation-relay.mjs:/app/scripts/selfserve-validation-relay.mjs:ro`,
       "--entrypoint", "node", images.WEB, "scripts/selfserve-validation-relay.mjs"]);
@@ -247,6 +281,8 @@ export async function runIsolatedValidation(env = process.env) {
   } finally {
     clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
+    try { await writeFile(join(output, "setup-commands.json"), `${JSON.stringify(setupCommands, null, 2)}\n`); }
+    catch { /* Diagnostic IO must not prevent owned-resource cleanup. */ }
     try { await writeFile(join(output, "web.log"), sanitize(docker(["logs", web], { maxBuffer: 2 * 1024 * 1024 }))); } catch {}
     const states = [];
     for (const name of names) {
