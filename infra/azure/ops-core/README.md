@@ -85,7 +85,8 @@ Official schemas checked for this topology:
 
 The `opsPostgresSkuName` and `corePostgresSkuName` parameters select each database
 independently. Both default to `Standard_D2ds_v5`; the template derives the matching
-`GeneralPurpose` tier. The explicit `Standard_B2s` alternative derives `Burstable`
+`GeneralPurpose` tier. The explicit `Standard_B1ms` (1 vCore / 2 GiB) and `Standard_B2s` (2 vCore / 4 GiB)
+alternatives derive `Burstable`
 and requires an accepted production support/CPU-credit tradeoff plus measured
 restore/runtime capacity before use. Choosing a SKU in this template does not
 establish that approval or capacity evidence.
@@ -97,3 +98,31 @@ resources and transition overlap together. No monthly-cost fit is implied. Measu
 restore/runtime demand and recovery with the selected tier and 32-GiB storage before
 production acceptance. Deployment/provisioning,
 private DNS/connectivity, restore, secret transfer and runtime activation remain separate.
+
+
+## Low-load qualification
+
+For small workloads, qualify the smaller Burstable options before adding General
+Purpose capacity. Retain separate Core and Ops databases and credentials. Compare
+measured CPU, memory, connections, storage and restore behavior, including bursts
+and permitted queued work; low web request volume alone does not size a database.
+Use explicit per-process `connection_limit` values in application database URLs,
+accounting for all web replicas, workers, rollout overlap and operator connections.
+Reserve provider/admin headroom instead of inheriting the host CPU-based Prisma
+pool size. Connection limits and extension availability must be verified on the
+chosen target. B1ms has less memory, I/O and connection capacity than B2s.
+
+Keep workers available for durable scheduling and callbacks. Deduplicated periodic
+and daily schedules count only newly inserted jobs, allowing the existing idle
+polling backoff to operate. Measure queue latency and CPU/network after rollout;
+fewer scheduler scans are not automatically equivalent to lower billed compute.
+
+Model app active time and idle time separately using the Azure billing conditions.
+Scale-to-zero web candidates require cold-start and callback qualification. Choose
+CPU/memory independently for each role in the frozen activation plan; do not impose
+one allocation on every process. Historical memory peaks, startup, accepted job
+concurrency and representative requests all constrain a smaller allocation.
+
+A small SKU is a qualification option, not a production capacity guarantee or a
+purchase instruction. Existing backup, recovery, private-access and independent
+release requirements remain in force.
