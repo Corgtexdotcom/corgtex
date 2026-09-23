@@ -7,6 +7,20 @@ non-cancelling concurrency group, existing server and one-hour lifecycle. The
 last fifteen minutes remain reserved for cleanup. This code is not authorization
 to dispatch, publish inputs, grant roles or spend money.
 
+The retained server can use `Standard_D2ds_v5` or the lower-cost `Standard_B1ms`.
+New lifecycle intents record the observed SKU in schema `1.1.0`; every subsequent
+start, readiness, recovery and cleanup check must match that SKU. Retained `1.0.0`
+intents remain bound to D2ds. The workflow never resizes the server, changes its
+128 GiB storage, or accepts an arbitrary SKU. Complete or recover any prior run
+before an independently authorized capacity change; prepare a new intent afterward.
+
+Before moving to B1ms, inspect and adjust retained connection and memory settings
+for its smaller capacity. Changing SKU does not establish safe pool sizes. Keep
+all existing databases and recovery evidence. The small synthetic fixture proves
+restore compatibility only; workload-sized memory, CPU-credit and connection tests
+are still needed. Stopping compute lasts at most seven days, so ongoing budgets
+must include the selected SKU's full restart cost as well as retained storage.
+
 The same job also accepts `prepare-synthetic`, domain `ops`: it verifies the
 published pins, exercises Linux bootstrap/TLS/baseline and Docker client transport checks, and removes the
 local fixture, skipping Azure login and all provider steps. Use that bounded

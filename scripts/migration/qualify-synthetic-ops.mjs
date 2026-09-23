@@ -2,7 +2,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Azure, SUBSCRIPTION, GROUP, SERVER, validateEnvironment, validateIntent, validateServer, validateRules, prepare, qualify, cleanup, recoveryEvidence, readIntent } from "./qualify-ops-azure-target.mjs";
+import { Azure, SUBSCRIPTION, GROUP, SERVER, validateEnvironment, validateIntent, validateServer, validateRules, prepare, qualify, cleanup, recoveryEvidence, readIntent, intentComputeSku } from "./qualify-ops-azure-target.mjs";
 import { HOST, RESOURCE, connectionConfig, captureWhenReady } from "./probe-ops-azure-target.mjs";
 import { targetDatabaseConfigFromEnv } from "./run-postgres-restore-rehearsal.mjs";
 import { validatePostgresRestoreRehearsal } from "./validate-postgres-restore-rehearsal.mjs";
@@ -223,14 +223,14 @@ export async function main(args = process.argv.slice(2), env = process.env) {
         }
       },
       preflight: async () => {
-        await api.identity(); await api.boundary(); validateServer(await api.server(), true); validateRules(await api.rules(), i);
+        await api.identity(); await api.boundary(); validateServer(await api.server(), true, intentComputeSku(i)); validateRules(await api.rules(), i);
       },
       databases: () => recoverScratchDatabases(intent, directory, new ScratchRecovery(supervisor, api, Math.min(api.deadline, Date.now() + 300000), env)),
       lifecycle: async () => {
         if (existsSync(`${directory}/lifecycle-cleanup.json`)) {
           const prior = readIntent(`${directory}/lifecycle-cleanup.json`);
           check(prior.runId === i.runId && prior.runAttempt === i.runAttempt && prior.deadline === i.deadline && prior.resource === RESOURCE
-            && prior.serverStopped && prior.firewallAbsent && validateServer(await api.server()).state === "Stopped", "LIFECYCLE_RECEIPT_MISMATCH");
+            && prior.serverStopped && prior.firewallAbsent && validateServer(await api.server(), false, intentComputeSku(i)).state === "Stopped", "LIFECYCLE_RECEIPT_MISMATCH");
           validateRules(await api.rules(), i, true); return prior;
         }
         if (recovering) api.verifyRecovery = () => recoveryEvidence(i, env, directory, fetch, "synthetic");
