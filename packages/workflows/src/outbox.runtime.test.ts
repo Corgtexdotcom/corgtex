@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getNextPollIntervalMs, getWorkerPollOutcome } from "../../../apps/worker/src/polling";
 
 const {
   prismaMock,
@@ -1231,6 +1232,15 @@ describe("schedulePeriodicJobs", () => {
     });
   });
 
+  it.each([0, 1])("reports %i newly inserted periodic jobs after deduplication", async (count) => {
+    prismaMock.customerDeployment.findMany.mockResolvedValue([{ id: "inst-1" }]);
+    txMock.workflowJob.createMany.mockResolvedValueOnce({ count });
+
+    await expect(schedulePeriodicJobs()).resolves.toBe(count);
+    expect(createdWorkflowJobs()).toHaveLength(2);
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledWith(expect.objectContaining({ skipDuplicates: true }));
+  });
+
   it("schedules bounded control-plane fleet snapshot jobs", async () => {
     prismaMock.communicationInstallation.findMany.mockResolvedValue([]);
     prismaMock.customerDeployment.findMany.mockResolvedValue([
@@ -1301,6 +1311,7 @@ describe("schedulePeriodicJobs", () => {
 
 describe("scheduleDailyJobs", () => {
   beforeEach(() => {
+    loggerMock.info.mockReset();
     prismaMock.$transaction.mockReset().mockImplementation(async (callback: (tx: typeof txMock) => Promise<unknown>) => callback(txMock));
     prismaMock.workspace.findMany.mockReset().mockResolvedValue([
       { id: "ws-1" },
@@ -1331,6 +1342,54 @@ describe("scheduleDailyJobs", () => {
     vi.setSystemTime(new Date("2026-04-29T20:15:00Z"));
   });
 
+  it.each([0, 2])("reports %i newly inserted daily jobs after deduplication", async (count) => {
+    txMock.workflowJob.createMany.mockResolvedValueOnce({ count });
+
+    await expect(scheduleDailyJobs()).resolves.toBe(count);
+    expect(createdWorkflowJobs()).toHaveLength(6);
+    expect(txMock.workflowJob.createMany).toHaveBeenCalledWith(expect.objectContaining({ skipDuplicates: true }));
+    if (count === 0) {
+      expect(loggerMock.info).not.toHaveBeenCalled();
+    } else {
+      expect(loggerMock.info).toHaveBeenCalledExactlyOnceWith("daily_jobs_scheduled", { insertedCount: count });
+    }
+  });
+
+  it("does not report created jobs when the scheduling transaction fails", async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(new Error("transaction failed"));
+    await expect(scheduleDailyJobs()).rejects.toThrow("transaction failed");
+    expect(loggerMock.info).not.toHaveBeenCalled();
+  });
+
+  it("backs off deduplicated schedules and resumes normal polling when a new job is inserted", async () => {
+    prismaMock.externalDataSource.findMany.mockResolvedValue([]);
+    prismaMock.customerDeployment.findMany.mockResolvedValue([]);
+    prismaMock.appRuntime.findMany.mockResolvedValue([]);
+    txMock.workflowJob.createMany.mockResolvedValue({ count: 0 });
+    let currentPollIntervalMs = 5_000;
+    for (const expectedInterval of [10_000, 20_000, 30_000, 30_000]) {
+      const outcome = getWorkerPollOutcome({
+        dispatched: 0, eventBatchSize: 25, processed: 0, jobBatchSize: 25,
+        scheduled: await scheduleDailyJobs(), scheduledPeriodic: await schedulePeriodicJobs(),
+        scheduledDrip: 0, finalized: 0,
+      });
+      currentPollIntervalMs = getNextPollIntervalMs({
+        outcome, pollIntervalMs: 5_000, maxPollIntervalMs: 30_000, currentPollIntervalMs,
+      });
+      expect(currentPollIntervalMs).toBe(expectedInterval);
+    }
+
+    txMock.workflowJob.createMany.mockResolvedValueOnce({ count: 1 });
+    const outcome = getWorkerPollOutcome({
+      dispatched: 0, eventBatchSize: 25, processed: 0, jobBatchSize: 25,
+      scheduled: await scheduleDailyJobs(), scheduledPeriodic: await schedulePeriodicJobs(),
+      scheduledDrip: 0, finalized: 0,
+    });
+    expect(getNextPollIntervalMs({
+      outcome, pollIntervalMs: 5_000, maxPollIntervalMs: 30_000, currentPollIntervalMs,
+    })).toBe(5_000);
+  });
+
   it("does not schedule a broad archive for an installation with a reconnect hold", async () => {
     prismaMock.communicationInstallation.findMany.mockResolvedValue([
       {workspaceId: "ws-1", settings: {publicArchiveSyncEnabled: false}},
@@ -1342,7 +1401,7 @@ describe("scheduleDailyJobs", () => {
   });
 
   it("schedules retention, digest, and Slack archive jobs once the daily window has opened", async () => {
-    await expect(scheduleDailyJobs()).resolves.toBe(4);
+    await expect(scheduleDailyJobs()).resolves.toBe(6);
 
     expect(txMock.workflowJob.createMany).toHaveBeenCalledTimes(1);
     expect(txMock.workflowJob.createMany).toHaveBeenCalledWith({
@@ -1378,7 +1437,7 @@ describe("scheduleDailyJobs", () => {
       { workspaceId: "ws-1" },
     ]);
 
-    await expect(scheduleDailyJobs()).resolves.toBe(5);
+    await expect(scheduleDailyJobs()).resolves.toBe(7);
 
     expect(prismaMock.meetingSeries.findMany).toHaveBeenCalledWith({
       where: {
@@ -1403,7 +1462,7 @@ describe("scheduleDailyJobs", () => {
     vi.setSystemTime(new Date("2026-04-29T10:59:00Z"));
     isNewspaperScheduleDueMock.mockReturnValue(false);
 
-    await expect(scheduleDailyJobs()).resolves.toBe(3);
+    await expect(scheduleDailyJobs()).resolves.toBe(5);
 
     expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1426,7 +1485,7 @@ describe("scheduleDailyJobs", () => {
       ["ws-2", { enabled: false, cadence: "WEEKLY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
     ]));
 
-    await expect(scheduleDailyJobs()).resolves.toBe(5);
+    await expect(scheduleDailyJobs()).resolves.toBe(9);
 
     expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1459,18 +1518,14 @@ describe("scheduleDailyJobs", () => {
       { workspaceId: "ws-1", newspaperCadence: "OFF", user: { email: "off@example.com", displayName: "Off Member" } },
     ]);
 
-    await expect(scheduleDailyJobs()).resolves.toBe(3);
+    await expect(scheduleDailyJobs()).resolves.toBe(5);
 
     expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: "brain.daily-digest",
       }),
     ]));
-    expect(loggerMock.info).toHaveBeenCalledWith("newspaper_schedule_skipped", expect.objectContaining({
-      workspaceId: "ws-1",
-      cadence: "DAILY",
-      reason: "daily_briefing_off",
-    }));
+
   });
 
   it("does not schedule newspaper jobs when workspace AI usage is paused", async () => {
@@ -1479,17 +1534,14 @@ describe("scheduleDailyJobs", () => {
       ["ws-2", { enabled: false, cadence: "DAILY", weekday: "MONDAY", localTime: "08:00", timeZone: "UTC" }],
     ]));
 
-    await expect(scheduleDailyJobs()).resolves.toBe(3);
+    await expect(scheduleDailyJobs()).resolves.toBe(5);
 
     expect(createdWorkflowJobs()).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: "brain.daily-digest",
       }),
     ]));
-    expect(loggerMock.info).toHaveBeenCalledWith("newspaper_schedule_skipped", expect.objectContaining({
-      workspaceId: "ws-1",
-      reason: "ai_paused",
-    }));
+
   });
 
   it("reads digest settings and members in batched queries, not per workspace", async () => {

@@ -12,7 +12,7 @@ const healthPlan = () => ({schemaVersion:1,projectId:id(1),environmentId:id(2),s
 ]});
 function releaseBody(role) { return {...release,service:role,runtime:{gitSha:release.gitSha,source:"baked",evidence:"baked"},drift:{gitSha:false,imageTag:false,version:false,details:[]}}; }
 function webBody() { return {status:"ok",service:"web",database:"up",schema:"ready",app:"corgtex",release:releaseBody("web"),runtime:{privateValue:"PRIVATE_ENV"}}; }
-function workerBody() { return {status:"ok",phase:"running",lastError:null,tickCount:3,lastSuccessfulTickAt:new Date().toISOString(),workerId:"PRIVATE_WORKER_ID",release:releaseBody("worker")}; }
+function workerBody(observedAt = Date.now()) { return {status:"ok",phase:"running",lastError:null,tickCount:3,lastSuccessfulTickAt:new Date(observedAt).toISOString(),workerId:"PRIVATE_WORKER_ID",release:releaseBody("worker")}; }
 const baked = role => ({schemaVersion:1,role,gitSha:release.gitSha});
 const fileHash = role => createHash("sha256").update(JSON.stringify(baked(role))).digest("hex");
 function fixture() {
@@ -29,8 +29,8 @@ function fixture() {
         serviceId:s.serviceId,status:"SUCCESS",deploymentStopped:false,instances:[{id:id((s.role==="web"?7:8)+state.instanceOffset),status:"RUNNING"}]}]}};
     state.providerMutate?.(data,state.providerReads);return data;
   },runRemoteRead:async r=>{
-    state.remoteReads++;const response={schemaVersion:1,nonce:r.nonce,role:r.service.role,deploymentId:r.service.deploymentId,instanceId:r.instanceId,observedAt:Date.now(),buildIdentity:baked(r.service.role),buildFileSha256:fileHash(r.service.role),
-      health:{status:200,body:r.service.role==="web"?webBody():workerBody()},ready:r.service.role==="web"?null:{status:200,body:{ready:true,phase:"running"}}};
+    state.remoteReads++;const observedAt=Date.now(),response={schemaVersion:1,nonce:r.nonce,role:r.service.role,deploymentId:r.service.deploymentId,instanceId:r.instanceId,observedAt,buildIdentity:baked(r.service.role),buildFileSha256:fileHash(r.service.role),
+      health:{status:200,body:r.service.role==="web"?webBody():workerBody(observedAt)},ready:r.service.role==="web"?null:{status:200,body:{ready:true,phase:"running"}}};
     state.remoteMutate?.(response);return JSON.stringify(response);
   }};
   return {plan,health,writerBaseline,abort,state,options,observer:()=>createOpsCoreSourceHealthObserver(options),

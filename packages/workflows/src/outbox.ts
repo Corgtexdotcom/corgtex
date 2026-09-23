@@ -1417,11 +1417,8 @@ export async function schedulePeriodicJobs() {
     });
   }
 
-  await prisma.$transaction(async (tx) => {
-    await enqueueJobBatch(tx, jobs);
-  });
-
-  return jobs.length;
+  // Only inserted jobs count as work; duplicate schedules must allow idle polling to back off.
+  return prisma.$transaction((tx) => enqueueJobBatch(tx, jobs));
 }
 
 // Internal operator import marker, written atomically with a new workspace.
@@ -1505,10 +1502,6 @@ export async function scheduleDailyJobs() {
   for (const workspace of workspaces) {
     const setting = digestSettings.get(workspace.id);
     if (!setting?.enabled) {
-      logger.info("newspaper_schedule_skipped", {
-        workspaceId: workspace.id,
-        reason: setting?.disabledReason ?? "agent_disabled",
-      });
       continue;
     }
 
@@ -1518,9 +1511,6 @@ export async function scheduleDailyJobs() {
     ));
     const localDateKey = getNewspaperLocalDateParts(now, setting.timeZone).dateKey;
 
-    const hasDailyRecipients = workspaceMembers.some((member) => (
-      (member.newspaperCadence ?? workspaceCadence) === "DAILY"
-    ));
     const hasWeeklyRecipients = workspaceMembers.some((member) => (
       (member.newspaperCadence ?? workspaceCadence) === "WEEKLY"
     ));
@@ -1536,13 +1526,6 @@ export async function scheduleDailyJobs() {
         dateKey: localDateKey,
         dedupeKey: `${workspace.id}:daily-digest:${localDateKey}`,
       });
-    } else {
-      logger.info("newspaper_schedule_skipped", {
-        workspaceId: workspace.id,
-        cadence: "DAILY",
-        reason: shouldGenerateDailyBriefing ? "outside_schedule_window" : "daily_briefing_off",
-        dailyRecipients: hasDailyRecipients,
-      });
     }
 
     if (hasWeeklyRecipients && isNewspaperScheduleDue({ now, schedule: setting, cadence: "WEEKLY" })) {
@@ -1551,12 +1534,6 @@ export async function scheduleDailyJobs() {
         cadence: "WEEKLY",
         dateKey: localDateKey,
         dedupeKey: `${workspace.id}:weekly-digest:${localDateKey}`,
-      });
-    } else if (isWeeklyWindow || hasWeeklyRecipients) {
-      logger.info("newspaper_schedule_skipped", {
-        workspaceId: workspace.id,
-        cadence: "WEEKLY",
-        reason: hasWeeklyRecipients ? "outside_schedule_window" : "no_weekly_recipients",
       });
     }
   }
@@ -1604,11 +1581,6 @@ export async function scheduleDailyJobs() {
       payload: { dateISO: now.toISOString(), dateKey: schedule.dateKey, cadence: schedule.cadence },
       dedupeKey: schedule.dedupeKey,
     });
-    logger.info("newspaper_schedule_created", {
-      workspaceId: schedule.workspaceId,
-      cadence: schedule.cadence,
-      dedupeKey: schedule.dedupeKey,
-    });
   }
 
   for (const installation of slackArchiveWorkspaces) {
@@ -1620,10 +1592,10 @@ export async function scheduleDailyJobs() {
     });
   }
 
-  await prisma.$transaction(async (tx) => {
-    await enqueueJobBatch(tx, jobs);
-  });
-
-  const scheduledCount = workspaces.length + newspaperSchedules.length + slackArchiveWorkspaces.length + recurringSeriesWorkspaces.length;
-  return scheduledCount;
+  // Log once after commit and only when scheduling actually inserted work.
+  const insertedCount = await prisma.$transaction((tx) => enqueueJobBatch(tx, jobs));
+  if (insertedCount > 0) {
+    logger.info("daily_jobs_scheduled", { insertedCount });
+  }
+  return insertedCount;
 }

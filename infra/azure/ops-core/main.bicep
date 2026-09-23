@@ -15,11 +15,11 @@ param existingAcrResourceId string
 param migrationOperatorPrincipalId string
 
 param postgresAdministratorLogin string = 'corgtexadmin'
-@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
-@description('General Purpose by default. B2s requires an explicitly accepted Burstable production exception and measured capacity.')
+@allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
+@description('General Purpose by default. B1ms/B2s require an explicitly accepted Burstable production exception and measured capacity.')
 param opsPostgresSkuName string = 'Standard_D2ds_v5'
-@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
-@description('General Purpose by default. B2s requires an explicitly accepted Burstable production exception and measured capacity.')
+@allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
+@description('General Purpose by default. B1ms/B2s require an explicitly accepted Burstable production exception and measured capacity.')
 param corePostgresSkuName string = 'Standard_D2ds_v5'
 @secure()
 param opsPostgresAdministratorPassword string

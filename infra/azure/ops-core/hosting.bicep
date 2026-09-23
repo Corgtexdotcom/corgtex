@@ -5,9 +5,9 @@ param namePrefix string
 param tags object
 param migrationOperatorPrincipalId string
 param postgresAdministratorLogin string
-@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+@allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
 param opsPostgresSkuName string
-@allowed(['Standard_D2ds_v5', 'Standard_B2s'])
+@allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
 param corePostgresSkuName string
 @secure()
 param opsPostgresAdministratorPassword string
