@@ -23,6 +23,7 @@ function fixture() {
   const release = { gitSha: "c".repeat(40), imageTag: `sha-${"c".repeat(40)}`, version: "fixture-1" };
   const identity = `${base}Microsoft.ManagedIdentity/userAssignedIdentities/fixture`;
   const role = name => ({ image: image.replace("/worker@", `/${name}@`),
+    resources: { cpu: 0.5, memory: "1Gi" },
     env: [{ name: "DATABASE_URL", secretRef: "database" }, { name: "REDIS_URL", secretRef: "redis" }],
     secrets: ["database", "redis"].map(key => ({ name: key, keyVaultUrl: `https://fixture.vault.azure.net/secrets/${key}/${"a".repeat(32)}`, identity })) });
   const sourceConnection = { host: "source.local", port: 5432, database: "railway", user: "postgres" };

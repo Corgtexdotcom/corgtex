@@ -257,6 +257,11 @@ export function assertManagedAzureTemplateDelta(baseline, candidate, expected) {
   return true;
 }
 
+export function managedAzureConsumptionEphemeralStorage(cpu) {
+  if (!Number.isFinite(cpu) || cpu < 0.25 || cpu > 4 || !Number.isInteger(cpu * 4)) return null;
+  return cpu <= 0.25 ? "1Gi" : cpu <= 0.5 ? "2Gi" : cpu <= 1 ? "4Gi" : "8Gi";
+}
+
 export function assertManagedAzureRevisionProjection(expectedTemplate, revisionTemplate, appName, revisionName) {
   const expected = safeJsonClone(expectedTemplate);
   const actual = safeJsonClone(revisionTemplate);
@@ -269,7 +274,8 @@ export function assertManagedAzureRevisionProjection(expectedTemplate, revisionT
     delete actual.revisionSuffix;
   }
   const expectedContainer = expected.containers[0]; const actualContainer = actual.containers[0];
-  if (expectedContainer.resources?.ephemeralStorage === "2Gi" && actualContainer.resources?.ephemeralStorage == null) {
+  const defaultStorage = managedAzureConsumptionEphemeralStorage(expectedContainer.resources?.cpu);
+  if (defaultStorage && expectedContainer.resources?.ephemeralStorage === defaultStorage && actualContainer.resources?.ephemeralStorage == null) {
     delete expectedContainer.resources.ephemeralStorage;
     if (actualContainer.resources) delete actualContainer.resources.ephemeralStorage;
   }

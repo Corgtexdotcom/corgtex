@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
-import { assertManagedAzureRevisionProjection } from "../release/managed-azure-container-app-transport.mjs";
+import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 
 const ARM = "https://management.azure.com";
@@ -43,9 +43,12 @@ export function validateOpsCoreActivationPlan(input) {
   for (const role of ROLES) {
     const r = p.roles[role];
     const generated = generatedEnv(p, role);
-    requireValue(exact(r, "image,env,secrets") && r.image.startsWith(`${p.acrServer}/corgtex/${role}@sha256:`)
+    requireValue(exact(r, "image,env,secrets,resources") && r.image.startsWith(`${p.acrServer}/corgtex/${role}@sha256:`)
       && HASH.test(r.image.split("@sha256:")[1]) && Array.isArray(r.env) && r.env.length <= 200
       && Array.isArray(r.secrets) && r.secrets.length <= 200, "ACTIVATION_RUNTIME_INVALID");
+    requireValue(exact(r.resources, "cpu,memory") && Number.isFinite(r.resources.cpu)
+      && r.resources.cpu >= 0.25 && r.resources.cpu <= 4 && Number.isInteger(r.resources.cpu * 4)
+      && r.resources.memory === `${r.resources.cpu * 2}Gi`, "ACTIVATION_RESOURCES_INVALID");
     const names = new Set();
     for (const s of r.secrets) {
       requireValue(exact(s, "name,keyVaultUrl,identity") && s.identity === p.managedIdentityId && /^[a-z][a-z0-9-]{0,62}$/.test(s.name) && !names.has(s.name)
@@ -126,7 +129,8 @@ function appBody(plan, role, suffix) {
         registries: [{ server: plan.acrServer, identity: plan.managedIdentityId }],
         secrets: runtime.secrets.map(s => ({ ...s, identity: plan.managedIdentityId })) },
       template: { revisionSuffix: suffix, terminationGracePeriodSeconds: 30,
-        containers: [{ name: role, image: runtime.image, env, resources: { cpu: 0.5, memory: "1Gi", ephemeralStorage: "2Gi" },
+        containers: [{ name: role, image: runtime.image, env, resources: { ...runtime.resources,
+          ephemeralStorage: managedAzureConsumptionEphemeralStorage(runtime.resources.cpu) },
           probes: [
             { type: "Startup", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 60, successThreshold: 1 },
             { type: "Readiness", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3, successThreshold: 1 },

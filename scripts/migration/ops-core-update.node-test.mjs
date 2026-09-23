@@ -42,7 +42,7 @@ function fixture(options = {}) {
     const template = { revisionSuffix: suffix, containers: [{ name: role, image: plan.baseline.images[role],
       env: [{ name: "CORGTEX_RELEASE_GIT_SHA", value: plan.baseline.release.gitSha }, { name: "CORGTEX_RELEASE_IMAGE_TAG", value: plan.baseline.release.imageTag },
         { name: "CORGTEX_RELEASE_VERSION", value: plan.baseline.release.version }, { name: "DATABASE_URL", secretRef: "db" },
-        ...(role === "web" ? [{ name: "CORGTEX_STARTUP_MODE", value: "web" }] : [])], resources: { cpu: 0.5, memory: "1Gi" } }],
+        ...(role === "web" ? [{ name: "CORGTEX_STARTUP_MODE", value: "web" }] : [])], resources: options.resources?.[role] ?? { cpu: 0.5, memory: "1Gi" } }],
       scale: { minReplicas: 1, maxReplicas: 1 } };
     apps[role] = { id: `${prefix}Microsoft.App/containerApps/${name}`, name, type: "Microsoft.App/containerApps", location: "westus3",
       properties: { environmentId: plan.target.environmentId, configuration, template, provisioningState: "Succeeded", latestRevisionName: revision, latestReadyRevisionName: revision } };
@@ -81,7 +81,9 @@ function fixture(options = {}) {
     async readRevisionState(input) {
       const r = revisionState[input.role].get(input.revisionName);
       if (!r) return { kind: "ABSENT" };
-      assertManagedAzureRevisionProjection(input.expectedTemplate, r.template, plan.target.apps[input.role], input.revisionName);
+      const projection = structuredClone(r.template);
+      if (options.omitEphemeralStorage) delete projection.containers[0].resources.ephemeralStorage;
+      assertManagedAzureRevisionProjection(input.expectedTemplate, projection, plan.target.apps[input.role], input.revisionName);
       return { kind: r.kind };
     },
     async setRevisionMode(input) {
@@ -198,6 +200,14 @@ test("forward update drains worker then web, migrates web before worker, returns
     assert.equal([...f.revisionState[role].values()].filter(r => r.active).length, 1);
   }
   assert.ok([...f.records.keys()].some(k => k.endsWith("phase-plan.json")));
+});
+
+test("forward update preserves larger per-role allocations with omitted default storage", async () => {
+  const resources = { web: { cpu: 1, memory: "2Gi", ephemeralStorage: "4Gi" },
+    worker: { cpu: 2, memory: "4Gi", ephemeralStorage: "8Gi" } };
+  const f = fixture({ resources, omitEphemeralStorage: true });
+  assert.equal((await f.run()).outcome, "UPDATED");
+  for (const role of ["web", "worker"]) assert.deepEqual(f.apps[role].properties.template.containers[0].resources, resources[role]);
 });
 
 test("authority failure rejects before provider effects", async () => {
