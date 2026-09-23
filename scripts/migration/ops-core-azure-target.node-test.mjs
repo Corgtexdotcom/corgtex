@@ -28,7 +28,9 @@ function fixture({ apps = false, mutate, maxPages = 100 } = {}) {
   const map = new Map();
   const set = (id, value) => map.set(id, { status: 200, body: value });
   set(b.environmentId, resource(b.environmentId, { provisioningState: "Succeeded" }));
-  set(b.postgres.resourceId, resource(b.postgres.resourceId, { state: "Ready", version: "18", fullyQualifiedDomainName: b.postgres.host }));
+  set(b.postgres.resourceId, resource(b.postgres.resourceId, { state: "Ready", version: "18", fullyQualifiedDomainName: b.postgres.host,
+    network: { publicNetworkAccess: "Disabled" } }));
+  set(`${b.postgres.resourceId}/firewallRules`, { value: [] });
   set(b.redis.resourceId, resource(b.redis.resourceId, { provisioningState: "Succeeded", hostName: b.redis.host,
     highAvailability: "Enabled", minimumTlsVersion: "1.2", publicNetworkAccess: "Disabled" }));
   set(b.redis.databaseId, resource(b.redis.databaseId, { provisioningState: "Succeeded", port: 10000,
@@ -56,6 +58,62 @@ function fixture({ apps = false, mutate, maxPages = 100 } = {}) {
   return { b, adapter, map, set, snapshot, calls, controller, custody };
 }
 const rejects = (promise, code) => assert.rejects(promise, error => opsCoreAzureTargetDiagnostic(error) === code);
+
+test("private PostgreSQL proof exhausts firewall pages and rereads identity under custody", async () => {
+  const f = fixture(), path = `${f.b.postgres.resourceId}/firewallRules`;
+  const nextLink = pageUrl(path).replace("2024-03-01", "2025-08-01");
+  f.set(path, { value: [], nextLink }); f.set(nextLink, { value: [], nextLink: null });
+  assert.deepEqual(await f.adapter.assertPostgresPrivate(), { complete: true, domain: "ops",
+    intentSha256: f.snapshot.intentSha256, targetBindingSha256: opsCoreAzureTargetBindingSha256(f.b),
+    publicNetworkAccess: "Disabled", firewallRules: 0 });
+  const reads = f.calls.filter(x => typeof x === "object");
+  assert.equal(reads.filter(x => x.resourceId === f.b.postgres.resourceId).length, 2);
+  assert.equal(reads.filter(x => x.nextLink === nextLink).length, 1);
+  assert.equal(reads.at(-1).resourceId, f.b.postgres.resourceId);
+  for (let i = 0; i < f.calls.length; i++) if (typeof f.calls[i] === "object") {
+    assert.equal(f.calls[i - 1], "custody"); assert.equal(f.calls[i + 1], "custody");
+  }
+});
+
+for (const [label, change, code] of [
+  ["public access enabled", f => { f.map.get(f.b.postgres.resourceId).body.properties.network.publicNetworkAccess = "Enabled"; }, "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN"],
+  ["missing network", f => { delete f.map.get(f.b.postgres.resourceId).body.properties.network; }, "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN"],
+  ["missing public access state", f => { delete f.map.get(f.b.postgres.resourceId).body.properties.network.publicNetworkAccess; }, "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN"],
+  ["foreign PostgreSQL identity", f => { f.map.get(f.b.postgres.resourceId).body.id += "-foreign"; }, "AZURE_TARGET_RESOURCE_CHANGED"],
+  ["retained firewall rule", f => { f.set(`${f.b.postgres.resourceId}/firewallRules`, { value: [{ name: "restore-window" }] }); }, "AZURE_TARGET_POSTGRES_FIREWALL_RETAINED"],
+  ["missing firewall inventory", f => { f.map.set(`${f.b.postgres.resourceId}/firewallRules`, missing()); }, "AZURE_TARGET_ARM_STATUS_UNPROVEN"],
+  ["pending PostgreSQL private endpoint", f => { f.map.get(f.b.postgres.privateEndpointId).body.properties.privateLinkServiceConnections[0].properties.privateLinkServiceConnectionState.status = "Pending"; }, "AZURE_TARGET_PRIVATE_ENDPOINT_UNPROVEN"],
+]) test(`private PostgreSQL proof rejects ${label}`, async () => {
+  const f = fixture(); change(f); await rejects(f.adapter.assertPostgresPrivate(), code);
+});
+
+test("private PostgreSQL proof rejects a firewall rule on a later page", async () => {
+  const f = fixture(), path = `${f.b.postgres.resourceId}/firewallRules`;
+  const nextLink = pageUrl(path).replace("2024-03-01", "2025-08-01");
+  f.set(path, { value: [], nextLink }); f.set(nextLink, { value: [{ name: "restore-window" }] });
+  await rejects(f.adapter.assertPostgresPrivate(), "AZURE_TARGET_POSTGRES_FIREWALL_RETAINED");
+  assert.ok(f.calls.some(x => x.nextLink === nextLink));
+});
+
+for (const [label, change] of [
+  ["reopened network", pg => { pg.network.publicNetworkAccess = "Enabled"; }],
+  ["changed host", pg => { pg.fullyQualifiedDomainName = "foreign.postgres.database.azure.com"; }],
+]) test(`private PostgreSQL final read rejects ${label}`, async () => {
+  let reads = 0;
+  const f = fixture({ mutate(q, r) {
+    if (q.resourceId === binding().postgres.resourceId && ++reads === 2) change(r.body.properties);
+  } });
+  await rejects(f.adapter.assertPostgresPrivate(), "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN");
+  assert.equal(reads, 2);
+});
+
+test("transfer inactivity remains compatible with an open PostgreSQL restore window", async () => {
+  const f = fixture();
+  f.map.get(f.b.postgres.resourceId).body.properties.network.publicNetworkAccess = "Enabled";
+  f.set(`${f.b.postgres.resourceId}/firewallRules`, { value: [{ name: "restore-window" }] });
+  assert.equal((await f.adapter.assertInactive()).complete, true);
+  await rejects(f.adapter.assertPostgresPrivate(), "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN");
+});
 
 test("fresh bound absent-app proof is redacted and each ARM read is enclosed by custody", async () => {
   const f = fixture();

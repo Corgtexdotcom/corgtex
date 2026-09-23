@@ -40,7 +40,9 @@ function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
   };
   const set = (key, body) => map.set(key, { status: 200, body });
   set(target.environmentId, resource(target.environmentId, { provisioningState: "Succeeded", defaultDomain: "fixture.westus3.azurecontainerapps.io" }));
-  set(target.postgres.resourceId, resource(target.postgres.resourceId, { state: "Ready", version: "18", fullyQualifiedDomainName: target.postgres.host }));
+  set(target.postgres.resourceId, resource(target.postgres.resourceId, { state: "Ready", version: "18", fullyQualifiedDomainName: target.postgres.host,
+    network: { publicNetworkAccess: "Disabled" } }));
+  set(`${target.postgres.resourceId}/firewallRules`, { value: [] });
   set(target.redis.resourceId, resource(target.redis.resourceId, { provisioningState: "Succeeded", hostName: target.redis.host,
     highAvailability: "Enabled", minimumTlsVersion: "1.2", publicNetworkAccess: "Disabled" }));
   const database = resource(target.redis.databaseId, { provisioningState: "Succeeded", port: 10000, clientProtocol: "Encrypted",
@@ -88,6 +90,46 @@ function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
   return { plan, custody, journal, log, map, records, options, appId, controller, set };
 }
 const rejects = (promise, code) => assert.rejects(promise, error => opsCoreActivationDiagnostic(error) === code);
+
+for (const [label, change] of [
+  ["public restore window", f => { f.map.get(f.plan.target.postgres.resourceId).body.properties.network.publicNetworkAccess = "Enabled"; }],
+  ["missing network proof", f => { delete f.map.get(f.plan.target.postgres.resourceId).body.properties.network; }],
+  ["retained restore firewall", f => { f.set(`${f.plan.target.postgres.resourceId}/firewallRules`, { value: [{ name: "restore-window" }] }); }],
+]) test(`activation rejects ${label} before phase boundary or app writes`, async () => {
+  const f = fixture(); change(f);
+  await rejects(createOpsCoreActivation(f.options).activate(), "ACTIVATION_RECONCILIATION_REQUIRED");
+  assert.equal(f.journal.destinationMayHaveWritten, false);
+  assert.equal(f.journal.phase, "VERIFIED"); assert.equal(f.journal.pending, null);
+  assert.equal(f.log.some(x => x.startsWith("put:") || x.startsWith("begin:")), false);
+  assert.equal(f.records.size, 0);
+});
+
+test("PostgreSQL reopening after the durable boundary blocks the first app PUT", async () => {
+  const f = fixture({ source(input, { journal }) {
+    if (journal.destinationMayHaveWritten) f.map.get(f.plan.target.postgres.resourceId).body.properties.network.publicNetworkAccess = "Enabled";
+    return { complete: true, domain: "ops", intentSha256: journal.intentSha256 };
+  } });
+  await rejects(createOpsCoreActivation(f.options).activate(), "ACTIVATION_RECONCILIATION_REQUIRED");
+  assert.equal(f.journal.pending.to, "TARGET_ACTIVATING");
+  assert.equal(f.log.some(x => x.startsWith("put:")), false);
+});
+
+for (const [context, expectedWrites] of [["web-before-worker", ["put:web"]],
+  ["worker-final", ["put:web", "put:worker"]]]) test(`PostgreSQL reopening during ${context} prevents further activation`, async () => {
+  let reopened = false;
+  const f = fixture({ health(input, result, { map }) {
+    if (input.invocationContext === context) {
+      map.get(f.plan.target.postgres.resourceId).body.properties.network.publicNetworkAccess = "Enabled";
+      reopened = true;
+    }
+  } });
+  await rejects(createOpsCoreActivation(f.options).activate(), "ACTIVATION_RECONCILIATION_REQUIRED");
+  assert.equal(reopened, true);
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), expectedWrites);
+  assert.equal(f.journal.phase, "VERIFIED"); assert.equal(f.journal.pending.to, "TARGET_ACTIVATING");
+  assert.equal(f.log.includes("complete:TARGET_ACTIVATING"), false);
+  assert.equal(f.log.includes("begin:TARGET_ACTIVE"), false);
+});
 
 test("bootstrap records write boundary then verifies web before worker, fresh final pair, and TARGET_ACTIVE", async () => {
   const f = fixture(), activation = createOpsCoreActivation(f.options);

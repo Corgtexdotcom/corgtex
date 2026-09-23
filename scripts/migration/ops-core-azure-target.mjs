@@ -170,12 +170,12 @@ export function createOpsCoreAzureTarget({ binding: value, custody, transport, m
       requireValue(response.status === 200 && !response.body.error, "AZURE_TARGET_ARM_STATUS_UNPROVEN");
       return response.body;
     }
-    async function list(resourceId) {
+    async function list(resourceId, apiVersion = API.app) {
       const values = [], seen = new Set(); let nextLink = null;
       for (let page = 0; page < maxPages; page++) {
-        const url = requestUrl(resourceId, API.app, nextLink);
+        const url = requestUrl(resourceId, apiVersion, nextLink);
         requireValue(!seen.has(url), "AZURE_TARGET_PAGINATION_CYCLE"); seen.add(url);
-        const body = await get(resourceId, API.app, { nextLink });
+        const body = await get(resourceId, apiVersion, { nextLink });
         requireValue(Array.isArray(body.value) && values.length + body.value.length <= 10000,
           "AZURE_TARGET_COLLECTION_INVALID");
         values.push(...body.value);
@@ -263,6 +263,22 @@ export function createOpsCoreAzureTarget({ binding: value, custody, transport, m
   }
 
   return Object.freeze({ binding, bindingSha256,
+    async assertPostgresPrivate() {
+      return scope(async ({ get, list, initial }) => {
+        const verify = body => {
+          const pg = identity(body, binding.postgres.resourceId, "Microsoft.DBforPostgreSQL/flexibleServers");
+          requireValue(pg.state === "Ready" && pg.version === "18" && pg.fullyQualifiedDomainName === binding.postgres.host
+            && pg.network?.publicNetworkAccess === "Disabled", "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN");
+        };
+        verify(await get(binding.postgres.resourceId, API.postgres));
+        requireValue((await list(`${binding.postgres.resourceId}/firewallRules`, API.postgres)).length === 0,
+          "AZURE_TARGET_POSTGRES_FIREWALL_RETAINED");
+        await endpoint(get, binding.postgres.privateEndpointId, binding.postgres.resourceId, "postgresqlServer");
+        verify(await get(binding.postgres.resourceId, API.postgres));
+        return { complete: true, domain: binding.domain, intentSha256: initial.intentSha256,
+          targetBindingSha256: bindingSha256, publicNetworkAccess: "Disabled", firewallRules: 0 };
+      });
+    },
     async assertInactive() {
       return scope(async ({ get, list, initial }) => {
         const environment = identity(await get(binding.environmentId, API.app), binding.environmentId, "Microsoft.App/managedEnvironments");

@@ -283,6 +283,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         await fenced();
         const guard = createOpsCoreAzureTarget({ binding: target, custody, transport });
         await guard.assertInactive();
+        await guard.assertPostgresPrivate();
         await absent("web"); await absent("worker");
         const environment = await request(target.environmentId);
         requireValue(environment.status === 200 && same(environment.body?.id, target.environmentId)
@@ -303,12 +304,14 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           receipts[role] = await recorder.runRecordedOperation({ kind: `azure.create.${role}`,
             input: { planSha256, resourceId: appId(role), bodySha256: hash(body) },
             async apply() {
+              await guard.assertPostgresPrivate();
               const result = await request(appId(role), { method: "PUT", body });
               requireValue([200, 201, 202].includes(result.status), "ACTIVATION_WRITE_UNCERTAIN");
             }, verify: () => ready(role, body, fqdn(role), `${role}-after-create`) });
         }
         const finalProofs = {};
         for (const role of ROLES) finalProofs[role] = await ready(role, bodies[role], fqdn(role), `${role}-final`);
+        finalProofs.postgresAccess = await guard.assertPostgresPrivate();
         await fenced(); await check();
         const evidenceSha256 = hash({ receipts, finalProofs });
         await custody.complete(pending.operationId, evidenceSha256);
