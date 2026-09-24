@@ -11,6 +11,7 @@ on:
           - rehearse
           - recover
           - qualify-target
+          - qualify-access
           - qualify-synthetic
           - prepare-synthetic
       recovery_kind:
@@ -201,7 +202,7 @@ jobs:
           retention-days: 7
 
   qualify-target:
-    if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-target'
+    if: github.ref == 'refs/heads/main' && (inputs.operation == 'qualify-target' || inputs.operation == 'qualify-access')
     name: Qualify existing Ops target metadata only
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -216,12 +217,13 @@ jobs:
       TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg
       TARGET_POSTGRES_HOST: corgtex-mig-reh-restore-pg.postgres.database.azure.com
       TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      QUALIFY_ACCESS: ${{ inputs.operation == 'qualify-access' }}
       QUALIFICATION_DIR: .artifacts/target-qualification/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
-      - name: Validate metadata-only inputs and protected credential presence
+      - name: Validate qualification inputs and protected credential presence
         env:
           TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
         run: |

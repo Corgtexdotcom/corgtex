@@ -106,7 +106,7 @@ async function credentials(plan, resolveSecretVersion) {
 const acl = (column, kind, owner) => `(SELECT COALESCE(jsonb_agg(jsonb_build_object('grantor', a.grantor::text, 'grantee', a.grantee::text,
   'privilege', a.privilege_type, 'grantable', a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type,a.is_grantable),'[]'::jsonb)
   FROM pg_catalog.aclexplode(COALESCE(${column},pg_catalog.acldefault('${kind}',${owner}))) a)`;
-const DATABASE_SQL = `/* runtime-access:databases */ SELECT d.datname AS name,d.oid::text AS oid,pg_catalog.pg_get_userbyid(d.datdba) AS owner,
+export const DATABASE_SQL = `/* runtime-access:databases */ SELECT d.datname AS name,d.oid::text AS oid,pg_catalog.pg_get_userbyid(d.datdba) AS owner,
   d.datallowconn AS "allowConnections",d.datistemplate AS "isTemplate",pg_catalog.pg_has_role(current_user,d.datdba,'USAGE') AS "ownerAuthority",${acl("d.datacl", "d", "d.datdba")} AS acl
   FROM pg_catalog.pg_database d ORDER BY d.datname`;
 const OBJECT_SQL = `/* runtime-access:objects */ WITH objects AS (
