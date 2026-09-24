@@ -133,6 +133,7 @@ jobs:
       LOCATION: ${{ inputs.location }}
       NAME_PREFIX: ${{ inputs.name_prefix }}
       DEPLOY_CONTAINER_APPS: ${{ inputs.deploy_container_apps }}
+      SHARED_STATE_BACKEND: ${{ vars.AZURE_SELFSERVE_STAGING_SHARED_STATE_BACKEND || 'redis' }}
       RUN_MIGRATION_JOB: ${{ inputs.run_migration_job }}
       RUN_HEALTH_SMOKE: ${{ inputs.run_health_smoke }}
       RUN_BROWSER_SMOKE: ${{ inputs.run_browser_smoke }}
@@ -362,6 +363,7 @@ jobs:
             "location=$LOCATION"
             "namePrefix=$NAME_PREFIX"
             "deployContainerApps=$DEPLOY_CONTAINER_APPS"
+            "sharedStateBackend=$SHARED_STATE_BACKEND"
             "appUrl=$APP_URL"
             "siteUrl=$SITE_URL"
             "controlPlaneUrl=$CONTROL_PLANE_URL"
@@ -399,6 +401,7 @@ jobs:
             "location=$LOCATION"
             "namePrefix=$NAME_PREFIX"
             "deployContainerApps=$DEPLOY_CONTAINER_APPS"
+            "sharedStateBackend=$SHARED_STATE_BACKEND"
             "appUrl=$APP_URL"
             "siteUrl=$SITE_URL"
             "controlPlaneUrl=$CONTROL_PLANE_URL"

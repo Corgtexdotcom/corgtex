@@ -6,7 +6,7 @@ This folder defines the staging Azure resource shape for the future self-serve r
 
 - Container Apps environment with web, worker, and manual migration/seed job definitions.
 - Azure Database for PostgreSQL Flexible Server and application database.
-- Azure Managed Redis.
+- Azure Managed Redis by default, or shared state in the existing PostgreSQL database.
 - Azure Blob Storage account and private container.
 - Key Vault with RBAC enabled.
 - User-assigned managed identity for Container Apps.
@@ -104,7 +104,7 @@ The template references these Key Vault secret names by default when `deployCont
 
 - `ghcr-pat`
 - `database-url`
-- `redis-url`
+- `redis-url` only when `sharedStateBackend=redis`
 - `session-cookie-secret`
 - `encryption-key`
 - `smoke-email-capture-secret`
@@ -136,6 +136,42 @@ If `azureOpenAiAuthMode=api_key`, also create these model API-key secrets:
 Production should prefer `managed_identity`.
 
 Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real Resend staging key and inbound webhook signing secret are available. With Resend unset, the app records the smoke setup URL through `SMOKE_EMAIL_CAPTURE_SECRET` without attempting external mail delivery.
+
+## PostgreSQL shared state
+
+`sharedStateBackend=postgres` omits Redis provisioning and Redis secret references
+for web, worker and the migration job, and sets `SHARED_STATE_BACKEND=postgres`
+consistently. The default remains `redis`. The staging workflow reads
+`AZURE_SELFSERVE_STAGING_SHARED_STATE_BACKEND` from its GitHub environment for both
+preview and apply; set it to the accepted backend and retain it for later deploys.
+An omitted variable selects Redis. Direct template deployments must pass the same
+backend explicitly. Review the what-if output before applying.
+
+This is a deployment option, not an online state-transfer mechanism. Before
+switching an existing staging runtime:
+
+1. Qualify the PostgreSQL backend and additive `20260923120000_postgres_shared_state`
+   migration on staging's PostgreSQL version, including distributed auth limits,
+   invalidation and transcript retries. Use bounded connection pools and retain
+   the existing encryption key and `REDIS_KEY_PREFIX` namespace.
+2. Fence every Redis writer, including web, worker, manual jobs and old revisions.
+   Preserve/drain pending uploads and live counters; prove the exact source cache
+   empty. Do not independently switch consumers while either backend has writers.
+3. Apply the additive schema before starting PostgreSQL-backed consumers. Switch
+   all consumers under that fence, then verify exact image/backend identity,
+   cold-wake health, shared-state behavior and the absence of Redis references.
+   Keep a PostgreSQL-capable rollback image; switching back to old Redis state
+   after new writes is not an acceptable rollback.
+4. Only after independent acceptance, retire the exact unused Redis resource and
+   verify its billing removal separately. Incremental ARM deployment does **not**
+   delete an existing Redis merely because the new template omits it. Do not use
+   complete-mode deployment for this retirement or discard retained recovery data.
+
+The readiness command accepts PostgreSQL without `REDIS_URL`, rejects unknown or
+mixed backend settings, and still requires database and encryption configuration.
+Readiness checks configuration names; they do not prove schema, source-state
+custody, database capacity or runtime acceptance. No Redis retirement or live
+backend switch is performed by this source change.
 
 ## Startup contract
 

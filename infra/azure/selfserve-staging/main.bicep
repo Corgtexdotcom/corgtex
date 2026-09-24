@@ -111,6 +111,13 @@ param allowAzureServicePostgresFirewall bool = false
 @description('Additional PostgreSQL firewall rules: [{ "name": "...", "startIpAddress": "...", "endIpAddress": "..." }].')
 param postgresFirewallRules array = []
 
+@allowed([
+  'redis'
+  'postgres'
+])
+@description('Shared-state backend. Switching an existing runtime requires a coordinated writer fence and drained source state; this template does not perform that transition.')
+param sharedStateBackend string = 'redis'
+
 @description('Azure Managed Redis SKU name. Balanced_B0 is the smallest staging default.')
 param managedRedisSkuName string = 'Balanced_B0'
 
@@ -238,6 +245,7 @@ var storageContainerName = 'selfserve-artifacts'
 var postgresServerName = '${namePrefix}-pg'
 var postgresDatabaseName = 'corgtex'
 var redisName = '${namePrefix}-redis'
+var provisionRedis = sharedStateBackend == 'redis'
 var containerEnvironmentName = 'cae-${namePrefix}'
 var webContainerAppName = 'ca-${namePrefix}-web'
 var workerContainerAppName = 'ca-${namePrefix}-worker'
@@ -300,13 +308,15 @@ var azureFoundryOmitTemperatureRuntimeEnv = usesAzureFoundryModels && !empty(azu
 
 var requiredSecretRefs = [
   { name: 'database-url', keyVaultSecretName: databaseUrlSecretName }
-  { name: 'redis-url', keyVaultSecretName: redisUrlSecretName }
   { name: 'session-cookie-secret', keyVaultSecretName: sessionCookieSecretName }
   { name: 'encryption-key', keyVaultSecretName: encryptionKeySecretName }
   { name: 'smoke-email-capture-secret', keyVaultSecretName: smokeEmailCaptureSecretName }
   { name: 'self-serve-registry-sync-secret', keyVaultSecretName: selfServeRegistrySyncSecretName }
   { name: 'model-price-overrides-json', keyVaultSecretName: modelPriceOverridesSecretName }
 ]
+var redisSecretRefs = provisionRedis ? [
+  { name: 'redis-url', keyVaultSecretName: redisUrlSecretName }
+] : []
 var azureOpenAiApiKeyRef = azureOpenAiAuthMode == 'api_key' ? [
   { name: 'azure-openai-api-key', keyVaultSecretName: azureOpenAiApiKeySecretName }
 ] : []
@@ -332,7 +342,7 @@ var microsoftOauthSecretRefs = enableMicrosoftOauthSecrets ? [
 ] : []
 var containerSecretRefs = concat([
   { name: 'ghcr-pat', keyVaultSecretName: ghcrPatSecretName }
-], requiredSecretRefs, azureOpenAiApiKeyRef, azureFoundryApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
+], requiredSecretRefs, redisSecretRefs, azureOpenAiApiKeyRef, azureFoundryApiKeyRef, stripeSecretRefs, resendSecretRefs, googleOauthSecretRefs, microsoftOauthSecretRefs)
 var migrationSecretRefs = concat(containerSecretRefs, [
   { name: 'admin-password', keyVaultSecretName: bootstrapAdminPasswordSecretName }
 ])
@@ -371,7 +381,7 @@ var commonRuntimeEnv = concat([
   { name: 'CORGTEX_RELEASE_IMAGE_TAG', value: releaseImageTag }
   { name: 'CORGTEX_RELEASE_GIT_SHA', value: releaseGitSha }
   { name: 'DATABASE_URL', secretRef: 'database-url' }
-  { name: 'REDIS_URL', secretRef: 'redis-url' }
+  { name: 'SHARED_STATE_BACKEND', value: sharedStateBackend }
   { name: 'REDIS_KEY_PREFIX', value: compactPrefix }
   { name: 'SESSION_COOKIE_SECRET', secretRef: 'session-cookie-secret' }
   { name: 'ENCRYPTION_KEY', secretRef: 'encryption-key' }
@@ -413,6 +423,8 @@ var commonRuntimeEnv = concat([
   { name: 'AZURE_OPENAI_API_KEY', secretRef: 'azure-openai-api-key' }
 ] : [], azureFoundryRuntimeEnv, azureOpenAiAuthMode == 'api_key' && usesAzureFoundryModels ? [
   { name: 'AZURE_FOUNDRY_API_KEY', secretRef: 'azure-foundry-api-key' }
+] : [], provisionRedis ? [
+  { name: 'REDIS_URL', secretRef: 'redis-url' }
 ] : [], stripeRuntimeEnv, resendRuntimeEnv, googleOauthRuntimeEnv, microsoftOauthRuntimeEnv)
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -562,7 +574,7 @@ resource postgresFirewallRuleResources 'Microsoft.DBforPostgreSQL/flexibleServer
   }
 }]
 
-resource redis 'Microsoft.Cache/redisEnterprise@2026-02-01-preview' = {
+resource redis 'Microsoft.Cache/redisEnterprise@2026-02-01-preview' = if (provisionRedis) {
   name: redisName
   location: location
   sku: {
@@ -578,7 +590,7 @@ resource redis 'Microsoft.Cache/redisEnterprise@2026-02-01-preview' = {
   }
 }
 
-resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2026-02-01-preview' = {
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2026-02-01-preview' = if (provisionRedis) {
   parent: redis
   name: 'default'
   properties: {
@@ -845,8 +857,9 @@ output managedIdentityClientId string = managedIdentity.properties.clientId
 output storageAccount string = storage.name
 output storageContainer string = storageContainer.name
 output postgresServerFqdn string = postgres.properties.fullyQualifiedDomainName
-output redisHostName string = redis.properties.hostName
-output redisPort int = managedRedisPort
+output sharedStateBackendOut string = sharedStateBackend
+output redisHostName string = provisionRedis ? redis!.properties.hostName : ''
+output redisPort int = provisionRedis ? managedRedisPort : 0
 output containerAppsEnvironment string = containerEnvironment.name
 output webAppName string = deployContainerApps ? webApp.name : ''
 output workerAppName string = deployContainerApps ? workerApp.name : ''
