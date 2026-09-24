@@ -28,7 +28,7 @@ export const WORKER_DEMAND_QUERY = `SELECT CASE WHEN
     )
   ) THEN 1 ELSE 0 END AS demand`;
 
-const TABLE_COLUMNS = Object.freeze({
+export const WORKER_SCALER_TABLE_COLUMNS = Object.freeze({
   Event: ["status", "lockedAt", "availableAt", "workspaceId"],
   WorkflowJob: ["id", "status", "dependsOnJobId", "runAfter", "workspaceId"],
   WorkspaceFeatureFlag: ["workspaceId", "flag", "enabled"],
@@ -44,25 +44,30 @@ export const workerScalerRoleDiagnostic = error => error instanceof WorkerScaler
  * owns authenticated TLS, server identity, a serialized maintenance lease and
  * secure credential custody. No role alteration or secret rotation is implicit.
  * Existing application roles, PUBLIC grants and other databases are untouched.
+ *
+ * Transaction body for the atomic post-promotion runtime/scaler operation.
+ * No BEGIN, COMMIT or ROLLBACK: the caller owns the transaction and custody.
+ * A SCRAM verifier avoids submitting plaintext when the caller precomputes one.
  */
-export async function provisionWorkerScalerRole({ client, database, role, password } = {}) {
+export async function provisionWorkerScalerRoleInTransaction({ client, database, role, password, passwordVerifier, administrator } = {}) {
+  const credential = passwordVerifier ?? password;
   need(client && typeof client.query === "function"
     && typeof database === "string" && /^[a-z][a-z0-9_]{0,62}$/.test(database)
     && typeof role === "string" && /^worker_scale_[a-z0-9_]{1,48}$/.test(role)
-    && typeof password === "string" && /^[a-f0-9]{64}$/.test(password), "WORKER_SCALER_ROLE_INPUT_INVALID");
-  let transaction = false;
+    && (administrator === undefined || (typeof administrator === "string" && /^[a-z][a-z0-9_]{0,62}$/.test(administrator)))
+    && !(password !== undefined && passwordVerifier !== undefined)
+    && typeof credential === "string" && (passwordVerifier === undefined ? /^[a-f0-9]{64}$/.test(credential)
+      : /^SCRAM-SHA-256\$4096:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$/.test(credential)), "WORKER_SCALER_ROLE_INPUT_INVALID");
   try {
-    await client.query("BEGIN"); transaction = true;
     const identity = await client.query("SELECT current_database() AS database");
     need(identity.rows.length === 1 && identity.rows[0].database === database, "WORKER_SCALER_DATABASE_MISMATCH");
     const existing = await client.query("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1", [role]);
     need(existing.rows.length === 0, "WORKER_SCALER_ROLE_ALREADY_EXISTS");
-    // Password is generated high-entropy hex; never include SQL or raw driver
-    // diagnostics in the returned receipt/error.
-    await client.query(`CREATE ROLE ${quote(role)} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 2`);
+    // The caller owns sensitive SQL logging suppression; never emit credentials.
+    await client.query(`CREATE ROLE ${quote(role)} LOGIN PASSWORD '${credential}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 2`);
     await client.query(`GRANT CONNECT ON DATABASE ${quote(database)} TO ${quote(role)}`);
     await client.query(`GRANT USAGE ON SCHEMA public TO ${quote(role)}`);
-    for (const [table, columns] of Object.entries(TABLE_COLUMNS)) {
+    for (const [table, columns] of Object.entries(WORKER_SCALER_TABLE_COLUMNS)) {
       await client.query(`GRANT SELECT (${columns.map(quote).join(", ")}) ON TABLE public.${quote(table)} TO ${quote(role)}`);
     }
     const access = await client.query(`SELECT
@@ -73,16 +78,33 @@ export async function provisionWorkerScalerRole({ client, database, role, passwo
       pg_catalog.has_column_privilege($1, 'public."Event"', 'payload', 'SELECT') AS event_payload,
       pg_catalog.has_column_privilege($1, 'public."WorkflowJob"', 'payload', 'SELECT') AS job_payload`, [role]);
     need(access.rows.length === 1 && Object.values(access.rows[0]).every(value => value === false), "WORKER_SCALER_EXCESS_PRIVILEGES");
+    if (administrator !== undefined) await client.query(`GRANT ${quote(role)} TO ${quote(administrator)} WITH SET TRUE, INHERIT FALSE`);
     await client.query(`SET LOCAL ROLE ${quote(role)}`);
     const result = await client.query(WORKER_DEMAND_QUERY);
     need(result.rows.length === 1 && [0, 1].includes(result.rows[0].demand), "WORKER_SCALER_PROJECTION_INVALID");
     await client.query("RESET ROLE");
-    await client.query("COMMIT"); transaction = false;
     return { database, role, created: true, demand: result.rows[0].demand,
       access: "queue eligibility columns only; no payload or application write access", connectionLimit: 2 };
   } catch (error) {
+    throw error instanceof WorkerScalerRoleError ? error : new WorkerScalerRoleError("WORKER_SCALER_ROLE_PROVISION_FAILED");
+  }
+}
+
+export async function provisionWorkerScalerRole(options = {}) {
+  let transaction = false;
+  try {
+    // Validate before opening a transaction, preserving the standalone API.
+    need(options.client && typeof options.client.query === "function"
+      && typeof options.database === "string" && /^[a-z][a-z0-9_]{0,62}$/.test(options.database)
+      && typeof options.role === "string" && /^worker_scale_[a-z0-9_]{1,48}$/.test(options.role)
+      && typeof options.password === "string" && /^[a-f0-9]{64}$/.test(options.password), "WORKER_SCALER_ROLE_INPUT_INVALID");
+    await options.client.query("BEGIN"); transaction = true;
+    const result = await provisionWorkerScalerRoleInTransaction(options);
+    await options.client.query("COMMIT"); transaction = false;
+    return result;
+  } catch (error) {
     if (transaction) {
-      try { await client.query("ROLLBACK"); }
+      try { await options.client.query("ROLLBACK"); }
       catch { throw new WorkerScalerRoleError("WORKER_SCALER_ROLE_ROLLBACK_UNCERTAIN"); }
     }
     throw error instanceof WorkerScalerRoleError ? error : new WorkerScalerRoleError("WORKER_SCALER_ROLE_PROVISION_FAILED");

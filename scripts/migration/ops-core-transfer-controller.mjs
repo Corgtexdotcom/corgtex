@@ -19,6 +19,9 @@ import { nodeClientConfig, observePostgresDatabase, buildObservedPostgresParityE
 
 import { reconcileOpsCorePostgresCopy } from "./ops-core-postgres-reconcile.mjs";
 import { validatePostgresDatabaseParity } from "./validate-postgres-restore-rehearsal.mjs";
+import { validateTransferRuntimeAccessBinding } from "./ops-core-runtime-access-binding.mjs";
+import { runOpsCoreRuntimeAccess } from "./ops-core-runtime-access-controller.mjs";
+import { openPostgresMaintenance } from "./ops-core-postgres-maintenance.mjs";
 
 class TransferError extends Error {}
 const fail = code => { throw new TransferError(code); };
@@ -40,7 +43,7 @@ export function validateOpsCoreTransferPlan(input) {
   if (![1, 2].includes(plan?.schemaVersion) || !["core", "ops"].includes(plan.domain)
     || plan.azure?.domain !== plan.domain) fail("TRANSFER_INTENT_MISMATCH");
   exact(plan.transfer, "postgres,objects");
-  exact(plan.transfer.postgres, "source,target,scratchName,targetIdentity,archiveStoreId,keyVersion,vaultName,maxArchiveBytes");
+  exact(plan.transfer.postgres, `source,target,scratchName,targetIdentity,archiveStoreId,keyVersion,vaultName,maxArchiveBytes${Object.hasOwn(plan.transfer.postgres, "runtimeAccess") ? ",runtimeAccess" : ""}`);
   exact(plan.transfer.objects, "sourceStoreId,targetStoreId,limits");
   let postgresState;
   try { postgresState = opsCorePlanSharedStateVariant(plan) === "postgres"; }
@@ -73,6 +76,7 @@ export function validateOpsCoreTransferPlan(input) {
     buildRedisProbeJobDefinition(plan.redis.job);
   }
   opsCoreAzureTargetBindingSha256(plan.azure);
+  validateTransferRuntimeAccessBinding(plan);
   return plan;
 }
 
@@ -134,7 +138,8 @@ function copyOptions(options, context) {
   return { domain: context.plan.domain, sourceConfig: options.sourceCredentials.readerConfig,
     targetAdminConfig: options.targetAdminConfig, expectedSource: config.source, expectedTarget: config.target,
     scratchName: config.scratchName, artifactDir: options.artifactDir, dockerNetwork: options.dockerNetwork ?? null,
-    custody: options.custody, operationStore: options.operationStore,
+    custody: context.maintenance ? { ...options.custody, signal: context.maintenance.signal } : options.custody,
+    operationStore: options.operationStore,
     assertSourceFenced: context.assertSourceFenced, assertTargetInactive: context.assertTargetInactive,
     archiveStore: options.archiveStore, keyVersion: config.keyVersion, vaultName: config.vaultName,
     maxArchiveBytes: config.maxArchiveBytes, resolveKey: options.resolveArchiveKey };
@@ -148,15 +153,22 @@ export const resumeOpsCoreDataTransfer = options => transfer(options, "resume");
 export const reconcileOpsCoreDataTransfer = options => transfer(options, "reconcile");
 
 async function transfer(options, mode) {
-  let client;
+  let client, maintenance;
   try {
     const context = createOpsCoreTransferContext(options);
     const { custody, operationStore } = options;
-    const { plan, check, assertSourceFenced, assertTargetInactive } = context;
+    const { plan } = context;
+    const originalCheck = context.check;
+    const check = async () => { await originalCheck(); if (maintenance) await maintenance.assertHeld(); };
+    let { assertSourceFenced, assertTargetInactive } = context;
     const initial = custody.snapshot(), config = plan.transfer.postgres;
-    const reconcilingVerification = mode === "reconcile" && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
+    const continuingRuntimeAccess = mode === "resume" && config.runtimeAccess
+      && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
+    const reconcilingVerification = (mode === "reconcile" || continuingRuntimeAccess)
+      && initial.phase === "RESTORED" && initial.pending?.to === "VERIFIED";
     if (mode === "start" && (initial.phase !== "SOURCE_FENCED" || initial.pending)
-      || mode === "resume" && (initial.pending || !["CAPTURED", "RESTORED"].includes(initial.phase))) fail("TRANSFER_RECONCILIATION_REQUIRED");
+      || mode === "resume" && !continuingRuntimeAccess
+        && (initial.pending || !["CAPTURED", "RESTORED"].includes(initial.phase))) fail("TRANSFER_RECONCILIATION_REQUIRED");
     await check();
     if (mode === "reconcile" && initial.phase === "VERIFIED" && !initial.pending) {
       const entry = initial.history.find(e => e.phase === "VERIFIED");
@@ -173,6 +185,17 @@ async function transfer(options, mode) {
         || phasePlan?.intentSha256 !== initial.intentSha256 || phasePlan?.promotion?.sha256 !== entry.intentSha256
         || phasePlan?.azureTargetBindingSha256 !== opsCoreAzureTargetBindingSha256(plan.azure)) fail("TRANSFER_COMPLETED_EVIDENCE_CHANGED");
       return { status: "VERIFIED", historical: true, freshAcceptance: false, evidenceSha256: entry.evidenceSha256, evidence };
+    }
+    if (config.runtimeAccess) {
+      maintenance = await openPostgresMaintenance({ config: options.targetAdminConfig, expected: config.target,
+        signal: custody.signal, assertOwned: originalCheck });
+      context.maintenance = maintenance;
+      // All shared-server SQL writers, including scratch creation and rename,
+      // cooperate through the same maintenance session while domain custody
+      // continues to bind source fencing and the phase journal.
+      const sourceCheck = context.assertSourceFenced, targetCheck = context.assertTargetInactive;
+      assertSourceFenced = context.assertSourceFenced = async () => { await maintenance.assertHeld(); return sourceCheck(); };
+      assertTargetInactive = context.assertTargetInactive = async () => { await maintenance.assertHeld(); return targetCheck(); };
     }
     await assertSourceFenced(); await assertTargetInactive();
     if (mode === "reconcile" && !reconcilingVerification) {
@@ -205,8 +228,9 @@ async function transfer(options, mode) {
       // local files or a new object inventory after an uncertain copy/promotion.
       prefix = `operations/${plan.domain}/${initial.intentSha256}/${initial.pending.operationId}/`;
       const retained = await read("phase-plan");
-      exact(retained, "schemaVersion,intentSha256,promotion,archiveManifestSha256,objectSnapshotSha256,objectSnapshotEvidenceSha256,azureTargetBindingSha256,postgresCopyEvidenceSha256");
-      if (retained.schemaVersion !== 2 || retained.intentSha256 !== initial.intentSha256
+      exact(retained, `schemaVersion,intentSha256,promotion,archiveManifestSha256,objectSnapshotSha256,objectSnapshotEvidenceSha256,azureTargetBindingSha256,postgresCopyEvidenceSha256${config.runtimeAccess ? ",runtimeAccessPolicySha256" : ""}`);
+      if (retained.schemaVersion !== (config.runtimeAccess ? 3 : 2) || retained.intentSha256 !== initial.intentSha256
+        || config.runtimeAccess && retained.runtimeAccessPolicySha256 !== archiveEvidenceHash(config.runtimeAccess)
         || retained.azureTargetBindingSha256 !== opsCoreAzureTargetBindingSha256(plan.azure)) fail("TRANSFER_PHASE_PLAN_CHANGED");
       const copyEvidence = await read(`phase-evidence-${retained.postgresCopyEvidenceSha256}`);
       if (copyEvidence.type !== "POSTGRES_COPY_CONTEXT" || archiveEvidenceHash(copyEvidence) !== retained.postgresCopyEvidenceSha256) fail("TRANSFER_COPY_LINEAGE_CHANGED");
@@ -265,10 +289,11 @@ async function transfer(options, mode) {
       prefix = `operations/${plan.domain}/${initial.intentSha256}/${phase.operationId}/`;
       const snapshotEvidence = { type: "OBJECT_SNAPSHOT", snapshot }, snapshotHash = archiveEvidenceHash(snapshotEvidence);
       const copyEvidence = { type: "POSTGRES_COPY_CONTEXT", copied }, copyHash = archiveEvidenceHash(copyEvidence);
-      const phasePlan = { schemaVersion: 2, intentSha256: initial.intentSha256, promotion: intent,
+      const phasePlan = { schemaVersion: config.runtimeAccess ? 3 : 2, intentSha256: initial.intentSha256, promotion: intent,
         archiveManifestSha256: copied.archive.sha256, objectSnapshotSha256: snapshot.sha256,
         objectSnapshotEvidenceSha256: snapshotHash, azureTargetBindingSha256: opsCoreAzureTargetBindingSha256(plan.azure),
-        postgresCopyEvidenceSha256: copyHash };
+        postgresCopyEvidenceSha256: copyHash,
+        ...(config.runtimeAccess ? { runtimeAccessPolicySha256: archiveEvidenceHash(config.runtimeAccess) } : {}) };
       await retain(`phase-evidence-${copyHash}`, copyEvidence);
       await retain("phase-plan", phasePlan); await retain(`phase-evidence-${snapshotHash}`, snapshotEvidence);
     }
@@ -308,6 +333,14 @@ async function transfer(options, mode) {
         stateFile: copied.stateFile, intent, assertSourceFenced, assertTargetInactive });
       promotion = await promotionCustody.recordResult(await applyPostgresPromotion({ client, intent, ...promotionCustody }));
     }
+    let runtimeAccess;
+    if (config.runtimeAccess) {
+      runtimeAccess = await runOpsCoreRuntimeAccess({ plan, custody, operationStore, phase,
+        databaseOid: copied.scratchOid, targetAdminConfig: options.targetAdminConfig,
+        resolveSecretVersion: options.resolveRuntimeSecretVersion, assertSourceFenced, assertTargetInactive, maintenance,
+        reconcile: mode === "reconcile" });
+      if (runtimeAccess.complete === false) return runtimeAccess;
+    }
     let redis, sharedState;
     if (plan.schemaVersion === 2) {
       sharedState = await assertOpsCorePostgresStateEmpty({ sourceRedis: plan.sharedState.sourceRedis,
@@ -341,6 +374,7 @@ async function transfer(options, mode) {
     }
     const evidence = { schemaVersion: 1, domain: plan.domain, intentSha256: initial.intentSha256,
       archiveManifestSha256: copied.archive.sha256, parity, parityEvidence, objects, promotion,
+      ...(runtimeAccess ? { runtimeAccess } : {}),
       ...(plan.schemaVersion === 2 ? { sharedState } : { redis }),
       sourceFence: await assertSourceFenced(), target: await assertTargetInactive() };
     const digest = archiveEvidenceHash(evidence); await retain(`phase-evidence-${digest}`, evidence);
@@ -349,5 +383,5 @@ async function transfer(options, mode) {
     return { status: "VERIFIED", evidenceSha256: digest, evidence, operationDir: copied.operationDir };
   } catch (error) {
     throw error instanceof TransferError ? error : new TransferError("TRANSFER_RECONCILIATION_REQUIRED");
-  } finally { await client?.end().catch(() => {}); }
+  } finally { await client?.end().catch(() => {}); await maintenance?.close(); }
 }

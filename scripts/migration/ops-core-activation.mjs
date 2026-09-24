@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256, opsCoreSharedStateBackend } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
+import { validateRuntimeAccessActivationBinding } from "./ops-core-runtime-access-binding.mjs";
 import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 
@@ -30,7 +31,7 @@ export const opsCoreActivationDiagnostic = error => error instanceof ActivationE
 export function validateOpsCoreActivationPlan(input) {
   const p = structuredClone(input);
   requireValue([1, 2].includes(p.schemaVersion) && exact(p,
-    `schemaVersion,target,location,managedIdentityId,managedIdentityClientId,runtimeVaultUri,acrServer,release,roles${p.schemaVersion === 2 ? ",workerDemand" : ""}`), "ACTIVATION_PLAN_INVALID");
+    `schemaVersion,target,location,managedIdentityId,managedIdentityClientId,runtimeVaultUri,acrServer,release,roles${p.schemaVersion === 2 ? ",workerDemand" : ""}${Object.hasOwn(p, "runtimeAccess") ? ",runtimeAccess" : ""}`), "ACTIVATION_PLAN_INVALID");
   opsCoreAzureTargetBindingSha256(p.target);
   const prefix = `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/`;
   const identityPrefix = `${prefix}Microsoft.ManagedIdentity/userAssignedIdentities/`;
@@ -83,6 +84,7 @@ export function validateOpsCoreActivationPlan(input) {
     else requireValue(!envNames.has("SHARED_STATE_BACKEND")
       || r.env.some(e => e.name === "SHARED_STATE_BACKEND" && e.value === "redis"), "ACTIVATION_SHARED_STATE_INVALID");
   }
+  try { validateRuntimeAccessActivationBinding(p); } catch { throw new ActivationError("ACTIVATION_RUNTIME_ACCESS_BINDING_INVALID"); }
   return p;
 }
 
@@ -179,12 +181,13 @@ function assertBootstrapProjection(expected, actual, appName, revisionName) {
  * Any inherited pending phase is refused; recovery requires explicit readback.
  */
 export function createOpsCoreActivation({ plan: input, custody, operationStore, assertSourceFenced, healthProbe,
-  armTransport, schedulerProof, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
+  armTransport, schedulerProof, assertRuntimeAccess, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
   const plan = validateOpsCoreActivationPlan(input), planSha256 = hash(plan), target = plan.target;
   requireValue(custody?.signal instanceof AbortSignal && typeof custody.assertOwned === "function"
     && typeof custody.begin === "function" && typeof custody.complete === "function"
     && typeof assertSourceFenced === "function" && typeof healthProbe === "function" && operationStore
     && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 30 * 60_000, "ACTIVATION_DEPENDENCY_INVALID");
+  requireValue(!plan.runtimeAccess || typeof assertRuntimeAccess === "function", "ACTIVATION_RUNTIME_ACCESS_REQUIRED");
   const transport = armTransport ?? createOpsCoreActivationArmTransport({ subscriptionId: target.subscriptionId });
   const appId = role => `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroupName}/providers/Microsoft.App/containerApps/${target.apps[role]}`;
   const schedulerId = plan.workerDemand
@@ -320,6 +323,12 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
       }
       try {
         await check(); const initial = custody.snapshot();
+        if (plan.runtimeAccess) {
+          const proof = await assertRuntimeAccess({ fresh: action === "activate", signal }); await check();
+          requireValue(proof?.complete === true && proof.domain === target.domain && proof.intentSha256 === intentSha256
+            && proof.policySha256 === hash(plan.runtimeAccess) && HASH.test(proof.receiptSha256)
+            && proof.freshAcceptance === (action === "activate"), "ACTIVATION_RUNTIME_ACCESS_UNPROVEN");
+        }
         if (action === "reconcile" && initial.phase === "TARGET_ACTIVE" && initial.pending === null) {
           // A committed final journal write can lose its acknowledgement. Read
           // the exact retained lineage under the current lease; this deliberately

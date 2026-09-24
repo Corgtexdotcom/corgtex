@@ -21,6 +21,7 @@ import { runOpsCoreTransferPreflight } from "./ops-core-preflight.mjs";
 import { createOpsCoreSourceHealthObserver, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
 import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
+import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation } from "./ops-core-runtime-access-controller.mjs";
 
 class OperatorError extends Error {}
 const need = (condition, code) => { if (!condition) throw new OperatorError(code); };
@@ -169,6 +170,9 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     });
     const sourceOptions = { plan, custody, operationStore, sourceConfig: credentials.sourceConfig,
       readerConfig: credentials.readerConfig, railway, assertSourceHealthy };
+    const resolveRuntimeSecretVersion = plan.transfer.postgres.runtimeAccess
+      ? runtime.resolveRuntimeSecretVersion ?? createRuntimeSecretResolver({ vaultUri: plan.activation.runtimeVaultUri, signal: custody.signal })
+      : undefined;
     if (["recover-source", "reconcile-source-recovery"].includes(action)) {
       need(!custody.snapshot().destinationMayHaveWritten, "MIGRATION_SOURCE_RECOVERY_FORBIDDEN");
       const target = createOpsCoreAzureTarget({ binding: plan.azure, custody,
@@ -187,6 +191,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     const transferOptions = () => ({ plan, custody, operationStore, artifactDir, railway,
       sourceCredentials: { sourceConfig: credentials.sourceConfig, readerConfig: credentials.readerConfig },
       targetAdminConfig: credentials.targetAdminConfig, redisSourceCredentials: credentials.redisSource,
+      ...(resolveRuntimeSecretVersion ? { resolveRuntimeSecretVersion } : {}),
       archiveStore: azureArchiveStore(container(plan.operator.archiveContainerUrl)),
       objectSource: new RailwayObjectSource({ ...plan.operator.sourceObjects,
         verifiedBinding: plan.operator.sourceObjects, credentials: credentials.objectSource }),
@@ -222,7 +227,13 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       return workerHealth.probeHealth(request);
     });
     const activation = () => (runtime.activate ?? createOpsCoreActivation)({ plan: plan.activation, custody,
-      operationStore, assertSourceFenced, healthProbe: actualHealthProbe });
+      operationStore, assertSourceFenced, healthProbe: actualHealthProbe,
+      ...(plan.transfer.postgres.runtimeAccess ? { assertRuntimeAccess: ({ fresh }) => assertOpsCoreRuntimeAccessForActivation({
+        plan, custody, operationStore, targetAdminConfig: credentials.targetAdminConfig,
+        resolveSecretVersion: resolveRuntimeSecretVersion, assertSourceFenced, fresh,
+        assertTargetInactive: () => createOpsCoreAzureTarget({ binding: plan.azure, custody,
+          ...(runtime.azureTransport ? { transport: runtime.azureTransport } : {}) }).assertInactive(),
+      }) } : {}) });
     if (["record-routing", "accept", "retain-acceptance-evidence"].includes(action)) {
       need(acceptanceArtifact, "MIGRATION_ACCEPTANCE_ARTIFACT_REQUIRED");
       const binding = validateOpsCoreAcceptanceBinding(acceptanceArtifact.binding);

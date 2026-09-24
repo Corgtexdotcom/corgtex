@@ -106,7 +106,8 @@ export async function prepareRetainedPostgresCopy(options, dependencies = {}) {
   need(same(source.evidence, archiveEvidence.sourceEvidence) && same(source.sequences, archiveEvidence.sourceSequences), "POSTGRES_FROZEN_SOURCE_CHANGED");
   const targetConfig = { ...o.targetAdminConfig, database: o.scratchName };
   const inspect = dependencies.inspectScratch ?? inspectPostgresScratch;
-  const scratch = await inspect({ config: targetConfig, signal, assertCustody: check });
+  const scratch = await inspect({ config: targetConfig, signal, assertCustody: check, requireProtectedAccess: true, expectedScratchOid: checkpoint.scratchOid });
+  need(scratch.protectedAccess === true, "POSTGRES_SCRATCH_ACCESS_UNPROTECTED");
   need(scratch.databaseOid === checkpoint.scratchOid && scratch.databaseOwner === checkpoint.scratchOwner,
     "POSTGRES_SCRATCH_IDENTITY_CHANGED");
   await check();

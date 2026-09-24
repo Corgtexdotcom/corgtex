@@ -7,6 +7,7 @@ import { preflightRedisJob } from "./ops-core-redis-job.mjs";
 import { preflightHealthJob } from "./ops-core-health-job.mjs";
 import { preflightOpsCorePostgresSource } from "./ops-core-postgres-fence.mjs";
 import { nodeClientConfig } from "./run-postgres-restore-rehearsal.mjs";
+import { preflightOpsCoreRuntimeAccess } from "./ops-core-runtime-access-controller.mjs";
 
 class PreflightError extends Error {}
 const need = (value, code) => { if (!value) throw new PreflightError(code); };
@@ -89,6 +90,9 @@ export async function runOpsCoreTransferPreflight(options, dependencies = {}) {
     const postgres = await preflightTargetPostgres({ config: options.targetAdminConfig, expected: plan.transfer.postgres.target,
       signal: options.custody.signal, assertOwned: guard, ...(dependencies.clientFactory ? { clientFactory: dependencies.clientFactory } : {}) });
     const pgPlan = plan.transfer.postgres;
+    const runtimeAccess = pgPlan.runtimeAccess ? await preflightOpsCoreRuntimeAccess({ ...options,
+      resolveSecretVersion: options.resolveRuntimeSecretVersion, assertOwned: guard, assertTargetInactive,
+      ...(dependencies.clientFactory ? { clientFactory: dependencies.clientFactory } : {}) }) : null;
     key = await (dependencies.resolveKey ?? readArchiveKeyVersion)(pgPlan.keyVersion, pgPlan.vaultName);
     need(Buffer.isBuffer(key) && key.length === 32, "PREFLIGHT_ARCHIVE_KEY_INVALID");
     key.fill(0); key = null; await guard();
@@ -109,6 +113,7 @@ export async function runOpsCoreTransferPreflight(options, dependencies = {}) {
     await assertTargetInactive(); await guard();
     const evidence = { schemaVersion: 1, type: "MIGRATION_DEPENDENCY_PREFLIGHT", domain: plan.domain,
       intentSha256: initial.intentSha256, observedAt: new Date().toISOString(), sourceAdmission, postgres, objects, health,
+      ...(runtimeAccess ? { runtimeAccess } : {}),
       ...(postgresState ? { sharedState } : { redis }),
       archiveKeyVersion: pgPlan.keyVersion, archiveKeyReadable: true, finalAcceptance: false };
     const evidenceSha256 = archiveEvidenceHash(evidence);

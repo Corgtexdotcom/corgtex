@@ -45,6 +45,69 @@ Adding resources changes the frozen plan: prepare it before custody initializati
 never rewrite an in-flight plan to bypass reconciliation. This does not resize an
 existing app or prove workload capacity.
 
+### Shared PostgreSQL runtime access
+
+An explicitly reused PostgreSQL server (`azure.postgres.resourceGroupName`) requires
+`transfer.postgres.runtimeAccess` and the identical policy in `activation.runtimeAccess`.
+Use the PostgreSQL shared-state variant and demand-based worker plan. Historical
+dedicated-server plans retain their existing shape; do not edit an initialized
+plan or reuse its receipts to add shared-server authority.
+
+The access policy binds `schemaVersion:1`, `applicationSchema:"public"`, the ordinary
+`runtimeRole` (`corgtex_<domain>_runtime`), exact versioned `runtimeDatabaseSecrets`
+for web and worker, and `scaler:{role,connectionSecretVersion}` for
+`worker_scale_<domain>`. Retain independently generated credentials before freezing
+the plan; SQL roles do not need to exist yet. Set the runtime-config binding's
+`postgresUser` to the exact runtime role. Web/worker versions must resolve to the
+same runtime identity and password; the scaler has a distinct credential and only
+queue eligibility column access. Activation binds these references to the actual
+application and scaler secret references; no latest-version lookup is permitted.
+
+`isolation` contains the reviewed `inventorySha256` and a complete `databases`
+inventory outside this domain's permanent database. Each item binds `name`, `oid`,
+`owner`, `beforeAclSha256`, `action` and `preserveConnectRoles:[{name,oid}]`.
+Use the catalog collector and `postgresRuntimeAccessIsolationInventory()` to
+compute these values. `replace-public-connect` preserves existing named grants
+and adds explicitly reviewed legitimate users before removing PUBLIC CONNECT;
+`verify-only` never alters the database. Do not infer a legitimate-user allowlist
+from a PUBLIC grant. Provider-owned databases are observational only. Effective
+foreign database access must be denied; a provider database that cannot satisfy
+this requirement blocks admission rather than being silently exempted.
+
+Preflight validates credentials, exact database ACL inventory and session logging
+controls before source fencing. The transfer holds a shared PostgreSQL maintenance
+session lock in `postgres`, in addition to its independent per-domain Blob lease.
+Production scratch databases start with connections disabled and open only after
+their administrator-only access is proved. All earlier rehearsal writers must
+still be drained before server promotion; advisory locks do not fence old tools.
+
+After promotion, one transaction creates the two roles, transfers only manifested
+application objects, preserves database/schema/extension ownership and administrator
+readback, and applies the exact foundation ACL policy. No `REASSIGN OWNED` or role
+adoption is used. The before-manifest and intent are retained before the transaction;
+the expected after-manifest is durably read back before COMMIT. A lost acknowledgement
+requires `reconcile-transfer`, which reports applied, unchanged or indeterminate
+state without replaying SQL. If promotion completed before the access intent was
+created, reconciliation reports `CONTINUATION_AVAILABLE`; `resume-transfer`
+rechecks promoted data and dispatches that first access attempt. An inherited
+intent is only reconciled, including on resume. Missing proof leaves verification pending.
+Do not reset passwords or reverse ownership automatically to recover.
+
+Activation requires the retained receipt and a fresh catalog/credential check before
+its first write. After activation may have written or migrated, reconciliation
+validates historical receipt bindings rather than comparing old catalogs to
+legitimate new migrations. Actual Azure administrator permissions, provider-database
+isolation and legitimate foundation access must be qualified before production;
+local fixture success is not that proof.
+
+The opt-in local fixture runs with
+`CORGTEX_RUNTIME_ACCESS_LOCAL_TEST=1 node --test scripts/migration/ops-core-postgres-runtime-access.integration.node-test.mjs`.
+It requires a preloaded local PG18/vector0.8.2 image; set
+`CORGTEX_RUNTIME_ACCESS_PG_IMAGE=sha256:<image-id>` to choose that exact image.
+It uses `--pull=never`, verified local TLS, randomly named owned resources and
+cleanup readback. The default image ID refers to the private local qualification
+image, not a public download. Default test runs skip this explicit local fixture.
+
 Keep plan and credential JSON files owned by the operator with mode0600 and no
 symlinks. Credentials are separate from the retained plan:
 `sourceConfig`, `readerConfig`, `targetAdminConfig`, `objectSource`, `redisSource`

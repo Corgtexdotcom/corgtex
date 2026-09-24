@@ -1059,7 +1059,7 @@ const databaseSettings = async (client) => {
 
 const writeState = (stateFile, value) => writePrivateJson(stateFile, value);
 
-export const buildCreateDatabaseSql = (scratchName, settings) => {
+export const buildCreateDatabaseSql = (scratchName, settings, { allowConnections = true } = {}) => {
   if (!SAFE_NAME.test(scratchName) || !scratchName.startsWith("corgtex_rehearsal_")) fail("INVALID_SCRATCH_DATABASE_NAME");
   const common = [
     `CREATE DATABASE ${quoteIdentifier(scratchName)}`,
@@ -1083,6 +1083,7 @@ export const buildCreateDatabaseSql = (scratchName, settings) => {
   } else {
     fail("UNSUPPORTED_LOCALE_PROVIDER");
   }
+  if (!allowConnections) common.push("ALLOW_CONNECTIONS false");
   return common.join(" ");
 };
 
@@ -1116,8 +1117,54 @@ export const buildLocaleDiagnostic = (source, target = null) => ({
   crossRuntimeVersionRelation: target === null ? "UNAVAILABLE" : classifyCollationVersionRelation(source, target),
 });
 
+/** Maintenance-session proof; scratch ACL protection is required before enabling
+ * connections and again before a production resume. Never repairs resumed ACLs. */
+export async function inspectProtectedScratchAccess({ client, scratchName, scratchOid, administrator, allowConnections }) {
+  const row = await querySingle(client, `SELECT d.oid::text AS oid, pg_get_userbyid(d.datdba) AS owner,
+    d.datallowconn AS allow_connections,
+    has_database_privilege($2, d.oid, 'CONNECT') AS administrator_connect,
+    EXISTS (SELECT 1 FROM aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
+      WHERE a.grantee <> d.datdba) AS foreign_acl,
+    EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolcanlogin AND NOT r.rolsuper AND r.rolname <> $2
+      AND has_database_privilege(r.oid, d.oid, 'CONNECT')) AS foreign_login_connect,
+    (SELECT count(*)::text FROM pg_stat_activity WHERE datid=d.oid) AS connections
+    FROM pg_database d WHERE d.datname=$1`, [scratchName, administrator], "SCRATCH_ACCESS_UNPROVEN");
+  if (row.oid !== scratchOid || row.owner !== administrator) fail("SCRATCH_IDENTITY_CHANGED");
+  if (row.allow_connections !== allowConnections || row.administrator_connect !== true
+    || row.foreign_acl !== false || row.foreign_login_connect !== false) fail("SCRATCH_ACCESS_UNPROTECTED");
+  if (!allowConnections && row.connections !== "0") fail("SCRATCH_CONNECTIONS_PRESENT");
+  return { databaseOid: row.oid, databaseOwner: row.owner, protectedAccess: true, allowConnections: row.allow_connections };
+}
+
+export async function protectScratchDatabaseAccess({ client, scratchName, scratchOid, administrator, assertCustody }) {
+  if (!SAFE_NAME.test(scratchName) || !scratchName.startsWith("corgtex_rehearsal_") || !administrator) fail("INVALID_SCRATCH_DATABASE_NAME");
+  await assertCustody("PROTECT_SCRATCH_ACCESS");
+  await client.query("BEGIN");
+  try {
+    const identity = await querySingle(client,
+      "SELECT oid::text AS oid, pg_get_userbyid(datdba) AS owner, datallowconn AS allow_connections FROM pg_database WHERE datname=$1",
+      [scratchName], "SCRATCH_IDENTITY_UNPROVEN");
+    if (identity.oid !== scratchOid || identity.owner !== administrator || identity.allow_connections !== false) fail("SCRATCH_IDENTITY_CHANGED");
+    await assertCustody("REVOKE_SCRATCH_PUBLIC_ACCESS");
+    await client.query(`REVOKE CONNECT, TEMPORARY ON DATABASE ${quoteIdentifier(scratchName)} FROM PUBLIC`);
+    await client.query(`GRANT CONNECT, TEMPORARY ON DATABASE ${quoteIdentifier(scratchName)} TO ${quoteIdentifier(administrator)}`);
+    await inspectProtectedScratchAccess({ client, scratchName, scratchOid, administrator, allowConnections: false });
+    await assertCustody("ENABLE_PROTECTED_SCRATCH_CONNECTIONS");
+    await client.query(`ALTER DATABASE ${quoteIdentifier(scratchName)} ALLOW_CONNECTIONS true`);
+    await inspectProtectedScratchAccess({ client, scratchName, scratchOid, administrator, allowConnections: true });
+    await assertCustody("COMMIT_SCRATCH_ACCESS");
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+  // Lost COMMIT acknowledgement is never replayed. Fresh resume must prove ACLs.
+  await assertCustody("VERIFY_SCRATCH_ACCESS");
+  return inspectProtectedScratchAccess({ client, scratchName, scratchOid, administrator, allowConnections: true });
+}
+
 export const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, productionMode = false, assertCustody = async () => {} }) => {
-  const createSql = buildCreateDatabaseSql(scratchName, settings);
+  const createSql = buildCreateDatabaseSql(scratchName, settings, { allowConnections: !productionMode });
   const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
   await client.connect();
   let scratchOid, scratchOwner;
@@ -1132,7 +1179,8 @@ export const createScratchDatabase = async ({ adminConfig, scratchName, settings
     scratchOid = normalizeLargeObjectOid(identity.oid);
     scratchOwner = identity.owner;
     writeState(stateFile, { schemaVersion: "1.0.0", scratchName, targetRef,
-      ...(productionMode ? { phase: "MIGRATION_RETAINED", scratchOid } : { phase: "CREATED" }) });
+      ...(productionMode ? { phase: "MIGRATION_RETAINED", scratchOid, scratchOwner } : { phase: "CREATED" }) });
+    if (productionMode) await protectScratchDatabaseAccess({ client, scratchName, scratchOid, administrator: adminConfig.user, assertCustody });
   } finally {
     await client.end().catch(() => {});
   }
@@ -3835,8 +3883,17 @@ export function buildObservedPostgresParityEvidence({ domain, sourceRef, targetR
     archiveSequences: { tocEntryCount, beforeReplay: destination.sequences, afterReplay: destination.sequences } };
 }
 
-export async function inspectPostgresScratch({ config, signal, assertCustody, requireEmpty = false }) {
+export async function inspectPostgresScratch({ config, signal, assertCustody, requireEmpty = false, requireProtectedAccess = false, expectedScratchOid }) {
   signal.throwIfAborted(); await assertCustody();
+  if (requireProtectedAccess) {
+    const maintenance = new Client(nodeClientConfig({ ...config, database: "postgres" }, "corgtex_copy_scratch_access", 30_000, 30_000));
+    try {
+      await maintenance.connect();
+      await inspectProtectedScratchAccess({ client: maintenance, scratchName: config.database,
+        scratchOid: expectedScratchOid, administrator: config.user, allowConnections: true });
+      signal.throwIfAborted(); await assertCustody();
+    } finally { await maintenance.end().catch(() => {}); }
+  }
   const client = new Client(nodeClientConfig(config, "corgtex_copy_scratch_identity", 30_000, 30_000));
   try {
     await client.connect(); await client.query("BEGIN READ ONLY");
@@ -3860,7 +3917,8 @@ export async function inspectPostgresScratch({ config, signal, assertCustody, re
     const empty = String(row.objects) === "0" && String(row.other_sessions) === "0";
     if (requireEmpty && !empty) fail("SCRATCH_NOT_EMPTY");
     await client.query("COMMIT"); signal.throwIfAborted(); await assertCustody();
-    return { databaseOid: normalizeLargeObjectOid(identity.oid), databaseOwner: identity.owner, empty };
+    return { databaseOid: normalizeLargeObjectOid(identity.oid), databaseOwner: identity.owner, empty,
+      ...(requireProtectedAccess ? { protectedAccess: true } : {}) };
   } catch (error) {
     if (isRehearsalError(error)) throw error;
     fail("SCRATCH_IDENTITY_UNPROVEN");

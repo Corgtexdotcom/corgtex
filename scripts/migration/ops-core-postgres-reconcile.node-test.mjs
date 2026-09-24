@@ -77,7 +77,7 @@ async function fixture(t, phase = "CAPTURED") {
       await assertCustody(); assert.deepEqual(await readFile(join(tempDir, "snapshot.dump")), plaintext); log.push("inspect-decrypted-dump");
       return { tocEntryCount: sequences.length };
     },
-    async inspectScratch({ assertCustody }) { await assertCustody(); log.push("scratch-read"); return { databaseOid: actualOid, databaseOwner: targetAdminConfig.user, empty }; },
+    async inspectScratch({ assertCustody, requireProtectedAccess, expectedScratchOid }) { await assertCustody(); assert.equal(requireProtectedAccess, true); assert.equal(expectedScratchOid, checkpoint.scratchOid); log.push("scratch-read"); return { databaseOid: actualOid, databaseOwner: targetAdminConfig.user, empty, protectedAccess: true }; },
     async observe({ config, assertCustody }) { await assertCustody(); const source = config.host === sourceConfig.host;
       log.push(source ? "source-read" : "destination-read");
       if (!source && empty) throw Error("missing application tables");
@@ -215,4 +215,15 @@ test("lost first restore checkpoint acknowledgement never starts or replays rest
   await assert.rejects(f.resume(), /POSTGRES_COPY_RESTORE_ALREADY_ATTEMPTED/);
   assert.equal((await f.reconcile()).complete, false); assert.equal(f.journal.pending.to, "RESTORED");
   assert.equal(f.log.includes("restore"), false);
+});
+
+for (const protectedAccess of [undefined, false]) test(`resume rejects missing/unprotected scratch ACL proof: ${protectedAccess}`, async t => {
+  const f = await fixture(t);
+  const inspect = f.dependencies.inspectScratch;
+  f.dependencies.inspectScratch = async args => ({ ...await inspect(args), protectedAccess });
+  const result = await f.reconcile();
+  assert.equal(result.complete, false);
+  assert.equal(result.code, "POSTGRES_SCRATCH_ACCESS_UNPROTECTED");
+  assert.equal(f.log.includes("restore"), false);
+  assert.equal(f.journal.pending.to, "CAPTURED");
 });

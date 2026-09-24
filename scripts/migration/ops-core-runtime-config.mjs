@@ -34,6 +34,12 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
     && /^[a-z0-9-]+\.postgres\.database\.azure\.com$/.test(b.postgresHost)
     && (backend === "postgres" ? b.redisHost === null : /^[a-z0-9.-]+\.redis\.azure\.net$/.test(b.redisHost)), "RUNTIME_BINDING_INVALID");
   const database = url(databaseUrl);
+  if (Object.hasOwn(b, "postgresUser")) {
+    let user;
+    try { user = decodeURIComponent(database.username); } catch { throw new RuntimeConfigError("RUNTIME_DATABASE_USER_INVALID"); }
+    need(b.postgresUser === `corgtex_${p.domain}_runtime` && user === b.postgresUser,
+      "RUNTIME_DATABASE_USER_INVALID");
+  }
   need(["postgres:", "postgresql:"].includes(database.protocol) && database.hostname === b.postgresHost
     && (!database.port || database.port === "5432") && database.pathname === `/corgtex_${p.domain}`
     && database.username.length > 0 && database.password.length > 0 && !database.hash
