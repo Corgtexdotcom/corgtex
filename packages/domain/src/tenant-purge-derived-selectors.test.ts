@@ -1,3 +1,4 @@
+import { getWorkspaceOwnershipRules } from "../../../scripts/migration/workspace-ownership";
 import { readFileSync, readdirSync } from "node:fs";
 import { Prisma } from "@prisma/client";
 import { describe, expect, it } from "vitest";
@@ -147,6 +148,20 @@ describe("tenant purge derived selector registry", () => {
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace("requestHash: params.idemRequestHash,\n          workspaceId: workspace.id,\n          responseJson", "requestHash: params.idemRequestHash,\n          responseJson") })).toThrow(/writer evidence/);
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace("workspaceId: null,", "workspaceId: workspace.id,") })).toThrow(/writer evidence/);
     expect(() => assertTenantPurgeWriterEvidence({ ...writers, procurement: writers.procurement.replace(/(procurementIdempotencyKey\.updateMany\(\{[\s\S]*?requestHash:) params\.idemRequestHash/, "$1 wrongRequestHash") })).toThrow(/writer evidence/);
+  });
+
+  it("preserves opaque global runtime state without adding tenant export selectors", () => {
+    const ownership = getWorkspaceOwnershipRules();
+    expect(ownership.get("PendingTranscriptUpload")).toEqual([{ steps: [], field: "workspaceId" }]);
+    for (const model of ["SharedRateLimit", "SharedCacheEntry", "SharedCacheVersion"] as const) {
+      expect(TENANT_PURGE_DERIVED_SELECTORS).toContainEqual({ kind: "NO_SELECTOR_PRESERVE", model, authorizesRoot: false });
+      expect(effectiveTargets(model)).toEqual([]);
+      expect(ownership.has(model)).toBe(false);
+      expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, selectorsWithout((selector) => selector.model === model))).toThrow(/derived selector drift/);
+    }
+    // Existing shared models cannot be reclassified into opaque global state.
+    const userWithoutPaths = selectorsWithout((selector) => selector.model === "User");
+    expect(() => assertTenantPurgeDerivedSelectorRegistry(schemaModels, [...userWithoutPaths, { kind: "NO_SELECTOR_PRESERVE", model: "User", authorizesRoot: false }])).toThrow(/shared=User/);
   });
 
   it("keeps shared and retained rows preserve-only and exports no evidence values", () => {

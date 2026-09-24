@@ -98,6 +98,8 @@ The Core/Ops low-load runtime profile requires `connection_limit=5&pool_timeout=
 
 Pending transcript tokens stop working after 20 minutes. This is an **application access deadline**, not a backup erasure promise: encrypted rows can remain in database backups for the configured retention period, and the long-lived encryption key can decrypt retained ciphertext. Expired rows are removed in bounded batches during subsequent operations. Evaluate this retention behavior before opting into the PostgreSQL backend.
 
+Pending uploads belong to their workspace and are deleted with it. The opaque rate-limit, cache and version keys are shared runtime state: individual tenant exports omit them and tenant deletion preserves them. Encrypted cache rows remain until expiry cleanup, and hashed version counters persist; backup retention applies to both.
+
 Do not switch a running deployment between backends: that would lose effective rate-limit counters and pending uploads. Fence writers and settle or preserve source state first. Core/Ops migration requires an empty, independently observed source Redis plus a migrated, empty PostgreSQL state schema. Once PostgreSQL state is active, rollback must use a PostgreSQL-capable application image and retain the additive schema. After restoring a backup, remove restored retrieval-cache and pending-upload rows before reopening traffic, and assess rate-limit continuity rather than silently resetting counters.
 
 ## Intercom Support Settings
