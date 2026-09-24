@@ -100,6 +100,18 @@ legitimate new migrations. Actual Azure administrator permissions, provider-data
 isolation and legitimate foundation access must be qualified before production;
 local fixture success is not that proof.
 
+Dispatch **Azure Migration PostgreSQL Restore Rehearsal** on protected `main` with
+`operation=qualify-access` and `domain=ops` while the candidate server is stopped.
+Its bounded lifecycle uses the protected administrator credential, opens one
+temporary runner IP, captures a read-only catalog and session-setting receipt in
+the private `azure-target-qualification-*` artifact, removes the rule and stops
+the server. `shared-postgres-access.json` records exact database ACLs, roles,
+memberships, provider logging hooks and which required session settings the Azure
+administrator can set. The receipt explicitly has `admissionReady:false`; inspect
+it and the separate cleanup receipt before choosing foundation ACL policy or
+promoting the server. A failed cleanup uses the existing `target-qualification`
+recovery operation with the original run ID and attempt.
+
 The opt-in local fixture runs with
 `CORGTEX_RUNTIME_ACCESS_LOCAL_TEST=1 node --test scripts/migration/ops-core-postgres-runtime-access.integration.node-test.mjs`.
 It requires a preloaded local PG18/vector0.8.2 image; set

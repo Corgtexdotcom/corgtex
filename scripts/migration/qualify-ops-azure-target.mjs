@@ -28,6 +28,7 @@ export const validIp = (ip) => isIP(ip) === 4 && !/^(?:0|10|127|169\.254|192\.16
 
 export function validateEnvironment(env, recovery = false) {
   assert(env.GITHUB_REF === "refs/heads/main" && env.DOMAIN === "ops", "PROTECTED_INPUT_MISMATCH");
+  assert(env.QUALIFY_ACCESS === undefined || ["true", "false"].includes(env.QUALIFY_ACCESS), "PROTECTED_INPUT_MISMATCH");
   assert(env.AZURE_SUBSCRIPTION_ID === SUBSCRIPTION && env.AZURE_TENANT_ID === TENANT
     && digest(String(env.AZURE_CLIENT_ID).toLowerCase()) === "707be00bd89b2c0cf1ebdf8c0d389ff24b5f69d9f2ba35a113cddf8f073296bf", "AZURE_IDENTITY_MISMATCH");
   assert(numeric(env.GITHUB_RUN_ID) && numeric(env.GITHUB_RUN_ATTEMPT), "RUN_IDENTITY_MISMATCH");
@@ -392,8 +393,24 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   if (mode === "run") {
     const config = await connectionConfig(env);
     const { default: pg } = await import("pg");
-    const result = await qualify(api, i, (options) => captureWhenReady(() => new pg.Client(config), options), () => save(`${dir}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
+    let accessReceipt;
+    const result = await qualify(api, i, async (options) => {
+      const metadata = await captureWhenReady(() => new pg.Client(config), options);
+      if (env.QUALIFY_ACCESS === "true") {
+        const { captureSharedPostgresAccess } = await import("./probe-shared-postgres-access.mjs");
+        const remainingMs = Math.min(120000, options.deadline - Date.now() - 3000);
+        assert(remainingMs > 0, "ACCESS_DEADLINE");
+        accessReceipt = await captureSharedPostgresAccess(new pg.Client(config), { deadlineMs: remainingMs });
+      }
+      return metadata;
+    }, () => save(`${dir}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
     save(`${dir}/metadata.json`, result); console.log(JSON.stringify({ status: result.status, comparison: result.comparison }));
+    if (env.QUALIFY_ACCESS === "true") {
+      assert(accessReceipt?.status === "SHARED_POSTGRES_ACCESS_CAPTURED", "ACCESS_RECEIPT_MISSING");
+      save(`${dir}/shared-postgres-access.json`, accessReceipt);
+      console.log(JSON.stringify({ status: accessReceipt.status, databaseCount: accessReceipt.databases.length,
+        settingFailures: accessReceipt.settingResults.filter(row => !row.accepted).length }));
+    }
   } else {
     const result = await cleanup(api, i, clock, recovery); save(`${dir}/cleanup.json`, result);
     console.log(JSON.stringify(result)); assert(result.withinWindow, "ABSOLUTE_WINDOW_BREACHED");
