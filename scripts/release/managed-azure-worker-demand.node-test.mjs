@@ -29,6 +29,30 @@ function app() {
 const job = (trigger = "Manual") => buildManagedAzureSchedulerJob({ workerApp: app(), demand, target, trigger });
 const actual = body => ({ ...structuredClone(body), id: jobId, name: demand.schedulerJobName, type: "Microsoft.App/jobs", properties: { ...structuredClone(body.properties), provisioningState: "Succeeded" } });
 
+test("scheduler password registry accepts ARM's inactive empty identity default", () => {
+  const expected = job();
+  expected.properties.configuration.registries = [{ server: "fixtureacr.azurecr.io", username: "fixtureacr", passwordSecretRef: "registry" }];
+  expected.properties.configuration.secrets.push({ name: "registry", keyVaultUrl: `https://fixture.vault.azure.net/secrets/registry/${"e".repeat(32)}`, identity });
+  const observed = actual(expected);
+  observed.properties.configuration.registries[0].identity = "";
+  assertManagedAzureSchedulerJob(observed, expected, jobId);
+  // A retained ARM baseline can contain the same default on the expected side.
+  assertManagedAzureSchedulerJob(actual(expected), observed, jobId);
+  for (const change of [{ identity }, { identity: "system" }, { username: "other" }, { passwordSecretRef: "other" }]) {
+    const drifted = structuredClone(observed);
+    Object.assign(drifted.properties.configuration.registries[0], change);
+    assert.throws(() => assertManagedAzureSchedulerJob(drifted, expected, jobId), /SCHEDULER_DRIFT/);
+  }
+});
+
+test("scheduler empty registry identity does not normalize without password authentication", () => {
+  const expected = job(), observed = actual(expected);
+  observed.properties.configuration.registries[0].identity = "";
+  assert.throws(() => assertManagedAzureSchedulerJob(observed, expected, jobId), /SCHEDULER_DRIFT/);
+  delete expected.properties.configuration.registries[0].identity;
+  assert.throws(() => assertManagedAzureSchedulerJob(observed, expected, jobId), /SCHEDULER_DRIFT/);
+});
+
 test("fixed PostgreSQL/HTTP scaler and scheduler inherit the exact runtime with separate scaler credentials", () => {
   assert.deepEqual(validateManagedAzureWorkerDemand(demand, target), demand);
   const scale = managedAzureWorkerDemandScale(demand);

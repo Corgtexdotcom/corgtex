@@ -103,7 +103,12 @@ function configurationIdentity(value) {
   omitNull(result, ["dapr", "eventTriggerConfig", "manualTriggerConfig", "scheduleTriggerConfig"]);
   if (result.identitySettings?.length === 0) delete result.identitySettings;
   for (const secret of result.secrets ?? []) omitNull(secret, ["value"]);
-  for (const registry of result.registries ?? []) omitNull(registry, ["username", "passwordSecretRef", "identity"]);
+  for (const registry of result.registries ?? []) {
+    omitNull(registry, ["username", "passwordSecretRef", "identity"]);
+    // ARM materializes an inactive identity for password-authenticated registries.
+    if (registry.identity === "" && typeof registry.username === "string" && registry.username.length > 0
+      && typeof registry.passwordSecretRef === "string" && registry.passwordSecretRef.length > 0) delete registry.identity;
+  }
   return result;
 }
 function region(value) {
