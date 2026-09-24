@@ -3,7 +3,8 @@ import { pathToFileURL } from "node:url";
 import { runPostgresRestoreRehearsal, cleanupScratchDatabase, nodeClientConfig, buildCreateDatabaseSql, writeClientFiles, probeTargetClientConnection } from "./run-postgres-restore-rehearsal.mjs";
 import { SOURCE_PINS, pinnedBytes, readSourceBaseline, hash, check, ATTEST_SQL, assertRuntime, collectCorpus, compareCorpus } from "./synthetic-ops-source.mjs";
 import { bootstrapSource, save, withDatabase, LOCAL_CLIENT_HOST } from "./bootstrap-synthetic-ops.mjs";
-import { SyntheticSubprocesses } from "./synthetic-subprocess.mjs";
+import { SyntheticSubprocesses, supervisedExecFile } from "./synthetic-subprocess.mjs";
+import { rehearsalAuthorityForTarget } from "./rehearsal-authority.mjs";
 import { HOST } from "./probe-ops-azure-target.mjs";
 
 export const sourceSettings = { encoding: "UTF8", provider: "libc", collation: "en_US.utf8", ctype: "en_US.utf8", providerLocale: null, icuRules: null };
@@ -24,13 +25,15 @@ export async function work(mode, config, supervisor = new SyntheticSubprocesses(
   check(config.targetAdminConfig?.host === HOST && config.targetAdminConfig.database === "postgres"
     && config.targetAdminConfig.sslmode === "verify-full", "SYNTHETIC_TARGET_CONFIG_MISMATCH");
   check(/^corgtex_rehearsal_syn_[1-9][0-9]*_[1-9][0-9]*_(1|2|corpus)$/u.test(config.scratchName), "SYNTHETIC_SCRATCH_NAME_INVALID");
+  const rehearsalAuthorityOptions = { execute: supervisedExecFile(supervisor), deadline: config.deadline, environment: process.env };
+  const authority = rehearsalAuthorityForTarget(config.targetAdminConfig, rehearsalAuthorityOptions);
   mkdirSync(config.artifactDir, { recursive: true, mode: 0o700 });
-  if (mode === "cleanup") return cleanupScratchDatabase({ ...config, expectedScratchName: config.scratchName });
+  if (mode === "cleanup") return cleanupScratchDatabase({ ...config, rehearsalAuthorityOptions, expectedScratchName: config.scratchName });
   if (mode === "restore") {
     check(config.sourceConfig?.database === "source" && config.sourceConfig.host === "127.0.0.1"
       && config.sourceConfig.user === "fixture_reader" && config.sourceConfig.sslmode === "require", "NON_SYNTHETIC_SOURCE_REJECTED");
     pinnedBytes(config.bundle, "synthetic.dump");
-    const result = await runPostgresRestoreRehearsal({ ...config, domain: "ops", afterArchive: async () => {
+    const result = await runPostgresRestoreRehearsal({ ...config, rehearsalAuthorityOptions, domain: "ops", afterArchive: async () => {
       pinnedBytes(config.bundle, "synthetic.dump");
       const dump = `${config.tempDir}/snapshot.dump`;
       copyFileSync(`${config.bundle}/synthetic.dump`, dump); chmodSync(dump, 0o600);
@@ -39,7 +42,7 @@ export async function work(mode, config, supervisor = new SyntheticSubprocesses(
       // pg_dump does not pin CREATE EXTENSION's default version. Select the
       // already allowlisted version only in the runner-created owned scratch DB.
       await withDatabase(nodeClientConfig({ ...config.targetAdminConfig, database: config.scratchName }, "synthetic_vector_pin", 5000, 5000),
-        c => c.query("CREATE EXTENSION vector VERSION '0.8.2'"));
+        async c => { await authority(); return c.query("CREATE EXTENSION vector VERSION '0.8.2'"); });
     } });
     await withDatabase(nodeClientConfig({ ...config.targetAdminConfig, database: config.scratchName }, "synthetic_restore_attest", 5000, 5000), async c => {
       assertRuntime((await c.query(ATTEST_SQL)).rows[0], "2.38");
@@ -53,11 +56,14 @@ export async function work(mode, config, supervisor = new SyntheticSubprocesses(
   await withDatabase(nodeClientConfig(config.targetAdminConfig, "synthetic_corpus_create", 5000, 5000), async c => {
     check((await c.query("SELECT 1 FROM pg_database WHERE datname=$1", [config.scratchName])).rowCount === 0, "SCRATCH_DATABASE_ALREADY_EXISTS");
     state.phase = "ABSENCE_VERIFIED"; writeFileSync(config.stateFile, JSON.stringify(state), { mode: 0o600 });
+    await authority();
     await c.query(buildCreateDatabaseSql(config.scratchName, sourceSettings));
     state.phase = "CREATED"; writeFileSync(config.stateFile, JSON.stringify(state), { mode: 0o600 });
   });
   const captured = await withDatabase(nodeClientConfig({ ...config.targetAdminConfig, database: config.scratchName }, "synthetic_corpus_capture", 5000, 10000), async c => {
-    await c.query(pinnedBytes(config.bundle, "corpus.sql").toString());
+    const corpus = pinnedBytes(config.bundle, "corpus.sql").toString();
+    await authority();
+    await c.query(corpus);
     assertRuntime((await c.query(ATTEST_SQL)).rows[0], "2.38");
     return collectCorpus(c);
   });

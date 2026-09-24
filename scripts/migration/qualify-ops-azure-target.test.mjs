@@ -452,12 +452,12 @@ describe("target qualification lifecycle", () => {
     expect(c.time - i.createdAt).toBe(180000); expect(events.filter(e => e === "start")).toHaveLength(1);
   });
   it("binds every Azure write to a fresh identity check and exact CLI arguments", async () => {
-    const api = new Azure({}); const calls = []; api.identity = async () => calls.push("identity"); api.call = async (args) => calls.push(args);
+    const api = new Azure({}); const calls = []; api.identity = async () => calls.push("identity"); api.authority = async () => calls.push("authority"); api.call = async (args) => calls.push(args);
     const { api: fake, c } = setup(); const i = await prepare(fake, inputs, c);
     await api.start(); await api.createRule(i); await api.deleteRule(i); await api.stop();
-    for (let n = 0; n < calls.length; n += 2) expect(calls[n]).toBe("identity");
-    expect(calls[1]).toContain("--no-wait");
-    expect(calls[3]).toContain("--server-name"); expect(calls[3]).toContain(i.ipv4); expect(calls[5]).toContain(i.firewallName);
+    for (let n = 0; n < calls.length; n += 3) { expect(calls[n]).toBe("identity"); expect(calls[n + 1]).toBe("authority"); }
+    expect(calls[2]).toContain("--no-wait");
+    expect(calls[5]).toContain("--server-name"); expect(calls[5]).toContain(i.ipv4); expect(calls[8]).toContain(i.firewallName);
     expect(calls.flat().join(" ")).not.toMatch(/(?:database| db |grant|role assignment create)/u);
   });
   it("rejects invalid network addresses and unsupported protected inputs", () => {
@@ -565,7 +565,7 @@ describe("protected workflow integration", () => {
   it("loads qualification cleanup with no installed packages or DB client", () => {
     const dir = mkdtempSync(join(tmpdir(), "corgtex-target-cleanup-"));
     try {
-      for (const name of ["qualify-ops-azure-target.mjs", "probe-ops-azure-target.mjs", "validate-postgres-restore-rehearsal.mjs",
+      for (const name of ["qualify-ops-azure-target.mjs", "rehearsal-authority.mjs", "probe-ops-azure-target.mjs", "validate-postgres-restore-rehearsal.mjs",
         "validate-azure-what-if.mjs", "postgres-schema-representation.mjs", "postgres-schema-tokens.mjs", "postgres-check-structure.mjs"]) {
         copyFileSync(`scripts/migration/${name}`, join(dir, name));
       }

@@ -8,6 +8,8 @@ import { pathToFileURL } from "node:url";
 import { RESOURCE, HOST, ProbeError, connectionConfig, captureWhenReady, sanitize } from "./probe-ops-azure-target.mjs";
 import { validateRehearsalPrincipal } from "./validate-postgres-restore-rehearsal.mjs";
 
+import { createRehearsalAuthorityGuard } from "./rehearsal-authority.mjs";
+
 export const SUBSCRIPTION = "227eb707-bc46-415e-a09b-7d2b69fb14b2";
 export const TENANT = "f6f245dd-ad33-4fed-8624-c44efa093b21";
 export const GROUP = "rg-corgtex-migration-rehearsal";
@@ -144,15 +146,16 @@ export class Azure {
     const p = await this.call(["network", "private-endpoint-connection", "list", "--id", RESOURCE]);
     assert(Array.isArray(p) && p.length === 0, "PRIVATE_ENDPOINT_DRIFT");
   }
-  async start() { await this.identity(); return this.call(["postgres", "flexible-server", "start", "--resource-group", GROUP, "--name", SERVER, "--no-wait"]); }
-  async stop() { await this.identity(); return this.call(["postgres", "flexible-server", "stop", "--resource-group", GROUP, "--name", SERVER]); }
+  async authority() { await createRehearsalAuthorityGuard({ read: args => this.call(args) })(); }
+  async start() { await this.identity(); await this.authority(); return this.call(["postgres", "flexible-server", "start", "--resource-group", GROUP, "--name", SERVER, "--no-wait"]); }
+  async stop() { await this.identity(); await this.authority(); return this.call(["postgres", "flexible-server", "stop", "--resource-group", GROUP, "--name", SERVER]); }
   async createRule(i) {
-    await this.identity();
+    await this.identity(); await this.authority();
     return this.call(["postgres", "flexible-server", "firewall-rule", "create", "--resource-group", GROUP, "--server-name", SERVER,
       "--name", i.firewallName, "--start-ip-address", i.ipv4, "--end-ip-address", i.ipv4]);
   }
   async deleteRule(i) {
-    await this.identity();
+    await this.identity(); await this.authority();
     return this.call(["postgres", "flexible-server", "firewall-rule", "delete", "--resource-group", GROUP, "--server-name", SERVER, "--name", i.firewallName, "--yes"]);
   }
 }

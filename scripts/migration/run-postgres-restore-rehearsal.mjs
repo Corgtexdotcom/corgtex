@@ -20,6 +20,7 @@ import {
 import { basename, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
+import { rehearsalAuthorityForTarget } from "./rehearsal-authority.mjs";
 import {
   KNOWN_CHECK_KEY,
   captureKnownCheckStructure,
@@ -977,7 +978,7 @@ if (( statuses[1] != 0 || statuses[0] != 0 )); then
 fi
 `;
 
-const restoreArchiveSections = async ({
+export const restoreArchiveSections = async ({
   tempDir,
   clientFiles,
   network,
@@ -1115,7 +1116,7 @@ export const buildLocaleDiagnostic = (source, target = null) => ({
   crossRuntimeVersionRelation: target === null ? "UNAVAILABLE" : classifyCollationVersionRelation(source, target),
 });
 
-const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, productionMode = false, assertCustody = async () => {} }) => {
+export const createScratchDatabase = async ({ adminConfig, scratchName, settings, stateFile, targetRef, artifactDir, productionMode = false, assertCustody = async () => {} }) => {
   const createSql = buildCreateDatabaseSql(scratchName, settings);
   const client = new Client(nodeClientConfig(adminConfig, "corgtex_rehearsal_create"));
   await client.connect();
@@ -3919,7 +3920,9 @@ export async function runPostgresRestoreRehearsal(options) {
     productionMode = false,
   } = options;
   if (!REQUIRED_DOMAINS.has(domain)) fail("INVALID_DOMAIN");
-  const assertCustody = createRestoreCustodyBoundary(options);
+  const custody = createRestoreCustodyBoundary(options);
+  const authority = rehearsalAuthorityForTarget(targetAdminConfig, { ...options.rehearsalAuthorityOptions, productionMode });
+  const assertCustody = productionMode ? custody : async effect => { await custody(effect); await authority(); await custody(effect); };
   await assertCustody("START_RESTORE_REHEARSAL");
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
   mkdirSync(tempDir, { recursive: true, mode: 0o700 });
@@ -4273,7 +4276,8 @@ export async function runPostgresRestoreRehearsal(options) {
   }
 }
 
-export async function cleanupScratchDatabase({ targetAdminConfig, stateFile, artifactDir, expectedScratchName }) {
+export async function cleanupScratchDatabase({ targetAdminConfig, stateFile, artifactDir, expectedScratchName, rehearsalAuthorityOptions }) {
+  const authority = rehearsalAuthorityForTarget(targetAdminConfig, { ...rehearsalAuthorityOptions, productionMode: false });
   if (!SAFE_NAME.test(expectedScratchName) || !expectedScratchName.startsWith("corgtex_rehearsal_")) {
     fail("INVALID_SCRATCH_DATABASE_NAME");
   }
@@ -4297,6 +4301,7 @@ export async function cleanupScratchDatabase({ targetAdminConfig, stateFile, art
     const existing = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [state.scratchName]);
     if (existing.rowCount > 0) {
       if (state.phase === "INTENT") fail("DATABASE_OWNERSHIP_UNPROVEN");
+      await authority();
       await client.query(`DROP DATABASE ${quoteIdentifier(state.scratchName)} WITH (FORCE)`);
     }
     const remaining = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [state.scratchName]);

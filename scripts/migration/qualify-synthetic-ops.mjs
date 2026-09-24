@@ -57,6 +57,7 @@ export class ScratchRecovery {
     await this.api.identity(); await this.api.boundary();
     if (await this.matching(name)) {
       validateScratchState(state, name);
+      await this.api.authority();
       try { await this.command(["postgres", "flexible-server", "db", "delete", "--ids", `${RESOURCE}/databases/${name}`, "--yes"]); }
       catch { /* Never replay an ambiguous deletion; absence readback is required. */ }
     }
@@ -88,7 +89,7 @@ export async function completeSyntheticCleanup({ local, preflight = async () => 
 }
 async function invoke(supervisor, mode, config, temp, deadline, env = localToolEnvironment()) {
   const path = `${temp}/child-${mode}-${config.scratchName ?? "source"}.json`;
-  save(path, config);
+  save(path, { ...config, deadline });
   try { return await supervisor.run(process.execPath, [worker, mode, path], { deadline, env }); }
   finally { rmSync(path, { force: true }); }
 }
