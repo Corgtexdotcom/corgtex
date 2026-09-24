@@ -10,6 +10,22 @@ import { redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
 import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer, validateOpsCoreTransferPlan } from "./ops-core-transfer-controller.mjs";
 
 const shared = vi.hoisted(() => ({ current: null }));
+vi.mock("./ops-core-postgres-maintenance.mjs", () => ({ openPostgresMaintenance: async ({ signal, assertOwned }) => {
+  await assertOwned(); shared.current.events.push("maintenance-lock");
+  return { signal, assertHeld: async () => { await assertOwned(); if (shared.current.maintenanceLost) throw Error("MAINTENANCE_LOST"); },
+    close: async () => { shared.current.events.push("maintenance-close"); } };
+} }));
+vi.mock("./ops-core-runtime-access-controller.mjs", async original => ({ ...await original(),
+  runOpsCoreRuntimeAccess: async options => {
+    const f = shared.current; await options.maintenance.assertHeld();
+    expect(f.events).toContain("promote"); expect(f.events).not.toContain("postgres-state");
+    expect(options.phase.to).toBe("VERIFIED"); expect(options.databaseOid).toBe("16401");
+    f.events.push(options.reconcile ? "access-reconcile" : "access-apply");
+    if (f.accessFails) throw Error("RUNTIME_ACCESS_UNPROVEN");
+    const record = { status: "APPLIED", policySha256: archiveEvidenceHash(f.plan.transfer.postgres.runtimeAccess) };
+    return { record, sha256: archiveEvidenceHash(record) };
+  },
+}));
 vi.mock("./ops-core-source-controller.mjs", () => ({ assertOpsCoreSourceFenced: vi.fn(async ({ plan }) => ({
   schemaVersion: 1, domain: plan.domain, intentSha256: shared.current.intentHash,
   railway: { complete: shared.current.sourceComplete }, postgres: { synthetic: true },
@@ -363,6 +379,41 @@ function postgresVariant(plan) {
 }
 
 describe("PostgreSQL shared state transfer variant", () => {
+  function sharedVariant(plan) {
+    postgresVariant(plan); plan.azure.postgres.resourceGroupName = plan.azure.resourceGroupName;
+    const vault = "https://fixture-vault.vault.azure.net/";
+    const secret = name => `${vault}secrets/${name}/${"a".repeat(32)}`;
+    const policy = { schemaVersion: 1, runtimeRole: "corgtex_core_runtime", applicationSchema: "public",
+      runtimeDatabaseSecrets: { web: secret("web"), worker: secret("worker") },
+      scaler: { role: "worker_scale_core", connectionSecretVersion: secret("scaler") },
+      isolation: { inventorySha256: "a".repeat(64), databases: [{ name: "postgres", oid: "5", owner: "target_admin",
+        action: "verify-only", beforeAclSha256: "b".repeat(64), preserveConnectRoles: [] }] } };
+    plan.transfer.postgres.runtimeAccess = policy;
+    plan.activation = { schemaVersion: 2, target: plan.azure, runtimeVaultUri: vault, runtimeAccess: policy,
+      workerDemand: { scalerConnectionSecret: { keyVaultUrl: policy.scaler.connectionSecretVersion } },
+      roles: Object.fromEntries(["web", "worker"].map(role => [role, { env: [{ name: "DATABASE_URL", secretRef: "db" }],
+        secrets: [{ name: "db", keyVaultUrl: policy.runtimeDatabaseSecrets[role] }] }])) };
+  }
+  it("holds shared maintenance through copy and accepts runtime ownership before completing verification", async () => {
+    const f = await fixture(sharedVariant), result = await runOpsCoreDataTransfer(f.options);
+    expect(f.events).toEqual(["maintenance-lock", "copy", "object", "promote", "access-apply", "postgres-state", "maintenance-close"]);
+    expect(result.evidence.runtimeAccess.record.status).toBe("APPLIED");
+    const retained = [...f.records.entries()].find(([key]) => key.endsWith("/phase-plan.json"));
+    expect(JSON.parse(retained[1]).schemaVersion).toBe(3);
+    expect(JSON.parse(retained[1]).runtimeAccessPolicySha256).toBe(archiveEvidenceHash(f.plan.transfer.postgres.runtimeAccess));
+  });
+  it("failed runtime ownership leaves promotion retained and only read-only reconciliation may continue", async () => {
+    const f = await fixture(sharedVariant); f.accessFails = true;
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow("TRANSFER_RECONCILIATION_REQUIRED");
+    expect(f.custody.snapshot().phase).toBe("RESTORED"); expect(f.custody.snapshot().pending.to).toBe("VERIFIED");
+    expect(f.events).not.toContain("postgres-state"); expect(f.databaseName).toBe("corgtex_core");
+    f.accessFails = false; await f.reopen();
+    const result = await reconcileOpsCoreDataTransfer(f.options);
+    expect(result.status).toBe("VERIFIED");
+    expect(f.events.filter(x => x === "promote")).toHaveLength(1);
+    expect(f.events.filter(x => x === "access-apply")).toHaveLength(1);
+    expect(f.events).toContain("access-reconcile");
+  });
   it("preserves transfer and promotion controls while recording PostgreSQL acceptance without Redis proof", async () => {
     const f = await fixture(postgresVariant);
     const result = await runOpsCoreDataTransfer(f.options);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { createOpsCoreActivation, createOpsCoreActivationArmTransport, opsCoreActivationDiagnostic } from "./ops-core-activation.mjs";
 
 const subscription = "00000000-0000-4000-8000-000000000001";
@@ -510,10 +511,7 @@ test("PostgreSQL activation pins backend and never injects a Redis credential", 
   }
 });
 test("cross-group PostgreSQL activation keeps runtime resources in the hosting group", async () => {
-  const f = fixture({ postgresState: true, mutatePlan(plan) {
-    plan.target.postgres.resourceGroupName = "shared-database";
-    plan.target.postgres.resourceId = plan.target.postgres.resourceId.replace("/resourceGroups/fixture/", "/resourceGroups/shared-database/");
-  } });
+  const f = sharedDemandFixture();
   assert.equal((await createOpsCoreActivation(f.options).activate()).phase, "TARGET_ACTIVE");
   for (const role of ["web", "worker"]) {
     const app = f.map.get(f.appId(role)).body;
@@ -522,6 +520,31 @@ test("cross-group PostgreSQL activation keeps runtime resources in the hosting g
     assert.equal(app.properties.template.containers[0].env.find(e => e.name === "DATABASE_URL").secretRef, "db");
   }
 });
+test("shared-server activation cannot omit SQL acceptance or its current proof", async () => {
+  const missingPolicy = sharedDemandFixture(); delete missingPolicy.plan.runtimeAccess;
+  assert.throws(() => createOpsCoreActivation(missingPolicy.options), /ACTIVATION_RUNTIME_ACCESS_BINDING_INVALID/);
+  const missingProof = sharedDemandFixture(); delete missingProof.options.assertRuntimeAccess;
+  assert.throws(() => createOpsCoreActivation(missingProof.options), /ACTIVATION_RUNTIME_ACCESS_REQUIRED/);
+  const wrongProof = sharedDemandFixture();
+  wrongProof.options.assertRuntimeAccess = async () => ({ complete: true, policySha256: "0".repeat(64) });
+  await rejects(createOpsCoreActivation(wrongProof.options).activate(), "ACTIVATION_RUNTIME_ACCESS_UNPROVEN");
+  assert.equal(wrongProof.log.some(x => x.startsWith("put:") || x.startsWith("begin:")), false);
+});
+
+function sharedDemandFixture() {
+  const f = demandFixture({ mutatePlan(plan) {
+    plan.target.postgres.resourceGroupName = "shared-database";
+    plan.target.postgres.resourceId = plan.target.postgres.resourceId.replace("/resourceGroups/fixture/", "/resourceGroups/shared-database/");
+    plan.runtimeAccess = { schemaVersion: 1, runtimeRole: "corgtex_ops_runtime", applicationSchema: "public",
+      runtimeDatabaseSecrets: Object.fromEntries(["web", "worker"].map(role => [role, plan.roles[role].secrets.find(s => s.name === "db").keyVaultUrl])),
+      scaler: { role: "worker_scale_ops", connectionSecretVersion: plan.workerDemand.scalerConnectionSecret.keyVaultUrl },
+      isolation: { inventorySha256: "a".repeat(64), databases: [{ name: "postgres", oid: "5", owner: "admin",
+        action: "replace-public-connect", beforeAclSha256: "b".repeat(64), preserveConnectRoles: [{ name: "admin", oid: "10" }] }] } };
+  } });
+  f.options.assertRuntimeAccess = async ({ fresh }) => ({ complete: true, domain: "ops", intentSha256: f.journal.intentSha256,
+    policySha256: hash(f.plan.runtimeAccess), receiptSha256: "f".repeat(64), freshAcceptance: fresh });
+  return f;
+}
 test("PostgreSQL activation rejects a mixed backend before any target write", () => {
   const f = fixture({ postgresState: true });
   f.plan.roles.worker.env.find(e => e.name === "SHARED_STATE_BACKEND").value = "redis";

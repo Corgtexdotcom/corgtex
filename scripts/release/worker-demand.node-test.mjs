@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import pg from "pg";
-import { WORKER_DEMAND_QUERY, provisionWorkerScalerRole, validateWorkerScalerConnection, verifyWorkerScalerAccess } from "./worker-demand.mjs";
+import { WORKER_DEMAND_QUERY, provisionWorkerScalerRole, provisionWorkerScalerRoleInTransaction, validateWorkerScalerConnection, verifyWorkerScalerAccess } from "./worker-demand.mjs";
 
 const database = "worker_demand_synthetic";
 const password = () => randomBytes(32).toString("hex");
@@ -142,4 +142,22 @@ test("scaler access probe rejects plaintext, wrong identities and new inherited 
       ? "WORKER_SCALER_VERIFIED_TLS_REQUIRED" : change === "excess" ? "WORKER_SCALER_EXCESS_PRIVILEGES" : "WORKER_SCALER_ROLE_IDENTITY_INVALID" });
     if (change === "plaintext") assert.equal(calls, 0);
   }
+});
+
+
+test("transaction body leaves commit/rollback to custody owner and grants scaler only TO admin", async () => {
+  const calls = [], role = "worker_scale_fixture";
+  const client = { query: async (sql) => {
+    calls.push(sql);
+    if (sql.includes("current_database")) return { rows: [{ database }] };
+    if (sql.includes("AS schema_create")) return { rows: [{ schema_create: false, broad_access: false, event_payload: false, job_payload: false }] };
+    if (sql === WORKER_DEMAND_QUERY) return { rows: [{ demand: 0 }] };
+    return { rows: [] };
+  } };
+  const passwordVerifier = `SCRAM-SHA-256$4096:${randomBytes(16).toString("base64")}$${randomBytes(32).toString("base64")}:${randomBytes(32).toString("base64")}`;
+  await provisionWorkerScalerRoleInTransaction({ client, database, role, passwordVerifier, administrator: "fixture_admin" });
+  assert.equal(calls.some(sql => /^(BEGIN|COMMIT|ROLLBACK)/.test(sql)), false);
+  assert.ok(calls.includes('GRANT "worker_scale_fixture" TO "fixture_admin" WITH SET TRUE, INHERIT FALSE'));
+  assert.equal(calls.some(sql => sql.startsWith('GRANT "fixture_admin" TO')), false);
+  assert.equal(calls.at(-1), "RESET ROLE");
 });

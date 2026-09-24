@@ -3,6 +3,19 @@ import { test } from "node:test";
 import { randomBytes } from "node:crypto";
 import { prepareOpsCoreRuntimeValues, retainOpsCoreRuntimeConfig } from "./ops-core-runtime-config.mjs";
 
+test("shared runtime username is exact after URL decoding", () => {
+  const f = fixture(); f.options.plan.binding.postgresUser = "corgtex_core_runtime";
+  const u = new URL(f.options.databaseUrl); u.username = "corgtex_core_runtime";
+  f.options.databaseUrl = u.href;
+  assert.equal(prepareOpsCoreRuntimeValues(f.options).roles.web.values.DATABASE_URL, u.href);
+  u.username = "administrator"; f.options.databaseUrl = u.href;
+  assert.throws(() => prepareOpsCoreRuntimeValues(f.options), /RUNTIME_DATABASE_USER_INVALID/);
+  u.username = "corgtex_core_%72untime"; f.options.databaseUrl = u.href;
+  assert.equal(prepareOpsCoreRuntimeValues(f.options).roles.worker.values.DATABASE_URL, u.href);
+  u.username = "%ZZ"; f.options.databaseUrl = u.href;
+  assert.throws(() => prepareOpsCoreRuntimeValues(f.options), /RUNTIME_DATABASE_USER_INVALID/);
+});
+
 function fixture() {
   const credential = randomBytes(32).toString("base64");
   const source = { SESSION_COOKIE_SECRET: credential, ENCRYPTION_KEY: credential,
