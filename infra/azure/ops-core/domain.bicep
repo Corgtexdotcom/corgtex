@@ -1,5 +1,26 @@
 targetScope = 'resourceGroup'
 
+@sealed()
+type dedicatedPostgresBinding = {
+  mode: 'dedicated'
+}
+@sealed()
+type existingPostgresBinding = {
+  mode: 'existing-shared'
+  resourceId: string
+  resourceGroupName: string
+  serverName: string
+  host: string
+  administratorLogin: string
+  publicNetworkAccess: 'Enabled' | 'Disabled'
+  privateEndpointId: string
+}
+@discriminator('mode')
+type postgresBindingConfig = dedicatedPostgresBinding | existingPostgresBinding
+param postgresBinding postgresBindingConfig = { mode: 'dedicated' }
+var provisionPostgres = postgresBinding.mode == 'dedicated'
+
+
 param location string
 param namePrefix string
 param tags object
@@ -51,7 +72,7 @@ module runtimeSecretsWriter './vault-writer.bicep' = {
   }
 }
 
-resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
+resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = if (provisionPostgres) {
   name: '${namePrefix}-pg'
   location: location
   tags: tags
@@ -74,7 +95,7 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
 }
 
 // 0.0.0.0 is Azure-wide access, not a single-client rule. Never create it.
-resource restoreFirewall 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2025-08-01' = if (postgresPublicNetworkAccess == 'Enabled' && !empty(temporaryRestoreIpv4) && temporaryRestoreIpv4 != '0.0.0.0') {
+resource restoreFirewall 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2025-08-01' = if (provisionPostgres && postgresPublicNetworkAccess == 'Enabled' && !empty(temporaryRestoreIpv4) && temporaryRestoreIpv4 != '0.0.0.0') {
   parent: postgres
   name: 'temporary-migration-operator'
   properties: {
@@ -83,7 +104,7 @@ resource restoreFirewall 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRule
   }
 }
 
-resource postgresEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+resource postgresEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (provisionPostgres) {
   name: 'pe-${namePrefix}-pg'
   location: location
   tags: tags
@@ -93,14 +114,14 @@ resource postgresEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
       {
         name: 'postgres'
         properties: {
-          privateLinkServiceId: postgres.id
+          privateLinkServiceId: postgres!.id
           groupIds: ['postgresqlServer']
         }
       }
     ]
   }
 }
-resource postgresEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+resource postgresEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (provisionPostgres) {
   parent: postgresEndpoint
   name: 'default'
   properties: {
@@ -169,14 +190,16 @@ output resources object = {
   runtimeKeyVaultId: identity.outputs.keyVaultId
   runtimeKeyVaultUri: identity.outputs.keyVaultUri
   objectStorage: objects.outputs.resources
-  postgresServerId: postgres.id
-  postgresServerName: postgres.name
-  postgresHost: postgres.properties.fullyQualifiedDomainName
+  postgresHostingMode: postgresBinding.mode
+  postgresServerResourceGroupName: postgresBinding.mode == 'existing-shared' ? postgresBinding.resourceGroupName : resourceGroup().name
+  postgresServerId: postgresBinding.mode == 'existing-shared' ? postgresBinding.resourceId : postgres!.id
+  postgresServerName: postgresBinding.mode == 'existing-shared' ? postgresBinding.serverName : postgres!.name
+  postgresHost: postgresBinding.mode == 'existing-shared' ? postgresBinding.host : postgres!.properties.fullyQualifiedDomainName
   postgresPort: 5432
-  postgresAdministratorLogin: postgresAdministratorLogin
-  postgresPrivateEndpointId: postgresEndpoint.id
-  postgresPublicNetworkAccess: postgresPublicNetworkAccess
-  temporaryRestoreFirewallName: 'temporary-migration-operator'
+  postgresAdministratorLogin: postgresBinding.mode == 'existing-shared' ? postgresBinding.administratorLogin : postgresAdministratorLogin
+  postgresPrivateEndpointId: postgresBinding.mode == 'existing-shared' ? postgresBinding.privateEndpointId : postgresEndpoint!.id
+  postgresPublicNetworkAccess: postgresBinding.mode == 'existing-shared' ? postgresBinding.publicNetworkAccess : postgresPublicNetworkAccess
+  temporaryRestoreFirewallName: provisionPostgres ? 'temporary-migration-operator' : null
   sharedStateBackend: sharedStateBackend
   redisId: provisionRedis ? redis!.id : null
   redisDatabaseId: provisionRedis ? redisDatabase!.id : null

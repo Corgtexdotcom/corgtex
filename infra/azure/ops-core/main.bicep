@@ -1,5 +1,10 @@
 targetScope = 'subscription'
 
+import { postgresHostingConfig } from './hosting.bicep'
+
+@description('Dedicated servers by default; existing-shared references one server in this subscription without managing its lifecycle.')
+param postgresHosting postgresHostingConfig = { mode: 'dedicated' }
+
 @allowed(['westus3'])
 param location string = 'westus3'
 
@@ -26,9 +31,11 @@ param opsSharedStateBackend string = 'redis'
 @allowed(['redis', 'postgres'])
 param coreSharedStateBackend string = 'redis'
 @secure()
-param opsPostgresAdministratorPassword string
+@description('Required for dedicated creation only. Leave omitted for existing-shared; never supply an existing server password to this template.')
+param opsPostgresAdministratorPassword string = ''
 @secure()
-param corePostgresAdministratorPassword string
+@description('Required for dedicated creation only. Leave omitted for existing-shared; never supply an existing server password to this template.')
+param corePostgresAdministratorPassword string = ''
 
 @allowed(['Disabled', 'Enabled'])
 param opsPostgresPublicNetworkAccess string = 'Disabled'
@@ -73,6 +80,7 @@ module hosting './hosting.bicep' = {
     namePrefix: namePrefix
     tags: tags
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
+    postgresHosting: postgresHosting
     postgresAdministratorLogin: postgresAdministratorLogin
     opsPostgresSkuName: opsPostgresSkuName
     corePostgresSkuName: corePostgresSkuName

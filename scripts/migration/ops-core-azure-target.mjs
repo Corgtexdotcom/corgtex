@@ -37,21 +37,26 @@ function bind(value) {
   requireValue((keys(value, fields) || keys(value, `${fields},sharedStateBackend`))
     && ["ops", "core"].includes(value.domain) && GUID.test(value.subscriptionId)
     && nameValue(value.resourceGroupName)
-    && keys(value.postgres, "resourceId,host,major,privateEndpointId")
+    && (keys(value.postgres, "resourceId,host,major,privateEndpointId")
+      || keys(value.postgres, "resourceId,host,major,privateEndpointId,resourceGroupName")
+        && nameValue(value.postgres.resourceGroupName))
     && (postgresState ? value.redis === null : keys(value.redis, "resourceId,databaseId,host,port,privateEndpointId"))
     && keys(value.apps, "web,worker") && nameValue(value.apps.web) && nameValue(value.apps.worker)
     && value.apps.web !== value.apps.worker && value.postgres.major === 18
     && hostValue(value.postgres.host) && value.postgres.host.endsWith(".postgres.database.azure.com")
     && (postgresState || hostValue(value.redis.host) && value.redis.host.endsWith(".redis.azure.net") && value.redis.port === 10000),
   "AZURE_TARGET_BINDING_INVALID");
-  const prefix = `/subscriptions/${value.subscriptionId}/resourceGroups/${value.resourceGroupName}/providers/`;
-  function resource(id, type) {
-    const stem = `${prefix}${type}/`;
+  function resource(id, type, resourceGroupName = value.resourceGroupName) {
+    const stem = `/subscriptions/${value.subscriptionId}/resourceGroups/${resourceGroupName}/providers/${type}/`;
     requireValue(typeof id === "string" && id.toLowerCase().startsWith(stem.toLowerCase())
       && NAME.test(id.slice(stem.length)), "AZURE_TARGET_RESOURCE_BINDING_INVALID");
   }
   resource(value.environmentId, "Microsoft.App/managedEnvironments");
-  resource(value.postgres.resourceId, "Microsoft.DBforPostgreSQL/flexibleServers");
+  // Only the server may live outside the hosting group, by explicit binding.
+  // Its endpoint stays in the hosting group and is checked against this exact
+  // server on every observation. Existing binding hashes remain unchanged.
+  resource(value.postgres.resourceId, "Microsoft.DBforPostgreSQL/flexibleServers",
+    value.postgres.resourceGroupName ?? value.resourceGroupName);
   resource(value.postgres.privateEndpointId, "Microsoft.Network/privateEndpoints");
   if (!postgresState) {
     resource(value.redis.resourceId, "Microsoft.Cache/redisEnterprise");

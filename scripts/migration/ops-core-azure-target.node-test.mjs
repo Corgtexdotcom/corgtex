@@ -22,8 +22,12 @@ const resource = (id, properties) => ({ id, name: id.includes("/Microsoft.Cache/
 const missing = () => ({ status: 404, body: { error: { code: "ResourceNotFound", message: "unprinted provider detail" } } });
 const revision = (name, props = {}) => resource(`${appId("fixture-web")}/revisions/${name}`, { active: false, replicas: 0, ...props });
 const pageUrl = (path, token = "next") => `https://management.azure.com${path}?api-version=2024-03-01&$skiptoken=${token}`;
-function fixture({ apps = false, mutate, maxPages = 100, postgresState = false } = {}) {
+function fixture({ apps = false, mutate, maxPages = 100, postgresState = false, postgresGroup } = {}) {
   const b = binding(), controller = new AbortController(), calls = [];
+  if (postgresGroup) {
+    b.postgres.resourceGroupName = postgresGroup;
+    b.postgres.resourceId = b.postgres.resourceId.replace("/resourceGroups/fixture/", `/resourceGroups/${postgresGroup}/`);
+  }
   const snapshot = { domain: "ops", intentSha256: "a".repeat(64), phase: "PREPARED", pending: null };
   const map = new Map();
   const set = (id, value) => map.set(id, { status: 200, body: value });
@@ -59,6 +63,68 @@ function fixture({ apps = false, mutate, maxPages = 100, postgresState = false }
   return { b, adapter, map, set, snapshot, calls, controller, custody };
 }
 const rejects = (promise, code) => assert.rejects(promise, error => opsCoreAzureTargetDiagnostic(error) === code);
+
+test("explicit cross-group PostgreSQL retains exact private endpoint and app custody checks", async () => {
+  const f = fixture({ postgresState: true, postgresGroup: "database-custody" });
+  assert.equal((await f.adapter.assertInactive()).complete, true);
+  assert.equal((await f.adapter.assertPostgresPrivate()).complete, true);
+  assert.equal(f.adapter.binding.postgres.resourceGroupName, "database-custody");
+  const reads = f.calls.filter(x => typeof x === "object");
+  assert.ok(reads.some(x => x.resourceId === f.b.postgres.resourceId));
+  assert.ok(reads.some(x => x.resourceId === f.b.postgres.privateEndpointId));
+  assert.ok(reads.some(x => x.resourceId === appId(f.b.apps.web)));
+  assert.ok(reads.every(x => !x.resourceId.includes("Microsoft.Cache/")));
+});
+
+test("cross-group opt-in cannot broaden the subscription, server type, endpoint or environment scope", () => {
+  for (const change of [
+    b => { delete b.postgres.resourceGroupName; },
+    b => { b.postgres.resourceGroupName = "different"; },
+    b => { b.postgres.resourceGroupName = ""; },
+    b => { b.postgres.resourceGroupName = null; },
+    b => { b.postgres.resourceGroupName = "../database-custody"; },
+    b => { b.postgres.resourceId = b.postgres.resourceId.replace(subscriptionId, "00000000-0000-4000-8000-000000000002"); },
+    b => { b.postgres.resourceId += "/databases/corgtex_ops"; },
+    b => { b.postgres.resourceId = b.postgres.resourceId.replace("flexibleServers", "servers"); },
+    b => { b.postgres.privateEndpointId = b.postgres.privateEndpointId.replace("/fixture/", "/database-custody/"); },
+    b => { b.environmentId = b.environmentId.replace("/fixture/", "/database-custody/"); },
+  ]) {
+    const b = structuredClone(fixture({ postgresGroup: "database-custody" }).b);
+    change(b);
+    assert.throws(() => opsCoreAzureTargetBindingSha256(b), /AZURE_TARGET_(RESOURCE_)?BINDING_INVALID/);
+  }
+});
+
+test("explicit PostgreSQL group participates in the binding hash without changing legacy bindings", () => {
+  const legacy = binding(), explicit = structuredClone(legacy);
+  explicit.postgres.resourceGroupName = "fixture";
+  assert.notEqual(opsCoreAzureTargetBindingSha256(legacy), opsCoreAzureTargetBindingSha256(explicit));
+  assert.equal(Object.hasOwn(createOpsCoreAzureTarget({ binding: legacy, custody: fixture().custody }).binding.postgres, "resourceGroupName"), false);
+});
+
+test("cross-group PostgreSQL still rejects a wrong endpoint target, FQDN or later-page firewall", async () => {
+  for (const [change, code] of [
+    [f => { f.map.get(f.b.postgres.privateEndpointId).body.properties.privateLinkServiceConnections[0].properties.privateLinkServiceId = binding().postgres.resourceId; }, "AZURE_TARGET_PRIVATE_ENDPOINT_UNPROVEN"],
+    [f => { f.map.get(f.b.postgres.resourceId).body.properties.fullyQualifiedDomainName = "other.postgres.database.azure.com"; }, "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN"],
+    [f => {
+      const path = `${f.b.postgres.resourceId}/firewallRules`;
+      const nextLink = pageUrl(path).replace("2024-03-01", "2025-08-01");
+      f.set(path, { value: [], nextLink }); f.set(nextLink, { value: [{ name: "still-open" }] });
+    }, "AZURE_TARGET_POSTGRES_FIREWALL_RETAINED"],
+  ]) {
+    const f = fixture({ postgresGroup: "database-custody" }); change(f);
+    await rejects(f.adapter.assertPostgresPrivate(), code);
+  }
+});
+
+test("cross-group PostgreSQL rejects reopened public access on the final read", async () => {
+  let reads = 0;
+  const f = fixture({ postgresGroup: "database-custody", mutate(q, r) {
+    if (q.resourceId.endsWith("/flexibleServers/fixture-pg") && ++reads === 2) r.body.properties.network.publicNetworkAccess = "Enabled";
+  } });
+  await rejects(f.adapter.assertPostgresPrivate(), "AZURE_TARGET_POSTGRES_PUBLIC_ACCESS_OPEN");
+  assert.equal(reads, 2);
+});
 
 test("private PostgreSQL proof exhausts firewall pages and rereads identity under custody", async () => {
   const f = fixture(), path = `${f.b.postgres.resourceId}/firewallRules`;

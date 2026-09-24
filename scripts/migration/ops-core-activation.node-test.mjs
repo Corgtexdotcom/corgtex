@@ -509,6 +509,19 @@ test("PostgreSQL activation pins backend and never injects a Redis credential", 
     assert.equal(env.some(e => e.name === "REDIS_URL"), false);
   }
 });
+test("cross-group PostgreSQL activation keeps runtime resources in the hosting group", async () => {
+  const f = fixture({ postgresState: true, mutatePlan(plan) {
+    plan.target.postgres.resourceGroupName = "shared-database";
+    plan.target.postgres.resourceId = plan.target.postgres.resourceId.replace("/resourceGroups/fixture/", "/resourceGroups/shared-database/");
+  } });
+  assert.equal((await createOpsCoreActivation(f.options).activate()).phase, "TARGET_ACTIVE");
+  for (const role of ["web", "worker"]) {
+    const app = f.map.get(f.appId(role)).body;
+    assert.ok(app.id.startsWith(prefix));
+    assert.equal(app.properties.environmentId, f.plan.target.environmentId);
+    assert.equal(app.properties.template.containers[0].env.find(e => e.name === "DATABASE_URL").secretRef, "db");
+  }
+});
 test("PostgreSQL activation rejects a mixed backend before any target write", () => {
   const f = fixture({ postgresState: true });
   f.plan.roles.worker.env.find(e => e.name === "SHARED_STATE_BACKEND").value = "redis";

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "westus3"
+    },
+    "namePrefix": {
+      "value": "corgtex-prod"
+    },
+    "postgresHosting": {
+      "value": {
+        "mode": "existing-shared",
+        "resourceGroupName": "existing-postgres-group",
+        "serverName": "existing-pg18-server"
+      }
+    },
+    "existingAcrResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/<registry-group>/providers/Microsoft.ContainerRegistry/registries/<existing-registry>"
+    },
+    "migrationOperatorPrincipalId": {
+      "value": "<github-oidc-service-principal-object-id>"
+    },
+    "opsSharedStateBackend": {
+      "value": "postgres"
+    },
+    "coreSharedStateBackend": {
+      "value": "postgres"
+    },
+    "vnetAddressPrefix": {
+      "value": "10.84.0.0/24"
+    },
+    "containerAppsSubnetPrefix": {
+      "value": "10.84.0.0/27"
+    },
+    "privateEndpointsSubnetPrefix": {
+      "value": "10.84.0.32/27"
+    }
+  }
+}
