@@ -4,6 +4,7 @@ import {archiveEvidenceHash as hash} from "./ops-core-archive.mjs";
 import {openProviderOperationRecorder} from "./ops-core-provider-operations.mjs";
 import {buildHealthProbeJobDefinition,createHealthJobDispatcher,createHealthJobTransport,preflightHealthJob} from "./ops-core-health-job.mjs";
 import {HEALTH_PROBE_PREFIX,healthProbeBuildSha256,projectWorkerHealth,runWorkerHealthProbe,runHealthProbeCli} from "./ops-core-health-probe.mjs";
+import { managedAzureWorkerDemandScale } from "../release/managed-azure-worker-demand.mjs";
 const base="/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/fixture/providers/";
 const release={gitSha:"a".repeat(40),imageTag:`sha-${"a".repeat(40)}`,version:"main-fixture"};
 const image=`fixture.azurecr.io/worker@sha256:${"b".repeat(64)}`;
@@ -37,9 +38,11 @@ async function fixture({releaseMode=false,acceptancePhase=null}={}){
     if(path.startsWith(p.jobResourceId+"?")){const v=structuredClone(job);state.jobMutation?.(v);return response(v);}
     if(path.startsWith(p.environmentResourceId+"?"))return response(env);
     if(path.startsWith(p.worker.appId+"?")){const v=structuredClone(app);state.appMutation?.(v);return response(v);}
+    if(path.includes("/replicas?")&&state.replicaCount!==undefined)return response({value:Array.from({length:state.replicaCount},()=>({name:"worker-replica"}))});
     if(path.startsWith(`${p.worker.appId}/revisions/`)){const v=structuredClone(rev);state.revMutation?.(v);return response(v);}
     if(path.includes(`${p.jobResourceId}/start?`)){
       assert.equal(method,"POST");state.starts++;
+      if(state.wakeOnStart){state.replicaCount=1;rev.properties.healthState="Healthy";rev.properties.runningState="Running";app.properties.latestReadyRevisionName=revision;}
       assert([...records.keys()].some(k=>k.endsWith("/descriptor.json")));assert([...records.values()].some(v=>JSON.parse(v).kind==="AZURE_HEALTH_PROBE_START"&&JSON.parse(v).type==="intent"));
       const timestamp=new Date().toISOString();const name=`fixture-health-run${state.starts}`;
       state.runs.push({id:`${p.jobResourceId}/executions/${name}`,name,properties:{status:"Succeeded",startTime:timestamp,endTime:timestamp,template:structuredClone(input)}});
@@ -445,4 +448,58 @@ test("standalone health real authenticated transport redacts auth failure and ma
   const f=standaloneHealthPreflight();let fetches=0;
   f.options.transport=createHealthJobTransport(f.plan,{credential:{async getToken(){throw Error("PRIVATE_AUTH_ERROR");}},fetchImpl:async()=>{fetches++;throw Error("NETWORK_FORBIDDEN");}});
   await assert.rejects(f.run(),error=>{assert(!error.message.includes("PRIVATE_AUTH_ERROR"));return /HEALTH_JOB_/.test(error.message);});assert.equal(fetches,0);
+});
+
+
+async function coldDemandFixture() {
+  const f=await fixture({releaseMode:true});
+  const target={subscriptionId:base.split("/")[2],resourceGroupName:"fixture",environmentId:p.environmentResourceId,apps:{web:"fixture-web",worker:"fixture-worker"}};
+  const demand={schedulerJobName:"fixture-scheduler",schedulerResources:{cpu:0.5,memory:"1Gi"},scalerConnectionSecret:{name:"worker-scaler-connection",identity:p.identityResourceId,keyVaultUrl:`https://fixture.vault.azure.net/secrets/scaler/${"a".repeat(32)}`}};
+  f.opts.workerDemand={plan:demand,target};
+  f.app.identity={type:"UserAssigned",userAssignedIdentities:{[p.identityResourceId]:{}}};
+  const c=f.app.properties.configuration;c.ingress.targetPort=9090;
+  c.secrets=[demand.scalerConnectionSecret,{name:"db",identity:p.identityResourceId,keyVaultUrl:`https://fixture.vault.azure.net/secrets/db/${"b".repeat(32)}`}];
+  f.app.properties.template={containers:[{name:"worker",image:p.worker.image,env:[{name:"DATABASE_URL",secretRef:"db"},{name:"WORKER_EXECUTION_MODE",value:"queue-only"}]}],scale:managedAzureWorkerDemandScale(demand)};
+  f.app.properties.latestReadyRevisionName="previous";
+  f.rev.properties.healthState="None";f.rev.properties.runningState="Stopped";
+  f.state.replicaCount=0;f.state.wakeOnStart=true;
+  return f;
+}
+test("demand private health probe wakes a zero-replica revision before strict post-probe health",async()=>{
+  const f=await coldDemandFixture();const result=await f.run(await f.reopen());
+  assert.equal(result.health.status,200);assert.equal(f.state.starts,1);assert.equal(f.state.replicaCount,1);
+  assert.ok(f.state.requests.some(r=>r.path.includes("/replicas?")));
+});
+test("demand cold preflight cannot turn an idle revision into a serving claim without actual wake",async()=>{
+  const f=await coldDemandFixture();f.state.wakeOnStart=false;
+  await assert.rejects(f.run(await f.reopen()),/HEALTH_JOB_WORKER_(BINDING|REVISION)_CHANGED/);
+  assert.equal(f.state.starts,1);
+});
+test("demand cold preflight refuses scaler drift before starting observation",async()=>{
+  const f=await coldDemandFixture();f.app.properties.template.scale.rules[0].custom.metadata.query="SELECT 0";
+  await assert.rejects(f.run(await f.reopen()));assert.equal(f.state.starts,0);
+});
+
+
+test("default health transport allows only exact worker revision replica GETs",async()=>{
+ const calls=[];const transport=createHealthJobTransport(p,{credential:{getToken:async()=>({token:"synthetic"})},fetchImpl:async(url,options)=>{
+  calls.push({url,method:options.method});const response=Response.json({value:[]});Object.defineProperty(response,"url",{value:url});return response;
+ }});const signal=new AbortController().signal;
+ const path=`${p.worker.appId}/revisions/${revision}/replicas?api-version=2025-07-01`;
+ assert.deepEqual(await transport({method:"GET",path,signal}),{status:200,body:{value:[]}});
+ for(const [method,denied]of[["POST",path],["GET",path.replace("/containerApps/fixture-worker/","/containerApps/foreign-worker/")],["GET",path.replace(`/revisions/${revision}/`,`/revisions/foreign-worker--fixture/`)],["GET",path.replace("/replicas?","/replicas/other?")]]){
+  await assert.rejects(transport({method,path:denied,signal}),/HEALTH_JOB_ENDPOINT_DENIED/);
+ }
+ assert.equal(calls.length,1);
+});
+
+test("cold demand probe crosses the actual default transport replica allowlist",async()=>{
+ const f=await coldDemandFixture(),provider=f.opts.transport;
+ f.opts.transport=createHealthJobTransport(p,{credential:{getToken:async()=>({token:"synthetic"})},fetchImpl:async(url,options)=>{
+  const parsed=new URL(url),result=await provider({method:options.method,path:parsed.pathname+parsed.search,signal:options.signal,...(options.body?{body:JSON.parse(options.body)}:{})});
+  const response=Response.json(result.body,{status:result.status});Object.defineProperty(response,"url",{value:url});return response;
+ }});
+ assert.equal((await f.run(await f.reopen())).health.status,200);
+ assert.ok(f.state.requests.some(r=>r.path.includes(`/revisions/${revision}/replicas?`)));
+ assert.equal(f.state.starts,1);
 });

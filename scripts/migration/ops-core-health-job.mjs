@@ -5,6 +5,8 @@ import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { HEALTH_PROBE_PREFIX, validateHealthTarget, validateHealthChallenge, projectWorkerHealth } from "./ops-core-health-probe.mjs";
 
+import { validateManagedAzureWorkerDemand, assertManagedAzureWorkerDemandApp } from "../release/managed-azure-worker-demand.mjs";
+
 const API="2025-07-01",HASH=/^[a-f0-9]{64}$/,GUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const ROOT="^/subscriptions/([a-f0-9-]{36})/resourcegroups/[a-z0-9_.()-]{1,90}/providers/";
 const equalId=(a,b)=>typeof a==="string"&&typeof b==="string"&&a.toLowerCase()===b.toLowerCase();
@@ -53,9 +55,12 @@ export function createHealthJobTransport(value,{credential=new AzureCliCredentia
     const logs=path===`/v1/workspaces/${p.workspaceId}/query`;
     const url=new URL(path,logs?"https://api.loganalytics.azure.com":"https://management.azure.com");
     const oneChild=(base)=>url.pathname.toLowerCase().startsWith(`${base}/`.toLowerCase())&&/^[a-z0-9][a-z0-9-]{0,79}$/.test(url.pathname.slice(base.length+1));
+    const revisionBase=`${p.worker.appId}/revisions/`;
+    const revisionReplicas=url.pathname.toLowerCase().startsWith(revisionBase.toLowerCase())
+      &&new RegExp(`^${p.worker.appId.split("/").at(-1)}--[a-z0-9][a-z0-9-]{0,79}/replicas$`).test(url.pathname.slice(revisionBase.length));
     const allowed=logs?method==="POST":(method==="POST"&&equalId(url.pathname,`${p.jobResourceId}/start`))
       ||(method==="GET"&&([p.jobResourceId,p.environmentResourceId,p.worker.appId,`${p.jobResourceId}/executions`].some(v=>equalId(v,url.pathname))
-        ||oneChild(`${p.jobResourceId}/executions`)||oneChild(`${p.worker.appId}/revisions`)));
+        ||oneChild(`${p.jobResourceId}/executions`)||oneChild(`${p.worker.appId}/revisions`)||revisionReplicas));
     need(allowed&&url.origin===(logs?"https://api.loganalytics.azure.com":"https://management.azure.com")&&!url.hash&&!url.username&&!url.password
       &&(logs||url.searchParams.get("api-version")===API),"HEALTH_JOB_ENDPOINT_DENIED");
     const timeout=AbortSignal.any([signal,AbortSignal.timeout(15000)]);
@@ -138,9 +143,15 @@ function query(p,run,c){return`ContainerAppConsoleLogs_CL\n| where TimeGenerated
  * not proof of all business workflows, sustained uptime, or a no-write interval.
  */
 function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertDeploymentAuthority,
-  plan:value,custody,assertSourceFenced,descriptorStore,operations,transport,pollIntervalMs=1000,timeoutMs=180000}){
+  plan:value,custody,assertSourceFenced,descriptorStore,operations,transport,workerDemand,pollIntervalMs=1000,timeoutMs=180000}){
   const p=plan(value),send=transport??createHealthJobTransport(p),initial=custody?.snapshot?.();
   const releaseMode=mode==="release",acceptanceMode=mode==="acceptance";
+  if(workerDemand){
+    need(exact(workerDemand,"plan,target"),"HEALTH_JOB_DEMAND_INVALID");
+    validateManagedAzureWorkerDemand(workerDemand.plan,workerDemand.target);
+    need(equalId(p.worker.appId,`/subscriptions/${workerDemand.target.subscriptionId}/resourceGroups/${workerDemand.target.resourceGroupName}/providers/Microsoft.App/containerApps/${workerDemand.target.apps.worker}`)
+      &&equalId(p.environmentResourceId,workerDemand.target.environmentId),"HEALTH_JOB_DEMAND_INVALID");
+  }
   const phase=releaseMode?"RELEASING":acceptanceMode?initial.pending?.to:"TARGET_ACTIVATING";
   const expectedPhase=releaseMode?"RELEASE_PREPARED":acceptanceMode?({TARGET_ACTIVE:"TARGET_ACTIVATING",ROUTED:"TARGET_ACTIVE",ACCEPTED:"ROUTED"})[phase]:"VERIFIED";
   need(["migration","release","acceptance"].includes(mode),"HEALTH_JOB_MODE_INVALID");
@@ -151,7 +162,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
     &&Number.isInteger(pollIntervalMs)&&pollIntervalMs>=0&&pollIntervalMs<=5000&&Number.isInteger(timeoutMs)&&timeoutMs>0&&timeoutMs<=300000,"HEALTH_JOB_CUSTODY_REQUIRED");
   const context={domain:initial.domain,intentSha256:initial.intentSha256,
     sourceFenceSha256:releaseMode?releaseContext.migrationSourceFenceSha256:initial.history?.find(x=>x.phase==="SOURCE_FENCED")?.evidenceSha256,
-    phaseOperationId:initial.pending?.operationId,...(acceptanceMode?{mode,phase}:{}),...(releaseMode?{mode,acceptedMigrationSha256:releaseContext.acceptedMigrationSha256}:{})};
+    phaseOperationId:initial.pending?.operationId,...(workerDemand?{workerDemandSha256:hash(workerDemand)}:{}),...(acceptanceMode?{mode,phase}:{}),...(releaseMode?{mode,acceptedMigrationSha256:releaseContext.acceptedMigrationSha256}:{})};
   need(["core","ops"].includes(context.domain)&&HASH.test(context.intentSha256)&&HASH.test(context.sourceFenceSha256)&&GUID.test(context.phaseOperationId)
     &&expectedPhase!==undefined&&initial.phase===expectedPhase&&initial.pending?.to===phase
     &&(releaseMode||initial.destinationMayHaveWritten===true),"HEALTH_JOB_PHASE_INVALID");
@@ -177,16 +188,23 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
   async function request(method,path,signal,body){await check(signal);const r=await send({method,path,signal,...(body===undefined?{}:{body})});await check(signal);
     need(r&&[200,202,404].includes(r.status),"HEALTH_JOB_TRANSPORT_INVALID");return r;}
   async function prepare(signal = custody.signal) { return prepareHealthJob(p, request, signal); }
-  async function assertWorker(r,signal){
+  async function assertWorker(r,signal,allowCold=false){
     const a=await request("GET",pathFor(p.worker.appId),signal),ap=a.body?.properties,ingress=ap?.configuration?.ingress;
     need(a.status===200&&equalId(a.body?.id,p.worker.appId)&&equalId(ap?.environmentId??ap?.managedEnvironmentId,p.environmentResourceId)
-      &&ap.provisioningState==="Succeeded"&&ap.configuration?.activeRevisionsMode==="Single"&&ap.latestRevisionName===r.revisionName&&ap.latestReadyRevisionName===r.revisionName
+      &&ap.provisioningState==="Succeeded"&&ap.configuration?.activeRevisionsMode==="Single"&&ap.latestRevisionName===r.revisionName&&(ap.latestReadyRevisionName===r.revisionName||workerDemand&&allowCold)
       &&ingress?.external===false&&`https://${ingress.fqdn}`===p.worker.origin&&ingress.allowInsecure===false
       &&ingress.traffic?.length===1&&ingress.traffic[0].weight===100
       &&(ingress.traffic[0].revisionName===r.revisionName||ingress.traffic[0].latestRevision===true),"HEALTH_JOB_WORKER_BINDING_CHANGED");
+    if(workerDemand)assertManagedAzureWorkerDemandApp(a.body,workerDemand.plan,workerDemand.target);
     const rev=await request("GET",pathFor(`${p.worker.appId}/revisions/${r.revisionName}`),signal),rp=rev.body?.properties;
+    let cold=false;
+    if(workerDemand&&allowCold){
+      const replicas=await request("GET",pathFor(`${p.worker.appId}/revisions/${r.revisionName}/replicas`),signal);
+      need(replicas.status===200&&Array.isArray(replicas.body?.value)&&!replicas.body.nextLink&&replicas.body.value.length<=1,"HEALTH_JOB_DEMAND_REPLICAS_INVALID");
+      cold=replicas.body.value.length===0&&["Stopped","ScaleToZero","Running","Activating"].includes(rp?.runningState);
+    }
     need(rev.status===200&&rev.body?.name===r.revisionName&&(!rev.body.id||equalId(rev.body.id,`${p.worker.appId}/revisions/${r.revisionName}`))
-      &&rp?.active===true&&rp.provisioningState==="Provisioned"&&rp.healthState==="Healthy"&&["Running","RunningAtMaxScale"].includes(rp.runningState)
+      &&rp?.active===true&&rp.provisioningState==="Provisioned"&&(cold||rp.healthState==="Healthy"&&["Running","RunningAtMaxScale"].includes(rp.runningState))
       &&rp.template?.containers?.length===1&&rp.template.containers[0].name==="worker"&&rp.template.containers[0].image===p.worker.image,"HEALTH_JOB_WORKER_REVISION_CHANGED");
     return hash({appId:p.worker.appId,revisionName:r.revisionName,image:p.worker.image,origin:p.worker.origin});
   }
@@ -226,7 +244,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       const requested={role,origin,release,appId,revisionName,invocationContext};const now=Date.now();const challenge={schemaVersion:releaseMode?2:1,...(authority?{authority}:{}),nonce:randomBytes(32).toString("hex"),
         domain:context.domain,intentSha256:context.intentSha256,sourceFenceSha256:context.sourceFenceSha256,targetSha256:hash(p.worker),identity:identity(p),
         issuedAt:now,expiresAt:now+timeoutMs,request:structuredClone(requested)};
-      validateHealthChallenge(challenge,p.worker,identity(p));await prepare(signal);await assertWorker(requested,signal);
+      validateHealthChallenge(challenge,p.worker,identity(p));await prepare(signal);await assertWorker(requested,signal,true);
       let index;
       for(index=0;index<10;index++){const old=await readSlot(index,signal);if(!old)break;
         const previous=await reconcile(old,signal);need(["Succeeded","Failed","Stopped"].includes(previous.properties.status),"HEALTH_JOB_PREVIOUS_EXECUTION_PENDING");}
@@ -234,7 +252,7 @@ function createBoundHealthJobDispatcher({mode="migration",releaseContext,assertD
       need((await inventory(signal)).every(r=>["Succeeded","Failed","Stopped"].includes(r.properties.status)),"HEALTH_JOB_FOREIGN_EXECUTION");
       const record={kind:"AZURE_HEALTH_PROBE_START",input:{plan:p,context,index,challenge,template:template(p,challenge)}};await retain(record,index,signal);let found,acceptedId;
       await operations.runRecordedOperation({...record,apply:async()=>{
-        await prepare(signal);await assertWorker(requested,signal);const boundary=Math.ceil(challenge.issuedAt/1000)*1000;
+        await prepare(signal);await assertWorker(requested,signal,true);const boundary=Math.ceil(challenge.issuedAt/1000)*1000;
         if(Date.now()<boundary)await delay(boundary-Date.now(),undefined,{signal});validateHealthChallenge(challenge,p.worker,identity(p));
         const r=await request("POST",pathFor(`${p.jobResourceId}/start`),signal,record.input.template);
         if(r.body){need(typeof r.body.name==="string"&&/^[a-z0-9][a-z0-9-]{0,79}$/.test(r.body.name)&&(!r.body.id||equalId(r.body.id,`${p.jobResourceId}/executions/${r.body.name}`)),"HEALTH_JOB_EXECUTION_INVALID");acceptedId=`${p.jobResourceId}/executions/${r.body.name}`;}

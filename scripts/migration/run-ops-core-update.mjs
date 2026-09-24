@@ -153,6 +153,7 @@ export async function executeOpsCoreUpdate(action, input, dependencies = {}) {
     for (const phase of ["baseline", "incoming", "recovery"]) {
       const h = envelope.health[phase];
       dispatchers[phase] = (dependencies.healthFactory ?? createHealthJobDispatcher)({ mode: "release", plan: h, custody, operationStore,
+        ...(p.workerDemand ? { workerDemand: { plan: p.workerDemand, target: p.target } } : {}),
         releaseContext: { migrationSourceFenceSha256: p.authority.migrationSourceFenceSha256, acceptedMigrationSha256: p.authority.acceptedMigrationSha256 },
         assertDeploymentAuthority: async request => {
           await authority(binding);

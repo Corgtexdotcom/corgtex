@@ -10,6 +10,10 @@ import { managedAzureHealthReady } from "../release/managed-azure-release-transa
 import { projectWorkerHealth, validateHealthChallenge } from "./ops-core-health-probe.mjs";
 import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
 
+import { createOpsCoreActivationArmTransport } from "./ops-core-activation.mjs";
+import { validateManagedAzureWorkerDemand, assertManagedAzureWorkerDemandApp, buildManagedAzureSchedulerJob,
+  schedulerJobWithRelease, createManagedAzureWorkerDemandLifecycle } from "../release/managed-azure-worker-demand.mjs";
+
 const ROLES = ["web", "worker"];
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -22,10 +26,10 @@ const same = (a, b) => hash(a) === hash(b);
 
 export function validateOpsCoreUpdatePlan(input) {
   const p = structuredClone(input);
-  need(exact(p, "schemaVersion,domain,releaseId,target,acrName,authority,baseline,incoming,recovery,origins")
-    && p.schemaVersion === 1 && UUID.test(p.releaseId) && p.domain === p.target?.domain
+  need([1, 2].includes(p.schemaVersion) && exact(p, `schemaVersion,domain,releaseId,target,acrName,authority,baseline,incoming,recovery,origins${p.schemaVersion === 2 ? ",workerDemand" : ""}`) && UUID.test(p.releaseId) && p.domain === p.target?.domain
     && /^[a-z0-9]{5,50}$/.test(p.acrName), "UPDATE_PLAN_INVALID");
   opsCoreAzureTargetBindingSha256(p.target);
+  if (p.schemaVersion === 2) validateManagedAzureWorkerDemand(p.workerDemand, p.target);
   need(ROLES.every(role => /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(p.target.apps[role])
     && !p.target.apps[role].includes("--")), "UPDATE_TARGET_INVALID");
   need(exact(p.authority, "acceptedMigrationSha256,migrationIntentSha256,migrationSourceFenceSha256,compatibilitySha256")
@@ -87,11 +91,13 @@ export async function fetchOpsCoreUpdateWebHealth({ origin, signal }, fetchImpl 
 export async function runOpsCoreUpdate({ plan: input, custody, operationStore: store, action = "apply",
   assertDeploymentAuthority, prepareHealth, workerHealth,
   webHealth = fetchOpsCoreUpdateWebHealth, assertImages = assertOpsCoreUpdateImages,
-  transport = createManagedAzureContainerAppTransport(), armTransport }) {
+  transport = createManagedAzureContainerAppTransport(), armTransport, demandArmTransport, schedulerProof }) {
   const p = validateOpsCoreUpdatePlan(input), target = opsCoreUpdateTransportTarget(p);
   const arm = armTransport ?? createAzureTargetArmTransport({ subscriptionId: p.target.subscriptionId });
   need(["apply", "reconcile", "recover"].includes(action) && custody?.signal instanceof AbortSignal
     && [assertDeploymentAuthority, prepareHealth, workerHealth].every(fn => typeof fn === "function"), "UPDATE_CALLBACK_REQUIRED");
+  const demandArm = p.workerDemand ? demandArmTransport ?? createOpsCoreActivationArmTransport({ subscriptionId: p.target.subscriptionId }) : null;
+  const schedulerId = p.workerDemand ? `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/jobs/${p.workerDemand.schedulerJobName}` : null;
   const binding = { domain: p.domain, intentSha256: hash(p), releaseId: p.releaseId,
     targetBindingSha256: opsCoreAzureTargetBindingSha256(p.target), ...p.authority };
   async function owned() {
@@ -155,6 +161,21 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     }
     return keys.every(key => allowed.has(key));
   }
+  async function workerObservation(phase, context, revisionName) {
+    await authority();
+    const worker = await workerHealth({ phase, invocationContext: context, revisionName: revisionName,
+      release: p[phase].release, origin: p.origins.worker, signal: custody.signal });
+    need(worker?.health?.status === 200 && worker.ready?.status === 200 && worker.evidence?.mode === "release"
+      && worker.evidence.invocationContext === context && worker.evidence.sourceFenceProvenance === "historical-migration", "UPDATE_WORKER_HEALTH_UNPROVEN");
+    const workerTarget = { appId: `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.worker}`,
+      origin: p.origins.worker, image: p[phase].images.worker, release: p[phase].release };
+    need(same(projectWorkerHealth(worker.health.body, worker.ready.body, workerTarget), { health: worker.health, ready: worker.ready })
+      && worker.evidence.requestSha256 === hash({ role: "worker", origin: p.origins.worker, release: p[phase].release,
+        appId: workerTarget.appId, revisionName: revisionName, invocationContext: context })
+      && worker.evidence.authoritySha256 === hash({ mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256,
+        releaseId: p.releaseId, targetSha256: hash(workerTarget), sourceFenceProvenance: "historical-migration" }), "UPDATE_WORKER_HEALTH_UNPROVEN");
+    await authority(); return worker.evidence;
+  }
   let unchanged = await read(unchangedKey);
   if (unchanged) need(action === "reconcile" && same(unchanged, { type: "UPDATE_UNCHANGED_DECISION", binding }), "UPDATE_UNCHANGED_DECISION_CHANGED");
   let snapshot = await read(snapshotKey);
@@ -179,10 +200,22 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     for (const role of ROLES) {
       await authority();
       baselines[role] = await transport.readApp({ target, role, release: p.baseline.release,
-        imageDigest: p.baseline.images[role].split("@")[1] });
+        imageDigest: p.baseline.images[role].split("@")[1], ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
+    }
+    let demand;
+    if (p.workerDemand) {
+      await prepareHealth({ phase: "baseline", plan: p, signal: custody.signal });
+      await workerObservation("baseline", "baseline-worker", baselines.worker.revisionName);
+      await authority();
+      const workerAppId = `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.worker}`;
+      const raw = await demandArm({ resourceId: workerAppId, signal: custody.signal }); await authority();
+      need(raw.status === 200, "UPDATE_DEMAND_APP_UNPROVEN");
+      assertManagedAzureWorkerDemandApp(raw.body, p.workerDemand, p.target);
+      need(managedAzureTemplateDigest(raw.body.properties.template) === baselines.worker.templateDigest, "UPDATE_DEMAND_TEMPLATE_DRIFT");
+      demand = { baselineJob: buildManagedAzureSchedulerJob({ workerApp: raw.body, demand: p.workerDemand, target: p.target, trigger: "Schedule" }) };
     }
     const ownership = await snapshotManagedAzureExclusiveActivation(transport, target, baselines);
-    snapshot = { schemaVersion: 1, binding, baselines, ownership };
+    snapshot = { schemaVersion: 1, binding, baselines, ownership, ...(demand ? { demand } : {}) };
     await retain(snapshotKey, snapshot);
   }
   need(snapshot.schemaVersion === 1 && same(snapshot.binding, binding), "UPDATE_BASELINE_CHANGED");
@@ -192,6 +225,12 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       && snapshot.baselines?.[role]?.image === p.baseline.images[role]
       && snapshot.baselines[role].templateDigest === managedAzureTemplateDigest(snapshot.baselines[role].template)), "UPDATE_BASELINE_INVALID");
   const operations = await openProviderOperationRecorder({ custody, store, phase: "RELEASING", signal: custody.signal });
+  const scheduler = p.workerDemand ? createManagedAzureWorkerDemandLifecycle({ jobId: schedulerId, target: p.target, operations, proofStore: store, proofPrefix: `${prefix}/`,
+    request: (resourceId, extra = {}) => demandArm({ resourceId, signal: custody.signal, ...extra }),
+    check: authority, signal: custody.signal, schedulerProof }) : null;
+  if (p.workerDemand) need(snapshot.demand?.baselineJob?.properties?.configuration?.triggerType === "Schedule", "UPDATE_SCHEDULER_BASELINE_INVALID");
+  const schedulerBody = (phase, trigger = "Manual") => schedulerJobWithRelease(snapshot.demand.baselineJob,
+    p[phase].images.worker, p[phase].release, trigger);
   const candidates = {};
   for (const phase of ["incoming", "recovery"]) {
     candidates[phase] = {};
@@ -202,7 +241,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       candidates[phase][role] = { template, revisionName: `${p.target.apps[role]}--${suffix}` };
     }
   }
-  const inputFor = (role) => ({ target, role, exclusiveActivation: ownership });
+  const inputFor = (role) => ({ target, role, exclusiveActivation: ownership, ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
   const patchInput = (phase, role) => ({ phase, role, revisionName: candidates[phase][role].revisionName,
     templateSha256: managedAzureTemplateDigest(candidates[phase][role].template) });
   const known = Object.fromEntries(ROLES.map(role => [role, new Set([snapshot.baselines[role].revisionName])]));
@@ -214,19 +253,42 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     for (const role of ROLES) {
       const s = await transport.readExclusiveState(inputFor(role));
       need(s.configurationDigest === ownership.configurationDigests[role]
-        && ["Single", "Multiple"].includes(s.mode) && s.provisioningState === "Succeeded", "UPDATE_PROVIDER_NOT_SETTLED");
+        && (scheduler && role === "worker" ? s.mode === "Single" : ["Single", "Multiple"].includes(s.mode)) && s.provisioningState === "Succeeded", "UPDATE_PROVIDER_NOT_SETTLED");
       need(s.revisions.every(r => (!r.active && r.replicaCount === 0) || known[role].has(r.revisionName)), "UPDATE_FOREIGN_WRITER");
       result[role] = s;
     }
     await authority(); return result;
   }
+  const workerDrained = s => scheduler ? s.mode === "Single" && s.runningStatus === "Stopped"
+    && s.revisions.every(r => r.replicaCount === 0) : s.revisions.every(r => !r.active && r.replicaCount === 0);
+  async function stoppedTemplate(phase) {
+    const state = (await inspect()).worker;
+    need(workerDrained(state), "UPDATE_WORKER_STOP_UNPROVEN");
+    const candidate = candidates[phase].worker;
+    const observed = await transport.readAppTemplate({ ...inputFor("worker"), release: p[phase].release,
+      imageDigest: p[phase].images.worker.split("@")[1] });
+    need(observed.provisioningState === "Succeeded" && observed.state.revisionName === candidate.revisionName
+      && observed.state.templateDigest === managedAzureTemplateDigest(candidate.template), "UPDATE_TEMPLATE_DRIFT");
+    // The revision projection must also match, but a stopped image is not ready.
+    await transport.readRevisionState({ ...inputFor("worker"), revisionName: candidate.revisionName, expectedTemplate: candidate.template });
+    need(workerDrained((await inspect()).worker), "UPDATE_WORKER_STOP_UNPROVEN");
+    return { revisionName: candidate.revisionName, templateSha256: observed.state.templateDigest, runningStatus: "Stopped" };
+  }
   async function selected(phase, role) {
     await authority();
     const candidate = candidates[phase][role];
     need(known[role].has(candidate.revisionName), "UPDATE_REVISION_INTENT_MISSING");
+    if (scheduler && role === "worker") {
+      need((await inspect()).worker.runningStatus === "Running", "UPDATE_WORKER_START_UNPROVEN");
+      await workerObservation(phase, phase === "incoming" ? "release-final" : "recovery-final", candidate.revisionName);
+    }
     const state = await transport.readApp({ ...inputFor(role), release: p[phase].release,
       imageDigest: p[phase].images[role].split("@")[1] });
     need(state.revisionName === candidate.revisionName && state.templateDigest === managedAzureTemplateDigest(candidate.template), "UPDATE_TEMPLATE_DRIFT");
+    if (scheduler && role === "worker" && (await transport.readRevisionState({ ...inputFor(role), revisionName: candidate.revisionName,
+      expectedTemplate: candidate.template })).kind !== "READY") {
+      await workerObservation(phase, phase === "incoming" ? "release-final" : "recovery-final", candidate.revisionName);
+    }
     need((await transport.readRevisionState({ ...inputFor(role), revisionName: candidate.revisionName,
       expectedTemplate: candidate.template })).kind === "READY", "UPDATE_REVISION_NOT_READY");
     const inventory = (await inspect())[role];
@@ -278,18 +340,8 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
   async function health(phase, context, revisions) {
     await authority();
     const body = await boundWebHealth(phase);
-    const worker = await workerHealth({ phase, invocationContext: context, revisionName: revisions.worker,
-      release: p[phase].release, origin: p.origins.worker, signal: custody.signal });
-    need(worker?.health?.status === 200 && worker.ready?.status === 200 && worker.evidence?.mode === "release"
-      && worker.evidence.invocationContext === context && worker.evidence.sourceFenceProvenance === "historical-migration", "UPDATE_WORKER_HEALTH_UNPROVEN");
-    const workerTarget = { appId: `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/Microsoft.App/containerApps/${p.target.apps.worker}`,
-      origin: p.origins.worker, image: p[phase].images.worker, release: p[phase].release };
-    need(same(projectWorkerHealth(worker.health.body, worker.ready.body, workerTarget), { health: worker.health, ready: worker.ready })
-      && worker.evidence.requestSha256 === hash({ role: "worker", origin: p.origins.worker, release: p[phase].release,
-        appId: workerTarget.appId, revisionName: revisions.worker, invocationContext: context })
-      && worker.evidence.authoritySha256 === hash({ mode: "release", acceptedMigrationSha256: p.authority.acceptedMigrationSha256,
-        releaseId: p.releaseId, targetSha256: hash(workerTarget), sourceFenceProvenance: "historical-migration" }), "UPDATE_WORKER_HEALTH_UNPROVEN");
-    await authority(); return { webSha256: hash(body), worker: worker.evidence };
+    const workerEvidence = await workerObservation(phase, context, revisions.worker);
+    await authority(); return { webSha256: hash(body), worker: workerEvidence };
   }
   async function finish(result) {
     const retained = custody.result;
@@ -307,7 +359,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       const baselines = {};
       for (const role of ROLES) {
         baselines[role] = await transport.readApp({ target, role, release: p.baseline.release,
-          imageDigest: p.baseline.images[role].split("@")[1] });
+          imageDigest: p.baseline.images[role].split("@")[1], ...(p.workerDemand && role === "worker" ? { workerDemandEnabled: true } : {}) });
         need(same(baselines[role], snapshot.baselines[role]), "UPDATE_UNCHANGED_BASELINE_DRIFT");
         need((await transport.readRevisionState({ target, role, revisionName: baselines[role].revisionName,
           expectedTemplate: baselines[role].template })).kind === "READY", "UPDATE_REVISION_NOT_READY");
@@ -320,6 +372,7 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
     const revisions = Object.fromEntries(ROLES.map(role => [role, snapshot.baselines[role].revisionName]));
     const evidence = await health("baseline", "baseline-worker", revisions);
     await unchangedPair();
+    if (scheduler) evidence.scheduler = await scheduler.observe(schedulerBody("baseline", "Schedule"));
     return finish({ complete: true, schemaVersion: 1, binding, outcome: "UNCHANGED", release: p.baseline.release,
       images: p.baseline.images, revisions, evidence, sourceFenceProvenance: "historical-migration" });
   }
@@ -355,8 +408,25 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
           const candidate = candidates.incoming[role];
           need(observed[role].latestRevisionName === candidate.revisionName, "UPDATE_FORWARD_EFFECT_UNSETTLED");
           const revision = await transport.readRevisionState({ ...inputFor(role), revisionName: candidate.revisionName, expectedTemplate: candidate.template });
-          need(["READY", "FAILED"].includes(revision.kind), "UPDATE_FORWARD_EFFECT_UNSETTLED");
+          if (scheduler && role === "worker" && workerDrained(observed.worker)) await stoppedTemplate("incoming");
+          else need(["READY", "FAILED"].includes(revision.kind), "UPDATE_FORWARD_EFFECT_UNSETTLED");
         }
+      }
+      if (scheduler) for (const runningStatus of ["Stopped", "Running"]) {
+        const prior = await operations.readStatus("UPDATE_WORKER_RUNNING", { phase: "incoming", runningStatus });
+        need(!prior.intent || prior.receipt || observed.worker.runningStatus === runningStatus
+          && (runningStatus !== "Stopped" || workerDrained(observed.worker)), "UPDATE_FORWARD_EFFECT_UNSETTLED");
+      }
+      if (scheduler) {
+        for (const [kind, before, after] of [
+          ["UPDATE_SCHEDULER_DISABLE", schedulerBody("baseline", "Schedule"), schedulerBody("baseline")],
+          ["UPDATE_SCHEDULER_INSTALL", schedulerBody("baseline"), schedulerBody("incoming")],
+          ["UPDATE_SCHEDULER_ENABLE", schedulerBody("incoming"), schedulerBody("incoming", "Schedule")],
+        ]) {
+          const prior = await operations.readStatus(kind, { jobId: schedulerId, bodySha256: hash(after), beforeSha256: hash(before) });
+          if (prior.intent && !prior.receipt) await scheduler.assertJob(after);
+        }
+        await scheduler.assertProofStartSettled(schedulerBody("incoming"), p.incoming.release, `${p.releaseId}-incoming`);
       }
       decision = { type: "UPDATE_RECOVERY_DECISION", binding };
       await retain(decisionKey, decision);
@@ -371,12 +441,36 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       await operations.runRecordedOperation({ kind, input, apply: async () => { await authority(); await apply(); }, verify });
       await inspect();
     }
-    for (const role of ROLES) {
+    if (scheduler) {
+      // Every scheduler execution is a database writer. Disable new cron starts
+      // and wait for all existing executions before either app is drained.
+      if (phase === "incoming") await scheduler.write("UPDATE_SCHEDULER_DISABLE",
+        schedulerBody("baseline", "Schedule"), schedulerBody("baseline"), true);
+      else {
+        const allowed = [schedulerBody("baseline", "Schedule"), schedulerBody("baseline")];
+        for (const previous of ["incoming"]) {
+          const prior = await operations.readStatus("UPDATE_SCHEDULER_INSTALL", { jobId: schedulerId,
+            bodySha256: hash(schedulerBody(previous)), beforeSha256: hash(schedulerBody("baseline")) });
+          if (prior.intent) allowed.push(schedulerBody(previous), schedulerBody(previous, "Schedule"));
+        }
+        // The complete, deterministic predecessor set is retained in the input;
+        // inherited intent can only read back, never dispatch a second PUT.
+        await scheduler.write("RECOVERY_SCHEDULER_DISABLE", allowed, schedulerBody("baseline"), true);
+      }
+      const install = await operations.readStatus("UPDATE_SCHEDULER_INSTALL", { jobId: schedulerId,
+        bodySha256: hash(schedulerBody(phase)), beforeSha256: hash(schedulerBody("baseline")) });
+      if (!install.intent) await scheduler.drained(schedulerBody("baseline"));
+      await effect("UPDATE_WORKER_RUNNING", { phase, runningStatus: "Stopped" },
+        async () => { await scheduler.drained(schedulerBody("baseline"));
+          await transport.setAppRunningState({ ...inputFor("worker"), runningStatus: "Stopped", onProgress: authority }); },
+        async () => { const state = (await inspect()).worker; return { complete: workerDrained(state), evidence: state }; });
+    }
+    for (const role of scheduler ? ["web"] : ROLES) {
       await effect("UPDATE_MODE", { phase, role, mode: "Multiple" },
         () => transport.setRevisionMode({ ...inputFor(role), mode: "Multiple", onProgress: authority }),
         async () => { const s = (await inspect())[role]; return { complete: s.mode === "Multiple", evidence: s }; });
     }
-    for (const role of ["worker", "web"]) {
+    for (const role of scheduler ? ["web"] : ["worker", "web"]) {
       const state = (await inspect())[role];
       for (const revision of state.revisions) {
         if (!revision.active && revision.replicaCount === 0) continue;
@@ -394,10 +488,11 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
         // runRecordedOperation invokes apply only after intent write/readback.
         known[role].add(candidate.revisionName);
         const pair = await inspect(), before = pair[role];
-        need(before.mode === "Multiple" && before.revisions.every(r => !r.active && r.replicaCount === 0), "UPDATE_ROLE_NOT_DRAINED");
+        need(before.mode === (scheduler && role === "worker" ? "Single" : "Multiple") && (scheduler && role === "worker" ? workerDrained(before) : before.revisions.every(r => !r.active && r.replicaCount === 0)), "UPDATE_ROLE_NOT_DRAINED");
         need(!before.revisions.some(r => r.revisionName === candidate.revisionName), "UPDATE_REVISION_ALREADY_EXISTS");
         if (role === "web") {
-          need(pair.worker.revisions.every(r => !r.active && r.replicaCount === 0), "UPDATE_ROLE_NOT_DRAINED");
+          need(workerDrained(pair.worker), "UPDATE_ROLE_NOT_DRAINED");
+          if (scheduler) await scheduler.drained(schedulerBody("baseline"));
         } else {
           await selected(phase, "web");
           need(pair.web.mode === "Single", "UPDATE_WEB_HEALTH_UNPROVEN");
@@ -405,14 +500,22 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
           await authority();
           await selected(phase, "web");
           const afterHealth = await inspect();
-          need(afterHealth.web.mode === "Single" && afterHealth.worker.mode === "Multiple"
-            && afterHealth.worker.revisions.every(r => !r.active && r.replicaCount === 0), "UPDATE_ROLE_NOT_DRAINED");
+          need(afterHealth.web.mode === "Single" && afterHealth.worker.mode === (scheduler ? "Single" : "Multiple")
+            && workerDrained(afterHealth.worker), "UPDATE_ROLE_NOT_DRAINED");
+          if (scheduler) await scheduler.drained(schedulerBody("baseline"));
         }
         await transport.patchTemplate({ ...inputFor(role), location: snapshot.baselines[role].location,
           template: candidate.template, onProgress: authority });
+        if (scheduler && role === "worker") return;
         await transport.waitForState({ ...inputFor(role), release: p[phase].release, imageDigest: p[phase].images[role].split("@")[1],
           expectedTemplate: candidate.template, onProgress: authority });
-      }, async () => ({ complete: true, evidence: await selected(phase, role) }));
+      }, async () => ({ complete: true, evidence: scheduler && role === "worker" ? await stoppedTemplate(phase) : await selected(phase, role) }));
+      if (scheduler && role === "worker") {
+        await effect("UPDATE_WORKER_RUNNING", { phase, runningStatus: "Running" },
+          async () => { await stoppedTemplate(phase); await scheduler.drained(schedulerBody("baseline"));
+            await transport.setAppRunningState({ ...inputFor(role), runningStatus: "Running", onProgress: authority }); },
+          async () => ({ complete: (await inspect()).worker.runningStatus === "Running", evidence: await selected(phase, role) }));
+      }
       await selected(phase, role);
       await effect("UPDATE_MODE", { phase, role, mode: "Single" },
         () => transport.setRevisionMode({ ...inputFor(role), mode: "Single", onProgress: authority }),
@@ -423,11 +526,24 @@ export async function runOpsCoreUpdate({ plan: input, custody, operationStore: s
       }
     }
   }
+  let schedulerEvidence;
+  if (scheduler) {
+    if (action !== "reconcile") {
+      await scheduler.write("UPDATE_SCHEDULER_INSTALL", schedulerBody("baseline"), schedulerBody(phase), true);
+      const proof = await scheduler.prove(schedulerBody(phase), p[phase].release, `${p.releaseId}-${phase}`, true);
+      await scheduler.write("UPDATE_SCHEDULER_ENABLE", schedulerBody(phase), schedulerBody(phase, "Schedule"), true, false);
+      schedulerEvidence = { ...await scheduler.observe(schedulerBody(phase, "Schedule")), proof };
+    } else {
+      const proof = await scheduler.prove(schedulerBody(phase), p[phase].release, `${p.releaseId}-${phase}`, false);
+      schedulerEvidence = { ...await scheduler.observe(schedulerBody(phase, "Schedule")), proof };
+    }
+  }
   const revisions = {};
   for (const role of ROLES) revisions[role] = (await selected(phase, role)).revisionName;
   need(Object.values(await inspect()).every(s => s.mode === "Single"), "UPDATE_FINAL_MODE_UNPROVEN");
   const context = phase === "incoming" ? "release-final" : "recovery-final";
   const evidence = await health(phase, context, revisions);
+  if (schedulerEvidence) evidence.scheduler = schedulerEvidence;
   for (const role of ROLES) await selected(phase, role);
   await authority();
   const result = { complete: true, schemaVersion: 1, binding, outcome: phase === "incoming" ? "UPDATED" : "RECOVERED",

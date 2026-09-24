@@ -102,6 +102,26 @@ Pending uploads belong to their workspace and are deleted with it. The opaque ra
 
 Do not switch a running deployment between backends: that would lose effective rate-limit counters and pending uploads. Fence writers and settle or preserve source state first. Core/Ops migration requires an empty, independently observed source Redis plus a migrated, empty PostgreSQL state schema. Once PostgreSQL state is active, rollback must use a PostgreSQL-capable application image and retain the additive schema. After restoring a backup, remove restored retrieval-cache and pending-upload rows before reopening traffic, and assess rate-limit continuity rather than silently resetting counters.
 
+## Demand-based workers
+
+`WORKER_EXECUTION_MODE` defaults to `continuous`, preserving the existing combined queue and scheduler loop. Low-load deployments can separate the two responsibilities:
+
+| Value | Behavior |
+| --- | --- |
+| `continuous` | Polls events and jobs, expires approvals, and runs daily, periodic and drip scheduling. |
+| `queue-only` | Polls events and jobs and exposes worker health/readiness. Does not schedule future work. |
+| `scheduler-once` | Runs approval expiry and daily, periodic and drip scheduling once, then closes connections and exits. Does not consume queues or open a health listener. |
+
+A queue-only deployment needs an independent scheduler; setting its minimum replicas to zero alone would stop scheduled work. Run the same immutable worker image as a one-minute UTC scheduled job. A dedicated one-connection PostgreSQL advisory lock prevents overlapping scheduler executions within the database. A lock skip exits successfully but is not proof that a scheduling cycle ran. Failures and interrupted executions exit nonzero. Include the extra advisory connection and scheduler pool in database capacity planning.
+
+The managed Azure demand profile uses one queue worker at most, Single revision mode, a PostgreSQL demand query every 10 seconds, a 30-second cooldown and internal HTTP wake for release health checks. Due eligible events and jobs wake it, including retries that become due without another insert. Existing event claims and running jobs keep it awake. A stuck claim can therefore keep a worker allocated and needs investigation; do not clear claims merely to reduce cost.
+
+Use a separate scaler database login and a versioned Key Vault connection secret. The create-only `provisionWorkerScalerRole` helper in `scripts/release/worker-demand.mjs` grants only the queue eligibility columns and validates the query under that role. The caller must bind the exact database/server, verify TLS, hold shared database maintenance custody, and preserve credentials through the existing secret store. The helper refuses existing roles and excessive inherited PUBLIC access; it does not rotate credentials or change other roles. Never reuse the application writer credential for the scaler or expose the scaler secret as a container environment variable. Before activation, reread the exact Key Vault secret version: `validateWorkerScalerConnection` binds its value to the expected Azure hostname, database and dedicated login with `sslmode=verify-full`; `verifyWorkerScalerAccess` checks a verified TLS connection, actual role, inherited privileges and demand query. Retain that evidence with the exact secret-version URI. A versioned URI alone does not prove its contents or permissions.
+
+The schema-version-2 Core/Ops activation and update plans opt in through `workerDemand`; legacy plans retain continuous behavior. Keep the scheduler under the same release custody as web and queue worker. A release must suspend scheduled executions, drain them, and prove the exact new scheduler execution and live worker before resuming scheduling. Do not use another release runner that updates only the worker image: that would leave a stale scheduler writer. The scheduler job has its own bounded resource allocation, so queue-worker memory headroom does not silently double scheduled-job costs.
+
+A successful local test or merged configuration is not evidence of Azure scaling or a monthly cost ceiling. Before production activation, qualify native cold starts, zero-to-work-to-zero, delayed retries, in-flight work, scheduler overlap, scaler failures and release recovery. Measure total allocated time, including startup, cooldown, failed executions and termination; scheduled jobs incur usage even when they find no work. See [Azure scale rules](https://learn.microsoft.com/en-us/azure/container-apps/scale-app) and [the PostgreSQL scaler contract](https://keda.sh/docs/2.21/scalers/postgresql/).
+
 ## Intercom Support Settings
 
 These variables enable Intercom Messenger and Fin support on hosted Corgtex site/app surfaces. Leave them unset for customer-owned or self-managed runtimes unless that customer explicitly wants Intercom enabled.

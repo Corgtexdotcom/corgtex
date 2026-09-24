@@ -93,7 +93,7 @@
     "check:private-boundary": "node scripts/check-private-boundary.mjs",
     "check:migration-fixtures": "node scripts/check-data-migration-fixtures.mjs",
     "test:migration:postgres-smoke": "node scripts/migration/postgres-restore-rehearsal-smoke.mjs",
-    "test:migration:ops-core": "node --test scripts/migration/ops-core-*.node-test.mjs scripts/migration/railway-source-fence.node-test.mjs scripts/migration/railway-postgres-custody.node-test.mjs scripts/migration/run-ops-core-update.node-test.mjs && npm run test:migration:postgres-smoke",
+    "test:migration:ops-core": "node --test scripts/migration/ops-core-*.node-test.mjs scripts/migration/railway-source-fence.node-test.mjs scripts/migration/railway-postgres-custody.node-test.mjs scripts/migration/run-ops-core-update.node-test.mjs scripts/release/worker-demand.node-test.mjs scripts/release/managed-azure-worker-demand.node-test.mjs scripts/release/managed-azure-container-app-transport.node-test.mjs && npm run test:migration:postgres-smoke",
     "check:seed-fixtures": "node scripts/check-seed-fixtures.mjs",
     "meeting-recorder:cleanup": "node scripts/meeting-recorder-cleanup.mjs",
     "knowledge:azure-search": "tsx scripts/azure-knowledge-search.ts",

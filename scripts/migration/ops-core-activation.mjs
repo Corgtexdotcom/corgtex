@@ -7,6 +7,9 @@ import { openProviderOperationRecorder } from "./ops-core-provider-operations.mj
 import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 
+import { validateManagedAzureWorkerDemand, managedAzureWorkerDemandScale, buildManagedAzureSchedulerJob,
+  schedulerJobWithRelease, createManagedAzureWorkerDemandLifecycle } from "../release/managed-azure-worker-demand.mjs";
+
 const ARM = "https://management.azure.com";
 const API = "2025-01-01";
 const HASH = /^[a-f0-9]{64}$/;
@@ -26,8 +29,8 @@ export const opsCoreActivationDiagnostic = error => error instanceof ActivationE
 
 export function validateOpsCoreActivationPlan(input) {
   const p = structuredClone(input);
-  requireValue(exact(p, "schemaVersion,target,location,managedIdentityId,managedIdentityClientId,runtimeVaultUri,acrServer,release,roles")
-    && p.schemaVersion === 1, "ACTIVATION_PLAN_INVALID");
+  requireValue([1, 2].includes(p.schemaVersion) && exact(p,
+    `schemaVersion,target,location,managedIdentityId,managedIdentityClientId,runtimeVaultUri,acrServer,release,roles${p.schemaVersion === 2 ? ",workerDemand" : ""}`), "ACTIVATION_PLAN_INVALID");
   opsCoreAzureTargetBindingSha256(p.target);
   const prefix = `/subscriptions/${p.target.subscriptionId}/resourceGroups/${p.target.resourceGroupName}/providers/`;
   const identityPrefix = `${prefix}Microsoft.ManagedIdentity/userAssignedIdentities/`;
@@ -40,6 +43,7 @@ export function validateOpsCoreActivationPlan(input) {
     && p.release.imageTag === `sha-${p.release.gitSha}` && /^[A-Za-z0-9._+-]{1,128}$/.test(p.release.version)
     && exact(p.roles, "web,worker"), "ACTIVATION_PLAN_INVALID");
 
+  if (p.schemaVersion === 2) validateManagedAzureWorkerDemand(p.workerDemand, p.target, p);
   for (const role of ROLES) {
     const r = p.roles[role];
     const generated = generatedEnv(p, role);
@@ -66,6 +70,10 @@ export function validateOpsCoreActivationPlan(input) {
       requireValue(e.secretRef ? names.has(e.secretRef) : typeof e.value === "string" && e.value.length <= 8192
         && !/(?:SECRET|PASSWORD|TOKEN|API_KEY|ENCRYPTION_KEY|DATABASE_URL|REDIS_URL)/.test(e.name), "ACTIVATION_ENV_INVALID");
     }
+    if (p.workerDemand) requireValue(!r.env.some(e => e.name === "WORKER_SCHEDULER_PROOF_NONCE"
+      || e.secretRef === p.workerDemand.scalerConnectionSecret.name)
+      && !r.secrets.some(e => e.name === p.workerDemand.scalerConnectionSecret.name
+        || e.keyVaultUrl === p.workerDemand.scalerConnectionSecret.keyVaultUrl), "ACTIVATION_DEMAND_SECRET_INVALID");
     const backend = opsCoreSharedStateBackend(p.target);
     for (const name of backend === "redis" ? ["DATABASE_URL", "REDIS_URL"] : ["DATABASE_URL"]) {
       requireValue(r.env.some(e => e.name === name && e.secretRef), "ACTIVATION_ENV_INVALID");
@@ -84,7 +92,8 @@ export function createOpsCoreActivationArmTransport({ subscriptionId, fetchImpl 
   execFileImpl = promisify(execFile) } = {}) {
   requireValue(GUID.test(subscriptionId), "ACTIVATION_TRANSPORT_INVALID");
   return async ({ resourceId, apiVersion = API, method = "GET", body, nextLink, signal }) => {
-    requireValue(signal instanceof AbortSignal && ["GET", "PUT"].includes(method)
+    requireValue(signal instanceof AbortSignal && ["GET", "PUT", "POST"].includes(method)
+      && (method !== "POST" || /\/providers\/Microsoft\.App\/jobs\/[a-z0-9-]+\/start$/.test(resourceId))
       && resourceId.startsWith(`/subscriptions/${subscriptionId}/resourceGroups/`)
       && /^\/[A-Za-z0-9_.()\/-]+$/.test(resourceId) && /^20\d{2}-\d{2}-\d{2}$/.test(apiVersion), "ACTIVATION_REQUEST_INVALID");
     const base = new URL(`${ARM}${resourceId}?api-version=${apiVersion}`);
@@ -120,7 +129,7 @@ function generatedEnv(plan, role) {
     ...(opsCoreSharedStateBackend(plan.target) === "postgres" ? { SHARED_STATE_BACKEND: "postgres" } : {}),
     CORGTEX_RELEASE_GIT_SHA: plan.release.gitSha, CORGTEX_RELEASE_IMAGE_TAG: plan.release.imageTag,
     CORGTEX_RELEASE_VERSION: plan.release.version,
-    ...(role === "web" ? { CORGTEX_STARTUP_MODE: "migrate-and-web" } : { WORKER_HEALTH_PORT: "9090" }) };
+    ...(role === "web" ? { CORGTEX_STARTUP_MODE: "migrate-and-web" } : { WORKER_HEALTH_PORT: "9090", ...(plan.workerDemand ? { WORKER_EXECUTION_MODE: "queue-only" } : {}) }) };
 }
 
 function appBody(plan, role, suffix) {
@@ -135,7 +144,8 @@ function appBody(plan, role, suffix) {
         ingress: { external: role === "web", targetPort: port, transport: "auto", allowInsecure: false,
           traffic: [{ latestRevision: true, weight: 100 }] },
         registries: [{ server: plan.acrServer, identity: plan.managedIdentityId }],
-        secrets: runtime.secrets.map(s => ({ ...s, identity: plan.managedIdentityId })) },
+        secrets: [...runtime.secrets.map(s => ({ ...s, identity: plan.managedIdentityId })),
+          ...(role === "worker" && plan.workerDemand ? [plan.workerDemand.scalerConnectionSecret] : [])] },
       template: { revisionSuffix: suffix, terminationGracePeriodSeconds: 30,
         containers: [{ name: role, image: runtime.image, env, resources: { ...runtime.resources,
           ephemeralStorage: managedAzureConsumptionEphemeralStorage(runtime.resources.cpu) },
@@ -143,7 +153,8 @@ function appBody(plan, role, suffix) {
             { type: "Startup", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 60, successThreshold: 1 },
             { type: "Readiness", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3, successThreshold: 1 },
             { type: "Liveness", httpGet: { path, port, scheme: "HTTP" }, periodSeconds: 30, timeoutSeconds: 5, failureThreshold: 3, successThreshold: 1 },
-          ] }], scale: { minReplicas: 1, maxReplicas: 1, cooldownPeriod: 300, pollingInterval: 30, rules: [] } } } };
+          ] }], scale: role === "worker" && plan.workerDemand ? managedAzureWorkerDemandScale(plan.workerDemand)
+            : { minReplicas: 1, maxReplicas: 1, cooldownPeriod: 300, pollingInterval: 30, rules: [] } } } };
 }
 
 function assertBootstrapProjection(expected, actual, appName, revisionName) {
@@ -168,7 +179,7 @@ function assertBootstrapProjection(expected, actual, appName, revisionName) {
  * Any inherited pending phase is refused; recovery requires explicit readback.
  */
 export function createOpsCoreActivation({ plan: input, custody, operationStore, assertSourceFenced, healthProbe,
-  armTransport, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
+  armTransport, schedulerProof, now = Date.now, wait = (ms, signal) => sleep(ms, undefined, { signal }), timeoutMs = 15 * 60_000 } = {}) {
   const plan = validateOpsCoreActivationPlan(input), planSha256 = hash(plan), target = plan.target;
   requireValue(custody?.signal instanceof AbortSignal && typeof custody.assertOwned === "function"
     && typeof custody.begin === "function" && typeof custody.complete === "function"
@@ -176,6 +187,11 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
     && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 30 * 60_000, "ACTIVATION_DEPENDENCY_INVALID");
   const transport = armTransport ?? createOpsCoreActivationArmTransport({ subscriptionId: target.subscriptionId });
   const appId = role => `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroupName}/providers/Microsoft.App/containerApps/${target.apps[role]}`;
+  const schedulerId = plan.workerDemand
+    ? `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroupName}/providers/Microsoft.App/jobs/${plan.workerDemand.schedulerJobName}` : null;
+  function schedulerBody(workerBody) {
+    return buildManagedAzureSchedulerJob({ workerApp: { ...workerBody, id: appId("worker") }, demand: plan.workerDemand, target });
+  }
   let used = false;
   async function run(action, { customDomains = [] } = {}) {
       requireValue(!used, "ACTIVATION_ALREADY_ATTEMPTED"); used = true;
@@ -259,7 +275,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           requireValue(!["Failed", "Canceled"].includes(r.body.properties?.provisioningState), "ACTIVATION_PROVISIONING_FAILED");
           if (r.body.properties?.provisioningState !== "Succeeded") { await wait(2000, signal); continue; }
           const p = assertApp(r.body, role, expected, fqdn);
-          if (p.latestRevisionName !== revisionName || p.latestReadyRevisionName !== revisionName) {
+          if (p.latestRevisionName !== revisionName || p.latestReadyRevisionName !== revisionName && !(plan.workerDemand && role === "worker")) {
             await wait(2000, signal); continue;
           }
           const revisions = await list(`${appId(role)}/revisions`);
@@ -269,6 +285,13 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           assertBootstrapProjection(expected.properties.template, rev.template, target.apps[role], revisionName);
           const replicas = await list(`${appId(role)}/revisions/${revisionName}/replicas`);
           requireValue(replicas.length <= 1, "ACTIVATION_REPLICA_DRIFT");
+          if (plan.workerDemand && role === "worker" && replicas.length === 0) {
+            // Internal HTTP scaler wakes the exact target; idle is never accepted as serving.
+            await check();
+            await healthProbe({ role, appId: appId(role), revisionName, origin: `https://${fqdn}`,
+              release: structuredClone(plan.release), invocationContext, signal });
+            await check(); await wait(1000, signal); continue;
+          }
           if (rev.active !== true || rev.provisioningState !== "Provisioned" || rev.healthState !== "Healthy"
             || !["Running", "RunningAtMaxScale"].includes(rev.runningState) || replicas.length !== 1
             || replicas[0].properties?.runningState !== "Running" || replicas[0].properties?.containers?.length !== 1
@@ -318,6 +341,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           };
           const bodies = Object.fromEntries(ROLES.map(role => [role,
             appBody(plan, role, `boot-${operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
+          if (plan.workerDemand) bodies.scheduler = schedulerBody(bodies.worker);
           const retainedPlan = await read("phase-plan");
           requireValue(exact(retainedPlan, "schemaVersion,planSha256,activationOperationId,environmentDomain,bodies")
             && retainedPlan.schemaVersion === 1 && retainedPlan.planSha256 === planSha256
@@ -335,6 +359,14 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
               requireValue(proof?.complete === true && value?.role === role && value.planSha256 === planSha256
                 && value.revisionSha256 === hash(revision) && value.imageSha256 === hash(plan.roles[role].image)
                 && HASH.test(value.healthSha256) && HASH.test(value.probeEvidenceSha256), "ACTIVATION_EVIDENCE_MISMATCH");
+            }
+            if (plan.workerDemand) {
+              const scheduler = evidence.finalProofs?.scheduler, proof = scheduler?.proof;
+              requireValue(scheduler?.complete === true && scheduler.jobId === schedulerId
+                && scheduler.bodySha256 === hash(schedulerJobWithRelease(bodies.scheduler, plan.roles.worker.image, plan.release, "Schedule"))
+                && proof?.complete === true && proof.jobId === schedulerId && proof.image === plan.roles.worker.image
+                && hash(proof.release) === hash(plan.release) && HASH.test(proof.receiptSha256)
+                && proof.context === `activation-${operationId}` && HASH.test(proof.nonce), "ACTIVATION_EVIDENCE_MISMATCH");
             }
             const access = evidence.finalProofs?.postgresAccess;
             requireValue(access?.complete === true && access.domain === target.domain && access.intentSha256 === intentSha256
@@ -370,7 +402,10 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         }
         await fenced();
         const guard = createOpsCoreAzureTarget({ binding: target, custody, transport });
-        if (fresh) { await guard.assertInactive(); await absent("web"); await absent("worker"); }
+        if (fresh) {
+          await guard.assertInactive(); await absent("web"); await absent("worker");
+          if (schedulerId) requireValue((await request(schedulerId)).status === 404, "ACTIVATION_SCHEDULER_NOT_ABSENT");
+        }
         await guard.assertPostgresPrivate();
         const environment = await request(target.environmentId);
         requireValue(environment.status === 200 && same(environment.body?.id, target.environmentId)
@@ -384,6 +419,7 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         const prefix = `operations/${target.domain}/${intentSha256}/${pending.operationId}/`;
         const bodies = Object.fromEntries(ROLES.map(role => [role,
           appBody(plan, role, `boot-${pending.operationId.replaceAll("-", "").slice(0, 16)}-${role}`)]));
+        if (plan.workerDemand) bodies.scheduler = schedulerBody(bodies.worker);
         const retainedPlan = { schemaVersion: 1, planSha256, activationOperationId: pending.operationId, environmentDomain: domain, bodies };
         async function retain(name, value) {
           await check(); await operationStore.assertPrivate();
@@ -398,7 +434,9 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           // A lost acknowledgement before phase-plan persistence cannot have
           // dispatched an app. Resume may retain the plan only while both absent.
           requireValue(fresh || action === "resume", "ACTIVATION_PLAN_UNRETAINED");
-          await absent("web"); await absent("worker"); await retain("phase-plan", retainedPlan);
+          await absent("web"); await absent("worker");
+          if (schedulerId) requireValue((await request(schedulerId)).status === 404, "ACTIVATION_SCHEDULER_NOT_ABSENT");
+          await retain("phase-plan", retainedPlan);
         } else requireValue(hash(JSON.parse(prior)) === hash(retainedPlan), "ACTIVATION_EVIDENCE_MISMATCH");
         const fqdn = role => `${target.apps[role]}.${role === "worker" ? "internal." : ""}${domain}`;
         const receipts = {};
@@ -424,6 +462,19 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
         }
         const finalProofs = {};
         for (const role of ROLES) finalProofs[role] = await ready(role, bodies[role], fqdn(role), `${role}-final`);
+        if (plan.workerDemand) {
+          const scheduled = schedulerJobWithRelease(bodies.scheduler, plan.roles.worker.image, plan.release, "Schedule");
+          const scheduler = createManagedAzureWorkerDemandLifecycle({ jobId: schedulerId, target, proofStore: operationStore, proofPrefix: prefix,
+            operations: fresh || pendingActivation ? await openProviderOperationRecorder({ custody, store: operationStore, phase: "TARGET_ACTIVATING", signal }) : null,
+            request, check: async () => { await check(); await fenced(); }, signal, schedulerProof, now,
+            wait: ms => wait(ms, signal) });
+          if (fresh || pendingActivation) {
+            await scheduler.write("WORKER_SCHEDULER_CREATE", null, bodies.scheduler, action !== "reconcile");
+            const proof = await scheduler.prove(bodies.scheduler, plan.release, `activation-${pending.operationId}`, action !== "reconcile");
+            await scheduler.write("WORKER_SCHEDULER_ENABLE", bodies.scheduler, scheduled, action !== "reconcile", false);
+            finalProofs.scheduler = { ...await scheduler.observe(scheduled), proof };
+          } else finalProofs.scheduler = await scheduler.observe(scheduled);
+        }
         finalProofs.postgresAccess = await guard.assertPostgresPrivate();
         await fenced(); await check();
         const evidence = { schemaVersion: 1, domain: target.domain, intentSha256, planSha256,

@@ -11,6 +11,8 @@ import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
 import { canonicalizeManagedAzureContainerAppState, managedAzureConfigurationDigest,
   assertManagedAzureRevisionProjection } from "../release/managed-azure-container-app-transport.mjs";
 
+import { managedAzureWorkerDemandScale, buildManagedAzureSchedulerJob } from "../release/managed-azure-worker-demand.mjs";
+
 const subscriptionId = "00000000-0000-4000-8000-000000000001";
 const prefix = `/subscriptions/${subscriptionId}/resourceGroups/fixture/providers/`;
 const release = character => ({ gitSha: character.repeat(40), imageTag: `sha-${character.repeat(40)}`, version: `1.0.${character.charCodeAt(0)}` });
@@ -48,6 +50,21 @@ function fixture(options = {}) {
       properties: { environmentId: plan.target.environmentId, configuration, template, provisioningState: "Succeeded", latestRevisionName: revision, latestReadyRevisionName: revision } };
     revisionState[role] = new Map([[revision, { revisionName: revision, active: true, replicaCount: 1, kind: "READY", template: structuredClone(template) }]]);
   }
+  let schedulerJob = null; const schedulerRuns = [];
+  if (options.demand) {
+    plan.schemaVersion = 2;
+    const identity = `${prefix}Microsoft.ManagedIdentity/userAssignedIdentities/runtime`;
+    plan.workerDemand = { schedulerJobName: "fixture-scheduler", schedulerResources: { cpu: 0.5, memory: "1Gi" },
+      scalerConnectionSecret: { name: "worker-scaler-connection", identity, keyVaultUrl: `https://fixture.vault.azure.net/secrets/scaler/${"a".repeat(32)}` } };
+    const a = apps.worker, c = a.properties.configuration;
+    a.identity = { type: "UserAssigned", userAssignedIdentities: { [identity]: {} } };
+    a.properties.runningStatus = "Running"; c.ingress.allowInsecure = false;
+    c.secrets[0].identity = identity; c.registries[0].identity = identity; c.secrets.push(plan.workerDemand.scalerConnectionSecret);
+    a.properties.template.scale = managedAzureWorkerDemandScale(plan.workerDemand);
+    a.properties.template.containers[0].env.push({ name: "WORKER_EXECUTION_MODE", value: "queue-only" });
+    revisionState.worker.values().next().value.template = structuredClone(a.properties.template);
+    schedulerJob = buildManagedAzureSchedulerJob({ workerApp: a, demand: plan.workerDemand, target: plan.target, trigger: "Schedule" });
+  }
   let custody = { signal: controller.signal, get mode() { return mode; },
     snapshot() { return { domain: plan.domain, intentSha256: hash(plan), phase: finished ? "RELEASE_FINISHED" : "RELEASE_PREPARED",
       pending: finished ? null : { to: "RELEASING", operationId: plan.releaseId } }; },
@@ -74,7 +91,7 @@ function fixture(options = {}) {
       options.beforeExclusive?.(input, f);
       configCheck(input); const p = apps[input.role].properties;
       return { mode: p.configuration.activeRevisionsMode, configurationDigest: managedAzureConfigurationDigest(p.configuration),
-        location: apps[input.role].location, provisioningState: p.provisioningState,
+        location: apps[input.role].location, provisioningState: p.provisioningState, ...(options.demand && input.role === "worker" ? { runningStatus: p.runningStatus } : {}),
         latestRevisionName: p.latestRevisionName, latestReadyRevisionName: p.latestReadyRevisionName,
         revisions: [...revisionState[input.role].values()].map(({ revisionName, active, replicaCount }) => ({ revisionName, active, replicaCount })) };
     },
@@ -85,6 +102,21 @@ function fixture(options = {}) {
       if (options.omitEphemeralStorage) delete projection.containers[0].resources.ephemeralStorage;
       assertManagedAzureRevisionProjection(input.expectedTemplate, projection, plan.target.apps[input.role], input.revisionName);
       return { kind: r.kind };
+    },
+    async readAppTemplate(input) {
+      const raw = structuredClone(apps[input.role]); raw.properties.latestReadyRevisionName = raw.properties.latestRevisionName;
+      return { state: canonicalizeManagedAzureContainerAppState(raw, input), provisioningState: raw.properties.provisioningState };
+    },
+    async setAppRunningState(input) {
+      assert.equal(input.role, "worker"); assert.equal(apps.worker.properties.configuration.activeRevisionsMode, "Single");
+      assert.equal(schedulerJob.properties.configuration.triggerType, "Manual");
+      log.push(`running:${input.runningStatus}`); apps.worker.properties.runningStatus = input.runningStatus;
+      for (const r of revisionState.worker.values()) {
+        r.replicaCount = 0;
+        if (input.runningStatus === "Running") r.active = r.revisionName === apps.worker.properties.latestRevisionName;
+      }
+      options.afterRunning?.(input, f);
+      return transport.readExclusiveState(input);
     },
     async setRevisionMode(input) {
       configCheck(input); await input.onProgress?.();
@@ -104,10 +136,11 @@ function fixture(options = {}) {
       const phase = input.template.revisionSuffix.startsWith("rec-") ? "recovery" : "incoming";
       log.push(`patch:${phase}:${input.role}`);
       options.beforePatch?.(input, f);
-      assert.ok([...revisionState[input.role].values()].every(r => !r.active && r.replicaCount === 0), "no live predecessor at patch");
+      assert.ok([...revisionState[input.role].values()].every(r => (options.demand && input.role === "worker" || !r.active) && r.replicaCount === 0), "no live predecessor at patch");
+      if (options.demand && input.role === "worker") assert.equal(apps.worker.properties.runningStatus, "Stopped");
       const p = apps[input.role].properties, revisionName = `${plan.target.apps[input.role]}--${input.template.revisionSuffix}`;
       p.template = structuredClone(input.template); p.latestRevisionName = revisionName; p.latestReadyRevisionName = revisionName;
-      revisionState[input.role].set(revisionName, { revisionName, active: true, replicaCount: 1, kind: "READY", template: structuredClone(input.template) });
+      revisionState[input.role].set(revisionName, { revisionName, active: true, replicaCount: options.demand && input.role === "worker" ? 0 : 1, kind: options.demand && input.role === "worker" ? "UNKNOWN" : "READY", template: structuredClone(input.template) });
       options.afterPatch?.(input, f);
       return { terminal: true, succeeded: true };
     },
@@ -115,9 +148,32 @@ function fixture(options = {}) {
   };
   const f = { plan, target, records, log, apps, revisionState, custody, store, transport, controller,
     useCustody(owner) { custody = owner; f.custody = owner; },
+    get schedulerJob() { return schedulerJob; }, schedulerRuns,
     get finished() { return finished; }, reopen() { assert.equal(finished, null); mode = "reconcile"; },
     effects: () => log.filter(item => /^(?:mode:|drain:|patch:)/.test(item)),
     async run(action = "apply") { return runOpsCoreUpdate({ plan, custody, operationStore: store, action, transport,
+      ...(options.demand ? { demandArmTransport: async input => {
+        const id = `${prefix}Microsoft.App/jobs/${plan.workerDemand.schedulerJobName}`;
+        if (input.resourceId === apps.worker.id) return { status: 200, body: structuredClone(apps.worker) };
+        if (input.method === "PUT") { schedulerJob = structuredClone(input.body); log.push(`scheduler:${schedulerJob.properties.configuration.triggerType}:${schedulerJob.properties.template.containers[0].image.slice(-1)}`); return { status: 202 }; }
+        if (input.resourceId === `${id}/start`) {
+          assert.equal(apps.worker.properties.runningStatus, "Running");
+          const name = `proof-${schedulerRuns.length}`, timestamp = new Date().toISOString();
+          schedulerRuns.push({ id: `${id}/executions/${name}`, name, properties: { status: "Succeeded", template: structuredClone(input.body), startTime: timestamp, endTime: timestamp } });
+          log.push("scheduler:proof"); return { status: 202 };
+        }
+        if (input.resourceId === `${id}/executions`) return { status: 200, body: { value: structuredClone(schedulerRuns) } };
+        assert.equal(input.resourceId, id);
+        const body = { ...structuredClone(schedulerJob), id, name: plan.workerDemand.schedulerJobName, type: "Microsoft.App/jobs" };
+        body.properties.provisioningState = "Succeeded"; options.schedulerRead?.(body, f); return { status: 200, body };
+      }, schedulerProof: async ({ execution, nonce }) => {
+        const env = execution.properties.template.containers[0].env;
+        const release = { gitSha: env.find(e => e.name === "CORGTEX_RELEASE_GIT_SHA").value, imageTag: env.find(e => e.name === "CORGTEX_RELEASE_IMAGE_TAG").value, version: env.find(e => e.name === "CORGTEX_RELEASE_VERSION").value };
+        return { jobId: `${prefix}Microsoft.App/jobs/${plan.workerDemand.schedulerJobName}`, executionId: execution.id, replicaName: `${execution.name}-replica`, containerName: "scheduler",
+          receipt: { event: "scheduler_complete", executionMode: "scheduler-once", proofNonce: nonce, skipped: false, ts: execution.properties.startTime,
+            release: { ...release, evidence: "baked", drift: { version: false, gitSha: false, imageTag: false, details: [] } },
+            counts: { finalized: 0, dispatched: 0, processed: 0, scheduled: 0, scheduledPeriodic: 0, scheduledDrip: 0 } } };
+      } } : {}),
       async armTransport(input) {
         assert.equal(input.resourceId, apps.web.id); assert.equal(input.apiVersion, "2024-03-01");
         assert.equal(input.signal, custody.signal); log.push("arm:web");
@@ -135,7 +191,11 @@ function fixture(options = {}) {
       },
       async workerHealth(input) {
         log.push(`health:worker:${input.invocationContext}`);
-        const r = revisionState.worker.get(input.revisionName); assert.ok(r?.active && r.replicaCount === 1);
+        const r = revisionState.worker.get(input.revisionName);
+        if (options.demand && r?.active && apps.worker.properties.runningStatus === "Running") {
+          r.replicaCount = 1; r.kind = "READY"; apps.worker.properties.latestReadyRevisionName = input.revisionName;
+        }
+        assert.ok(r?.active && r.replicaCount === 1);
         assert.equal(apps.worker.properties.configuration.activeRevisionsMode, "Single");
         const workerTarget = { appId: `${prefix}Microsoft.App/containerApps/${plan.target.apps.worker}`,
           origin: plan.origins.worker, image: plan[input.phase].images.worker, release: input.release };
@@ -559,4 +619,61 @@ test("direct web health refuses redirected, foreign URL and oversized response",
   await rejected(fetchOpsCoreUpdateWebHealth({ origin, signal }, async () => response("{}", "https://foreign.invalid/api/health")), "UPDATE_WEB_HEALTH_UNPROVEN");
   await rejected(fetchOpsCoreUpdateWebHealth({ origin, signal }, async () => response("{}", `${origin}/api/health`, true)), "UPDATE_WEB_HEALTH_UNPROVEN");
   await rejected(fetchOpsCoreUpdateWebHealth({ origin, signal }, async () => response(" ".repeat(32769))), "UPDATE_WEB_HEALTH_TOO_LARGE");
+});
+
+
+test("demand update stops all worker replicas in Single, patches stopped, wakes exact image and proves scheduler", async () => {
+  const f = fixture({ demand: true }); const result = await f.run();
+  assert.equal(result.outcome, "UPDATED");
+  assert.ok(!f.log.includes("mode:worker:Multiple"));
+  const index = text => f.log.indexOf(text);
+  assert.ok(index("scheduler:Manual:a") < index("running:Stopped"));
+  assert.ok(index("running:Stopped") < index("patch:incoming:web"));
+  assert.ok(index("patch:incoming:web") < index("patch:incoming:worker"));
+  assert.ok(index("patch:incoming:worker") < index("running:Running"));
+  assert.ok(index("running:Running") < index("scheduler:proof"));
+  assert.ok(index("scheduler:proof") < index("scheduler:Schedule:b"));
+  assert.equal(result.evidence.scheduler.proof.image, f.plan.incoming.images.worker);
+});
+
+test("demand update rejects scheduler secret drift before stopping either app", async () => {
+  const f = fixture({ demand: true, schedulerRead: j => { j.properties.configuration.secrets[0].keyVaultUrl += "-changed"; } });
+  await assert.rejects(f.run(), /PROVIDER_OPERATION_RECONCILE_REQUIRED/);
+  assert.equal(f.effects().length, 0); assert.ok(!f.log.includes("running:Stopped"));
+});
+
+test("demand patch which restarts worker unexpectedly never dispatches start or resumes scheduler", async () => {
+  const f = fixture({ demand: true, afterPatch: (input, f) => {
+    if (input.role === "worker") f.apps.worker.properties.runningStatus = "Running";
+  } });
+  await assert.rejects(f.run(), /PROVIDER_OPERATION_RECONCILE_REQUIRED/);
+  assert.ok(!f.log.includes("running:Running"));
+  assert.equal(f.schedulerJob.properties.configuration.triggerType, "Manual");
+});
+
+test("demand recovery drains scheduler and stopped worker before compatible recovery migration", async () => {
+  let fail = true;
+  const f = fixture({ demand: true, afterPatch: (input) => { if (input.role === "worker" && fail) { fail = false; throw new Error("lost acknowledgement"); } } });
+  await assert.rejects(f.run()); f.reopen();
+  const result = await f.run("recover");
+  assert.equal(result.outcome, "RECOVERED");
+  assert.equal(result.evidence.scheduler.proof.image, f.plan.recovery.images.worker);
+  assert.ok(!f.log.includes("mode:worker:Multiple"));
+  assert.equal(f.log.filter(v => v === "patch:incoming:worker").length, 1);
+});
+
+
+test("demand completed update reconciles without repeating scheduler/app effects", async () => {
+  let fail=true;const f=fixture({demand:true,beforeFinish(){if(fail){fail=false;throw new Error("lost final record");}}});
+  await assert.rejects(f.run());f.reopen();
+  const effects=()=>f.log.filter(v=>/^(scheduler:|running:|patch:|mode:|drain:)/.test(v));
+  const before=effects();assert.equal((await f.run("reconcile")).outcome,"UPDATED");assert.deepEqual(effects(),before);
+});
+test("demand recovery continuation does not repeat stopped template or scheduler install effects", async () => {
+  let incoming=true,recovery=true;
+  const f=fixture({demand:true,afterPatch(input){if(input.role==="worker"&&incoming){incoming=false;throw new Error("lost incoming");}},beforeFinish(){if(recovery){recovery=false;throw new Error("lost recovery final");}}});
+  await assert.rejects(f.run());f.reopen();await assert.rejects(f.run("recover"));f.reopen();
+  const before=f.log.filter(v=>/^(scheduler:|running:|patch:|mode:|drain:)/.test(v));
+  assert.equal((await f.run("recover")).outcome,"RECOVERED");
+  assert.deepEqual(f.log.filter(v=>/^(scheduler:|running:|patch:|mode:|drain:)/.test(v)),before);
 });
