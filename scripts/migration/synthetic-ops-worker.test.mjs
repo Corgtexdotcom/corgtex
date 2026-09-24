@@ -5,7 +5,8 @@ import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { HOST } from "./probe-ops-azure-target.mjs";
 
-const mocks = vi.hoisted(() => ({ run: vi.fn(), cleanup: vi.fn(), database: vi.fn(), pinned: vi.fn(), baseline: vi.fn(), corpus: vi.fn(), clientFiles: vi.fn(), probe: vi.fn(), pins: {} }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), cleanup: vi.fn(), database: vi.fn(), pinned: vi.fn(), baseline: vi.fn(), corpus: vi.fn(), clientFiles: vi.fn(), probe: vi.fn(), authority: vi.fn(), pins: {} }));
+vi.mock("./rehearsal-authority.mjs", async original => ({ ...await original(), rehearsalAuthorityForTarget: () => mocks.authority }));
 vi.mock("./run-postgres-restore-rehearsal.mjs", async original => ({ ...await original(), runPostgresRestoreRehearsal: mocks.run, cleanupScratchDatabase: mocks.cleanup, writeClientFiles: mocks.clientFiles, probeTargetClientConnection: mocks.probe }));
 vi.mock("./bootstrap-synthetic-ops.mjs", async original => ({ ...await original(), withDatabase: mocks.database }));
 vi.mock("./synthetic-ops-source.mjs", async original => ({ ...await original(), pinnedBytes: mocks.pinned, readSourceBaseline: mocks.baseline, collectCorpus: mocks.corpus, SOURCE_PINS: mocks.pins }));
@@ -16,11 +17,12 @@ let root, config;
 const archive = Buffer.from("test-only synthetic archive");
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.authority.mockResolvedValue(undefined);
   root = mkdtempSync(resolve(tmpdir(), "synthetic-worker-"));
   writeFileSync(resolve(root, "synthetic.dump"), archive);
   config = { bundle: root, sourceConfig: { host: "127.0.0.1", port: 1234, database: "source", user: "fixture_reader", sslmode: "require" },
     targetAdminConfig: { host: HOST, database: "postgres", sslmode: "verify-full", targetTlsRootCert: "test-ca" },
-    scratchName: "corgtex_rehearsal_syn_12345_1_1", stateFile: resolve(root, "state.json"), artifactDir: resolve(root, "evidence"), tempDir: resolve(root, "work"), dockerNetwork: "owned-internal-network" };
+    scratchName: "corgtex_rehearsal_syn_12345_1_1", stateFile: resolve(root, "state.json"), artifactDir: resolve(root, "evidence"), tempDir: resolve(root, "work"), dockerNetwork: "owned-internal-network", deadline: Date.now() + 60000 };
   mocks.pins["synthetic.dump"] = createHash("sha256").update(archive).digest("hex");
   mocks.pinned.mockReturnValue(archive);
   mocks.database.mockImplementation((_config, run) => run({ query: async () => ({ rows: [{ version: 180006, encoding: "UTF8", locale: "en_US.utf8", ctype: "en_US.utf8", provider: "c", recorded: "2.38", actual: "2.38", vector: "0.8.2", tls: true }] }) }));
@@ -61,7 +63,8 @@ describe("synthetic worker uses unchanged restore contracts", () => {
   it("uses the unchanged scratch cleanup and exact expected identity", async () => {
     mocks.cleanup.mockResolvedValue({ scratchDatabase: { dropped: true } });
     expect(await work("cleanup", config)).toMatchObject({ scratchDatabase: { dropped: true } });
-    expect(mocks.cleanup).toHaveBeenCalledWith({ ...config, expectedScratchName: config.scratchName });
+    expect(mocks.cleanup).toHaveBeenCalledWith({ ...config, expectedScratchName: config.scratchName,
+      rehearsalAuthorityOptions: { execute: expect.any(Function), deadline: config.deadline, environment: process.env } });
   });
   it("rejects non-owned scratch names without creating or cleaning", async () => {
     config.scratchName = "corgtex";

@@ -279,3 +279,34 @@ Local validation:
 npx vitest run --project unit scripts/migration/run-postgres-restore-rehearsal.test.mjs scripts/migration/validate-postgres-restore-rehearsal.test.mjs scripts/migration/azure-postgres-restore-rehearsal-contract.test.mjs
 npm run test:migration:postgres-smoke
 ```
+
+## Retiring rehearsal authority before production sharing
+
+The historical rehearsal server and its resource group must both retain the exact
+three foundation tags (`authority=non-authoritative-restore-target`,
+`purpose=railway-to-azure-migration-foundation`, `managedBy=github-oidc`).
+`scripts/migration/rehearsal-authority.mjs` reads both exact resource IDs afresh
+before each START, STOP, firewall change and scratch database deletion. The SQL
+runner also checks before scratch creation, each restore section and sequence
+replay; synthetic extension and corpus writes use the same check. Missing tags,
+changed tags, unexpected IDs and unavailable reads fail closed, including
+`always()` cleanup and recovery of an older retained intent. Local credential and
+owned client cleanup remains available. Production copy custody is unchanged.
+
+These reads are **not an atomic ownership fence** across ARM and PostgreSQL. A
+previously admitted restore section or accepted provider operation can still be
+running after the check. Before transferring either authority tag to production:
+
+1. Drain all rehearsal runs, child processes, SQL sessions and accepted provider
+   operations; reconcile any ambiguous effects and finish owned scratch/firewall
+   cleanup while rehearsal authority still applies.
+2. Prevent replay of older workflow revisions, queued runs and historical cleanup
+   or recovery jobs that predate this guard. Workflow concurrency alone does not
+   serialize a separate production controller; explicitly transfer that ownership.
+3. Retain the exact server/database inventory and recovery evidence, then transfer
+   authority. Never temporarily restore rehearsal tags to make legacy cleanup run
+   against a production-shared server. Any remaining maintenance requires the new
+   production owner's separately governed procedure.
+
+This guard adds no role grants and does not revoke existing credentials. It does
+not prove SQL role isolation, shared-server capacity, or production activation.

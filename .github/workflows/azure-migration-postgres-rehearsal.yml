@@ -775,6 +775,7 @@ jobs:
             '{schemaVersion:"1.0.0",name:$name,ip:$ip,phase:"ABSENCE_VERIFIED"}' \
             > "$REHEARSAL_TEMP_DIR/firewall-state.json"
           chmod 600 "$REHEARSAL_TEMP_DIR/firewall-state.json"
+          node scripts/migration/rehearsal-authority.mjs
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule create \
             --resource-group "$RESOURCE_GROUP" \
             --server-name "$NAME_PREFIX-restore-pg" \
@@ -862,6 +863,7 @@ jobs:
             echo "::error::Firewall cleanup ownership is unproven."
             exit 1
           }
+          node scripts/migration/rehearsal-authority.mjs
           AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule delete \
             --resource-group "$RESOURCE_GROUP" \
             --server-name "$NAME_PREFIX-restore-pg" \
@@ -1209,6 +1211,7 @@ jobs:
               echo "::error::The exact recovery database resource binding drifted."
               exit 1
             }
+            node scripts/migration/rehearsal-authority.mjs
             AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server db delete \
               --ids "$expected_id" \
               --subscription "$AZURE_SUBSCRIPTION_ID" \
@@ -1246,6 +1249,7 @@ jobs:
             exit 1
           }
           if [[ "$count" == "1" ]]; then
+            node scripts/migration/rehearsal-authority.mjs
             AZURE_CORE_COLLECT_TELEMETRY=no az postgres flexible-server firewall-rule delete \
               --resource-group "$RESOURCE_GROUP" \
               --server-name "$NAME_PREFIX-restore-pg" \

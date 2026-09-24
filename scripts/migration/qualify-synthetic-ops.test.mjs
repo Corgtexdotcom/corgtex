@@ -117,21 +117,32 @@ describe("run-owned scratch recovery", () => {
     expect(() => validateScratchState({ ...state(), phase }, name)).not.toThrow();
   });
   it("never submits DELETE for an existing unowned database", async () => {
-    const api = { identity: vi.fn(), boundary: vi.fn() };
+    const api = { identity: vi.fn(), boundary: vi.fn(), authority: vi.fn() };
     const recovery = new ScratchRecovery({}, api, Date.now() + 1000, {});
     recovery.matching = vi.fn().mockResolvedValue(true); recovery.command = vi.fn();
     await expect(recovery.drop(name, null)).rejects.toThrow("DATABASE_OWNERSHIP_UNPROVEN");
     expect(recovery.command).not.toHaveBeenCalled();
   });
   it("reconciles an ambiguous DELETE once and requires exact absence", async () => {
-    const recovery = new ScratchRecovery({}, { identity: vi.fn(), boundary: vi.fn() }, Date.now() + 1000, {});
+    const recovery = new ScratchRecovery({}, { identity: vi.fn(), boundary: vi.fn(), authority: vi.fn() }, Date.now() + 1000, {});
     recovery.matching = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     recovery.command = vi.fn().mockRejectedValue(new Error("ambiguous"));
     expect(await recovery.drop(name, state())).toMatchObject({ scratchDatabase: { dropped: true } });
     expect(recovery.command).toHaveBeenCalledTimes(1);
   });
+  it("refuses recovery DELETE when authority transfers during the inventory read", async () => {
+    let transferred = false;
+    const api = { identity: vi.fn(), boundary: vi.fn(), authority: async () => {
+      if (transferred) throw new ProbeError("REHEARSAL_AUTHORITY_TRANSFERRED");
+    } };
+    const recovery = new ScratchRecovery({}, api, Date.now() + 1000, {});
+    recovery.matching = async () => { transferred = true; return true; };
+    recovery.command = vi.fn();
+    await expect(recovery.drop(name, state())).rejects.toThrow("REHEARSAL_AUTHORITY_TRANSFERRED");
+    expect(recovery.command).not.toHaveBeenCalled();
+  });
   it("an absent database needs no ownership adoption or DELETE", async () => {
-    const recovery = new ScratchRecovery({}, { identity: vi.fn(), boundary: vi.fn() }, Date.now() + 1000, {});
+    const recovery = new ScratchRecovery({}, { identity: vi.fn(), boundary: vi.fn(), authority: vi.fn() }, Date.now() + 1000, {});
     recovery.matching = vi.fn().mockResolvedValue(false); recovery.command = vi.fn();
     await recovery.drop(name, null); expect(recovery.command).not.toHaveBeenCalled();
   });
