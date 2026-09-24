@@ -117,6 +117,53 @@ test("PostgreSQL runtime explicitly selects shared backend with bounded pools an
     assert.equal(result.roles[role].env.some(e => e.name === "DATABASE_URL" && e.secretRef), true);
   }
 });
+
+test("an explicit two-connection pool is retained in both inactive-target roles and bound to plan evidence", async () => {
+  const f = postgresStateFixture();
+  f.options.plan.binding.postgresConnectionLimit = 2;
+  f.options.databaseUrl = f.options.databaseUrl.replace("connection_limit=5", "connection_limit=2");
+  const projected = prepareOpsCoreRuntimeValues(f.options);
+  for (const role of ["web", "worker"]) assert.equal(new URL(projected.roles[role].values.DATABASE_URL).searchParams.get("connection_limit"), "2");
+  const result = await retainOpsCoreRuntimeConfig(f.options);
+  for (const role of ["web", "worker"]) {
+    const env = result.roles[role].env.find(e => e.name === "DATABASE_URL");
+    const secret = result.roles[role].secrets.find(s => s.name === env.secretRef);
+    const name = new URL(secret.keyVaultUrl).pathname.split("/")[2];
+    assert.equal(f.secrets.get(name).value, f.options.databaseUrl);
+  }
+  assert.equal(JSON.stringify(result).includes(f.credential), false);
+  const legacy = postgresStateFixture();
+  assert.notEqual(result.planSha256, (await retainOpsCoreRuntimeConfig(legacy.options)).planSha256);
+});
+
+test("pool changes cannot overwrite existing versioned runtime credentials", async () => {
+  const f = postgresStateFixture();
+  await retainOpsCoreRuntimeConfig(f.options);
+  const calls = f.calls.length;
+  f.options.plan.binding.postgresConnectionLimit = 2;
+  f.options.databaseUrl = f.options.databaseUrl.replace("connection_limit=5", "connection_limit=2");
+  await assert.rejects(retainOpsCoreRuntimeConfig(f.options), /RUNTIME_SECRET_READBACK_MISMATCH/);
+  assert.equal(f.calls.length, calls);
+});
+
+for (const [label, change] of [
+  ["unbound reduction", o => { o.databaseUrl = o.databaseUrl.replace("connection_limit=5", "connection_limit=2"); }],
+  ["plan URL mismatch", o => { o.plan.binding.postgresConnectionLimit = 2; }],
+  ["unknown pool", o => { o.plan.binding.postgresConnectionLimit = 3; }],
+  ["string pool", o => { o.plan.binding.postgresConnectionLimit = "2"; }],
+  ["null pool", o => { o.plan.binding.postgresConnectionLimit = null; }],
+  ["timeout drift", o => { o.databaseUrl = o.databaseUrl.replace("pool_timeout=10", "pool_timeout=20"); }],
+  ["duplicate pool", o => { o.databaseUrl += "&connection_limit=2"; }],
+]) test(`PostgreSQL runtime rejects ${label} before writing any secrets`, async () => {
+  const f = postgresStateFixture(); change(f.options);
+  await assert.rejects(retainOpsCoreRuntimeConfig(f.options)); assert.equal(f.calls.length, 0);
+});
+
+test("Redis plans cannot opt into a PostgreSQL-only pool binding", async () => {
+  const f = fixture(); f.options.plan.binding.postgresConnectionLimit = 2;
+  await assert.rejects(retainOpsCoreRuntimeConfig(f.options), /RUNTIME_DATABASE_POOL_BINDING_INVALID/);
+  assert.equal(f.calls.length, 0);
+});
 for (const [label, change] of [
   ["mixed Redis credentials", o => { o.redisUrl = fixture().options.redisUrl; }],
   ["unbounded pool", o => { o.databaseUrl = o.databaseUrl.replace("connection_limit=5", "connection_limit=50"); }],

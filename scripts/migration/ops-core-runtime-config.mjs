@@ -21,6 +21,12 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
   const b = p.binding;
   const backend = b?.sharedStateBackend ?? "redis";
   need(["redis", "postgres"].includes(backend), "RUNTIME_SHARED_STATE_INVALID");
+  // An inactive target may opt into a two-connection process pool for a
+  // separately qualified shared server. Retained plans keep the five-connection
+  // default. Never silently resize a supplied URL or an existing vault secret.
+  const postgresConnectionLimit = b?.postgresConnectionLimit ?? 5;
+  need(!Object.hasOwn(b ?? {}, "postgresConnectionLimit")
+    || backend === "postgres" && [2, 5].includes(b.postgresConnectionLimit), "RUNTIME_DATABASE_POOL_BINDING_INVALID");
   need(b && /^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(b.vaultUri)
     && /^\/subscriptions\/[a-f0-9-]{36}\/resourceGroups\/[a-zA-Z0-9_.()-]+\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/[a-zA-Z0-9-]+$/.test(b.identityResourceId)
     && GUID.test(b.identityClientId) && /^[a-z0-9]{3,24}$/.test(b.storageAccount)
@@ -39,7 +45,7 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
     need(value === null || /^[1-9][0-9]*$/.test(value) && Number(value) <= maximum, "RUNTIME_DATABASE_POOL_INVALID");
   }
   if (backend === "postgres") {
-    need(redisUrl == null && database.searchParams.get("connection_limit") === "5"
+    need(redisUrl == null && database.searchParams.get("connection_limit") === String(postgresConnectionLimit)
       && database.searchParams.get("pool_timeout") === "10", "RUNTIME_POSTGRES_STATE_INVALID");
   } else {
     const redis = url(redisUrl);

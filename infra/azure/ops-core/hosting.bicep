@@ -1,5 +1,35 @@
 targetScope = 'resourceGroup'
 
+@sealed()
+type dedicatedPostgres = {
+  mode: 'dedicated'
+}
+
+@sealed()
+type existingSharedPostgres = {
+  mode: 'existing-shared'
+  @minLength(1)
+  @maxLength(90)
+  resourceGroupName: string
+  @minLength(3)
+  @maxLength(63)
+  serverName: string
+}
+
+@export()
+@discriminator('mode')
+type postgresHostingConfig = dedicatedPostgres | existingSharedPostgres
+
+param postgresHosting postgresHostingConfig = { mode: 'dedicated' }
+var useExistingPostgres = postgresHosting.mode == 'existing-shared'
+
+// The scope has no subscription override: reuse is explicitly same-subscription.
+resource existingPostgres 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' existing = if (useExistingPostgres) {
+  name: postgresHosting.mode == 'existing-shared' ? postgresHosting.serverName : 'unused'
+  scope: resourceGroup(postgresHosting.mode == 'existing-shared' ? postgresHosting.resourceGroupName : resourceGroup().name)
+}
+
+
 param location string
 param namePrefix string
 param tags object
@@ -90,6 +120,45 @@ resource postgresDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
   }
 }
 
+// One endpoint serves both distinct domain databases on the retained server.
+resource sharedPostgresEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (useExistingPostgres) {
+  name: 'pe-${namePrefix}-shared-pg'
+  location: location
+  tags: tags
+  properties: {
+    subnet: { id: privateEndpointsSubnetId }
+    privateLinkServiceConnections: [
+      {
+        name: 'postgres'
+        properties: {
+          privateLinkServiceId: existingPostgres!.id
+          groupIds: ['postgresqlServer']
+        }
+      }
+    ]
+  }
+}
+resource sharedPostgresEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (useExistingPostgres) {
+  parent: sharedPostgresEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      { name: 'postgres', properties: { privateDnsZoneId: postgresDns.id } }
+    ]
+  }
+}
+
+var domainPostgres = useExistingPostgres ? {
+  mode: 'existing-shared'
+  resourceId: existingPostgres!.id
+  resourceGroupName: postgresHosting.mode == 'existing-shared' ? postgresHosting.resourceGroupName : resourceGroup().name
+  serverName: existingPostgres!.name
+  host: existingPostgres!.properties.fullyQualifiedDomainName
+  administratorLogin: existingPostgres!.properties.administratorLogin
+  publicNetworkAccess: existingPostgres!.properties.network.publicNetworkAccess
+  privateEndpointId: sharedPostgresEndpoint!.id
+} : { mode: 'dedicated' }
+
 resource redisDns 'Microsoft.Network/privateDnsZones@2020-06-01' = if (provisionRedisDns) {
   name: 'privatelink.redis.azure.net'
   location: 'global'
@@ -135,6 +204,7 @@ module opsDomain './domain.bicep' = {
     namePrefix: '${namePrefix}-ops'
     tags: union(tags, { domain: 'ops' })
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
+    postgresBinding: domainPostgres
     postgresAdministratorLogin: postgresAdministratorLogin
     postgresAdministratorPassword: opsPostgresAdministratorPassword
     postgresSkuName: opsPostgresSkuName
@@ -154,6 +224,7 @@ module coreDomain './domain.bicep' = {
     namePrefix: '${namePrefix}-core'
     tags: union(tags, { domain: 'core' })
     migrationOperatorPrincipalId: migrationOperatorPrincipalId
+    postgresBinding: domainPostgres
     postgresAdministratorLogin: postgresAdministratorLogin
     postgresAdministratorPassword: corePostgresAdministratorPassword
     postgresSkuName: corePostgresSkuName

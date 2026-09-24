@@ -215,6 +215,20 @@ function fixture(options = {}) {
 }
 const rejected = (promise, code) => assert.rejects(promise, error => opsCoreUpdateDiagnostic(error) === code);
 
+test("an accepted cross-group database binding survives app-only release and retains pinned runtime secrets", async () => {
+  const f = fixture();
+  f.plan.target.postgres.resourceGroupName = "shared-database";
+  f.plan.target.postgres.resourceId = f.plan.target.postgres.resourceId.replace("/resourceGroups/fixture/", "/resourceGroups/shared-database/");
+  const before = Object.fromEntries(["web", "worker"].map(role => [role, structuredClone(f.apps[role].properties.configuration.secrets)]));
+  const targetHash = opsCoreAzureTargetBindingSha256(f.plan.target);
+  assert.equal((await f.run()).outcome, "UPDATED");
+  assert.equal(opsCoreAzureTargetBindingSha256(f.plan.target), targetHash);
+  for (const role of ["web", "worker"]) {
+    assert.deepEqual(f.apps[role].properties.configuration.secrets, before[role]);
+    assert.ok(f.apps[role].id.startsWith(prefix));
+  }
+});
+
 async function retainBaselineObserver(f, mutate = () => {}) {
   const p = f.plan, h = { worker: { appId: `${prefix}Microsoft.App/containerApps/${p.target.apps.worker}`,
     origin: p.origins.worker, image: p.baseline.images.worker, release: structuredClone(p.baseline.release) },

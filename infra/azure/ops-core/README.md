@@ -20,13 +20,73 @@ Redis public access is disabled; Redis persistence is disabled, so HA is replica
 not an archive. No `flexibleServers/databases` resource is created: full restore owns
 database names and promotion. Extension allowlisting is also a restore preflight step.
 
+## Reuse one existing PostgreSQL server
+
+`postgresHosting` defaults to `{ mode: 'dedicated' }`, preserving two new servers.
+For explicit reuse set `{ mode: 'existing-shared', resourceGroupName: '<existing-group>',
+serverName: '<existing-pg18>' }`; see `existing-shared.parameters.example.json`.
+The discriminated, closed parameter type requires both names and accepts no subscription
+override. The reference always uses the deployment subscription.
+
+Existing mode only reads the server. It does not create/update the server, administrator,
+SKU, storage, backups, firewall rules, public access, extensions or databases. Dedicated
+password parameters may be omitted; administrator login, host and public-access outputs
+come from the actual server properties, not the dedicated-mode inputs. The dedicated
+SKU/login/network/restore-IP inputs have no effect on the retained server. Each domain's
+`temporaryRestoreFirewallName` output is null in this mode.
+
+Hosting creates one shared PostgreSQL private endpoint and DNS zone group in its new
+private-endpoint subnet. Both domain outputs bind that same endpoint/server and include
+`postgresServerResourceGroupName`. Separate domain identities, runtime vaults, object
+stores and migration custody remain unchanged. Select PostgreSQL shared state separately
+for each domain if Redis is not wanted; server sharing does not implicitly change it.
+
+In each retained Azure target binding, set `postgres.resourceGroupName` to the
+existing server's group and bind its exact `resourceId`, `host`, `major: 18` and
+hosting-owned `privateEndpointId`. Only the PostgreSQL server may use that explicit
+other group; the environment, apps, Redis and endpoints remain in the hosting
+group and subscription. Omitting the field preserves legacy same-group bindings
+and their hashes. Reusing a server does not prove all its database writers stopped:
+the inactivity guard observes only the declared domain's apps.
+
+Before deployment/activation, independently admit the exact PG18 server, existing
+public-networking/Private Link compatibility, approved endpoint, private DNS/connectivity,
+restore privilege and capacity. Existing-server read access and endpoint approval authority
+must already be governed; this template grants neither. The supplied names alone do not
+prove any of these prerequisites. For temporary external restore access use the existing
+server's serialized maintenance procedure; these templates deliberately cannot open or
+close that window. The target guard must still prove public access Disabled and all
+firewall rules removed before activation.
+
+Full restore promotes separate `corgtex_ops` and `corgtex_core` databases only after
+collision and OID/owner checks. Do not precreate these databases or overwrite retained
+foundation databases. Use distinct domain SQL credentials and verify cross-database
+isolation; separate vaults and managed identities do not grant SQL isolation automatically.
+Retire or rebind rehearsal stop/firewall/cleanup authority before sharing a production
+server. Per-domain release leases do not serialize server-wide maintenance, capacity,
+backup recovery or stop operations. Retain capacity for all web/worker pools, the
+scheduler pool plus its separate one-connection advisory lock, the scaler role
+(connection limit two), deployment overlap and operator/provider reserve. Neither a
+two-connection pool nor a min-zero worker proves shared-server capacity. Sharing reduces physical isolation and creates a
+shared failure/maintenance scope; compilation is not live capacity or activation proof.
+
+Incremental redeployment does not remove old dedicated servers/endpoints. This option
+must not be used to imply their retirement or savings; preserve their data and recovery
+obligations until separately accepted retirement.
+
+Local template checks (Bicep must already be installed):
+
+```sh
+node --test infra/azure/ops-core/infra.node-test.mjs
+```
+
 ## Optional PostgreSQL shared state
 
 `opsSharedStateBackend` and `coreSharedStateBackend` accept `redis` (the unchanged default) or `postgres`, independently. A PostgreSQL domain provisions no Redis instance or Redis private endpoint; the shared Redis DNS zone is omitted when both domains choose PostgreSQL. Each domain still has its own database, identity, secrets and object store. This choice does not resize applications or change the PostgreSQL SKU automatically.
 
 Incremental redeployment with PostgreSQL selected does not delete previously created Redis resources. Retire any existing Redis instance, endpoint and unused DNS only after an accepted state transition and recovery check; omission alone produces no saving on those existing resources.
 
-Pin `sharedStateBackend: "postgres"` and `redis: null` into that domain's Azure binding. Runtime custody must select the same backend, omit `REDIS_URL`, retain the encryption key and namespace, and use `connection_limit=5&pool_timeout=10`. Activation rejects mixed backend settings and requires matching web health. Deploy the compatible additive schema to the source before taking the final migration copy.
+Pin `sharedStateBackend: "postgres"` and `redis: null` into that domain's Azure binding. Runtime custody must select the same backend, omit `REDIS_URL`, and retain the encryption key and namespace. The default URL policy remains `connection_limit=5&pool_timeout=10`. An explicit `binding.postgresConnectionLimit: 2` in the runtime projection plan permits `connection_limit=2&pool_timeout=10` for inactive-target qualification; only numeric `2` or `5` is accepted, and the supplied URL must match exactly. The operator never rewrites an existing Key Vault secret. Changing an active pool requires a separate versioned configuration rollout, not this infrastructure deployment. Activation rejects mixed backend settings and requires matching web health. Deploy the compatible additive schema to the source before taking the final migration copy.
 
 The PostgreSQL transfer variant uses schema version 2 with `sharedState: { backend: "postgres", sourceRedis: <pinned source binding> }` instead of the legacy `redis` target/job block. It preserves source writer fences and fresh source Redis emptiness checks. Target acceptance is a read-only PostgreSQL schema/state proof, not a simulated Redis receipt. PostgreSQL public restore access still closes before activation.
 
@@ -52,8 +112,10 @@ Retained cache/upload ciphertext inherits database-backup retention. Pending upl
   operators and app download URLs; this does not permit anonymous or account-key
   access. Custody receives no user-delegation role.
 
-No secrets are created, returned, or embedded in examples. Supply separate PostgreSQL
-admin passwords through protected deployment inputs. The example uses references to
+No secrets are created, returned, or embedded in examples. In dedicated mode, supply
+valid separate PostgreSQL admin passwords through protected deployment inputs. Empty
+defaults only allow existing-shared mode to omit these creation-only secrets; they are
+not usable dedicated-server passwords. The example uses references to
 an existing bootstrap vault, which must support ARM secret references; it cannot
 reference the vaults being created in the same initial deployment. These templates
 do not grant ARM access to that existing vault. Do not store populated parameter files.
