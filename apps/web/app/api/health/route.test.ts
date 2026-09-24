@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryRaw = vi.fn();
@@ -31,6 +32,7 @@ beforeEach(() => {
   delete process.env.RAILWAY_GIT_COMMIT_SHA;
   delete process.env.npm_package_version;
   delete process.env.REDIS_URL;
+  delete process.env.SHARED_STATE_BACKEND;
   delete process.env.R2_ACCOUNT_ID;
   delete process.env.S3_BUCKET_NAME;
   delete process.env.AWS_S3_BUCKET_NAME;
@@ -389,4 +391,59 @@ describe("GET /api/health", () => {
       },
     });
   });
+
+  it("reports PostgreSQL as the selected shared backend while preserving the legacy Redis field", async () => {
+    vi.stubEnv("SHARED_STATE_BACKEND", "postgres");
+    vi.stubEnv("DATABASE_URL", "postgresql://synthetic@localhost/synthetic");
+    vi.stubEnv("ENCRYPTION_KEY", randomBytes(32).toString("hex"));
+    try {
+      const { GET } = await import("./route");
+      queryRaw.mockReset();
+      queryRaw.mockResolvedValueOnce([{ ok: 1 }]).mockResolvedValueOnce([{ ready: true }])
+        .mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([]);
+      const response = await GET();
+      expect(response.status).toBe(200);
+      expect((await response.json()).runtime).toMatchObject({ redis: "missing", sharedState: { backend: "postgres", status: "configured" } });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each(["", "not-a-key", `${randomBytes(32).toString("hex")}extra`])("rejects PostgreSQL readiness with unusable encryption", async (key) => {
+    vi.stubEnv("SHARED_STATE_BACKEND", "postgres");
+    vi.stubEnv("DATABASE_URL", "postgresql://synthetic@localhost/synthetic");
+    vi.stubEnv("ENCRYPTION_KEY", key);
+    try {
+      const { GET } = await import("./route");
+      queryRaw.mockReset();
+      queryRaw.mockResolvedValueOnce([{ ok: 1 }]).mockResolvedValueOnce([{ ready: true }])
+        .mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([]);
+      const response = await GET();
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body).toMatchObject({ status: "degraded", runtime: { sharedState: { backend: "postgres", status: "missing" } } });
+      if (key) expect(JSON.stringify(body)).not.toContain(key);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("reports Redis configuration without claiming PostgreSQL is selected", async () => {
+    process.env.REDIS_URL = "redis://synthetic:6379";
+    const { GET } = await import("./route");
+    queryRaw.mockReset();
+    queryRaw.mockResolvedValueOnce([{ ok: 1 }]).mockResolvedValueOnce([{ ready: true }])
+      .mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([]);
+    expect((await (await GET()).json()).runtime).toMatchObject({ redis: "configured", sharedState: { backend: "redis", status: "configured" } });
+  });
+
+  it("returns structured degraded health for an invalid shared backend selection", async () => {
+    vi.stubEnv("SHARED_STATE_BACKEND", "unexpected");
+    try {
+      const { GET } = await import("./route");
+      queryRaw.mockReset();
+      queryRaw.mockResolvedValueOnce([{ ok: 1 }]).mockResolvedValueOnce([{ ready: true }])
+        .mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([]);
+      const response = await GET();
+      expect(response.status).toBe(503);
+      expect((await response.json()).runtime.sharedState).toEqual({ backend: "invalid", status: "invalid" });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
 });

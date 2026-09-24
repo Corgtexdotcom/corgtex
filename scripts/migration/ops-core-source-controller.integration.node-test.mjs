@@ -171,7 +171,7 @@ function simulatedRailway(scenario) {
 
 // All provider identities and startup file hashes below are explicitly synthetic.
 // Only PostgreSQL and Docker are real, bounded to each test's own local container.
-for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECEIPT", "LOST_POSTGRES_STAGE_RECEIPT",
+for (const scenario of ["COMPLETE", "COMPLETE_POSTGRES", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECEIPT", "LOST_POSTGRES_STAGE_RECEIPT",
   "LOST_ROTATION_RECEIPT", "PROVIDER_INCOMPLETE", "RECOVERY_LOST_PASSWORD_RECEIPT", "RECOVERY_LOST_RESTART_ACK",
   "RECOVERY_LOST_STAGE_ACK", "RECOVERY_LOST_COMMIT_ACK", "RECOVERY_DRIFT", "RECOVERY_TARGET_DRIFT", "PREFLIGHT_BAD_ORIGINAL", "PREFLIGHT_BAD_READER", "PREFLIGHT_BAD_READER_GRANTS", "RECOVERY_LOST_COMPLETE_ACK", "RECOVERY_PARTIAL_STAGE", "PREFLIGHT_BAD_HEALTH", "RECOVERY_BAD_HEALTH"]) {
   test(`integrated source controller ${scenario}`, { timeout: 180_000 }, async () => {
@@ -272,6 +272,15 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
           originalSecretVersion: `https://migration-fixture.vault.azure.net/secrets/source-original/${"b".repeat(32)}`,
           retainedSecretVersion: `https://migration-fixture.vault.azure.net/secrets/source-recovery/${"a".repeat(32)}`, vaultName: "migration-fixture",
         } } };
+      if (scenario === "COMPLETE_POSTGRES") {
+        plan.schemaVersion = 2;
+        plan.azure.sharedStateBackend = "postgres";
+        plan.azure.redis = null;
+        plan.sharedState = { backend: "postgres", sourceRedis: {
+          mode: "standalone", resourceId: null, server: { version: "8.2.9", runId: "a".repeat(40) },
+          connection: { host: "source.local", port: 6379, database: 0, username: "default", tls: false },
+        } };
+      }
       const stores = storesFor(plan, scenario);
       rail.state.records = stores.records;
       owner = await openCutoverCustody(stores.blob, stores.intentSha256);
@@ -306,7 +315,7 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
         assert.equal(rail.state.effects.size, 0, "initial PostgreSQL admission must precede every Railway mutation");
         return;
       }
-      if (scenario === "COMPLETE" || (scenario.startsWith("RECOVERY_") && scenario !== "RECOVERY_PARTIAL_STAGE")) result = await runOpsCoreSourceFence(options(plan));
+      if (["COMPLETE", "COMPLETE_POSTGRES"].includes(scenario) || (scenario.startsWith("RECOVERY_") && scenario !== "RECOVERY_PARTIAL_STAGE")) result = await runOpsCoreSourceFence(options(plan));
       else {
         await assert.rejects(runOpsCoreSourceFence(options(plan)));
         assert.equal(owner.snapshot().phase, "PREPARED");
@@ -395,7 +404,7 @@ for (const scenario of ["COMPLETE", "LOST_WRITER_STAGE", "LOST_WRITER_STAGE_RECE
       const toc = docker("exec", containerId, "pg_restore", "--list", "/tmp/source-controller-reader.dump");
       assert.ok(toc.includes("TABLE DATA public retained_lifecycle_fixture"));
       assert.ok(toc.includes("SEQUENCE SET public retained_lifecycle_fixture_id_seq"));
-      if (scenario === "COMPLETE" || scenario.startsWith("RECOVERY_")) {
+      if (["COMPLETE", "COMPLETE_POSTGRES"].includes(scenario) || scenario.startsWith("RECOVERY_")) {
         stage = "SOURCE_RECOVERY";
         await admin.end(); admin = null;
         const abandoned = await owner.begin("CAPTURED", "f".repeat(64));

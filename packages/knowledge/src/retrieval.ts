@@ -132,13 +132,13 @@ async function knowledgeCacheVersion(workspaceId: string) {
   return `${globalVersion}:${workspaceVersion}`;
 }
 
-export async function invalidateKnowledgeCache(workspaceId?: string) {
+export async function invalidateKnowledgeCache(workspaceId?: string, transaction?: Prisma.TransactionClient) {
   if (!workspaceId) {
-    await incrementCacheVersion("knowledge:all");
+    await incrementCacheVersion("knowledge:all", transaction);
     return;
   }
 
-  await incrementCacheVersion(`knowledge:${workspaceId}`);
+  await incrementCacheVersion(`knowledge:${workspaceId}`, transaction);
 }
 
 

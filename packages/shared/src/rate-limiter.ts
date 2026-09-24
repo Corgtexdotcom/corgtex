@@ -1,3 +1,5 @@
+import { getSharedStateBackend } from "./shared-state";
+import { postgresSharedState } from "./postgres-shared-state";
 import { env } from "./env";
 import { getRedisClient, isRedisConfigured, redisKey } from "./redis";
 
@@ -18,6 +20,8 @@ export type RateLimitResetResult = {
   key: string;
   memoryCleared: true;
   redisCleared: boolean;
+  sharedStateCleared: boolean;
+  backend: "redis" | "postgres";
 };
 
 type Bucket = {
@@ -146,6 +150,14 @@ function shouldFailClosed(opts: RateLimitOptions) {
 }
 
 export async function checkRateLimit(key: string, opts: RateLimitOptions): Promise<RateLimitResult> {
+  if (getSharedStateBackend() === "postgres") {
+    try {
+      return await postgresSharedState.check(key, opts);
+    } catch (error) {
+      if (!opts.failClosed) throw error;
+      return { allowed: false, remaining: 0, limit: opts.limit, resetAtMs: Date.now() + opts.windowMs };
+    }
+  }
   try {
     const redisResult = await checkRedisRateLimit(key, opts);
     if (redisResult) {
@@ -176,6 +188,17 @@ export async function checkRateLimit(key: string, opts: RateLimitOptions): Promi
 
 export async function resetRateLimit(key: string): Promise<RateLimitResetResult> {
   buckets.delete(key);
+  const backend = getSharedStateBackend();
+  if (backend === "postgres") {
+    let sharedStateCleared = false;
+    try {
+      await postgresSharedState.reset(key);
+      sharedStateCleared = true;
+    } catch {
+      // Report failure to callers; never claim a process-local reset cleared shared state.
+    }
+    return { key, memoryCleared: true, redisCleared: false, sharedStateCleared, backend };
+  }
   let redisCleared = false;
   try {
     redisCleared = await resetRedisRateLimit(key);
@@ -186,6 +209,8 @@ export async function resetRateLimit(key: string): Promise<RateLimitResetResult>
     key,
     memoryCleared: true,
     redisCleared,
+    sharedStateCleared: redisCleared,
+    backend,
   };
 }
 

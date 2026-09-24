@@ -98,3 +98,32 @@ test("activation or cancellation during readback blocks further secret writes", 
   f.options.secretClient.setSecret = async (...args) => { const value = await set(...args); f.activate(); return value; };
   await assert.rejects(retainOpsCoreRuntimeConfig(f.options), /RUNTIME_TARGET_UNPROVEN/); assert.equal(f.calls.length, 1);
 });
+
+
+function postgresStateFixture() {
+  const f = fixture();
+  f.options.plan.binding.sharedStateBackend = "postgres";
+  f.options.plan.binding.redisHost = null;
+  f.options.redisUrl = null;
+  f.options.databaseUrl += "&connection_limit=5&pool_timeout=10";
+  return f;
+}
+test("PostgreSQL runtime explicitly selects shared backend with bounded pools and no Redis secret", async () => {
+  const f = postgresStateFixture();
+  const result = await retainOpsCoreRuntimeConfig(f.options);
+  for (const role of ["web", "worker"]) {
+    assert.deepEqual(result.roles[role].env.find(e => e.name === "SHARED_STATE_BACKEND"), { name: "SHARED_STATE_BACKEND", value: "postgres" });
+    assert.equal(result.roles[role].env.some(e => e.name === "REDIS_URL"), false);
+    assert.equal(result.roles[role].env.some(e => e.name === "DATABASE_URL" && e.secretRef), true);
+  }
+});
+for (const [label, change] of [
+  ["mixed Redis credentials", o => { o.redisUrl = fixture().options.redisUrl; }],
+  ["unbounded pool", o => { o.databaseUrl = o.databaseUrl.replace("connection_limit=5", "connection_limit=50"); }],
+  ["missing pool", o => { o.databaseUrl = o.databaseUrl.replace("&connection_limit=5", ""); }],
+  ["missing backend", o => { delete o.plan.binding.sharedStateBackend; }],
+  ["unknown backend", o => { o.plan.binding.sharedStateBackend = "automatic"; }],
+]) test(`PostgreSQL runtime rejects ${label} before secret writes`, async () => {
+  const f = postgresStateFixture(); change(f.options);
+  await assert.rejects(retainOpsCoreRuntimeConfig(f.options)); assert.equal(f.calls.length, 0);
+});

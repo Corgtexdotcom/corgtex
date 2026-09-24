@@ -16,6 +16,10 @@ param temporaryRestoreIpv4 string = ''
 param privateEndpointsSubnetId string
 param postgresDnsZoneId string
 param redisDnsZoneId string
+@allowed(['redis', 'postgres'])
+param sharedStateBackend string = 'redis'
+
+var provisionRedis = sharedStateBackend == 'redis'
 
 module identity '../modules/identity-key-vault.bicep' = {
   name: '${namePrefix}-identity'
@@ -106,7 +110,7 @@ resource postgresEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneG
   }
 }
 
-resource redis 'Microsoft.Cache/redisEnterprise@2025-07-01' = {
+resource redis 'Microsoft.Cache/redisEnterprise@2025-07-01' = if (provisionRedis) {
   name: '${namePrefix}-redis'
   location: location
   tags: tags
@@ -117,7 +121,7 @@ resource redis 'Microsoft.Cache/redisEnterprise@2025-07-01' = {
     publicNetworkAccess: 'Disabled'
   }
 }
-resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-07-01' = {
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-07-01' = if (provisionRedis) {
   parent: redis
   name: 'default'
   properties: {
@@ -130,7 +134,7 @@ resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-07-01' = 
     port: 10000
   }
 }
-resource redisEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+resource redisEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (provisionRedis) {
   name: 'pe-${namePrefix}-redis'
   location: location
   tags: tags
@@ -148,7 +152,7 @@ resource redisEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
   }
   dependsOn: [redisDatabase]
 }
-resource redisEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+resource redisEndpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (provisionRedis) {
   parent: redisEndpoint
   name: 'default'
   properties: {
@@ -173,9 +177,10 @@ output resources object = {
   postgresPrivateEndpointId: postgresEndpoint.id
   postgresPublicNetworkAccess: postgresPublicNetworkAccess
   temporaryRestoreFirewallName: 'temporary-migration-operator'
-  redisId: redis.id
-  redisDatabaseId: redisDatabase.id
-  redisHost: redis.properties.hostName
-  redisPort: redisDatabase.properties.port
-  redisPrivateEndpointId: redisEndpoint.id
+  sharedStateBackend: sharedStateBackend
+  redisId: provisionRedis ? redis!.id : null
+  redisDatabaseId: provisionRedis ? redisDatabase!.id : null
+  redisHost: provisionRedis ? redis!.properties.hostName : null
+  redisPort: provisionRedis ? redisDatabase!.properties.port : null
+  redisPrivateEndpointId: provisionRedis ? redisEndpoint!.id : null
 }

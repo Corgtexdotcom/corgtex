@@ -95,6 +95,7 @@ type Env = {
   readonly DEPLOYMENT_WORKSPACE_SCOPE_SLUG: string | undefined;
   readonly SESSION_COOKIE_SECRET: string;
   readonly SESSION_LAST_SEEN_WRITE_INTERVAL_MS: number;
+  readonly SHARED_STATE_BACKEND: "redis" | "postgres";
   readonly REDIS_URL: string | undefined;
   readonly REDIS_KEY_PREFIX: string;
   readonly AGENT_API_KEY: string | undefined;
@@ -222,6 +223,11 @@ export const env: Env = {
   },
   get SESSION_LAST_SEEN_WRITE_INTERVAL_MS() {
     return numberFromEnv("SESSION_LAST_SEEN_WRITE_INTERVAL_MS", 5 * 60 * 1000);
+  },
+  get SHARED_STATE_BACKEND() {
+    const value = optional("SHARED_STATE_BACKEND") ?? "redis";
+    if (value !== "redis" && value !== "postgres") throw new Error("Invalid SHARED_STATE_BACKEND.");
+    return value;
   },
   get REDIS_URL() {
     return optional("REDIS_URL");

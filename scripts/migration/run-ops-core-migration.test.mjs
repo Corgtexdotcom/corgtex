@@ -101,6 +101,20 @@ function fixture() {
     options: { plan, containerFactory, identityCheck: async () => {} } };
 }
 
+function postgresVariant(plan) {
+  plan.schemaVersion = 2;
+  plan.sharedState = { backend: "postgres", sourceRedis: structuredClone(plan.redis.source) };
+  delete plan.redis;
+  plan.azure.sharedStateBackend = "postgres";
+  plan.azure.redis = null;
+  plan.activation.target = structuredClone(plan.azure);
+  for (const role of Object.values(plan.activation.roles)) {
+    role.env = role.env.filter(entry => entry.name !== "REDIS_URL");
+    role.env.push({ name: "SHARED_STATE_BACKEND", value: "postgres" });
+    role.secrets = role.secrets.filter(entry => entry.name !== "redis");
+  }
+}
+
 function stage(f, phase) {
   const index = CUTOVER_PHASES.indexOf(phase), row = f.blobs.get("cutovers/core.json");
   const journal = JSON.parse(row.text);
@@ -128,6 +142,18 @@ describe("Ops/Core executable operator", () => {
     if(kind==="same-version") pg.originalSecretVersion=pg.retainedSecretVersion;
     await expect(runOpsCoreMigration({...f.options,action:"initialize"})).rejects.toThrow(/MIGRATION_/);
     expect(f.writes()).toBe(0);
+  });
+  it("initializes and reopens a PostgreSQL v2 plan through the real operator validator", async () => {
+    const f = fixture(); postgresVariant(f.plan);
+    const first = await runOpsCoreMigration({ ...f.options, action: "initialize" });
+    expect(first.status).toBe("PREPARED");
+    expect(f.blobs.has(`plans/core/${archiveEvidenceHash(f.plan)}.json`)).toBe(true);
+    const writes = f.writes();
+    expect(await runOpsCoreMigration({ ...f.options, action: "status" })).toEqual(first);
+    expect(f.writes()).toBe(writes);
+    f.plan.redis = {};
+    await expect(runOpsCoreMigration({ ...f.options, action: "status" })).rejects.toThrow();
+    expect(f.writes()).toBe(writes);
   });
   it("checks Azure identity before creating any plan or journal", async () => {
     const f = fixture();
@@ -356,6 +382,25 @@ describe("live transfer dependency admission before source fencing", () => {
     expect(f.calls.filter(value => typeof value === "object").every(call => call.method === "GET"
       || call.method === "POST" && call.path.endsWith("/query") && call.body.query === "print preflight = 1")).toBe(true);
     expect(f.calls.filter(value => typeof value === "string" && /^(ALTER|CREATE|DROP|UPDATE|INSERT)/.test(value))).toEqual([]);
+  });
+
+  it("preflights PostgreSQL v2 without a Redis job while preserving all remaining admission checks", async () => {
+    const f = await setup(); postgresVariant(f.f.plan);
+    f.state.intentSha256 = archiveEvidenceHash(f.f.plan);
+    f.dependencies.redisTransport = async () => { throw Error("No Redis job is permitted"); };
+    const result = await f.run();
+    expect(result.status).toBe("PREFLIGHT_READY");
+    expect(result.evidence.sharedState).toMatchObject({ backend: "postgres", finalAcceptance: false });
+    expect(Object.hasOwn(result.evidence, "redis")).toBe(false);
+    expect(result.evidence.sourceAdmission).toMatchObject({ fresh: true, proof: { complete: true } });
+    expect(result.evidence.postgres).toMatchObject({ readOnly: true, tlsVerified: true });
+    expect(result.evidence.objects.readObjects).toBe(1);
+    expect(result.evidence.health).toBeDefined();
+    expect(f.calls).toContain("source-admission");
+    expect(f.calls).toContain("archive-key");
+    expect(f.calls.filter(call => typeof call === "object").some(call => call.path.includes("fixture-redis"))).toBe(false);
+    expect(f.key.every(byte => byte === 0)).toBe(true);
+    expect(f.state.phase).toBe("PREPARED");
   });
 
   it.each(["source", "postgres", "archive", "object-list", "object-read", "redis-job", "health-logs", "lease", "target-written"])(

@@ -1,3 +1,6 @@
+import type { Prisma } from "@prisma/client";
+import { getSharedStateBackend } from "./shared-state";
+import { postgresSharedState } from "./postgres-shared-state";
 import { getRedisClient, redisKey } from "./redis";
 
 type CacheEntry = {
@@ -32,6 +35,9 @@ function setMemoryValue(key: string, value: string, ttlMs: number) {
 }
 
 export async function getCacheJson<T>(key: string): Promise<T | null> {
+  if (getSharedStateBackend() === "postgres") {
+    try { return await postgresSharedState.getJson<T>(key); } catch { return null; }
+  }
   const namespacedKey = `cache:${key}`;
   const client = await getRedisClient();
 
@@ -49,6 +55,10 @@ export async function getCacheJson<T>(key: string): Promise<T | null> {
 }
 
 export async function setCacheJson(key: string, value: unknown, ttlMs: number) {
+  if (getSharedStateBackend() === "postgres") {
+    await postgresSharedState.setJson(key, value, ttlMs);
+    return;
+  }
   const namespacedKey = `cache:${key}`;
   const raw = JSON.stringify(value);
   const client = await getRedisClient();
@@ -66,6 +76,7 @@ export async function setCacheJson(key: string, value: unknown, ttlMs: number) {
 }
 
 export async function getCacheVersion(scope: string) {
+  if (getSharedStateBackend() === "postgres") return postgresSharedState.getVersion(scope);
   const key = `cache-version:${scope}`;
   const client = await getRedisClient();
 
@@ -81,7 +92,8 @@ export async function getCacheVersion(scope: string) {
   return memoryVersions.get(key) ?? 0;
 }
 
-export async function incrementCacheVersion(scope: string) {
+export async function incrementCacheVersion(scope: string, transaction?: Prisma.TransactionClient) {
+  if (getSharedStateBackend() === "postgres") return postgresSharedState.incrementVersion(scope, transaction);
   const key = `cache-version:${scope}`;
   const client = await getRedisClient();
 

@@ -6,6 +6,9 @@ export const TENANT_PURGE_DISPOSITIONS = [
 ] as const;
 export type TenantPurgeDisposition = typeof TENANT_PURGE_DISPOSITIONS[number];
 
+// Opaque runtime keys are database-wide, not tenant ownership references.
+export const TENANT_PURGE_GLOBAL_STATE_MODELS = ["SharedRateLimit", "SharedCacheEntry", "SharedCacheVersion"] as const;
+
 export const TENANT_PURGE_MODEL_DISPOSITIONS = {
   TARGET: ["Workspace", "CustomerAccount", "CustomerDeployment", "ProcurementTrial"],
   CASCADE: [
@@ -22,7 +25,7 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
     "GovernanceScore", "ImpactFootprint", "InboundWebhook", "KeyResult", "KnowledgeChunk", "McpOAuthAccessToken", "McpOAuthAuthorizationCode", "Meeting", "MeetingAudioAsset",
     "MeetingFollowUpReview", "MeetingInsight", "MeetingRecorderSmokeRun", "MeetingRecording", "MeetingSeries", "MeetingTranscriptImportBatch", "MeetingTranscriptProcessingProgress",
     "MeetingTranscriptSourceConnection", "MeetingTranscriptSourceRecord", "Member", "MemberEmailAlias", "MemberExpertise", "MemberInviteRequest", "ModelUsage", "ModelUsageBudget",
-    "NewspaperDelivery", "NewspaperEdition", "NewspaperTrackedLink", "Notification", "NotificationDelivery", "OAuthApp", "OAuthConnection", "Objection", "PolicyCorpus",
+    "NewspaperDelivery", "NewspaperEdition", "NewspaperTrackedLink", "Notification", "NotificationDelivery", "OAuthApp", "OAuthConnection", "Objection", "PendingTranscriptUpload", "PolicyCorpus",
     "ProcurementBillingHandoff", "ProcurementSetupSession", "ProductAnalyticsEvent", "Proposal", "Recognition", "Role", "RoleAssignment", "RoleHolderHistory", "RoleOnboardingSession",
     "RoleVersion", "Tension", "TensionUpvote", "UserWorkspaceOnboardingState", "WebhookDelivery", "WebhookEndpoint", "WorkItemEvidence", "WorkItemVersion", "WorkspaceAgentConfig",
     "WorkspaceArchiveRecord", "WorkspaceBillingProfile", "WorkspaceBriefing", "WorkspaceEnterpriseService", "WorkspaceExternalResource", "WorkspaceExternalResourceAttachment",
@@ -39,7 +42,7 @@ export const TENANT_PURGE_MODEL_DISPOSITIONS = {
     "OAuthAccessToken", "OAuthAuthorizationCode", "ProcurementIdempotencyKey", "SelfServeEmailCapture", "SelfServeSmokeRun", "SelfServeSupportSession",
   ],
   RETAIN: ["StripeWebhookEvent", "TenantPurgeRun"],
-  SHARED_PRESERVE: ["AppDefinition", "AppRelease", "AppRuntime", "McpOAuthClient", "NotificationPreference", "PasswordResetToken", "Session", "User", "UserSsoIdentity"],
+  SHARED_PRESERVE: [...TENANT_PURGE_GLOBAL_STATE_MODELS, "AppDefinition", "AppRelease", "AppRuntime", "McpOAuthClient", "NotificationPreference", "PasswordResetToken", "Session", "User", "UserSsoIdentity"],
 } as const satisfies Record<TenantPurgeDisposition, readonly Prisma.ModelName[]>;
 
 export const TENANT_PURGE_TARGET_MODELS = ["Workspace", "CustomerDeployment", "CustomerAccount", "ProcurementTrial"] as const;
@@ -106,6 +109,7 @@ ProcurementBillingHandoff|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascad
 ProviderCutover|destinationDeployment|CustomerDeployment|DestinationDeployment|destinationDeploymentId,customerAccountId|id,customerAccountId|1|10|Restrict|Restrict
 WorkspaceSupportGrant|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 WorkspaceSupportAccessRequest|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
+PendingTranscriptUpload|workspace|Workspace||workspaceId|id|0|0|Cascade|Cascade
 `;
 
 export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPurgeDirectRelation[] {
@@ -123,7 +127,7 @@ export function decodeDirectRelations(dsl: string, sourceBits: string): TenantPu
 }
 
 // Each row has delete/update source bits: 1 is explicit, 0 is the verified PostgreSQL default.
-const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}1010`;
+const DIRECT_RELATION_SOURCE_BITS = `${"10".repeat(154)}${"11".repeat(3)}101010`;
 export const TENANT_PURGE_DIRECT_RELATIONS = decodeDirectRelations(DIRECT_RELATION_DSL, DIRECT_RELATION_SOURCE_BITS);
 
 function stripPrismaComments(schema: string) {

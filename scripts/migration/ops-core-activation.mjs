@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256, opsCoreSharedStateBackend } from "./ops-core-azure-target.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
@@ -66,7 +66,14 @@ export function validateOpsCoreActivationPlan(input) {
       requireValue(e.secretRef ? names.has(e.secretRef) : typeof e.value === "string" && e.value.length <= 8192
         && !/(?:SECRET|PASSWORD|TOKEN|API_KEY|ENCRYPTION_KEY|DATABASE_URL|REDIS_URL)/.test(e.name), "ACTIVATION_ENV_INVALID");
     }
-    for (const name of ["DATABASE_URL", "REDIS_URL"]) requireValue(r.env.some(e => e.name === name && e.secretRef), "ACTIVATION_ENV_INVALID");
+    const backend = opsCoreSharedStateBackend(p.target);
+    for (const name of backend === "redis" ? ["DATABASE_URL", "REDIS_URL"] : ["DATABASE_URL"]) {
+      requireValue(r.env.some(e => e.name === name && e.secretRef), "ACTIVATION_ENV_INVALID");
+    }
+    if (backend === "postgres") requireValue(!envNames.has("REDIS_URL")
+      && r.env.some(e => e.name === "SHARED_STATE_BACKEND" && e.value === "postgres"), "ACTIVATION_SHARED_STATE_INVALID");
+    else requireValue(!envNames.has("SHARED_STATE_BACKEND")
+      || r.env.some(e => e.name === "SHARED_STATE_BACKEND" && e.value === "redis"), "ACTIVATION_SHARED_STATE_INVALID");
   }
   return p;
 }
@@ -110,6 +117,7 @@ export function createOpsCoreActivationArmTransport({ subscriptionId, fetchImpl 
 
 function generatedEnv(plan, role) {
   return { PORT: role === "web" ? "3000" : "9090", AZURE_CLIENT_ID: plan.managedIdentityClientId,
+    ...(opsCoreSharedStateBackend(plan.target) === "postgres" ? { SHARED_STATE_BACKEND: "postgres" } : {}),
     CORGTEX_RELEASE_GIT_SHA: plan.release.gitSha, CORGTEX_RELEASE_IMAGE_TAG: plan.release.imageTag,
     CORGTEX_RELEASE_VERSION: plan.release.version,
     ...(role === "web" ? { CORGTEX_STARTUP_MODE: "migrate-and-web" } : { WORKER_HEALTH_PORT: "9090" }) };
@@ -275,7 +283,9 @@ export function createOpsCoreActivation({ plan: input, custody, operationStore, 
           const healthy = health?.status === 200 && (role === "web" ? managedAzureHealthReady(health.body, plan.release)
             : health.body?.status === "ok" && health.body.phase === "running" && health.body.release?.gitSha === plan.release.gitSha
               && health.body.release?.imageTag === plan.release.imageTag && health.body.release?.version === plan.release.version);
-          if (!healthy) { await wait(2000, signal); continue; }
+          const stateReady = opsCoreSharedStateBackend(plan.target) !== "postgres" || role !== "web"
+            || health.body?.runtime?.sharedState?.backend === "postgres" && health.body.runtime.sharedState.status === "configured";
+          if (!healthy || !stateReady) { await wait(2000, signal); continue; }
           const final = await request(appId(role));
           requireValue(final.status === 200, "ACTIVATION_READBACK_UNCERTAIN");
           const after = assertApp(final.body, role, expected, fqdn);

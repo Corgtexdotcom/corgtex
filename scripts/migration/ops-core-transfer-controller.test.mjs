@@ -7,7 +7,7 @@ import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { createCutoverJournal, openCutoverCustody } from "./ops-core-custody.mjs";
 import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
-import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer } from "./ops-core-transfer-controller.mjs";
+import { runOpsCoreDataTransfer, resumeOpsCoreDataTransfer, reconcileOpsCoreDataTransfer, validateOpsCoreTransferPlan } from "./ops-core-transfer-controller.mjs";
 
 const shared = vi.hoisted(() => ({ current: null }));
 vi.mock("./ops-core-source-controller.mjs", () => ({ assertOpsCoreSourceFenced: vi.fn(async ({ plan }) => ({
@@ -78,6 +78,22 @@ vi.mock("./ops-core-redis-gate.mjs", async importOriginal => {
       sourceFenceSha256: source.sourceFenceSha256 };
   } };
 });
+
+vi.mock("./ops-core-postgres-state-gate.mjs", () => ({ assertOpsCorePostgresStateEmpty: async options => {
+  const f = shared.current;
+  f.events.push("postgres-state");
+  expect(options.targetAdminConfig.database).toBe("postgres");
+  expect(typeof options.assertSourceRedisBound).toBe("function");
+  expect(options.targetDatabaseOid).toBe("16401");
+  expect(options.sourceRedis).toEqual(f.plan.sharedState.sourceRedis);
+  expect(options.targetBindingSha256).toBe(opsCoreAzureTargetBindingSha256(f.plan.azure));
+  const source = await options.assertSourceFenced();
+  await options.assertTargetInactive();
+  if (f.postgresStateFails) throw new Error("private shared state diagnostic");
+  return { status: "POSTGRES_SHARED_STATE_ACCEPTED", domain: f.plan.domain,
+    intentSha256: f.intentHash, sourceFenceSha256: source.sourceFenceSha256,
+    targetBindingSha256: options.targetBindingSha256 };
+} }));
 
 const databaseEvidence = () => ({
   server: { majorVersion: 18 }, locale: { encoding: "UTF8", collation: "C", ctype: "C", provider: "builtin",
@@ -334,5 +350,51 @@ describe("copy phase continuation and terminal readback", () => {
     await f.custody.begin("RESTORED", "d".repeat(64)); f.copyIncomplete = true;
     expect(await reconcileOpsCoreDataTransfer(f.options)).toMatchObject({ complete: false, status: "INCOMPLETE" });
     expect(f.events).toEqual(["reconcile-copy"]); expect(f.custody.snapshot().pending.to).toBe("RESTORED");
+  });
+});
+
+
+function postgresVariant(plan) {
+  plan.schemaVersion = 2;
+  plan.sharedState = { backend: "postgres", sourceRedis: structuredClone(plan.redis.source) };
+  delete plan.redis;
+  plan.azure.sharedStateBackend = "postgres";
+  plan.azure.redis = null;
+}
+
+describe("PostgreSQL shared state transfer variant", () => {
+  it("preserves transfer and promotion controls while recording PostgreSQL acceptance without Redis proof", async () => {
+    const f = await fixture(postgresVariant);
+    const result = await runOpsCoreDataTransfer(f.options);
+    expect(result.status).toBe("VERIFIED");
+    expect(f.events).toEqual(["copy", "object", "promote", "postgres-state"]);
+    expect(result.evidence.sharedState.status).toBe("POSTGRES_SHARED_STATE_ACCEPTED");
+    expect(Object.hasOwn(result.evidence, "redis")).toBe(false);
+    expect(f.custody.snapshot().destinationMayHaveWritten).toBe(false);
+  });
+
+  it.each([
+    ["legacy plus PG state", plan => { plan.sharedState = { backend: "postgres", sourceRedis: plan.redis.source }; }],
+    ["PG plus old Redis", plan => { const redis = plan.redis; postgresVariant(plan); plan.redis = redis; }],
+    ["PG plus Redis Azure binding", plan => { const redis = plan.azure.redis; postgresVariant(plan); plan.azure.redis = redis; }],
+    ["PG plus implicit Azure backend", plan => { postgresVariant(plan); delete plan.azure.sharedStateBackend; }],
+    ["PG plus legacy schema", plan => { postgresVariant(plan); plan.schemaVersion = 1; }],
+    ["legacy plus PG schema", plan => { plan.schemaVersion = 2; }],
+  ])("rejects mixed variant %s before copying", async (name, mutate) => {
+    const f = await fixture(mutate);
+    expect(() => validateOpsCoreTransferPlan(f.plan)).toThrow();
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow();
+    expect(f.events).toEqual([]);
+  });
+
+  it("keeps failed PostgreSQL acceptance in pending verification without activation", async () => {
+    const f = await fixture(postgresVariant); f.postgresStateFails = true;
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow("TRANSFER_RECONCILIATION_REQUIRED");
+    expect(f.custody.snapshot().phase).toBe("RESTORED");
+    expect(f.custody.snapshot().pending.to).toBe("VERIFIED");
+    expect(f.custody.snapshot().destinationMayHaveWritten).toBe(false);
+    const previous = [...f.events];
+    await expect(runOpsCoreDataTransfer(f.options)).rejects.toThrow();
+    expect(f.events).toEqual(previous);
   });
 });

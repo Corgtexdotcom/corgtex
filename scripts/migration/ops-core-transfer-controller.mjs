@@ -2,14 +2,17 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import pg from "pg";
+import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { archiveEvidenceHash, validateArchiveKeyVersion } from "./ops-core-archive.mjs";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { assertOpsCoreSourceRedisBound } from "./ops-core-source-redis.mjs";
 import { assertOpsCoreSourceFenced } from "./ops-core-source-controller.mjs";
 import { runOpsCorePostgresCopy, resumeOpsCorePostgresCopy } from "./ops-core-postgres-copy.mjs";
 import { applyPostgresPromotion, preparePostgresPromotion, reconcilePostgresPromotion, postgresPromotionDurableRecord } from "./ops-core-postgres-promotion.mjs";
 import { openPostgresPromotionCustody } from "./ops-core-promotion-custody.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { assertOpsCoreRedisEmpty, redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
+import { assertOpsCorePostgresStateEmpty } from "./ops-core-postgres-state-gate.mjs";
 import { buildRedisProbeJobDefinition, createRedisJobDispatcher } from "./ops-core-redis-job.mjs";
 import { captureOpsCoreObjects, copyOpsCoreObjects, verifyOpsCoreObjects } from "./ops-core-objects.ts";
 import { nodeClientConfig, observePostgresDatabase, buildObservedPostgresParityEvidence } from "./run-postgres-restore-rehearsal.mjs";
@@ -34,12 +37,15 @@ const localEvidence = (path, value) => writeFile(path, `${JSON.stringify(value)}
  */
 export function validateOpsCoreTransferPlan(input) {
   const plan = structuredClone(input);
-  if (plan?.schemaVersion !== 1 || !["core", "ops"].includes(plan.domain)
+  if (![1, 2].includes(plan?.schemaVersion) || !["core", "ops"].includes(plan.domain)
     || plan.azure?.domain !== plan.domain) fail("TRANSFER_INTENT_MISMATCH");
   exact(plan.transfer, "postgres,objects");
   exact(plan.transfer.postgres, "source,target,scratchName,targetIdentity,archiveStoreId,keyVersion,vaultName,maxArchiveBytes");
   exact(plan.transfer.objects, "sourceStoreId,targetStoreId,limits");
-  exact(plan.redis, "source,target,job");
+  let postgresState;
+  try { postgresState = opsCorePlanSharedStateVariant(plan) === "postgres"; }
+  catch { fail("TRANSFER_SHARED_STATE_VARIANT_MISMATCH"); }
+  if (!postgresState) exact(plan.redis, "source,target,job");
   for (const config of [plan.transfer.postgres.source, plan.transfer.postgres.target]) exact(config, "host,port,database,user");
   const expectedSource = { ...plan.source.postgres.expected.connection, user: plan.source.postgres.expected.readerRole };
   const target = plan.transfer.postgres.target;
@@ -54,16 +60,18 @@ export function validateOpsCoreTransferPlan(input) {
   const limits = plan.transfer.objects.limits;
   if (!limits || ["maxPages", "maxObjectBytes", "maxTotalBytes"].some(name => !Number.isSafeInteger(limits[name]) || limits[name] < 1)
     || !Number.isSafeInteger(limits.maxObjects) || limits.maxObjects < 0 || limits.maxObjects > 10_000) fail("TRANSFER_PLAN_INVALID");
-  const sourceRedisHash = redisGateBindingSha256(plan.redis.source);
-  const targetRedisHash = redisGateBindingSha256(plan.redis.target);
-  if (!HASH.test(sourceRedisHash) || plan.redis.target.mode !== "azure-enterprise-proxy"
-    || plan.redis.target.resourceId !== plan.azure.redis.databaseId
-    || plan.redis.target.connection.host !== plan.azure.redis.host
-    || plan.redis.target.connection.port !== plan.azure.redis.port
-    || !same(plan.redis.job.target, plan.redis.target)
-    || plan.redis.job.environmentResourceId !== plan.azure.environmentId) fail("TRANSFER_REDIS_BINDING_MISMATCH");
-  // Reject an invalid pinned probe definition before creating any archive or DB.
-  buildRedisProbeJobDefinition(plan.redis.job);
+  if (!postgresState) {
+    const sourceRedisHash = redisGateBindingSha256(plan.redis.source);
+    const targetRedisHash = redisGateBindingSha256(plan.redis.target);
+    if (!HASH.test(sourceRedisHash) || plan.redis.target.mode !== "azure-enterprise-proxy"
+      || plan.redis.target.resourceId !== plan.azure.redis.databaseId
+      || plan.redis.target.connection.host !== plan.azure.redis.host
+      || plan.redis.target.connection.port !== plan.azure.redis.port
+      || !same(plan.redis.job.target, plan.redis.target)
+      || plan.redis.job.environmentResourceId !== plan.azure.environmentId) fail("TRANSFER_REDIS_BINDING_MISMATCH");
+    // Reject an invalid pinned probe definition before creating any archive or DB.
+    buildRedisProbeJobDefinition(plan.redis.job);
+  }
   opsCoreAzureTargetBindingSha256(plan.azure);
   return plan;
 }
@@ -81,7 +89,7 @@ export function createOpsCoreTransferContext(options) {
     || plan.transfer.objects.targetStoreId !== options.objectTarget.identity
     || options.objectSource.identity === options.objectTarget.identity
     || options.archiveStore.identity === options.objectTarget.identity) fail("TRANSFER_STORAGE_BINDING_MISMATCH");
-  const targetRedisHash = redisGateBindingSha256(plan.redis.target);
+  const targetRedisHash = plan.schemaVersion === 1 ? redisGateBindingSha256(plan.redis.target) : null;
   const azureHash = opsCoreAzureTargetBindingSha256(plan.azure);
   const azure = createOpsCoreAzureTarget({ binding: plan.azure, custody,
     ...(options.azureTransport ? { transport: options.azureTransport } : {}) });
@@ -114,6 +122,7 @@ export function createOpsCoreTransferContext(options) {
     return evidence;
   };
   const assertRedisTargetInactive = async () => {
+    if (targetRedisHash === null) fail("TRANSFER_SHARED_STATE_VARIANT_MISMATCH");
     const evidence = await assertTargetInactive();
     return { ...evidence, azureTargetBindingSha256: evidence.targetBindingSha256, targetBindingSha256: targetRedisHash };
   };
@@ -299,24 +308,40 @@ async function transfer(options, mode) {
         stateFile: copied.stateFile, intent, assertSourceFenced, assertTargetInactive });
       promotion = await promotionCustody.recordResult(await applyPostgresPromotion({ client, intent, ...promotionCustody }));
     }
-    const operations = await openProviderOperationRecorder({ custody, store: operationStore, phase: "VERIFIED", signal: custody.signal });
-    const dispatcher = createRedisJobDispatcher({ plan: plan.redis.job, custody, operations, descriptorStore: operationStore,
-      assertSourceFenced, assertTargetInactive: context.assertRedisTargetInactive, assertEnterpriseBinding: context.azure.assertEnterpriseBinding,
-      ...(options.redisJobTransport ? { transport: options.redisJobTransport } : {}) });
-    await dispatcher.prepare();
-    const redis = await assertOpsCoreRedisEmpty({ source: plan.redis.source, target: plan.redis.target,
-      sourceCredentials: options.redisSourceCredentials, custody, assertSourceFenced,
-      assertTargetInactive: context.assertRedisTargetInactive, assertEnterpriseBinding: context.azure.assertEnterpriseBinding,
-      remoteTarget: { identity: dispatcher.identity, runProbe: dispatcher.runProbe }, remoteTimeoutMs: 300_000 });
-    if (redis.status !== "REDIS_EMPTY_ACCEPTED" || redis.domain !== plan.domain
-      || redis.intentSha256 !== initial.intentSha256 || redis.sourceFenceSha256 !== context.sourceFence()) fail("TRANSFER_REDIS_UNPROVEN");
+    let redis, sharedState;
+    if (plan.schemaVersion === 2) {
+      sharedState = await assertOpsCorePostgresStateEmpty({ sourceRedis: plan.sharedState.sourceRedis,
+        sourceCredentials: options.redisSourceCredentials, targetAdminConfig: options.targetAdminConfig,
+        targetDatabaseOid: copied.scratchOid, targetBindingSha256: opsCoreAzureTargetBindingSha256(plan.azure),
+        custody, assertSourceFenced, assertTargetInactive,
+        assertSourceRedisBound: () => assertOpsCoreSourceRedisBound({ plan, custody, operationStore, assertSourceFenced,
+          ...(options.railway ? { railway: options.railway } : {}) }),
+        ...(options.postgresStateClientFactory ? { createPostgresClient: options.postgresStateClientFactory } : {}),
+        ...(options.redisSourceClientFactory ? { createRedisClient: options.redisSourceClientFactory } : {}) });
+      if (sharedState.status !== "POSTGRES_SHARED_STATE_ACCEPTED" || sharedState.domain !== plan.domain
+        || sharedState.intentSha256 !== initial.intentSha256 || sharedState.sourceFenceSha256 !== context.sourceFence()
+        || sharedState.targetBindingSha256 !== opsCoreAzureTargetBindingSha256(plan.azure)) fail("TRANSFER_SHARED_STATE_UNPROVEN");
+    } else {
+      const operations = await openProviderOperationRecorder({ custody, store: operationStore, phase: "VERIFIED", signal: custody.signal });
+      const dispatcher = createRedisJobDispatcher({ plan: plan.redis.job, custody, operations, descriptorStore: operationStore,
+        assertSourceFenced, assertTargetInactive: context.assertRedisTargetInactive, assertEnterpriseBinding: context.azure.assertEnterpriseBinding,
+        ...(options.redisJobTransport ? { transport: options.redisJobTransport } : {}) });
+      await dispatcher.prepare();
+      redis = await assertOpsCoreRedisEmpty({ source: plan.redis.source, target: plan.redis.target,
+        sourceCredentials: options.redisSourceCredentials, custody, assertSourceFenced,
+        assertTargetInactive: context.assertRedisTargetInactive, assertEnterpriseBinding: context.azure.assertEnterpriseBinding,
+        remoteTarget: { identity: dispatcher.identity, runProbe: dispatcher.runProbe }, remoteTimeoutMs: 300_000 });
+      if (redis.status !== "REDIS_EMPTY_ACCEPTED" || redis.domain !== plan.domain
+        || redis.intentSha256 !== initial.intentSha256 || redis.sourceFenceSha256 !== context.sourceFence()) fail("TRANSFER_REDIS_UNPROVEN");
+    }
     if (reconcilingVerification) {
       await assertSourceFenced(); await assertTargetInactive();
       const final = await reconcilePostgresPromotion({ client, intent });
       if (final.status !== "PROMOTED" || final.connectionCount !== 0) fail("TRANSFER_PROMOTION_UNPROVEN");
     }
     const evidence = { schemaVersion: 1, domain: plan.domain, intentSha256: initial.intentSha256,
-      archiveManifestSha256: copied.archive.sha256, parity, parityEvidence, objects, promotion, redis,
+      archiveManifestSha256: copied.archive.sha256, parity, parityEvidence, objects, promotion,
+      ...(plan.schemaVersion === 2 ? { sharedState } : { redis }),
       sourceFence: await assertSourceFenced(), target: await assertTargetInactive() };
     const digest = archiveEvidenceHash(evidence); await retain(`phase-evidence-${digest}`, evidence);
     await localEvidence(join(copied.operationDir, "transfer-verification.json"), evidence);

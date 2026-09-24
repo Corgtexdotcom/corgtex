@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import {
   TENANT_PURGE_DIRECT_RELATIONS,
+  TENANT_PURGE_GLOBAL_STATE_MODELS,
   TENANT_PURGE_MODEL_DISPOSITIONS,
   TENANT_PURGE_TARGET_MODELS,
   type TenantPurgeTargetModel,
@@ -54,6 +55,7 @@ S|AppDefinition|installations.workspace|WORKSPACE|B|;S|AppDefinition|runtimes.cu
 S|AppRuntime|installations.workspace|WORKSPACE|B|
 S|AppRelease|runtime.customerDeployment|DEPLOYMENT|B|;S|AppRelease|installations.workspace|WORKSPACE|B|
 N|StripeWebhookEvent||||
+N|SharedRateLimit||||;N|SharedCacheEntry||||;N|SharedCacheVersion||||
 `;
 
 const CODE_TO_KIND = { D: "DIRECT_SCALAR", R: "RELATION_PATH", J: "DERIVED_UNIQUE_JOIN", S: "SHARED_PRESERVE", N: "NO_SELECTOR_PRESERVE" } as const;
@@ -134,7 +136,7 @@ export function assertTenantPurgeDerivedSelectorRegistry(models: readonly Tenant
   const covered = new Set<string>([...TENANT_PURGE_TARGET_MODELS, ...directModels, ...selectors.map((selector) => selector.model)]);
   const classified = Object.values(TENANT_PURGE_MODEL_DISPOSITIONS).flat();
   const missing = classified.filter((model) => !covered.has(model) || !modelMap.has(model));
-  const sharedMissing = TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.filter((model) => !directModels.has(model) && !selectors.some((selector) => selector.model === model && selector.kind === "SHARED_PRESERVE"));
+  const sharedMissing = TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.filter((model) => !directModels.has(model) && !selectors.some((selector) => selector.model === model && (selector.kind === "SHARED_PRESERVE" || (selector.kind === "NO_SELECTOR_PRESERVE" && TENANT_PURGE_GLOBAL_STATE_MODELS.includes(model as never)))));
   const preserveModels = new Set(selectors.filter((selector) => selector.kind === "SHARED_PRESERVE" || selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
   const noSelectorModels = new Set(selectors.filter((selector) => selector.kind === "NO_SELECTOR_PRESERVE").map((selector) => selector.model));
   const invalidPreserve = selectors.filter((selector) => (selector.kind === "SHARED_PRESERVE" && (!TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE.includes(selector.model as never) || noSelectorModels.has(selector.model))) || (selector.kind === "NO_SELECTOR_PRESERVE" && ![...TENANT_PURGE_MODEL_DISPOSITIONS.RETAIN, ...TENANT_PURGE_MODEL_DISPOSITIONS.SHARED_PRESERVE].includes(selector.model as never)) || (preserveModels.has(selector.model) && selector.kind !== "SHARED_PRESERVE" && selector.kind !== "NO_SELECTOR_PRESERVE"));

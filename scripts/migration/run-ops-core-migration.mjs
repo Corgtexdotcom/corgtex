@@ -43,7 +43,7 @@ export async function readPrivateMigrationJson(path) {
 
 export function validateOperatorPlan(plan) {
   const p = structuredClone(plan); const o = p?.operator;
-  need(p?.schemaVersion === 1 && ["core", "ops"].includes(p.domain) && o
+  need([1, 2].includes(p?.schemaVersion) && ["core", "ops"].includes(p.domain) && o
     && Object.keys(o).sort().join() === "archiveContainerUrl,azureIdentity,custodyContainerUrl,sourceObjects,targetObjectContainerUrl"
     && [o.custodyContainerUrl, o.archiveContainerUrl, o.targetObjectContainerUrl].every(containerUrl)
     && new Set([o.custodyContainerUrl, o.archiveContainerUrl, o.targetObjectContainerUrl]).size === 3
@@ -164,7 +164,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     let sourceHealth;
     const assertSourceHealthy = runtime.assertSourceHealthy ?? (request => {
       sourceHealth ??= createOpsCoreSourceHealthObserver({ plan, signal: custody.signal,
-        assertOwned: () => custody.assertOwned(), ...railway });
+        assertOwned: () => custody.assertOwned(), ...railway, redisSourceCredentials: credentials.redisSource });
       return sourceHealth(request);
     });
     const sourceOptions = { plan, custody, operationStore, sourceConfig: credentials.sourceConfig,

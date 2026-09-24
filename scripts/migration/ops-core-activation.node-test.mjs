@@ -8,7 +8,7 @@ const id = (type, name) => `${prefix}${type}/${name}`;
 const resource = (resourceId, properties) => ({ id: resourceId, name: resourceId.split("/").at(-1),
   type: resourceId.split("/providers/")[1].split("/").filter((_, i) => i === 0 || i % 2 === 1).join("/"), properties });
 const missing = () => ({ status: 404, body: { error: { code: "ResourceNotFound" } } });
-function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
+function fixture({ mutateRead, health, mutatePlan, source, put, postgresState = false } = {}) {
   const target = { domain: "ops", subscriptionId: subscription, resourceGroupName: "fixture",
     environmentId: id("Microsoft.App/managedEnvironments", "fixture"),
     postgres: { resourceId: id("Microsoft.DBforPostgreSQL/flexibleServers", "fixture-pg"), host: "fixture-pg.postgres.database.azure.com",
@@ -55,6 +55,14 @@ function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
       privateLinkServiceId: service.resourceId, groupIds: [group], privateLinkServiceConnectionState: { status: "Approved" } } }] }));
   const appId = role => id("Microsoft.App/containerApps", target.apps[role]);
   for (const role of ["web", "worker"]) map.set(appId(role), missing());
+  if (postgresState) {
+    target.sharedStateBackend = "postgres"; target.redis = null;
+    for (const role of ["web", "worker"]) {
+      plan.roles[role].env = plan.roles[role].env.filter(e => e.name !== "REDIS_URL");
+      plan.roles[role].env.push({ name: "SHARED_STATE_BACKEND", value: "postgres" });
+      plan.roles[role].secrets = plan.roles[role].secrets.filter(e => e.name !== "redis");
+    }
+  }
   const transport = async request => {
     const role = ["web", "worker"].find(r => appId(r) === request.resourceId);
     if (request.method === "PUT") {
@@ -87,6 +95,7 @@ function fixture({ mutateRead, health, mutatePlan, source, put } = {}) {
       const result = { health: { status: 200, body: input.role === "web"
         ? { status: "ok", service: "web", database: "up", schema: "ready", app: "corgtex", release }
         : { status: "ok", phase: "running", release } }, evidence: { receiptSha256: "e".repeat(64) } };
+      if (postgresState && input.role === "web") result.health.body.runtime = { sharedState: { backend: "postgres", status: "configured" } };
       health?.(input, result, { journal, log, map }); return result;
     } };
   return { plan, custody, journal, log, map, records, options, appId, controller, set };
@@ -488,4 +497,32 @@ test("completed history does not permit a new activation or resume effect", asyn
   await rejects(createOpsCoreActivation(f.options).activate(), "ACTIVATION_PHASE_INVALID");
   await rejects(createOpsCoreActivation(f.options).resume(), "ACTIVATION_PHASE_INVALID");
   assert.deepEqual(f.log, before);
+});
+
+
+test("PostgreSQL activation pins backend and never injects a Redis credential", async () => {
+  const f = fixture({ postgresState: true });
+  assert.equal((await createOpsCoreActivation(f.options).activate()).phase, "TARGET_ACTIVE");
+  for (const role of ["web", "worker"]) {
+    const env = f.map.get(f.appId(role)).body.properties.template.containers[0].env;
+    assert.deepEqual(env.find(e => e.name === "SHARED_STATE_BACKEND"), { name: "SHARED_STATE_BACKEND", value: "postgres" });
+    assert.equal(env.some(e => e.name === "REDIS_URL"), false);
+  }
+});
+test("PostgreSQL activation rejects a mixed backend before any target write", () => {
+  const f = fixture({ postgresState: true });
+  f.plan.roles.worker.env.find(e => e.name === "SHARED_STATE_BACKEND").value = "redis";
+  assert.throws(() => createOpsCoreActivation(f.options));
+  assert.equal(f.log.some(x => x.startsWith("put:")), false);
+});
+for (const [name, state] of [
+  ["selected backend", { backend: "redis", status: "configured" }],
+  ["usable encrypted state", { backend: "postgres", status: "missing" }],
+]) test(`PostgreSQL activation requires web health to prove ${name} before worker startup`, async () => {
+  const f = fixture({ postgresState: true, health(input, result) {
+    if (input.role === "web") result.health.body.runtime.sharedState = state;
+  } });
+  await assert.rejects(createOpsCoreActivation(f.options).activate());
+  assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web"]);
+  assert.equal(f.journal.phase, "VERIFIED");
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import vm from "node:vm";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
 import { createOpsCoreSourceHealthObserver, createRailwaySourceHealthRemoteRead, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
@@ -153,4 +153,38 @@ test("legacy recovery rejects changed baked bytes even when health release label
 test("actual remote baked file mismatch fails before any health GET",async()=>{
   const f=await runActualRemoteScript({legacy:true,buildOverride:{...baked("worker"),gitSha:"b".repeat(40)}});
   assert.match(f.error?.message??"",/^SOURCE_HEALTH_REMOTE_READ_FAILED$/);assert.equal(f.calls,0);
+});
+
+
+test("global v2 uses the real source health observer and preserves independent v1 health receipts", async () => {
+  const f = fixture();
+  f.plan.schemaVersion = 2;
+  f.plan.azure = { sharedStateBackend: "postgres", redis: null };
+  f.plan.sharedState = { backend: "postgres", sourceRedis: {
+    mode: "standalone", resourceId: null, server: { version: "8.2.9", runId: "a".repeat(40) },
+    connection: { host: "source.local", port: 6379, database: 0, username: "default", tls: false },
+  } };
+  const password = randomBytes(32).toString("base64");
+  f.options.redisSourceCredentials = { password, tlsCa: null };
+  f.state.remoteMutate = r => { r.redis = {
+    server: { version: "8.2.9", runIdSha256: createHash("sha256").update("a".repeat(40)).digest("hex") },
+    database: 0, username: "default", tls: false, endpointSha256: "d".repeat(64),
+    credentialProof: createHmac("sha256", password).update(JSON.stringify([r.nonce, hash(f.plan), r.role,
+      f.health.services.find(s => s.role === r.role).serviceId, r.deploymentId, r.instanceId])).digest("hex"),
+  }; };
+  const baseline = await f.run();
+  assert.equal(baseline.complete, true);
+  assert.equal(baseline.services.every(service => service.redis.credentialMatched), true);
+  assert.equal(JSON.stringify(baseline).includes(password), false);
+  assert.equal(JSON.stringify(baseline).includes("credentialProof"), false);
+  assert.equal(baseline.schemaVersion, 1);
+  assert.equal(baseline.intentSha256, hash(f.plan));
+  const recovery = await f.observer()({ stage: "recovery", baseline, writerBaseline: f.writerBaseline });
+  assert.equal(recovery.complete, true);
+  assert.equal(recovery.baselineEvidenceSha256, baseline.evidenceSha256);
+  assert.equal(f.state.remoteReads, 4);
+  const before = f.state.providerReads;
+  f.plan.redis = {};
+  assert.throws(() => f.observer(), /SOURCE_HEALTH_OPTIONS_INVALID/);
+  assert.equal(f.state.providerReads, before);
 });

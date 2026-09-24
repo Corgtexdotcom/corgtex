@@ -1,4 +1,6 @@
 import pg from "pg";
+import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
+import { redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
 import { archiveEvidenceHash, readArchiveKeyVersion } from "./ops-core-archive.mjs";
 import { createOpsCoreTransferContext } from "./ops-core-transfer-controller.mjs";
 import { preflightRedisJob } from "./ops-core-redis-job.mjs";
@@ -91,13 +93,23 @@ export async function runOpsCoreTransferPreflight(options, dependencies = {}) {
     need(Buffer.isBuffer(key) && key.length === 32, "PREFLIGHT_ARCHIVE_KEY_INVALID");
     key.fill(0); key = null; await guard();
     const objects = await preflightSourceObjects(options.objectSource, plan.transfer.objects.limits, guard);
-    const redis = await preflightRedisJob({ plan: plan.redis.job, signal: options.custody.signal, assertOwned: guard,
-      ...(dependencies.redisTransport ? { transport: dependencies.redisTransport } : {}) });
+    const postgresState = opsCorePlanSharedStateVariant(plan) === "postgres";
+    let redis, sharedState;
+    if (postgresState) {
+      // No target Redis job exists in this variant. Source Redis emptiness and
+      // promoted PostgreSQL schema/state remain mandatory fenced transfer gates.
+      sharedState = { backend: "postgres", targetPostgresPreflightSha256: archiveEvidenceHash(postgres),
+        sourceRedisBindingSha256: redisGateBindingSha256(plan.sharedState.sourceRedis), finalAcceptance: false };
+    } else {
+      redis = await preflightRedisJob({ plan: plan.redis.job, signal: options.custody.signal, assertOwned: guard,
+        ...(dependencies.redisTransport ? { transport: dependencies.redisTransport } : {}) });
+    }
     const health = await preflightHealthJob({ plan: plan.health, signal: options.custody.signal, assertOwned: guard,
       ...(dependencies.healthTransport ? { transport: dependencies.healthTransport } : {}) });
     await assertTargetInactive(); await guard();
     const evidence = { schemaVersion: 1, type: "MIGRATION_DEPENDENCY_PREFLIGHT", domain: plan.domain,
-      intentSha256: initial.intentSha256, observedAt: new Date().toISOString(), sourceAdmission, postgres, objects, redis, health,
+      intentSha256: initial.intentSha256, observedAt: new Date().toISOString(), sourceAdmission, postgres, objects, health,
+      ...(postgresState ? { sharedState } : { redis }),
       archiveKeyVersion: pgPlan.keyVersion, archiveKeyReadable: true, finalAcceptance: false };
     const evidenceSha256 = archiveEvidenceHash(evidence);
     const evidenceKey = `preflights/${plan.domain}/${initial.intentSha256}/${evidenceSha256}.json`;

@@ -56,6 +56,8 @@ describe("redis rate limiter", () => {
       key: "redis:key",
       memoryCleared: true,
       redisCleared: true,
+      sharedStateCleared: true,
+      backend: "redis",
     });
     expect(delMock).toHaveBeenCalledWith("test:rate-limit:redis:key");
   });

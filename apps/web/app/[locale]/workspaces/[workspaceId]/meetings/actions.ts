@@ -1,6 +1,6 @@
 "use server";
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { enforceDemoGuard } from "@/lib/demo-guard";
 import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, refresh } from "../action-utils";
@@ -30,7 +30,12 @@ import {
   type MeetingTranscriptIntakeResult,
 } from "@corgtex/domain";
 import { extractTextFromFileBuffer } from "@corgtex/knowledge";
-import { getRedisClient, redisKey } from "@corgtex/shared";
+import {
+  deletePendingTranscriptPayload,
+  readPendingTranscriptPayload,
+  storePendingTranscriptPayload,
+  type PendingTranscriptPayload,
+} from "@/lib/pending-transcript-upload";
 import { captureTelemetryEvent } from "@corgtex/shared/telemetry-node";
 import {
   parseMeetingDateTimeInput,
@@ -38,7 +43,6 @@ import {
   resolveMeetingEndFromDurationOrInput,
 } from "@/lib/meeting-timezone";
 
-const PENDING_TRANSCRIPT_TTL_SECONDS = 20 * 60;
 const CREATE_NEW_MEETING_CHOICE = "__create_new_meeting__";
 
 export type MeetingTranscriptActionCandidate = {
@@ -117,22 +121,6 @@ function normalizeProcessedContentFormValue(value: string | null | undefined) {
   return value?.trim() || null;
 }
 
-type PendingTranscriptPayload = {
-  workspaceId: string;
-  transcript: string;
-  fileName: string | null;
-  title: string | null;
-  source: string | null;
-  recordedAt: string | null;
-  timeZone: string | null;
-  summaryMd: string | null;
-  ingestionGuidanceMd: string | null;
-  participantIds: string[];
-  participantEmails: string[];
-  meetingId: string | null;
-  createNewMeeting: boolean;
-};
-
 type TranscriptUploadPayload = PendingTranscriptPayload & {
   meetingId: string | null;
   createNewMeeting: boolean;
@@ -148,10 +136,6 @@ function isTranscriptUploadPayload(value: TranscriptUploadPayload | TranscriptUp
   return !("status" in value);
 }
 
-function pendingTranscriptKey(workspaceId: string, token: string) {
-  return redisKey(`meeting-transcript-upload:${workspaceId}:${token}`);
-}
-
 function pendingTranscriptClarificationId(token: string | null | undefined) {
   if (!token) return null;
   return createHash("sha256").update(token).digest("hex").slice(0, 16);
@@ -165,67 +149,6 @@ function captureMeetingTranscriptIntakeAdvisory(properties: Record<string, unkno
       : "meeting-transcript-intake",
     properties,
   });
-}
-
-function isPendingTranscriptPayload(value: unknown): value is PendingTranscriptPayload {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return typeof record.workspaceId === "string"
-    && typeof record.transcript === "string"
-    && (typeof record.fileName === "string" || record.fileName === null)
-    && (typeof record.title === "string" || record.title === null)
-    && (typeof record.source === "string" || record.source === null)
-    && (typeof record.recordedAt === "string" || record.recordedAt === null)
-    && (typeof record.timeZone === "string" || record.timeZone === null)
-    && (typeof record.summaryMd === "string" || record.summaryMd === null)
-    && (typeof record.ingestionGuidanceMd === "string" || record.ingestionGuidanceMd === null)
-    && Array.isArray(record.participantIds)
-    && Array.isArray(record.participantEmails)
-    && (typeof record.meetingId === "string" || record.meetingId === null || record.meetingId === undefined)
-    && (typeof record.createNewMeeting === "boolean" || record.createNewMeeting === undefined);
-}
-
-async function storePendingTranscriptPayload(payload: PendingTranscriptPayload) {
-  try {
-    const client = await getRedisClient();
-    if (!client) return null;
-    const token = randomUUID();
-    await client.setEx(
-      pendingTranscriptKey(payload.workspaceId, token),
-      PENDING_TRANSCRIPT_TTL_SECONDS,
-      JSON.stringify(payload),
-    );
-    return token;
-  } catch (error) {
-    console.warn("Unable to store pending meeting transcript upload.", error);
-    return null;
-  }
-}
-
-async function readPendingTranscriptPayload(workspaceId: string, token: string) {
-  try {
-    const client = await getRedisClient();
-    if (!client) return null;
-    const raw = await client.get(pendingTranscriptKey(workspaceId, token));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isPendingTranscriptPayload(parsed) || parsed.workspaceId !== workspaceId) return null;
-    return parsed;
-  } catch (error) {
-    console.warn("Unable to read pending meeting transcript upload.", error);
-    return null;
-  }
-}
-
-async function deletePendingTranscriptPayload(workspaceId: string, token: string | null) {
-  if (!token) return;
-  try {
-    const client = await getRedisClient();
-    if (!client) return;
-    await client.del(pendingTranscriptKey(workspaceId, token));
-  } catch (error) {
-    console.warn("Unable to clear pending meeting transcript upload.", error);
-  }
 }
 
 function actionValuesFromPayload(payload: PendingTranscriptPayload): MeetingTranscriptActionValues {

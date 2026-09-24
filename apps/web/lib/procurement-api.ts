@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { AppError } from "@corgtex/domain";
-import { checkRateLimit, env, isRedisConfigured, RATE_LIMITS, resetRateLimits } from "@corgtex/shared";
+import { checkRateLimit, env, getSharedStateBackend, isSharedStateConfigured, RATE_LIMITS, resetRateLimits } from "@corgtex/shared";
 import { z } from "zod";
 
 export const createTrialSchema = z.object({
@@ -128,7 +128,10 @@ export async function resetProcurementTrialCreateRateLimitsForHeaders(headers: H
   assertSmokeCaptureDomain(params.adminEmail);
   const keys = procurementTrialCreateRateLimitKeysForHeaders(headers, params);
   const resets = await resetRateLimits(keys);
-  if (isRedisConfigured() && resets.some((reset) => !reset.redisCleared)) {
+  const backend = getSharedStateBackend();
+  if (isSharedStateConfigured() && (resets.length !== keys.length || resets.some((reset, index) => (
+    reset.key !== keys[index] || reset.backend !== backend || !reset.sharedStateCleared
+  )))) {
     throw new AppError(503, "RATE_LIMIT_RESET_UNAVAILABLE", "Unable to clear production rate-limit counters.");
   }
   return {

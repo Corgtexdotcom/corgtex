@@ -51,6 +51,7 @@ vi.mock("@corgtex/knowledge", () => ({
 
 vi.mock("@corgtex/shared", () => ({
   getRedisClient,
+  getSharedStateBackend: () => "redis",
   redisKey: (key: string) => `test:${key}`,
 }));
 
@@ -469,6 +470,29 @@ describe("meeting server actions", () => {
       transcript: "Updated transcript from replacement file.",
       fileName: "updated.txt",
     }));
+  });
+
+  it("keeps the old stored token when a replacement cannot be stored and requests re-upload", async () => {
+    const { uploadMeetingTranscriptStateAction } = await import("./actions");
+    redisClient.get.mockResolvedValueOnce(JSON.stringify({
+      workspaceId: "workspace-1", transcript: "Old cached transcript.", fileName: "old.txt",
+      title: "Weekly Review", source: "transcript-upload", recordedAt: null, timeZone: "UTC",
+      summaryMd: null, ingestionGuidanceMd: null, participantIds: [], participantEmails: [],
+    }));
+    extractTextFromFileBuffer.mockResolvedValueOnce({ textContent: "Replacement transcript." });
+    redisClient.setEx.mockRejectedValueOnce(new Error("Shared storage unavailable"));
+    intakeMeetingTranscript.mockResolvedValueOnce({
+      status: "needs_clarification", message: "Choose a meeting date.", requiredFields: ["recordedAt"],
+      inferred: { title: null, recordedAt: null, participantEmails: [], source: "transcript-upload" }, candidates: [],
+    });
+    const data = formData({ workspaceId: "workspace-1", pendingTranscriptToken: "token-1" });
+    data.set("file", new File(["replacement"], "replacement.txt", { type: "text/plain" }));
+    const state = await uploadMeetingTranscriptStateAction({
+      status: "needs_clarification", pendingTranscriptToken: "token-1", retryRequiresTranscriptUpload: false,
+    }, data);
+    expect(state).toMatchObject({ status: "needs_clarification", pendingTranscriptToken: null, retryRequiresTranscriptUpload: true });
+    expect(redisClient.del).not.toHaveBeenCalled();
+    expect(intakeMeetingTranscript).toHaveBeenCalledWith(actor, expect.objectContaining({ transcript: "Replacement transcript." }));
   });
 
   it("preserves a pending transcript token when clarification validation fails", async () => {

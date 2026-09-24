@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { getWorkspaceIndexingHealth, reindexWorkspace, syncKnowledgeForSource } from "./chunks";
 import { prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
+import { invalidateKnowledgeCache } from "./retrieval";
 
 const { syncAzureKnowledgeSourceMock } = vi.hoisted(() => ({
   syncAzureKnowledgeSourceMock: vi.fn().mockResolvedValue({ skipped: true, deleted: 0, uploaded: 0 }),
@@ -224,5 +225,34 @@ describe("Azure Search indexing guard", () => {
       sourceTitle: "Document",
       content: "",
     })).rejects.toThrow("Azure Search indexing is enabled but not configured for writes");
+  });
+});
+
+
+describe("PostgreSQL knowledge cache transaction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("SHARED_STATE_BACKEND", "postgres");
+    vi.stubEnv("KNOWLEDGE_SEARCH_PROVIDER", "postgres");
+    vi.mocked(invalidateKnowledgeCache).mockResolvedValue(undefined);
+    vi.mocked(defaultModelGateway.embed).mockResolvedValue({ embeddings: [[1, 0]], usage: { provider: "test", model: "fake-embed" } });
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(invalidateKnowledgeCache).mockResolvedValue(undefined);
+  });
+  for (const content of ["", "Synthetic content"]) {
+    it(`invalidates with the source transaction before external indexing (${content ? "replace" : "delete"})`, async () => {
+      await syncKnowledgeForSource({ workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE", sourceId: "source-1", content });
+      expect(vi.mocked(invalidateKnowledgeCache).mock.calls[0]).toEqual(["ws_1", prisma]);
+      expect(vi.mocked(invalidateKnowledgeCache).mock.invocationCallOrder[0]).toBeLessThan(syncAzureKnowledgeSourceMock.mock.invocationCallOrder[0]);
+      expect(vi.mocked(invalidateKnowledgeCache).mock.calls[1]).toEqual(["ws_1"]);
+    });
+  }
+  it("propagates transactional invalidation failure before external indexing or success", async () => {
+    vi.mocked(invalidateKnowledgeCache).mockRejectedValueOnce(new Error("version unavailable"));
+    await expect(syncKnowledgeForSource({ workspaceId: "ws_1", sourceType: "DOCUMENT", accessDomain: "WORKSPACE", sourceId: "source-1", content: "Synthetic content" })).rejects.toThrow("version unavailable");
+    expect(syncAzureKnowledgeSourceMock).not.toHaveBeenCalled();
+    expect(invalidateKnowledgeCache).toHaveBeenCalledTimes(1);
   });
 });

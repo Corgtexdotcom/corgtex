@@ -1,3 +1,5 @@
+import { redisRuntimeObservationScript, verifyRuntimeRedisObservation } from "./ops-core-source-redis.mjs";
+import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
@@ -42,8 +44,8 @@ export function validateOpsCoreSourceHealthPlan(value, railwayBinding) {
 }
 
 const quote = s => `'${s.replaceAll("'", `'"'"'`)}'`;
-// Runs entirely inside the selected source container. The only I/O is bounded
-// loopback GET. No environment dump, application import, migration or DB write.
+// Runs inside the selected source instance. Bounded loopback health reads and,
+// for v2, listener-process Redis identity reads; no environment dump or writes.
 function remoteScript(request) {
   return `const c=${JSON.stringify(request)};
 const fail=()=>{throw Error('SOURCE_HEALTH_REMOTE_UNPROVEN')};
@@ -51,12 +53,13 @@ const end=Date.now()+100000;
 const bakedRead=async()=>{const fs=await import('node:fs/promises'),crypto=await import('node:crypto');const f=await fs.open('/app/release-build.json','r');try{const bytes=Buffer.alloc(4097);const n=(await f.read(bytes,0,4097,0)).bytesRead;if(n===0||n>4096)fail();const raw=bytes.subarray(0,n),identity=JSON.parse(raw.toString('utf8'));if(Object.keys(identity).sort().join(',')!=='gitSha,role,schemaVersion'||identity.schemaVersion!==1||identity.role!==c.role||identity.gitSha!==c.release.gitSha)fail();return {identity,fileSha256:crypto.createHash('sha256').update(raw).digest('hex')};}finally{await f.close();}};
 const release=r=>{const runtime=r?.runtime;const baked=runtime?.gitSha===c.release.gitSha&&runtime.source==='baked'&&runtime.evidence==='baked';const legacy=runtime?.gitSha===null&&runtime.source==='missing'&&(runtime.evidence===undefined||runtime.evidence==='missing');if(!r||r.gitSha!==c.release.gitSha||r.imageTag!==c.release.imageTag||r.version!==c.release.version||r.service!==c.role||(!baked&&!legacy)||r.drift?.gitSha!==false||r.drift.imageTag!==false||r.drift.version!==false||!Array.isArray(r.drift.details)||r.drift.details.length)fail();return {...c.release,service:c.role,runtime:{gitSha:runtime.gitSha,source:runtime.source,...(runtime.evidence===undefined?{}:{evidence:runtime.evidence})},drift:{gitSha:false,imageTag:false,version:false,details:[]}};};
 const read=async path=>{const url='http://127.0.0.1:'+c.port+path;const r=await fetch(url,{method:'GET',redirect:'error',signal:AbortSignal.timeout(Math.max(1,Math.min(10000,end-Date.now()))),headers:{Accept:'application/json'}});if(r.url!==url||r.redirected||![200,503].includes(r.status)||!/^application\\/json(?:;|$)/i.test(r.headers.get('content-type')||''))fail();let size=0;const chunks=[];for await(const part of r.body){size+=part.length;if(size>32768)fail();chunks.push(Buffer.from(part));}return {status:r.status,body:JSON.parse(Buffer.concat(chunks).toString('utf8'))};};
-try {const baked=await bakedRead();for(;;){if(Date.now()>=end)fail();const h=await read(c.role==='web'?'/api/health':'/health');const b=h.body;const r=release(b.release);let health,ready=null;
+${redisRuntimeObservationScript()}
+try {const baked=await bakedRead();const redis=c.observeRedis?await observeRuntimeRedis():null;for(;;){if(Date.now()>=end)fail();const h=await read(c.role==='web'?'/api/health':'/health');const b=h.body;const r=release(b.release);let health,ready=null;
 if(c.role==='web'){if(h.status!==200||b.status!=='ok'||b.service!=='web'||b.database!=='up'||b.schema!=='ready'||b.app!=='corgtex')fail();health={status:200,body:{status:'ok',service:'web',database:'up',schema:'ready',app:'corgtex',release:r}};}
 else {if(h.status!==200||b.status!=='ok'||!['starting','running'].includes(b.phase)||b.lastError!==null||!Number.isSafeInteger(b.tickCount)||b.tickCount<0)fail();const rr=await read('/ready');const rb=rr.body;if(rr.status===503){if(rb.ready!==false||!['starting','running'].includes(rb.phase))fail();}else if(rb.ready!==true||rb.phase!=='running')fail();
 if(rr.status===503||b.phase!=='running'||b.tickCount===0){await new Promise(r=>setTimeout(r,1000));continue;}
 const tick=Date.parse(b.lastSuccessfulTickAt);if(!Number.isFinite(tick)||tick>Date.now()||Date.now()-tick>120000)fail();health={status:200,body:{status:'ok',phase:'running',tickCount:b.tickCount,lastSuccessfulTickAt:new Date(tick).toISOString(),lastError:null,release:r}};ready={status:200,body:{ready:true,phase:'running'}};}
-process.stdout.write(JSON.stringify({schemaVersion:1,nonce:c.nonce,role:c.role,deploymentId:c.deploymentId,instanceId:c.instanceId,observedAt:Date.now(),buildIdentity:baked.identity,buildFileSha256:baked.fileSha256,health,ready}));break;}}
+process.stdout.write(JSON.stringify({schemaVersion:1,nonce:c.nonce,role:c.role,deploymentId:c.deploymentId,instanceId:c.instanceId,observedAt:Date.now(),buildIdentity:baked.identity,buildFileSha256:baked.fileSha256,health,ready,...(redis?{redis}:{})}));break;}}
 catch{process.stderr.write('SOURCE_HEALTH_REMOTE_UNPROVEN');process.exitCode=1;}`;
 }
 
@@ -64,11 +67,12 @@ catch{process.stderr.write('SOURCE_HEALTH_REMOTE_UNPROVEN');process.exitCode=1;}
  * project/environment/service/instance IDs, clear inherited Node options, cap
  * output and wall time, and suppress all raw CLI/provider errors. */
 export function createRailwaySourceHealthRemoteRead({ execFileImpl = execFile } = {}) {
-  return async ({ binding, service, instanceId, nonce, signal }) => {
+  return async ({ binding, service, instanceId, nonce, signal, observeRedis = false, redisIntentSha256 }) => {
     validateOpsCoreSourceHealthPlan(binding);
     need(binding.services.some(s => same(s, service)) && ID.test(instanceId) && HASH.test(nonce)
       && signal instanceof AbortSignal && !signal.aborted, "SOURCE_HEALTH_REMOTE_BINDING_INVALID");
-    const request = { ...service, instanceId, nonce };
+    need(typeof observeRedis === "boolean" && (!observeRedis || HASH.test(redisIntentSha256)), "SOURCE_HEALTH_REMOTE_BINDING_INVALID");
+    const request = { ...service, instanceId, nonce, ...(observeRedis ? { observeRedis, redisIntentSha256 } : {}) };
     const args = ["ssh", "-p", binding.projectId, "-e", binding.environmentId, "-s", service.serviceId,
       "-d", instanceId, "--", "env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "node", "--input-type=module", "-e", quote(remoteScript(request))];
     try {
@@ -117,11 +121,14 @@ function releaseProjection(r, expected, role) {
  * current provider identity and live health; no caller-supplied receipt is fresh
  * proof. Only safe projections and hashes are retained, never raw health/errors. */
 export function createOpsCoreSourceHealthObserver({ plan: input, signal, assertOwned, transport, token,
-  runRemoteRead = createRailwaySourceHealthRemoteRead() }) {
+  runRemoteRead = createRailwaySourceHealthRemoteRead(), redisSourceCredentials }) {
   const plan = structuredClone(input), p = validateOpsCoreSourceHealthPlan(plan?.source?.health, plan?.source?.writers?.binding);
   const domain = plan.domain, intentSha256 = hash(plan), sourceHealthBindingSha256 = hash(p);
-  need(plan.schemaVersion === 1 && ["core", "ops"].includes(domain) && signal instanceof AbortSignal && typeof assertOwned === "function"
+  try { opsCorePlanSharedStateVariant(plan); } catch { need(false, "SOURCE_HEALTH_OPTIONS_INVALID"); }
+  need(["core", "ops"].includes(domain) && signal instanceof AbortSignal && typeof assertOwned === "function"
     && typeof runRemoteRead === "function", "SOURCE_HEALTH_OPTIONS_INVALID");
+  const observeRedis = plan.schemaVersion === 2;
+  need(!observeRedis || typeof redisSourceCredentials?.password === "string" && redisSourceCredentials.password.length > 0, "SOURCE_HEALTH_REDIS_CREDENTIALS_REQUIRED");
   const send = transport ?? createRailwayFenceTransport({ token });
   return async ({ stage, baseline, writerBaseline }) => {
     try {
@@ -150,7 +157,8 @@ export function createOpsCoreSourceHealthObserver({ plan: input, signal, assertO
       const services = [];
       for (const s of p.services) {
         const identity = await read(s), nonce = randomBytes(32).toString("hex"), started = Date.now();
-        await check(); const stdout = await runRemoteRead({ binding: p, service: s, instanceId: identity.instanceId, nonce, signal }); await check();
+        await check(); const stdout = await runRemoteRead({ binding: p, service: s, instanceId: identity.instanceId, nonce, signal,
+          ...(observeRedis ? { observeRedis: true, redisIntentSha256: intentSha256 } : {}) }); await check();
         need(typeof stdout === "string" && Buffer.byteLength(stdout) <= 32768, "SOURCE_HEALTH_REMOTE_RESPONSE_INVALID");
         const r = JSON.parse(stdout);
         need(r.schemaVersion === 1 && r.nonce === nonce && r.role === s.role && r.deploymentId === s.deploymentId
@@ -159,6 +167,8 @@ export function createOpsCoreSourceHealthObserver({ plan: input, signal, assertO
         need(exact(r.buildIdentity, "schemaVersion,role,gitSha") && r.buildIdentity.schemaVersion === 1
           && r.buildIdentity.role === s.role && r.buildIdentity.gitSha === s.release.gitSha && HASH.test(r.buildFileSha256), "SOURCE_HEALTH_BUILD_CHANGED");
         if (stage === "recovery") need(baseline.services.find(v => v.role === s.role)?.buildFileSha256 === r.buildFileSha256, "SOURCE_HEALTH_BUILD_CHANGED");
+        const redis = observeRedis ? verifyRuntimeRedisObservation({ observed: r.redis, binding: plan.sharedState.sourceRedis,
+          credentials: redisSourceCredentials, nonce, context: { intentSha256, ...s, instanceId: identity.instanceId } }) : null;
         const release = releaseProjection(r.health.body?.release, s.release, s.role);
         let projection;
         if (s.role === "worker") {
@@ -177,7 +187,7 @@ export function createOpsCoreSourceHealthObserver({ plan: input, signal, assertO
         }
         need(same(await read(s), identity), "SOURCE_HEALTH_INSTANCE_CHANGED");
         services.push({ role: s.role, ...identity, release: s.release, observedAt: r.observedAt,
-          buildIdentity: r.buildIdentity, buildFileSha256: r.buildFileSha256,
+          buildIdentity: r.buildIdentity, buildFileSha256: r.buildFileSha256, ...(redis ? { redis } : {}),
           releaseProvenance: { commitAndRole: "/app/release-build.json", tagAndVersion: "configured-health-concordant",
             healthRuntime: release.runtime.source === "missing" ? "legacy-missing" : "baked" }, ...projection });
       }

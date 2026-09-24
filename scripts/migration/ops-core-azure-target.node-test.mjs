@@ -22,7 +22,7 @@ const resource = (id, properties) => ({ id, name: id.includes("/Microsoft.Cache/
 const missing = () => ({ status: 404, body: { error: { code: "ResourceNotFound", message: "unprinted provider detail" } } });
 const revision = (name, props = {}) => resource(`${appId("fixture-web")}/revisions/${name}`, { active: false, replicas: 0, ...props });
 const pageUrl = (path, token = "next") => `https://management.azure.com${path}?api-version=2024-03-01&$skiptoken=${token}`;
-function fixture({ apps = false, mutate, maxPages = 100 } = {}) {
+function fixture({ apps = false, mutate, maxPages = 100, postgresState = false } = {}) {
   const b = binding(), controller = new AbortController(), calls = [];
   const snapshot = { domain: "ops", intentSha256: "a".repeat(64), phase: "PREPARED", pending: null };
   const map = new Map();
@@ -47,6 +47,7 @@ function fixture({ apps = false, mutate, maxPages = 100 } = {}) {
   }
   const custody = { signal: controller.signal, snapshot: () => structuredClone(snapshot),
     async assertOwned() { calls.push("custody"); } };
+  if (postgresState) { b.sharedStateBackend = "postgres"; b.redis = null; }
   const adapter = createOpsCoreAzureTarget({ binding: b, custody, maxPages,
     async transport(request) {
       calls.push(request);
@@ -274,4 +275,17 @@ test("real transport is authenticated GET only with fixed az argv, abort and red
     execFileImpl(_, __, ___, callback) { callback(new Error("credential detail must not escape")); } });
   await rejects(broken(request), "AZURE_TARGET_ARM_READ_FAILED");
   await rejects(transport({ ...request, nextLink: "https://example.com/" }), "AZURE_TARGET_NEXT_LINK_INVALID");
+});
+
+
+test("explicit PostgreSQL shared state preserves inactive/private proofs without Redis reads", async () => {
+  const f = fixture({ postgresState: true });
+  assert.equal((await f.adapter.assertInactive()).complete, true);
+  assert.equal((await f.adapter.assertPostgresPrivate()).complete, true);
+  assert.equal(f.calls.some(call => typeof call === "object" && /redis/i.test(call.resourceId)), false);
+  assert.throws(() => opsCoreAzureTargetBindingSha256({ ...f.b, sharedStateBackend: "automatic" }), /SHARED_STATE_INVALID/);
+  assert.throws(() => opsCoreAzureTargetBindingSha256({ ...f.b, redis: binding().redis }), /BINDING_INVALID/);
+  const legacy = binding();
+  assert.notEqual(opsCoreAzureTargetBindingSha256(legacy), opsCoreAzureTargetBindingSha256(f.b));
+  assert.throws(() => opsCoreAzureTargetBindingSha256({ ...legacy, redis: null }), /BINDING_INVALID/);
 });

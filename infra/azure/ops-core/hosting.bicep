@@ -9,6 +9,12 @@ param postgresAdministratorLogin string
 param opsPostgresSkuName string
 @allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
 param corePostgresSkuName string
+@allowed(['redis', 'postgres'])
+param opsSharedStateBackend string = 'redis'
+@allowed(['redis', 'postgres'])
+param coreSharedStateBackend string = 'redis'
+
+var provisionRedisDns = opsSharedStateBackend == 'redis' || coreSharedStateBackend == 'redis'
 @secure()
 param opsPostgresAdministratorPassword string
 @secure()
@@ -84,12 +90,12 @@ resource postgresDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
   }
 }
 
-resource redisDns 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+resource redisDns 'Microsoft.Network/privateDnsZones@2020-06-01' = if (provisionRedisDns) {
   name: 'privatelink.redis.azure.net'
   location: 'global'
   tags: tags
 }
-resource redisDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+resource redisDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (provisionRedisDns) {
   parent: redisDns
   name: namePrefix
   location: 'global'
@@ -132,11 +138,12 @@ module opsDomain './domain.bicep' = {
     postgresAdministratorLogin: postgresAdministratorLogin
     postgresAdministratorPassword: opsPostgresAdministratorPassword
     postgresSkuName: opsPostgresSkuName
+    sharedStateBackend: opsSharedStateBackend
     postgresPublicNetworkAccess: opsPostgresPublicNetworkAccess
     temporaryRestoreIpv4: opsTemporaryRestoreIpv4
     privateEndpointsSubnetId: privateEndpointsSubnetId
     postgresDnsZoneId: postgresDns.id
-    redisDnsZoneId: redisDns.id
+    redisDnsZoneId: provisionRedisDns ? redisDns!.id : ''
   }
 }
 
@@ -150,11 +157,12 @@ module coreDomain './domain.bicep' = {
     postgresAdministratorLogin: postgresAdministratorLogin
     postgresAdministratorPassword: corePostgresAdministratorPassword
     postgresSkuName: corePostgresSkuName
+    sharedStateBackend: coreSharedStateBackend
     postgresPublicNetworkAccess: corePostgresPublicNetworkAccess
     temporaryRestoreIpv4: coreTemporaryRestoreIpv4
     privateEndpointsSubnetId: privateEndpointsSubnetId
     postgresDnsZoneId: postgresDns.id
-    redisDnsZoneId: redisDns.id
+    redisDnsZoneId: provisionRedisDns ? redisDns!.id : ''
   }
 }
 
@@ -165,7 +173,7 @@ output platform object = {
   containerAppsSubnetId: containerAppsSubnetId
   privateEndpointsSubnetId: privateEndpointsSubnetId
   postgresPrivateDnsZoneId: postgresDns.id
-  redisPrivateDnsZoneId: redisDns.id
+  redisPrivateDnsZoneId: provisionRedisDns ? redisDns!.id : null
   logAnalyticsId: observability.outputs.logAnalyticsId
   applicationInsightsId: observability.outputs.applicationInsightsId
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { KnowledgeAccessDomain, KnowledgeSourceType } from "@prisma/client";
-import { prisma } from "@corgtex/shared";
+import { getSharedStateBackend, prisma } from "@corgtex/shared";
 import { defaultModelGateway } from "@corgtex/models";
 import { invalidateKnowledgeCache } from "./retrieval";
 import { getKnowledgeSearchProvider, isAzureKnowledgeSearchConfigured, logAzureKnowledgeIndexingWarning, syncAzureKnowledgeSource } from "./azure-search";
@@ -94,6 +94,7 @@ export async function syncKnowledgeForSource(params: {
           sourceId: params.sourceId,
         },
       });
+      if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
     });
     await syncAzureSourceBestEffort({
       workspaceId: params.workspaceId,
@@ -145,6 +146,9 @@ export async function syncKnowledgeForSource(params: {
       },
     });
     await tx.knowledgeChunk.createMany({ data: chunkRows });
+    // PostgreSQL cache invalidation commits with its source rows. A failure must
+    // roll both back instead of leaving cached results after a committed change.
+    if (getSharedStateBackend() === "postgres") await invalidateKnowledgeCache(params.workspaceId, tx);
   });
 
   await syncAzureSourceBestEffort({

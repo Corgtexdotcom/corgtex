@@ -1,3 +1,4 @@
+import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { openSourceOperations } from "./ops-core-source-operations.mjs";
 import { assertPostgresSourceFenced, runPostgresSourceFence, preflightOpsCorePostgresSource, recoverPostgresSourcePassword } from "./ops-core-postgres-fence.mjs";
@@ -20,7 +21,8 @@ const sameIds = (left, right) => Array.isArray(left) && Array.isArray(right)
 function context(options, runRecordedOperation) {
   const plan = structuredClone(options.plan);
   const { custody, railway = {} } = options;
-  if (plan?.schemaVersion !== 1 || !["core", "ops"].includes(plan.domain)) fail("SOURCE_CONTROLLER_PLAN_INVALID");
+  try { opsCorePlanSharedStateVariant(plan); } catch { fail("SOURCE_CONTROLLER_PLAN_INVALID"); }
+  if (!["core", "ops"].includes(plan.domain)) fail("SOURCE_CONTROLLER_PLAN_INVALID");
   exact(plan.source, "writers,postgresTriggers,postgresService,postgres,health");
   exact(plan.source.writers, "binding,expectedSourceLinks");
   exact(plan.source.postgresTriggers, "binding,expectedSourceLinks");
@@ -197,7 +199,8 @@ export async function runOpsCoreSourceFence(options) {
     const postgres = await runPostgresSourceFence({ ...ctx.postgresOptions(operations),
       resumeSessionOperations: pending.filter(item => item.kind === "POSTGRES_TERMINATE_OLD_RUNTIME_SESSION") });
     const settled = await operations.assertSettled();
-    const result = { ...await evidence(ctx, postgres), operations: settled };
+    const result = { ...await evidence(ctx, postgres), operations: settled,
+      ...(ctx.plan.schemaVersion === 2 ? { sourceRuntimeRedisBaselineSha256: archiveEvidenceHash(phasePlan.recoveryBaseline.health) } : {}) };
     const evidenceSha256 = await operations.retainPhaseArtifact("phase-evidence", result);
     await ctx.check();
     await custody.complete(pendingPhase.operationId, evidenceSha256);
