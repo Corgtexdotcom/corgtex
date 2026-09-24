@@ -18,6 +18,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await prisma.workspace.deleteMany({ where: { id: { in: [workspaceId, otherWorkspaceId] } } });
+  vi.useRealTimers();
   vi.unstubAllEnvs();
 });
 
@@ -51,14 +52,33 @@ describe("PostgreSQL pending transcripts", () => {
     expect(await prisma.pendingTranscriptUpload.count({ where: { workspaceId } })).toBe(1);
   });
 
-  it("bounds expired cleanup to 100 rows in the current workspace", async () => {
+  it("sweeps an inactive workspace's expired content on another workspace's upload using database time", async () => {
+    const encryptedPayload = encryptSecret(JSON.stringify(payload()));
+    const expiredId = randomUUID();
+    const liveId = randomUUID();
+    await prisma.$executeRaw`
+      INSERT INTO "PendingTranscriptUpload" ("id", "workspaceId", "encryptedPayload", "expiresAt")
+      VALUES
+        (${expiredId}, ${workspaceId}, ${encryptedPayload}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 minute'),
+        (${liveId}, ${workspaceId}, ${encryptedPayload}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') + INTERVAL '10 minutes')
+    `;
+    // An application clock ahead of the database must not expire still-live rows.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.now() + 60 * 60 * 1000));
+    expect(await storePendingTranscriptPayload({ ...payload(), workspaceId: otherWorkspaceId })).toBeTruthy();
+    expect(await prisma.pendingTranscriptUpload.findUnique({ where: { id: expiredId } })).toBeNull();
+    expect(await prisma.pendingTranscriptUpload.findUnique({ where: { id: liveId } })).not.toBeNull();
+    expect(await prisma.pendingTranscriptUpload.count({ where: { workspaceId: otherWorkspaceId } })).toBe(1);
+  });
+
+  it("bounds global expired cleanup to 100 rows across workspaces", async () => {
     const encryptedPayload = encryptSecret(JSON.stringify(payload()));
     await prisma.pendingTranscriptUpload.createMany({ data: Array.from({ length: 102 }, (_, index) => ({
-      id: randomUUID(), workspaceId: index < 101 ? workspaceId : otherWorkspaceId,
+      id: randomUUID(), workspaceId: index % 2 === 0 ? workspaceId : otherWorkspaceId,
       encryptedPayload, expiresAt: new Date(Date.now() - 60000),
     })) });
     expect(await storePendingTranscriptPayload(payload())).toBeTruthy();
-    expect(await prisma.pendingTranscriptUpload.count({ where: { workspaceId } })).toBe(2);
-    expect(await prisma.pendingTranscriptUpload.count({ where: { workspaceId: otherWorkspaceId } })).toBe(1);
+    expect(await prisma.pendingTranscriptUpload.count({ where: { workspaceId: { in: [workspaceId, otherWorkspaceId] } } })).toBe(3);
+    expect(await prisma.pendingTranscriptUpload.count({ where: { workspaceId: { in: [workspaceId, otherWorkspaceId] }, expiresAt: { lt: new Date() } } })).toBe(2);
   });
 });

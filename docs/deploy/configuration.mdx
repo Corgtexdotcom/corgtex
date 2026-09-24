@@ -96,7 +96,7 @@ Apply the additive migration before selecting `SHARED_STATE_BACKEND=postgres`. K
 
 The Core/Ops low-load runtime profile requires `connection_limit=5&pool_timeout=10` in each application database URL. Qualify total connections and database load including rollout overlap; fewer services does not prove sufficient capacity.
 
-Pending transcript tokens stop working after 20 minutes. This is an **application access deadline**, not a backup erasure promise: encrypted rows can remain in database backups for the configured retention period, and the long-lived encryption key can decrypt retained ciphertext. Expired rows are removed in bounded batches during subsequent operations. Evaluate this retention behavior before opting into the PostgreSQL backend.
+Pending transcript tokens stop working after 20 minutes. This is an **application access deadline**, not a backup erasure promise: encrypted rows can remain in database backups for the configured retention period, and the long-lived encryption key can decrypt retained ciphertext. Expired pending uploads are swept globally in bounded batches when any workspace stores a new upload. Cleanup is activity-driven; expiration does not schedule a timed database deletion. Evaluate this retention behavior before opting into the PostgreSQL backend.
 
 Pending uploads belong to their workspace and are deleted with it. The opaque rate-limit, cache and version keys are shared runtime state: individual tenant exports omit them and tenant deletion preserves them. Encrypted cache rows remain until expiry cleanup, and hashed version counters persist; backup retention applies to both.
 

@@ -45,16 +45,16 @@ function pendingTranscriptId(workspaceId: string, token: string) {
   return createHash("sha256").update(JSON.stringify([redisKey("meeting-transcript-upload"), workspaceId, token])).digest("hex");
 }
 
-// Only expire rows belonging to this workspace, with a bounded lock/cleanup batch.
-async function cleanupExpired(workspaceId: string, now: Date) {
+// Sweep expired rows across workspaces so inactive tenants do not retain them indefinitely.
+async function cleanupExpired() {
   await prisma.$executeRaw`
     WITH expired AS MATERIALIZED (
       SELECT "id" FROM "PendingTranscriptUpload"
-      WHERE "workspaceId" = ${workspaceId} AND "expiresAt" <= ${now}
+      WHERE "expiresAt" <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
       ORDER BY "expiresAt" LIMIT 100 FOR UPDATE SKIP LOCKED
     )
     DELETE FROM "PendingTranscriptUpload"
-    WHERE "workspaceId" = ${workspaceId} AND "id" IN (SELECT "id" FROM expired)
+    WHERE "id" IN (SELECT "id" FROM expired)
   `;
 }
 
@@ -66,7 +66,7 @@ export async function storePendingTranscriptPayload(payload: PendingTranscriptPa
       // Encrypt before any database operation: never write plaintext on missing keys.
       const encryptedPayload = encryptSecret(JSON.stringify(payload));
       const now = new Date();
-      await cleanupExpired(payload.workspaceId, now);
+      await cleanupExpired();
       await prisma.pendingTranscriptUpload.create({ data: {
         id: pendingTranscriptId(payload.workspaceId, token),
         workspaceId: payload.workspaceId,
