@@ -66,6 +66,29 @@ describe("Azure self-serve domain readiness", () => {
     expect(result.checks.find((check) => check.name === "email-reply-to-support")).toMatchObject({ level: "ok" });
   });
 
+  it.each([undefined, "", "redis"])("keeps Redis required for the default backend (%s)", (backend) => {
+    const result = validateAzureSelfServeDomainReadiness({
+      ...COMPLETE_ENV, SHARED_STATE_BACKEND: backend, REDIS_URL: "",
+    }, { strict: true });
+    expect(result.checks).toContainEqual({ level: "error", name: "env:REDIS_URL", detail: "REDIS_URL is missing." });
+  });
+
+  it("accepts PostgreSQL shared state without Redis while retaining database and encryption requirements", () => {
+    const env = { ...COMPLETE_ENV, SHARED_STATE_BACKEND: "postgres", REDIS_URL: "" };
+    expect(validateAzureSelfServeDomainReadiness(env, { strict: true }).checks.filter(check => check.level === "error")).toEqual([]);
+    for (const name of ["DATABASE_URL", "ENCRYPTION_KEY", "SESSION_COOKIE_SECRET"]) {
+      const result = validateAzureSelfServeDomainReadiness({ ...env, [name]: "" }, { strict: true });
+      expect(result.checks).toContainEqual({ level: "error", name: `env:${name}`, detail: `${name} is missing.` });
+    }
+  });
+
+  it("rejects invalid and mixed backend settings even outside strict readiness", () => {
+    for (const [backend, expected] of [["postgress", "shared-state-backend"], ["postgres", "shared-state-redis-omitted"]]) {
+      const result = validateAzureSelfServeDomainReadiness({ ...COMPLETE_ENV, SHARED_STATE_BACKEND: backend });
+      expect(result.checks).toContainEqual(expect.objectContaining({ level: "error", name: expected }));
+    }
+  });
+
   it("rejects old Resend and root-domain app senders", () => {
     for (const emailFrom of [
       "Corgtex <onboarding@corgtex.com>",

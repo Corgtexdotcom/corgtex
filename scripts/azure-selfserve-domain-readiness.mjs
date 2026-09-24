@@ -22,7 +22,6 @@ const REQUIRED_RUNTIME_ENV = [
   "SESSION_COOKIE_SECRET",
   "ENCRYPTION_KEY",
   "DATABASE_URL",
-  "REDIS_URL",
   "SMOKE_EMAIL_CAPTURE_SECRET",
   "SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS",
   "SELF_SERVE_REGISTRY_SYNC_SECRET",
@@ -188,7 +187,19 @@ export function validateAzureSelfServeDomainReadiness(env = process.env, options
       : status("error", "meeting-recorder-origin", "MEETING_RECORDER_PUBLIC_BASE_URL must match APP_URL."),
   );
 
-  for (const name of REQUIRED_RUNTIME_ENV) {
+  const sharedStateBackend = env.SHARED_STATE_BACKEND?.trim() || "redis";
+  checks.push(
+    ["redis", "postgres"].includes(sharedStateBackend)
+      ? status("ok", "shared-state-backend", `Shared state uses ${sharedStateBackend}.`)
+      : status("error", "shared-state-backend", "SHARED_STATE_BACKEND must be redis or postgres."),
+  );
+  if (sharedStateBackend === "postgres" && envConfigured(env, "REDIS_URL")) {
+    checks.push(status("error", "shared-state-redis-omitted", "PostgreSQL shared state requires REDIS_URL to be omitted."));
+  }
+  const requiredRuntimeEnv = sharedStateBackend === "redis"
+    ? [...REQUIRED_RUNTIME_ENV, "REDIS_URL"]
+    : REQUIRED_RUNTIME_ENV;
+  for (const name of requiredRuntimeEnv) {
     if (envConfigured(env, name)) {
       checks.push(status("ok", `env:${name}`, `${name} is configured.`));
     } else {
