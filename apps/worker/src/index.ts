@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { prisma, logger } from "@corgtex/shared";
+import { closeRedisClient, env, prisma, logger } from "@corgtex/shared";
 import { captureErrorTelemetry } from "@corgtex/shared/telemetry-node";
 import { resolveNodeReleaseMetadata } from "@corgtex/shared/release-metadata-node";
 import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, renderWorkflowJobMetrics, runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs, scheduleDripCampaigns } from "@corgtex/workflows";
 import * as Sentry from "@sentry/node";
 import { getNextPollIntervalMs, getWorkerPollOutcome, type WorkerPollOutcome } from "./polling";
+
+import { assertSchedulerProofRelease, parseSchedulerProofNonce, parseWorkerExecutionMode, runWorkerCycle, schedulerCompletionReceipt, type WorkerOperations } from "./execution";
+import { createSchedulerLock, withSchedulerLock } from "./scheduler";
+
+// Validate before initializing telemetry, a health listener, or any database work.
+const executionMode = parseWorkerExecutionMode();
+const schedulerProofNonce = parseSchedulerProofNonce(process.env.WORKER_SCHEDULER_PROOF_NONCE);
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -63,6 +70,15 @@ function log(level: "info" | "warn" | "error", data: Record<string, unknown>) {
   }
 }
 
+const operations: WorkerOperations = {
+  finalize: () => finalizeExpiredApprovalFlows(),
+  dispatch: () => dispatchPendingEvents(workerId, EVENT_BATCH_SIZE),
+  process: () => runPendingJobs(workerId, JOB_BATCH_SIZE, JOB_CONCURRENCY),
+  daily: () => scheduleDailyJobs(),
+  periodic: () => schedulePeriodicJobs(),
+  drip: () => scheduleDripCampaigns(),
+};
+
 // --- Worker tick ---
 
 async function tick(): Promise<WorkerPollOutcome | null> {
@@ -71,12 +87,7 @@ async function tick(): Promise<WorkerPollOutcome | null> {
 
   const tickStart = Date.now();
   try {
-    const finalized = await finalizeExpiredApprovalFlows();
-    const dispatched = await dispatchPendingEvents(workerId, EVENT_BATCH_SIZE);
-    const processed = await runPendingJobs(workerId, JOB_BATCH_SIZE, JOB_CONCURRENCY);
-    const scheduled = await scheduleDailyJobs();
-    const scheduledPeriodic = await schedulePeriodicJobs();
-    const scheduledDrip = await scheduleDripCampaigns();
+    const { finalized, dispatched, processed, scheduled, scheduledPeriodic, scheduledDrip } = await runWorkerCycle(executionMode, operations);
 
     tickCount++;
     totalDispatched += dispatched;
@@ -152,6 +163,7 @@ function startHealthServer() {
       const status = {
         status: healthy ? "ok" : "draining",
         workerId,
+        executionMode,
         phase,
         tickCount,
         totalDispatched,
@@ -175,7 +187,7 @@ function startHealthServer() {
     if (req.url === "/ready") {
       const ready = phase === "running" && !tickInFlight;
       res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ready, phase }));
+      res.end(JSON.stringify({ ready, phase, executionMode }));
       return;
     }
 
@@ -237,6 +249,13 @@ async function shutdown(signal: string) {
   log("info", { event: "shutdown_initiated", signal });
   phase = "draining";
 
+  if (executionMode === "scheduler-once") {
+    // Let the in-flight cycle release its advisory lock and disconnect normally.
+    // A signaled scheduled execution is not silently promoted to successful completion.
+    process.exitCode = signal === "SIGINT" ? 130 : 143;
+    return;
+  }
+
   // Stop polling
   if (pollTimer) {
     clearTimeout(pollTimer);
@@ -273,17 +292,51 @@ async function shutdown(signal: string) {
 async function main() {
   log("info", {
     event: "starting",
+    executionMode,
     pollIntervalMs: POLL_INTERVAL_MS,
     eventBatchSize: EVENT_BATCH_SIZE,
     jobBatchSize: JOB_BATCH_SIZE,
     healthPort: HEALTH_PORT,
   });
 
+  if (executionMode === "scheduler-once") {
+    let completed: Awaited<ReturnType<typeof runWorkerCycle>> | null = null;
+    let skipped = false;
+    try {
+      assertSchedulerProofRelease(schedulerProofNonce, release);
+      const result = await withSchedulerLock(createSchedulerLock(env.DATABASE_URL), () => runWorkerCycle("scheduler-once", operations));
+      skipped = result.skipped;
+      if (!result.skipped) completed = result.result;
+    } catch {
+      // Provider errors can include connection details. Keep scheduled-job diagnostics bounded.
+      log("error", { event: "scheduler_failed", code: "SCHEDULER_EXECUTION_FAILED" });
+      process.exitCode = 1;
+    } finally {
+      const cleanup = await Promise.allSettled([
+        Promise.resolve().then(() => prisma.$disconnect()),
+        Promise.resolve().then(() => closeRedisClient()),
+      ]);
+      if (cleanup.some((result) => result.status === "rejected")) {
+        log("error", { event: "scheduler_failed", code: "SCHEDULER_DISCONNECT_FAILED" });
+        process.exitCode = 1;
+      }
+      phase = "stopped";
+    }
+    if (!process.exitCode) {
+      if (completed) log("info", schedulerCompletionReceipt(schedulerProofNonce, release, completed));
+      else if (skipped) log("info", { event: "scheduler_skipped", executionMode, proofNonce: schedulerProofNonce, skipped: true, reason: "lock_held" });
+    }
+    // This is a finite container job: do not remain alive on SDK or telemetry sockets.
+    process.exit(Number(process.exitCode) || 0);
+    return;
+  }
+
   // Start health server
   startHealthServer();
 
   // Initial tick
   const initialWork = await tick();
+  if (phase === "draining" || phase === "stopped") return;
   phase = "running";
   if (initialWork) {
     currentPollIntervalMs = getNextPollIntervalMs({

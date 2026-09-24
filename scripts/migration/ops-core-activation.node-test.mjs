@@ -526,3 +526,70 @@ for (const [name, state] of [
   assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web"]);
   assert.equal(f.journal.phase, "VERIFIED");
 });
+
+function demandFixture(options = {}) {
+  const f = fixture({ postgresState: true, ...options, mutatePlan(plan) {
+    plan.schemaVersion = 2;
+    plan.workerDemand = { schedulerJobName: "fixture-scheduler", schedulerResources: { cpu: 0.5, memory: "1Gi" }, scalerConnectionSecret: {
+      name: "worker-scaler-connection", keyVaultUrl: `https://fixture.vault.azure.net/secrets/scaler/${"e".repeat(32)}`, identity: plan.managedIdentityId } };
+    options.mutatePlan?.(plan);
+  } });
+  const schedulerId = id("Microsoft.App/jobs", f.plan.workerDemand.schedulerJobName), rows = [];
+  const appTransport = f.options.armTransport;
+  f.map.set(schedulerId, missing());
+  f.options.armTransport = async request => {
+    if (request.resourceId === `${schedulerId}/start`) {
+      f.log.push("scheduler:proof");
+      rows.push(resource(`${schedulerId}/executions/proof`, { status: "Succeeded", startTime: new Date(0).toISOString(), endTime: new Date(1).toISOString(), template: structuredClone(request.body) }));
+      return { status: 202 };
+    }
+    if (request.resourceId === `${schedulerId}/executions`) return { status: 200, body: { value: structuredClone(rows) } };
+    if (request.resourceId === schedulerId) {
+      if (request.method === "PUT") {
+        f.log.push(`scheduler:${request.body.properties.configuration.triggerType}`);
+        const body = { ...structuredClone(request.body), ...resource(schedulerId, { ...structuredClone(request.body.properties), provisioningState: "Succeeded" }) };
+        f.set(schedulerId, body); return { status: 202 };
+      }
+      return structuredClone(f.map.get(schedulerId));
+    }
+    return appTransport(request);
+  };
+  f.options.schedulerProof = async ({ execution, nonce }) => ({ jobId: schedulerId, executionId: execution.id,
+    replicaName: `${execution.name}-replica`, containerName: "scheduler", receipt: { event: "scheduler_complete", skipped: false,
+      proofNonce: nonce, executionMode: "scheduler-once", ts: execution.properties.startTime, release: { ...f.plan.release, evidence: "baked", drift: { gitSha: false, version: false, imageTag: false, details: [] } },
+      counts: { finalized: 0, dispatched: 0, processed: 0, scheduled: 0, scheduledPeriodic: 0, scheduledDrip: 0 } } });
+  return { ...f, schedulerId };
+}
+
+test("demand activation creates queue-only scale-zero worker and proves scheduler before enabling cron", async () => {
+  const f = demandFixture();
+  assert.equal((await createOpsCoreActivation(f.options).activate()).complete, true);
+  const worker = f.map.get(f.appId("worker")).body;
+  assert.equal(worker.properties.template.scale.minReplicas, 0);
+  assert.equal(worker.properties.template.containers[0].env.find(e => e.name === "WORKER_EXECUTION_MODE").value, "queue-only");
+  assert.ok(f.log.indexOf("scheduler:Manual") > f.log.indexOf("put:worker"));
+  assert.ok(f.log.indexOf("scheduler:proof") < f.log.indexOf("scheduler:Schedule"));
+  const before = f.log.filter(v => v.startsWith("put:") || v.startsWith("scheduler:")).length;
+  assert.equal((await createOpsCoreActivation(f.options).reconcile()).complete, true);
+  assert.equal(f.log.filter(v => v.startsWith("put:") || v.startsWith("scheduler:")).length, before);
+});
+
+test("demand activation wakes zero through bound health before accepting a positive replica", async () => {
+  let f;
+  f = demandFixture({ put({ role, body, map }) {
+    if (role === "worker") map.get(`${f.appId(role)}/revisions/${body.properties.latestRevisionName}/replicas`).body.value = [];
+  }, health(input, result, { map }) {
+    if (input.role === "worker") map.get(`${f.appId("worker")}/revisions/${input.revisionName}/replicas`).body.value = [{ name: "replica", properties: { runningState: "Running", containers: [{ name: "worker", ready: true }] } }];
+  } });
+  // A fixture PUT hook must still acknowledge the exact app mutation.
+  const previous = f.options.armTransport;
+  f.options.armTransport = async request => (await previous(request)) ?? { status: 202 };
+  assert.equal((await createOpsCoreActivation(f.options).activate()).complete, true);
+  assert.ok(f.log.filter(v => v === "health:worker").length >= 3);
+});
+
+test("demand activation rejects runtime/scaler credential reuse before effects", () => {
+  const f = demandFixture({ mutatePlan(plan) { plan.roles.worker.env.push({ name: "OTHER_DATABASE_URL", secretRef: "worker-scaler-connection" }); } });
+  assert.throws(() => createOpsCoreActivation(f.options));
+  assert.equal(f.records.size, 0);
+});

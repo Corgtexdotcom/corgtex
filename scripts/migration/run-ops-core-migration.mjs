@@ -217,6 +217,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       if (request.role === "web") return fetchWebActivationHealth(request);
       workerHealth ??= createHealthJobDispatcher({ plan: plan.health, custody, operationStore, assertSourceFenced,
         mode: custody.snapshot().pending?.to === "TARGET_ACTIVATING" ? "migration" : "acceptance",
+        ...(plan.activation.workerDemand ? { workerDemand: { plan: plan.activation.workerDemand, target: plan.azure } } : {}),
         ...(runtime.healthTransport ? { transport: runtime.healthTransport } : {}) });
       return workerHealth.probeHealth(request);
     });

@@ -198,6 +198,10 @@ function canonicalizeTemplateIdentity(template, location, revisionName, input) {
   if (!container || typeof container.name !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(container.name)
     || container.image !== expected) fail("AZURE_IMAGE_MISMATCH");
   assertReleaseEnvironment(container, release);
+  // Generic fleet releases do not own the separate scheduler writer. Only the
+  // explicit demand-aware Core/Ops release controller may update this runtime.
+  if (role === "worker" && container.env?.some(e => e.name === "WORKER_EXECUTION_MODE" && e.value === "queue-only")
+    && input.workerDemandEnabled !== true) fail("AZURE_DEMAND_WORKER_RELEASE_UNSUPPORTED");
   return Object.freeze({
     appName,
     location,
@@ -331,8 +335,11 @@ function validOperationPath(url, target) {
     providerIndex = 5;
   }
   if (parts[providerIndex] !== "providers" || parts[providerIndex + 1] !== "Microsoft.App") return false;
-  if (parts[providerIndex + 2] === "containerApps" && parts.length === providerIndex + 4)
-    return [target.webAppName, target.workerAppName].includes(parts[providerIndex + 3]);
+  if (parts[providerIndex + 2] === "containerApps") {
+    if (![target.webAppName, target.workerAppName].includes(parts[providerIndex + 3])) return false;
+    return parts.length === providerIndex + 4 || parts.length === providerIndex + 6
+      && parts[providerIndex + 4] === "operationResults" && segment.test(parts[providerIndex + 5]);
+  }
   if (parts[providerIndex + 2] !== "locations" || !segment.test(parts[providerIndex + 3])) return false;
   if (parts[providerIndex + 4] === "operationStatuses" && parts.length === providerIndex + 6)
     return segment.test(parts[providerIndex + 5]);
@@ -503,14 +510,15 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     return patchProperties(input, { template: safeJsonClone(input.template) });
   }
 
-  async function patchProperties(input, properties) {
+  async function patchProperties(input, properties, action) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
-    const url = resourceUrl(target, appName);
+    const baseUrl = input.workerDemandEnabled ? resourceUrl(target, appName).replace(`api-version=${API_VERSION}`, "api-version=2025-07-01") : resourceUrl(target, appName);
+    const url = action ? baseUrl.replace("?", `/${action}?`) : baseUrl;
     if (typeof input.location !== "string" || !/^[A-Za-z0-9 ._-]{1,128}$/.test(input.location)) fail("AZURE_TARGET_INVALID");
     let response;
     try {
-      response = await request(url, { method: "PATCH", headers: { "content-type": PATCH_CONTENT_TYPE }, body: JSON.stringify({ location: input.location, properties }) }, true);
+      response = await request(url, action ? { method: "POST" } : { method: "PATCH", headers: { "content-type": PATCH_CONTENT_TYPE }, body: JSON.stringify({ location: input.location, properties }) }, true);
     } catch {
       return patchResult(false, false, "AZURE_PATCH_AMBIGUOUS", null, "PATCH_REQUEST");
     }
@@ -529,7 +537,7 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
       return patchResult(false, false, "AZURE_OPERATION_AMBIGUOUS", null, "PATCH_RESPONSE", response.status);
     }
     let location;
-    try { location = operationUrl(response.headers.get("azure-asyncoperation") ?? response.headers.get("location"), target); } catch {
+    try { location = operationUrl(response.headers.get("azure-asyncoperation") ?? response.headers.get("location"), action ? { ...target, webAppName: appName, workerAppName: appName } : target); } catch {
       return patchResult(false, false, "AZURE_OPERATION_LOCATION_INVALID", null, "OPERATION_LOCATION", response.status);
     }
     let retryAfter = response.headers.get("retry-after");
@@ -634,7 +642,7 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
   async function readExclusiveState(input) {
     const target = targetValue(input.target);
     const appName = appNameFor(target, input.role);
-    const url = resourceUrl(target, appName);
+    const url = input.workerDemandEnabled ? resourceUrl(target, appName).replace(`api-version=${API_VERSION}`, "api-version=2025-07-01") : resourceUrl(target, appName);
     const response = await request(url, { method: "GET" }, true);
     if (response.status !== 200) fail("AZURE_EXCLUSIVE_READ_FAILED", true);
     const app = await responseBody(response);
@@ -663,8 +671,33 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     }
     return Object.freeze({ mode: configuration.activeRevisionsMode,
       configurationDigest: managedAzureConfigurationDigest(configuration), location: app.location,
-      provisioningState: app.properties.provisioningState, latestRevisionName: app.properties.latestRevisionName,
+      provisioningState: app.properties.provisioningState,
+      ...(input.workerDemandEnabled ? { runningStatus: app.properties.runningStatus } : {}), latestRevisionName: app.properties.latestRevisionName,
       latestReadyRevisionName: app.properties.latestReadyRevisionName, revisions: Object.freeze(inventory) });
+  }
+
+  async function setAppRunningState(input) {
+    if (!input.workerDemandEnabled || input.role !== "worker" || !input.exclusiveActivation
+      || !["Running", "Stopped"].includes(input.runningStatus)) fail("AZURE_APP_ACTION_UNOWNED");
+    const before = await readExclusiveState(input);
+    if (before.mode !== "Single" || before.provisioningState !== "Succeeded") fail("AZURE_APP_ACTION_UNSETTLED", true);
+    const satisfied = s => s.mode === "Single" && s.provisioningState === "Succeeded"
+      && s.runningStatus === input.runningStatus
+      && (input.runningStatus !== "Stopped" || s.revisions.every(r => r.replicaCount === 0));
+    if (satisfied(before)) return before;
+    await input.onProgress?.();
+    // Exactly one POST. Ambiguous acknowledgements are followed only by reads.
+    const result = await patchProperties({ ...input, location: before.location }, null,
+      input.runningStatus === "Stopped" ? "stop" : "start");
+    const started = clock();
+    while (clock() - started < OPERATION_TIMEOUT_MS) {
+      await input.onProgress?.();
+      const current = await readExclusiveState(input);
+      if (satisfied(current)) return current;
+      if (result.terminal && !result.succeeded) fail("AZURE_APP_ACTION_REJECTED", true);
+      await sleep(1_000);
+    }
+    fail("AZURE_APP_ACTION_UNPROVEN", true);
   }
 
   async function setRevisionMode(input) {
@@ -697,5 +730,5 @@ export function createManagedAzureContainerAppTransport(dependencies = {}) {
     return Object.freeze({ terminal: true, succeeded: true, code: "AZURE_BASELINE_PAIR_DRAINED" });
   }
 
-  return Object.freeze({ readApp, readAppTemplate, readRevisionState, patchTemplate, waitForState, setRevisionActive, drainBaseline, readExclusiveState, setRevisionMode });
+  return Object.freeze({ readApp, readAppTemplate, readRevisionState, patchTemplate, waitForState, setRevisionActive, drainBaseline, readExclusiveState, setRevisionMode, setAppRunningState });
 }
