@@ -14,13 +14,14 @@ const posture = isolation => ({ default_ro: "on", ro: "on", isolation, statement
   lock_timeout: "1s", idle_timeout: "15s", transaction_timeout: "1min", search_path: "pg_catalog",
   row_security: "on", database_ok: true, user_ok: true });
 
-function client({ deniedSetting, catalogError } = {}) {
+function client({ deniedSetting, catalogError, database = "postgres", providerViewError } = {}) {
   const calls = []; let inside = false;
   return { calls, ended: false, connection: { stream: { destroy() { calls.push("DESTROY"); } } },
     async connect() { calls.push("CONNECT"); },
     async query(sql, values) {
       calls.push([sql, values]);
-      if (sql === metadataSql.guard) return { rows: [posture(inside ? "repeatable read" : "read committed")] };
+      if (sql === metadataSql.guard || sql === ACCESS_SQL.providerGuard)
+        return { rows: [posture(inside ? "repeatable read" : "read committed")] };
       if (sql.startsWith("BEGIN")) { inside = true; return { command: "BEGIN" }; }
       if (sql === "ROLLBACK") { inside = false; return { command: "ROLLBACK" }; }
       if (sql.startsWith("SAVEPOINT") || sql.startsWith("ROLLBACK TO") || sql.startsWith("RELEASE")) return { command: sql.split(" ")[0] };
@@ -31,6 +32,17 @@ function client({ deniedSetting, catalogError } = {}) {
       }
       if (sql === ACCESS_SQL.memberships) return { rows: [] };
       if (sql === ACCESS_SQL.hooks) return { rows: hooks };
+      if (sql === ACCESS_SQL.effectiveSettings) return { rows: [{ name: "pg_qs.query_capture_mode", setting: "none",
+        source: "default", context: "sighup", pendingRestart: false }] };
+      if (sql === ACCESS_SQL.providerSchemas) return { rows: [{ name: database === "azure_sys" ? "query_store" : "public",
+        oid: "300", owner: "azuresu" }] };
+      if (sql === ACCESS_SQL.providerPublicRelations) return { rows: [] };
+      if (sql === ACCESS_SQL.providerPublicDefiners) return { rows: [] };
+      if (sql === ACCESS_SQL.providerRelation) return { rows: [{ relation: values[0] }] };
+      if (sql.startsWith("SELECT EXISTS(SELECT 1 FROM query_store.")) {
+        if (providerViewError) throw Object.assign(Error("synthetic provider view denied"), { code: "42501" });
+        return { rows: [{ hasRows: sql.includes("query_texts_view") }] };
+      }
       if (sql === "SELECT pg_catalog.set_config($1,$2,true)") {
         if (values[0] === deniedSetting) throw Object.assign(Error("synthetic raw provider error"), { code: "42501" });
         return { rows: [{ set_config: values[1] }] };
@@ -46,12 +58,20 @@ function client({ deniedSetting, catalogError } = {}) {
 }
 
 test("captures bounded actual database ACLs and GUC privileges with rollback and disconnect", async () => {
-  const c = client(), receipt = await captureSharedPostgresAccess(c);
+  const c = client(), providers = [];
+  const receipt = await captureSharedPostgresAccess(c, { providerClientFactory: database => {
+    const provider = client({ database }); providers.push(provider); return provider;
+  }, azureParameters: [{ name: "pg_qs.query_capture_mode", value: "none" }] });
   assert.equal(receipt.status, "SHARED_POSTGRES_ACCESS_CAPTURED");
   assert.equal(receipt.resource, RESOURCE); assert.equal(receipt.host, HOST);
   assert.equal(receipt.admissionReady, false);
   assert.equal(receipt.databases.length, 4);
   assert.equal(receipt.settingResults.every(row => row.accepted), true);
+  assert.equal(receipt.effectiveSettings[0].setting, "none");
+  assert.equal(receipt.azureParameters[0].value, "none");
+  assert.equal(receipt.providerDatabases.length, 3);
+  assert.equal(receipt.providerDatabases.find(row => row.name === "azure_sys").queryStore[0].hasRows, true);
+  assert.equal(providers.every(provider => provider.ended && provider.calls.some(([sql]) => sql === "ROLLBACK")), true);
   assert.equal(receipt.inventories.core.databases.length, 4);
   assert.equal(receipt.inventories.ops.databases.length, 4);
   assert.equal(receipt.rollback, true); assert.equal(c.ended, true);
@@ -60,7 +80,7 @@ test("captures bounded actual database ACLs and GUC privileges with rollback and
 
 test("a denied Azure session setting is retained without hiding the remaining catalog", async () => {
   const c = client({ deniedSetting: "track_activities" });
-  const receipt = await captureSharedPostgresAccess(c);
+  const receipt = await captureSharedPostgresAccess(c, { providerClientFactory: database => client({ database }) });
   assert.deepEqual(receipt.settingResults.filter(row => !row.accepted),
     [{ name: "track_activities", accepted: false, sqlState: "42501" }]);
   assert.equal(c.calls.some(([sql]) => sql === "ROLLBACK TO SAVEPOINT access_setting"), true);
@@ -70,6 +90,16 @@ test("a denied Azure session setting is retained without hiding the remaining ca
 
 test("catalog failure cannot produce admission receipt and closes the connection", async () => {
   const c = client({ catalogError: true });
-  await assert.rejects(captureSharedPostgresAccess(c));
+  await assert.rejects(captureSharedPostgresAccess(c, { providerClientFactory: database => client({ database }) }));
   assert.equal(c.ended, true);
+});
+
+test("provider Query Store denial is recorded without exporting query text", async () => {
+  const c = client();
+  const receipt = await captureSharedPostgresAccess(c, { providerClientFactory: database =>
+    client({ database, providerViewError: database === "azure_sys" }) });
+  const store = receipt.providerDatabases.find(row => row.name === "azure_sys").queryStore;
+  assert.equal(store.every(row => row.present && !row.readable && row.hasRows === null && row.sqlState === "42501"), true);
+  assert.equal(JSON.stringify(receipt).includes("synthetic provider view denied"), false);
+  assert.equal(receipt.admissionReady, false);
 });

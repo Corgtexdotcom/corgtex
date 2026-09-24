@@ -80,6 +80,7 @@ export class Azure {
       ["network private-endpoint-connection list", "PRIVATE_ENDPOINT_READ"],
       ["postgres flexible-server show", "SERVER_READ"], ["postgres flexible-server start", "SERVER_START"],
       ["postgres flexible-server stop", "SERVER_STOP"], ["postgres flexible-server firewall-rule list", "FIREWALL_READ"],
+      ["postgres flexible-server parameter list", "PARAMETER_READ"],
       ["postgres flexible-server firewall-rule create", "FIREWALL_CREATE"], ["postgres flexible-server firewall-rule delete", "FIREWALL_DELETE"],
     ];
     const operation = operations.find(([prefix]) => args.slice(0, prefix.split(" ").length).join(" ") === prefix)?.[1];
@@ -397,10 +398,20 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const result = await qualify(api, i, async (options) => {
       const metadata = await captureWhenReady(() => new pg.Client(config), options);
       if (env.QUALIFY_ACCESS === "true") {
-        const { captureSharedPostgresAccess } = await import("./probe-shared-postgres-access.mjs");
+        const { ACCESS_SETTING_NAMES, captureSharedPostgresAccess } = await import("./probe-shared-postgres-access.mjs");
+        const parameterRows = await api.call(["postgres", "flexible-server", "parameter", "list",
+          "--resource-group", GROUP, "--server-name", SERVER]);
+        assert(Array.isArray(parameterRows) && parameterRows.length <= 1000, "ACCESS_PARAMETER_READ_INVALID");
+        const parameterNames = new Set(ACCESS_SETTING_NAMES);
+        const azureParameters = parameterRows.filter(row => parameterNames.has(row?.name))
+          .map(row => ({ name: row.name, value: String(row.value ?? ""),
+            source: row.source ?? null, defaultValue: String(row.defaultValue ?? ""),
+            pendingRestart: row.isConfigPendingRestart ?? null }));
+        assert(Buffer.byteLength(JSON.stringify(azureParameters)) <= 16000, "ACCESS_PARAMETER_LIMIT");
         const remainingMs = Math.min(120000, options.deadline - Date.now() - 3000);
         assert(remainingMs > 0, "ACCESS_DEADLINE");
-        accessReceipt = await captureSharedPostgresAccess(new pg.Client(config), { deadlineMs: remainingMs });
+        accessReceipt = await captureSharedPostgresAccess(new pg.Client(config), { deadlineMs: remainingMs,
+          azureParameters, providerClientFactory: database => new pg.Client({ ...config, database }) });
       }
       return metadata;
     }, () => save(`${dir}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
