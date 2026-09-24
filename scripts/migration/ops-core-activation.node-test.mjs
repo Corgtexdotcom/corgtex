@@ -515,9 +515,12 @@ test("PostgreSQL activation rejects a mixed backend before any target write", ()
   assert.throws(() => createOpsCoreActivation(f.options));
   assert.equal(f.log.some(x => x.startsWith("put:")), false);
 });
-test("PostgreSQL activation requires web health to prove the selected backend before worker startup", async () => {
+for (const [name, state] of [
+  ["selected backend", { backend: "redis", status: "configured" }],
+  ["usable encrypted state", { backend: "postgres", status: "missing" }],
+]) test(`PostgreSQL activation requires web health to prove ${name} before worker startup`, async () => {
   const f = fixture({ postgresState: true, health(input, result) {
-    if (input.role === "web") result.health.body.runtime.sharedState.backend = "redis";
+    if (input.role === "web") result.health.body.runtime.sharedState = state;
   } });
   await assert.rejects(createOpsCoreActivation(f.options).activate());
   assert.deepEqual(f.log.filter(x => x.startsWith("put:")), ["put:web"]);

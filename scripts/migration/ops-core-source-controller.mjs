@@ -199,7 +199,8 @@ export async function runOpsCoreSourceFence(options) {
     const postgres = await runPostgresSourceFence({ ...ctx.postgresOptions(operations),
       resumeSessionOperations: pending.filter(item => item.kind === "POSTGRES_TERMINATE_OLD_RUNTIME_SESSION") });
     const settled = await operations.assertSettled();
-    const result = { ...await evidence(ctx, postgres), operations: settled };
+    const result = { ...await evidence(ctx, postgres), operations: settled,
+      ...(ctx.plan.schemaVersion === 2 ? { sourceRuntimeRedisBaselineSha256: archiveEvidenceHash(phasePlan.recoveryBaseline.health) } : {}) };
     const evidenceSha256 = await operations.retainPhaseArtifact("phase-evidence", result);
     await ctx.check();
     await custody.complete(pendingPhase.operationId, evidenceSha256);

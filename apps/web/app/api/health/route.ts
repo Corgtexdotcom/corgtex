@@ -152,7 +152,8 @@ export async function GET() {
     }
 
     const runtime = runtimeFingerprint();
-    if (!runtime.workspaceScopeValid || runtime.sharedState.status === "invalid") {
+    if (!runtime.workspaceScopeValid || runtime.sharedState.status === "invalid"
+      || runtime.sharedState.backend === "postgres" && runtime.sharedState.status !== "configured") {
       return NextResponse.json({
         status: "degraded",
         service: "web",

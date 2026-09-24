@@ -1,5 +1,7 @@
+import { randomBytes } from "node:crypto";
+import { decryptSecret, encryptSecret, isSecretEncryptionConfigured } from "./crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getSharedStateBackend, sharedStateKey } from "./shared-state";
+import { getSharedStateBackend, isSharedStateConfigured, sharedStateKey } from "./shared-state";
 import { checkRateLimit, resetRateLimit } from "./rate-limiter";
 import { getCacheJson, getCacheVersion, incrementCacheVersion, setCacheJson } from "./cache";
 import { postgresSharedState } from "./postgres-shared-state";
@@ -16,6 +18,26 @@ describe("shared state routing", () => {
     expect(getSharedStateBackend()).toBe("redis");
     vi.stubEnv("SHARED_STATE_BACKEND", "postgress");
     expect(() => getSharedStateBackend()).toThrow("Invalid SHARED_STATE_BACKEND");
+  });
+  it("requires a valid encryption key for PostgreSQL readiness using the encryption validator", () => {
+    vi.stubEnv("SHARED_STATE_BACKEND", "postgres");
+    vi.stubEnv("DATABASE_URL", "postgresql://localhost/synthetic");
+    const valid = randomBytes(32).toString("hex");
+    for (const invalid of ["", "not-hex", valid.slice(2), `${valid}zz`, `${valid}a`]) {
+      vi.stubEnv("ENCRYPTION_KEY", invalid);
+      expect(isSharedStateConfigured()).toBe(false);
+      expect(isSecretEncryptionConfigured()).toBe(false);
+      expect(() => encryptSecret("synthetic")).toThrow(/ENCRYPTION_KEY/);
+    }
+    vi.stubEnv("ENCRYPTION_KEY", valid);
+    expect(isSharedStateConfigured()).toBe(true);
+    expect(decryptSecret(encryptSecret("synthetic"))).toBe("synthetic");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DATABASE_URL", "");
+    expect(isSharedStateConfigured()).toBe(false);
+    vi.stubEnv("SHARED_STATE_BACKEND", "redis");
+    vi.stubEnv("ENCRYPTION_KEY", "");
+    expect(isSharedStateConfigured()).toBe(true);
   });
   it("hashes keys with distinct namespaces and kinds", () => {
     vi.stubEnv("REDIS_KEY_PREFIX", "one");

@@ -83,6 +83,7 @@ vi.mock("./ops-core-postgres-state-gate.mjs", () => ({ assertOpsCorePostgresStat
   const f = shared.current;
   f.events.push("postgres-state");
   expect(options.targetAdminConfig.database).toBe("postgres");
+  expect(typeof options.assertSourceRedisBound).toBe("function");
   expect(options.targetDatabaseOid).toBe("16401");
   expect(options.sourceRedis).toEqual(f.plan.sharedState.sourceRedis);
   expect(options.targetBindingSha256).toBe(opsCoreAzureTargetBindingSha256(f.plan.azure));

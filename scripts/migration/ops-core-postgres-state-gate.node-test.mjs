@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { redisGateBindingSha256 } from "./ops-core-redis-gate.mjs";
 import { randomBytes } from "node:crypto";
 import { assertOpsCorePostgresStateEmpty, POSTGRES_SHARED_STATE_MIGRATION } from "./ops-core-postgres-state-gate.mjs";
 
@@ -28,6 +29,8 @@ function fixture(change = {}) {
     custody: { signal: controller.signal, snapshot: () => structuredClone(journal), async assertOwned() {} },
     async assertSourceFenced() { state.guards++; change.guard?.(state, journal, controller);
       return { complete: true, domain: "core", intentSha256: "a".repeat(64), sourceFenceSha256: "c".repeat(64) }; },
+    async assertSourceRedisBound() { return { complete: true, domain: "core", intentSha256: "a".repeat(64),
+      sourceFenceSha256: "c".repeat(64), bindingSha256: redisGateBindingSha256(options.sourceRedis), runtimeBaselineSha256: "f".repeat(64) }; },
     async assertTargetInactive() { return { complete: true, domain: "core", intentSha256: "a".repeat(64), targetBindingSha256: "e".repeat(64) }; },
     createRedisClient() { return { isOpen: false, on() {}, async connect() {}, destroy() { state.redisEnds++; },
       async sendCommand(args) {
@@ -138,4 +141,12 @@ test("abort and hanging query timeout cannot produce acceptance or leak the clie
   const hanging = fixture({ hang: true }); hanging.options.timeoutMs = 20;
   await assert.rejects(assertOpsCorePostgresStateEmpty(hanging.options), { code: "POSTGRES_STATE_READ_TIMEOUT" });
   assert.equal(hanging.state.ends, 1);
+});
+
+
+test("an unrelated empty Redis cannot bypass the live source runtime binding proof", async () => {
+  const f = fixture(); f.options.assertSourceRedisBound = async () => ({ complete: true, domain: "core", intentSha256: "a".repeat(64),
+    sourceFenceSha256: "c".repeat(64), bindingSha256: "0".repeat(64), runtimeBaselineSha256: "f".repeat(64) });
+  await assert.rejects(assertOpsCorePostgresStateEmpty(f.options), { code: "POSTGRES_STATE_SOURCE_RUNTIME_UNPROVEN" });
+  assert.equal(f.state.scans, 0); assert.equal(f.state.connects, 0);
 });

@@ -1,13 +1,18 @@
 import { env } from "./env";
 import { isRedisConfigured } from "./redis";
-import { sha256 } from "./crypto";
+import { isSecretEncryptionConfigured, sha256 } from "./crypto";
 
 export function getSharedStateBackend(): "redis" | "postgres" {
   return env.SHARED_STATE_BACKEND ?? "redis";
 }
 
 export function isSharedStateConfigured() {
-  return getSharedStateBackend() === "postgres" ? Boolean(env.DATABASE_URL) : isRedisConfigured();
+  if (getSharedStateBackend() !== "postgres") return isRedisConfigured();
+  try {
+    return Boolean(env.DATABASE_URL) && isSecretEncryptionConfigured();
+  } catch {
+    return false;
+  }
 }
 
 export function sharedStateKey(kind: string, key: string) {

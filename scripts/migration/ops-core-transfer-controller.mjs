@@ -5,6 +5,7 @@ import pg from "pg";
 import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { archiveEvidenceHash, validateArchiveKeyVersion } from "./ops-core-archive.mjs";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
+import { assertOpsCoreSourceRedisBound } from "./ops-core-source-redis.mjs";
 import { assertOpsCoreSourceFenced } from "./ops-core-source-controller.mjs";
 import { runOpsCorePostgresCopy, resumeOpsCorePostgresCopy } from "./ops-core-postgres-copy.mjs";
 import { applyPostgresPromotion, preparePostgresPromotion, reconcilePostgresPromotion, postgresPromotionDurableRecord } from "./ops-core-postgres-promotion.mjs";
@@ -313,6 +314,8 @@ async function transfer(options, mode) {
         sourceCredentials: options.redisSourceCredentials, targetAdminConfig: options.targetAdminConfig,
         targetDatabaseOid: copied.scratchOid, targetBindingSha256: opsCoreAzureTargetBindingSha256(plan.azure),
         custody, assertSourceFenced, assertTargetInactive,
+        assertSourceRedisBound: () => assertOpsCoreSourceRedisBound({ plan, custody, operationStore, assertSourceFenced,
+          ...(options.railway ? { railway: options.railway } : {}) }),
         ...(options.postgresStateClientFactory ? { createPostgresClient: options.postgresStateClientFactory } : {}),
         ...(options.redisSourceClientFactory ? { createRedisClient: options.redisSourceClientFactory } : {}) });
       if (sharedState.status !== "POSTGRES_SHARED_STATE_ACCEPTED" || sharedState.domain !== plan.domain

@@ -7,11 +7,20 @@ function encryptionKey() {
   if (!env.ENCRYPTION_KEY) {
     throw new Error("Missing ENCRYPTION_KEY required for AES-256-GCM");
   }
-  const key = Buffer.from(env.ENCRYPTION_KEY, "hex");
-  if (key.length !== 32) {
+  if (!/^[a-fA-F0-9]{64}$/.test(env.ENCRYPTION_KEY)) {
     throw new Error("ENCRYPTION_KEY must be a 32-byte hex string.");
   }
-  return key;
+  return Buffer.from(env.ENCRYPTION_KEY, "hex");
+}
+
+/** Validate configuration through the same path as encryption without exposing key bytes. */
+export function isSecretEncryptionConfigured() {
+  try {
+    encryptionKey();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function encryptSecret(value: string) {

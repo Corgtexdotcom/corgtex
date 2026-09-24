@@ -164,7 +164,7 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
     let sourceHealth;
     const assertSourceHealthy = runtime.assertSourceHealthy ?? (request => {
       sourceHealth ??= createOpsCoreSourceHealthObserver({ plan, signal: custody.signal,
-        assertOwned: () => custody.assertOwned(), ...railway });
+        assertOwned: () => custody.assertOwned(), ...railway, redisSourceCredentials: credentials.redisSource });
       return sourceHealth(request);
     });
     const sourceOptions = { plan, custody, operationStore, sourceConfig: credentials.sourceConfig,

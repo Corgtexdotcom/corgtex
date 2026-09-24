@@ -30,6 +30,8 @@ Pin `sharedStateBackend: "postgres"` and `redis: null` into that domain's Azure 
 
 The PostgreSQL transfer variant uses schema version 2 with `sharedState: { backend: "postgres", sourceRedis: <pinned source binding> }` instead of the legacy `redis` target/job block. It preserves source writer fences and fresh source Redis emptiness checks. Target acceptance is a read-only PostgreSQL schema/state proof, not a simulated Redis receipt. PostgreSQL public restore access still closes before activation.
 
+Before fencing, the exact source web/worker instances must prove their actual listening processes use that Redis server, logical database and credentials. The bounded Linux `/proc` probe retains only safe identity evidence; it never retains Redis URLs, passwords or credential challenges. Private/public host aliases require matching server identity. Missing runtime proof or a changed Redis run ID blocks transfer.
+
 Retained cache/upload ciphertext inherits database-backup retention. Pending uploads expire for application access after twenty minutes; encryption does not make old backups unrecoverable. Once the backend accepts writes, use a compatible image for rollback and preserve state continuity. See the deployment configuration documentation for backup-recovery handling. Qualify the full estate cost before provisioning; omitting Redis alone does not establish affordability or workload capacity.
 
 ## Access and custody

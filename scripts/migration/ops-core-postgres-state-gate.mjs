@@ -23,7 +23,7 @@ export const postgresSharedStateGateDiagnostic = error => error instanceof GateE
  * twice in full; no target Redis instance or fabricated Redis receipt is used. */
 export async function assertOpsCorePostgresStateEmpty({ sourceRedis: sourceValue, sourceCredentials,
   targetAdminConfig: configValue, targetDatabaseOid, targetBindingSha256, custody,
-  assertSourceFenced, assertTargetInactive, createPostgresClient = config => new pg.Client(config),
+  assertSourceFenced, assertTargetInactive, assertSourceRedisBound, createPostgresClient = config => new pg.Client(config),
   createRedisClient, maxScanPages = 100, timeoutMs = 30_000 }) {
   let client;
   let abort;
@@ -39,7 +39,7 @@ export async function assertOpsCorePostgresStateEmpty({ sourceRedis: sourceValue
     requireValue(sourceRedis.mode === "standalone", "POSTGRES_STATE_SOURCE_ENTERPRISE_UNPROVEN");
     requireValue(custody?.signal instanceof AbortSignal && typeof custody.assertOwned === "function"
       && typeof custody.snapshot === "function" && typeof assertSourceFenced === "function"
-      && typeof assertTargetInactive === "function" && typeof createPostgresClient === "function", "POSTGRES_STATE_CUSTODY_REQUIRED");
+      && typeof assertTargetInactive === "function" && typeof assertSourceRedisBound === "function" && typeof createPostgresClient === "function", "POSTGRES_STATE_CUSTODY_REQUIRED");
     requireValue(HASH.test(targetBindingSha256) && /^[1-9][0-9]*$/.test(targetDatabaseOid)
       && Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 30_000, "POSTGRES_STATE_BINDING_INVALID");
     signal = custody.signal;
@@ -66,8 +66,15 @@ export async function assertOpsCorePostgresStateEmpty({ sourceRedis: sourceValue
         && target.targetBindingSha256 === targetBindingSha256, "POSTGRES_STATE_TARGET_ACTIVE");
       await custody.assertOwned(); signalCheck(); snapshotCheck();
     };
+    const sourceRuntimeProofs = [];
     const sourceScan = async () => {
       await check();
+      const proof = await assertSourceRedisBound();
+      signalCheck(); snapshotCheck();
+      requireValue(proof?.complete === true && proof.domain === initial.domain && proof.intentSha256 === initial.intentSha256
+        && proof.sourceFenceSha256 === sourceFenceSha256 && proof.bindingSha256 === sourceBindingSha256
+        && HASH.test(proof.runtimeBaselineSha256), "POSTGRES_STATE_SOURCE_RUNTIME_UNPROVEN");
+      sourceRuntimeProofs.push(proof);
       const result = await observeRedisEmpty({ binding: sourceRedis, credentials: sourceCredentials, side: "SOURCE", signal,
         maxScanPages, connectTimeoutMs: timeoutMs, ...(createRedisClient ? { createClient: createRedisClient } : {}) });
       await check(); return result;
@@ -140,7 +147,7 @@ export async function assertOpsCorePostgresStateEmpty({ sourceRedis: sourceValue
     await check();
     return { schemaVersion: 1, status: "POSTGRES_SHARED_STATE_ACCEPTED", domain: initial.domain,
       intentSha256: initial.intentSha256, sourceFenceSha256, targetBindingSha256,
-      source: { before: sourceBefore, after: sourceAfter }, target: targetAfter };
+      source: { before: sourceBefore, after: sourceAfter, runtimeProofs: sourceRuntimeProofs }, target: targetAfter };
   } catch (error) {
     if (error instanceof GateError) throw error;
     const redisCode = redisEmptyGateDiagnostic(error);
