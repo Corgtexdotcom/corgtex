@@ -15,3 +15,5 @@ export * from "./release-metadata";
 export * from "./logger";
 export * from "./support-context";
 export * from "./mcp-context";
+
+export * from "./shared-state";

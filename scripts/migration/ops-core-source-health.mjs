@@ -1,3 +1,4 @@
+import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
@@ -120,7 +121,8 @@ export function createOpsCoreSourceHealthObserver({ plan: input, signal, assertO
   runRemoteRead = createRailwaySourceHealthRemoteRead() }) {
   const plan = structuredClone(input), p = validateOpsCoreSourceHealthPlan(plan?.source?.health, plan?.source?.writers?.binding);
   const domain = plan.domain, intentSha256 = hash(plan), sourceHealthBindingSha256 = hash(p);
-  need(plan.schemaVersion === 1 && ["core", "ops"].includes(domain) && signal instanceof AbortSignal && typeof assertOwned === "function"
+  try { opsCorePlanSharedStateVariant(plan); } catch { need(false, "SOURCE_HEALTH_OPTIONS_INVALID"); }
+  need(["core", "ops"].includes(domain) && signal instanceof AbortSignal && typeof assertOwned === "function"
     && typeof runRemoteRead === "function", "SOURCE_HEALTH_OPTIONS_INVALID");
   const send = transport ?? createRailwayFenceTransport({ token });
   return async ({ stage, baseline, writerBaseline }) => {

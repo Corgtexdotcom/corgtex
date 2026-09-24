@@ -154,3 +154,26 @@ test("actual remote baked file mismatch fails before any health GET",async()=>{
   const f=await runActualRemoteScript({legacy:true,buildOverride:{...baked("worker"),gitSha:"b".repeat(40)}});
   assert.match(f.error?.message??"",/^SOURCE_HEALTH_REMOTE_READ_FAILED$/);assert.equal(f.calls,0);
 });
+
+
+test("global v2 uses the real source health observer and preserves independent v1 health receipts", async () => {
+  const f = fixture();
+  f.plan.schemaVersion = 2;
+  f.plan.azure = { sharedStateBackend: "postgres", redis: null };
+  f.plan.sharedState = { backend: "postgres", sourceRedis: {
+    mode: "standalone", resourceId: null, server: { version: "8.2.9", runId: "a".repeat(40) },
+    connection: { host: "source.local", port: 6379, database: 0, username: "default", tls: false },
+  } };
+  const baseline = await f.run();
+  assert.equal(baseline.complete, true);
+  assert.equal(baseline.schemaVersion, 1);
+  assert.equal(baseline.intentSha256, hash(f.plan));
+  const recovery = await f.observer()({ stage: "recovery", baseline, writerBaseline: f.writerBaseline });
+  assert.equal(recovery.complete, true);
+  assert.equal(recovery.baselineEvidenceSha256, baseline.evidenceSha256);
+  assert.equal(f.state.remoteReads, 4);
+  const before = f.state.providerReads;
+  f.plan.redis = {};
+  assert.throws(() => f.observer(), /SOURCE_HEALTH_OPTIONS_INVALID/);
+  assert.equal(f.state.providerReads, before);
+});

@@ -733,6 +733,7 @@ enum TenantPurgeRunStatus {
 }
 
 model Workspace {
+  pendingTranscriptUploads PendingTranscriptUpload[]
   id                             String                                @id @default(uuid())
   supportOwnerUserId             String?
   supportOwner                   User?                                 @relation("WorkspaceSupportOwner", fields: [supportOwnerUserId], references: [id], onDelete: Restrict)
@@ -6273,4 +6274,36 @@ model ProviderCutover {
   @@index([customerAccountId])
   @@index([sourceDeploymentId, customerAccountId])
   @@index([destinationDeploymentId, customerAccountId])
+}
+
+// Ephemeral shared state for low-load installations without Redis.
+model SharedRateLimit {
+  id String @id
+  timestamps BigInt[]
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+
+model SharedCacheEntry {
+  id String @id
+  encryptedPayload String
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+
+// Versions must not expire: returning to zero can resurrect a still-live cache entry.
+model SharedCacheVersion {
+  id String @id
+  version Int @default(0)
+}
+
+model PendingTranscriptUpload {
+  id String @id
+  workspaceId String
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  encryptedPayload String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([expiresAt])
+  @@index([workspaceId])
 }

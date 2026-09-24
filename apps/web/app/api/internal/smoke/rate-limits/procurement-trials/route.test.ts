@@ -5,6 +5,7 @@ const { resetRateLimitsMock, sharedEnv } = vi.hoisted(() => ({
   sharedEnv: {
     NODE_ENV: "production",
     REDIS_URL: "",
+    SHARED_STATE_BACKEND: "redis",
     REDIS_KEY_PREFIX: "test",
     SMOKE_EMAIL_CAPTURE_SECRET: "capture-secret",
     SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: "smoke.example,selfserve.corgtex.com",
@@ -17,7 +18,8 @@ vi.mock("@corgtex/shared", async (importOriginal) => {
     ...actual,
     env: sharedEnv,
     isDatabaseUnavailableError: vi.fn(() => false),
-    isRedisConfigured: vi.fn(() => Boolean(sharedEnv.REDIS_URL)),
+    getSharedStateBackend: vi.fn(() => sharedEnv.SHARED_STATE_BACKEND),
+    isSharedStateConfigured: vi.fn(() => sharedEnv.SHARED_STATE_BACKEND === "postgres" || Boolean(sharedEnv.REDIS_URL)),
     resetRateLimits: resetRateLimitsMock,
   };
 });
@@ -40,12 +42,15 @@ describe("POST /api/internal/smoke/rate-limits/procurement-trials", () => {
     vi.resetModules();
     vi.clearAllMocks();
     sharedEnv.REDIS_URL = "";
+    sharedEnv.SHARED_STATE_BACKEND = "redis";
     sharedEnv.SMOKE_EMAIL_CAPTURE_SECRET = "capture-secret";
     sharedEnv.SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS = "smoke.example,selfserve.corgtex.com";
     resetRateLimitsMock.mockImplementation(async (keys: string[]) => keys.map((key) => ({
       key,
       memoryCleared: true,
       redisCleared: false,
+      backend: sharedEnv.SHARED_STATE_BACKEND,
+      sharedStateCleared: false,
     })));
   });
 
@@ -101,4 +106,33 @@ describe("POST /api/internal/smoke/rate-limits/procurement-trials", () => {
 
     expect(response.status).toBe(503);
   });
+
+  it("requires successful PostgreSQL counter clearing even without Redis configured", async () => {
+    sharedEnv.SHARED_STATE_BACKEND = "postgres";
+    const { POST } = await import("./route");
+    const response = await POST(resetRequest({ companyName: "Smoke Company", adminEmail: "agent@smoke.example" }));
+    expect(response.status).toBe(503);
+  });
+
+  it("accepts PostgreSQL clearing without claiming Redis was cleared", async () => {
+    sharedEnv.SHARED_STATE_BACKEND = "postgres";
+    resetRateLimitsMock.mockImplementation(async (keys: string[]) => keys.map((key) => ({
+      key, memoryCleared: true, redisCleared: false, backend: "postgres", sharedStateCleared: true,
+    })));
+    const { POST } = await import("./route");
+    const response = await POST(resetRequest({ companyName: "Smoke Company", adminEmail: "agent@smoke.example" }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).reset.resets[0]).toMatchObject({ backend: "postgres", sharedStateCleared: true, redisCleared: false });
+  });
+
+  it("rejects a successful reset receipt for a different backend", async () => {
+    sharedEnv.SHARED_STATE_BACKEND = "postgres";
+    resetRateLimitsMock.mockImplementation(async (keys: string[]) => keys.map((key) => ({
+      key, memoryCleared: true, redisCleared: true, backend: "redis", sharedStateCleared: true,
+    })));
+    const { POST } = await import("./route");
+    const response = await POST(resetRequest({ companyName: "Smoke Company", adminEmail: "agent@smoke.example" }));
+    expect(response.status).toBe(503);
+  });
+
 });

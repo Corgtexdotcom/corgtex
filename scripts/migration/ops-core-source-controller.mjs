@@ -1,3 +1,4 @@
+import { opsCorePlanSharedStateVariant } from "./ops-core-plan-variant.mjs";
 import { archiveEvidenceHash } from "./ops-core-archive.mjs";
 import { openSourceOperations } from "./ops-core-source-operations.mjs";
 import { assertPostgresSourceFenced, runPostgresSourceFence, preflightOpsCorePostgresSource, recoverPostgresSourcePassword } from "./ops-core-postgres-fence.mjs";
@@ -20,7 +21,8 @@ const sameIds = (left, right) => Array.isArray(left) && Array.isArray(right)
 function context(options, runRecordedOperation) {
   const plan = structuredClone(options.plan);
   const { custody, railway = {} } = options;
-  if (plan?.schemaVersion !== 1 || !["core", "ops"].includes(plan.domain)) fail("SOURCE_CONTROLLER_PLAN_INVALID");
+  try { opsCorePlanSharedStateVariant(plan); } catch { fail("SOURCE_CONTROLLER_PLAN_INVALID"); }
+  if (!["core", "ops"].includes(plan.domain)) fail("SOURCE_CONTROLLER_PLAN_INVALID");
   exact(plan.source, "writers,postgresTriggers,postgresService,postgres,health");
   exact(plan.source.writers, "binding,expectedSourceLinks");
   exact(plan.source.postgresTriggers, "binding,expectedSourceLinks");

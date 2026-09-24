@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { env, prisma } from "@corgtex/shared";
+import { env, getSharedStateBackend, isSharedStateConfigured, prisma } from "@corgtex/shared";
 import { resolveNodeReleaseMetadata } from "@corgtex/shared/release-metadata-node";
 import {
   resolveAzureBlobStorageRuntimeConfig,
@@ -45,7 +45,15 @@ function runtimeFingerprint() {
     workspaceScopeValid = false;
   }
 
+  let sharedState: { backend: string; status: string };
+  try {
+    sharedState = { backend: getSharedStateBackend(), status: isSharedStateConfigured() ? "configured" : "missing" };
+  } catch {
+    sharedState = { backend: "invalid", status: "invalid" };
+  }
+
   return {
+    sharedState,
     redis: process.env.REDIS_URL ? "configured" : "missing",
     storage: storageConfigured ? "configured" : "missing",
     workspaceScopeSlug,
@@ -144,7 +152,7 @@ export async function GET() {
     }
 
     const runtime = runtimeFingerprint();
-    if (!runtime.workspaceScopeValid) {
+    if (!runtime.workspaceScopeValid || runtime.sharedState.status === "invalid") {
       return NextResponse.json({
         status: "degraded",
         service: "web",

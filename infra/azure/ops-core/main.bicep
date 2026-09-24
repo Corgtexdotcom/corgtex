@@ -21,6 +21,10 @@ param opsPostgresSkuName string = 'Standard_D2ds_v5'
 @allowed(['Standard_D2ds_v5', 'Standard_B2s', 'Standard_B1ms'])
 @description('General Purpose by default. B1ms/B2s require an explicitly accepted Burstable production exception and measured capacity.')
 param corePostgresSkuName string = 'Standard_D2ds_v5'
+@allowed(['redis', 'postgres'])
+param opsSharedStateBackend string = 'redis'
+@allowed(['redis', 'postgres'])
+param coreSharedStateBackend string = 'redis'
 @secure()
 param opsPostgresAdministratorPassword string
 @secure()
@@ -72,6 +76,8 @@ module hosting './hosting.bicep' = {
     postgresAdministratorLogin: postgresAdministratorLogin
     opsPostgresSkuName: opsPostgresSkuName
     corePostgresSkuName: corePostgresSkuName
+    opsSharedStateBackend: opsSharedStateBackend
+    coreSharedStateBackend: coreSharedStateBackend
     opsPostgresAdministratorPassword: opsPostgresAdministratorPassword
     corePostgresAdministratorPassword: corePostgresAdministratorPassword
     opsPostgresPublicNetworkAccess: opsPostgresPublicNetworkAccess

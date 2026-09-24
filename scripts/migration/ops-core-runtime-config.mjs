@@ -19,22 +19,34 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
   const p = structuredClone(plan);
   need(p?.schemaVersion === 1 && ["core", "ops"].includes(p.domain) && /^[a-f0-9]{64}$/.test(p.targetBindingSha256), "RUNTIME_PLAN_INVALID");
   const b = p.binding;
+  const backend = b?.sharedStateBackend ?? "redis";
+  need(["redis", "postgres"].includes(backend), "RUNTIME_SHARED_STATE_INVALID");
   need(b && /^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(b.vaultUri)
     && /^\/subscriptions\/[a-f0-9-]{36}\/resourceGroups\/[a-zA-Z0-9_.()-]+\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/[a-zA-Z0-9-]+$/.test(b.identityResourceId)
     && GUID.test(b.identityClientId) && /^[a-z0-9]{3,24}$/.test(b.storageAccount)
     && /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(b.storageContainer)
     && /^[a-z0-9-]+\.postgres\.database\.azure\.com$/.test(b.postgresHost)
-    && /^[a-z0-9.-]+\.redis\.azure\.net$/.test(b.redisHost), "RUNTIME_BINDING_INVALID");
-  const database = url(databaseUrl); const redis = url(redisUrl);
+    && (backend === "postgres" ? b.redisHost === null : /^[a-z0-9.-]+\.redis\.azure\.net$/.test(b.redisHost)), "RUNTIME_BINDING_INVALID");
+  const database = url(databaseUrl);
   need(["postgres:", "postgresql:"].includes(database.protocol) && database.hostname === b.postgresHost
     && (!database.port || database.port === "5432") && database.pathname === `/corgtex_${p.domain}`
     && database.username.length > 0 && database.password.length > 0 && !database.hash
     && database.searchParams.get("sslmode") === "verify-full"
-    && [...database.searchParams.keys()].every(key => ["sslmode", "schema"].includes(key))
+    && [...database.searchParams.keys()].every(key => ["sslmode", "schema", "connection_limit", "pool_timeout"].includes(key))
     && [...new Set(database.searchParams.keys())].every(key => database.searchParams.getAll(key).length === 1), "RUNTIME_DATABASE_INVALID");
-  need(redis.protocol === "rediss:" && redis.hostname === b.redisHost && redis.port === "10000"
-    && redis.password.length > 0 && ["", "/", "/0"].includes(redis.pathname)
-    && !redis.search && !redis.hash, "RUNTIME_REDIS_INVALID");
+  for (const [name, maximum] of [["connection_limit", 5], ["pool_timeout", 30]]) {
+    const value = database.searchParams.get(name);
+    need(value === null || /^[1-9][0-9]*$/.test(value) && Number(value) <= maximum, "RUNTIME_DATABASE_POOL_INVALID");
+  }
+  if (backend === "postgres") {
+    need(redisUrl == null && database.searchParams.get("connection_limit") === "5"
+      && database.searchParams.get("pool_timeout") === "10", "RUNTIME_POSTGRES_STATE_INVALID");
+  } else {
+    const redis = url(redisUrl);
+    need(redis.protocol === "rediss:" && redis.hostname === b.redisHost && redis.port === "10000"
+      && redis.password.length > 0 && ["", "/", "/0"].includes(redis.pathname)
+      && !redis.search && !redis.hash, "RUNTIME_REDIS_INVALID");
+  }
   const roles = {};
   for (const role of ["web", "worker"]) {
     const source = sourceEnvironments?.[role]; const inventory = p.roles?.[role];
@@ -49,7 +61,9 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
     // Railway build identity and source infrastructure must not masquerade as
     // the new runtime. Require explicit decisions even for injected metadata.
     need(inventory.sourceNames.filter(name => OMIT.test(name)).every(name => inventory.omit.includes(name)), "RUNTIME_SOURCE_INFRASTRUCTURE_UNCLASSIFIED");
+    need((source.SHARED_STATE_BACKEND ?? "redis") === "redis", "RUNTIME_SOURCE_SHARED_STATE_UNSUPPORTED");
     const generated = {
+      SHARED_STATE_BACKEND: backend,
       NODE_ENV: "production", STORAGE_PROVIDER: "azure_blob", AZURE_STORAGE_AUTH_MODE: "managed_identity",
       AZURE_STORAGE_ACCOUNT_NAME: b.storageAccount, AZURE_STORAGE_CONTAINER_NAME: b.storageContainer,
       AZURE_STORAGE_BLOB_ENDPOINT: `https://${b.storageAccount}.blob.core.windows.net/`,
@@ -62,7 +76,7 @@ export function prepareOpsCoreRuntimeValues({ plan, sourceEnvironments, database
     // Existing application credentials and external origins are not regenerated.
     need(typeof retained.SESSION_COOKIE_SECRET === "string" && retained.SESSION_COOKIE_SECRET.length > 0
       && typeof retained.ENCRYPTION_KEY === "string" && retained.ENCRYPTION_KEY.length > 0, "RUNTIME_CONTINUITY_SECRET_MISSING");
-    const values = { ...retained, DATABASE_URL: databaseUrl, REDIS_URL: redisUrl };
+    const values = { ...retained, DATABASE_URL: databaseUrl, ...(backend === "redis" ? { REDIS_URL: redisUrl } : {}) };
     roles[role] = { generated, values };
   }
   for (const name of ["ENCRYPTION_KEY", "SESSION_COOKIE_SECRET"]) {

@@ -74,12 +74,13 @@ By default, the platform relies on external Large Language Models to power the O
 
 ## Performance and Session Coordination
 
-Production and client instances should use Redis for shared short-lived state. Postgres remains the permanent source of truth.
+Production instances need a shared state backend across web and worker processes. Redis remains the default. Low-load deployments can explicitly select PostgreSQL to avoid a separate cache service. Durable jobs and sessions continue to use PostgreSQL.
 
 | Variable | Description |
 |---|---|
-| `REDIS_URL` | Redis connection string used for shared rate limiting, short-lived Brain retrieval cache, and session heartbeat throttling. Required for scaled production/client deployments. |
-| `REDIS_KEY_PREFIX` | Prefix for Redis keys. Use a deployment-specific value such as `corgtex-prod` or `crina-prod` so environments do not collide. |
+| `SHARED_STATE_BACKEND` | `redis` (default) or `postgres`. Set the same value on every web and worker process. PostgreSQL requires the shared-state migration, `DATABASE_URL`, and a valid `ENCRYPTION_KEY`. |
+| `REDIS_URL` | Shared Redis connection for rate limits, retrieval cache, and pending transcript uploads when the Redis backend is selected. |
+| `REDIS_KEY_PREFIX` | Deployment-specific namespace for either shared backend; keep it identical across web and worker. The historical variable name is retained for compatibility. |
 | `SESSION_LAST_SEEN_WRITE_INTERVAL_MS` | Optional session heartbeat throttle. Defaults to `300000` (5 minutes). |
 
 On Railway, add a Redis service in the same project and environment as the app, then set `REDIS_URL` on every runtime service that handles requests or jobs, normally web and worker. Use Railway reference variables, for example:
@@ -88,6 +89,16 @@ On Railway, add a Redis service in the same project and environment as the app, 
 REDIS_URL="${{Redis.REDIS_URL}}"
 REDIS_KEY_PREFIX="client-slug-prod"
 ```
+
+### PostgreSQL shared state
+
+Apply the additive migration before selecting `SHARED_STATE_BACKEND=postgres`. Keep existing deployments on their current backend until a coordinated transition. The PostgreSQL path uses shared transactional rate limits and version counters, encrypted cache payloads, and workspace-bound encrypted pending uploads. Database failure denies security-sensitive requests; it never silently switches to process memory or Redis. PostgreSQL cache invalidation commits with PostgreSQL knowledge-source updates.
+
+The Core/Ops low-load runtime profile requires `connection_limit=5&pool_timeout=10` in each application database URL. Qualify total connections and database load including rollout overlap; fewer services does not prove sufficient capacity.
+
+Pending transcript tokens stop working after 20 minutes. This is an **application access deadline**, not a backup erasure promise: encrypted rows can remain in database backups for the configured retention period, and the long-lived encryption key can decrypt retained ciphertext. Expired rows are removed in bounded batches during subsequent operations. Evaluate this retention behavior before opting into the PostgreSQL backend.
+
+Do not switch a running deployment between backends: that would lose effective rate-limit counters and pending uploads. Fence writers and settle or preserve source state first. Core/Ops migration requires an empty, independently observed source Redis plus a migrated, empty PostgreSQL state schema. Once PostgreSQL state is active, rollback must use a PostgreSQL-capable application image and retain the additive schema. After restoring a backup, remove restored retrieval-cache and pending-upload rows before reopening traffic, and assess rate-limit continuity rather than silently resetting counters.
 
 ## Intercom Support Settings
 

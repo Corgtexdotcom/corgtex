@@ -20,6 +20,18 @@ Redis public access is disabled; Redis persistence is disabled, so HA is replica
 not an archive. No `flexibleServers/databases` resource is created: full restore owns
 database names and promotion. Extension allowlisting is also a restore preflight step.
 
+## Optional PostgreSQL shared state
+
+`opsSharedStateBackend` and `coreSharedStateBackend` accept `redis` (the unchanged default) or `postgres`, independently. A PostgreSQL domain provisions no Redis instance or Redis private endpoint; the shared Redis DNS zone is omitted when both domains choose PostgreSQL. Each domain still has its own database, identity, secrets and object store. This choice does not resize applications or change the PostgreSQL SKU automatically.
+
+Incremental redeployment with PostgreSQL selected does not delete previously created Redis resources. Retire any existing Redis instance, endpoint and unused DNS only after an accepted state transition and recovery check; omission alone produces no saving on those existing resources.
+
+Pin `sharedStateBackend: "postgres"` and `redis: null` into that domain's Azure binding. Runtime custody must select the same backend, omit `REDIS_URL`, retain the encryption key and namespace, and use `connection_limit=5&pool_timeout=10`. Activation rejects mixed backend settings and requires matching web health. Deploy the compatible additive schema to the source before taking the final migration copy.
+
+The PostgreSQL transfer variant uses schema version 2 with `sharedState: { backend: "postgres", sourceRedis: <pinned source binding> }` instead of the legacy `redis` target/job block. It preserves source writer fences and fresh source Redis emptiness checks. Target acceptance is a read-only PostgreSQL schema/state proof, not a simulated Redis receipt. PostgreSQL public restore access still closes before activation.
+
+Retained cache/upload ciphertext inherits database-backup retention. Pending uploads expire for application access after twenty minutes; encryption does not make old backups unrecoverable. Once the backend accepts writes, use a compatible image for rollback and preserve state continuity. See the deployment configuration documentation for backup-recovery handling. Qualify the full estate cost before provisioning; omitting Redis alone does not establish affordability or workload capacity.
+
 ## Access and custody
 
 - Each app identity has Secrets User on its own runtime vault, Blob Data Contributor

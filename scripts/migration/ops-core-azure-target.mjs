@@ -24,16 +24,25 @@ const hash = value => createHash("sha256").update(canonical(value)).digest("hex"
 const sameId = (a, b) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 const signalCheck = signal => requireValue(!signal.aborted, "AZURE_TARGET_ABORTED");
 
+export function opsCoreSharedStateBackend(value) {
+  const backend = value?.sharedStateBackend ?? "redis";
+  requireValue(["redis", "postgres"].includes(backend), "AZURE_TARGET_SHARED_STATE_INVALID");
+  return backend;
+}
+
 function bind(value) {
-  requireValue(keys(value, "domain,subscriptionId,resourceGroupName,environmentId,postgres,redis,apps")
+  const fields = "domain,subscriptionId,resourceGroupName,environmentId,postgres,redis,apps";
+  const backend = opsCoreSharedStateBackend(value);
+  const postgresState = backend === "postgres";
+  requireValue((keys(value, fields) || keys(value, `${fields},sharedStateBackend`))
     && ["ops", "core"].includes(value.domain) && GUID.test(value.subscriptionId)
     && nameValue(value.resourceGroupName)
     && keys(value.postgres, "resourceId,host,major,privateEndpointId")
-    && keys(value.redis, "resourceId,databaseId,host,port,privateEndpointId")
+    && (postgresState ? value.redis === null : keys(value.redis, "resourceId,databaseId,host,port,privateEndpointId"))
     && keys(value.apps, "web,worker") && nameValue(value.apps.web) && nameValue(value.apps.worker)
     && value.apps.web !== value.apps.worker && value.postgres.major === 18
     && hostValue(value.postgres.host) && value.postgres.host.endsWith(".postgres.database.azure.com")
-    && hostValue(value.redis.host) && value.redis.host.endsWith(".redis.azure.net") && value.redis.port === 10000,
+    && (postgresState || hostValue(value.redis.host) && value.redis.host.endsWith(".redis.azure.net") && value.redis.port === 10000),
   "AZURE_TARGET_BINDING_INVALID");
   const prefix = `/subscriptions/${value.subscriptionId}/resourceGroups/${value.resourceGroupName}/providers/`;
   function resource(id, type) {
@@ -43,11 +52,13 @@ function bind(value) {
   }
   resource(value.environmentId, "Microsoft.App/managedEnvironments");
   resource(value.postgres.resourceId, "Microsoft.DBforPostgreSQL/flexibleServers");
-  resource(value.redis.resourceId, "Microsoft.Cache/redisEnterprise");
   resource(value.postgres.privateEndpointId, "Microsoft.Network/privateEndpoints");
-  resource(value.redis.privateEndpointId, "Microsoft.Network/privateEndpoints");
-  requireValue(sameId(value.redis.databaseId, `${value.redis.resourceId}/databases/default`)
-    && !sameId(value.postgres.privateEndpointId, value.redis.privateEndpointId), "AZURE_TARGET_RESOURCE_BINDING_INVALID");
+  if (!postgresState) {
+    resource(value.redis.resourceId, "Microsoft.Cache/redisEnterprise");
+    resource(value.redis.privateEndpointId, "Microsoft.Network/privateEndpoints");
+    requireValue(sameId(value.redis.databaseId, `${value.redis.resourceId}/databases/default`)
+      && !sameId(value.postgres.privateEndpointId, value.redis.privateEndpointId), "AZURE_TARGET_RESOURCE_BINDING_INVALID");
+  }
   const result = structuredClone(value);
   Object.freeze(result.postgres); Object.freeze(result.redis); Object.freeze(result.apps);
   return Object.freeze(result);
@@ -287,7 +298,7 @@ export function createOpsCoreAzureTarget({ binding: value, custody, transport, m
         requireValue(pg.state === "Ready" && pg.version === "18" && pg.fullyQualifiedDomainName === binding.postgres.host,
           "AZURE_TARGET_POSTGRES_CHANGED");
         await endpoint(get, binding.postgres.privateEndpointId, binding.postgres.resourceId, "postgresqlServer");
-        const redisPolicy = await redis(get);
+        const redisPolicy = opsCoreSharedStateBackend(binding) === "redis" ? await redis(get) : { backend: "postgres" };
         const apps = { web: await app(get, list, binding.apps.web), worker: await app(get, list, binding.apps.worker) };
         return { complete: true, domain: binding.domain, intentSha256: initial.intentSha256,
           targetBindingSha256: bindingSha256, observationSha256: hash({ bindingSha256, redisPolicy, apps }),
@@ -295,7 +306,7 @@ export function createOpsCoreAzureTarget({ binding: value, custody, transport, m
       });
     },
     async assertEnterpriseBinding({ side, binding: expected } = {}) {
-      requireValue(side === "target" && expected?.mode === "azure-enterprise-proxy"
+      requireValue(opsCoreSharedStateBackend(binding) === "redis" && side === "target" && expected?.mode === "azure-enterprise-proxy"
         && sameId(expected.resourceId, binding.redis.databaseId) && expected.connection?.host === binding.redis.host
         && expected.connection?.port === binding.redis.port && expected.connection?.database === 0
         && expected.connection?.tls === true, "AZURE_TARGET_REDIS_CALLBACK_BINDING_INVALID");
