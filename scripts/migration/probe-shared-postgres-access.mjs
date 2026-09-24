@@ -18,7 +18,43 @@ export const ACCESS_SQL = Object.freeze({
   hooks: `SELECT name,setting FROM pg_catalog.pg_settings
     WHERE name IN ('shared_preload_libraries','session_preload_libraries','local_preload_libraries')
     ORDER BY name`,
+  effectiveSettings: `SELECT name,setting,source,context,pending_restart AS "pendingRestart"
+    FROM pg_catalog.pg_settings WHERE name=ANY($1::text[]) ORDER BY name`,
+  providerGuard: metadataSql.guard.replace("current_database()='postgres'", "current_database()=$1"),
+  providerSchemas: `SELECT nspname AS name,oid::text AS oid,pg_catalog.pg_get_userbyid(nspowner) AS owner
+    FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+    AND nspname<>'information_schema' ORDER BY nspname`,
+  providerPublicRelations: `SELECT n.nspname AS schema,c.relname AS name,c.relkind::text AS kind,
+    a.privilege_type AS privilege FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,
+      CASE WHEN c.relkind='S' THEN pg_catalog.acldefault('s',c.relowner)
+      ELSE pg_catalog.acldefault('r',c.relowner) END)) a
+    WHERE n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname<>'information_schema'
+    AND a.grantee=0 ORDER BY n.nspname,c.relname,a.privilege_type`,
+  providerPublicDefiners: `SELECT n.nspname AS schema,p.proname AS name,p.oid::text AS oid,
+    a.privilege_type AS privilege FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,
+      pg_catalog.acldefault('f',p.proowner))) a
+    WHERE n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname<>'information_schema'
+    AND p.prosecdef AND a.grantee=0 AND a.privilege_type='EXECUTE'
+    ORDER BY n.nspname,p.proname,p.oid`,
+  providerRelation: "SELECT pg_catalog.to_regclass($1)::text AS relation",
 });
+
+export const ACCESS_SETTING_NAMES = Object.freeze([...new Set([
+  ...Object.keys(RUNTIME_ACCESS_SENSITIVE_SETTINGS),
+  "pg_stat_statements.track", "pg_stat_statements.track_utility",
+  "pg_qs.query_capture_mode", "pg_qs.parameters_capture_mode", "pg_qs.store_query_plans", "pg_qs.track_utility",
+  "pgms_wait_sampling.query_capture_mode", "pgaudit.log", "pgaudit.log_parameter",
+  "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length",
+])].sort());
+const PROVIDER_DATABASES = Object.freeze(["azure_maintenance", "azure_sys", "template1"]);
+const QUERY_STORE_VIEWS = Object.freeze([
+  "query_store.query_texts_view", "query_store.qs_view", "query_store.query_plans_view",
+  "query_store.pgms_wait_sampling_view",
+]);
 
 const boundedRows = (rows, maxRows, maxBytes) => {
   check(Array.isArray(rows) && rows.length <= maxRows
@@ -26,7 +62,10 @@ const boundedRows = (rows, maxRows, maxBytes) => {
   return rows;
 };
 
-export async function captureSharedPostgresAccess(client, { deadlineMs = 120000, closeMs = 3000 } = {}) {
+export async function captureSharedPostgresAccess(client, { deadlineMs = 120000, closeMs = 3000,
+  providerClientFactory, azureParameters = [] } = {}) {
+  check(typeof providerClientFactory === "function", "ACCESS_PROVIDER_FACTORY_MISSING");
+  const clients = [client];
   let timer, closeTimer, expired = false, began = false, rolledBack = false, disconnected = false;
   const query = async (sql, values) => {
     check(!expired, "ACCESS_DEADLINE");
@@ -44,6 +83,7 @@ export async function captureSharedPostgresAccess(client, { deadlineMs = 120000,
     const roles = boundedRows((await query(ACCESS_SQL.roles)).rows, 10000, 65000);
     const memberships = boundedRows((await query(ACCESS_SQL.memberships)).rows, 10000, 65000);
     const hooks = boundedRows((await query(ACCESS_SQL.hooks)).rows, 3, 4000);
+    const effectiveSettings = boundedRows((await query(ACCESS_SQL.effectiveSettings, [ACCESS_SETTING_NAMES])).rows, 100, 16000);
     check(databases.length > 0 && hooks.length === 3, "ACCESS_CATALOG_MISSING");
     const loaded = Object.fromEntries(hooks.map(row => [row.name, row.setting]));
     const modules = loaded.shared_preload_libraries.split(",").map(value => value.trim()).filter(Boolean);
@@ -69,27 +109,63 @@ export async function captureSharedPostgresAccess(client, { deadlineMs = 120000,
     }
     check((await query("ROLLBACK")).command === "ROLLBACK", "ACCESS_ROLLBACK_UNPROVEN");
     began = false; rolledBack = true;
+    const providerDatabases = [];
+    for (const name of PROVIDER_DATABASES) {
+      check(!expired, "ACCESS_DEADLINE");
+      const provider = providerClientFactory(name);
+      check(provider && typeof provider.query === "function", "ACCESS_PROVIDER_CLIENT_INVALID");
+      clients.push(provider);
+      await provider.connect();
+      guard((await provider.query(ACCESS_SQL.providerGuard, [name])).rows[0], "read committed");
+      check((await provider.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")).command === "BEGIN", "ACCESS_PROVIDER_BEGIN_UNPROVEN");
+      guard((await provider.query(ACCESS_SQL.providerGuard, [name])).rows[0], "repeatable read");
+      const schemas = boundedRows((await provider.query(ACCESS_SQL.providerSchemas)).rows, 100, 8000);
+      const publicRelations = boundedRows((await provider.query(ACCESS_SQL.providerPublicRelations)).rows, 500, 16000);
+      const publicDefiners = boundedRows((await provider.query(ACCESS_SQL.providerPublicDefiners)).rows, 100, 8000);
+      const queryStore = [];
+      if (name === "azure_sys") for (const view of QUERY_STORE_VIEWS) {
+        const relation = (await provider.query(ACCESS_SQL.providerRelation, [view])).rows[0]?.relation;
+        if (!relation) { queryStore.push({ view, present: false, readable: false, hasRows: null }); continue; }
+        await provider.query("SAVEPOINT access_provider_view");
+        let hasRows;
+        try {
+          const result = await provider.query(`SELECT EXISTS(SELECT 1 FROM ${view} LIMIT 1) AS "hasRows"`);
+          hasRows = result.rows[0]?.hasRows === true;
+        } catch (error) {
+          queryStore.push({ view, present: true, readable: false, hasRows: null,
+            sqlState: /^[0-9A-Z]{5}$/u.test(error?.code ?? "") ? error.code : null });
+          // A failed read aborts the transaction. Preserve the unknown result and
+          // continue only after a bounded savepoint rollback.
+          await provider.query("ROLLBACK TO SAVEPOINT access_provider_view");
+        }
+        await provider.query("RELEASE SAVEPOINT access_provider_view");
+        if (hasRows !== undefined) queryStore.push({ view, present: true, readable: true, hasRows });
+      }
+      check((await provider.query("ROLLBACK")).command === "ROLLBACK", "ACCESS_PROVIDER_ROLLBACK_UNPROVEN");
+      providerDatabases.push({ name, schemas, publicRelations, publicDefiners, queryStore,
+        readonlyGuards: true, rollback: true });
+    }
     const inventories = Object.fromEntries(["core", "ops"].map(domain =>
       [domain, postgresRuntimeAccessIsolationInventory({ databases }, domain)]));
     const result = { status: "SHARED_POSTGRES_ACCESS_CAPTURED", resource: RESOURCE,
       host: HOST, database: "postgres", at: new Date().toISOString(), readonlyGuards: true,
       rollback: true, disconnected: true, databases, roles, memberships, hooks,
-      settingResults, inventories, admissionReady: false,
-      limits: "Catalog and session-setting probe only; no role, ACL, data, private connectivity, workload, backup or production acceptance proof." };
+      settingResults, effectiveSettings, azureParameters, providerDatabases, inventories, admissionReady: false,
+      limits: "Read-only catalog, effective-setting and provider exposure probe; no role, ACL, customer-row, private connectivity, workload, backup or production acceptance proof." };
     check(Buffer.byteLength(JSON.stringify(result)) <= 65536, "ACCESS_RECEIPT_LIMIT");
     return result;
   };
   let result, failure;
   try {
     result = await Promise.race([work(), new Promise((_, reject) => {
-      timer = setTimeout(() => { expired = true; client.connection?.stream?.destroy(); reject(new ProbeError("ACCESS_DEADLINE")); }, deadlineMs);
+      timer = setTimeout(() => { expired = true; for (const active of clients) active.connection?.stream?.destroy(); reject(new ProbeError("ACCESS_DEADLINE")); }, deadlineMs);
     })]);
   } catch (error) { failure = error; }
   finally {
     clearTimeout(timer);
     try {
-      await Promise.race([client.end().then(() => { disconnected = true; }), new Promise((_, reject) => {
-        closeTimer = setTimeout(() => { client.connection?.stream?.destroy(); reject(new ProbeError("ACCESS_DISCONNECT_TIMEOUT")); }, closeMs);
+      await Promise.race([Promise.all(clients.map(active => active.end())).then(() => { disconnected = true; }), new Promise((_, reject) => {
+        closeTimer = setTimeout(() => { for (const active of clients) active.connection?.stream?.destroy(); reject(new ProbeError("ACCESS_DISCONNECT_TIMEOUT")); }, closeMs);
       })]);
     } catch (error) { failure ??= error; }
     clearTimeout(closeTimer);
