@@ -574,22 +574,7 @@ jobs:
           PY
           az containerapp job update --resource-group "$RESOURCE_GROUP" --name "$job_name" --container-name migrate --image "$migration_job_target_image" --output none
           az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query "$snapshot_query" --output json > "$after"
-          python3 - "$before" "$after" "$migration_job_target_image" <<'PY'
-          import json
-          import sys
-
-          before = json.load(open(sys.argv[1], encoding="utf-8"))
-          after = json.load(open(sys.argv[2], encoding="utf-8"))
-          expected_image = sys.argv[3]
-          if len(before["template"]["containers"]) != 1 or before["template"]["containers"][0]["name"] != "migrate":
-              raise SystemExit("Expected one named migration container before update")
-          if after["template"]["containers"][0]["image"] != expected_image:
-              raise SystemExit("Migration job image readback does not match the immutable target")
-          before["template"]["containers"][0]["image"] = expected_image
-          if before != after:
-              raise SystemExit("Migration job settings changed beyond the image; inspect the protected run before execution")
-          print("Migration job image and unchanged configuration verified")
-          PY
+          python3 scripts/migration/verify-staging-job-image.py "$before" "$after" "$migration_job_target_image"
 
       - name: Run migration job
         if: ${{ inputs.operation == 'run-migration' && inputs.run_migration_job }}

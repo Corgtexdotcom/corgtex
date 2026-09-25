@@ -160,7 +160,9 @@ switching an existing staging runtime:
 3. Preview with `prepare_migration_job=true`, `deploy_container_apps=false`,
    `shared_state_backend=redis`, and `run_migration_job=false`. Deploy those
    settings to pin the built digest in the existing migration job, then verify
-   its image and retained configuration. Use a separate protected
+   its image and retained configuration. The comparison treats the Azure CLI's
+   empty `value` beside an unchanged `secretRef` as equivalent to an omitted
+   `value`; all other job settings must match. Use a separate protected
    `operation=run-migration` run with `run_migration_job=true`, both deploy flags
    false, and `expected_migration_image` set to the verified digest reference.
    That run applies the additive schema without rebuilding the image or
