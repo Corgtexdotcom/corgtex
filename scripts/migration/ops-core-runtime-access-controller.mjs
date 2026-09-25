@@ -6,7 +6,8 @@ import { opsCoreAzureTargetBindingSha256 } from "./ops-core-azure-target.mjs";
 import { nodeClientConfig } from "./run-postgres-restore-rehearsal.mjs";
 import { openPostgresMaintenance } from "./ops-core-postgres-maintenance.mjs";
 import { preparePostgresRuntimeAccess, applyPostgresRuntimeAccess, reconcilePostgresRuntimeAccess,
-  preparePostgresRuntimeAccessPreflight, validatePostgresRuntimeAccessIntent } from "./ops-core-postgres-runtime-access.mjs";
+  preparePostgresRuntimeAccessPreflight, validatePostgresRuntimeAccessIntent,
+  monitorPostgresRuntimeAccessDrift } from "./ops-core-postgres-runtime-access.mjs";
 
 const HASH = /^[a-f0-9]{64}$/;
 const GUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -40,6 +41,76 @@ function accessPlan(plan, snapshot, phase, databaseOid) {
     host: plan.transfer.postgres.target.host, port: plan.transfer.postgres.target.port,
     database: `corgtex_${plan.domain}`, databaseOid, administrator: plan.transfer.postgres.target.user,
     runtimeVaultUri: plan.activation.runtimeVaultUri, policy: plan.transfer.postgres.runtimeAccess };
+}
+
+function azureParameterReader(plan, signal, options) {
+  if (plan.policy.schemaVersion !== 2) return undefined;
+  if (options.readAzureParameters) return options.readAzureParameters;
+  const credential = options.azureCredential ?? new AzureCliCredential({ processTimeoutInMs: 10_000 });
+  return async () => {
+    try {
+      signal.throwIfAborted();
+      const token = await credential.getToken("https://management.azure.com/.default", { abortSignal: signal });
+      need(typeof token?.token === "string", "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
+      const uri = `https://management.azure.com${plan.serverResourceId}/configurations?api-version=2024-08-01`;
+      const parameters = []; let next = uri;
+      while (next) {
+        need(next === uri || next.startsWith(`https://management.azure.com${plan.serverResourceId}/configurations?`),
+          "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
+        const response = await fetch(next, { headers: { Authorization: `Bearer ${token.token}` }, signal });
+        need(response.ok, "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
+        const page = await response.json();
+        need(Array.isArray(page.value) && page.value.length <= 1000, "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
+        for (const row of page.value) parameters.push({ name: row.name, value: row.properties?.value });
+        need(parameters.length <= 1000, "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
+        next = page.nextLink || null;
+      }
+      signal.throwIfAborted();
+      return parameters;
+    } catch { throw new Error("RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID"); }
+  };
+}
+
+const QUERY_STORE_VIEWS = Object.freeze([
+  "query_store.query_texts_view", "query_store.qs_view", "query_store.query_plans_view",
+  "query_store.pgms_wait_sampling_view",
+]);
+function azureQueryStoreInspector(plan, signal, options) {
+  if (plan.policy.schemaVersion !== 2) return undefined;
+  if (options.inspectAzureQueryStore) return options.inspectAzureQueryStore;
+  const source = options.targetAdminConfig;
+  need(source?.sslmode === "verify-full" && source.host === plan.host && Number(source.port) === plan.port
+    && source.user === plan.administrator, "RUNTIME_ACCESS_AZURE_QUERY_STORE_CONNECTION_INVALID");
+  return async () => {
+    const config = nodeClientConfig({ ...source, database: "azure_sys" }, "corgtex_runtime_access_query_store", 10_000, 15_000);
+    const client = options.clientFactory ? options.clientFactory(config) : new pg.Client(config);
+    let began = false;
+    try {
+      signal.throwIfAborted(); await client.connect();
+      need(client.connection?.stream?.encrypted === true && client.connection.stream.authorized === true
+        && client.connectionParameters?.host === plan.host && Number(client.connectionParameters.port) === plan.port
+        && client.connectionParameters.user === plan.administrator
+        && client.connectionParameters.database === "azure_sys", "RUNTIME_ACCESS_AZURE_QUERY_STORE_CONNECTION_INVALID");
+      const provider = plan.policy.isolation.databases.find(row => row.name === "azure_sys");
+      need(provider?.action === "allow-provider-connect", "RUNTIME_ACCESS_PROVIDER_EXCEPTION_INVALID");
+      const identity = (await client.query(`SELECT current_database() AS database,current_user AS administrator,
+        session_user AS "sessionUser",current_setting('server_version_num')::int AS version,
+        oid::text AS oid FROM pg_catalog.pg_database WHERE datname=current_database()`)).rows;
+      need(identity.length === 1 && identity[0].database === "azure_sys" && identity[0].oid === provider.oid
+        && identity[0].administrator === plan.administrator && identity[0].sessionUser === plan.administrator
+        && Math.floor(identity[0].version / 10000) === 18, "RUNTIME_ACCESS_AZURE_QUERY_STORE_CONNECTION_INVALID");
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); began = true;
+      for (const view of QUERY_STORE_VIEWS) {
+        signal.throwIfAborted();
+        const result = await client.query(`SELECT EXISTS(SELECT 1 FROM ${view} LIMIT 1) AS "hasRows"`);
+        need(result.rows.length === 1 && typeof result.rows[0].hasRows === "boolean",
+          "RUNTIME_ACCESS_AZURE_QUERY_STORE_READBACK_INVALID");
+        if (result.rows[0].hasRows) return true;
+      }
+      return false;
+    } catch { throw new Error("RUNTIME_ACCESS_AZURE_QUERY_STORE_READBACK_INVALID"); }
+    finally { if (began) await client.query("ROLLBACK").catch(() => {}); await client.end().catch(() => {}); }
+  };
 }
 
 async function withAccessClient(options, work) {
@@ -92,7 +163,9 @@ export async function runOpsCoreRuntimeAccess(options) {
   const prefix = `operations/${plan.domain}/${snapshot.intentSha256}/${phase.operationId}/`;
   const store = records({ operationStore, prefix, signal: custody.signal, check });
   return withAccessClient({ ...options, database: expected.database, assertOwned: check }, async guards => {
-    const common = { ...guards, resolveSecretVersion: options.resolveSecretVersion, assertSourceFenced, assertTargetInactive };
+    const common = { ...guards, resolveSecretVersion: options.resolveSecretVersion, assertSourceFenced, assertTargetInactive,
+      readAzureParameters: azureParameterReader(expected, guards.signal, options),
+      inspectAzureQueryStore: azureQueryStoreInspector(expected, guards.signal, options) };
     let intent = await store.read("runtime-access-intent");
     const inherited = intent !== null;
     if (intent === null) {
@@ -154,7 +227,9 @@ export async function assertOpsCoreRuntimeAccessForActivation(options) {
     await withAccessClient({ ...options, database: expected.database, assertOwned: check }, async guards => {
       const result = await reconcilePostgresRuntimeAccess({ ...guards, intent: retained.intent,
         resolveSecretVersion: options.resolveSecretVersion, readRecords: store.readRecords,
-        assertSourceFenced, assertTargetInactive: options.assertTargetInactive });
+        assertSourceFenced, assertTargetInactive: options.assertTargetInactive,
+        readAzureParameters: azureParameterReader(expected, guards.signal, options),
+        inspectAzureQueryStore: azureQueryStoreInspector(expected, guards.signal, options) });
       need(result.status === "APPLIED" && same(result, record.result), "RUNTIME_ACCESS_FRESH_READBACK_UNPROVEN");
     });
   }
@@ -162,14 +237,38 @@ export async function assertOpsCoreRuntimeAccessForActivation(options) {
     policySha256: record.policySha256, receiptSha256: archiveEvidenceHash(record), freshAcceptance: fresh };
 }
 
+export async function monitorOpsCoreRuntimeAccessDrift(options) {
+  const { plan, custody, operationStore } = options;
+  need(plan.transfer.postgres.runtimeAccess?.schemaVersion === 2, "RUNTIME_ACCESS_AZURE_PROFILE_REQUIRED");
+  await assertOpsCoreRuntimeAccessForActivation({ ...options, fresh: false });
+  const snapshot = custody.snapshot(), phase = snapshot.history.find(entry => entry.phase === "VERIFIED");
+  const check = async () => {
+    custody.signal.throwIfAborted(); await custody.assertOwned();
+    const current = custody.snapshot();
+    need(current.domain === plan.domain && current.intentSha256 === snapshot.intentSha256
+      && same(current.history.find(entry => entry.phase === "VERIFIED"), phase), "RUNTIME_ACCESS_CUSTODY_CHANGED");
+  };
+  const prefix = `operations/${plan.domain}/${snapshot.intentSha256}/${phase.operationId}/`;
+  const store = records({ operationStore, prefix, signal: custody.signal, check });
+  const [record, retained] = await Promise.all([store.read("runtime-access-receipt"), store.readRecords()]);
+  const expected = accessPlan(plan, snapshot, phase, record.databaseOid);
+  need(same(retained.intent.plan, expected), "RUNTIME_ACCESS_INTENT_CHANGED");
+  return withAccessClient({ ...options, database: expected.database, assertOwned: check }, async guards =>
+    monitorPostgresRuntimeAccessDrift({ ...guards, intent: retained.intent, expectedAfter: retained.expectedAfter,
+      readAzureParameters: azureParameterReader(expected, guards.signal, options),
+      inspectAzureQueryStore: azureQueryStoreInspector(expected, guards.signal, options) }));
+}
+
 export async function preflightOpsCoreRuntimeAccess(options) {
   const { plan, custody, assertOwned, assertTargetInactive } = options;
   return withAccessClient({ ...options, database: "postgres", assertOwned }, async guards => {
     await assertTargetInactive();
-    return preparePostgresRuntimeAccessPreflight({ ...guards, resolveSecretVersion: options.resolveSecretVersion,
-      plan: { schemaVersion: 1, domain: plan.domain, serverResourceId: plan.azure.postgres.resourceId,
+    const access = { schemaVersion: 1, domain: plan.domain, serverResourceId: plan.azure.postgres.resourceId,
         host: plan.transfer.postgres.target.host, port: plan.transfer.postgres.target.port,
         administrator: plan.transfer.postgres.target.user, runtimeVaultUri: plan.activation.runtimeVaultUri,
-        policy: plan.transfer.postgres.runtimeAccess }, assertTargetInactive });
+        policy: plan.transfer.postgres.runtimeAccess };
+    return preparePostgresRuntimeAccessPreflight({ ...guards, resolveSecretVersion: options.resolveSecretVersion,
+      plan: access, assertTargetInactive, readAzureParameters: azureParameterReader(access, guards.signal, options),
+      inspectAzureQueryStore: azureQueryStoreInspector(access, guards.signal, options) });
   });
 }

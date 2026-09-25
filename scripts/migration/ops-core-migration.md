@@ -53,7 +53,8 @@ Use the PostgreSQL shared-state variant and demand-based worker plan. Historical
 dedicated-server plans retain their existing shape; do not edit an initialized
 plan or reuse its receipts to add shared-server authority.
 
-The access policy binds `schemaVersion:1`, `applicationSchema:"public"`, the ordinary
+The access policy binds `schemaVersion:1` (or the explicit Azure profile below),
+`applicationSchema:"public"`, the ordinary
 `runtimeRole` (`corgtex_<domain>_runtime`), exact versioned `runtimeDatabaseSecrets`
 for web and worker, and `scaler:{role,connectionSecretVersion}` for
 `worker_scale_<domain>`. Retain independently generated credentials before freezing
@@ -70,9 +71,29 @@ Use the catalog collector and `postgresRuntimeAccessIsolationInventory()` to
 compute these values. `replace-public-connect` preserves existing named grants
 and adds explicitly reviewed legitimate users before removing PUBLIC CONNECT;
 `verify-only` never alters the database. Do not infer a legitimate-user allowlist
-from a PUBLIC grant. Provider-owned databases are observational only. Effective
-foreign database access must be denied; a provider database that cannot satisfy
-this requirement blocks admission rather than being silently exempted.
+from a PUBLIC grant. Version 1 keeps effective foreign `CONNECT` denied everywhere.
+For Azure Flexible Server PG18 only, `schemaVersion:2` with
+`providerProfile:"azure-flexible-postgres-18"` permits `allow-provider-connect`
+on pinned `azure_sys` and `azure_maintenance` owned by `azuresu`, and
+`template1` owned by `azure_pg_admin`. This action never changes provider ACLs.
+Names, OIDs, owners, normalized ACL hashes, template state, and effective
+runtime/scaler `CONNECT` must match the reviewed inventory. `postgres` retains
+normal PUBLIC revocation. All application databases, including the other
+CORGTEX domain, must deny effective foreign `CONNECT`.
+
+The Azure profile requires exact known preload modules, disabled Query Store
+capture, utility tracking, wait sampling, plans, `pg_stat_statements` capture,
+and settings that prevent credential SQL from entering logs or activity. It
+checks Azure server parameters and effective PostgreSQL settings with no
+pending restart before credential SQL and around commit. Parameter changes
+are a separate controlled operation; any mismatch fails closed. After
+activation, `monitorOpsCoreRuntimeAccessDrift()` checks retained database
+identities/ACLs for this domain and provider databases, provider capture
+settings, bounded Query Store history, and effective foreign `CONNECT` without
+comparing application object catalogs that may legitimately change. A later
+Core/Ops database may appear with its own grants; it remains denied to the
+other domain's roles. The monitor has a manual CLI action and is an acceptance
+gate; a protected recurring schedule must be configured separately.
 
 Preflight validates credentials, exact database ACL inventory and session logging
 controls before source fencing. The transfer holds a shared PostgreSQL maintenance
@@ -249,6 +270,7 @@ TLS domains, record routing through the supported operator:
 npx tsx scripts/migration/run-ops-core-migration.mjs record-routing /private/plan.json /private/credentials.json /private/evidence /private/routing.json
 npx tsx scripts/migration/run-ops-core-migration.mjs retain-acceptance-evidence /private/plan.json /private/credentials.json /private/evidence /private/workflow-receipt.json
 npx tsx scripts/migration/run-ops-core-migration.mjs accept /private/plan.json /private/credentials.json /private/evidence /private/acceptance.json
+npx tsx scripts/migration/run-ops-core-migration.mjs monitor-access /private/plan.json /private/target-credentials.json
 ```
 
 Routing and acceptance artifacts have `schemaVersion:1`, `phase` (`ROUTED` or
@@ -272,7 +294,12 @@ this command does not perform those exercises for you.
 
 The exact artifact and referenced receipts are read back from independent storage
 before advancement. Fresh runtime, source-fence and routing proofs precede journal
-completion. Expiry governs initial admission; an already-pending routing/acceptance action
+completion. For the Azure provider profile, `accept` also requires a fresh
+read-only access monitor pass. `monitor-access` can run in `TARGET_ACTIVE`,
+`ROUTED`, or `ACCEPTED` with no pending mutation, using only target administrator
+credentials; it reports a timestamp and result hash and can still run after
+source retirement. No recurring monitor is installed by this command.
+Expiry governs initial admission; an already-pending routing/acceptance action
 keeps the exact retained artifact and can reconcile after expiry through fresh
 observations. Repeating that action with the same artifact reconciles it; a lost completion acknowledgement returns historical evidence and
 makes no fresh-health claim. `ACCEPTED` then provides the retained authority used

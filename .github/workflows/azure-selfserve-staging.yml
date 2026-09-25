@@ -125,7 +125,6 @@ on:
 permissions:
   contents: read
   id-token: write
-  packages: write
 
 concurrency:
   group: azure-selfserve-staging
@@ -169,7 +168,6 @@ jobs:
       NEXT_SERVER_ACTIONS_ENCRYPTION_KEY: ${{ secrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY }}
       CRM_INQUIRY_WORKSPACE_SLUG: ${{ vars.CRM_INQUIRY_WORKSPACE_SLUG || '' }}
       CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL: ${{ vars.CRM_INQUIRY_ACKNOWLEDGEMENT_CC_EMAIL || '' }}
-      REGISTRY_USERNAME: corgtex-deploy
 
     steps:
       - uses: actions/checkout@v5
@@ -311,23 +309,48 @@ jobs:
           set -euo pipefail
           az account show --query "{tenantId: tenantId, subscriptionId: id, name: name}" --output table
 
+      - name: Resolve staging registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t registries < <(az acr list --resource-group "$RESOURCE_GROUP" --query '[].name' --output tsv)
+          if [[ ${#registries[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one staging registry in $RESOURCE_GROUP."
+            exit 1
+          fi
+          acr_name="${registries[0]}"
+          acr_server="$(az acr show --resource-group "$RESOURCE_GROUP" --name "$acr_name" --query loginServer --output tsv)"
+          admin_enabled="$(az acr show --resource-group "$RESOURCE_GROUP" --name "$acr_name" --query adminUserEnabled --output tsv)"
+          if [[ "$acr_server" != "${acr_name}.azurecr.io" || "$admin_enabled" != "true" ]]; then
+            echo "::error::Staging registry binding or credential mode changed."
+            exit 1
+          fi
+          echo "registry_name=$acr_name" >> "$GITHUB_ENV"
+          echo "registry_server=$acr_server" >> "$GITHUB_ENV"
+          echo "registry_username=$acr_name" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
         if: ${{ inputs.operation == 'deploy' && (inputs.deploy_container_apps || inputs.prepare_migration_job) }}
 
-      - name: Log in to GHCR
+      - name: Log in to staging ACR
         if: ${{ inputs.operation == 'deploy' && (inputs.deploy_container_apps || inputs.prepare_migration_job) }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          acr_password="$(az acr credential show --resource-group "$RESOURCE_GROUP" --name "$registry_name" --query 'passwords[0].value' --output tsv)"
+          if [[ -z "$acr_password" ]]; then
+            echo "::error::Staging registry credential unavailable."
+            exit 1
+          fi
+          printf '%s' "$acr_password" | docker login "$registry_server" --username "$registry_username" --password-stdin
+          unset acr_password
 
       - name: Compute immutable image tags
         id: image
         shell: bash
         run: |
           set -euo pipefail
-          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          repo="${registry_server}/corgtex"
           sha_tag="sha-${GITHUB_SHA}"
           echo "web=${repo}/web:${sha_tag}" >> "$GITHUB_OUTPUT"
           echo "worker=${repo}/worker:${sha_tag}" >> "$GITHUB_OUTPUT"
@@ -403,7 +426,8 @@ jobs:
             "releaseVersion=$release_version"
             "releaseImageTag=$release_image_tag"
             "releaseGitSha=$release_git_sha"
-            "registryUsername=$REGISTRY_USERNAME"
+            "registryServer=$registry_server"
+            "registryUsername=$registry_username"
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
             "azureFoundryBaseUrl=$AZURE_FOUNDRY_BASE_URL"
             "modelProvider=$MODEL_PROVIDER"
@@ -442,7 +466,8 @@ jobs:
             "releaseVersion=$release_version"
             "releaseImageTag=$release_image_tag"
             "releaseGitSha=$release_git_sha"
-            "registryUsername=$REGISTRY_USERNAME"
+            "registryServer=$registry_server"
+            "registryUsername=$registry_username"
             "azureOpenAiBaseUrl=$AZURE_OPENAI_BASE_URL"
             "azureFoundryBaseUrl=$AZURE_FOUNDRY_BASE_URL"
             "modelProvider=$MODEL_PROVIDER"

@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { validatePostgresRuntimeAccessPolicy, validatePostgresRuntimeAccessIntent, postgresRuntimeAccessPolicySha256 as hash,
+  AZURE_RUNTIME_ACCESS_SETTINGS,
   postgresRuntimeAccessIsolationInventory, preparePostgresRuntimeAccess, preparePostgresRuntimeAccessPreflight,
-  applyPostgresRuntimeAccess,reconcilePostgresRuntimeAccess } from "./ops-core-postgres-runtime-access.mjs";
+  applyPostgresRuntimeAccess,reconcilePostgresRuntimeAccess,monitorPostgresRuntimeAccessDrift } from "./ops-core-postgres-runtime-access.mjs";
 
 const grant=(grantor,grantee,privilege,grantable=false)=>({grantor,grantee,privilege,grantable});
 const acl=(oid,privileges)=>privileges.map(p=>grant(oid,oid,p));
@@ -23,24 +24,31 @@ function fixture() {
     action:d.name==="foundation"?"replace-public-connect":"verify-only",beforeAclSha256:d.aclSha256,preserveConnectRoles:d.name==="foundation"?[{name:"legitimate",oid:"11"}]:[]}))};
   const plan={schemaVersion:1,domain:"ops",intentSha256:"d".repeat(64),operationId:"phase-verified",serverResourceId:"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/fixture/providers/Microsoft.DBforPostgreSQL/flexibleServers/fixture",
     host,port,database,databaseOid:"100",administrator:admin,runtimeVaultUri:vault,policy};
-  const records={},effects=[],settings={},guards=[]; let saved,loseCommit=false,currentRole=admin;
+  const records={},effects=[],settings={},guards=[],azureSettings={...AZURE_RUNTIME_ACCESS_SETTINGS},azureParameters={...AZURE_RUNTIME_ACCESS_SETTINGS};
+  let saved,loseCommit=false,currentRole=admin,loggingModules="",historicalQueryRows=false;
+  const foreignAllowed = new Set();
   const client={connection:{stream:{encrypted:true,authorized:true}},connectionParameters:{host,port,user:admin,ssl:{rejectUnauthorized:true}},async query(sql,args=[]) {
     const label=sql.match(/runtime-access:(\w+)/)?.[1];
     if(label) {
-      if(label==="logging") return {rows:[{name:"shared_preload_libraries",setting:""},{name:"session_preload_libraries",setting:""},{name:"local_preload_libraries",setting:""}]};
+      if(label==="logging") return {rows:[{name:"shared_preload_libraries",setting:loggingModules},{name:"session_preload_libraries",setting:""},{name:"local_preload_libraries",setting:""}]};
+      if(label==="azure") return {rows:Object.entries(azureSettings).map(([name,setting])=>({name,setting,pendingRestart:false}))};
       return {rows:structuredClone(label==="identity"?[catalog.identity]:catalog[label])};
     }
     if(sql.startsWith("BEGIN")) { saved=structuredClone(catalog); return {rows:[]}; }
     if(sql==="ROLLBACK") { catalog=saved;currentRole=admin;effects.push("ROLLBACK");return {rows:[]}; }
     if(sql==="COMMIT") {effects.push("COMMIT");saved=null;if(loseCommit)throw new Error("untrusted driver details");return {rows:[]};}
     if(sql.includes("set_config")){settings[args[0]]=args[1];return {rows:[]};}
+    if(sql.startsWith("SELECT current_database() AS database,current_user AS administrator"))return {rows:[{
+      database:catalog.identity.database,administrator:admin,sessionUser:admin,version:180006}]};
     if(sql.includes("current_setting"))return {rows:[{value:settings[args[0]]}]};
     if(sql.startsWith("SET LOCAL lock_timeout")||sql.startsWith("SET LOCAL statement_timeout"))return {rows:[]};
     if(sql==="SELECT current_database() AS database")return {rows:[{database}]};
     if(sql.includes("SELECT 1 FROM pg_catalog.pg_roles"))return {rows:catalog.roles.filter(r=>r.name===args[0])};
     if(sql.includes("AS schema_create"))return {rows:[{schema_create:false,broad_access:false,event_payload:false,job_payload:false}]};
     if(sql.startsWith("SELECT CASE WHEN"))return {rows:[{demand:0}]};
-    if(sql.startsWith("SELECT datname AS name FROM"))return {rows:[]};
+    if(sql.startsWith("SELECT datname AS name,oid::text AS oid"))return {rows:catalog.databases.filter(d=>d.name!==database)
+      .map(d=>({name:d.name,oid:d.oid,allowed:foreignAllowed.has(d.name)
+        || policy.isolation.databases.find(row=>row.name===d.name)?.action==="allow-provider-connect"}))};
     if(sql.startsWith("SET LOCAL ROLE")){currentRole=sql.match(/"([^"]+)"/)[1];return {rows:[]};}
     if(sql==="RESET ROLE"){currentRole=admin;return {rows:[]};}
     effects.push(sql.split(" ").slice(0,2).join(" "));
@@ -70,16 +78,37 @@ function fixture() {
   }};
   const options={plan,client,signal:new AbortController().signal,assertHeld:async()=>{guards.push("lease");},assertSourceFenced:async()=>{guards.push("source");},assertTargetInactive:async()=>{guards.push("target");},
     resolveSecretVersion:async version=>`postgresql://${version===policy.scaler.connectionSecretVersion?scaler:runtime}:${version===policy.scaler.connectionSecretVersion?scalerPassword:runtimePassword}@${host}:${port}/${database}?sslmode=verify-full`,
+    readAzureParameters:async()=>Object.entries(azureParameters).map(([name,value])=>({name,value})),
+    inspectAzureQueryStore:async()=>historicalQueryRows,
     persistIntent:async value=>{records.intent=structuredClone(value);},persistExpectedAfter:async value=>{records.expectedAfter=structuredClone(value);},readRecords:async()=>structuredClone(records),
     clientFactory:config=>({connection:{stream:{encrypted:true,authorized:true}},async connect(){assert.equal(config.password,config.user===runtime?runtimePassword:scalerPassword);},async end(){},async query(sql){
       if(sql.includes("rolsuper"))return {rows:[{database,role:scaler,rolsuper:false,rolcreatedb:false,rolcreaterole:false,rolreplication:false,rolbypassrls:false,memberships:false,rolconnlimit:2}]};
       if(sql.includes("AS schema_create"))return {rows:[{schema_create:false,broad_access:false,event_payload:false,job_payload:false}]};
       if(sql.startsWith("SELECT CASE"))return {rows:[{demand:0}]};
-      if(sql.includes("datallowconn"))return {rows:policy.isolation.databases.map(d=>({name:d.name,allowed:false}))};
+      if(sql.includes("datallowconn"))return {rows:policy.isolation.databases.map(d=>({name:d.name,oid:d.oid,allowed:d.action==="allow-provider-connect"}))};
       if(sql.includes("AS usage"))return {rows:[{usage:true,create:true}]};
       return {rows:[{role:config.user,database,oid:"100"}]};
     }})};
-  return {options,records,effects,guards,get catalog(){return catalog;},set catalog(value){catalog=value;},loseCommit(){loseCommit=true;},passwords:[runtimePassword,scalerPassword]};
+  return {options,records,effects,guards,azureSettings,azureParameters,foreignAllowed,
+    set loggingModules(value){loggingModules=value;},set historicalQueryRows(value){historicalQueryRows=value;},
+    get catalog(){return catalog;},set catalog(value){catalog=value;},loseCommit(){loseCommit=true;},passwords:[runtimePassword,scalerPassword]};
+}
+
+function azureFixture() {
+  const f=fixture(),policy=f.options.plan.policy;
+  policy.schemaVersion=2;policy.providerProfile="azure-flexible-postgres-18";
+  f.loggingModules="pg_cron,pg_stat_statements,azure,pg_qs,pgaadauth,pgms_stats,pgms_wait_sampling,pg_availability";
+  const provider=(name,oid,owner,ownerOid,isTemplate=false)=>({name,oid,owner,allowConnections:true,isTemplate,ownerAuthority:false,
+    acl:[...acl(ownerOid,["CONNECT","CREATE","TEMPORARY"]),grant(ownerOid,"0","CONNECT"),grant(ownerOid,"0","TEMPORARY")]});
+  f.catalog.databases.push(provider("azure_sys","103","azuresu","12"),provider("azure_maintenance","104","azuresu","12"),
+    provider("template1","105","azure_pg_admin","13",true));
+  f.catalog.databases.sort((a,b)=>a.name.localeCompare(b.name));
+  const inventory=postgresRuntimeAccessIsolationInventory(f.catalog,"ops");
+  policy.isolation={inventorySha256:inventory.inventorySha256,databases:inventory.databases.map(db=>({name:db.name,oid:db.oid,owner:db.owner,
+    action:["azure_sys","azure_maintenance","template1"].includes(db.name)?"allow-provider-connect"
+      :db.name==="foundation"?"replace-public-connect":"verify-only",beforeAclSha256:db.aclSha256,
+    preserveConnectRoles:db.name==="foundation"?[{name:"legitimate",oid:"11"}]:[]}))};
+  return f;
 }
 
 test("atomic role/object/ACL handoff preserves DB owner and authenticates exact versioned credentials",async()=>{
@@ -141,7 +170,8 @@ test("provider-owned verify-only rows cannot become editable and effective forei
   const f=fixture();f.options.plan.policy.isolation.databases.find(d=>d.name==="postgres").owner="provider";
   await assert.rejects(preparePostgresRuntimeAccess(f.options));
   const g=fixture(),intent=await preparePostgresRuntimeAccess(g.options),original=g.options.client.query;
-  g.options.client.query=async(sql,args)=>sql.startsWith("SELECT datname AS name FROM")?{rows:[{name:"provider"}]}:original(sql,args);
+  g.options.client.query=async(sql,args)=>sql.startsWith("SELECT datname AS name,oid::text AS oid")
+    ?{rows:g.options.plan.policy.isolation.databases.map(d=>({name:d.name,oid:d.oid,allowed:d.name==="postgres"}))}:original(sql,args);
   await assert.rejects(applyPostgresRuntimeAccess({...g.options,intent}),{code:"RUNTIME_ACCESS_FOREIGN_CONNECT_ALLOWED"});assert.equal(hash(g.catalog),intent.beforeSha256);
 });
 test("preflight on postgres verifies exact inventory and logging capability without needing target OID",async()=>{
@@ -170,4 +200,61 @@ test("per-object effects check custody without repeated provider inventory; fina
   }}),{code:"RUNTIME_ACCESS_TARGET_NOT_INACTIVE"});
   assert.deepEqual(calls,["APPLY_ADMISSION","BEGIN","COMMIT"]);
   assert.equal(hash(f.catalog),intent.beforeSha256);assert.equal(f.effects.at(-1),"ROLLBACK");
+});
+
+test("exact Azure provider access survives commit and authenticated runtime readback",async()=>{
+  const f=azureFixture();
+  const intent=await preparePostgresRuntimeAccess(f.options);
+  const result=await applyPostgresRuntimeAccess({...f.options,intent});
+  assert.equal(result.status,"APPLIED");
+  assert.ok(f.catalog.databases.find(db=>db.name==="azure_sys").acl.some(a=>a.grantee==="0"&&a.privilege==="CONNECT"));
+  assert.equal((await reconcilePostgresRuntimeAccess({...f.options,intent})).status,"APPLIED");
+});
+
+test("Azure exception rejects unreviewed databases, changed identity, and unsafe capture before any mutation",async()=>{
+  for(const drift of ["unknown","owner","template","oid","acl","capture","parameter","hook","history"]) {
+    const f=azureFixture(),db=f.catalog.databases.find(row=>row.name==="azure_sys");
+    if(drift==="unknown") f.options.plan.policy.isolation.databases.find(row=>row.name==="foundation").action="allow-provider-connect";
+    if(drift==="owner") db.owner="other";
+    if(drift==="template") db.isTemplate=true;
+    if(drift==="oid") db.oid="999";
+    if(drift==="acl") db.acl.push(grant("12","99","CONNECT"));
+    if(drift==="capture") f.azureSettings["pg_qs.query_capture_mode"]="all";
+    if(drift==="parameter") f.azureParameters["pg_qs.query_capture_mode"]="top";
+    if(drift==="hook") f.loggingModules="pg_stat_statements,pgaudit";
+    if(drift==="history") f.historicalQueryRows=true;
+    await assert.rejects(preparePostgresRuntimeAccess(f.options),{name:"PostgresRuntimeAccessError"},drift);
+    assert.ok(!f.effects.some(effect=>effect.startsWith("CREATE")||effect.startsWith("ALTER")),drift);
+  }
+});
+
+test("Azure capture drift before commit rolls back credentials and ownership",async()=>{
+  const f=azureFixture(),intent=await preparePostgresRuntimeAccess(f.options);
+  const original=f.options.persistExpectedAfter;
+  await assert.rejects(applyPostgresRuntimeAccess({...f.options,intent,persistExpectedAfter:async value=>{
+    await original(value);f.azureParameters["pg_qs.track_utility"]="on";
+  }}),{code:"RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH"});
+  assert.equal(hash(f.catalog),intent.beforeSha256);
+  assert.equal(f.effects.at(-1),"ROLLBACK");
+});
+
+test("active Azure drift check tolerates application migrations but rejects provider ACL and capture changes",async()=>{
+  const f=azureFixture(),intent=await preparePostgresRuntimeAccess(f.options);
+  await applyPostgresRuntimeAccess({...f.options,intent});
+  f.catalog.objects.push({...f.catalog.objects[0],oid:"999",name:"new_table",identity:"public.new_table"});
+  assert.equal((await monitorPostgresRuntimeAccessDrift({...f.options,intent,expectedAfter:f.records.expectedAfter})).complete,true);
+  f.catalog.databases.push({name:"corgtex_core",oid:"106",owner:"fixture_admin",allowConnections:true,isTemplate:false,
+    ownerAuthority:true,acl:acl("10",["CONNECT"])});
+  assert.equal((await monitorPostgresRuntimeAccessDrift({...f.options,intent,expectedAfter:f.records.expectedAfter})).complete,true);
+  f.foreignAllowed.add("corgtex_core");
+  await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,expectedAfter:f.records.expectedAfter}),
+    {code:"RUNTIME_ACCESS_FOREIGN_CONNECT_ALLOWED"});
+  f.foreignAllowed.delete("corgtex_core");
+  f.catalog.databases.find(db=>db.name==="azure_sys").acl.push(grant("12","99","CONNECT"));
+  await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,expectedAfter:f.records.expectedAfter}),
+    {code:"RUNTIME_ACCESS_DATABASE_DRIFT"});
+  f.catalog.databases.find(db=>db.name==="azure_sys").acl.pop();
+  f.azureParameters["pg_qs.query_capture_mode"]="all";
+  await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,expectedAfter:f.records.expectedAfter}),
+    {code:"RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH"});
 });

@@ -115,6 +115,32 @@ function postgresVariant(plan) {
   }
 }
 
+function azureAccessVariant(plan) {
+  postgresVariant(plan);
+  plan.azure.postgres.resourceGroupName = plan.azure.resourceGroupName;
+  plan.activation.target = structuredClone(plan.azure);
+  plan.activation.schemaVersion = 2;
+  const vault = plan.activation.runtimeVaultUri, identity = plan.activation.managedIdentityId;
+  const secret = name => `${vault}secrets/${name}/${"a".repeat(32)}`;
+  const policy = { schemaVersion: 2, providerProfile: "azure-flexible-postgres-18",
+    runtimeRole: "corgtex_core_runtime", applicationSchema: "public",
+    runtimeDatabaseSecrets: { web: secret("core-web"), worker: secret("core-worker") },
+    scaler: { role: "worker_scale_core", connectionSecretVersion: secret("core-scaler") },
+    isolation: { inventorySha256: "a".repeat(64), databases: [
+      { name: "postgres", oid: "5", owner: "target_admin", action: "replace-public-connect",
+        beforeAclSha256: "b".repeat(64), preserveConnectRoles: [] },
+      { name: "azure_sys", oid: "6", owner: "azuresu", action: "allow-provider-connect",
+        beforeAclSha256: "c".repeat(64), preserveConnectRoles: [] },
+    ] } };
+  plan.transfer.postgres.runtimeAccess = policy;
+  plan.activation.runtimeAccess = policy;
+  plan.activation.workerDemand = { schedulerJobName: "core-scheduler", schedulerCadenceMinutes: 5,
+    schedulerResources: { cpu: 0.5, memory: "1Gi" },
+    scalerConnectionSecret: { name: "worker-scaler-connection", keyVaultUrl: policy.scaler.connectionSecretVersion, identity } };
+  for (const role of ["web", "worker"])
+    plan.activation.roles[role].secrets.find(entry => entry.name === "database").keyVaultUrl = policy.runtimeDatabaseSecrets[role];
+}
+
 function stage(f, phase) {
   const index = CUTOVER_PHASES.indexOf(phase), row = f.blobs.get("cutovers/core.json");
   const journal = JSON.parse(row.text);
@@ -318,6 +344,35 @@ describe("Ops/Core executable operator", () => {
     const writes=f.writes();await runOpsCoreMigration(opts);expect(f.writes()).toBe(writes);
     artifact.binding.release.version="foreign";
     await expect(runOpsCoreMigration(opts)).rejects.toThrow("MIGRATION_ACCEPTANCE_BINDING_MISMATCH");
+  });
+
+  it("runs Azure access monitoring after activation without source credentials and gates acceptance", async () => {
+    const f = fixture(); azureAccessVariant(f.plan);
+    await runOpsCoreMigration({ ...f.options, action: "initialize" });
+    stage(f, "TARGET_ACTIVE");
+    const calls = [];
+    const monitor = async () => { calls.push("monitor"); return { complete: true, domain: "core", profileSha256: "d".repeat(64) }; };
+    const monitored = await runOpsCoreMigration({ ...f.options, action: "monitor-access",
+      credentials: { targetAdminConfig: {} }, runtime: { monitorAccess: monitor } });
+    expect(monitored.status).toBe("ACCESS_MONITORED");
+    expect(monitored.complete).toBe(true);
+    expect(calls).toEqual(["monitor"]);
+    const j = stage(f, "ROUTED");
+    const artifact = { binding: { domain: "core", intentSha256: archiveEvidenceHash(f.plan),
+      targetBindingSha256: archiveEvidenceHash(f.plan.azure), release: structuredClone(f.plan.activation.release),
+      sourceFenceSha256: j.history.find(entry => entry.phase === "SOURCE_FENCED").evidenceSha256,
+      routes: ["app", "mcp"].map(name => ({ publicOrigin: `https://${name}.corgtex.com`,
+        azureOrigin: "https://fixture-web.environment.westus3.azurecontainerapps.io",
+        expectedCname: "fixture-web.environment.westus3.azurecontainerapps.io" })) } };
+    await runOpsCoreMigration({ ...f.options, action: "accept", acceptanceArtifact: artifact,
+      credentials: { sourceConfig: {}, readerConfig: {}, targetAdminConfig: {} },
+      runtime: { monitorAccess: monitor, acceptance: async () => { calls.push("accept"); return { phase: "ACCEPTED" }; } } });
+    expect(calls).toEqual(["monitor", "monitor", "accept"]);
+    await expect(runOpsCoreMigration({ ...f.options, action: "accept", acceptanceArtifact: artifact,
+      credentials: { sourceConfig: {}, readerConfig: {}, targetAdminConfig: {} },
+      runtime: { monitorAccess: async () => { throw Error("drift"); }, acceptance: async () => { calls.push("bad-accept"); } } }))
+      .rejects.toThrow("MIGRATION_RECONCILIATION_REQUIRED");
+    expect(calls).not.toContain("bad-accept");
   });
 
 });

@@ -21,10 +21,10 @@ param siteUrl string = 'https://www.corgtex.com'
 @description('Control-plane origin for read-only links and later registry sync.')
 param controlPlaneUrl string = 'https://ops.corgtex.com'
 
-@description('GHCR web image tagged by immutable Git SHA.')
+@description('Web image tagged by immutable Git SHA in the selected registry.')
 param webImage string
 
-@description('GHCR worker image tagged by immutable Git SHA.')
+@description('Worker image tagged by immutable Git SHA in the selected registry.')
 param workerImage string
 
 @description('Release version surfaced by /api/health.')
@@ -172,7 +172,7 @@ param workerHealthPort string = '9090'
 @description('Worker shutdown timeout in milliseconds.')
 param workerShutdownTimeoutMs string = '15000'
 
-@description('Key Vault secret name containing the GHCR PAT.')
+@description('Key Vault secret name containing the selected registry pull credential. The historical name is ghcr-pat.')
 param ghcrPatSecretName string = 'ghcr-pat'
 
 @description('Key Vault secret name containing DATABASE_URL.')

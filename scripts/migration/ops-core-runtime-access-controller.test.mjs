@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { archiveEvidenceHash as hash } from "./ops-core-archive.mjs";
-import { runOpsCoreRuntimeAccess, assertOpsCoreRuntimeAccessForActivation, createRuntimeSecretResolver } from "./ops-core-runtime-access-controller.mjs";
+import { runOpsCoreRuntimeAccess, assertOpsCoreRuntimeAccessForActivation, createRuntimeSecretResolver,
+  preflightOpsCoreRuntimeAccess } from "./ops-core-runtime-access-controller.mjs";
 import { validateRuntimeAccessActivationBinding, validateTransferRuntimeAccessBinding } from "./ops-core-runtime-access-binding.mjs";
 
 const mock = vi.hoisted(() => ({ calls: [], status: "APPLIED", closed: 0 }));
@@ -26,7 +27,11 @@ vi.mock("./ops-core-postgres-runtime-access.mjs", async original => ({ ...await 
     await assertHeld(); await assertSourceFenced(); await assertTargetInactive(); mock.calls.push("reconcile");
     return { status: mock.status, intentSha256: intent.sha256, manifestSha256: hash({}) };
   },
-  preparePostgresRuntimeAccessPreflight: async () => ({ complete: true }),
+  preparePostgresRuntimeAccessPreflight: async ({ inspectAzureQueryStore }) => {
+    const historyPresent = inspectAzureQueryStore ? await inspectAzureQueryStore() : null;
+    if (historyPresent) throw Error("RUNTIME_ACCESS_AZURE_QUERY_HISTORY_PRESENT");
+    return { complete: true, historyPresent };
+  },
 }));
 
 function fixture() {
@@ -141,5 +146,40 @@ describe("shared runtime credential binding", () => {
     const broken = createRuntimeSecretResolver({ vaultUri: f.plan.activation.runtimeVaultUri, signal: f.options.custody.signal,
       secretClient: { async getSecret() { throw new Error("private-provider-value"); } } });
     await expect(broken(reference)).rejects.toThrow(/^RUNTIME_ACCESS_SECRET_UNAVAILABLE$/);
+  });
+});
+
+describe("Azure provider Query Store readback", () => {
+  it("uses strict TLS and exact azure_sys identity, and rejects history, view errors and connection drift", async () => {
+    for (const variant of ["empty", "rows", "view-error", "oid", "tls"]) {
+      const f = fixture(); f.policy.schemaVersion = 2; f.policy.providerProfile = "azure-flexible-postgres-18";
+      f.policy.isolation.databases.push({ name: "azure_sys", oid: "42", owner: "azuresu", action: "allow-provider-connect",
+        beforeAclSha256: "f".repeat(64), preserveConnectRoles: [] });
+      const calls = [];
+      const clientFactory = config => ({
+        connectionParameters: config,
+        connection: { stream: { encrypted: true, authorized: variant !== "tls" } },
+        async connect() { calls.push(`connect:${config.database}`); },
+        async end() { calls.push(`end:${config.database}`); },
+        async query(sql) {
+          if (sql.includes("current_database() AS database,current_user AS administrator"))
+            return { rows: [{ database: "azure_sys", administrator: "admin", sessionUser: "admin", version: 180006,
+              oid: variant === "oid" ? "99" : "42" }] };
+          if (sql.startsWith("SELECT EXISTS")) {
+            calls.push(sql);
+            if (variant === "view-error") throw Error("unreadable");
+            return { rows: [{ hasRows: variant === "rows" }] };
+          }
+          return { rows: [] };
+        },
+      });
+      const run = () => preflightOpsCoreRuntimeAccess({ ...f.options, assertOwned: async () => {}, clientFactory });
+      if (variant === "empty") {
+        expect((await run()).historyPresent).toBe(false);
+        expect(calls.filter(call => call.startsWith("SELECT EXISTS"))).toHaveLength(4);
+        expect(calls).toContain("end:azure_sys");
+      } else await expect(run()).rejects.toThrow(variant === "rows"
+        ? "RUNTIME_ACCESS_AZURE_QUERY_HISTORY_PRESENT" : "RUNTIME_ACCESS_AZURE_QUERY_STORE_READBACK_INVALID");
+    }
   });
 });
