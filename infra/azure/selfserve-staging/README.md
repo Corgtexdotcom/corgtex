@@ -34,6 +34,7 @@ Required GitHub environment secrets:
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 - `AZURE_SELFSERVE_STAGING_POSTGRES_ADMIN_PASSWORD`
+- `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` when building the web or migration-job image
 - `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_CAPTURE_SECRET` when browser smoke is enabled
 
 Required GitHub environment variables:
@@ -49,10 +50,10 @@ The Azure identity used by GitHub OIDC needs enough permission to create the res
 
 Suggested run order:
 
-1. Run `operation=deploy` with `deployContainerApps=false` to create backing resources only.
+1. Run `operation=deploy` with `deploy_container_apps=false`, `prepare_migration_job=false`, and `shared_state_backend=redis` to create backing resources only.
 2. Populate the required Key Vault secrets listed below and grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
-3. Run `operation=deploy` with `deployContainerApps=true` to build and push GHCR images tagged `sha-<git-sha>`, then create or update the web app, worker, and migration job. Leave the optional provider-secret toggles off until real staging credentials and callback URLs are registered.
-4. Enable `run_migration_job=true` for the first app deploy of a new image.
+3. Preview the job-only deployment with `prepare_migration_job=true`, `deploy_container_apps=false`, `shared_state_backend=redis`, and `run_migration_job=false`. Then deploy with `run_migration_job=true`; this builds the immutable web image and runs the migration without updating web or worker.
+4. Verify the migration and, for an existing Redis runtime, complete the writer fence described below. Preview and deploy `deploy_container_apps=true`, `prepare_migration_job=false`, `run_migration_job=false` with the explicitly accepted `shared_state_backend`. This builds the web and worker images and updates consumers after the schema is ready. Leave optional provider-secret toggles off until real staging credentials and callback URLs are registered.
 5. Enable `run_health_smoke=true` and, after DNS/email/OAuth gates are ready, `run_browser_smoke=true`.
 
 The workflow does not configure DNS or OAuth callback registrations. Keep `selfserve-staging.corgtex.com` and `selfserve.corgtex.com` as manual gates until provider credentials and DNS access are approved.
@@ -87,7 +88,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 
 - Confirm the Azure account is the Corgtex work account and the target subscription has approved credits, budget alert permissions, and enough quota in the selected region.
 - Confirm Azure OpenAI or Foundry model availability. The app/data default is `westus3`; model deployments can be in another approved region if the base URL and deployment names are documented.
-- Populate required Key Vault secrets before setting `deployContainerApps=true`.
+- Populate required Key Vault secrets before setting `deployContainerApps=true` or `deployMigrationJob=true`.
 - Grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
 - Confirm GHCR image access. The Key Vault secret named `ghcr-pat` must contain a package-read token for `ghcr.io/corgtexdotcom/corgtex`.
 - If GHCR package-token scopes are not available for staging, use Azure Container Registry as a temporary fallback by setting `registryServer`, `registryUsername`, `webImage`, and `workerImage` to the ACR values and storing the ACR password in the same `ghcr-pat` Key Vault secret.
@@ -100,7 +101,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 
 ## Key Vault secrets
 
-The template references these Key Vault secret names by default when `deployContainerApps=true`:
+The template references these Key Vault secret names by default when `deployContainerApps=true` or `deployMigrationJob=true`:
 
 - `ghcr-pat`
 - `database-url`
@@ -141,11 +142,11 @@ Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real R
 
 `sharedStateBackend=postgres` omits Redis provisioning and Redis secret references
 for web, worker and the migration job, and sets `SHARED_STATE_BACKEND=postgres`
-consistently. The default remains `redis`. The staging workflow reads
-`AZURE_SELFSERVE_STAGING_SHARED_STATE_BACKEND` from its GitHub environment for both
-preview and apply; set it to the accepted backend and retain it for later deploys.
-An omitted variable selects Redis. Direct template deployments must pass the same
-backend explicitly. Review the what-if output before applying.
+consistently. The template default remains `redis`. The staging workflow requires
+an explicit `shared_state_backend` input of `redis` or `postgres` on every preview
+and deploy; it does not infer the accepted backend from a default or repository
+variable. Direct template deployments must pass the accepted backend explicitly.
+Review the what-if output before applying.
 
 This is a deployment option, not an online state-transfer mechanism. Before
 switching an existing staging runtime:
@@ -157,8 +158,13 @@ switching an existing staging runtime:
 2. Fence every Redis writer, including web, worker, manual jobs and old revisions.
    Preserve/drain pending uploads and live counters; prove the exact source cache
    empty. Do not independently switch consumers while either backend has writers.
-3. Apply the additive schema before starting PostgreSQL-backed consumers. Switch
-   all consumers under that fence, then verify exact image/backend identity,
+3. Preview with `prepare_migration_job=true`, `deploy_container_apps=false`,
+   `shared_state_backend=redis`, and `run_migration_job=false`. Deploy the same
+   settings with `run_migration_job=true` to run the prepared job. This
+   updates the job before web or worker and applies the additive schema without
+   switching consumers. Verify the migration, then preview and deploy
+   `deploy_container_apps=true`, `prepare_migration_job=false`, and
+   `shared_state_backend=postgres` under the writer fence. Verify exact image/backend identity,
    cold-wake health, shared-state behavior and the absence of Redis references.
    Keep a PostgreSQL-capable rollback image; switching back to old Redis state
    after new writes is not an acceptable rollback.
@@ -175,7 +181,7 @@ backend switch is performed by this source change.
 
 ## Startup contract
 
-- The web Container App sets `CORGTEX_STARTUP_MODE=web`, so it does not mutate the database at normal startup.
+- The web Container App sets `CORGTEX_STARTUP_MODE=web`, so it does not mutate the database at normal startup but requires all bundled migrations to be present.
 - The migration job sets `CORGTEX_STARTUP_MODE=migrate-and-seed` and should be run before smoke testing a new image.
 - The migration job also receives `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `bootstrapAdminEmail` and the `admin-password` Key Vault secret so the production bootstrap seed can complete.
 - The worker runs from the existing worker image and exposes `/health` on `WORKER_HEALTH_PORT`.

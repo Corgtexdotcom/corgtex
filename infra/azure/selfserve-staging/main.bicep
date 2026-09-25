@@ -9,6 +9,9 @@ param namePrefix string = 'corgtex-ss-stg'
 @description('When false, creates backing resources only. Set true after required Key Vault secrets are populated.')
 param deployContainerApps bool = false
 
+@description('Update the migration job without updating web or worker; use before switching shared state to PostgreSQL.')
+param deployMigrationJob bool = false
+
 @description('Public app origin for the Azure self-serve runtime.')
 param appUrl string = 'https://selfserve-staging.corgtex.com'
 
@@ -795,7 +798,7 @@ resource workerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContaine
   ]
 }
 
-resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps) {
+resource migrationJob 'Microsoft.App/jobs@2024-03-01' = if (deployContainerApps || deployMigrationJob) {
   name: migrationJobName
   location: location
   identity: {
@@ -863,4 +866,4 @@ output redisPort int = provisionRedis ? managedRedisPort : 0
 output containerAppsEnvironment string = containerEnvironment.name
 output webAppName string = deployContainerApps ? webApp.name : ''
 output workerAppName string = deployContainerApps ? workerApp.name : ''
-output migrationJobNameOut string = deployContainerApps ? migrationJob.name : ''
+output migrationJobNameOut string = (deployContainerApps || deployMigrationJob) ? migrationJob.name : ''
