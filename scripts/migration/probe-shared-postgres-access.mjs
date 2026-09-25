@@ -21,17 +21,32 @@ export const ACCESS_SQL = Object.freeze({
   effectiveSettings: `SELECT name,setting,source,context,pending_restart AS "pendingRestart"
     FROM pg_catalog.pg_settings WHERE name=ANY($1::text[]) ORDER BY name`,
   providerGuard: metadataSql.guard.replace("current_database()='postgres'", "current_database()=$1"),
-  providerSchemas: `SELECT nspname AS name,oid::text AS oid,pg_catalog.pg_get_userbyid(nspowner) AS owner
+  providerSchemas: `SELECT nspname AS name,oid::text AS oid,pg_catalog.pg_get_userbyid(nspowner) AS owner,
+    COALESCE((SELECT bool_or(a.privilege_type='USAGE') FROM pg_catalog.aclexplode(
+      COALESCE(nspacl,pg_catalog.acldefault('n',nspowner))) a WHERE a.grantee=0),false) AS "publicUsage",
+    COALESCE((SELECT bool_or(a.privilege_type='CREATE') FROM pg_catalog.aclexplode(
+      COALESCE(nspacl,pg_catalog.acldefault('n',nspowner))) a WHERE a.grantee=0),false) AS "publicCreate"
     FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
     AND nspname<>'information_schema' ORDER BY nspname`,
-  providerPublicRelations: `SELECT n.nspname AS schema,c.relname AS name,c.relkind::text AS kind,
-    a.privilege_type AS privilege FROM pg_catalog.pg_class c
+  providerPublicRelations: `WITH grants AS (
+    SELECT n.nspname AS schema,c.relname AS name,c.relkind::text AS kind,
+      'relation'::text AS "grantScope",NULL::text AS "column",a.privilege_type AS privilege
+    FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
     CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,
       CASE WHEN c.relkind='S' THEN pg_catalog.acldefault('s',c.relowner)
       ELSE pg_catalog.acldefault('r',c.relowner) END)) a
     WHERE n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname<>'information_schema'
-    AND a.grantee=0 ORDER BY n.nspname,c.relname,a.privilege_type`,
+      AND a.grantee=0
+    UNION ALL
+    SELECT n.nspname,c.relname,c.relkind::text,'column'::text,attr.attname,a.privilege_type
+    FROM pg_catalog.pg_attribute attr
+    JOIN pg_catalog.pg_class c ON c.oid=attr.attrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    CROSS JOIN LATERAL pg_catalog.aclexplode(attr.attacl) a
+    WHERE n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname<>'information_schema'
+      AND attr.attnum>0 AND NOT attr.attisdropped AND a.grantee=0 AND a.privilege_type='SELECT'
+  ) SELECT * FROM grants ORDER BY schema,name,"grantScope","column",privilege`,
   providerPublicDefiners: `SELECT n.nspname AS schema,p.proname AS name,p.oid::text AS oid,
     a.privilege_type AS privilege FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
@@ -39,6 +54,14 @@ export const ACCESS_SQL = Object.freeze({
       pg_catalog.acldefault('f',p.proowner))) a
     WHERE n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname<>'information_schema'
     AND p.prosecdef AND a.grantee=0 AND a.privilege_type='EXECUTE'
+    ORDER BY n.nspname,p.proname,p.oid`,
+  providerPublicFunctions: `SELECT n.nspname AS schema,p.proname AS name,p.oid::text AS oid,
+    p.prosecdef AS "securityDefiner",p.prokind::text AS kind
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,
+      pg_catalog.acldefault('f',p.proowner))) a
+    WHERE n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND n.nspname<>'information_schema'
+    AND a.grantee=0 AND a.privilege_type='EXECUTE'
     ORDER BY n.nspname,p.proname,p.oid`,
   providerRelation: "SELECT pg_catalog.to_regclass($1)::text AS relation",
 });
@@ -61,6 +84,7 @@ const boundedRows = (rows, maxRows, maxBytes) => {
     && Buffer.byteLength(JSON.stringify(rows)) <= maxBytes, "ACCESS_CATALOG_LIMIT");
   return rows;
 };
+const ident = value => `"${value.replaceAll('"', '""')}"`;
 
 export async function captureSharedPostgresAccess(client, { deadlineMs = 120000, closeMs = 3000,
   providerClientFactory, azureParameters = [] } = {}) {
@@ -122,6 +146,26 @@ export async function captureSharedPostgresAccess(client, { deadlineMs = 120000,
       const schemas = boundedRows((await provider.query(ACCESS_SQL.providerSchemas)).rows, 100, 8000);
       const publicRelations = boundedRows((await provider.query(ACCESS_SQL.providerPublicRelations)).rows, 500, 16000);
       const publicDefiners = boundedRows((await provider.query(ACCESS_SQL.providerPublicDefiners)).rows, 100, 8000);
+      const publicFunctions = boundedRows((await provider.query(ACCESS_SQL.providerPublicFunctions)).rows, 300, 16000);
+      const publicRelationRows = [], seenRelations = new Set();
+      for (const relation of publicRelations.filter(row => row.privilege === "SELECT")) {
+        const key = JSON.stringify([relation.schema, relation.name]);
+        if (seenRelations.has(key)) continue;
+        seenRelations.add(key);
+        await provider.query("SAVEPOINT access_public_relation");
+        try {
+          const result = await provider.query(`SELECT EXISTS(SELECT 1 FROM ${ident(relation.schema)}.${ident(relation.name)} LIMIT 1) AS "hasRows"`);
+          publicRelationRows.push({ schema: relation.schema, name: relation.name,
+            administratorRead: true, hasRows: result.rows[0]?.hasRows === true });
+        } catch (error) {
+          publicRelationRows.push({ schema: relation.schema, name: relation.name,
+            administratorRead: false, hasRows: null,
+            sqlState: /^[0-9A-Z]{5}$/u.test(error?.code ?? "") ? error.code : null });
+          await provider.query("ROLLBACK TO SAVEPOINT access_public_relation");
+        }
+        await provider.query("RELEASE SAVEPOINT access_public_relation");
+      }
+      boundedRows(publicRelationRows, 500, 16000);
       const queryStore = [];
       if (name === "azure_sys") for (const view of QUERY_STORE_VIEWS) {
         const relation = (await provider.query(ACCESS_SQL.providerRelation, [view])).rows[0]?.relation;
@@ -142,7 +186,8 @@ export async function captureSharedPostgresAccess(client, { deadlineMs = 120000,
         if (hasRows !== undefined) queryStore.push({ view, present: true, readable: true, hasRows });
       }
       check((await provider.query("ROLLBACK")).command === "ROLLBACK", "ACCESS_PROVIDER_ROLLBACK_UNPROVEN");
-      providerDatabases.push({ name, schemas, publicRelations, publicDefiners, queryStore,
+      providerDatabases.push({ name, schemas, publicRelations, publicDefiners, publicFunctions,
+        publicRelationRows, queryStore,
         readonlyGuards: true, rollback: true });
     }
     const inventories = Object.fromEntries(["core", "ops"].map(domain =>

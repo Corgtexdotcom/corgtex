@@ -14,7 +14,8 @@ const posture = isolation => ({ default_ro: "on", ro: "on", isolation, statement
   lock_timeout: "1s", idle_timeout: "15s", transaction_timeout: "1min", search_path: "pg_catalog",
   row_security: "on", database_ok: true, user_ok: true });
 
-function client({ deniedSetting, catalogError, database = "postgres", providerViewError } = {}) {
+function client({ deniedSetting, catalogError, database = "postgres", providerViewError,
+  relationName = "runtime_stats" } = {}) {
   const calls = []; let inside = false;
   return { calls, ended: false, connection: { stream: { destroy() { calls.push("DESTROY"); } } },
     async connect() { calls.push("CONNECT"); },
@@ -35,10 +36,22 @@ function client({ deniedSetting, catalogError, database = "postgres", providerVi
       if (sql === ACCESS_SQL.effectiveSettings) return { rows: [{ name: "pg_qs.query_capture_mode", setting: "none",
         source: "default", context: "sighup", pendingRestart: false }] };
       if (sql === ACCESS_SQL.providerSchemas) return { rows: [{ name: database === "azure_sys" ? "query_store" : "public",
-        oid: "300", owner: "azuresu" }] };
-      if (sql === ACCESS_SQL.providerPublicRelations) return { rows: [] };
+        oid: "300", owner: "azuresu", publicUsage: database === "azure_sys", publicCreate: false }] };
+      if (sql === ACCESS_SQL.providerPublicRelations) return { rows: database === "azure_sys" ? [
+        { schema: "query_store", name: "qs_view", kind: "v", grantScope: "relation", column: null, privilege: "SELECT" },
+        { schema: "query_store", name: "qs_view", kind: "v", grantScope: "column", column: "id", privilege: "SELECT" },
+        { schema: "query_store", name: relationName, kind: "r", grantScope: "relation", column: null, privilege: "SELECT" },
+        { schema: "query_store", name: "column_only", kind: "r", grantScope: "column", column: "id", privilege: "SELECT" },
+      ] : [] };
       if (sql === ACCESS_SQL.providerPublicDefiners) return { rows: [] };
+      if (sql === ACCESS_SQL.providerPublicFunctions) return { rows: database === "azure_sys" ? [
+        { schema: "query_store", name: "qs_reset", oid: "400", securityDefiner: false, kind: "f" },
+      ] : [] };
       if (sql === ACCESS_SQL.providerRelation) return { rows: [{ relation: values[0] }] };
+      if (sql.startsWith('SELECT EXISTS(SELECT 1 FROM "query_store"."')) {
+        if (providerViewError) throw Object.assign(Error("synthetic provider relation denied"), { code: "42501" });
+        return { rows: [{ hasRows: sql.includes('"runtime_stats"') || sql.includes('"column_only"') }] };
+      }
       if (sql.startsWith("SELECT EXISTS(SELECT 1 FROM query_store.")) {
         if (providerViewError) throw Object.assign(Error("synthetic provider view denied"), { code: "42501" });
         return { rows: [{ hasRows: sql.includes("query_texts_view") }] };
@@ -61,7 +74,8 @@ test("captures bounded actual database ACLs and GUC privileges with rollback and
   const c = client(), providers = [];
   const receipt = await captureSharedPostgresAccess(c, { providerClientFactory: database => {
     const provider = client({ database }); providers.push(provider); return provider;
-  }, azureParameters: [{ name: "pg_qs.query_capture_mode", value: "none" }] });
+  }, azureParameters: [{ name: "pg_qs.query_capture_mode", value: "none", allowedValues: "none,top,all",
+    readOnly: false, dynamic: true }] });
   assert.equal(receipt.status, "SHARED_POSTGRES_ACCESS_CAPTURED");
   assert.equal(receipt.resource, RESOURCE); assert.equal(receipt.host, HOST);
   assert.equal(receipt.admissionReady, false);
@@ -69,8 +83,16 @@ test("captures bounded actual database ACLs and GUC privileges with rollback and
   assert.equal(receipt.settingResults.every(row => row.accepted), true);
   assert.equal(receipt.effectiveSettings[0].setting, "none");
   assert.equal(receipt.azureParameters[0].value, "none");
+  assert.equal(receipt.azureParameters[0].dynamic, true);
   assert.equal(receipt.providerDatabases.length, 3);
-  assert.equal(receipt.providerDatabases.find(row => row.name === "azure_sys").queryStore[0].hasRows, true);
+  const azureSys = receipt.providerDatabases.find(row => row.name === "azure_sys");
+  assert.equal(azureSys.queryStore[0].hasRows, true);
+  assert.equal(azureSys.schemas[0].publicUsage, true);
+  assert.deepEqual(azureSys.publicRelations.find(row => row.name === "column_only"),
+    { schema: "query_store", name: "column_only", kind: "r", grantScope: "column", column: "id", privilege: "SELECT" });
+  assert.deepEqual(azureSys.publicRelationRows.map(row => [row.name, row.hasRows]),
+    [["qs_view", false], ["runtime_stats", true], ["column_only", true]]);
+  assert.equal(azureSys.publicFunctions[0].name, "qs_reset");
   assert.equal(providers.every(provider => provider.ended && provider.calls.some(([sql]) => sql === "ROLLBACK")), true);
   assert.equal(receipt.inventories.core.databases.length, 4);
   assert.equal(receipt.inventories.ops.databases.length, 4);
@@ -100,6 +122,22 @@ test("provider Query Store denial is recorded without exporting query text", asy
     client({ database, providerViewError: database === "azure_sys" }) });
   const store = receipt.providerDatabases.find(row => row.name === "azure_sys").queryStore;
   assert.equal(store.every(row => row.present && !row.readable && row.hasRows === null && row.sqlState === "42501"), true);
+  const publicRows = receipt.providerDatabases.find(row => row.name === "azure_sys").publicRelationRows;
+  assert.equal(publicRows.every(row => !row.administratorRead && row.hasRows === null && row.sqlState === "42501"), true);
   assert.equal(JSON.stringify(receipt).includes("synthetic provider view denied"), false);
+  assert.equal(JSON.stringify(receipt).includes("synthetic provider relation denied"), false);
   assert.equal(receipt.admissionReady, false);
+});
+
+test("provider catalog names are quoted as identifiers before the bounded row check", async () => {
+  const c = client(), providers = [];
+  const receipt = await captureSharedPostgresAccess(c, { providerClientFactory: database => {
+    const provider = client({ database, relationName: 'runtime"stats' }); providers.push(provider); return provider;
+  } });
+  const azureSys = providers.find(provider => provider.calls.some(([sql, values]) =>
+    sql === ACCESS_SQL.providerGuard && values?.[0] === "azure_sys"));
+  assert.ok(azureSys.calls.some(([sql]) => sql ===
+    'SELECT EXISTS(SELECT 1 FROM "query_store"."runtime""stats" LIMIT 1) AS "hasRows"'));
+  assert.equal(receipt.providerDatabases.find(row => row.name === "azure_sys").publicRelationRows[1].name,
+    'runtime"stats');
 });
