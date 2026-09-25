@@ -632,7 +632,6 @@ jobs:
       contents: read
       actions: read
       id-token: write
-      issues: write
     env:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -804,8 +803,7 @@ jobs:
             --manifest-json "$manifest_json" \
             --targets "$observation_targets" \
             --since "$OBSERVATION_SINCE" \
-            --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json \
-            --publish-advisories
+            --summary-file .artifacts/post-deploy-observation-gate/main-production-smoke.json
 
       - name: Verify Core provider after observation
         if: env.ACCEPTED_CORE_BASELINE == 'true'
