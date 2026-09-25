@@ -406,7 +406,9 @@ export async function main(args = process.argv.slice(2), env = process.env) {
         const azureParameters = parameterRows.filter(row => parameterNames.has(row?.name))
           .map(row => ({ name: row.name, value: String(row.value ?? ""),
             source: row.source ?? null, defaultValue: String(row.defaultValue ?? ""),
-            pendingRestart: row.isConfigPendingRestart ?? null }));
+            pendingRestart: row.isConfigPendingRestart ?? null,
+            allowedValues: row.allowedValues ?? null, dataType: row.dataType ?? null,
+            readOnly: row.isReadOnly ?? null, dynamic: row.isDynamicConfig ?? null }));
         assert(Buffer.byteLength(JSON.stringify(azureParameters)) <= 16000, "ACCESS_PARAMETER_LIMIT");
         const remainingMs = Math.min(120000, options.deadline - Date.now() - 3000);
         assert(remainingMs > 0, "ACCESS_DEADLINE");

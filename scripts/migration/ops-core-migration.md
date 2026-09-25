@@ -107,11 +107,14 @@ temporary runner IP, captures a read-only catalog and session-setting receipt in
 the private `azure-target-qualification-*` artifact, removes the rule and stops
 the server. `shared-postgres-access.json` records exact database ACLs, roles,
 memberships, provider logging hooks, which session settings the administrator can
-set, effective setting values and Azure parameter readback. It reads catalog-only
-PUBLIC object grants and security-definer functions in `azure_sys`,
-`azure_maintenance` and `template1`, plus existence booleans for Query Store
-history in `azure_sys`. It never exports query text or customer rows. Unknown or
-unreadable history is not empty-history proof. The receipt explicitly has
+set, effective setting values and Azure parameter readback, including parameter
+mutability metadata when Azure supplies it. It reads PUBLIC schema and object
+grants (including column-level `PUBLIC SELECT`), callable functions and security-definer functions in `azure_sys`,
+`azure_maintenance` and `template1`. It records only existence booleans for rows
+in every publicly selectable provider relation and the named Query Store views.
+These reads use the administrator, so their success alone does not prove an
+ordinary role's effective access. It never exports query text or customer rows.
+Unknown or unreadable history is not empty-history proof. The receipt explicitly has
 `admissionReady:false`; inspect it and the separate cleanup receipt before
 choosing foundation ACL policy or promoting the server. An exception for
 Azure-managed provider database access is a material security-contract decision,
