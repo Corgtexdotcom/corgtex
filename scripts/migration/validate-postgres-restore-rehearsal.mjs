@@ -69,7 +69,17 @@ export function validateRehearsalPrincipal(document, options = {}) {
   const clientId = normalizeUuid(document.clientId, "INVALID_CLIENT_ID");
   if (sha256(clientId) !== expectedClientSha256) fail("UNEXPECTED_AZURE_CLIENT");
   const principalId = normalizeUuid(document.principalId, "INVALID_PRINCIPAL_ID");
-  const expectedScope = expectedResourceGroupId(document.subscriptionId, document.resourceGroup).toLowerCase();
+  if (options.targetProfile !== undefined && !["rehearsal", "opscore"].includes(options.targetProfile)) {
+    fail("INVALID_TARGET_PROFILE");
+  }
+  let expectedScope;
+  if (options.targetProfile === "opscore") {
+    if (document.subscriptionId !== "227eb707-bc46-415e-a09b-7d2b69fb14b2") fail("INVALID_SUBSCRIPTION_ID");
+    if (document.resourceGroup !== "rg-corgtex-opscore-hosting") fail("INVALID_RESOURCE_GROUP");
+    expectedScope = `/subscriptions/${document.subscriptionId}/resourceGroups/${document.resourceGroup}`.toLowerCase();
+  } else {
+    expectedScope = expectedResourceGroupId(document.subscriptionId, document.resourceGroup).toLowerCase();
+  }
   const subscriptionScope = expectedScope.split("/resourcegroups/")[0];
   if (!Array.isArray(document.assignments) || document.assignments.length !== 2) {
     fail("UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT");

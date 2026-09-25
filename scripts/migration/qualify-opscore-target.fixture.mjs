@@ -2,8 +2,9 @@
 // accidentally reuse a rehearsal import cached by another test.
 import assert from 'node:assert/strict';
 import { targetResource, target } from './ops-core-target-profile.mjs';
-import { Azure, prepare, qualify, cleanup, validateIntent, validateServer,
+import { Azure, SUBSCRIPTION, TENANT, prepare, qualify, cleanup, validateIntent, validateServer,
   validateRecoveryEvidence } from './qualify-ops-azure-target.mjs';
+import { validateRehearsalPrincipal } from './validate-postgres-restore-rehearsal.mjs';
 
 assert.equal(process.env.TARGET_PROFILE, 'opscore');
 const resource = targetResource;
@@ -144,6 +145,59 @@ function setup() {
   assert.deepEqual(calls[0].args.slice(0, 4), ['keyvault', 'secret', 'show', '--id']);
   assert.equal(calls[0].args[4], target.adminSecretId);
   assert.equal(calls[0].options.env.TARGET_POSTGRES_ADMIN_PASSWORD, undefined);
+}
+{
+  const clientId = '5003dfed-459b-464d-9b2f-a936d8894af3';
+  const principalId = '99acfeea-762e-4a07-93d6-f621beeb4b1d';
+  const scope = `/subscriptions/${SUBSCRIPTION}`;
+  const groupScope = `${scope}/resourceGroups/${target.group}`;
+  const role = (id, roleId, roleScope) => ({ id: `${roleScope}/providers/Microsoft.Authorization/roleAssignments/${id}`,
+    roleDefinitionId: `${scope}/providers/Microsoft.Authorization/roleDefinitions/${roleId}`,
+    scope: roleScope, principalId, principalType: 'ServicePrincipal', condition: null });
+  const assignments = [
+    role('55555555-5555-4555-8555-555555555555', 'acdd72a7-3385-48ef-bd42-f606fba81ae7', scope),
+    role('44444444-4444-4444-8444-444444444444', 'b24988ac-6180-42a0-ab88-20f7382dd24c', groupScope),
+  ];
+  const token = `header.${Buffer.from(JSON.stringify({ tid: TENANT, appid: clientId, oid: principalId })).toString('base64url')}.signature`;
+  const account = { id: SUBSCRIPTION, tenantId: TENANT, state: 'Enabled' };
+  const group = { id: groupScope, location: 'westus3', tags: structuredClone(target.tags) };
+  const calls = [];
+  const execute = (_binary, args, options, done) => {
+    calls.push({ args, env: options.env });
+    const command = args.slice(0, 3).join(' ');
+    const value = command.startsWith('account list') ? [account]
+      : command.startsWith('account set') ? null
+      : command.startsWith('account show') ? account
+      : command.startsWith('account get-access-token') ? { accessToken: token }
+      : command === 'role assignment list' ? assignments
+      : command.startsWith('group show') ? group
+      : command === 'network private-endpoint-connection list' ? []
+      : command === 'postgres flexible-server show' ? original()
+      : command.startsWith('rest --method') ? { value: [] }
+      : command === 'keyvault secret show' ? { id: target.adminSecretId, attributes: { enabled: true }, value: 'x'.repeat(32) }
+      : undefined;
+    if (value === undefined) throw new Error(`unhandled mocked Azure command: ${command}`);
+    done(null, value === null ? '' : JSON.stringify(value));
+  };
+  const azure = new Azure({ AZURE_CLIENT_ID: clientId }, { execute, sleep: async () => {} });
+  await azure.identity();
+  assert.equal(await azure.readAdminSecret(), 'x'.repeat(32));
+  const prepared = await prepare(azure, inputs, { now: () => 1700000000000, sleep: async () => {} });
+  assert.equal(prepared.targetProfile, 'opscore');
+  assert.equal(calls.some(call => call.args.slice(0, 3).join(' ') === 'keyvault secret show'), true);
+  assert.equal(calls.every(call => !call.args.includes('x'.repeat(32)) && call.env.TARGET_POSTGRES_ADMIN_PASSWORD === undefined), true);
+  assert.throws(() => validateRehearsalPrincipal({ clientId, principalId, subscriptionId: SUBSCRIPTION,
+    resourceGroup: 'rg-corgtex-other-hosting', assignments }, { targetProfile: 'opscore' }), /INVALID_RESOURCE_GROUP/);
+  assert.throws(() => validateRehearsalPrincipal({ clientId, principalId, subscriptionId: SUBSCRIPTION,
+    resourceGroup: target.group, assignments }), /INVALID_RESOURCE_GROUP/);
+  assert.throws(() => validateRehearsalPrincipal({ clientId, principalId,
+    subscriptionId: '33333333-3333-4333-8333-333333333333', resourceGroup: target.group, assignments },
+  { targetProfile: 'opscore' }), /INVALID_SUBSCRIPTION_ID/);
+  const widened = [assignments[0], { ...assignments[1], scope }];
+  assert.throws(() => validateRehearsalPrincipal({ clientId, principalId, subscriptionId: SUBSCRIPTION,
+    resourceGroup: target.group, assignments: widened }, { targetProfile: 'opscore' }), /INHERITED_OR_FOREIGN_ROLE_ASSIGNMENT/);
+  assignments.push(role('66666666-6666-4666-8666-666666666666', 'acdd72a7-3385-48ef-bd42-f606fba81ae7', scope));
+  await assert.rejects(azure.identity(), /UNEXPECTED_EFFECTIVE_ROLE_ASSIGNMENT_COUNT/);
 }
 {
   const { api, clock } = setup();
