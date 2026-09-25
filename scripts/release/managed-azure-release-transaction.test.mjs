@@ -829,6 +829,16 @@ describe("managed Azure single-target transaction", () => {
     }
   });
 
+  it("uses the staging ACR for both image push and Container Apps pull", () => {
+    const workflow = readFileSync(new URL("../../.github/workflows/azure-selfserve-staging.yml", import.meta.url), "utf8");
+    expect(workflow).toContain("- name: Resolve staging registry");
+    expect(workflow).toContain("az acr credential show --resource-group \"$RESOURCE_GROUP\"");
+    expect(workflow).toContain("repo=\"${registry_server}/corgtex\"");
+    expect(workflow.match(/\"registryServer=\$registry_server\"/g)).toHaveLength(2);
+    expect(workflow.match(/\"registryUsername=\$registry_username\"/g)).toHaveLength(2);
+    expect(workflow).not.toContain("registry: ghcr.io");
+  });
+
   it("passes managed CRM inquiry settings to both staging deployment operations", () => {
     const workflow = readFileSync(new URL("../../.github/workflows/azure-selfserve-staging.yml", import.meta.url), "utf8");
     expect(workflow).toContain("CRM_INQUIRY_WORKSPACE_SLUG: ${{ vars.CRM_INQUIRY_WORKSPACE_SLUG || '' }}");

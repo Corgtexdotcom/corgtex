@@ -21,7 +21,8 @@ import { runOpsCoreTransferPreflight } from "./ops-core-preflight.mjs";
 import { createOpsCoreSourceHealthObserver, validateOpsCoreSourceHealthPlan } from "./ops-core-source-health.mjs";
 import { RailwayObjectSource } from "./railway-object-source.ts";
 import { AzureBlobObjectStore } from "./shared-tenant-objects.ts";
-import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation } from "./ops-core-runtime-access-controller.mjs";
+import { createRuntimeSecretResolver, assertOpsCoreRuntimeAccessForActivation,
+  monitorOpsCoreRuntimeAccessDrift } from "./ops-core-runtime-access-controller.mjs";
 
 class OperatorError extends Error {}
 const need = (condition, code) => { if (!condition) throw new OperatorError(code); };
@@ -130,7 +131,8 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
   let custody;
   try {
     need(["initialize", "status", "preflight", "fence", "transfer", "activate", "reconcile-transfer", "resume-transfer",
-      "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence"].includes(action), "MIGRATION_ACTION_INVALID");
+      "reconcile-activate", "resume-activate", "recover-source", "reconcile-source-recovery", "record-routing", "accept", "retain-acceptance-evidence",
+      "monitor-access"].includes(action), "MIGRATION_ACTION_INVALID");
     const plan = validateOperatorPlan(input); const intentSha256 = archiveEvidenceHash(plan);
     await identityCheck(plan);
     const azureCredential = new AzureCliCredential({ processTimeoutInMs: 10_000 });
@@ -159,8 +161,21 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
       return { status: state.phase, domain: plan.domain, intentSha256, pending: state.pending,
         destinationMayHaveWritten: state.destinationMayHaveWritten };
     }
-    need(credentials && credentials.sourceConfig && credentials.readerConfig, "MIGRATION_CREDENTIALS_REQUIRED");
     const operationStore = azureProviderOperationStore(custodyContainer);
+    const accessMonitor = async ({ acceptancePending = false } = {}) => {
+      const state = custody.snapshot();
+      need(plan.transfer.postgres.runtimeAccess?.schemaVersion === 2 && credentials?.targetAdminConfig
+        && state.destinationMayHaveWritten === true
+        && (!state.pending || acceptancePending && state.phase === "ROUTED" && state.pending.to === "ACCEPTED")
+        && ["TARGET_ACTIVE", "ROUTED", "ACCEPTED"].includes(state.phase), "MIGRATION_ACCESS_MONITOR_PHASE_INVALID");
+      const result = await (runtime.monitorAccess ?? monitorOpsCoreRuntimeAccessDrift)({ plan, custody, operationStore,
+        targetAdminConfig: credentials.targetAdminConfig });
+      need(result?.complete === true && result.domain === plan.domain, "MIGRATION_ACCESS_MONITOR_UNPROVEN");
+      return { status: "ACCESS_MONITORED", domain: plan.domain, observedAt: new Date().toISOString(),
+        resultSha256: archiveEvidenceHash(result), ...result };
+    };
+    if (action === "monitor-access") return await accessMonitor();
+    need(credentials && credentials.sourceConfig && credentials.readerConfig, "MIGRATION_CREDENTIALS_REQUIRED");
     const railway = credentials.railwayToken ? { token: credentials.railwayToken } : {};
     let sourceHealth;
     const assertSourceHealthy = runtime.assertSourceHealthy ?? (request => {
@@ -263,6 +278,10 @@ export async function runOpsCoreMigration({ action, plan: input, credentials, ar
         need(archiveEvidenceHash(JSON.parse(await evidenceStore.readOptional(key))) === evidenceSha256, "MIGRATION_ACCEPTANCE_EVIDENCE_CHANGED");
         await custody.assertOwned(); return {status:"EVIDENCE_RETAINED",domain:plan.domain,evidenceSha256};
       }
+      if (action === "accept" && plan.transfer.postgres.runtimeAccess?.schemaVersion === 2) {
+        const state = custody.snapshot();
+        if (state.phase === "ROUTED") await accessMonitor({ acceptancePending: true });
+      }
       return await (runtime.acceptance ?? runOpsCoreAcceptance)({ phase:action === "record-routing" ? "ROUTED" : "ACCEPTED",
         binding,custody,evidenceStore,artifact:acceptanceArtifact,assertSourceFenced,
         observeRuntime: options => activation().observe(options) });
@@ -283,7 +302,8 @@ export async function runOpsCoreMigrationCli(argv = process.argv.slice(2)) {
   // Keep customer/provider evidence in the private stores, not CI stdout.
   process.stdout.write(`${JSON.stringify({ status: result.status ?? result.phase, domain: plan.domain,
     intentSha256: archiveEvidenceHash(plan), evidenceSha256: result.evidenceSha256 ?? null, complete: result.complete ?? null,
-    code: result.code ?? null, nextAction: result.nextAction ?? null, historical: result.historical ?? false })}\n`);
+    code: result.code ?? null, nextAction: result.nextAction ?? null, historical: result.historical ?? false,
+    observedAt: result.observedAt ?? null, resultSha256: result.resultSha256 ?? null })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

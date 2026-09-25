@@ -22,8 +22,11 @@ const version = (value, vault) => typeof value === "string" && value.startsWith(
 
 export function validatePostgresRuntimeAccessPolicy(policy, { domain, runtimeVaultUri } = {}) {
   need(["core", "ops"].includes(domain) && /^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(runtimeVaultUri), "RUNTIME_ACCESS_BINDING_INVALID");
-  need(exact(policy, ["schemaVersion", "runtimeRole", "runtimeDatabaseSecrets", "scaler", "applicationSchema", "isolation"])
-    && policy.schemaVersion === 1 && policy.runtimeRole === `corgtex_${domain}_runtime` && policy.applicationSchema === "public", "RUNTIME_ACCESS_POLICY_INVALID");
+  const azure = policy?.schemaVersion === 2;
+  need(exact(policy, ["schemaVersion", "runtimeRole", "runtimeDatabaseSecrets", "scaler", "applicationSchema", "isolation",
+    ...(azure ? ["providerProfile"] : [])])
+    && [1, 2].includes(policy.schemaVersion) && (!azure || policy.providerProfile === "azure-flexible-postgres-18")
+    && policy.runtimeRole === `corgtex_${domain}_runtime` && policy.applicationSchema === "public", "RUNTIME_ACCESS_POLICY_INVALID");
   need(exact(policy.runtimeDatabaseSecrets, ["web", "worker"])
     && Object.values(policy.runtimeDatabaseSecrets).every(value => version(value, runtimeVaultUri))
     && exact(policy.scaler, ["role", "connectionSecretVersion"]) && policy.scaler.role === `worker_scale_${domain}`
@@ -35,7 +38,8 @@ export function validatePostgresRuntimeAccessPolicy(policy, { domain, runtimeVau
   for (const db of policy.isolation.databases) {
     need(exact(db, ["name", "oid", "owner", "action", "beforeAclSha256", "preserveConnectRoles"])
       && NAME.test(db.name) && db.name !== `corgtex_${domain}` && OID.test(db.oid) && typeof db.owner === "string" && db.owner.length <= 63
-      && !seen.has(db.name) && HASH.test(db.beforeAclSha256) && ["replace-public-connect", "verify-only"].includes(db.action)
+      && !seen.has(db.name) && HASH.test(db.beforeAclSha256)
+      && ["replace-public-connect", "verify-only", ...(azure ? ["allow-provider-connect"] : [])].includes(db.action)
       && Array.isArray(db.preserveConnectRoles) && db.preserveConnectRoles.length <= 1000, "RUNTIME_ACCESS_ISOLATION_INVALID");
     seen.add(db.name); const principals = new Set();
     for (const role of db.preserveConnectRoles) {
@@ -43,7 +47,9 @@ export function validatePostgresRuntimeAccessPolicy(policy, { domain, runtimeVau
         && ![policy.runtimeRole, policy.scaler.role].includes(role.name), "RUNTIME_ACCESS_CONNECT_ALLOWLIST_INVALID");
       principals.add(role.name);
     }
-    need(db.action !== "verify-only" || db.preserveConnectRoles.length === 0, "RUNTIME_ACCESS_VERIFY_ONLY_PATCH_INVALID");
+    need(db.action === "replace-public-connect" || db.preserveConnectRoles.length === 0, "RUNTIME_ACCESS_VERIFY_ONLY_PATCH_INVALID");
+    if (db.action === "allow-provider-connect") need({ azure_sys: "azuresu", azure_maintenance: "azuresu",
+      template1: "azure_pg_admin" }[db.name] === db.owner, "RUNTIME_ACCESS_PROVIDER_EXCEPTION_INVALID");
   }
   return policy;
 }
@@ -190,11 +196,40 @@ export const RUNTIME_ACCESS_SENSITIVE_SETTINGS = Object.freeze({
   debug_print_parse: "off", debug_print_rewritten: "off", debug_print_plan: "off", log_parser_stats: "off", log_planner_stats: "off",
   log_executor_stats: "off", log_statement_stats: "off", track_activities: "off", client_min_messages: "error",
 });
-async function suppressSensitiveSql(client) {
+const AZURE_PRELOAD_MODULES = Object.freeze(["pg_cron", "pg_stat_statements", "azure", "pg_qs", "pgaadauth",
+  "pgms_stats", "pgms_wait_sampling", "pg_availability"]);
+export const AZURE_RUNTIME_ACCESS_SETTINGS = Object.freeze({ ...RUNTIME_ACCESS_SENSITIVE_SETTINGS,
+  "pg_stat_statements.track": "none", "pg_stat_statements.track_utility": "off",
+  "pg_qs.query_capture_mode": "none", "pg_qs.parameters_capture_mode": "capture_parameterless_only",
+  "pg_qs.store_query_plans": "off", "pg_qs.track_utility": "off",
+  "pgms_wait_sampling.query_capture_mode": "none" });
+async function assertAzureLoggingProfile(client, readAzureParameters, inspectAzureQueryStore) {
+  need(typeof readAzureParameters === "function", "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_REQUIRED");
+  need(typeof inspectAzureQueryStore === "function", "RUNTIME_ACCESS_AZURE_QUERY_STORE_READBACK_REQUIRED");
+  const names = Object.keys(AZURE_RUNTIME_ACCESS_SETTINGS);
+  const rows = (await client.query(`/* runtime-access:azure-settings */ SELECT name,setting,pending_restart AS "pendingRestart"
+    FROM pg_catalog.pg_settings WHERE name=ANY($1::text[])`, [names])).rows;
+  need(rows.length === names.length && new Set(rows.map(row => row.name)).size === names.length
+    && rows.every(row => AZURE_RUNTIME_ACCESS_SETTINGS[row.name] === row.setting && row.pendingRestart === false),
+  "RUNTIME_ACCESS_AZURE_LOGGING_UNSAFE");
+  const parameters = await readAzureParameters();
+  need(Array.isArray(parameters) && parameters.length <= 1000, "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
+  const byName = new Map(parameters.map(row => [row.name, row.value]));
+  need(byName.size === parameters.length && names.every(name => byName.get(name) === AZURE_RUNTIME_ACCESS_SETTINGS[name]),
+    "RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH");
+  need(await inspectAzureQueryStore() === false, "RUNTIME_ACCESS_AZURE_QUERY_HISTORY_PRESENT");
+  return hash({ settings: rows, parameters: names.map(name => ({ name, value: byName.get(name) })) });
+}
+async function suppressSensitiveSql(client, policy, readAzureParameters, inspectAzureQueryStore) {
   const loaded = Object.fromEntries((await client.query(`/* runtime-access:logging */ SELECT name,setting FROM pg_catalog.pg_settings
     WHERE name IN ('shared_preload_libraries','session_preload_libraries','local_preload_libraries')`)).rows.map(row => [row.name,row.setting]));
   const modules = (loaded.shared_preload_libraries ?? "").split(",").map(value => value.trim()).filter(Boolean);
-  need(!loaded.session_preload_libraries && !loaded.local_preload_libraries && modules.every(name => name === "pg_stat_statements"), "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
+  need(!loaded.session_preload_libraries && !loaded.local_preload_libraries, "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
+  if (policy.schemaVersion === 2) {
+    need(equal(modules, AZURE_PRELOAD_MODULES), "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
+    return assertAzureLoggingProfile(client, readAzureParameters, inspectAzureQueryStore);
+  }
+  need(modules.every(name => name === "pg_stat_statements"), "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
   const settings = { ...RUNTIME_ACCESS_SENSITIVE_SETTINGS, ...(modules.includes("pg_stat_statements") ? { "pg_stat_statements.track": "none", "pg_stat_statements.track_utility": "off" } : {}) };
   for (const [name,value] of Object.entries(settings)) {
     await client.query("SELECT pg_catalog.set_config($1,$2,true)", [name,value]);
@@ -218,6 +253,11 @@ function isolationBefore(manifest, plan) {
     need(observed?.oid === db.oid && observed.owner === db.owner && observed.aclSha256 === db.beforeAclSha256, "RUNTIME_ACCESS_DATABASE_ACL_CHANGED");
     if (db.action === "verify-only" && observed.allowConnections) need(!manifest.databases.find(row=>row.oid===db.oid).acl.some(
       entry=>entry.grantee==="0" && entry.privilege==="CONNECT"), "RUNTIME_ACCESS_PROVIDER_PUBLIC_CONNECT");
+    if (db.action === "allow-provider-connect") {
+      need(plan.policy.schemaVersion === 2 && observed.allowConnections && observed.isTemplate === (db.name === "template1")
+        && manifest.databases.find(row=>row.oid===db.oid).acl.some(entry=>entry.grantee==="0" && entry.privilege==="CONNECT"),
+      "RUNTIME_ACCESS_PROVIDER_EXCEPTION_CHANGED");
+    }
     if (db.action === "replace-public-connect") need(manifest.databases.find(row=>row.oid===db.oid)?.ownerAuthority === true && !observed.isTemplate
       && !["azure_sys","azure_maintenance","template0","template1"].includes(db.name), "RUNTIME_ACCESS_PROVIDER_DATABASE_PATCH_FORBIDDEN");
     for (const role of db.preserveConnectRoles) need(manifest.roles.some(row => row.name === role.name && row.oid === role.oid), "RUNTIME_ACCESS_CONNECT_PRINCIPAL_CHANGED");
@@ -301,7 +341,7 @@ function validateAfter(before,after,plan) {
     const current=after.databases.find(d=>d.oid===old.oid), policy=plan.policy.isolation.databases.find(d=>d.name===old.name);
     need(current && equal({...old,acl:null},{...current,acl:null}),"RUNTIME_ACCESS_DATABASE_IDENTITY_CHANGED");
     const own=old.name===plan.database;
-    if (!own && policy.action==="verify-only") need(equal(old,current),"RUNTIME_ACCESS_PROVIDER_DATABASE_CHANGED");
+    if (!own && policy.action!=="replace-public-connect") need(equal(old,current),"RUNTIME_ACCESS_PROVIDER_DATABASE_CHANGED");
     else need(changedAclAllowed(old.acl,current.acl,{removedPublic:own?["CONNECT","TEMPORARY","CREATE"]:["CONNECT"],
       added:own?[{oid:runtime.oid,privileges:["CONNECT"]},{oid:scaler.oid,privileges:["CONNECT"]}]:policy.preserveConnectRoles.map(r=>({oid:r.oid,privileges:["CONNECT"]}))}),"RUNTIME_ACCESS_DATABASE_ACL_UNPROVEN");
   }
@@ -311,13 +351,42 @@ function validateAfter(before,after,plan) {
 }
 
 async function readSnapshot(client,plan) { return observePostgresRuntimeAccessCatalog({client,plan}); }
+function verifyForeignConnect(rows, policy) {
+  const expected = new Map(policy.isolation.databases.map(db => [db.name, db]));
+  need(rows.length === expected.size && new Set(rows.map(row => row.name)).size === expected.size,
+    "RUNTIME_ACCESS_FOREIGN_CONNECT_INVENTORY_CHANGED");
+  for (const row of rows) {
+    const db = expected.get(row.name);
+    need(db && row.oid === db.oid, "RUNTIME_ACCESS_FOREIGN_CONNECT_INVENTORY_CHANGED");
+    need(row.allowed === (db.action === "allow-provider-connect"), "RUNTIME_ACCESS_FOREIGN_CONNECT_ALLOWED");
+  }
+}
+function verifyMonitoredForeignConnect(rows, policy) {
+  const provider = new Map(policy.isolation.databases.filter(db => db.action === "allow-provider-connect")
+    .map(db => [db.name, db]));
+  need(new Set(rows.map(row => row.name)).size === rows.length,
+    "RUNTIME_ACCESS_FOREIGN_CONNECT_INVENTORY_CHANGED");
+  for (const row of rows) {
+    const approved = provider.get(row.name);
+    if (approved) need(row.oid === approved.oid && row.allowed === true,
+      "RUNTIME_ACCESS_PROVIDER_EXCEPTION_CHANGED");
+    else need(row.allowed === false, "RUNTIME_ACCESS_FOREIGN_CONNECT_ALLOWED");
+  }
+  need([...provider.keys()].every(name => rows.some(row => row.name === name)),
+    "RUNTIME_ACCESS_PROVIDER_EXCEPTION_CHANGED");
+}
+async function readForeignConnect(client, role, database) {
+  return (await client.query(`SELECT datname AS name,oid::text AS oid,
+    datallowconn AND pg_catalog.has_database_privilege($1,oid,'CONNECT') AS allowed
+    FROM pg_catalog.pg_database WHERE datname<>$2 ORDER BY datname`, [role, database])).rows;
+}
 export async function preparePostgresRuntimeAccessPreflight(options) {
   const plan=validatePlan(options.plan,true), check=guards(options,true); validateClient(options.client,plan);
   let transaction=false;
   try {
     await check("PREFLIGHT"); await credentials(plan,options.resolveSecretVersion);
     await options.client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); transaction=true;
-    await suppressSensitiveSql(options.client);
+    await suppressSensitiveSql(options.client,plan.policy,options.readAzureParameters,options.inspectAzureQueryStore);
     const manifest=await readSnapshot(options.client,{...plan,databaseOid:undefined});
     need(manifest.identity.database==="postgres", "RUNTIME_ACCESS_PREFLIGHT_DATABASE_INVALID");
     isolationBefore(manifest,plan);
@@ -333,7 +402,7 @@ export async function preparePostgresRuntimeAccess(options) {
     await check("PREPARE"); await credentials(plan,options.resolveSecretVersion);
     await options.client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); transaction=true;
     const before=await readSnapshot(options.client,plan); isolationBefore(before,plan); objectActions(before,plan);
-    await suppressSensitiveSql(options.client); await options.client.query("ROLLBACK"); transaction=false;
+    await suppressSensitiveSql(options.client,plan.policy,options.readAzureParameters,options.inspectAzureQueryStore); await options.client.query("ROLLBACK"); transaction=false;
     await check("PREPARE_COMPLETE");
     const body={schemaVersion:1,plan:structuredClone(plan),before,beforeSha256:hash(before)};
     return {...body,sha256:hash(body)};
@@ -362,9 +431,8 @@ async function authenticateRoles({intent,client,clientFactory=config=>new pg.Cli
       need(connection.connection?.stream?.encrypted===true && connection.connection.stream.authorized===true,"RUNTIME_ACCESS_ROLE_TLS_UNPROVEN");
       const identity=(await connection.query(`SELECT current_user AS role,current_database() AS database,oid::text AS oid FROM pg_catalog.pg_database WHERE datname=current_database()`)).rows;
       need(identity.length===1 && identity[0].role===secret.role && identity[0].database===p.database && identity[0].oid===p.databaseOid,"RUNTIME_ACCESS_ROLE_AUTHENTICATION_FAILED");
-      const isolation=(await connection.query(`SELECT datname AS name,datallowconn AND pg_catalog.has_database_privilege(current_user,oid,'CONNECT') AS allowed
-        FROM pg_catalog.pg_database WHERE datname<>current_database() ORDER BY datname`)).rows;
-      need(isolation.length===p.policy.isolation.databases.length && isolation.every(row=>row.allowed===false),"RUNTIME_ACCESS_FOREIGN_CONNECT_ALLOWED");
+      const isolation=await readForeignConnect(connection, secret.role, p.database);
+      verifyForeignConnect(isolation,p.policy);
       if (kind==="scaler") await verifyWorkerScalerAccess({client:connection,database:p.database,role:secret.role});
       else {
         const access=(await connection.query(`SELECT pg_catalog.has_schema_privilege(current_user,'public','USAGE') AS usage,
@@ -388,7 +456,7 @@ export async function applyPostgresRuntimeAccess(options) {
     await check("BEGIN"); await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE"); transaction=true;
     await client.query("SET LOCAL lock_timeout='5s'"); await client.query("SET LOCAL statement_timeout='30s'");
     const before=await readSnapshot(client,p); need(equal(before,intent.before),"RUNTIME_ACCESS_BEFORE_CHANGED");
-    await suppressSensitiveSql(client);
+    await suppressSensitiveSql(client,p.policy,options.readAzureParameters,options.inspectAzureQueryStore);
     const mutate=async sql=>{await check("SQL_MUTATION"); await client.query(sql);};
     await mutate(`CREATE ROLE ${q(p.policy.runtimeRole)} LOGIN PASSWORD '${scram(secrets.web.password)}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1`);
     await mutate(`GRANT ${q(p.policy.runtimeRole)} TO ${q(p.administrator)} WITH SET TRUE, INHERIT TRUE`);
@@ -407,17 +475,18 @@ export async function applyPostgresRuntimeAccess(options) {
     await provisionWorkerScalerRoleInTransaction({client:{query:async(...args)=>{await check("SCALER_PROVISION");return client.query(...args);}},database:p.database,
       role:p.policy.scaler.role,passwordVerifier:scram(secrets.scaler.password),administrator:p.administrator});
     const after=await readSnapshot(client,p); validateAfter(before,after,p);
+    if (p.policy.schemaVersion === 2) await suppressSensitiveSql(client,p.policy,options.readAzureParameters,options.inspectAzureQueryStore);
     // Effective foreign CONNECT must already be denied before committing either login.
     for(const role of [p.policy.runtimeRole,p.policy.scaler.role]) {
-      const foreign=(await client.query(`SELECT datname AS name FROM pg_catalog.pg_database WHERE datname<>$1 AND datallowconn
-        AND pg_catalog.has_database_privilege($2,oid,'CONNECT')`,[p.database,role])).rows;
-      need(foreign.length===0,"RUNTIME_ACCESS_FOREIGN_CONNECT_ALLOWED");
+      verifyForeignConnect(await readForeignConnect(client,role,p.database),p.policy);
     }
     const expectedAfter={schemaVersion:1,intentSha256:intent.sha256,manifest:after,manifestSha256:hash(after)};
     await options.persistExpectedAfter(expectedAfter);
     const retained=await options.readRecords(); need(equal(retained.intent,intent) && equal(retained.expectedAfter,expectedAfter),"RUNTIME_ACCESS_AFTER_RETENTION_UNPROVEN");
+    if (p.policy.schemaVersion === 2) await suppressSensitiveSql(client,p.policy,options.readAzureParameters,options.inspectAzureQueryStore);
     await check("COMMIT"); commitAttempted=true; await client.query("COMMIT"); transaction=false;
     const actual=await readSnapshot(client,p); need(equal(actual,after),"RUNTIME_ACCESS_POST_COMMIT_DRIFT");
+    if (p.policy.schemaVersion === 2) await suppressSensitiveSql(client,p.policy,options.readAzureParameters,options.inspectAzureQueryStore);
     await authenticateRoles(options,secrets,check);
     return {...receipt(intent,"APPLIED",actual),credentialAuthentication:{complete:true,runtimeRole:p.policy.runtimeRole,scalerRole:p.policy.scaler.role},isolation:{complete:true}};
   } catch(error) {
@@ -435,6 +504,7 @@ export async function reconcilePostgresRuntimeAccess(options) {
     await check("RECONCILE"); const secrets=await credentials(p,options.resolveSecretVersion),records=await options.readRecords();
     need(equal(records?.intent,intent),"RUNTIME_ACCESS_INTENT_RETENTION_UNPROVEN");
     const actual=await readSnapshot(options.client,p),expected=records.expectedAfter;
+    if (p.policy.schemaVersion === 2) await suppressSensitiveSql(options.client,p.policy,options.readAzureParameters,options.inspectAzureQueryStore);
     if(equal(actual,intent.before)) { await check("RECONCILE_COMPLETE"); return receipt(intent,"UNCHANGED",actual); }
     if(!expected || expected.intentSha256!==intent.sha256 || expected.manifestSha256!==hash(expected.manifest) || !equal(actual,expected.manifest)) {
       await check("RECONCILE_COMPLETE"); return receipt(intent,"INDETERMINATE",actual);
@@ -442,4 +512,34 @@ export async function reconcilePostgresRuntimeAccess(options) {
     validateAfter(intent.before,actual,p); await authenticateRoles(options,secrets,check);
     return {...receipt(intent,"APPLIED",actual),credentialAuthentication:{complete:true,runtimeRole:p.policy.runtimeRole,scalerRole:p.policy.scaler.role},isolation:{complete:true}};
   } catch(error) { throw safeError(error); }
+}
+
+/** Read-only drift check for an active Azure target. Application object catalogs
+ * may change after activation; database ACLs and capture controls may not. */
+export async function monitorPostgresRuntimeAccessDrift(options) {
+  const intent=validatePostgresRuntimeAccessIntent(options.intent),p=intent.plan,client=options.client;
+  need(p.policy.schemaVersion===2,"RUNTIME_ACCESS_AZURE_PROFILE_REQUIRED");
+  validateClient(client,p);
+  const expected=options.expectedAfter;
+  need(expected?.schemaVersion===1 && expected.intentSha256===intent.sha256
+    && expected.manifestSha256===hash(expected.manifest),"RUNTIME_ACCESS_AFTER_RETENTION_UNPROVEN");
+  const identity=(await client.query(`SELECT current_database() AS database,current_user AS administrator,
+    session_user AS "sessionUser",current_setting('server_version_num')::int AS version`)).rows[0];
+  need(identity?.database===p.database && identity.administrator===p.administrator
+    && identity.sessionUser===p.administrator && Math.floor(identity.version/10000)===18,
+  "RUNTIME_ACCESS_DATABASE_IDENTITY_CHANGED");
+  const databases=(await client.query(DATABASE_SQL)).rows;
+  const pinned = new Set([p.database,"postgres","template0","template1","azure_sys","azure_maintenance"]);
+  need(databases.length > 0 && databases.length <= 1000
+    && [...pinned].every(name => {
+      const before = expected.manifest.databases.find(row => row.name === name);
+      const current = databases.find(row => row.name === name);
+      return !before || equal(before,current);
+    }) && databases.some(row => row.name === p.database && row.oid === p.databaseOid),
+  "RUNTIME_ACCESS_DATABASE_DRIFT");
+  const profileSha256=await suppressSensitiveSql(client,p.policy,options.readAzureParameters,options.inspectAzureQueryStore);
+  for(const role of [p.policy.runtimeRole,p.policy.scaler.role])
+    verifyMonitoredForeignConnect(await readForeignConnect(client,role,p.database),p.policy);
+  return {schemaVersion:1,complete:true,domain:p.domain,intentSha256:intent.sha256,
+    databasesSha256:hash(databases),profileSha256};
 }

@@ -90,8 +90,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 - Confirm Azure OpenAI or Foundry model availability. The app/data default is `westus3`; model deployments can be in another approved region if the base URL and deployment names are documented.
 - Populate required Key Vault secrets before setting `deployContainerApps=true` or `deployMigrationJob=true`.
 - Grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
-- Confirm GHCR image access. The Key Vault secret named `ghcr-pat` must contain a package-read token for `ghcr.io/corgtexdotcom/corgtex`.
-- If GHCR package-token scopes are not available for staging, use Azure Container Registry as a temporary fallback by setting `registryServer`, `registryUsername`, `webImage`, and `workerImage` to the ACR values and storing the ACR password in the same `ghcr-pat` Key Vault secret.
+- The staging workflow resolves the single registry in the staging resource group and pushes immutable images there. Its OIDC identity reads the existing ACR admin credential through resource-group-scoped management access. The Container Apps secret remains named `ghcr-pat` for compatibility, but its Key Vault value must authenticate to the resolved ACR with the registry name as username. Verify that pull before applying a job or app image change.
 - Confirm the PostgreSQL firewall decision. `allowAzureServicePostgresFirewall` defaults to `false`; enable it only after review or replace it with approved explicit firewall rules.
 - Keep `postgresAllowedExtensions` set to include `vector`; the migration set uses pgvector and Azure Flexible Server rejects extension creation unless the server-level `azure.extensions` parameter allows it first.
 - Keep DNS manual until the `selfserve-staging.corgtex.com` or `selfserve.corgtex.com` record is approved and configured through the DNS provider.
