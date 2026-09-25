@@ -480,6 +480,34 @@ describe("target qualification lifecycle", () => {
   });
 });
 
+describe('pinned Ops/Core qualification profile', () => {
+  it('proves start, single-IP window and private stopped cleanup without changing rehearsal imports', () => {
+    const run = spawnSync(process.execPath, ['scripts/migration/qualify-opscore-target.fixture.mjs'], {
+      env: { ...process.env, TARGET_PROFILE: 'opscore' }, encoding: 'utf8', timeout: 10000,
+    });
+    expect(run.status, run.stderr).toBe(0);
+  });
+  it('routes only the named operation and recovery kind to the pinned target', () => {
+    const workflow = parse(readFileSync('.github/workflows/azure-migration-postgres-rehearsal.yml', 'utf8'));
+    const q = workflow.jobs['qualify-target'], r = workflow.jobs['recover-target-qualification'];
+    expect(workflow.on.workflow_dispatch.inputs.operation.options).toContain('qualify-opscore-capture');
+    expect(workflow.on.workflow_dispatch.inputs.recovery_kind.options).toContain('opscore-target-qualification');
+    expect(q.if).toContain("inputs.operation == 'qualify-opscore-capture'");
+    expect(q.env.TARGET_POSTGRES_RESOURCE_ID).toContain('corgtex-opscore-pg18');
+    expect(q.env.TARGET_PROFILE).toContain('opscore');
+    expect(r.if).toContain("inputs.recovery_kind == 'opscore-target-qualification'");
+    expect(r.env.TARGET_PROFILE).toContain('opscore');
+    expect(readFileSync('scripts/migration/ops-core-target-profile.mjs', 'utf8')).toContain('f7a9b67c299e4061b1e15334c1857777');
+    expect(JSON.stringify(q)).not.toContain('keyvault secret show');
+    expect(JSON.stringify(q)).not.toContain('AZURE_OPSCORE_POSTGRES_ADMIN_PASSWORD');
+    expect(q.env).not.toHaveProperty('TARGET_POSTGRES_ADMIN_PASSWORD');
+    const opscoreSteps = q.steps.filter(s => s.if === "inputs.operation == 'qualify-opscore-capture'");
+    expect(opscoreSteps).toHaveLength(2);
+    expect(opscoreSteps.every(s => !JSON.stringify(s.env ?? {}).includes('AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD'))).toBe(true);
+    expect(JSON.stringify(opscoreSteps)).not.toContain('GITHUB_ENV');
+  });
+});
+
 describe("recovery execution ownership", () => {
   async function evidence() {
     const { api, c } = setup(), i = await prepare(api, inputs, c);
@@ -560,11 +588,12 @@ describe("protected workflow integration", () => {
     expect(JSON.stringify(r)).not.toContain("POSTGRES_ADMIN_PASSWORD");
   });
   it("checks credential before login/effects and persists intent before run", () => {
-    const steps = q.steps; const credential = steps.findIndex(s => s.name?.includes("credential presence"));
+    const steps = q.steps; const credential = steps.findIndex(s => s.name === "Validate rehearsal administrator credential");
     const login = steps.findIndex(s => s.uses === "azure/login@v2");
     const intent = steps.findIndex(s => s.id === "qualification_intent"); const run = steps.findIndex(s => s.name?.startsWith("Start target"));
     expect(credential).toBeLessThan(login); expect(intent).toBeLessThan(run);
     expect(steps[credential].run).toContain('-n "$TARGET_POSTGRES_ADMIN_PASSWORD"');
+    expect(steps[credential].env.TARGET_POSTGRES_ADMIN_PASSWORD).toContain('AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD');
     expect(steps[intent].with["if-no-files-found"]).toBe("error");
     const cleanup = steps.find(s => s.name?.startsWith("Remove qualification")); expect(cleanup.if).toContain("always()");
     expect(run).toBeLessThan(steps.indexOf(cleanup));
@@ -578,7 +607,7 @@ describe("protected workflow integration", () => {
   it("loads qualification cleanup with no installed packages or DB client", () => {
     const dir = mkdtempSync(join(tmpdir(), "corgtex-target-cleanup-"));
     try {
-      for (const name of ["qualify-ops-azure-target.mjs", "rehearsal-authority.mjs", "probe-ops-azure-target.mjs", "validate-postgres-restore-rehearsal.mjs",
+      for (const name of ["qualify-ops-azure-target.mjs", "rehearsal-authority.mjs", "probe-ops-azure-target.mjs", "ops-core-target-profile.mjs", "validate-postgres-restore-rehearsal.mjs",
         "validate-azure-what-if.mjs", "postgres-schema-representation.mjs", "postgres-schema-tokens.mjs", "postgres-check-structure.mjs"]) {
         copyFileSync(`scripts/migration/${name}`, join(dir, name));
       }

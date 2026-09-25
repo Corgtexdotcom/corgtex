@@ -9,17 +9,18 @@ import { RESOURCE, HOST, OPTIONS, ProbeError, connectionConfig, captureWhenReady
 import { validateRehearsalPrincipal } from "./validate-postgres-restore-rehearsal.mjs";
 
 import { createRehearsalAuthorityGuard } from "./rehearsal-authority.mjs";
+import { TARGET_PROFILE, target } from './ops-core-target-profile.mjs';
 
 export const SUBSCRIPTION = "227eb707-bc46-415e-a09b-7d2b69fb14b2";
 export const TENANT = "f6f245dd-ad33-4fed-8624-c44efa093b21";
-export const GROUP = "rg-corgtex-migration-rehearsal";
-export const SERVER = "corgtex-mig-reh-restore-pg";
+export const GROUP = target.group;
+export const SERVER = target.server;
 const HOUR = 3600000, RESERVE = 900000;
 const assert = (v, code) => { if (!v) throw new ProbeError(code); };
 const digest = (v) => createHash("sha256").update(v).digest("hex");
-const tags = { authority: "non-authoritative-restore-target", purpose: "railway-to-azure-migration-foundation", managedBy: "github-oidc" };
+const tags = target.tags;
 const computeTiers = { Standard_D2ds_v5: "GeneralPurpose", Standard_B1ms: "Burstable" };
-export const intentComputeSku = (intent) => intent?.schemaVersion === "1.1.0" ? intent.computeSku : "Standard_D2ds_v5";
+export const intentComputeSku = (intent) => ["1.1.0", "1.2.0"].includes(intent?.schemaVersion) ? intent.computeSku : "Standard_D2ds_v5";
 const numeric = (v) => typeof v === "string" && /^[1-9][0-9]{0,19}$/u.test(v);
 const sameKeys = (v, names) => v && Object.keys(v).sort().join() === [...names].sort().join();
 export const firewallName = (run, attempt) => `corgtex-target-qualification-${run}-${attempt}`;
@@ -35,9 +36,13 @@ export function captureTrialClientConfig(config) {
 
 export function validateEnvironment(env, recovery = false) {
   assert(env.GITHUB_REF === "refs/heads/main" && env.DOMAIN === "ops", "PROTECTED_INPUT_MISMATCH");
+  assert((env.TARGET_PROFILE ?? 'rehearsal') === TARGET_PROFILE, 'PROTECTED_TARGET_PROFILE_MISMATCH');
   assert(env.QUALIFY_ACCESS === undefined || ["true", "false"].includes(env.QUALIFY_ACCESS), "PROTECTED_INPUT_MISMATCH");
   assert(env.QUALIFY_CAPTURE_TRIAL === undefined || ["true", "false"].includes(env.QUALIFY_CAPTURE_TRIAL), "PROTECTED_INPUT_MISMATCH");
   assert(env.QUALIFY_CAPTURE_TRIAL !== "true" || env.QUALIFY_ACCESS === "true", "PROTECTED_INPUT_MISMATCH");
+  if (TARGET_PROFILE === 'opscore' && !recovery) {
+    assert(env.QUALIFY_ACCESS === 'true' && env.QUALIFY_CAPTURE_TRIAL === 'true', 'PROTECTED_OPSCORE_OPERATION_MISMATCH');
+  }
   assert(env.AZURE_SUBSCRIPTION_ID === SUBSCRIPTION && env.AZURE_TENANT_ID === TENANT
     && digest(String(env.AZURE_CLIENT_ID).toLowerCase()) === "707be00bd89b2c0cf1ebdf8c0d389ff24b5f69d9f2ba35a113cddf8f073296bf", "AZURE_IDENTITY_MISMATCH");
   assert(numeric(env.GITHUB_RUN_ID) && numeric(env.GITHUB_RUN_ATTEMPT), "RUN_IDENTITY_MISMATCH");
@@ -46,9 +51,12 @@ export function validateEnvironment(env, recovery = false) {
 }
 
 export function validateIntent(i, run, attempt) {
-  assert(sameKeys(i, ["schemaVersion", "kind", "resource", "host", "database", "runId", "runAttempt", "initialState", "firewallName", "ipv4", "createdAt", "deadline", "workDeadline", "transitionCapUsd", ...(i?.schemaVersion === "1.1.0" ? ["computeSku"] : [])]), "INTENT_SHAPE");
-  assert(["1.0.0", "1.1.0"].includes(i.schemaVersion) && Object.hasOwn(computeTiers, intentComputeSku(i))
-    && i.kind === "ops-target-qualification" && i.resource === RESOURCE
+  assert(sameKeys(i, ["schemaVersion", "kind", "resource", "host", "database", "runId", "runAttempt", "initialState", "firewallName", "ipv4", "createdAt", "deadline", "workDeadline", "transitionCapUsd", ...(["1.1.0", "1.2.0"].includes(i?.schemaVersion) ? ["computeSku"] : []), ...(i?.schemaVersion === "1.2.0" ? ["targetProfile", "initialPublicAccess"] : [])]), "INTENT_SHAPE");
+  assert((TARGET_PROFILE === 'opscore' ? i.schemaVersion === '1.2.0' && i.targetProfile === 'opscore'
+    && i.initialPublicAccess === 'Disabled' : ["1.0.0", "1.1.0"].includes(i.schemaVersion))
+    && Object.hasOwn(computeTiers, intentComputeSku(i))
+    && (TARGET_PROFILE !== 'opscore' || intentComputeSku(i) === 'Standard_D2ds_v5')
+    && i.kind === target.kind && i.resource === RESOURCE
     && i.host === HOST && i.database === "postgres" && i.initialState === "Stopped" && i.transitionCapUsd === 5, "INTENT_TARGET_MISMATCH");
   assert(numeric(run) && numeric(attempt) && i.runId === run && i.runAttempt === attempt
     && i.firewallName === firewallName(run, attempt) && validIp(i.ipv4), "INTENT_OWNER_MISMATCH");
@@ -59,13 +67,19 @@ export function validateIntent(i, run, attempt) {
 
 export function validateServer(s, allowUpdating = false, computeSku = "Standard_D2ds_v5") {
   assert(Object.hasOwn(computeTiers, computeSku), "TARGET_COMPUTE_UNSUPPORTED");
+  assert(TARGET_PROFILE !== 'opscore' || computeSku === 'Standard_D2ds_v5', 'TARGET_COMPUTE_UNSUPPORTED');
   assert(s?.id?.toLowerCase() === RESOURCE.toLowerCase() && s.name === SERVER && s.fullyQualifiedDomainName === HOST
     && s.administratorLogin === "corgtexadmin" && s.version === "18" && s.location?.replaceAll(" ", "").toLowerCase() === "westus3"
-    && s.sku?.name === computeSku && s.sku?.tier === computeTiers[computeSku] && s.storage?.storageSizeGb === 128
-    && s.highAvailability?.mode === "Disabled" && s.backup?.backupRetentionDays === 7
-    && s.network?.publicNetworkAccess === "Enabled" && !s.network.delegatedSubnetResourceId
+    && s.sku?.name === computeSku && s.sku?.tier === computeTiers[computeSku] && s.storage?.storageSizeGb === target.storageGiB
+    && s.highAvailability?.mode === "Disabled" && s.backup?.backupRetentionDays === target.backupDays
+    && (TARGET_PROFILE === 'opscore' ? ['Disabled', 'Enabled'].includes(s.network?.publicNetworkAccess)
+      : s.network?.publicNetworkAccess === "Enabled") && !s.network.delegatedSubnetResourceId
     && !s.network.privateDnsZoneArmResourceId && sameKeys(s.tags, Object.keys(tags))
     && Object.entries(tags).every(([k, v]) => s.tags?.[k] === v), "TARGET_DRIFT");
+  if (TARGET_PROFILE === 'opscore') assert(s.storage?.autoGrow === 'Enabled' && s.storage?.tier === 'P4'
+    && s.storage?.iops === 120 && s.backup?.geoRedundantBackup === 'Disabled'
+    && s.authConfig?.activeDirectoryAuth === 'Disabled' && s.authConfig?.passwordAuth === 'Enabled',
+  'TARGET_DRIFT');
   assert(["Stopped", "Ready", "Starting", "Stopping", ...(allowUpdating ? ["Updating"] : [])].includes(s.state), "TARGET_STATE_UNEXPECTED");
   return s;
 }
@@ -89,11 +103,18 @@ export class Azure {
       ["network private-endpoint-connection list", "PRIVATE_ENDPOINT_READ"],
       ["postgres flexible-server show", "SERVER_READ"], ["postgres flexible-server start", "SERVER_START"],
       ["postgres flexible-server stop", "SERVER_STOP"], ["postgres flexible-server firewall-rule list", "FIREWALL_READ"],
+      ["postgres flexible-server update", "SERVER_NETWORK_UPDATE"], ["rest", "ARM_READ"],
+      ["keyvault secret show", "CREDENTIAL_READ"],
       ["postgres flexible-server parameter list", "PARAMETER_READ"],
       ["postgres flexible-server firewall-rule create", "FIREWALL_CREATE"], ["postgres flexible-server firewall-rule delete", "FIREWALL_DELETE"],
     ];
     const operation = operations.find(([prefix]) => args.slice(0, prefix.split(" ").length).join(" ") === prefix)?.[1];
     assert(operation, "AZURE_OPERATION_UNSUPPORTED");
+    if (operation === 'ARM_READ') assert(args.length === 5 && args[1] === '--method' && args[2] === 'get'
+      && args[3] === '--url' && args[4] === `https://management.azure.com${RESOURCE}/firewallRules?api-version=2025-08-01`,
+    'AZURE_OPERATION_UNSUPPORTED');
+    if (operation === 'CREDENTIAL_READ') assert(TARGET_PROFILE === 'opscore' && args.length === 5
+      && args[4] === target.adminSecretId && args[3] === '--id', 'AZURE_OPERATION_UNSUPPORTED');
     if (this.deadline !== undefined) {
       timeout = Math.min(timeout, this.deadline - Date.now());
       assert(timeout > 0, "AZURE_OPERATION_DEADLINE");
@@ -148,7 +169,14 @@ export class Azure {
     validateRehearsalPrincipal({ clientId: this.env.AZURE_CLIENT_ID, principalId: claims.oid, subscriptionId: SUBSCRIPTION, resourceGroup: GROUP, assignments });
   }
   server() { return this.call(["postgres", "flexible-server", "show", "--resource-group", GROUP, "--name", SERVER]); }
-  rules() { return this.call(["postgres", "flexible-server", "firewall-rule", "list", "--resource-group", GROUP, "--server-name", SERVER]); }
+  async rules() {
+    if (TARGET_PROFILE !== 'opscore') return this.call(["postgres", "flexible-server", "firewall-rule", "list", "--resource-group", GROUP, "--server-name", SERVER]);
+    // The CLI firewall-list command fails when public access is Disabled.
+    const result = await this.call(['rest', '--method', 'get', '--url', `https://management.azure.com${RESOURCE}/firewallRules?api-version=2025-08-01`]);
+    assert(Array.isArray(result?.value) && !result.nextLink, 'FIREWALL_READ_INVALID');
+    return result.value.map(r => ({ id: r.id, name: r.name,
+      startIpAddress: r.properties?.startIpAddress, endIpAddress: r.properties?.endIpAddress }));
+  }
   async boundary() {
     const g = await this.call(["group", "show", "--name", GROUP]);
     assert(g.id?.toLowerCase() === `/subscriptions/${SUBSCRIPTION}/resourceGroups/${GROUP}`.toLowerCase()
@@ -160,6 +188,21 @@ export class Azure {
   async authority() { await createRehearsalAuthorityGuard({ read: args => this.call(args) })(); }
   async start() { await this.identity(); await this.authority(); return this.call(["postgres", "flexible-server", "start", "--resource-group", GROUP, "--name", SERVER, "--no-wait"]); }
   async stop() { await this.identity(); await this.authority(); return this.call(["postgres", "flexible-server", "stop", "--resource-group", GROUP, "--name", SERVER]); }
+  async setPublicAccess(value) {
+    assert(TARGET_PROFILE === 'opscore' && ['Enabled', 'Disabled'].includes(value), 'NETWORK_CHANGE_UNSUPPORTED');
+    await this.identity(); await this.authority();
+    return this.call(['postgres', 'flexible-server', 'update', '--resource-group', GROUP,
+      '--name', SERVER, '--public-access', value], 600000);
+  }
+  async readAdminSecret() {
+    assert(TARGET_PROFILE === 'opscore', 'CREDENTIAL_READ_UNSUPPORTED');
+    await this.identity(); await this.authority();
+    const secret = await this.call(['keyvault', 'secret', 'show', '--id', target.adminSecretId]);
+    assert(secret?.id === target.adminSecretId && secret.attributes?.enabled === true
+      && typeof secret.value === 'string' && secret.value.length >= 32 && secret.value.length <= 256
+      && !/[\r\n\0]/u.test(secret.value), 'CREDENTIAL_READ_INVALID');
+    return secret.value;
+  }
   async createRule(i) {
     await this.identity(); await this.authority();
     return this.call(["postgres", "flexible-server", "firewall-rule", "create", "--resource-group", GROUP, "--server-name", SERVER,
@@ -218,9 +261,12 @@ export async function prepare(api, { runId, runAttempt, ipv4 }, c = clock) {
   const server = await api.server();
   const computeSku = server?.sku?.name;
   assert(validateServer(server, false, computeSku).state === "Stopped", "TARGET_NOT_STOPPED");
+  assert(server.network.publicNetworkAccess === target.initialPublicAccess, 'TARGET_NETWORK_NOT_BASELINE');
   assert((await api.rules()).length === 0, "FIREWALL_NOT_ABSENT");
   const createdAt = c.now();
-  return validateIntent({ schemaVersion: "1.1.0", computeSku, kind: "ops-target-qualification", resource: RESOURCE, host: HOST, database: "postgres",
+  return validateIntent({ schemaVersion: TARGET_PROFILE === 'opscore' ? '1.2.0' : "1.1.0", computeSku,
+    ...(TARGET_PROFILE === 'opscore' ? { targetProfile: 'opscore', initialPublicAccess: 'Disabled' } : {}),
+    kind: target.kind, resource: RESOURCE, host: HOST, database: "postgres",
     runId, runAttempt, initialState: "Stopped", firewallName: firewallName(runId, runAttempt), ipv4,
     createdAt, deadline: createdAt + HOUR, workDeadline: createdAt + HOUR - RESERVE, transitionCapUsd: 5 }, runId, runAttempt);
 }
@@ -230,12 +276,20 @@ export async function qualify(api, i, probe, markAttempt, c = clock) {
   assert(c.now() >= i.createdAt, "INTENT_FROM_FUTURE");
   api.deadline = i.workDeadline;
   await api.identity(); await api.boundary();
-  assert(validateServer(await api.server(), false, intentComputeSku(i)).state === "Stopped", "TARGET_NOT_STOPPED");
+  const initial = validateServer(await api.server(), false, intentComputeSku(i));
+  assert(initial.state === "Stopped", "TARGET_NOT_STOPPED");
+  assert(initial.network.publicNetworkAccess === target.initialPublicAccess, 'TARGET_NETWORK_NOT_BASELINE');
   validateRules(await api.rules(), i, true);
   remaining(i.workDeadline, c);
   await markAttempt(); // Durable local marker precedes the first possibly ambiguous effect.
   await api.start();
-  await waitState(api, "Ready", i.workDeadline, c, i);
+  const started = await waitState(api, "Ready", i.workDeadline, c, i);
+  if (TARGET_PROFILE === 'opscore') {
+    assert(started.network.publicNetworkAccess === 'Disabled', 'TARGET_NETWORK_DRIFT');
+    await api.setPublicAccess('Enabled');
+    const enabled = await waitState(api, 'Ready', i.workDeadline, c, i);
+    assert(enabled.network.publicNetworkAccess === 'Enabled', 'TARGET_PUBLIC_ACCESS_UNPROVEN');
+  }
   remaining(i.workDeadline, c);
   try { await api.createRule(i); }
   catch (error) { if (error.code !== "AZURE_FIREWALL_CREATE_FAILED") throw error; }
@@ -295,6 +349,11 @@ export async function cleanup(api, i, c = clock, recovery = false) {
       s = await waitState(api, ["Ready", "Starting", "Stopping", "Stopped"], cleanupDeadline, c, i);
       continue;
     }
+    if (TARGET_PROFILE === 'opscore' && s.state === 'Stopped' && s.network.publicNetworkAccess === 'Enabled') {
+      await api.start();
+      s = await waitState(api, 'Ready', cleanupDeadline, c, i);
+      continue;
+    }
     if (s.state === "Starting" || (s.state === "Stopped" && !observedStopping)) {
       s = await waitState(api, "Ready", cleanupDeadline, c, i);
       continue;
@@ -302,10 +361,26 @@ export async function cleanup(api, i, c = clock, recovery = false) {
     break;
   }
   assert(s.state === "Ready" || s.state === "Stopping" || (s.state === "Stopped" && observedStopping), "START_TERMINAL_UNPROVEN");
+  if (TARGET_PROFILE === 'opscore' && s.state === 'Stopping') {
+    s = await waitState(api, 'Stopped', cleanupDeadline, c, i);
+  }
+  if (TARGET_PROFILE === 'opscore' && s.state === 'Stopped' && s.network.publicNetworkAccess === 'Enabled') {
+    // A stopped server retains its public setting through automatic restart.
+    // Resume only this owned lifecycle to close the network setting.
+    await api.start();
+    s = await waitState(api, 'Ready', cleanupDeadline, c, i);
+  }
+  let networkClosureUnproven = false;
   if (s.state === "Ready") {
+    if (TARGET_PROFILE === 'opscore' && s.network.publicNetworkAccess === 'Enabled') {
+      try { await api.setPublicAccess('Disabled'); } catch { /* Readback resolves an ambiguous update. */ }
+      s = await waitState(api, 'Ready', cleanupDeadline, c, i);
+      networkClosureUnproven = s.network.publicNetworkAccess !== 'Disabled';
+    }
     try { await api.stop(); } catch { /* Bounded state polling resolves an ambiguous response. */ }
   }
-  await waitState(api, "Stopped", cleanupDeadline, c, i);
+  const stopped = await waitState(api, "Stopped", cleanupDeadline, c, i);
+  if (TARGET_PROFILE === 'opscore') assert(!networkClosureUnproven && stopped.network.publicNetworkAccess === 'Disabled', 'PUBLIC_ACCESS_NOT_DISABLED');
   validateRules(await api.rules(), i, true);
   remaining(cleanupDeadline, c);
   return { status: "TARGET_QUALIFICATION_CLEANED", resource: RESOURCE, firewallAbsent: true, serverStopped: true,
@@ -340,10 +415,13 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
     && runs.workflow_runs.every(r => (r.id === source.id && r.run_attempt === source.run_attempt)
       || (r.id === current.id && r.run_attempt === current.run_attempt)), "RECOVERY_SUPERSEDED");
   assert(Array.isArray(jobs?.jobs) && jobs.total_count === jobs.jobs.length && jobs.total_count <= 100, "RECOVERY_JOBS_UNPROVEN");
-  const candidates = jobs.jobs.filter(j => j.name === (kind === "metadata" ? "Qualify existing Ops target metadata only" : "Qualify pinned synthetic Ops archive only"));
+  const metadataJobName = i.targetProfile === 'opscore' ? 'Qualify pinned Ops/Core PG18 target capture' : 'Qualify existing Ops target metadata only';
+  const candidates = jobs.jobs.filter(j => j.name === (kind === "metadata" ? metadataJobName : "Qualify pinned synthetic Ops archive only"));
   assert(candidates.length === 1 && candidates[0].status === "completed", "RECOVERY_JOB_UNPROVEN");
   const steps = candidates[0].steps;
-  const start = steps?.filter(s => s.name === (kind === "metadata" ? "Start target, open single-IP access and read metadata once" : "Start target and compare pinned synthetic source"));
+  const startName = i.targetProfile === 'opscore' ? 'Start Ops/Core target, open single-IP access and test disabled capture'
+    : 'Start target, open single-IP access and read metadata once';
+  const start = steps?.filter(s => s.name === (kind === "metadata" ? startName : "Start target and compare pinned synthetic source"));
   const clean = steps?.filter(s => s.name === (kind === "metadata" ? "Remove qualification access and return target to Stopped" : "Remove synthetic scratch databases and stop target"));
   assert(start?.length === 1 && start[0].status === "completed" && ["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion)
     && clean?.length === 1 && clean[0].conclusion !== "success", "RECOVERY_NOT_UNRESOLVED");
@@ -382,6 +460,11 @@ function save(path, data) {
   assert(Buffer.byteLength(bytes) <= 65536, "RECEIPT_LIMIT");
   writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
 }
+async function targetConnectionConfig(api, env) {
+  if (TARGET_PROFILE !== 'opscore') return connectionConfig(env);
+  const password = await api.readAdminSecret();
+  return connectionConfig({ ...env, TARGET_POSTGRES_ADMIN_PASSWORD: password });
+}
 export async function main(args = process.argv.slice(2), env = process.env) {
   assert(args.length === 2 && ["prepare", "run", "cleanup", "recover"].includes(args[0]), "INVALID_ARGS");
   const [mode, directory] = args, recovery = mode === "recover";
@@ -389,7 +472,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   const dir = resolve(directory); mkdirSync(dir, { recursive: true, mode: 0o700 });
   const api = new Azure(env), path = `${dir}/qualification-intent.json`;
   if (mode === "prepare") {
-    await connectionConfig(env); // Missing secret or TLS material must fail before provider effects.
+    await targetConnectionConfig(api, env); // Missing secret or TLS material must fail before provider effects.
     const i = await prepare(api, { runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT, ipv4: env.QUALIFY_RUNNER_IPV4 });
     save(path, i); console.log(JSON.stringify({ status: "QUALIFICATION_PREPARED", deadline: i.deadline })); return;
   }
@@ -401,7 +484,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   assert(!existsSync(`${dir}/cleanup.json`), "EXECUTION_ALREADY_CLEANED");
   if (recovery) api.verifyRecovery = () => recoveryEvidence(i, env, dir);
   if (mode === "run") {
-    const config = await connectionConfig(env);
+    const config = await targetConnectionConfig(api, env);
     const { default: pg } = await import("pg");
     let accessReceipt, captureTrialReceipt;
     const result = await qualify(api, i, async (options) => {
