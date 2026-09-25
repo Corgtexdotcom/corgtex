@@ -52,7 +52,7 @@ Suggested run order:
 
 1. Run `operation=deploy` with `deploy_container_apps=false`, `prepare_migration_job=false`, and `shared_state_backend=redis` to create backing resources only.
 2. Populate the required Key Vault secrets listed below and grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
-3. Preview the job-only deployment with `prepare_migration_job=true`, `deploy_container_apps=false`, `shared_state_backend=redis`, and `run_migration_job=false`. Then deploy with `run_migration_job=true`; this builds the immutable web image and runs the migration without updating web or worker.
+3. For an existing migration job, preview with `prepare_migration_job=true`, `deploy_container_apps=false`, `shared_state_backend=redis`, and `run_migration_job=false`. This reports only the current and proposed job image. Deploy with the same settings to build and push the web image, pin its digest in the existing job, and verify its other settings. Record the exact digest image from the protected run. Then start a separate protected `operation=run-migration` run with `run_migration_job=true`, `prepare_migration_job=false`, `deploy_container_apps=false`, `shared_state_backend=redis`, and `expected_migration_image` set to that digest reference. The run verifies the job still points to it and executes without rebuilding. Initial job creation belongs to a separately reviewed full infrastructure deployment.
 4. Verify the migration and, for an existing Redis runtime, complete the writer fence described below. Preview and deploy `deploy_container_apps=true`, `prepare_migration_job=false`, `run_migration_job=false` with the explicitly accepted `shared_state_backend`. This builds the web and worker images and updates consumers after the schema is ready. Leave optional provider-secret toggles off until real staging credentials and callback URLs are registered.
 5. Enable `run_health_smoke=true` and, after DNS/email/OAuth gates are ready, `run_browser_smoke=true`.
 
@@ -158,9 +158,12 @@ switching an existing staging runtime:
    Preserve/drain pending uploads and live counters; prove the exact source cache
    empty. Do not independently switch consumers while either backend has writers.
 3. Preview with `prepare_migration_job=true`, `deploy_container_apps=false`,
-   `shared_state_backend=redis`, and `run_migration_job=false`. Deploy the same
-   settings with `run_migration_job=true` to run the prepared job. This
-   updates the job before web or worker and applies the additive schema without
+   `shared_state_backend=redis`, and `run_migration_job=false`. Deploy those
+   settings to pin the built digest in the existing migration job, then verify
+   its image and retained configuration. Use a separate protected
+   `operation=run-migration` run with `run_migration_job=true`, both deploy flags
+   false, and `expected_migration_image` set to the verified digest reference.
+   That run applies the additive schema without rebuilding the image or
    switching consumers. Verify the migration, then preview and deploy
    `deploy_container_apps=true`, `prepare_migration_job=false`, and
    `shared_state_backend=postgres` under the writer fence. Verify exact image/backend identity,

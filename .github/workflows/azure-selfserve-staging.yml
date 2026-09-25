@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "what-if previews changes; deploy applies them."
+        description: "what-if previews, deploy applies, run-migration executes a verified image."
         required: true
         type: choice
         default: what-if
         options:
           - what-if
           - deploy
+          - run-migration
       resource_group:
         description: "Azure resource group for staging."
         required: true
@@ -41,10 +42,15 @@ on:
         required: true
         type: string
       run_migration_job:
-        description: "Run the prepared migrate/seed job while existing web and worker remain on redis."
+        description: "Run the prepared migrate/seed job in a separate protected run."
         required: true
         type: boolean
         default: false
+      expected_migration_image:
+        description: "Exact ACR image digest reference verified after prepare; required for run-migration."
+        required: false
+        type: string
+        default: ""
       run_health_smoke:
         description: "Probe the Azure web app /api/health endpoint."
         required: true
@@ -144,6 +150,7 @@ jobs:
       PREPARE_MIGRATION_JOB: ${{ inputs.prepare_migration_job }}
       SHARED_STATE_BACKEND: ${{ inputs.shared_state_backend }}
       RUN_MIGRATION_JOB: ${{ inputs.run_migration_job }}
+      EXPECTED_MIGRATION_IMAGE: ${{ inputs.expected_migration_image }}
       RUN_HEALTH_SMOKE: ${{ inputs.run_health_smoke }}
       RUN_BROWSER_SMOKE: ${{ inputs.run_browser_smoke }}
       SMOKE_EMAIL_CAPTURE_ALLOWED_DOMAINS: ${{ inputs.smoke_email_capture_allowed_domains }}
@@ -266,8 +273,8 @@ jobs:
             fi
           fi
 
-          if [[ "$RUN_MIGRATION_JOB" == "true" && "$OPERATION" != "deploy" ]]; then
-            echo "::error::run_migration_job requires operation=deploy."
+          if [[ "$RUN_MIGRATION_JOB" == "true" && "$OPERATION" != "run-migration" ]]; then
+            echo "::error::run_migration_job requires operation=run-migration."
             exit 1
           fi
           if [[ "$SHARED_STATE_BACKEND" != "redis" && "$SHARED_STATE_BACKEND" != "postgres" ]]; then
@@ -282,12 +289,16 @@ jobs:
             echo "::error::Prepare the migration job with shared_state_backend=redis while existing web and worker still use Redis."
             exit 1
           fi
-          if [[ "$RUN_MIGRATION_JOB" == "true" && "$PREPARE_MIGRATION_JOB" != "true" ]]; then
-            echo "::error::run_migration_job requires prepare_migration_job=true so this commit's job image is deployed first."
+          if [[ "$OPERATION" == "run-migration" && ( "$RUN_MIGRATION_JOB" != "true" || "$PREPARE_MIGRATION_JOB" == "true" || "$DEPLOY_CONTAINER_APPS" == "true" ) ]]; then
+            echo "::error::run-migration requires only run_migration_job=true; prepare and app deployment must be separate."
             exit 1
           fi
           if [[ "$RUN_MIGRATION_JOB" == "true" && "$SHARED_STATE_BACKEND" != "redis" ]]; then
             echo "::error::Run the migration with shared_state_backend=redis, then deploy postgres in a separate run after verifying the migration."
+            exit 1
+          fi
+          if [[ "$RUN_MIGRATION_JOB" == "true" && ! "$EXPECTED_MIGRATION_IMAGE" =~ ^[^[:space:]]+/corgtex/web@sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::run-migration requires the exact prepared ACR image digest reference."
             exit 1
           fi
 
@@ -360,7 +371,45 @@ jobs:
           echo "release_git_sha=${GITHUB_SHA}" >> "$GITHUB_ENV"
           echo "release_version=${GITHUB_REF_NAME}-${GITHUB_SHA:0:12}" >> "$GITHUB_ENV"
 
+      - name: Verify prepared migration image for execution
+        if: ${{ inputs.operation == 'run-migration' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_name="caj-${NAME_PREFIX}-migrate"
+          container_count="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'length(properties.template.containers)' --output tsv)"
+          current_name="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.template.containers[0].name' --output tsv)"
+          current_image="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.template.containers[0].image' --output tsv)"
+          current_registry="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.configuration.registries[0].server' --output tsv)"
+          registry_secret="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.configuration.registries[0].passwordSecretRef' --output tsv)"
+          if [[ "$container_count" != "1" || "$current_name" != "migrate" || "$current_registry" != "$registry_server" || "$registry_secret" != "ghcr-pat" || "$EXPECTED_MIGRATION_IMAGE" != "${registry_server}/corgtex/web@sha256:"* || "$current_image" != "$EXPECTED_MIGRATION_IMAGE" ]]; then
+            echo "::error::Prepared migration job image differs from the approved ACR digest."
+            exit 1
+          fi
+          echo "Verified migration image: ${current_image}"
+
+      - name: Preview existing migration job image only
+        if: ${{ inputs.prepare_migration_job && !inputs.deploy_container_apps }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_name="caj-${NAME_PREFIX}-migrate"
+          current_name="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.template.containers[0].name' --output tsv)"
+          current_image="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.template.containers[0].image' --output tsv)"
+          current_registry="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.configuration.registries[0].server' --output tsv)"
+          registry_secret="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query 'properties.configuration.registries[0].passwordSecretRef' --output tsv)"
+          if [[ "$current_name" != "migrate" || "$current_registry" != "$registry_server" || "$registry_secret" != "ghcr-pat" || ( "$current_image" != "${registry_server}/corgtex/web:sha-"* && "$current_image" != "${registry_server}/corgtex/web@sha256:"* ) ]]; then
+            echo "::error::Existing staging migration job binding changed; refusing image-only update."
+            exit 1
+          fi
+          echo "Migration job only: ${job_name}"
+          echo "Current image: ${current_image}"
+          echo "Proposed image: ${web_image}"
+          echo "Other job settings and backing resources are outside this update."
+          echo "migration_job_source_image=${current_image}" >> "$GITHUB_ENV"
+
       - name: Build and push web image
+        id: web_build
         if: ${{ inputs.operation == 'deploy' && (inputs.deploy_container_apps || inputs.prepare_migration_job) }}
         uses: docker/build-push-action@v6
         with:
@@ -375,6 +424,19 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.web }}
 
+      - name: Pin built migration image by digest
+        if: ${{ inputs.operation == 'deploy' && inputs.prepare_migration_job && !inputs.deploy_container_apps }}
+        shell: bash
+        env:
+          BUILT_DIGEST: ${{ steps.web_build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BUILT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::Build did not return a valid image digest."
+            exit 1
+          fi
+          echo "migration_job_target_image=${registry_server}/corgtex/web@${BUILT_DIGEST}" >> "$GITHUB_ENV"
+
       - name: Build and push worker image
         if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
         uses: docker/build-push-action@v6
@@ -388,7 +450,7 @@ jobs:
           tags: ${{ steps.image.outputs.worker }}
 
       - name: Ensure resource group for deployment
-        if: ${{ inputs.operation == 'deploy' }}
+        if: ${{ inputs.operation == 'deploy' && (!inputs.prepare_migration_job || inputs.deploy_container_apps) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -398,8 +460,8 @@ jobs:
             --tags app=corgtex environment=staging workload=self-serve managed-by=github-actions \
             --output none
 
-      - name: Confirm resource group exists for what-if
-        if: ${{ inputs.operation == 'what-if' }}
+      - name: Confirm resource group exists for preview or job update
+        if: ${{ inputs.operation == 'what-if' || inputs.operation == 'run-migration' || (inputs.prepare_migration_job && !inputs.deploy_container_apps) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -409,6 +471,7 @@ jobs:
           fi
 
       - name: Preview Azure deployment
+        if: ${{ inputs.operation != 'run-migration' && (!inputs.prepare_migration_job || inputs.deploy_container_apps) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -448,7 +511,7 @@ jobs:
             --parameters "${parameters[@]}"
 
       - name: Apply Azure deployment
-        if: ${{ inputs.operation == 'deploy' }}
+        if: ${{ inputs.operation == 'deploy' && (!inputs.prepare_migration_job || inputs.deploy_container_apps) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -489,8 +552,47 @@ jobs:
             --parameters "${parameters[@]}" \
             --output table
 
+      - name: Update existing migration job image only
+        if: ${{ inputs.operation == 'deploy' && inputs.prepare_migration_job && !inputs.deploy_container_apps }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_name="caj-${NAME_PREFIX}-migrate"
+          before="$(mktemp)"
+          after="$(mktemp)"
+          trap 'rm -f "$before" "$after"' EXIT
+          snapshot_query='{identity:identity,environmentId:properties.environmentId,workloadProfileName:properties.workloadProfileName,configuration:properties.configuration,template:properties.template}'
+          az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query "$snapshot_query" --output json > "$before"
+          python3 - "$before" "$migration_job_source_image" <<'PY'
+          import json
+          import sys
+
+          before = json.load(open(sys.argv[1], encoding="utf-8"))
+          containers = before["template"]["containers"]
+          if len(containers) != 1 or containers[0]["name"] != "migrate" or containers[0]["image"] != sys.argv[2]:
+              raise SystemExit("Migration job changed since preview; refusing image update")
+          PY
+          az containerapp job update --resource-group "$RESOURCE_GROUP" --name "$job_name" --container-name migrate --image "$migration_job_target_image" --output none
+          az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query "$snapshot_query" --output json > "$after"
+          python3 - "$before" "$after" "$migration_job_target_image" <<'PY'
+          import json
+          import sys
+
+          before = json.load(open(sys.argv[1], encoding="utf-8"))
+          after = json.load(open(sys.argv[2], encoding="utf-8"))
+          expected_image = sys.argv[3]
+          if len(before["template"]["containers"]) != 1 or before["template"]["containers"][0]["name"] != "migrate":
+              raise SystemExit("Expected one named migration container before update")
+          if after["template"]["containers"][0]["image"] != expected_image:
+              raise SystemExit("Migration job image readback does not match the immutable target")
+          before["template"]["containers"][0]["image"] = expected_image
+          if before != after:
+              raise SystemExit("Migration job settings changed beyond the image; inspect the protected run before execution")
+          print("Migration job image and unchanged configuration verified")
+          PY
+
       - name: Run migration job
-        if: ${{ inputs.run_migration_job }}
+        if: ${{ inputs.operation == 'run-migration' && inputs.run_migration_job }}
         shell: bash
         run: |
           set -euo pipefail
