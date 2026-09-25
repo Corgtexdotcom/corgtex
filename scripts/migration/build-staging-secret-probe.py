@@ -20,6 +20,55 @@ EXPECTED_REFS = {
 }
 REQUIRED_NONEMPTY = ("DATABASE_URL", "REDIS_URL", "SESSION_COOKIE_SECRET", "ENCRYPTION_KEY", "ADMIN_PASSWORD")
 PROVIDER_EXECUTION_REF = "cappjob-caj-corgtex-ss-stg-migrate"
+SCHEMA_PROBE_SCRIPT = r"""
+const allowedHost = 'corgtex-ss-stg-pg.postgres.database.azure.com';
+const migration = '20260923120000_postgres_shared_state';
+const rawUrl = process.env.DATABASE_URL;
+let url;
+try { url = new URL(rawUrl); } catch { throw new Error('TARGET_URL_INVALID'); }
+const queryKeys = [...url.searchParams.keys()].sort().join(',');
+if (url.protocol !== 'postgresql:' || url.hostname !== allowedHost || url.pathname !== '/corgtex'
+  || (url.port !== '' && url.port !== '5432') || queryKeys !== 'schema,sslaccept,sslmode'
+  || url.searchParams.get('schema') !== 'public' || url.searchParams.get('sslmode') !== 'require'
+  || url.searchParams.get('sslaccept') !== 'strict') {
+  throw new Error('TARGET_MISMATCH');
+}
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+async function run() {
+  try {
+    const state = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+      const [tables] = await tx.$queryRawUnsafe(`SELECT
+        to_regclass('public."_prisma_migrations"') IS NOT NULL AS "ledger",
+        to_regclass('public."SharedRateLimit"') IS NOT NULL AS "rateLimit",
+        to_regclass('public."SharedCacheEntry"') IS NOT NULL AS "cacheEntry",
+        to_regclass('public."SharedCacheVersion"') IS NOT NULL AS "cacheVersion",
+        to_regclass('public."PendingTranscriptUpload"') IS NOT NULL AS "pendingUpload"`);
+      let ledger = { total: 0, finished: 0 };
+      if (tables.ledger) {
+        [ledger] = await tx.$queryRawUnsafe(`SELECT count(*)::int AS "total",
+          count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL)::int AS "finished"
+          FROM public."_prisma_migrations" WHERE migration_name = $1`, migration);
+      }
+      return { tables, ledger };
+    }, { timeout: 20000 });
+    const { tables, ledger } = state;
+    const flags = [tables.rateLimit, tables.cacheEntry, tables.cacheVersion, tables.pendingUpload];
+    const unapplied = ledger.total === 0 && flags.every((flag) => flag === false);
+    const applied = ledger.total === 1 && ledger.finished === 1 && flags.every((flag) => flag === true);
+    if (!unapplied && !applied) throw new Error('INCONSISTENT_SCHEMA');
+    console.log('SCHEMA_PROBE_PASS state=' + (applied ? 'APPLIED' : 'NOT_APPLIED'));
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+run().catch((error) => {
+  const known = ['TARGET_URL_INVALID', 'TARGET_MISMATCH', 'INCONSISTENT_SCHEMA'];
+  console.error('SCHEMA_PROBE_FAILED code=' + (known.includes(error.message) ? error.message : 'QUERY_FAILED'));
+  process.exitCode = 1;
+});
+""".strip()
 
 
 def build_request(job, expected_image):
@@ -72,6 +121,12 @@ def build_request(job, expected_image):
     }]}
 
 
+def build_schema_request(job, expected_image):
+    request = build_request(job, expected_image)
+    request["containers"][0]["args"] = ["-e", SCHEMA_PROBE_SCRIPT]
+    return request
+
+
 def verify_execution(execution, request):
     containers = execution["template"]["containers"]
     if len(containers) != 1:
@@ -110,7 +165,7 @@ def verify_execution(execution, request):
 
 
 def main():
-    usage = "usage: build-staging-secret-probe.py build JOB_JSON EXPECTED_IMAGE REQUEST_JSON | verify EXECUTION_JSON REQUEST_JSON"
+    usage = "usage: build-staging-secret-probe.py build|build-schema JOB_JSON EXPECTED_IMAGE REQUEST_JSON | verify EXECUTION_JSON REQUEST_JSON"
     if len(sys.argv) < 2:
         raise SystemExit(usage)
     try:
@@ -120,11 +175,11 @@ def main():
             verify_execution(execution, request)
             print("Secret probe execution command and provider reference shape verified")
             return
-        if sys.argv[1] == "build" and len(sys.argv) == 5:
+        if sys.argv[1] in ("build", "build-schema") and len(sys.argv) == 5:
             job = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-            request = build_request(job, sys.argv[3])
+            request = build_schema_request(job, sys.argv[3]) if sys.argv[1] == "build-schema" else build_request(job, sys.argv[3])
             Path(sys.argv[4]).write_text(json.dumps(request, separators=(",", ":")), encoding="utf-8")
-            print("Staging secret probe template prepared for the pinned image")
+            print("Staging read-only probe template prepared for the pinned image")
             return
         raise ValueError(usage)
     except (KeyError, TypeError, ValueError) as error:
