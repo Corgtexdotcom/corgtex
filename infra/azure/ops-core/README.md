@@ -22,6 +22,25 @@ database names and promotion. Extension allowlisting is also a restore preflight
 
 ## Reuse one existing PostgreSQL server
 
+For a new shared target, deploy `shared-postgres-target.bicep` once to the intended
+hosting resource group, then use the resulting group and server name with the
+`existing-shared` mode below. Its example parameters reference a versioned
+bootstrap Key Vault secret; keep the real parameter file private. Review an exact
+resource-group `what-if` before creation. The standalone template creates one
+PG18 server with 32 GiB storage, 14-day local backup, no HA, and public network
+access disabled. It creates no database, firewall rule, endpoint, app, or role
+assignment. The backing deployment owns the single private endpoint; the migration
+operator owns the later restore and database isolation.
+
+`Standard_D2ds_v5` is the General Purpose default. `Standard_B2s` is available
+only after its production support and CPU-credit tradeoff, workload capacity, and
+whole-Azure cost are explicitly accepted. Neither choice is admitted by template
+compilation alone. Keep the source serving while qualifying the new target; set a
+bounded spend/deadline for inactive provisioning and stop unneeded compute. A
+stopped target still incurs storage and backup charges. Do not deploy either
+configuration as a permanent addition until measured total Azure spend fits the
+approved monthly ceiling with headroom.
+
 `postgresHosting` defaults to `{ mode: 'dedicated' }`, preserving two new servers.
 For explicit reuse set `{ mode: 'existing-shared', resourceGroupName: '<existing-group>',
 serverName: '<existing-pg18>' }`; see `existing-shared.parameters.example.json`.
