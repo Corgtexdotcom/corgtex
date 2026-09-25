@@ -10,6 +10,10 @@ const main = JSON.parse(execFileSync("az", ["bicep", "build", "--file",
   encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
 }));
 const hosting = main.resources.hosting.properties.template;
+const sharedTarget = JSON.parse(execFileSync("az", ["bicep", "build", "--file",
+  fileURLToPath(new URL("./shared-postgres-target.bicep", import.meta.url)), "--stdout"], {
+  encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
+}));
 const domains = ["opsDomain", "coreDomain"].map(name => hosting.resources[name].properties.template);
 const values = template => Object.values(template.resources);
 
@@ -129,4 +133,25 @@ test("domain and custody isolation remain and no application database is deploye
   }
   assert.ok(main.resources.custody);
   assert.notEqual(hosting.resources.opsDomain.properties.parameters.namePrefix.value, hosting.resources.coreDomain.properties.parameters.namePrefix.value);
+});
+
+test("new shared target is one closed PG18 server with bounded storage and no application data", () => {
+  assert.equal(sharedTarget.parameters.administratorPassword.type, "securestring");
+  assert.equal(sharedTarget.parameters.skuName.defaultValue, "Standard_D2ds_v5");
+  assert.deepEqual(sharedTarget.parameters.skuName.allowedValues, ["Standard_D2ds_v5", "Standard_B2s"]);
+  const resources = Object.values(sharedTarget.resources);
+  assert.equal(resources.length, 1);
+  const server = resources[0];
+  assert.equal(server.type, "Microsoft.DBforPostgreSQL/flexibleServers");
+  assert.equal(server.properties.version, "18");
+  assert.equal(server.properties.storage.storageSizeGB, 32);
+  assert.equal(server.properties.backup.backupRetentionDays, 14);
+  assert.equal(server.properties.backup.geoRedundantBackup, "Disabled");
+  assert.equal(server.properties.highAvailability.mode, "Disabled");
+  assert.equal(server.properties.network.publicNetworkAccess, "Disabled");
+  assert.match(server.properties.administratorLoginPassword, /parameters\('administratorPassword'\)/);
+  const example = JSON.parse(readFileSync(new URL("./shared-postgres-target.parameters.example.json", import.meta.url), "utf8"));
+  assert.equal(example.parameters.administratorPassword.reference.secretName, "ops-core-shared-pg18-admin-password");
+  assert.equal(example.parameters.administratorPassword.reference.secretVersion, "<reviewed-secret-version>");
+  assert.equal(example.parameters.skuName.value, "Standard_D2ds_v5");
 });

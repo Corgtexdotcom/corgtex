@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "value": "westus3" },
+    "serverName": { "value": "<globally-unique-ops-core-pg18-name>" },
+    "skuName": { "value": "Standard_D2ds_v5" },
+    "administratorPassword": {
+      "reference": {
+        "keyVault": {
+          "id": "/subscriptions/<subscription-id>/resourceGroups/<bootstrap-secrets-group>/providers/Microsoft.KeyVault/vaults/<bootstrap-vault>"
+        },
+        "secretName": "ops-core-shared-pg18-admin-password",
+        "secretVersion": "<reviewed-secret-version>"
+      }
+    }
+  }
+}
