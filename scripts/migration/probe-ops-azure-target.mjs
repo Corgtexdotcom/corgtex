@@ -3,9 +3,10 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { target, targetResource } from './ops-core-target-profile.mjs';
 
-export const RESOURCE = "/subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg";
-export const HOST = "corgtex-mig-reh-restore-pg.postgres.database.azure.com";
+export const RESOURCE = targetResource;
+export const HOST = target.host;
 const hash = (v) => createHash("sha256").update(v).digest("hex");
 export class ProbeError extends Error { constructor(code) { super(code); this.code = code; } }
 const check = (v, code) => { if (!v) throw new ProbeError(code); };

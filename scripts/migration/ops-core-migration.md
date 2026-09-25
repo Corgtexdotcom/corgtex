@@ -102,6 +102,19 @@ parameter and named Query Store view readback. It records a private trial receip
 only when the settings remain exact and all views remain empty. It uses the same
 stopped-server baseline, single-IP access, cleanup, and recovery path as
 `qualify-access`; no application database or customer rows are touched.
+For the separately provisioned `corgtex-opscore-pg18` target, dispatch
+`operation=qualify-opscore-capture`, `domain=ops` on protected `main`. This
+operation pins the target identity, D2ds_v5/32 GiB/14-day configuration and the
+versioned bootstrap Key Vault credential. It starts from Stopped with public
+access Disabled, enables public access only for the run-owned single-IP rule,
+then removes the rule, disables public access and returns to Stopped. The intent
+artifact precedes the first effect. If cleanup fails, use `operation=recover`,
+`recovery_kind=opscore-target-qualification` with the exact original run ID and
+attempt; recovery verifies run ownership before changing the target. Grant the
+workflow identity only subscription Reader, target-group Contributor and
+bootstrap-vault Secrets User for this bounded trial, then remove those grants.
+This is a target-specific synthetic capture observation, not migration or
+production admission. Do not reuse the rehearsal receipt as target proof.
 The profile checks Azure server parameters and effective PostgreSQL settings with no
 pending restart before credential SQL and around commit. Parameter changes
 are a separate controlled operation; any mismatch fails closed. After

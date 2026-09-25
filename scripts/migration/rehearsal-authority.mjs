@@ -2,10 +2,10 @@
 import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { RESOURCE, HOST, ProbeError } from "./probe-ops-azure-target.mjs";
+import { target } from './ops-core-target-profile.mjs';
 
 export const REHEARSAL_GROUP_ID = RESOURCE.split("/providers/")[0];
-export const REHEARSAL_TAGS = Object.freeze({ authority: "non-authoritative-restore-target",
-  purpose: "railway-to-azure-migration-foundation", managedBy: "github-oidc" });
+export const REHEARSAL_TAGS = target.tags;
 const subscription = RESOURCE.split("/")[2];
 const group = REHEARSAL_GROUP_ID.split("/").at(-1);
 const server = RESOURCE.split("/").at(-1);

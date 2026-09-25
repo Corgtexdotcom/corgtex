@@ -13,6 +13,7 @@ on:
           - qualify-target
           - qualify-access
           - qualify-capture
+          - qualify-opscore-capture
           - qualify-synthetic
           - prepare-synthetic
       recovery_kind:
@@ -23,6 +24,7 @@ on:
         options:
           - restore
           - target-qualification
+          - opscore-target-qualification
           - synthetic-qualification
       domain:
         description: "Exactly one Railway PostgreSQL data domain to restore and verify."
@@ -203,8 +205,8 @@ jobs:
           retention-days: 7
 
   qualify-target:
-    if: github.ref == 'refs/heads/main' && (inputs.operation == 'qualify-target' || inputs.operation == 'qualify-access' || inputs.operation == 'qualify-capture')
-    name: Qualify existing Ops target metadata only
+    if: github.ref == 'refs/heads/main' && (inputs.operation == 'qualify-target' || inputs.operation == 'qualify-access' || inputs.operation == 'qualify-capture' || inputs.operation == 'qualify-opscore-capture')
+    name: ${{ inputs.operation == 'qualify-opscore-capture' && 'Qualify pinned Ops/Core PG18 target capture' || 'Qualify existing Ops target metadata only' }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     environment: azure-migration-foundation
@@ -215,22 +217,27 @@ jobs:
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
       RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
-      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg
-      TARGET_POSTGRES_HOST: corgtex-mig-reh-restore-pg.postgres.database.azure.com
+      TARGET_PROFILE: ${{ inputs.operation == 'qualify-opscore-capture' && 'opscore' || 'rehearsal' }}
+      TARGET_POSTGRES_RESOURCE_ID: ${{ inputs.operation == 'qualify-opscore-capture' && '/subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-opscore-hosting/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18' || '/subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-migration-rehearsal/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-mig-reh-restore-pg' }}
+      TARGET_POSTGRES_HOST: ${{ inputs.operation == 'qualify-opscore-capture' && 'corgtex-opscore-pg18.postgres.database.azure.com' || 'corgtex-mig-reh-restore-pg.postgres.database.azure.com' }}
       TARGET_POSTGRES_ADMIN_USER: corgtexadmin
-      QUALIFY_ACCESS: ${{ inputs.operation == 'qualify-access' || inputs.operation == 'qualify-capture' }}
-      QUALIFY_CAPTURE_TRIAL: ${{ inputs.operation == 'qualify-capture' }}
+      QUALIFY_ACCESS: ${{ inputs.operation == 'qualify-access' || inputs.operation == 'qualify-capture' || inputs.operation == 'qualify-opscore-capture' }}
+      QUALIFY_CAPTURE_TRIAL: ${{ inputs.operation == 'qualify-capture' || inputs.operation == 'qualify-opscore-capture' }}
       QUALIFICATION_DIR: .artifacts/target-qualification/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
       - name: Validate qualification inputs and protected credential presence
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$DOMAIN" == ops && -z "$RECOVERY_RUN_ID" && -z "$RECOVERY_RUN_ATTEMPT" ]] || exit 1
+      - name: Validate rehearsal administrator credential
+        if: inputs.operation != 'qualify-opscore-capture'
         env:
           TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == refs/heads/main && "$DOMAIN" == ops && -z "$RECOVERY_RUN_ID" && -z "$RECOVERY_RUN_ATTEMPT" ]] || exit 1
           [[ -n "$TARGET_POSTGRES_ADMIN_PASSWORD" ]] || { echo '::error::Protected target credential missing.'; exit 1; }
       - uses: actions/setup-node@v4
         with:
@@ -242,11 +249,20 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - name: Verify stopped baseline and prepare typed qualification intent
-        id: qualification_prepare
+      - name: Verify rehearsal stopped baseline and prepare typed qualification intent
+        id: qualification_prepare_rehearsal
+        if: inputs.operation != 'qualify-opscore-capture'
         timeout-minutes: 10
         env:
           TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+          node scripts/migration/qualify-ops-azure-target.mjs prepare "$QUALIFICATION_DIR"
+      - name: Verify Ops/Core stopped baseline and prepare typed qualification intent
+        id: qualification_prepare_opscore
+        if: inputs.operation == 'qualify-opscore-capture'
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
@@ -260,16 +276,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Start target, open single-IP access and read metadata once
+        if: inputs.operation != 'qualify-opscore-capture'
         timeout-minutes: 45
         env:
           TARGET_POSTGRES_ADMIN_PASSWORD: ${{ secrets.AZURE_MIGRATION_POSTGRES_ADMIN_PASSWORD }}
         run: node scripts/migration/qualify-ops-azure-target.mjs run "$QUALIFICATION_DIR"
+      - name: Start Ops/Core target, open single-IP access and test disabled capture
+        if: inputs.operation == 'qualify-opscore-capture'
+        timeout-minutes: 45
+        run: node scripts/migration/qualify-ops-azure-target.mjs run "$QUALIFICATION_DIR"
       - name: Remove qualification access and return target to Stopped
-        if: ${{ always() && steps.qualification_prepare.outcome == 'success' }}
+        if: ${{ always() && (steps.qualification_prepare_rehearsal.outcome == 'success' || steps.qualification_prepare_opscore.outcome == 'success') }}
         timeout-minutes: 20
         run: node scripts/migration/qualify-ops-azure-target.mjs cleanup "$QUALIFICATION_DIR"
       - name: Upload private target qualification receipts
-        if: ${{ always() && steps.qualification_prepare.outcome == 'success' }}
+        if: ${{ always() && (steps.qualification_prepare_rehearsal.outcome == 'success' || steps.qualification_prepare_opscore.outcome == 'success') }}
         uses: actions/upload-artifact@v4
         with:
           name: azure-target-qualification-${{ github.run_id }}-${{ github.run_attempt }}
@@ -278,7 +299,7 @@ jobs:
           retention-days: 7
 
   recover-target-qualification:
-    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'target-qualification'
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && (inputs.recovery_kind == 'target-qualification' || inputs.recovery_kind == 'opscore-target-qualification')
     name: Recover exact target qualification lifecycle only
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -290,6 +311,7 @@ jobs:
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
       RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      TARGET_PROFILE: ${{ inputs.recovery_kind == 'opscore-target-qualification' && 'opscore' || 'rehearsal' }}
       QUALIFICATION_DIR: .artifacts/target-qualification-recovery/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
