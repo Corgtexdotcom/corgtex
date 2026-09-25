@@ -15,7 +15,7 @@ on:
         description: "Azure resource group for staging."
         required: true
         type: string
-        default: rg-corgtex-selfserve-staging
+        default: rg-corgtex-selfserve-staging-wus3
       location:
         description: "Azure region for app/data resources."
         required: true
@@ -31,8 +31,17 @@ on:
         required: true
         type: boolean
         default: false
+      prepare_migration_job:
+        description: "Update only the migration job image, leaving web and worker untouched; preview with what-if first."
+        required: true
+        type: boolean
+        default: false
+      shared_state_backend:
+        description: "Explicitly enter redis or postgres for this run; never infer the currently accepted backend."
+        required: true
+        type: string
       run_migration_job:
-        description: "Run the one-shot migrate/seed job after deploy."
+        description: "Run the prepared migrate/seed job while existing web and worker remain on redis."
         required: true
         type: boolean
         default: false
@@ -133,7 +142,8 @@ jobs:
       LOCATION: ${{ inputs.location }}
       NAME_PREFIX: ${{ inputs.name_prefix }}
       DEPLOY_CONTAINER_APPS: ${{ inputs.deploy_container_apps }}
-      SHARED_STATE_BACKEND: ${{ vars.AZURE_SELFSERVE_STAGING_SHARED_STATE_BACKEND || 'redis' }}
+      PREPARE_MIGRATION_JOB: ${{ inputs.prepare_migration_job }}
+      SHARED_STATE_BACKEND: ${{ inputs.shared_state_backend }}
       RUN_MIGRATION_JOB: ${{ inputs.run_migration_job }}
       RUN_HEALTH_SMOKE: ${{ inputs.run_health_smoke }}
       RUN_BROWSER_SMOKE: ${{ inputs.run_browser_smoke }}
@@ -227,7 +237,7 @@ jobs:
             fi
           fi
 
-          if [[ "$OPERATION" == "deploy" && "$DEPLOY_CONTAINER_APPS" == "true" ]]; then
+          if [[ "$OPERATION" == "deploy" && ( "$DEPLOY_CONTAINER_APPS" == "true" || "$PREPARE_MIGRATION_JOB" == "true" ) ]]; then
             require NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
           fi
 
@@ -262,6 +272,26 @@ jobs:
             echo "::error::run_migration_job requires operation=deploy."
             exit 1
           fi
+          if [[ "$SHARED_STATE_BACKEND" != "redis" && "$SHARED_STATE_BACKEND" != "postgres" ]]; then
+            echo "::error::shared_state_backend must be explicitly set to redis or postgres."
+            exit 1
+          fi
+          if [[ "$PREPARE_MIGRATION_JOB" == "true" && "$DEPLOY_CONTAINER_APPS" == "true" ]]; then
+            echo "::error::Prepare the migration job before updating web and worker, in a separate run."
+            exit 1
+          fi
+          if [[ "$PREPARE_MIGRATION_JOB" == "true" && "$SHARED_STATE_BACKEND" != "redis" ]]; then
+            echo "::error::Prepare the migration job with shared_state_backend=redis while existing web and worker still use Redis."
+            exit 1
+          fi
+          if [[ "$RUN_MIGRATION_JOB" == "true" && "$PREPARE_MIGRATION_JOB" != "true" ]]; then
+            echo "::error::run_migration_job requires prepare_migration_job=true so this commit's job image is deployed first."
+            exit 1
+          fi
+          if [[ "$RUN_MIGRATION_JOB" == "true" && "$SHARED_STATE_BACKEND" != "redis" ]]; then
+            echo "::error::Run the migration with shared_state_backend=redis, then deploy postgres in a separate run after verifying the migration."
+            exit 1
+          fi
 
           if (( ${#missing[@]} > 0 )); then
             printf "::error::Missing GitHub environment settings: %s\\n" "${missing[*]}"
@@ -282,10 +312,10 @@ jobs:
           az account show --query "{tenantId: tenantId, subscriptionId: id, name: name}" --output table
 
       - uses: docker/setup-buildx-action@v3
-        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+        if: ${{ inputs.operation == 'deploy' && (inputs.deploy_container_apps || inputs.prepare_migration_job) }}
 
       - name: Log in to GHCR
-        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+        if: ${{ inputs.operation == 'deploy' && (inputs.deploy_container_apps || inputs.prepare_migration_job) }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -308,7 +338,7 @@ jobs:
           echo "release_version=${GITHUB_REF_NAME}-${GITHUB_SHA:0:12}" >> "$GITHUB_ENV"
 
       - name: Build and push web image
-        if: ${{ inputs.operation == 'deploy' && inputs.deploy_container_apps }}
+        if: ${{ inputs.operation == 'deploy' && (inputs.deploy_container_apps || inputs.prepare_migration_job) }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -363,6 +393,7 @@ jobs:
             "location=$LOCATION"
             "namePrefix=$NAME_PREFIX"
             "deployContainerApps=$DEPLOY_CONTAINER_APPS"
+            "deployMigrationJob=$PREPARE_MIGRATION_JOB"
             "sharedStateBackend=$SHARED_STATE_BACKEND"
             "appUrl=$APP_URL"
             "siteUrl=$SITE_URL"
@@ -401,6 +432,7 @@ jobs:
             "location=$LOCATION"
             "namePrefix=$NAME_PREFIX"
             "deployContainerApps=$DEPLOY_CONTAINER_APPS"
+            "deployMigrationJob=$PREPARE_MIGRATION_JOB"
             "sharedStateBackend=$SHARED_STATE_BACKEND"
             "appUrl=$APP_URL"
             "siteUrl=$SITE_URL"

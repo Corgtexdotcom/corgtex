@@ -141,11 +141,11 @@ Keep `enable_resend_secrets=false` for smoke-only signup testing unless a real R
 
 `sharedStateBackend=postgres` omits Redis provisioning and Redis secret references
 for web, worker and the migration job, and sets `SHARED_STATE_BACKEND=postgres`
-consistently. The default remains `redis`. The staging workflow reads
-`AZURE_SELFSERVE_STAGING_SHARED_STATE_BACKEND` from its GitHub environment for both
-preview and apply; set it to the accepted backend and retain it for later deploys.
-An omitted variable selects Redis. Direct template deployments must pass the same
-backend explicitly. Review the what-if output before applying.
+consistently. The template default remains `redis`. The staging workflow requires
+an explicit `shared_state_backend` input of `redis` or `postgres` on every preview
+and deploy; it does not infer the accepted backend from a default or repository
+variable. Direct template deployments must pass the accepted backend explicitly.
+Review the what-if output before applying.
 
 This is a deployment option, not an online state-transfer mechanism. Before
 switching an existing staging runtime:
@@ -157,8 +157,13 @@ switching an existing staging runtime:
 2. Fence every Redis writer, including web, worker, manual jobs and old revisions.
    Preserve/drain pending uploads and live counters; prove the exact source cache
    empty. Do not independently switch consumers while either backend has writers.
-3. Apply the additive schema before starting PostgreSQL-backed consumers. Switch
-   all consumers under that fence, then verify exact image/backend identity,
+3. Preview with `prepare_migration_job=true`, `deploy_container_apps=false`,
+   `shared_state_backend=redis`, and `run_migration_job=false`. Deploy the same
+   settings with `run_migration_job=true` to run the prepared job. This
+   updates the job before web or worker and applies the additive schema without
+   switching consumers. Verify the migration, then preview and deploy
+   `deploy_container_apps=true`, `prepare_migration_job=false`, and
+   `shared_state_backend=postgres` under the writer fence. Verify exact image/backend identity,
    cold-wake health, shared-state behavior and the absence of Redis references.
    Keep a PostgreSQL-capable rollback image; switching back to old Redis state
    after new writes is not an acceptable rollback.
@@ -175,7 +180,7 @@ backend switch is performed by this source change.
 
 ## Startup contract
 
-- The web Container App sets `CORGTEX_STARTUP_MODE=web`, so it does not mutate the database at normal startup.
+- The web Container App sets `CORGTEX_STARTUP_MODE=web`, so it does not mutate the database at normal startup but requires all bundled migrations to be present.
 - The migration job sets `CORGTEX_STARTUP_MODE=migrate-and-seed` and should be run before smoke testing a new image.
 - The migration job also receives `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `bootstrapAdminEmail` and the `admin-password` Key Vault secret so the production bootstrap seed can complete.
 - The worker runs from the existing worker image and exposes `/health` on `WORKER_HEALTH_PORT`.
