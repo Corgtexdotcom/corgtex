@@ -62,6 +62,18 @@ class BuildStagingSecretProbeTests(unittest.TestCase):
         request = MODULE.build_request(self.job, IMAGE)
         self.assertEqual(request["containers"][0]["env"][0], {"name": "DATABASE_URL", "secretRef": "database-url"})
 
+    def test_accepts_empty_saved_job_ephemeral_storage_without_propagating_it(self):
+        resources = self.job["template"]["containers"][0]["resources"]
+        resources["ephemeralStorage"] = ""
+        request = MODULE.build_schema_request(self.job, IMAGE)
+        self.assertEqual(request["containers"][0]["resources"], {"cpu": 0.5, "memory": "1Gi"})
+        self.assertEqual(resources["ephemeralStorage"], "")
+
+    def test_rejects_nonempty_saved_job_ephemeral_storage(self):
+        self.job["template"]["containers"][0]["resources"]["ephemeralStorage"] = "1Gi"
+        with self.assertRaisesRegex(ValueError, "image or resources"):
+            MODULE.build_schema_request(self.job, IMAGE)
+
     def test_verifies_execution_command_and_references(self):
         request = MODULE.build_request(self.job, IMAGE)
         execution = {"template": copy.deepcopy(request)}

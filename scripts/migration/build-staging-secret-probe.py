@@ -89,7 +89,11 @@ def build_request(job, expected_image):
     if job["template"].get("initContainers"):
         raise ValueError("Unexpected migration job init container")
     container = containers[0]
-    if container.get("image") != expected_image or container.get("resources") != {"cpu": 0.5, "memory": "1Gi"}:
+    resources = dict(container.get("resources") or {})
+    # Azure may add an empty ephemeralStorage to the saved job as well as execution GET.
+    if resources.get("ephemeralStorage") == "":
+        del resources["ephemeralStorage"]
+    if container.get("image") != expected_image or resources != {"cpu": 0.5, "memory": "1Gi"}:
         raise ValueError("Migration image or resources changed")
     if container.get("command") or container.get("args"):
         raise ValueError("Migration job already overrides its image command")
@@ -123,7 +127,7 @@ def build_request(job, expected_image):
     return {"containers": [{
         "name": "migrate",
         "image": expected_image,
-        "resources": container["resources"],
+        "resources": resources,
         "env": probe_env,
         "command": ["node"],
         "args": ["-e", script],
@@ -146,7 +150,7 @@ def verify_execution(execution, request):
         if actual.get(key) != expected[key]:
             raise ValueError(f"Secret probe execution changed {key}")
     resources = dict(actual.get("resources") or {})
-    # Azure execution GET adds an empty ephemeralStorage to this job's 0.5 CPU / 1Gi request.
+    # Azure execution GET can also add an empty ephemeralStorage to this request.
     if resources.get("ephemeralStorage") == "":
         del resources["ephemeralStorage"]
     if resources != expected["resources"]:
