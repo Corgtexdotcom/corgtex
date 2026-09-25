@@ -83,8 +83,18 @@ CORGTEX domain, must deny effective foreign `CONNECT`.
 
 The Azure profile requires exact known preload modules, disabled Query Store
 capture, utility tracking, wait sampling, plans, `pg_stat_statements` capture,
-and settings that prevent credential SQL from entering logs or activity. It
-checks Azure server parameters and effective PostgreSQL settings with no
+and settings that prevent credential SQL from entering logs or activity. Azure
+PG18 may report `pg_qs.track_utility=on` even after accepting an `off` update.
+An explicit `queryStoreUtilityTracking:"capture-disabled-provider-on"` in the
+version 2 policy admits only that observed `on` value. It still requires
+`pg_qs.query_capture_mode=none`, `pg_qs.store_query_plans=off`,
+`pgms_wait_sampling.query_capture_mode=none`, empty named Query Store views,
+and all other logging safeguards. Without the opt-in, `off` remains required.
+The policy is frozen into the plan; drift to either a different setting or
+nonempty history fails admission or monitoring. This exception should be used
+only after a synthetic capture trial on the intended Azure target, allowing for
+the [up to 20-minute persistence delay](https://learn.microsoft.com/en-us/azure/postgresql/monitor/concepts-query-store).
+The profile checks Azure server parameters and effective PostgreSQL settings with no
 pending restart before credential SQL and around commit. Parameter changes
 are a separate controlled operation; any mismatch fails closed. After
 activation, `monitorOpsCoreRuntimeAccessDrift()` checks retained database
