@@ -19,6 +19,7 @@ EXPECTED_REFS = {
     "ADMIN_PASSWORD": "admin-password",
 }
 REQUIRED_NONEMPTY = ("DATABASE_URL", "REDIS_URL", "SESSION_COOKIE_SECRET", "ENCRYPTION_KEY", "ADMIN_PASSWORD")
+PROVIDER_EXECUTION_REF = "cappjob-caj-corgtex-ss-stg-migrate"
 
 
 def build_request(job, expected_image):
@@ -77,19 +78,32 @@ def verify_execution(execution, request):
         raise ValueError("Secret probe execution has an unexpected container count")
     actual = containers[0]
     expected = request["containers"][0]
-    for key in ("name", "image", "resources", "command", "args"):
+    for key in ("name", "image", "command", "args"):
         if actual.get(key) != expected[key]:
             raise ValueError(f"Secret probe execution changed {key}")
+    resources = dict(actual.get("resources") or {})
+    # Azure execution GET adds an empty ephemeralStorage to this job's 0.5 CPU / 1Gi request.
+    if resources.get("ephemeralStorage") == "":
+        del resources["ephemeralStorage"]
+    if resources != expected["resources"]:
+        raise ValueError("Secret probe execution changed resources")
     if execution["template"].get("initContainers"):
         raise ValueError("Secret probe execution has an init container")
     actual_env = actual.get("env", [])
     if len(actual_env) != len(expected["env"]) or len({entry["name"] for entry in actual_env}) != len(actual_env):
         raise ValueError("Secret probe execution environment changed")
     by_name = {entry["name"]: entry for entry in actual_env}
+    requested_refs = [entry["secretRef"] for entry in expected["env"] if "secretRef" in entry]
+    returned_refs = [by_name.get(entry["name"], {}).get("secretRef") for entry in expected["env"] if "secretRef" in entry]
+    # The observed execution GET replaces every named job secret with this one opaque
+    # provider reference. The saved job and POST still require the exact named refs;
+    # execution success requires the five values to resolve inside the container.
+    if returned_refs not in (requested_refs, [PROVIDER_EXECUTION_REF] * len(requested_refs)):
+        raise ValueError("Secret probe execution references changed")
     for entry in expected["env"]:
         found = by_name.get(entry["name"], {})
         if "secretRef" in entry:
-            if found.get("secretRef") != entry["secretRef"] or found.get("value") not in (None, ""):
+            if found.get("value") not in (None, ""):
                 raise ValueError(f"Secret probe execution reference changed: {entry['name']}")
         elif found != entry:
             raise ValueError(f"Secret probe execution environment changed: {entry['name']}")
@@ -104,7 +118,7 @@ def main():
             execution = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
             request = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
             verify_execution(execution, request)
-            print("Secret probe execution command and references verified")
+            print("Secret probe execution command and provider reference shape verified")
             return
         if sys.argv[1] == "build" and len(sys.argv) == 5:
             job = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))

@@ -75,7 +75,31 @@ class BuildStagingSecretProbeTests(unittest.TestCase):
             MODULE.verify_execution(execution, request)
         execution = {"template": copy.deepcopy(request)}
         execution["template"]["containers"][0]["env"][0]["secretRef"] = "other"
-        with self.assertRaisesRegex(ValueError, "DATABASE_URL"):
+        with self.assertRaisesRegex(ValueError, "references changed"):
+            MODULE.verify_execution(execution, request)
+
+    def test_accepts_observed_azure_execution_readback(self):
+        request = MODULE.build_request(self.job, IMAGE)
+        execution = {"template": copy.deepcopy(request)}
+        container = execution["template"]["containers"][0]
+        container["resources"]["ephemeralStorage"] = ""
+        for entry in container["env"]:
+            if "secretRef" in entry:
+                entry["secretRef"] = MODULE.PROVIDER_EXECUTION_REF
+        MODULE.verify_execution(execution, request)
+
+    def test_rejects_mixed_or_changed_provider_readback(self):
+        request = MODULE.build_request(self.job, IMAGE)
+        execution = {"template": copy.deepcopy(request)}
+        container = execution["template"]["containers"][0]
+        container["env"][0]["secretRef"] = MODULE.PROVIDER_EXECUTION_REF
+        with self.assertRaisesRegex(ValueError, "references changed"):
+            MODULE.verify_execution(execution, request)
+        for entry in container["env"]:
+            if "secretRef" in entry:
+                entry["secretRef"] = MODULE.PROVIDER_EXECUTION_REF
+        container["resources"]["ephemeralStorage"] = "1Gi"
+        with self.assertRaisesRegex(ValueError, "resources"):
             MODULE.verify_execution(execution, request)
 
 
