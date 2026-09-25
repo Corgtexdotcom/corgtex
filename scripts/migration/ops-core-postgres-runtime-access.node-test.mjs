@@ -211,6 +211,51 @@ test("exact Azure provider access survives commit and authenticated runtime read
   assert.equal((await reconcilePostgresRuntimeAccess({...f.options,intent})).status,"APPLIED");
 });
 
+test("Azure utility tracking exception requires explicit policy and disabled capture throughout",async()=>{
+  const noOptIn=azureFixture();
+  noOptIn.azureSettings["pg_qs.track_utility"]="on";
+  noOptIn.azureParameters["pg_qs.track_utility"]="on";
+  await assert.rejects(preparePostgresRuntimeAccess(noOptIn.options),
+    {code:"RUNTIME_ACCESS_AZURE_LOGGING_UNSAFE"});
+  const f=azureFixture();
+  f.options.plan.policy.queryStoreUtilityTracking="capture-disabled-provider-on";
+  f.azureSettings["pg_qs.track_utility"]="on";
+  f.azureParameters["pg_qs.track_utility"]="on";
+  f.azureSettings["pg_qs.interval_length_minutes"]="15";
+  f.azureParameters["pg_qs.interval_length_minutes"]="15";
+  const intent=await preparePostgresRuntimeAccess(f.options);
+  assert.equal((await applyPostgresRuntimeAccess({...f.options,intent})).status,"APPLIED");
+  assert.equal((await monitorPostgresRuntimeAccessDrift({...f.options,intent,
+    expectedAfter:f.records.expectedAfter})).complete,true);
+  for(const [name,value] of [["pg_qs.query_capture_mode","top"],
+    ["pg_qs.store_query_plans","on"],["pgms_wait_sampling.query_capture_mode","all"]]) {
+    f.azureParameters[name]=value;
+    await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,
+      expectedAfter:f.records.expectedAfter}),{code:"RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH"},name);
+    f.azureParameters[name]=AZURE_RUNTIME_ACCESS_SETTINGS[name];
+  }
+  f.azureParameters["pg_qs.interval_length_minutes"]="30";
+  await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,
+    expectedAfter:f.records.expectedAfter}),{code:"RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH"});
+  f.azureParameters["pg_qs.interval_length_minutes"]="15";
+  f.historicalQueryRows=true;
+  await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,
+    expectedAfter:f.records.expectedAfter}),{code:"RUNTIME_ACCESS_AZURE_QUERY_HISTORY_PRESENT"});
+});
+
+test("Azure utility tracking exception rejects unknown opt-in and mismatched effective setting",async()=>{
+  const f=azureFixture();
+  f.options.plan.policy.queryStoreUtilityTracking="unreviewed";
+  assert.throws(()=>validatePostgresRuntimeAccessPolicy(f.options.plan.policy,f.options.plan),
+    {code:"RUNTIME_ACCESS_POLICY_INVALID"});
+  f.options.plan.policy.queryStoreUtilityTracking="capture-disabled-provider-on";
+  f.azureParameters["pg_qs.track_utility"]="on";
+  f.azureSettings["pg_qs.interval_length_minutes"]="15";
+  f.azureParameters["pg_qs.interval_length_minutes"]="15";
+  await assert.rejects(preparePostgresRuntimeAccess(f.options),
+    {code:"RUNTIME_ACCESS_AZURE_LOGGING_UNSAFE"});
+});
+
 test("Azure exception rejects unreviewed databases, changed identity, and unsafe capture before any mutation",async()=>{
   for(const drift of ["unknown","owner","template","oid","acl","capture","parameter","hook","history"]) {
     const f=azureFixture(),db=f.catalog.databases.find(row=>row.name==="azure_sys");

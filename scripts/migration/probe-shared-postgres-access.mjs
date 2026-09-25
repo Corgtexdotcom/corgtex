@@ -1,6 +1,6 @@
 // Catalog-only admission probe for the existing PG18 server. The owning
 // qualification workflow controls its stopped baseline, temporary IP and cleanup.
-import { DATABASE_SQL, RUNTIME_ACCESS_SENSITIVE_SETTINGS,
+import { AZURE_RUNTIME_ACCESS_SETTINGS, DATABASE_SQL, RUNTIME_ACCESS_SENSITIVE_SETTINGS,
   postgresRuntimeAccessIsolationInventory } from "./ops-core-postgres-runtime-access.mjs";
 import { HOST, RESOURCE, ProbeError, SQL as metadataSql, guard } from "./probe-ops-azure-target.mjs";
 
@@ -70,6 +70,7 @@ export const ACCESS_SETTING_NAMES = Object.freeze([...new Set([
   ...Object.keys(RUNTIME_ACCESS_SENSITIVE_SETTINGS),
   "pg_stat_statements.track", "pg_stat_statements.track_utility",
   "pg_qs.query_capture_mode", "pg_qs.parameters_capture_mode", "pg_qs.store_query_plans", "pg_qs.track_utility",
+  "pg_qs.interval_length_minutes",
   "pgms_wait_sampling.query_capture_mode", "pgaudit.log", "pgaudit.log_parameter",
   "auto_explain.log_min_duration", "auto_explain.log_parameter_max_length",
 ])].sort());
@@ -78,6 +79,45 @@ const QUERY_STORE_VIEWS = Object.freeze([
   "query_store.query_texts_view", "query_store.qs_view", "query_store.query_plans_view",
   "query_store.pgms_wait_sampling_view",
 ]);
+const CAPTURE_TRIAL_WAIT_MS = 21 * 60 * 1000;
+
+function assertDisabledCapture(receipt) {
+  check(receipt?.status === "SHARED_POSTGRES_ACCESS_CAPTURED" && receipt.readonlyGuards === true
+    && receipt.rollback === true && receipt.disconnected === true, "CAPTURE_TRIAL_BASELINE_INVALID");
+  check(Array.isArray(receipt.effectiveSettings) && Array.isArray(receipt.azureParameters),
+    "CAPTURE_TRIAL_BASELINE_INVALID");
+  const expected = { ...AZURE_RUNTIME_ACCESS_SETTINGS, "pg_qs.track_utility": "on", "pg_qs.interval_length_minutes": "15" };
+  const effective = new Map(receipt.effectiveSettings?.map(row => [row.name, row]));
+  const parameters = new Map(receipt.azureParameters?.map(row => [row.name, row]));
+  check(effective.size === receipt.effectiveSettings?.length && parameters.size === receipt.azureParameters?.length
+    && Object.entries(expected).every(([name, value]) => effective.get(name)?.setting === value
+      && effective.get(name)?.pendingRestart === false && parameters.get(name)?.value === value),
+  "CAPTURE_TRIAL_SETTINGS_UNSAFE");
+  const views = receipt.providerDatabases?.find(row => row.name === "azure_sys")?.queryStore;
+  check(Array.isArray(views) && views.length === QUERY_STORE_VIEWS.length
+    && QUERY_STORE_VIEWS.every(name => views.some(row => row.view === name && row.present === true
+      && row.readable === true && row.hasRows === false)), "CAPTURE_TRIAL_HISTORY_PRESENT");
+}
+
+export async function trialDisabledQueryCapture({ baseline, executeSynthetic, recapture, wait,
+  now = Date.now, deadline }) {
+  check(typeof executeSynthetic === "function" && typeof recapture === "function"
+    && typeof wait === "function" && typeof now === "function" && Number.isSafeInteger(deadline),
+  "CAPTURE_TRIAL_INPUT_INVALID");
+  assertDisabledCapture(baseline);
+  check(deadline - now() > CAPTURE_TRIAL_WAIT_MS + 120000, "CAPTURE_TRIAL_WINDOW_SHORT");
+  await executeSynthetic();
+  const executedAtMs = now(), executedAt = new Date(executedAtMs).toISOString();
+  await wait(CAPTURE_TRIAL_WAIT_MS);
+  check(now() - executedAtMs >= CAPTURE_TRIAL_WAIT_MS, "CAPTURE_TRIAL_WAIT_UNPROVEN");
+  check(deadline - now() > 120000, "CAPTURE_TRIAL_DEADLINE");
+  const after = await recapture();
+  assertDisabledCapture(after);
+  return { status: "QUERY_STORE_CAPTURE_TRIAL_PASS", executedAt, checkedAt: new Date(now()).toISOString(),
+    waitMs: CAPTURE_TRIAL_WAIT_MS, provider: "azure-flexible-postgres-18",
+    statements: ["EXPLAIN (COSTS OFF) SELECT 1", "SELECT 1"],
+    views: [...QUERY_STORE_VIEWS], historyEmpty: true };
+}
 
 const boundedRows = (rows, maxRows, maxBytes) => {
   check(Array.isArray(rows) && rows.length <= maxRows

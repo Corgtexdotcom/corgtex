@@ -24,8 +24,11 @@ export function validatePostgresRuntimeAccessPolicy(policy, { domain, runtimeVau
   need(["core", "ops"].includes(domain) && /^https:\/\/[a-z0-9-]{3,24}\.vault\.azure\.net\/$/.test(runtimeVaultUri), "RUNTIME_ACCESS_BINDING_INVALID");
   const azure = policy?.schemaVersion === 2;
   need(exact(policy, ["schemaVersion", "runtimeRole", "runtimeDatabaseSecrets", "scaler", "applicationSchema", "isolation",
-    ...(azure ? ["providerProfile"] : [])])
+    ...(azure ? ["providerProfile"] : []),
+    ...(azure && policy?.queryStoreUtilityTracking !== undefined ? ["queryStoreUtilityTracking"] : [])])
     && [1, 2].includes(policy.schemaVersion) && (!azure || policy.providerProfile === "azure-flexible-postgres-18")
+    && (!azure || policy.queryStoreUtilityTracking === undefined
+      || policy.queryStoreUtilityTracking === "capture-disabled-provider-on")
     && policy.runtimeRole === `corgtex_${domain}_runtime` && policy.applicationSchema === "public", "RUNTIME_ACCESS_POLICY_INVALID");
   need(exact(policy.runtimeDatabaseSecrets, ["web", "worker"])
     && Object.values(policy.runtimeDatabaseSecrets).every(value => version(value, runtimeVaultUri))
@@ -203,19 +206,24 @@ export const AZURE_RUNTIME_ACCESS_SETTINGS = Object.freeze({ ...RUNTIME_ACCESS_S
   "pg_qs.query_capture_mode": "none", "pg_qs.parameters_capture_mode": "capture_parameterless_only",
   "pg_qs.store_query_plans": "off", "pg_qs.track_utility": "off",
   "pgms_wait_sampling.query_capture_mode": "none" });
-async function assertAzureLoggingProfile(client, readAzureParameters, inspectAzureQueryStore) {
+function azureRuntimeAccessSettings(policy) {
+  return policy.queryStoreUtilityTracking === "capture-disabled-provider-on"
+    ? { ...AZURE_RUNTIME_ACCESS_SETTINGS, "pg_qs.track_utility": "on", "pg_qs.interval_length_minutes": "15" }
+    : AZURE_RUNTIME_ACCESS_SETTINGS;
+}
+async function assertAzureLoggingProfile(client, policy, readAzureParameters, inspectAzureQueryStore) {
   need(typeof readAzureParameters === "function", "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_REQUIRED");
   need(typeof inspectAzureQueryStore === "function", "RUNTIME_ACCESS_AZURE_QUERY_STORE_READBACK_REQUIRED");
-  const names = Object.keys(AZURE_RUNTIME_ACCESS_SETTINGS);
+  const expected = azureRuntimeAccessSettings(policy), names = Object.keys(expected);
   const rows = (await client.query(`/* runtime-access:azure-settings */ SELECT name,setting,pending_restart AS "pendingRestart"
     FROM pg_catalog.pg_settings WHERE name=ANY($1::text[])`, [names])).rows;
   need(rows.length === names.length && new Set(rows.map(row => row.name)).size === names.length
-    && rows.every(row => AZURE_RUNTIME_ACCESS_SETTINGS[row.name] === row.setting && row.pendingRestart === false),
+    && rows.every(row => expected[row.name] === row.setting && row.pendingRestart === false),
   "RUNTIME_ACCESS_AZURE_LOGGING_UNSAFE");
   const parameters = await readAzureParameters();
   need(Array.isArray(parameters) && parameters.length <= 1000, "RUNTIME_ACCESS_AZURE_PARAMETER_READBACK_INVALID");
   const byName = new Map(parameters.map(row => [row.name, row.value]));
-  need(byName.size === parameters.length && names.every(name => byName.get(name) === AZURE_RUNTIME_ACCESS_SETTINGS[name]),
+  need(byName.size === parameters.length && names.every(name => byName.get(name) === expected[name]),
     "RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH");
   need(await inspectAzureQueryStore() === false, "RUNTIME_ACCESS_AZURE_QUERY_HISTORY_PRESENT");
   return hash({ settings: rows, parameters: names.map(name => ({ name, value: byName.get(name) })) });
@@ -227,7 +235,7 @@ async function suppressSensitiveSql(client, policy, readAzureParameters, inspect
   need(!loaded.session_preload_libraries && !loaded.local_preload_libraries, "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
   if (policy.schemaVersion === 2) {
     need(equal(modules, AZURE_PRELOAD_MODULES), "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
-    return assertAzureLoggingProfile(client, readAzureParameters, inspectAzureQueryStore);
+    return assertAzureLoggingProfile(client, policy, readAzureParameters, inspectAzureQueryStore);
   }
   need(modules.every(name => name === "pg_stat_statements"), "RUNTIME_ACCESS_LOGGING_HOOK_UNPROVEN");
   const settings = { ...RUNTIME_ACCESS_SENSITIVE_SETTINGS, ...(modules.includes("pg_stat_statements") ? { "pg_stat_statements.track": "none", "pg_stat_statements.track_utility": "off" } : {}) };

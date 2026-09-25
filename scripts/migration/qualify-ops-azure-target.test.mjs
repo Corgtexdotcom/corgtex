@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse } from "yaml";
-import { RESOURCE, HOST, ProbeError } from "./probe-ops-azure-target.mjs";
-import { Azure, SERVER, prepare, qualify, cleanup, validateIntent, validateServer, validateEnvironment, validIp, validateRecoveryEvidence } from "./qualify-ops-azure-target.mjs";
+import { RESOURCE, HOST, OPTIONS, ProbeError } from "./probe-ops-azure-target.mjs";
+import { Azure, SERVER, prepare, qualify, cleanup, validateIntent, validateServer, validateEnvironment, validIp, validateRecoveryEvidence,
+  captureTrialClientConfig } from "./qualify-ops-azure-target.mjs";
 
 const baseline = () => ({ id: RESOURCE, name: SERVER, fullyQualifiedDomainName: HOST, administratorLogin: "corgtexadmin", version: "18",
   location: "westus3", sku: { name: "Standard_D2ds_v5", tier: "GeneralPurpose" }, storage: { storageSizeGb: 128 },
@@ -463,7 +464,19 @@ describe("target qualification lifecycle", () => {
   it("rejects invalid network addresses and unsupported protected inputs", () => {
     for (const ip of ["0.0.0.0", "127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "::1", "bad", "224.0.0.1"]) expect(validIp(ip)).toBe(false);
     expect(() => validateEnvironment({ GITHUB_REF: "refs/heads/feature", DOMAIN: "ops" })).toThrow();
+    expect(() => validateEnvironment({ GITHUB_REF: "refs/heads/main", DOMAIN: "ops",
+      QUALIFY_ACCESS: "false", QUALIFY_CAPTURE_TRIAL: "true" })).toThrow("PROTECTED_INPUT_MISMATCH");
     expect(() => validateServer({ ...baseline(), network: { publicNetworkAccess: "Enabled", delegatedSubnetResourceId: "foreign" } })).toThrow();
+  });
+  it("uses a read-write synthetic session while retaining the exact TLS and bounded query options", () => {
+    const config = { host: HOST, database: "postgres", user: "corgtexadmin", ssl: { rejectUnauthorized: true }, options: OPTIONS };
+    const synthetic = captureTrialClientConfig(config);
+    expect(synthetic).toMatchObject({ host: HOST, database: "postgres", user: "corgtexadmin", ssl: config.ssl });
+    expect(synthetic.options).toContain("-c default_transaction_read_only=off ");
+    expect(synthetic.options.replace("-c default_transaction_read_only=off ",
+      "-c default_transaction_read_only=on ")).toBe(OPTIONS);
+    expect(config.options).toBe(OPTIONS);
+    expect(() => captureTrialClientConfig({ ...config, options: "" })).toThrow("CAPTURE_TRIAL_CONFIG_INVALID");
   });
 });
 
