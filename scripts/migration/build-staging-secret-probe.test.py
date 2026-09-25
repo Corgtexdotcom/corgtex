@@ -1,5 +1,8 @@
 import copy
 import importlib.util
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -101,6 +104,88 @@ class BuildStagingSecretProbeTests(unittest.TestCase):
         container["resources"]["ephemeralStorage"] = "1Gi"
         with self.assertRaisesRegex(ValueError, "resources"):
             MODULE.verify_execution(execution, request)
+
+    def test_builds_read_only_schema_probe_for_exact_staging_database(self):
+        request = MODULE.build_schema_request(self.job, IMAGE)
+        container = request["containers"][0]
+        script = container["args"][1]
+        self.assertEqual(container["command"], ["node"])
+        self.assertIn("SET TRANSACTION READ ONLY", script)
+        self.assertIn("corgtex-ss-stg-pg.postgres.database.azure.com", script)
+        self.assertIn("20260923120000_postgres_shared_state", script)
+        self.assertIn("SCHEMA_PROBE_PASS", script)
+        self.assertEqual(container["env"][-1], {"name": "CORGTEX_STARTUP_MODE", "value": "secret-probe-no-migration"})
+        self.assertNotIn("migrate-and-seed", str(request))
+        self.assertNotIn("CREATE TABLE", script)
+
+    def test_schema_probe_retains_execution_readback_guards(self):
+        request = MODULE.build_schema_request(self.job, IMAGE)
+        execution = {"template": copy.deepcopy(request)}
+        container = execution["template"]["containers"][0]
+        container["resources"]["ephemeralStorage"] = ""
+        for entry in container["env"]:
+            if "secretRef" in entry:
+                entry["secretRef"] = MODULE.PROVIDER_EXECUTION_REF
+        MODULE.verify_execution(execution, request)
+        container["args"][1] = "console.log('no database query')"
+        with self.assertRaisesRegex(ValueError, "args"):
+            MODULE.verify_execution(execution, request)
+
+    def test_schema_script_uses_read_only_transaction_and_rejects_partial_state(self):
+        fake_client = r"""
+let readOnly = false;
+module.exports.PrismaClient = class {
+  async $transaction(work) {
+    return work({
+      $executeRawUnsafe: async (sql) => {
+        if (sql !== 'SET TRANSACTION READ ONLY') throw new Error('not read only');
+        readOnly = true;
+      },
+      $queryRawUnsafe: async (sql) => {
+        if (!readOnly || !sql.trim().startsWith('SELECT')) throw new Error('unsafe query');
+        const state = process.env.FAKE_SCHEMA_STATE;
+        if (sql.includes('to_regclass')) return [{ ledger: state !== 'unapplied',
+          rateLimit: state !== 'unapplied', cacheEntry: state !== 'unapplied',
+          cacheVersion: state !== 'unapplied', pendingUpload: state === 'applied' }];
+        return [{ total: 1, finished: 1 }];
+      },
+    });
+  }
+  async $disconnect() {}
+};
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory, "@prisma", "client")
+            package.mkdir(parents=True)
+            (package / "index.js").write_text(fake_client, encoding="utf-8")
+            for state, code, marker in (
+                ("unapplied", 0, "SCHEMA_PROBE_PASS state=NOT_APPLIED"),
+                ("applied", 0, "SCHEMA_PROBE_PASS state=APPLIED"),
+                ("partial", 1, "SCHEMA_PROBE_FAILED code=INCONSISTENT_SCHEMA"),
+            ):
+                with self.subTest(state=state):
+                    env = {**os.environ, "NODE_PATH": directory, "FAKE_SCHEMA_STATE": state,
+                           "DATABASE_URL": "postgresql://probe:local-only@corgtex-ss-stg-pg.postgres.database.azure.com/corgtex?schema=public&sslmode=require&sslaccept=strict"}
+                    result = subprocess.run(["node", "-e", MODULE.SCHEMA_PROBE_SCRIPT],
+                                            cwd=directory, env=env, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, code)
+                    self.assertIn(marker, result.stdout + result.stderr)
+            base = "postgresql://probe:local-only@corgtex-ss-stg-pg.postgres.database.azure.com"
+            for target in (
+                base + ":5433/corgtex?schema=public&sslmode=require&sslaccept=strict",
+                base + "/corgtex?schema=foreign&sslmode=require&sslaccept=strict",
+                base + "/corgtex?schema=public&sslmode=disable&sslaccept=strict",
+                base + "/corgtex?schema=public&sslmode=require",
+                base + "/corgtex?schema=public&sslmode=require&sslaccept=accept_invalid_certs",
+                base + "/corgtex?schema=public&sslmode=require&sslaccept=strict&host=/tmp/foreign-db",
+            ):
+                with self.subTest(target=target.split("?")[-1]):
+                    env = {**os.environ, "NODE_PATH": directory, "FAKE_SCHEMA_STATE": "applied",
+                           "DATABASE_URL": target}
+                    result = subprocess.run(["node", "-e", MODULE.SCHEMA_PROBE_SCRIPT],
+                                            cwd=directory, env=env, text=True, capture_output=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("TARGET_MISMATCH", result.stderr)
 
 
 if __name__ == "__main__":
