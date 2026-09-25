@@ -26,7 +26,20 @@ For a new shared target, deploy `shared-postgres-target.bicep` once to the inten
 hosting resource group, then use the resulting group and server name with the
 `existing-shared` mode below. Its example parameters reference a versioned
 bootstrap Key Vault secret; keep the real parameter file private. Review an exact
-resource-group `what-if` before creation. The standalone template creates one
+resource-group `what-if` before creation, then use the same reviewed inputs for
+the bounded deployment:
+
+```sh
+az deployment group what-if --resource-group "$TARGET_RG" \
+  --template-file infra/azure/ops-core/shared-postgres-target.bicep \
+  --parameters @"$PRIVATE_PARAMS"
+az deployment group create --resource-group "$TARGET_RG" \
+  --template-file infra/azure/ops-core/shared-postgres-target.bicep \
+  --parameters @"$PRIVATE_PARAMS"
+```
+
+Set `TARGET_RG` to the new Ops/Core hosting group and `PRIVATE_PARAMS` to the
+private, version-pinned parameter file. The standalone template creates one
 PG18 server with 32 GiB storage, 14-day local backup, no HA, and public network
 access disabled. It creates no database, firewall rule, endpoint, app, or role
 assignment. The backing deployment owns the single private endpoint; the migration
