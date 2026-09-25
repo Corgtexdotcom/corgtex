@@ -61,6 +61,11 @@ class StartStagingSecretProbeTests(unittest.TestCase):
             MODULE.start_once(JOB_ID, JOB, b"request", "token",
                               send=lambda *_: (200, {}, b'{"name":"different-abc123"}'))
 
+    def test_rejects_wrong_subscription_before_post(self):
+        with self.assertRaisesRegex(ValueError, "JOB_IDENTITY_INVALID"):
+            MODULE.start_once(JOB_ID.replace("227eb707", "117eb707"), JOB, b"request", "token",
+                              send=lambda *_: self.fail("must not post"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,10 +38,11 @@ def response_name(body, job_name):
 
 
 def start_once(job_id, job_name, request_body, token, *, send, sleep=time.sleep, now=time.monotonic):
-    if not re.fullmatch(
-        r"/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/rg-corgtex-selfserve-staging-wus3/providers/Microsoft\.App/jobs/"
-        + re.escape(job_name), job_id, re.IGNORECASE
-    ):
+    expected_job = "caj-corgtex-ss-stg-migrate"
+    expected_id = ("/subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/"
+                   "resourceGroups/rg-corgtex-selfserve-staging-wus3/providers/Microsoft.App/jobs/"
+                   + expected_job)
+    if job_name != expected_job or job_id.lower() != expected_id.lower():
         raise ValueError("AZURE_JOB_IDENTITY_INVALID")
     start_url = management_url(f"https://management.azure.com{job_id}/start?api-version=2026-07-01")
     deadline = now() + 120
