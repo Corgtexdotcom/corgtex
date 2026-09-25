@@ -34,6 +34,7 @@ Required GitHub environment secrets:
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 - `AZURE_SELFSERVE_STAGING_POSTGRES_ADMIN_PASSWORD`
+- `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY` when building the web or migration-job image
 - `AZURE_SELFSERVE_STAGING_SMOKE_EMAIL_CAPTURE_SECRET` when browser smoke is enabled
 
 Required GitHub environment variables:
@@ -49,10 +50,10 @@ The Azure identity used by GitHub OIDC needs enough permission to create the res
 
 Suggested run order:
 
-1. Run `operation=deploy` with `deployContainerApps=false` to create backing resources only.
+1. Run `operation=deploy` with `deploy_container_apps=false`, `prepare_migration_job=false`, and `shared_state_backend=redis` to create backing resources only.
 2. Populate the required Key Vault secrets listed below and grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
-3. Run `operation=deploy` with `deployContainerApps=true` to build and push GHCR images tagged `sha-<git-sha>`, then create or update the web app, worker, and migration job. Leave the optional provider-secret toggles off until real staging credentials and callback URLs are registered.
-4. Enable `run_migration_job=true` for the first app deploy of a new image.
+3. Preview the job-only deployment with `prepare_migration_job=true`, `deploy_container_apps=false`, `shared_state_backend=redis`, and `run_migration_job=false`. Then deploy with `run_migration_job=true`; this builds the immutable web image and runs the migration without updating web or worker.
+4. Verify the migration and, for an existing Redis runtime, complete the writer fence described below. Preview and deploy `deploy_container_apps=true`, `prepare_migration_job=false`, `run_migration_job=false` with the explicitly accepted `shared_state_backend`. This builds the web and worker images and updates consumers after the schema is ready. Leave optional provider-secret toggles off until real staging credentials and callback URLs are registered.
 5. Enable `run_health_smoke=true` and, after DNS/email/OAuth gates are ready, `run_browser_smoke=true`.
 
 The workflow does not configure DNS or OAuth callback registrations. Keep `selfserve-staging.corgtex.com` and `selfserve.corgtex.com` as manual gates until provider credentials and DNS access are approved.
@@ -87,7 +88,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 
 - Confirm the Azure account is the Corgtex work account and the target subscription has approved credits, budget alert permissions, and enough quota in the selected region.
 - Confirm Azure OpenAI or Foundry model availability. The app/data default is `westus3`; model deployments can be in another approved region if the base URL and deployment names are documented.
-- Populate required Key Vault secrets before setting `deployContainerApps=true`.
+- Populate required Key Vault secrets before setting `deployContainerApps=true` or `deployMigrationJob=true`.
 - Grant the managed identity access to the Azure OpenAI or Foundry model resource when using managed identity auth.
 - Confirm GHCR image access. The Key Vault secret named `ghcr-pat` must contain a package-read token for `ghcr.io/corgtexdotcom/corgtex`.
 - If GHCR package-token scopes are not available for staging, use Azure Container Registry as a temporary fallback by setting `registryServer`, `registryUsername`, `webImage`, and `workerImage` to the ACR values and storing the ACR password in the same `ghcr-pat` Key Vault secret.
@@ -100,7 +101,7 @@ Do not remove or replace existing provider callbacks for `app.corgtex.com` durin
 
 ## Key Vault secrets
 
-The template references these Key Vault secret names by default when `deployContainerApps=true`:
+The template references these Key Vault secret names by default when `deployContainerApps=true` or `deployMigrationJob=true`:
 
 - `ghcr-pat`
 - `database-url`
