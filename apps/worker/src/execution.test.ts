@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseWorkerExecutionMode, runWorkerCycle, type WorkerOperations } from "./execution";
+import { parseSchedulerCadenceMinutes, parseWorkerExecutionMode, runWorkerCycle, type WorkerOperations } from "./execution";
 
 function fixture() {
   const calls: string[] = [];
@@ -12,6 +12,12 @@ describe("worker execution modes", () => {
     expect(parseWorkerExecutionMode(undefined)).toBe("continuous");
     for (const mode of ["continuous", "queue-only", "scheduler-once"] as const) expect(parseWorkerExecutionMode(mode)).toBe(mode);
     for (const mode of ["", "scheduler", "CONTINUOUS", "queue-only "]) expect(() => parseWorkerExecutionMode(mode)).toThrow("Invalid WORKER_EXECUTION_MODE");
+  });
+  it("accepts only the plan-bound scheduler cadences", () => {
+    expect(parseSchedulerCadenceMinutes(undefined)).toBe(1);
+    expect(parseSchedulerCadenceMinutes("1")).toBe(1);
+    expect(parseSchedulerCadenceMinutes("5")).toBe(5);
+    for (const value of ["", "0", "2", "10", "5 "]) expect(() => parseSchedulerCadenceMinutes(value)).toThrow("Invalid WORKER_SCHEDULER_CADENCE_MINUTES");
   });
   it("preserves the complete continuous cycle and order", async () => {
     const { calls, operations } = fixture();

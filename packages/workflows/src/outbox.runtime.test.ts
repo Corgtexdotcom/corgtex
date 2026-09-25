@@ -26,6 +26,7 @@ const {
   runMeetingAudioAssetTranscriptionMock,
   getWorkspaceDigestSettingsMock,
   getNewspaperLocalDatePartsMock,
+  getNewspaperDueOccurrenceMock,
   isNewspaperScheduleDueMock,
   recordMeetingTranscriptProcessingStageMock,
   markMeetingTranscriptProcessingReadyMock,
@@ -101,6 +102,7 @@ const {
   runMeetingAudioAssetTranscriptionMock: vi.fn(),
   getWorkspaceDigestSettingsMock: vi.fn(),
   getNewspaperLocalDatePartsMock: vi.fn(),
+  getNewspaperDueOccurrenceMock: vi.fn(),
   isNewspaperScheduleDueMock: vi.fn(),
   recordMeetingTranscriptProcessingStageMock: vi.fn(),
   markMeetingTranscriptProcessingReadyMock: vi.fn(),
@@ -200,6 +202,7 @@ vi.mock("@corgtex/domain", async () => ({
     return Boolean(email) && !email.startsWith("system+") && !email.startsWith("support+") && displayName !== "corgtex support";
   },
   isNewspaperScheduleDue: isNewspaperScheduleDueMock,
+  getNewspaperDueOccurrence: getNewspaperDueOccurrenceMock,
 }));
 
 import { runPendingJobs, scheduleDailyJobs, schedulePeriodicJobs } from "./outbox";
@@ -308,6 +311,7 @@ describe("runPendingJobs", () => {
       timeZone: "UTC",
     });
     isNewspaperScheduleDueMock.mockReset().mockReturnValue(true);
+    getNewspaperDueOccurrenceMock.mockReset().mockReturnValue(null);
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
     resetWorkflowJobMetricsForTest();
@@ -1505,6 +1509,27 @@ describe("scheduleDailyJobs", () => {
         type: "context-graph.reconcile",
         dedupeKey: "ws-1:context-graph-reconcile:2026-05-04",
       }),
+    ]));
+  });
+
+  it("binds five-minute newspaper payloads and dedupe to the occurrence date", async () => {
+    vi.setSystemTime(new Date("2026-05-05T00:04:00Z"));
+    getNewspaperDueOccurrenceMock.mockImplementation(({ cadence }) => ({
+      cadence, dateKey: "2026-05-04", scheduledAt: new Date("2026-05-04T23:58:00Z"),
+    }));
+    getWorkspaceDigestSettingsMock.mockResolvedValue(new Map([
+      ["ws-1", { enabled: true, cadence: "WEEKLY", weekday: "MONDAY", localTime: "23:58", timeZone: "UTC" }],
+      ["ws-2", { enabled: false, cadence: "WEEKLY", weekday: "MONDAY", localTime: "23:58", timeZone: "UTC" }],
+    ]));
+
+    await scheduleDailyJobs({ schedulerCadenceMinutes: 5 });
+
+    expect(isNewspaperScheduleDueMock).not.toHaveBeenCalled();
+    expect(createdWorkflowJobs()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "brain.daily-digest", dedupeKey: "ws-1:daily-digest:2026-05-04",
+        payload: { dateISO: "2026-05-04T23:58:00.000Z", dateKey: "2026-05-04", cadence: "DAILY" } }),
+      expect.objectContaining({ type: "brain.daily-digest", dedupeKey: "ws-1:weekly-digest:2026-05-04",
+        payload: { dateISO: "2026-05-04T23:58:00.000Z", dateKey: "2026-05-04", cadence: "WEEKLY" } }),
     ]));
   });
 

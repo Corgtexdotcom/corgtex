@@ -1426,7 +1426,9 @@ export async function schedulePeriodicJobs() {
 // Integrations and pending source work still require separate import staging.
 const OPERATOR_IMPORT_INACTIVE_FLAG = "operator_import_inactive";
 
-export async function scheduleDailyJobs() {
+export async function scheduleDailyJobs(options: { schedulerCadenceMinutes?: 1 | 5 } = {}) {
+  const cadenceMinutes = options.schedulerCadenceMinutes ?? 1;
+  if (cadenceMinutes !== 1 && cadenceMinutes !== 5) throw new Error("Invalid scheduler cadence");
   const now = new Date();
   const todayISO = now.toISOString().split("T")[0];
   const workspaces = await prisma.workspace.findMany({
@@ -1456,6 +1458,7 @@ export async function scheduleDailyJobs() {
   const slackArchiveWorkspaces = slackArchiveInstallations.filter((installation) => slackPublicArchiveEnabled(installation.settings));
   const {
     getNewspaperLocalDateParts,
+    getNewspaperDueOccurrence,
     getWorkspaceDigestSettings,
     isHumanNewspaperRecipientIdentity,
     isNewspaperScheduleDue,
@@ -1464,6 +1467,7 @@ export async function scheduleDailyJobs() {
     workspaceId: string;
     cadence: Exclude<NewspaperCadence, "OFF">;
     dateKey: string;
+    dateISO: string;
     dedupeKey: string;
   }> = [];
   const isWeeklyWindow = now.getUTCDay() === 1;
@@ -1519,21 +1523,31 @@ export async function scheduleDailyJobs() {
     ));
     const shouldGenerateDailyBriefing = workspaceCadence !== "OFF" || hasAnyNewspaperRecipient;
 
-    if (shouldGenerateDailyBriefing && isNewspaperScheduleDue({ now, schedule: setting, cadence: "DAILY" })) {
+    const daily = cadenceMinutes === 5
+      ? getNewspaperDueOccurrence({ now, schedule: setting, cadence: "DAILY" })
+      : isNewspaperScheduleDue({ now, schedule: setting, cadence: "DAILY" })
+        ? { dateKey: localDateKey, scheduledAt: now } : null;
+    if (shouldGenerateDailyBriefing && daily) {
       newspaperSchedules.push({
         workspaceId: workspace.id,
         cadence: "DAILY",
-        dateKey: localDateKey,
-        dedupeKey: `${workspace.id}:daily-digest:${localDateKey}`,
+        dateKey: daily.dateKey,
+        dateISO: daily.scheduledAt.toISOString(),
+        dedupeKey: `${workspace.id}:daily-digest:${daily.dateKey}`,
       });
     }
 
-    if (hasWeeklyRecipients && isNewspaperScheduleDue({ now, schedule: setting, cadence: "WEEKLY" })) {
+    const weekly = cadenceMinutes === 5
+      ? getNewspaperDueOccurrence({ now, schedule: setting, cadence: "WEEKLY" })
+      : isNewspaperScheduleDue({ now, schedule: setting, cadence: "WEEKLY" })
+        ? { dateKey: localDateKey, scheduledAt: now } : null;
+    if (hasWeeklyRecipients && weekly) {
       newspaperSchedules.push({
         workspaceId: workspace.id,
         cadence: "WEEKLY",
-        dateKey: localDateKey,
-        dedupeKey: `${workspace.id}:weekly-digest:${localDateKey}`,
+        dateKey: weekly.dateKey,
+        dateISO: weekly.scheduledAt.toISOString(),
+        dedupeKey: `${workspace.id}:weekly-digest:${weekly.dateKey}`,
       });
     }
   }
@@ -1578,7 +1592,7 @@ export async function scheduleDailyJobs() {
     jobs.push({
       workspaceId: schedule.workspaceId,
       type: "brain.daily-digest",
-      payload: { dateISO: now.toISOString(), dateKey: schedule.dateKey, cadence: schedule.cadence },
+      payload: { dateISO: schedule.dateISO, dateKey: schedule.dateKey, cadence: schedule.cadence },
       dedupeKey: schedule.dedupeKey,
     });
   }

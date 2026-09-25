@@ -36,6 +36,7 @@ beforeEach(() => {
   mocks.closeRedis.mockResolvedValue(undefined);
   vi.stubEnv("WORKER_EXECUTION_MODE", "scheduler-once");
   vi.stubEnv("WORKER_SCHEDULER_PROOF_NONCE", undefined);
+  vi.stubEnv("WORKER_SCHEDULER_CADENCE_MINUTES", undefined);
   mocks.releaseMetadata.runtime.evidence = "baked";
   mocks.releaseMetadata.drift.gitSha = false;
   signals = new Map();
@@ -83,6 +84,39 @@ describe("worker entrypoint modes", () => {
     expect(mocks.dispatch).not.toHaveBeenCalled();
     expect(mocks.process).not.toHaveBeenCalled();
     for (const operation of [mocks.finalize, mocks.daily, mocks.periodic, mocks.drip, mocks.release, mocks.disconnectLock, mocks.disconnect, mocks.closeRedis]) expect(operation).toHaveBeenCalledOnce();
+    expect(mocks.daily).toHaveBeenCalledWith({ schedulerCadenceMinutes: 1 });
+  });
+  it("passes the five-minute policy and drains expiry batches until a short batch", async () => {
+    vi.stubEnv("WORKER_SCHEDULER_CADENCE_MINUTES", "5");
+    mocks.finalize.mockResolvedValueOnce(25).mockResolvedValueOnce(25).mockResolvedValueOnce(3);
+    await import("./index");
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(mocks.finalize).toHaveBeenCalledTimes(3);
+    expect(mocks.finalize).toHaveBeenNthCalledWith(1, 25);
+    expect(mocks.daily).toHaveBeenCalledWith({ schedulerCadenceMinutes: 5 });
+    const receipt = mocks.logger.info.mock.calls.map(([entry]) => JSON.parse(entry)).find((entry) => entry.event === "scheduler_complete");
+    expect(receipt.counts.finalized).toBe(53);
+    expect(mocks.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("approval_expiry_backlog"));
+  });
+  it("warns and stops at the five-batch expiry cap", async () => {
+    vi.stubEnv("WORKER_SCHEDULER_CADENCE_MINUTES", "5");
+    mocks.finalize.mockResolvedValue(25);
+    await import("./index");
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(mocks.finalize).toHaveBeenCalledTimes(5);
+    expect(mocks.logger.warn).toHaveBeenCalledWith(expect.stringContaining('"event":"approval_expiry_backlog"'));
+    const receipt = mocks.logger.info.mock.calls.map(([entry]) => JSON.parse(entry)).find((entry) => entry.event === "scheduler_complete");
+    expect(receipt.counts.finalized).toBe(125);
+  });
+  it("warns and stops expiry draining when the loop time budget is reached", async () => {
+    vi.stubEnv("WORKER_SCHEDULER_CADENCE_MINUTES", "5");
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    mocks.finalize.mockImplementation(async () => { now += 31_000; return 25; });
+    await import("./index");
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    expect(mocks.finalize).toHaveBeenCalledOnce();
+    expect(mocks.logger.warn).toHaveBeenCalledWith(expect.stringContaining('"event":"approval_expiry_backlog"'));
   });
   it("binds a manual proof nonce to the baked release and actual scheduling counts", async () => {
     const nonce = "manual-proof-" + "b".repeat(32);
@@ -164,6 +198,17 @@ describe("worker entrypoint modes", () => {
   it("rejects invalid mode before any work or health listener", async () => {
     vi.stubEnv("WORKER_EXECUTION_MODE", "invalid-sensitive-value");
     await expect(import("./index")).rejects.toThrow("Invalid WORKER_EXECUTION_MODE");
+    expect(mocks.acquire).not.toHaveBeenCalled();
+    expect(mocks.finalize).not.toHaveBeenCalled();
+    expect(mocks.createServer).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["queue-only", "5", "Scheduler cadence is only valid for scheduler-once mode"],
+    ["scheduler-once", "2", "Invalid WORKER_SCHEDULER_CADENCE_MINUTES"],
+  ])("rejects cadence %s/%s before any work", async (mode, cadence, message) => {
+    vi.stubEnv("WORKER_EXECUTION_MODE", mode);
+    vi.stubEnv("WORKER_SCHEDULER_CADENCE_MINUTES", cadence);
+    await expect(import("./index")).rejects.toThrow(message);
     expect(mocks.acquire).not.toHaveBeenCalled();
     expect(mocks.finalize).not.toHaveBeenCalled();
     expect(mocks.createServer).not.toHaveBeenCalled();

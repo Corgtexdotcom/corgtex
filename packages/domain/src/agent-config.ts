@@ -127,11 +127,17 @@ function normalizeNewspaperLocalTime(value: unknown, fallback = DEFAULT_NEWSPAPE
   return `${match[1].padStart(2, "0")}:${match[2]}`;
 }
 
+const newspaperTimeZoneValidity = new Map<string, boolean>();
+
 function isValidTimeZone(value: string) {
+  const known = newspaperTimeZoneValidity.get(value);
+  if (known !== undefined) return known;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date(0));
+    newspaperTimeZoneValidity.set(value, true);
     return true;
   } catch {
+    newspaperTimeZoneValidity.set(value, false);
     return false;
   }
 }
@@ -152,18 +158,24 @@ export function normalizeNewspaperScheduleConfig(configJson: unknown): Newspaper
   };
 }
 
+const newspaperFormatters = new Map<string, Intl.DateTimeFormat>();
+
 export function getNewspaperLocalDateParts(now: Date, timeZone: string) {
   const normalizedTimeZone = normalizeNewspaperTimeZone(timeZone);
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: normalizedTimeZone,
-    weekday: "long",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+  let formatter = newspaperFormatters.get(normalizedTimeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: normalizedTimeZone,
+      weekday: "long",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    newspaperFormatters.set(normalizedTimeZone, formatter);
+  }
   const parts = new Map(formatter.formatToParts(now).map((part) => [part.type, part.value]));
   const weekday = normalizeNewspaperWeekday(parts.get("weekday"));
   return {
@@ -173,6 +185,66 @@ export function getNewspaperLocalDateParts(now: Date, timeZone: string) {
     minute: Number(parts.get("minute") ?? "0"),
     timeZone: normalizedTimeZone,
   };
+}
+
+function newspaperScheduledInstant(dateKey: string, localTime: string, timeZone: string) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const [hour, minute] = localTime.split(":").map(Number);
+  const wallClockUTC = Date.UTC(year, month - 1, day, hour, minute);
+  const localAt = (timestamp: number) => getNewspaperLocalDateParts(new Date(timestamp), timeZone);
+  const offsets = new Set<number>();
+  for (const sample of [wallClockUTC - 24 * 60 * 60_000, wallClockUTC, wallClockUTC + 24 * 60 * 60_000]) {
+    const local = localAt(sample);
+    const [localYear, localMonth, localDay] = local.dateKey.split("-").map(Number);
+    offsets.add(Date.UTC(localYear, localMonth - 1, localDay, local.hour, local.minute) - sample);
+  }
+  const candidates = [...offsets].map((offset) => wallClockUTC - offset).sort((a, b) => a - b);
+  const exact = candidates.find((timestamp) => {
+    const local = localAt(timestamp);
+    return local.dateKey === dateKey && local.hour === hour && local.minute === minute;
+  });
+  if (exact !== undefined) return new Date(exact);
+
+  // In a spring gap use the first representable local instant after the requested
+  // wall time. A wholly skipped local date has no occurrence.
+  if (candidates.length < 2) return null;
+  let low = Math.floor(candidates[0] / 60_000);
+  let high = Math.ceil(candidates.at(-1)! / 60_000);
+  const atOrAfter = (timestamp: number) => {
+    const local = localAt(timestamp);
+    return local.dateKey > dateKey || (local.dateKey === dateKey
+      && (local.hour > hour || (local.hour === hour && local.minute >= minute)));
+  };
+  if (atOrAfter(low * 60_000) || !atOrAfter(high * 60_000)) return null;
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (atOrAfter(middle * 60_000)) high = middle;
+    else low = middle;
+  }
+  return localAt(high * 60_000).dateKey === dateKey ? new Date(high * 60_000) : null;
+}
+
+/** A five-minute scheduler retains same-day late eligibility and carries an
+ * occurrence across local midnight for at most fifteen minutes. */
+export function getNewspaperDueOccurrence(params: {
+  now: Date;
+  schedule: NewspaperScheduleConfig;
+  cadence: Exclude<NewspaperCadence, "OFF">;
+}) {
+  const currentDateKey = getNewspaperLocalDateParts(params.now, params.schedule.timeZone).dateKey;
+  const [year, month, day] = currentDateKey.split("-").map(Number);
+  const previousDateKey = new Date(Date.UTC(year, month - 1, day - 1)).toISOString().slice(0, 10);
+  for (const dateKey of [previousDateKey, currentDateKey]) {
+    const weekday = (["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"] as const)[
+      new Date(`${dateKey}T12:00:00Z`).getUTCDay()
+    ];
+    if (params.cadence === "WEEKLY" && weekday !== params.schedule.weekday) continue;
+    const scheduledAt = newspaperScheduledInstant(dateKey, params.schedule.localTime, params.schedule.timeZone);
+    if (!scheduledAt || scheduledAt > params.now) continue;
+    if (dateKey !== currentDateKey && params.now.getTime() - scheduledAt.getTime() > 15 * 60_000) continue;
+    return { scheduledAt, dateKey, cadence: params.cadence };
+  }
+  return null;
 }
 
 export function isNewspaperScheduleDue(params: {

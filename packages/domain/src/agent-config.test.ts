@@ -588,3 +588,31 @@ describe("agent-config", () => {
     });
   });
 });
+
+describe("five-minute newspaper occurrence", () => {
+  const setting = (localTime: string, timeZone = "UTC", weekday = "MONDAY" as const) => ({
+    cadence: "DAILY" as const, weekday, localTime, timeZone,
+  });
+
+  it("carries the previous local date near midnight and preserves weekly eligibility", async () => {
+    const { getNewspaperDueOccurrence } = await import("./agent-config");
+    const now = new Date("2026-05-05T00:04:00Z");
+    expect(getNewspaperDueOccurrence({ now, schedule: setting("23:58"), cadence: "DAILY" })).toMatchObject({
+      dateKey: "2026-05-04", scheduledAt: new Date("2026-05-04T23:58:00Z"),
+    });
+    expect(getNewspaperDueOccurrence({ now, schedule: setting("23:58"), cadence: "WEEKLY" })?.dateKey).toBe("2026-05-04");
+    expect(getNewspaperDueOccurrence({ now: new Date("2026-05-05T00:20:00Z"), schedule: setting("23:58"), cadence: "DAILY" })).toBeNull();
+    expect(getNewspaperDueOccurrence({ now: new Date("2026-05-04T10:00:00Z"), schedule: setting("09:00"), cadence: "DAILY" })?.dateKey).toBe("2026-05-04");
+    expect(getNewspaperDueOccurrence({ now: new Date("2026-05-04T08:59:00Z"), schedule: setting("09:00"), cadence: "DAILY" })).toBeNull();
+  });
+
+  it("chooses the first repeated wall time and the first instant after a DST gap", async () => {
+    const { getNewspaperDueOccurrence } = await import("./agent-config");
+    expect(getNewspaperDueOccurrence({ now: new Date("2026-11-01T06:45:00Z"),
+      schedule: setting("01:30", "America/New_York"), cadence: "DAILY" })?.scheduledAt.toISOString()).toBe("2026-11-01T05:30:00.000Z");
+    expect(getNewspaperDueOccurrence({ now: new Date("2026-03-08T07:05:00Z"),
+      schedule: setting("02:30", "America/New_York"), cadence: "DAILY" })?.scheduledAt.toISOString()).toBe("2026-03-08T07:00:00.000Z");
+    expect(getNewspaperDueOccurrence({ now: new Date("2026-10-03T15:35:00Z"),
+      schedule: setting("02:15", "Australia/Lord_Howe"), cadence: "DAILY" })?.scheduledAt.toISOString()).toBe("2026-10-03T15:30:00.000Z");
+  });
+});

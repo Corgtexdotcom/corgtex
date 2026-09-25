@@ -8,6 +8,12 @@ export function parseWorkerExecutionMode(value = process.env.WORKER_EXECUTION_MO
   throw new Error("Invalid WORKER_EXECUTION_MODE");
 }
 
+export function parseSchedulerCadenceMinutes(value = process.env.WORKER_SCHEDULER_CADENCE_MINUTES): 1 | 5 {
+  if (value === undefined || value === "1") return 1;
+  if (value === "5") return 5;
+  throw new Error("Invalid WORKER_SCHEDULER_CADENCE_MINUTES");
+}
+
 export interface WorkerOperations {
   finalize: () => Promise<number>;
   dispatch: () => Promise<number>;

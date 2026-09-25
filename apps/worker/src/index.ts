@@ -8,12 +8,16 @@ import { dispatchPendingEvents, renderWorkflowJobMetrics, runPendingJobs, schedu
 import * as Sentry from "@sentry/node";
 import { getNextPollIntervalMs, getWorkerPollOutcome, type WorkerPollOutcome } from "./polling";
 
-import { assertSchedulerProofRelease, parseSchedulerProofNonce, parseWorkerExecutionMode, runWorkerCycle, schedulerCompletionReceipt, type WorkerOperations } from "./execution";
+import { assertSchedulerProofRelease, parseSchedulerCadenceMinutes, parseSchedulerProofNonce, parseWorkerExecutionMode, runWorkerCycle, schedulerCompletionReceipt, type WorkerOperations } from "./execution";
 import { createSchedulerLock, withSchedulerLock } from "./scheduler";
 
 // Validate before initializing telemetry, a health listener, or any database work.
 const executionMode = parseWorkerExecutionMode();
 const schedulerProofNonce = parseSchedulerProofNonce(process.env.WORKER_SCHEDULER_PROOF_NONCE);
+const schedulerCadenceMinutes = parseSchedulerCadenceMinutes();
+if (executionMode !== "scheduler-once" && process.env.WORKER_SCHEDULER_CADENCE_MINUTES !== undefined) {
+  throw new Error("Scheduler cadence is only valid for scheduler-once mode");
+}
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -71,10 +75,24 @@ function log(level: "info" | "warn" | "error", data: Record<string, unknown>) {
 }
 
 const operations: WorkerOperations = {
-  finalize: () => finalizeExpiredApprovalFlows(),
+  finalize: async () => {
+    if (executionMode !== "scheduler-once" || schedulerCadenceMinutes === 1) return finalizeExpiredApprovalFlows();
+    const deadline = Date.now() + 30_000;
+    let total = 0;
+    for (let batch = 0; batch < 5; batch += 1) {
+      const finalized = await finalizeExpiredApprovalFlows(25);
+      total += finalized;
+      if (finalized < 25) break;
+      if (batch === 4 || Date.now() >= deadline) {
+        log("warn", { event: "approval_expiry_backlog", finalized: total, batchLimit: 5 });
+        break;
+      }
+    }
+    return total;
+  },
   dispatch: () => dispatchPendingEvents(workerId, EVENT_BATCH_SIZE),
   process: () => runPendingJobs(workerId, JOB_BATCH_SIZE, JOB_CONCURRENCY),
-  daily: () => scheduleDailyJobs(),
+  daily: () => scheduleDailyJobs({ schedulerCadenceMinutes }),
   periodic: () => schedulePeriodicJobs(),
   drip: () => scheduleDripCampaigns(),
 };
