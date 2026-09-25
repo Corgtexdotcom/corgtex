@@ -1,6 +1,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { ACCESS_SQL, captureSharedPostgresAccess } from "./probe-shared-postgres-access.mjs";
+import { ACCESS_SQL, captureSharedPostgresAccess, trialDisabledQueryCapture } from "./probe-shared-postgres-access.mjs";
+import { AZURE_RUNTIME_ACCESS_SETTINGS } from "./ops-core-postgres-runtime-access.mjs";
 import { HOST, RESOURCE, SQL as metadataSql } from "./probe-ops-azure-target.mjs";
 
 const databases = ["azure_maintenance", "azure_sys", "corgtex", "postgres"].map((name, index) => ({
@@ -140,4 +141,34 @@ test("provider catalog names are quoted as identifiers before the bounded row ch
     'SELECT EXISTS(SELECT 1 FROM "query_store"."runtime""stats" LIMIT 1) AS "hasRows"'));
   assert.equal(receipt.providerDatabases.find(row => row.name === "azure_sys").publicRelationRows[1].name,
     'runtime"stats');
+});
+
+test("guarded capture trial waits beyond Azure persistence and rejects history or setting drift", async () => {
+  const settings = { ...AZURE_RUNTIME_ACCESS_SETTINGS, "pg_qs.track_utility": "on",
+    "pg_qs.interval_length_minutes": "15" };
+  const receipt = () => ({ status: "SHARED_POSTGRES_ACCESS_CAPTURED", readonlyGuards: true,
+    rollback: true, disconnected: true,
+    effectiveSettings: Object.entries(settings).map(([name, setting]) => ({ name, setting, pendingRestart: false })),
+    azureParameters: Object.entries(settings).map(([name, value]) => ({ name, value })),
+    providerDatabases: [{ name: "azure_sys", queryStore: ["query_texts_view", "qs_view", "query_plans_view",
+      "pgms_wait_sampling_view"].map(name => ({ view: `query_store.${name}`, present: true, readable: true, hasRows: false })) }] });
+  let time = 1000000000, synthetic = 0, recaptures = 0;
+  const args = { baseline: receipt(), deadline: time + 30 * 60 * 1000, now: () => time,
+    executeSynthetic: async () => { synthetic++; },
+    wait: async ms => { time += ms; },
+    recapture: async () => { recaptures++; return receipt(); } };
+  const result = await trialDisabledQueryCapture(args);
+  assert.equal(result.status, "QUERY_STORE_CAPTURE_TRIAL_PASS");
+  assert.equal(result.waitMs, 21 * 60 * 1000);
+  assert.equal(synthetic, 1); assert.equal(recaptures, 1);
+  args.deadline = time + 30 * 60 * 1000;
+  await assert.rejects(trialDisabledQueryCapture({ ...args, wait: async () => {} }),
+    { code: "CAPTURE_TRIAL_WAIT_UNPROVEN" });
+  args.recapture = async () => { const after = receipt(); after.providerDatabases[0].queryStore[0].hasRows = true; return after; };
+  args.deadline = time + 30 * 60 * 1000;
+  await assert.rejects(trialDisabledQueryCapture(args), { code: "CAPTURE_TRIAL_HISTORY_PRESENT" });
+  args.baseline = receipt(); args.baseline.azureParameters.find(row => row.name === "pg_qs.query_capture_mode").value = "all";
+  await assert.rejects(trialDisabledQueryCapture(args), { code: "CAPTURE_TRIAL_SETTINGS_UNSAFE" });
+  args.baseline = receipt(); args.baseline.azureParameters.find(row => row.name === "pg_qs.interval_length_minutes").value = "30";
+  await assert.rejects(trialDisabledQueryCapture(args), { code: "CAPTURE_TRIAL_SETTINGS_UNSAFE" });
 });

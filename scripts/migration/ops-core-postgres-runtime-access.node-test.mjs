@@ -221,6 +221,8 @@ test("Azure utility tracking exception requires explicit policy and disabled cap
   f.options.plan.policy.queryStoreUtilityTracking="capture-disabled-provider-on";
   f.azureSettings["pg_qs.track_utility"]="on";
   f.azureParameters["pg_qs.track_utility"]="on";
+  f.azureSettings["pg_qs.interval_length_minutes"]="15";
+  f.azureParameters["pg_qs.interval_length_minutes"]="15";
   const intent=await preparePostgresRuntimeAccess(f.options);
   assert.equal((await applyPostgresRuntimeAccess({...f.options,intent})).status,"APPLIED");
   assert.equal((await monitorPostgresRuntimeAccessDrift({...f.options,intent,
@@ -232,6 +234,10 @@ test("Azure utility tracking exception requires explicit policy and disabled cap
       expectedAfter:f.records.expectedAfter}),{code:"RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH"},name);
     f.azureParameters[name]=AZURE_RUNTIME_ACCESS_SETTINGS[name];
   }
+  f.azureParameters["pg_qs.interval_length_minutes"]="30";
+  await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,
+    expectedAfter:f.records.expectedAfter}),{code:"RUNTIME_ACCESS_AZURE_PARAMETER_MISMATCH"});
+  f.azureParameters["pg_qs.interval_length_minutes"]="15";
   f.historicalQueryRows=true;
   await assert.rejects(monitorPostgresRuntimeAccessDrift({...f.options,intent,
     expectedAfter:f.records.expectedAfter}),{code:"RUNTIME_ACCESS_AZURE_QUERY_HISTORY_PRESENT"});
@@ -244,6 +250,8 @@ test("Azure utility tracking exception rejects unknown opt-in and mismatched eff
     {code:"RUNTIME_ACCESS_POLICY_INVALID"});
   f.options.plan.policy.queryStoreUtilityTracking="capture-disabled-provider-on";
   f.azureParameters["pg_qs.track_utility"]="on";
+  f.azureSettings["pg_qs.interval_length_minutes"]="15";
+  f.azureParameters["pg_qs.interval_length_minutes"]="15";
   await assert.rejects(preparePostgresRuntimeAccess(f.options),
     {code:"RUNTIME_ACCESS_AZURE_LOGGING_UNSAFE"});
 });

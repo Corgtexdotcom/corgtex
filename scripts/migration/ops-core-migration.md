@@ -89,11 +89,19 @@ An explicit `queryStoreUtilityTracking:"capture-disabled-provider-on"` in the
 version 2 policy admits only that observed `on` value. It still requires
 `pg_qs.query_capture_mode=none`, `pg_qs.store_query_plans=off`,
 `pgms_wait_sampling.query_capture_mode=none`, empty named Query Store views,
-and all other logging safeguards. Without the opt-in, `off` remains required.
+`pg_qs.interval_length_minutes=15`, and all other logging safeguards. Without
+the opt-in, `off` remains required.
 The policy is frozen into the plan; drift to either a different setting or
 nonempty history fails admission or monitoring. This exception should be used
 only after a synthetic capture trial on the intended Azure target, allowing for
 the [up to 20-minute persistence delay](https://learn.microsoft.com/en-us/azure/postgresql/monitor/concepts-query-store).
+The protected `qualify-capture` operation verifies a read-write session, runs
+only `EXPLAIN (COSTS OFF) SELECT 1` and `SELECT 1` against the rehearsal server,
+waits 21 minutes beyond the pinned 15-minute persistence interval, and repeats the
+parameter and named Query Store view readback. It records a private trial receipt
+only when the settings remain exact and all views remain empty. It uses the same
+stopped-server baseline, single-IP access, cleanup, and recovery path as
+`qualify-access`; no application database or customer rows are touched.
 The profile checks Azure server parameters and effective PostgreSQL settings with no
 pending restart before credential SQL and around commit. Parameter changes
 are a separate controlled operation; any mismatch fails closed. After

@@ -5,7 +5,7 @@ import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readF
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { RESOURCE, HOST, ProbeError, connectionConfig, captureWhenReady, sanitize } from "./probe-ops-azure-target.mjs";
+import { RESOURCE, HOST, OPTIONS, ProbeError, connectionConfig, captureWhenReady, sanitize } from "./probe-ops-azure-target.mjs";
 import { validateRehearsalPrincipal } from "./validate-postgres-restore-rehearsal.mjs";
 
 import { createRehearsalAuthorityGuard } from "./rehearsal-authority.mjs";
@@ -26,9 +26,18 @@ export const firewallName = (run, attempt) => `corgtex-target-qualification-${ru
 export const validIp = (ip) => isIP(ip) === 4 && !/^(?:0|10|127|169\.254|192\.168|172\.(?:1[6-9]|2\d|3[01]))\./u.test(ip)
   && Number(ip.split(".")[0]) < 224;
 
+export function captureTrialClientConfig(config) {
+  assert(config?.options === OPTIONS && OPTIONS.startsWith("-c default_transaction_read_only=on "),
+    "CAPTURE_TRIAL_CONFIG_INVALID");
+  return { ...config, options: OPTIONS.replace("-c default_transaction_read_only=on ",
+    "-c default_transaction_read_only=off ") };
+}
+
 export function validateEnvironment(env, recovery = false) {
   assert(env.GITHUB_REF === "refs/heads/main" && env.DOMAIN === "ops", "PROTECTED_INPUT_MISMATCH");
   assert(env.QUALIFY_ACCESS === undefined || ["true", "false"].includes(env.QUALIFY_ACCESS), "PROTECTED_INPUT_MISMATCH");
+  assert(env.QUALIFY_CAPTURE_TRIAL === undefined || ["true", "false"].includes(env.QUALIFY_CAPTURE_TRIAL), "PROTECTED_INPUT_MISMATCH");
+  assert(env.QUALIFY_CAPTURE_TRIAL !== "true" || env.QUALIFY_ACCESS === "true", "PROTECTED_INPUT_MISMATCH");
   assert(env.AZURE_SUBSCRIPTION_ID === SUBSCRIPTION && env.AZURE_TENANT_ID === TENANT
     && digest(String(env.AZURE_CLIENT_ID).toLowerCase()) === "707be00bd89b2c0cf1ebdf8c0d389ff24b5f69d9f2ba35a113cddf8f073296bf", "AZURE_IDENTITY_MISMATCH");
   assert(numeric(env.GITHUB_RUN_ID) && numeric(env.GITHUB_RUN_ATTEMPT), "RUN_IDENTITY_MISMATCH");
@@ -394,33 +403,70 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   if (mode === "run") {
     const config = await connectionConfig(env);
     const { default: pg } = await import("pg");
-    let accessReceipt;
+    let accessReceipt, captureTrialReceipt;
     const result = await qualify(api, i, async (options) => {
       const metadata = await captureWhenReady(() => new pg.Client(config), options);
       if (env.QUALIFY_ACCESS === "true") {
-        const { ACCESS_SETTING_NAMES, captureSharedPostgresAccess } = await import("./probe-shared-postgres-access.mjs");
-        const parameterRows = await api.call(["postgres", "flexible-server", "parameter", "list",
-          "--resource-group", GROUP, "--server-name", SERVER]);
-        assert(Array.isArray(parameterRows) && parameterRows.length <= 1000, "ACCESS_PARAMETER_READ_INVALID");
+        const { ACCESS_SETTING_NAMES, captureSharedPostgresAccess, trialDisabledQueryCapture } = await import("./probe-shared-postgres-access.mjs");
         const parameterNames = new Set(ACCESS_SETTING_NAMES);
-        const azureParameters = parameterRows.filter(row => parameterNames.has(row?.name))
-          .map(row => ({ name: row.name, value: String(row.value ?? ""),
-            source: row.source ?? null, defaultValue: String(row.defaultValue ?? ""),
-            pendingRestart: row.isConfigPendingRestart ?? null,
-            allowedValues: row.allowedValues ?? null, dataType: row.dataType ?? null,
-            readOnly: row.isReadOnly ?? null, dynamic: row.isDynamicConfig ?? null }));
-        assert(Buffer.byteLength(JSON.stringify(azureParameters)) <= 16000, "ACCESS_PARAMETER_LIMIT");
+        const readAccessParameters = async () => {
+          const rows = await api.call(["postgres", "flexible-server", "parameter", "list",
+            "--resource-group", GROUP, "--server-name", SERVER]);
+          assert(Array.isArray(rows) && rows.length <= 1000, "ACCESS_PARAMETER_READ_INVALID");
+          const parameters = rows.filter(row => parameterNames.has(row?.name))
+            .map(row => ({ name: row.name, value: String(row.value ?? ""),
+              source: row.source ?? null, defaultValue: String(row.defaultValue ?? ""),
+              pendingRestart: row.isConfigPendingRestart ?? null,
+              allowedValues: row.allowedValues ?? null, dataType: row.dataType ?? null,
+              readOnly: row.isReadOnly ?? null, dynamic: row.isDynamicConfig ?? null }));
+          assert(Buffer.byteLength(JSON.stringify(parameters)) <= 16000, "ACCESS_PARAMETER_LIMIT");
+          return parameters;
+        };
+        const azureParameters = await readAccessParameters();
         const remainingMs = Math.min(120000, options.deadline - Date.now() - 3000);
         assert(remainingMs > 0, "ACCESS_DEADLINE");
         accessReceipt = await captureSharedPostgresAccess(new pg.Client(config), { deadlineMs: remainingMs,
           azureParameters, providerClientFactory: database => new pg.Client({ ...config, database }) });
+        if (env.QUALIFY_CAPTURE_TRIAL === "true") {
+          save(`${dir}/shared-postgres-access.json`, accessReceipt);
+          captureTrialReceipt = await trialDisabledQueryCapture({ baseline: accessReceipt,
+            deadline: options.deadline, wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+            executeSynthetic: async () => {
+              const syntheticConfig = captureTrialClientConfig(config);
+              const client = new pg.Client(syntheticConfig);
+              try {
+                await client.connect();
+                assert(client.connection?.stream?.encrypted === true && client.connection.stream.authorized === true
+                  && client.connectionParameters?.host === HOST && client.connectionParameters?.database === "postgres"
+                  && client.connectionParameters?.user === "corgtexadmin"
+                  && client.connectionParameters?.options === syntheticConfig.options, "CAPTURE_TRIAL_TLS_INVALID");
+                const identity = (await client.query(`SELECT current_database() AS database, session_user AS "user",
+                  current_setting('default_transaction_read_only') AS default_ro,
+                  current_setting('transaction_read_only') AS ro`)).rows[0];
+                assert(identity?.database === "postgres" && identity.user === "corgtexadmin"
+                  && identity.default_ro === "off" && identity.ro === "off", "CAPTURE_TRIAL_IDENTITY_INVALID");
+                await client.query("EXPLAIN (COSTS OFF) SELECT 1");
+                await client.query("SELECT 1");
+              } finally { await client.end().catch(() => {}); }
+            },
+            recapture: async () => {
+              const after = await captureSharedPostgresAccess(new pg.Client(config), {
+                deadlineMs: Math.min(120000, options.deadline - Date.now() - 3000),
+                azureParameters: await readAccessParameters(),
+                providerClientFactory: database => new pg.Client({ ...config, database }) });
+              save(`${dir}/shared-postgres-access-after-trial.json`, after);
+              return after;
+            },
+          });
+          save(`${dir}/query-store-capture-trial.json`, captureTrialReceipt);
+        }
       }
       return metadata;
     }, () => save(`${dir}/start-attempt.json`, { runId: i.runId, runAttempt: i.runAttempt }));
     save(`${dir}/metadata.json`, result); console.log(JSON.stringify({ status: result.status, comparison: result.comparison }));
     if (env.QUALIFY_ACCESS === "true") {
       assert(accessReceipt?.status === "SHARED_POSTGRES_ACCESS_CAPTURED", "ACCESS_RECEIPT_MISSING");
-      save(`${dir}/shared-postgres-access.json`, accessReceipt);
+      if (!existsSync(`${dir}/shared-postgres-access.json`)) save(`${dir}/shared-postgres-access.json`, accessReceipt);
       console.log(JSON.stringify({ status: accessReceipt.status, databaseCount: accessReceipt.databases.length,
         settingFailures: accessReceipt.settingResults.filter(row => !row.accepted).length }));
     }

@@ -208,7 +208,7 @@ export const AZURE_RUNTIME_ACCESS_SETTINGS = Object.freeze({ ...RUNTIME_ACCESS_S
   "pgms_wait_sampling.query_capture_mode": "none" });
 function azureRuntimeAccessSettings(policy) {
   return policy.queryStoreUtilityTracking === "capture-disabled-provider-on"
-    ? { ...AZURE_RUNTIME_ACCESS_SETTINGS, "pg_qs.track_utility": "on" }
+    ? { ...AZURE_RUNTIME_ACCESS_SETTINGS, "pg_qs.track_utility": "on", "pg_qs.interval_length_minutes": "15" }
     : AZURE_RUNTIME_ACCESS_SETTINGS;
 }
 async function assertAzureLoggingProfile(client, policy, readAzureParameters, inspectAzureQueryStore) {
