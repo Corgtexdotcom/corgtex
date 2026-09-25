@@ -172,12 +172,16 @@ switching an existing staging runtime:
    this probe succeeds, use `operation=probe-migration-schema` with the same
    digest and all deploy, migration and smoke flags false. It starts one
    command-overridden execution against the exact staging PostgreSQL host and
-   database. The configured `DATABASE_URL` must pin `schema=public`,
-   `sslmode=require`, and `sslaccept=strict`, with no socket override; a weaker
-   URL fails before Prisma connects. It opens a read-only transaction and reports whether the additive
+   database. The configured `DATABASE_URL` must pin `schema=public` and
+   `sslmode=require`, with no socket override. If `sslaccept=strict` is absent,
+   this execution adds it only to its in-memory URL before loading Prisma;
+   any other `sslaccept` value fails before connection. The log distinguishes
+   `tls=PROBE_ONLY_STRICT` from `tls=CONFIGURED_STRICT`. The probe opens a read-only transaction and reports whether the additive
    migration ledger and four shared-state tables are consistently absent or
    present. Inspect the exact execution log for `SCHEMA_PROBE_PASS` and its
    state. This checks schema state, not writer custody or runtime capacity.
+   A probe-only strict URL does not prepare the saved migration job for SQL:
+   require a separately verified strict `DATABASE_URL` before `run-migration`.
    Then use a separate protected `operation=run-migration` run
    with `run_migration_job=true`, both deploy flags false, and the same digest.
    That run applies the additive schema without rebuilding the image or

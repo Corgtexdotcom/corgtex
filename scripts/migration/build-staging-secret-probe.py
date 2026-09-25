@@ -27,11 +27,19 @@ const rawUrl = process.env.DATABASE_URL;
 let url;
 try { url = new URL(rawUrl); } catch { throw new Error('TARGET_URL_INVALID'); }
 const queryKeys = [...url.searchParams.keys()].sort().join(',');
+const configuredStrict = url.searchParams.has('sslaccept');
 if (url.protocol !== 'postgresql:' || url.hostname !== allowedHost || url.pathname !== '/corgtex'
-  || (url.port !== '' && url.port !== '5432') || queryKeys !== 'schema,sslaccept,sslmode'
+  || (url.port !== '' && url.port !== '5432') || rawUrl.includes('#')
+  || !['schema,sslmode', 'schema,sslaccept,sslmode'].includes(queryKeys)
   || url.searchParams.get('schema') !== 'public' || url.searchParams.get('sslmode') !== 'require'
-  || url.searchParams.get('sslaccept') !== 'strict') {
+  || (configuredStrict && url.searchParams.get('sslaccept') !== 'strict')) {
   throw new Error('TARGET_MISMATCH');
+}
+// This execution alone gets strict certificate validation. The saved shared secret
+// and the migration job template are not changed by the read-only probe.
+if (!configuredStrict) {
+  url.searchParams.set('sslaccept', 'strict');
+  process.env.DATABASE_URL = url.toString();
 }
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
@@ -58,7 +66,8 @@ async function run() {
     const unapplied = ledger.total === 0 && flags.every((flag) => flag === false);
     const applied = ledger.total === 1 && ledger.finished === 1 && flags.every((flag) => flag === true);
     if (!unapplied && !applied) throw new Error('INCONSISTENT_SCHEMA');
-    console.log('SCHEMA_PROBE_PASS state=' + (applied ? 'APPLIED' : 'NOT_APPLIED'));
+    console.log('SCHEMA_PROBE_PASS state=' + (applied ? 'APPLIED' : 'NOT_APPLIED')
+      + ' tls=' + (configuredStrict ? 'CONFIGURED_STRICT' : 'PROBE_ONLY_STRICT'));
   } finally {
     await prisma.$disconnect();
   }

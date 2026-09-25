@@ -135,6 +135,13 @@ class BuildStagingSecretProbeTests(unittest.TestCase):
         fake_client = r"""
 let readOnly = false;
 module.exports.PrismaClient = class {
+  constructor() {
+    const url = new URL(process.env.DATABASE_URL);
+    if ([...url.searchParams.keys()].sort().join(',') !== 'schema,sslaccept,sslmode'
+      || url.searchParams.get('sslaccept') !== 'strict') throw new Error('Prisma saw a weak URL');
+    if (process.env.EXPECT_ENCODED_PASSWORD && url.password !== process.env.EXPECT_ENCODED_PASSWORD)
+      throw new Error('Prisma saw a changed password');
+  }
   async $transaction(work) {
     return work({
       $executeRawUnsafe: async (sql) => {
@@ -158,26 +165,36 @@ module.exports.PrismaClient = class {
             package = Path(directory, "@prisma", "client")
             package.mkdir(parents=True)
             (package / "index.js").write_text(fake_client, encoding="utf-8")
-            for state, code, marker in (
-                ("unapplied", 0, "SCHEMA_PROBE_PASS state=NOT_APPLIED"),
-                ("applied", 0, "SCHEMA_PROBE_PASS state=APPLIED"),
-                ("partial", 1, "SCHEMA_PROBE_FAILED code=INCONSISTENT_SCHEMA"),
+            for state, suffix, code, marker in (
+                ("unapplied", "&sslaccept=strict", 0, "SCHEMA_PROBE_PASS state=NOT_APPLIED tls=CONFIGURED_STRICT"),
+                ("applied", "&sslaccept=strict", 0, "SCHEMA_PROBE_PASS state=APPLIED tls=CONFIGURED_STRICT"),
+                ("applied", "", 0, "SCHEMA_PROBE_PASS state=APPLIED tls=PROBE_ONLY_STRICT"),
+                ("partial", "", 1, "SCHEMA_PROBE_FAILED code=INCONSISTENT_SCHEMA"),
             ):
-                with self.subTest(state=state):
+                with self.subTest(state=state, suffix=suffix):
                     env = {**os.environ, "NODE_PATH": directory, "FAKE_SCHEMA_STATE": state,
-                           "DATABASE_URL": "postgresql://probe:local-only@corgtex-ss-stg-pg.postgres.database.azure.com/corgtex?schema=public&sslmode=require&sslaccept=strict"}
+                           "DATABASE_URL": "postgresql://probe:local-only@corgtex-ss-stg-pg.postgres.database.azure.com/corgtex?schema=public&sslmode=require" + suffix}
                     result = subprocess.run(["node", "-e", MODULE.SCHEMA_PROBE_SCRIPT],
                                             cwd=directory, env=env, text=True, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, code)
                     self.assertIn(marker, result.stdout + result.stderr)
+            escaped = {**os.environ, "NODE_PATH": directory, "FAKE_SCHEMA_STATE": "applied",
+                       "EXPECT_ENCODED_PASSWORD": "local%23only",
+                       "DATABASE_URL": "postgresql://probe:local%23only@corgtex-ss-stg-pg.postgres.database.azure.com/corgtex?schema=public&sslmode=require"}
+            escaped_result = subprocess.run(["node", "-e", MODULE.SCHEMA_PROBE_SCRIPT],
+                                            cwd=directory, env=escaped, text=True, capture_output=True, timeout=10)
+            self.assertEqual(escaped_result.returncode, 0)
+            self.assertIn("SCHEMA_PROBE_PASS state=APPLIED tls=PROBE_ONLY_STRICT", escaped_result.stdout)
             base = "postgresql://probe:local-only@corgtex-ss-stg-pg.postgres.database.azure.com"
             for target in (
                 base + ":5433/corgtex?schema=public&sslmode=require&sslaccept=strict",
                 base + "/corgtex?schema=foreign&sslmode=require&sslaccept=strict",
                 base + "/corgtex?schema=public&sslmode=disable&sslaccept=strict",
-                base + "/corgtex?schema=public&sslmode=require",
                 base + "/corgtex?schema=public&sslmode=require&sslaccept=accept_invalid_certs",
                 base + "/corgtex?schema=public&sslmode=require&sslaccept=strict&host=/tmp/foreign-db",
+                base + "/corgtex?schema=public&sslmode=require&sslaccept=strict#ignored",
+                base + "/corgtex?schema=public&sslmode=require#",
+                base + "/corgtex?schema=public&sslmode=require&schema=public",
             ):
                 with self.subTest(target=target.split("?")[-1]):
                     env = {**os.environ, "NODE_PATH": directory, "FAKE_SCHEMA_STATE": "applied",
