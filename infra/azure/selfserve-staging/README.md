@@ -163,8 +163,14 @@ switching an existing staging runtime:
    its image and retained configuration. The comparison treats the Azure CLI's
    empty `value` beside an unchanged `secretRef` as equivalent to an omitted
    `value`; all other job settings must match. Use a separate protected
-   `operation=run-migration` run with `run_migration_job=true`, both deploy flags
-   false, and `expected_migration_image` set to the verified digest reference.
+   `operation=probe-migration-secrets` run with `run_migration_job=false`, both
+   deploy flags false, `shared_state_backend=redis`, and `expected_migration_image`
+   set to that digest. The protected probe starts one execution with the pinned
+   image and a command override that checks required secret values are nonempty without
+   connecting to PostgreSQL or running migrations. It preserves the saved job
+   definition and retains an invalid startup mode as an entrypoint guard. After
+   this probe succeeds, use a separate protected `operation=run-migration` run
+   with `run_migration_job=true`, both deploy flags false, and the same digest.
    That run applies the additive schema without rebuilding the image or
    switching consumers. Verify the migration, then preview and deploy
    `deploy_container_apps=true`, `prepare_migration_job=false`, and

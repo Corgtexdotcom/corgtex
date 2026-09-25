@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "what-if previews, deploy applies, run-migration executes a verified image."
+        description: "Preview, deploy, probe staged secrets, or execute a verified migration image."
         required: true
         type: choice
         default: what-if
         options:
           - what-if
           - deploy
+          - probe-migration-secrets
           - run-migration
       resource_group:
         description: "Azure resource group for staging."
@@ -47,7 +48,7 @@ on:
         type: boolean
         default: false
       expected_migration_image:
-        description: "Exact ACR image digest reference verified after prepare; required for run-migration."
+        description: "Exact prepared ACR image digest; required for secret probe and run-migration."
         required: false
         type: string
         default: ""
@@ -293,12 +294,20 @@ jobs:
             echo "::error::run-migration requires only run_migration_job=true; prepare and app deployment must be separate."
             exit 1
           fi
+          if [[ "$OPERATION" == "probe-migration-secrets" && ( "$RUN_MIGRATION_JOB" == "true" || "$PREPARE_MIGRATION_JOB" == "true" || "$DEPLOY_CONTAINER_APPS" == "true" || "$RUN_HEALTH_SMOKE" == "true" || "$RUN_BROWSER_SMOKE" == "true" || "$SHARED_STATE_BACKEND" != "redis" ) ]]; then
+            echo "::error::The migration secret probe requires redis and all deploy, migration, and smoke flags false."
+            exit 1
+          fi
+          if [[ "$OPERATION" == "probe-migration-secrets" && ( "$RESOURCE_GROUP" != "rg-corgtex-selfserve-staging-wus3" || "$LOCATION" != "westus3" || "$NAME_PREFIX" != "corgtex-ss-stg" ) ]]; then
+            echo "::error::The migration secret probe is limited to the pinned staging resource group and job."
+            exit 1
+          fi
           if [[ "$RUN_MIGRATION_JOB" == "true" && "$SHARED_STATE_BACKEND" != "redis" ]]; then
             echo "::error::Run the migration with shared_state_backend=redis, then deploy postgres in a separate run after verifying the migration."
             exit 1
           fi
-          if [[ "$RUN_MIGRATION_JOB" == "true" && ! "$EXPECTED_MIGRATION_IMAGE" =~ ^[^[:space:]]+/corgtex/web@sha256:[a-f0-9]{64}$ ]]; then
-            echo "::error::run-migration requires the exact prepared ACR image digest reference."
+          if [[ ( "$OPERATION" == "probe-migration-secrets" || "$RUN_MIGRATION_JOB" == "true" ) && ! "$EXPECTED_MIGRATION_IMAGE" =~ ^[^[:space:]]+/corgtex/web@sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::The migration secret probe and run-migration require the exact prepared ACR image digest reference."
             exit 1
           fi
 
@@ -372,7 +381,7 @@ jobs:
           echo "release_version=${GITHUB_REF_NAME}-${GITHUB_SHA:0:12}" >> "$GITHUB_ENV"
 
       - name: Verify prepared migration image for execution
-        if: ${{ inputs.operation == 'run-migration' }}
+        if: ${{ inputs.operation == 'run-migration' || inputs.operation == 'probe-migration-secrets' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -387,6 +396,71 @@ jobs:
             exit 1
           fi
           echo "Verified migration image: ${current_image}"
+
+      - name: Probe staged migration secret references without SQL
+        if: ${{ inputs.operation == 'probe-migration-secrets' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_name="caj-${NAME_PREFIX}-migrate"
+          job_json="$(mktemp)"
+          request_json="$(mktemp)"
+          execution_json="$(mktemp)"
+          execution_name=""
+          probe_succeeded=false
+          cleanup_probe() {
+            if [[ "$probe_succeeded" != "true" && -n "$execution_name" ]]; then
+              echo "::warning::Stopping the exact staging secret probe execution after an unverified result."
+              az containerapp job stop --resource-group "$RESOURCE_GROUP" --name "$job_name" \
+                --job-execution-name "$execution_name" --output none || echo "::error::Exact secret probe stop needs operator reconciliation."
+            fi
+            rm -f "$job_json" "$request_json" "$execution_json"
+          }
+          trap cleanup_probe EXIT
+          job_id="$(az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" --query id --output tsv)"
+          az containerapp job show --resource-group "$RESOURCE_GROUP" --name "$job_name" \
+            --query '{template:properties.template,registries:properties.configuration.registries}' --output json > "$job_json"
+          python3 scripts/migration/build-staging-secret-probe.py build "$job_json" "$EXPECTED_MIGRATION_IMAGE" "$request_json"
+          execution_name="$(python3 scripts/migration/start-staging-secret-probe.py \
+            "$job_id" "$job_name" "$request_json")"
+          if [[ ! "$execution_name" == "${job_name}-"* ]]; then
+            echo "::error::Secret probe start outcome is indeterminate; inspect job executions before any retry."
+            exit 1
+          fi
+          echo "Secret probe execution: ${execution_name}"
+          execution_found=false
+          for attempt in {1..12}; do
+            if az containerapp job execution show --resource-group "$RESOURCE_GROUP" --name "$job_name" \
+              --job-execution-name "$execution_name" --query '{template:properties.template,status:properties.status}' \
+              --output json > "$execution_json" 2>/dev/null; then
+              execution_found=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$execution_found" != "true" ]] || ! python3 scripts/migration/build-staging-secret-probe.py verify "$execution_json" "$request_json"; then
+            echo "::error::Secret probe execution template is unverified."
+            exit 1
+          fi
+          deadline=$((SECONDS + 600))
+          while (( SECONDS < deadline )); do
+            status="$(az containerapp job execution show --resource-group "$RESOURCE_GROUP" --name "$job_name" \
+              --job-execution-name "$execution_name" --query properties.status --output tsv)"
+            case "$status" in
+              Succeeded)
+                echo "Staging migration secret references resolved with the pinned image; no migration SQL ran."
+                probe_succeeded=true
+                exit 0
+                ;;
+              Failed|Canceled)
+                echo "::error::Secret probe execution ended with status $status."
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Secret probe did not finish within ten minutes."
+          exit 1
 
       - name: Preview existing migration job image only
         if: ${{ inputs.prepare_migration_job && !inputs.deploy_container_apps }}
@@ -471,7 +545,7 @@ jobs:
           fi
 
       - name: Preview Azure deployment
-        if: ${{ inputs.operation != 'run-migration' && (!inputs.prepare_migration_job || inputs.deploy_container_apps) }}
+        if: ${{ (inputs.operation == 'what-if' || inputs.operation == 'deploy') && (!inputs.prepare_migration_job || inputs.deploy_container_apps) }}
         shell: bash
         run: |
           set -euo pipefail
