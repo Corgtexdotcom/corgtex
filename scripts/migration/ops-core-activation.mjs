@@ -71,7 +71,7 @@ export function validateOpsCoreActivationPlan(input) {
       requireValue(e.secretRef ? names.has(e.secretRef) : typeof e.value === "string" && e.value.length <= 8192
         && !/(?:SECRET|PASSWORD|TOKEN|API_KEY|ENCRYPTION_KEY|DATABASE_URL|REDIS_URL)/.test(e.name), "ACTIVATION_ENV_INVALID");
     }
-    if (p.workerDemand) requireValue(!r.env.some(e => e.name === "WORKER_SCHEDULER_PROOF_NONCE"
+    if (p.workerDemand) requireValue(!r.env.some(e => e.name === "WORKER_SCHEDULER_PROOF_NONCE" || e.name === "WORKER_SCHEDULER_CADENCE_MINUTES"
       || e.secretRef === p.workerDemand.scalerConnectionSecret.name)
       && !r.secrets.some(e => e.name === p.workerDemand.scalerConnectionSecret.name
         || e.keyVaultUrl === p.workerDemand.scalerConnectionSecret.keyVaultUrl), "ACTIVATION_DEMAND_SECRET_INVALID");

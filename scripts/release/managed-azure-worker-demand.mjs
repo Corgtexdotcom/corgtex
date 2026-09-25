@@ -13,11 +13,14 @@ const sameId = (a, b) => typeof a === "string" && typeof b === "string" && a.toL
 class DemandError extends Error {}
 const need = (v, code) => { if (!v) throw new DemandError(code); };
 export const managedAzureWorkerDemandDiagnostic = e => e instanceof DemandError ? e.message : null;
+const schedulerCadence = demand => Object.hasOwn(demand, "schedulerCadenceMinutes") ? demand.schedulerCadenceMinutes : 1;
+const schedulerCron = cadence => cadence === 5 ? "*/5 * * * *" : "* * * * *";
 
 export function validateManagedAzureWorkerDemand(value, target, context = {}) {
   const p = structuredClone(value);
   const identityPrefix = `/subscriptions/${target.subscriptionId}/resourceGroups/${target.resourceGroupName}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/`;
-  need(exact(p, "schedulerJobName,scalerConnectionSecret,schedulerResources") && /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(p.schedulerJobName)
+  need(exact(p, `schedulerJobName,scalerConnectionSecret,schedulerResources${Object.hasOwn(p ?? {}, "schedulerCadenceMinutes") ? ",schedulerCadenceMinutes" : ""}`)
+    && [1, 5].includes(schedulerCadence(p)) && /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(p.schedulerJobName)
     && !p.schedulerJobName.includes("--") && !Object.values(target.apps).includes(p.schedulerJobName), "WORKER_DEMAND_PLAN_INVALID");
   need(exact(p.schedulerResources, "cpu,memory") && Number.isFinite(p.schedulerResources.cpu)
     && p.schedulerResources.cpu >= 0.25 && p.schedulerResources.cpu <= 4 && Number.isInteger(p.schedulerResources.cpu * 4)
@@ -52,7 +55,8 @@ export function assertManagedAzureWorkerDemandApp(app, demand, target) {
     && (!container.command || container.command.length === 0) && (!container.args || container.args.length === 0)
     && container.env?.filter(e => e.name === "WORKER_EXECUTION_MODE").length === 1
     && container.env.find(e => e.name === "WORKER_EXECUTION_MODE").value === "queue-only"
-    && !container.env.some(e => e.name === "WORKER_SCHEDULER_PROOF_NONCE" || e.secretRef === demand.scalerConnectionSecret.name), "WORKER_DEMAND_APP_DRIFT");
+    && !container.env.some(e => e.name === "WORKER_SCHEDULER_PROOF_NONCE"
+      || e.name === "WORKER_SCHEDULER_CADENCE_MINUTES" || e.secretRef === demand.scalerConnectionSecret.name), "WORKER_DEMAND_APP_DRIFT");
   const scaler = c.secrets?.filter(s => s.name === demand.scalerConnectionSecret.name);
   need(scaler?.length === 1 && same({ name: scaler[0].name, keyVaultUrl: scaler[0].keyVaultUrl, identity: scaler[0].identity }, demand.scalerConnectionSecret)
     && scaler[0].value == null, "WORKER_DEMAND_SCALER_SECRET_DRIFT");
@@ -70,12 +74,13 @@ export function buildManagedAzureSchedulerJob({ workerApp, demand, target, trigg
   runtime.resources = structuredClone(demand.schedulerResources);
   delete runtime.probes;
   runtime.env = runtime.env.map(e => e.name === "WORKER_EXECUTION_MODE" ? { name: e.name, value: "scheduler-once" } : e);
+  if (schedulerCadence(demand) === 5) runtime.env.push({ name: "WORKER_SCHEDULER_CADENCE_MINUTES", value: "5" });
   return { location: workerApp.location,
     identity: { type: "UserAssigned", userAssignedIdentities: { [demand.scalerConnectionSecret.identity]: {} } },
     properties: { environmentId: target.environmentId, workloadProfileName: "Consumption",
       configuration: { triggerType: trigger, replicaTimeout: 120, replicaRetryLimit: 0,
         [trigger === "Manual" ? "manualTriggerConfig" : "scheduleTriggerConfig"]: {
-          parallelism: 1, replicaCompletionCount: 1, ...(trigger === "Schedule" ? { cronExpression: "* * * * *" } : {}) },
+          parallelism: 1, replicaCompletionCount: 1, ...(trigger === "Schedule" ? { cronExpression: schedulerCron(schedulerCadence(demand)) } : {}) },
         secrets: p.configuration.secrets.filter(s => s.name !== demand.scalerConnectionSecret.name).map(s => ({ name: s.name, keyVaultUrl: s.keyVaultUrl, identity: s.identity })),
         registries: structuredClone(p.configuration.registries) },
       template: { containers: [runtime], initContainers: [] } } };
@@ -84,13 +89,20 @@ export function buildManagedAzureSchedulerJob({ workerApp, demand, target, trigg
 export function schedulerJobWithRelease(body, image, release, trigger = "Manual") {
   const next = structuredClone(body), c = next.properties.template.containers[0];
   need(/\/corgtex\/worker@sha256:[a-f0-9]{64}$/.test(image), "WORKER_DEMAND_IMAGE_INVALID");
+  need(["Manual", "Schedule"].includes(trigger), "WORKER_DEMAND_TRIGGER_INVALID");
+  const cadenceValues = c.env.filter(e => e.name === "WORKER_SCHEDULER_CADENCE_MINUTES");
+  need(cadenceValues.length <= 1 && (cadenceValues.length === 0 || cadenceValues[0].value === "5"), "WORKER_DEMAND_SCHEDULER_POLICY_INVALID");
+  const cron = schedulerCron(cadenceValues.length ? 5 : 1);
+  if (next.properties.configuration.triggerType === "Schedule") {
+    need(next.properties.configuration.scheduleTriggerConfig?.cronExpression === cron, "WORKER_DEMAND_SCHEDULER_CADENCE_DRIFT");
+  }
   c.image = image;
   const generated = { CORGTEX_RELEASE_GIT_SHA: release.gitSha, CORGTEX_RELEASE_IMAGE_TAG: release.imageTag, CORGTEX_RELEASE_VERSION: release.version };
   c.env = c.env.map(e => generated[e.name] === undefined ? e : { name: e.name, value: generated[e.name] });
   next.properties.configuration.triggerType = trigger;
   delete next.properties.configuration.manualTriggerConfig; delete next.properties.configuration.scheduleTriggerConfig;
   next.properties.configuration[trigger === "Manual" ? "manualTriggerConfig" : "scheduleTriggerConfig"] = {
-    parallelism: 1, replicaCompletionCount: 1, ...(trigger === "Schedule" ? { cronExpression: "* * * * *" } : {}) };
+    parallelism: 1, replicaCompletionCount: 1, ...(trigger === "Schedule" ? { cronExpression: cron } : {}) };
   return next;
 }
 

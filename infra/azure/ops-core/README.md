@@ -74,6 +74,33 @@ Incremental redeployment does not remove old dedicated servers/endpoints. This o
 must not be used to imply their retirement or savings; preserve their data and recovery
 obligations until separately accepted retirement.
 
+## Demand scheduler cadence
+
+The retained worker-demand plan defaults to a one-minute scheduler. Set
+`schedulerCadenceMinutes: 5` in each domain's `workerDemand` plan only when the
+five-minute latency is accepted. Plan validation accepts only `1` or `5`.
+The generated job binds `*/5 * * * *` to
+`WORKER_SCHEDULER_CADENCE_MINUTES=5`; the default has the existing one-minute
+cron and no extra runtime setting. Activation, readback, update, pause and recovery
+retain this pairing and reject cron or runtime-policy drift. Changing cadence on an
+active domain requires a separately reviewed transition, not a provider-only edit.
+
+The five-minute worker keeps current-day newspaper eligibility and carries a
+scheduled occurrence across local midnight for at most 15 minutes. Its payload
+cutoff and dedupe date are the scheduled occurrence, including weekly and DST
+boundaries. Approval expiry is checked in up to five batches of 25 under a
+30-second loop budget; a full final batch or time cap emits a backlog warning.
+Source sync checks are still based on `lastSyncAt`: a nominal five-minute source
+can take roughly ten minutes between starts if a sync finishes just after a tick,
+plus cold start and queue time. Use the one-minute profile where this is too slow.
+
+Azure Cost Details reported 20 vCPU-seconds and 40 GiB-seconds for one synthetic
+0.5-vCPU/1-GiB scheduler run on September 24, 2026: 40 allocated seconds. The
+earlier ten-second cost assumption did not hold for that run. One run does not
+prove a monthly average or the whole-estate budget. Qualify representative runs,
+the pending resource retirements, shared PostgreSQL and production workload
+before enabling this profile or claiming savings.
+
 Local template checks (Bicep must already be installed):
 
 ```sh

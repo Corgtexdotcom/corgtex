@@ -68,6 +68,30 @@ test("fixed PostgreSQL/HTTP scaler and scheduler inherit the exact runtime with 
   assertManagedAzureSchedulerJob(actual(scheduled), scheduled, jobId);
 });
 
+test("opt-in five-minute cron and worker policy stay bound through release and readback", () => {
+  const lowLoad = { ...demand, schedulerCadenceMinutes: 5 };
+  assert.deepEqual(validateManagedAzureWorkerDemand(lowLoad, target), lowLoad);
+  const scheduled = buildManagedAzureSchedulerJob({ workerApp: app(), demand: lowLoad, target, trigger: "Schedule" });
+  assert.equal(scheduled.properties.configuration.scheduleTriggerConfig.cronExpression, "*/5 * * * *");
+  assert.deepEqual(scheduled.properties.template.containers[0].env.filter(e => e.name === "WORKER_SCHEDULER_CADENCE_MINUTES"),
+    [{ name: "WORKER_SCHEDULER_CADENCE_MINUTES", value: "5" }]);
+  assertManagedAzureSchedulerJob(actual(scheduled), scheduled, jobId);
+  const incoming = schedulerJobWithRelease(scheduled, image, release, "Manual");
+  assert.equal(incoming.properties.configuration.triggerType, "Manual");
+  assert.equal(schedulerJobWithRelease(incoming, image, release, "Schedule")
+    .properties.configuration.scheduleTriggerConfig.cronExpression, "*/5 * * * *");
+  const drift = actual(scheduled);
+  drift.properties.configuration.scheduleTriggerConfig.cronExpression = "* * * * *";
+  assert.throws(() => assertManagedAzureSchedulerJob(drift, scheduled, jobId), /SCHEDULER_DRIFT/);
+  assert.throws(() => schedulerJobWithRelease(drift, image, release), /CADENCE_DRIFT/);
+  const policyDrift = actual(scheduled);
+  policyDrift.properties.template.containers[0].env.find(e => e.name === "WORKER_SCHEDULER_CADENCE_MINUTES").value = "1";
+  assert.throws(() => schedulerJobWithRelease(policyDrift, image, release), /POLICY_INVALID/);
+  for (const bad of [0, 2, 10, null, "5"]) {
+    assert.throws(() => validateManagedAzureWorkerDemand({ ...demand, schedulerCadenceMinutes: bad }, target), /PLAN_INVALID/);
+  }
+});
+
 for (const [name, mutate] of [
   ["arbitrary query", a => { a.properties.template.scale.rules[0].custom.metadata.query = "SELECT 0"; }],
   ["public ingress", a => { a.properties.configuration.ingress.external = true; }],
