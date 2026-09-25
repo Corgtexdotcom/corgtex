@@ -166,7 +166,8 @@ export class Azure {
     assert(claims.tid === TENANT && (claims.appid ?? claims.azp)?.toLowerCase() === this.env.AZURE_CLIENT_ID.toLowerCase(), "AZURE_PRINCIPAL_MISMATCH");
     const assignments = await this.call(["role", "assignment", "list", "--assignee-object-id", claims.oid,
       "--scope", `/subscriptions/${SUBSCRIPTION}/resourceGroups/${GROUP}`, "--include-groups", "--include-inherited", "--fill-principal-name", "false"]);
-    validateRehearsalPrincipal({ clientId: this.env.AZURE_CLIENT_ID, principalId: claims.oid, subscriptionId: SUBSCRIPTION, resourceGroup: GROUP, assignments });
+    validateRehearsalPrincipal({ clientId: this.env.AZURE_CLIENT_ID, principalId: claims.oid, subscriptionId: SUBSCRIPTION, resourceGroup: GROUP, assignments },
+      { targetProfile: TARGET_PROFILE });
   }
   server() { return this.call(["postgres", "flexible-server", "show", "--resource-group", GROUP, "--name", SERVER]); }
   async rules() {
