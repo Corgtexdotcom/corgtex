@@ -1,0 +1,138 @@
+name: Azure Site Image Import
+
+on:
+  workflow_dispatch:
+    inputs:
+      hosting_run_id:
+        description: Successful Hosting Images workflow run on main
+        required: true
+        type: string
+      hosting_run_attempt:
+        description: Attempt number of that workflow run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: fleet-release
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.ref == 'refs/heads/main'
+    name: Import exact site digest to production ACR
+    runs-on: ubuntu-latest
+    environment: fleet-release-production
+    timeout-minutes: 20
+    env:
+      ACR_NAME: acrcorgtexssstgwus3
+      ACR_RESOURCE_GROUP: rg-corgtex-selfserve-staging-wus3
+      AZURE_SUBSCRIPTION_EXPECTED: 227eb707-bc46-415e-a09b-7d2b69fb14b2
+      HOSTING_RUN_ID: ${{ inputs.hosting_run_id }}
+      HOSTING_RUN_ATTEMPT: ${{ inputs.hosting_run_attempt }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate successful main image run
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$HOSTING_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$HOSTING_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,3}$ ]] || {
+            echo '::error::Invalid Hosting Images run identity.'
+            exit 1
+          }
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${HOSTING_RUN_ID}" > "$RUNNER_TEMP/hosting-run.json"
+          jq -e --arg branch main --arg name 'Hosting Images' --argjson attempt "$HOSTING_RUN_ATTEMPT" \
+            '.name == $name and .head_branch == $branch and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and .run_attempt == $attempt' \
+            "$RUNNER_TEMP/hosting-run.json" > /dev/null || {
+              echo '::error::Hosting Images run is not a successful main run.'
+              exit 1
+            }
+
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.hosting_run_id }}
+          github-token: ${{ github.token }}
+          name: hosting-images-${{ inputs.hosting_run_id }}-${{ inputs.hosting_run_attempt }}
+          path: ${{ runner.temp }}/hosting-image-receipt
+
+      - name: Validate immutable site receipt
+        id: receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNNER_TEMP/hosting-image-receipt/receipt.json"
+          sha="$(jq -r '.head_sha' "$RUNNER_TEMP/hosting-run.json")"
+          jq -e --arg sha "$sha" --arg run "$HOSTING_RUN_ID" --arg attempt "$HOSTING_RUN_ATTEMPT" '
+            .schemaVersion == 1 and .sourceCommit == $sha
+            and .workflowRun.id == $run and .workflowRun.attempt == $attempt
+            and (.images.site.digest | test("^sha256:[a-f0-9]{64}$"))
+            and .images.site.reference == ("ghcr.io/corgtexdotcom/corgtex/site@" + .images.site.digest)
+          ' "$receipt" > /dev/null || {
+            echo '::error::Site receipt does not match the successful Hosting Images run.'
+            exit 1
+          }
+          git merge-base --is-ancestor "$sha" HEAD || {
+            echo '::error::Image source commit is not in main history.'
+            exit 1
+          }
+          echo "digest=$(jq -r '.images.site.digest' "$receipt")" >> "$GITHUB_OUTPUT"
+          echo "source=$(jq -r '.images.site.reference' "$receipt")" >> "$GITHUB_OUTPUT"
+          echo "tag=corgtex/site:hosting-${HOSTING_RUN_ID}-${HOSTING_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify exact Azure target and import site image
+        shell: bash
+        env:
+          SOURCE: ${{ steps.receipt.outputs.source }}
+          DIGEST: ${{ steps.receipt.outputs.digest }}
+          TARGET_TAG: ${{ steps.receipt.outputs.tag }}
+          GHCR_IMPORT_USERNAME: ${{ vars.GHCR_IMPORT_USERNAME }}
+          GHCR_IMPORT_TOKEN: ${{ secrets.GHCR_IMPORT_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GHCR_IMPORT_USERNAME" && -n "$GHCR_IMPORT_TOKEN" ]] || {
+            echo '::error::Protected GHCR package-read credential is missing.'
+            exit 1
+          }
+          [[ "$(az account show --query id -o tsv)" == "$AZURE_SUBSCRIPTION_EXPECTED" ]] || {
+            echo '::error::Azure subscription mismatch.'
+            exit 1
+          }
+          registry_id="$(az acr show --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP" --query id -o tsv)"
+          expected_id="/subscriptions/${AZURE_SUBSCRIPTION_EXPECTED}/resourceGroups/${ACR_RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${ACR_NAME}"
+          [[ "${registry_id,,}" == "${expected_id,,}" ]] || {
+            echo '::error::ACR identity mismatch.'
+            exit 1
+          }
+          current_digest="$(az acr manifest show-metadata --registry "$ACR_NAME" --name "$TARGET_TAG" --query digest -o tsv 2>/dev/null || true)"
+          if [[ -n "$current_digest" && "$current_digest" != "$DIGEST" ]]; then
+            echo '::error::Existing site tag has a different digest.'
+            exit 1
+          fi
+          if [[ -z "$current_digest" ]]; then
+            az acr import --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP" \
+              --source "$SOURCE" --image "$TARGET_TAG" \
+              --username "$GHCR_IMPORT_USERNAME" --password "$GHCR_IMPORT_TOKEN" \
+              --only-show-errors --output none
+          fi
+          imported_digest="$(az acr manifest show-metadata --registry "$ACR_NAME" --name "$TARGET_TAG" --query digest -o tsv 2>/dev/null)"
+          [[ "$imported_digest" == "$DIGEST" ]] || {
+            echo '::error::Imported ACR manifest differs from the published site digest.'
+            exit 1
+          }
+          echo "Verified ACR image: ${ACR_NAME}.azurecr.io/corgtex/site@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Source Hosting Images run: ${HOSTING_RUN_ID}/${HOSTING_RUN_ATTEMPT}" >> "$GITHUB_STEP_SUMMARY"
