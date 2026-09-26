@@ -267,14 +267,24 @@ export async function updateKeyResultFormAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = await requireGoalsEnabled(formData);
-  await updateKeyResult(actor, {
-    workspaceId,
-    krId: asString(formData, "keyResultId"),
-    title: asString(formData, "title"),
-    targetValue: optionalNumber(formData.get("targetValue")),
-    currentValue: optionalNumber(formData.get("currentValue")),
-    unit: asOptional(formData, "unit"),
-  });
+  const goalId = asString(formData, "goalId");
+  const expectedVersion = expectedVersionFromForm(formData);
+  try {
+    await updateKeyResult(actor, {
+      workspaceId,
+      krId: asString(formData, "keyResultId"),
+      expectedVersion,
+      title: asString(formData, "title"),
+      targetValue: optionalNumber(formData.get("targetValue")),
+      currentValue: optionalNumber(formData.get("currentValue")),
+      unit: asOptional(formData, "unit"),
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      redirect(`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goalId)}&versionConflict=1`);
+    }
+    throw error;
+  }
   refresh(workspaceId);
 }
 
