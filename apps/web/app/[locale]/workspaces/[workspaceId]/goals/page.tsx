@@ -529,7 +529,9 @@ function GoalNodeInner({
                     </summary>
                     <form action={updateKeyResultFormAction} className="action-menu-form">
                       <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="goalId" value={goal.id} />
                       <input type="hidden" name="keyResultId" value={kr.id} />
+                      <input type="hidden" name="expectedVersion" value={goal.version} />
                       <label>
                         {t("formKeyResultTitle")}
                         <input name="title" defaultValue={kr.title} required />

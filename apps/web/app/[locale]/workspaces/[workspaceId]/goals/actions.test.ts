@@ -23,6 +23,7 @@ class MockAppError extends Error {
 const addKeyResult = vi.fn();
 const createGoal = vi.fn();
 const deleteGoal = vi.fn();
+const deleteKeyResult = vi.fn();
 const enforceDemoGuard = vi.fn();
 const requirePageActor = vi.fn(async () => actor);
 const requireWorkspaceFeature = vi.fn();
@@ -31,6 +32,7 @@ const returnGoalToDraft = vi.fn();
 const skipCompanyUnderstandingQuestion = vi.fn();
 const triggerAgentRun = vi.fn();
 const updateGoal = vi.fn();
+const updateKeyResult = vi.fn();
 const revalidatePath = vi.fn();
 const redirect = vi.fn();
 
@@ -51,11 +53,13 @@ vi.mock("@corgtex/domain", () => ({
   addKeyResult,
   createGoal,
   deleteGoal,
+  deleteKeyResult,
   respondToCheckIn,
   returnGoalToDraft,
   skipCompanyUnderstandingQuestion,
   triggerAgentRun,
   updateGoal,
+  updateKeyResult,
 }));
 
 vi.mock("next/cache", () => ({
@@ -88,6 +92,42 @@ function buildEditFormData(expectedVersion = "6") {
 }
 
 describe("goals server actions", () => {
+  it("updates a saved Key Result with the rendered Goal version", async () => {
+    const { updateKeyResultFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("goalId", "goal-1");
+    formData.set("keyResultId", "kr-1");
+    formData.set("expectedVersion", "6");
+    formData.set("title", "Grow synthetic adoption");
+    formData.set("currentValue", "4");
+    formData.set("targetValue", "10");
+    formData.set("unit", "customers");
+
+    await updateKeyResultFormAction(formData);
+
+    expect(updateKeyResult).toHaveBeenCalledWith(actor, {
+      workspaceId: "workspace-1",
+      krId: "kr-1",
+      expectedVersion: 6,
+      title: "Grow synthetic adoption",
+      currentValue: 4,
+      targetValue: 10,
+      unit: "customers",
+    });
+  });
+
+  it("rejects a saved Key Result update without a valid Goal version", async () => {
+    const { updateKeyResultFormAction } = await import("./actions");
+    const formData = new FormData();
+    formData.set("workspaceId", "workspace-1");
+    formData.set("keyResultId", "kr-1");
+    formData.set("title", "Stale edit");
+
+    await expect(updateKeyResultFormAction(formData)).rejects.toMatchObject({ status: 400, code: "INVALID_INPUT" });
+    expect(updateKeyResult).not.toHaveBeenCalled();
+  });
+
   it("passes the exact rendered version and reports Goal edit success only after revalidation", async () => {
     const { editGoalFormAction } = await import("./actions");
 

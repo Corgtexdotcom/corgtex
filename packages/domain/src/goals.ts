@@ -1290,6 +1290,7 @@ export async function updateKeyResult(
     targetValue?: number | null;
     currentValue?: number | null;
     unit?: string | null;
+    expectedVersion?: number;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -1308,6 +1309,11 @@ export async function updateKeyResult(
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
     await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+      invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
+    }
 
     const data: any = {};
     if (params.title !== undefined) {
