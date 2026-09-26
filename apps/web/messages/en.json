@@ -1029,7 +1029,11 @@
   "goals": {
     "contributesTo": "contributes to:",
     "addKeyResultTitle": "Add key result",
+    "editKeyResultTitle": "Edit key result",
     "btnAddKeyResult": "Add key result",
+    "btnSaveKeyResult": "Save key result",
+    "btnDeleteKeyResult": "Delete key result",
+    "confirmDeleteKeyResult": "Delete this key result? This cannot be undone.",
     "btnArchiveGoal": "Archive goal",
     "btnCreateGoal": "Create goal",
     "btnEdit": "Edit",

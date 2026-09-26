@@ -1029,7 +1029,11 @@
   "goals": {
     "contributesTo": "contribuye a:",
     "addKeyResultTitle": "Agregar resultado clave",
+    "editKeyResultTitle": "Editar resultado clave",
     "btnAddKeyResult": "Agregar resultado clave",
+    "btnSaveKeyResult": "Guardar resultado clave",
+    "btnDeleteKeyResult": "Eliminar resultado clave",
+    "confirmDeleteKeyResult": "¿Eliminar este resultado clave? Esta acción no se puede deshacer.",
     "btnArchiveGoal": "Archivar objetivo",
     "btnCreateGoal": "Crear objetivo",
     "btnEdit": "Editar",

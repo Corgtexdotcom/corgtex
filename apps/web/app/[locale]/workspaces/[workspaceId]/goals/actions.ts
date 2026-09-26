@@ -8,6 +8,8 @@ import {
   returnGoalToDraft,
   deleteGoal,
   addKeyResult,
+  updateKeyResult,
+  deleteKeyResult,
   respondToCheckIn,
   skipCompanyUnderstandingQuestion,
   triggerAgentRun,
@@ -255,6 +257,36 @@ export async function addKeyResultFormAction(formData: FormData) {
     targetValue: optionalNumber(formData.get("targetValue")),
     currentValue: optionalNumber(formData.get("currentValue")),
     unit: asOptional(formData, "unit"),
+  });
+  refresh(workspaceId);
+}
+
+export async function updateKeyResultFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await updateKeyResult(actor, {
+    workspaceId,
+    krId: asString(formData, "keyResultId"),
+    title: asString(formData, "title"),
+    targetValue: optionalNumber(formData.get("targetValue")),
+    currentValue: optionalNumber(formData.get("currentValue")),
+    unit: asOptional(formData, "unit"),
+  });
+  refresh(workspaceId);
+}
+
+export async function deleteKeyResultFormAction(formData: FormData) {
+  const _demoGuardWsId = formData.get("workspaceId") as string;
+  if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
+
+  const actor = await requirePageActor();
+  const workspaceId = await requireGoalsEnabled(formData);
+  await deleteKeyResult(actor, {
+    workspaceId,
+    krId: asString(formData, "keyResultId"),
   });
   refresh(workspaceId);
 }
