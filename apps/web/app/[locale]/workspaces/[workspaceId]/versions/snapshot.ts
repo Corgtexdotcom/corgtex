@@ -9,9 +9,6 @@ export function snapshotText(snapshot: unknown) {
       }
       return body;
     }
-    if (keyResults) {
-      return JSON.stringify({ keyResults }, null, 2);
-    }
   }
   return JSON.stringify(snapshot, null, 2);
 }
