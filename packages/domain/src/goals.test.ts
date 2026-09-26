@@ -1764,6 +1764,7 @@ describe("Goals Domain", () => {
       // 2. updateKeyResult
       const kr = { id: "kr-1", goalId: "goal-kr-atomic", title: "KR 1", targetValue: 100, currentValue: 50, progressPercent: 50, goal };
       vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.keyResult.findMany).mockResolvedValueOnce([{ id: "kr-1", goalId: goal.id, title: "KR 1", targetValue: 100, currentValue: 50, unit: null, progressPercent: 50 }] as any);
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, progressPercent: 50, version: 2, keyResults: [{ id: "kr-1", progressPercent: 100 }] } as any);
       vi.mocked(prisma.keyResult.update).mockResolvedValueOnce({ ...kr, currentValue: 100, progressPercent: 100 } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, progressPercent: 100, version: 3 } as any);
@@ -1775,19 +1776,55 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.keyResult.update).toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).toHaveBeenLastCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          previousState: expect.objectContaining({
+            keyResults: expect.arrayContaining([expect.objectContaining({ title: "KR 1", currentValue: 50 })]),
+          }),
+        }),
+      }));
 
       // 3. deleteKeyResult
       vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
-      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, progressPercent: 100, version: 3, keyResults: [] } as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce({ ...goal, progressPercent: 100, version: 3 } as any)
+        .mockResolvedValueOnce({ ...goal, progressPercent: 100, version: 3, keyResults: [] } as any);
       vi.mocked(prisma.keyResult.delete).mockResolvedValueOnce(kr as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, progressPercent: 0, version: 4 } as any);
 
       await deleteKeyResult(actor, {
         workspaceId: "ws-1",
         krId: "kr-1",
+        expectedVersion: 3,
       });
 
       expect(prisma.keyResult.delete).toHaveBeenCalled();
+    });
+
+    it("rejects stale Key Result deletes and avoids versioning unchanged edit submissions", async () => {
+      const { deleteKeyResult, updateKeyResult } = await import("./goals");
+      const goal = makeGoalFixture("goal-kr-stale", { version: 4, progressPercent: 50 });
+      const kr = { id: "kr-stale", goalId: goal.id, title: "KR", targetValue: 100, currentValue: 50, unit: null, progressPercent: 50, goal };
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, version: 5 } as any);
+
+      await expect(deleteKeyResult(actor, { workspaceId: "ws-1", krId: kr.id, expectedVersion: 4 }))
+        .rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
+      expect(prisma.keyResult.delete).not.toHaveBeenCalled();
+
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, version: 4 } as any);
+      await updateKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: kr.id,
+        expectedVersion: 4,
+        title: kr.title,
+        targetValue: kr.targetValue,
+        currentValue: kr.currentValue,
+        unit: kr.unit,
+      });
+      expect(prisma.keyResult.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
     });
 
     it("proves nonexistent, unauthorized, or invalid-state Goal guard wins before invalid body/author validation, and stale body-only update creates nothing", async () => {
@@ -1972,7 +2009,9 @@ describe("Goals Domain", () => {
       // 3. deleteKeyResult failure on derived Goal update (after lock update & KR deletion)
       const goalWithKr = makeGoalFixture("goal-kr-fail", { version: 1, progressPercent: 50, keyResults: [{ id: "kr-fail-1", progressPercent: 50 }, { id: "kr-remaining", progressPercent: 0 }] });
       vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce({ ...kr, goal: goalWithKr } as any);
-      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goalWithKr, keyResults: [{ id: "kr-remaining", progressPercent: 0 }] } as any);
+      vi.mocked(prisma.goal.findUnique)
+        .mockResolvedValueOnce({ ...goalWithKr, version: 1 } as any)
+        .mockResolvedValueOnce({ ...goalWithKr, keyResults: [{ id: "kr-remaining", progressPercent: 0 }] } as any);
       vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goalWithKr } as any);
       vi.mocked(prisma.keyResult.delete).mockResolvedValueOnce(kr as any);
       vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });
@@ -1985,6 +2024,7 @@ describe("Goals Domain", () => {
       await expect(deleteKeyResult(actor, {
         workspaceId: "ws-1",
         krId: "kr-fail-1",
+        expectedVersion: 1,
       })).rejects.toMatchObject({
         status: 409,
         code: "VERSION_CONFLICT",

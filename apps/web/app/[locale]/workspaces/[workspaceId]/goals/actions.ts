@@ -294,10 +294,19 @@ export async function deleteKeyResultFormAction(formData: FormData) {
 
   const actor = await requirePageActor();
   const workspaceId = await requireGoalsEnabled(formData);
-  await deleteKeyResult(actor, {
-    workspaceId,
-    krId: asString(formData, "keyResultId"),
-  });
+  const goalId = asString(formData, "goalId");
+  try {
+    await deleteKeyResult(actor, {
+      workspaceId,
+      krId: asString(formData, "keyResultId"),
+      expectedVersion: expectedVersionFromForm(formData),
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
+      redirect(`/workspaces/${workspaceId}/goals?goalId=${encodeURIComponent(goalId)}&versionConflict=1`);
+    }
+    throw error;
+  }
   refresh(workspaceId);
 }
 

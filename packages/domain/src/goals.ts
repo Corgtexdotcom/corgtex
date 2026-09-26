@@ -1263,6 +1263,7 @@ export async function addKeyResult(
     });
     invariant(goal && goal.workspaceId === params.workspaceId && !goal.archivedAt, 404, "NOT_FOUND", "Goal not found.");
     await lockGoalForKeyResultMutation(tx, actor, membership, goal);
+    const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: params.goalId }, orderBy: { id: "asc" } });
 
     const kr = await tx.keyResult.create({
       data: {
@@ -1275,7 +1276,7 @@ export async function addKeyResult(
       },
     });
 
-    await recomputeGoalProgress(params.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"] });
+    await recomputeGoalProgress(params.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
 
     return kr;
   });
@@ -1334,12 +1335,17 @@ export async function updateKeyResult(
       currentValue: newCurrent,
     });
 
+    const changed = Object.entries(data).some(([field, value]) => (kr as Record<string, unknown>)[field] !== value);
+    if (!changed) return kr;
+
+    const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
+
     const updated = await tx.keyResult.update({
       where: { id: params.krId },
       data,
     });
 
-    await recomputeGoalProgress(updated.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"] });
+    await recomputeGoalProgress(updated.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
 
     return updated;
   });
@@ -1350,6 +1356,7 @@ export async function deleteKeyResult(
   params: {
     workspaceId: string;
     krId: string;
+    expectedVersion: number;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -1368,10 +1375,14 @@ export async function deleteKeyResult(
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
     await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
+    invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+    const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+    invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result could be deleted. Please refresh and try again.");
+    const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
 
     await tx.keyResult.delete({ where: { id: params.krId } });
 
-    await recomputeGoalProgress(kr.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"] });
+    await recomputeGoalProgress(kr.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"], previousKeyResults });
   });
 }
 
@@ -1661,7 +1672,7 @@ export async function recomputeGoalProgress(
   goalId: string,
   actor?: AppActor,
   txClient?: Prisma.TransactionClient,
-  options?: { forceVersion?: boolean; changedFields?: string[] },
+  options?: { forceVersion?: boolean; changedFields?: string[]; previousKeyResults?: unknown[] },
 ) {
   const execute = async (tx: Prisma.TransactionClient) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
@@ -1713,7 +1724,7 @@ export async function recomputeGoalProgress(
           ...(options?.changedFields ?? []),
           ...(computedProgress !== goal.progressPercent ? ["progressPercent"] : []),
         ],
-        previousState: pickJsonSnapshot(goal as unknown as Record<string, unknown>, [
+        previousState: pickJsonSnapshot({ ...goal, ...(options?.previousKeyResults ? { keyResults: options.previousKeyResults } : {}) } as unknown as Record<string, unknown>, [
           "id",
           "workspaceId",
           "title",
@@ -1731,6 +1742,7 @@ export async function recomputeGoalProgress(
           "publishedAt",
           "status",
           "version",
+          "keyResults",
         ]),
       });
 
