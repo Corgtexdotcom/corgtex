@@ -105,6 +105,11 @@ describe("Action duplicate resolution", () => {
       where: { workspaceId: "ws-1", actionId: "action-2" },
       data: { actionId: "action-1" },
     });
+    expect(db.action.update).toHaveBeenCalledWith({
+      where: { id: "action-2" }, data: { duplicateOfActionId: "action-1" },
+    });
+    const pointerUpdate = db.action.update.mock.calls.findIndex(([input]) => input.where.id === "action-2");
+    expect(db.action.update.mock.invocationCallOrder[pointerUpdate]).toBeLessThan(archiveWorkspaceArtifact.mock.invocationCallOrder[0]);
   });
 
   it("rejects an unconfirmed target and actions outside the workspace", async () => {

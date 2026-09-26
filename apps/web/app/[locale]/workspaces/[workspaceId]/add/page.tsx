@@ -8,7 +8,7 @@ import type {
   GoalLevel,
 } from "@prisma/client";
 import type { ReactNode } from "react";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { notFound, redirect } from "next/navigation";
 import {
   AppError,
@@ -56,6 +56,7 @@ import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
 import { DEFAULT_WORK_ITEM_PRIORITY_LABELS } from "@/lib/work-item-priority";
+import { parseCreateRequestDate } from "@/lib/create-request-date";
 import { getWorkspaceFeatureFlags } from "@/lib/workspace-feature-flags";
 import {
   DEFAULT_MEETING_DURATION_MINUTES,
@@ -192,6 +193,11 @@ function shouldApplyCreateAddOns(formData: FormData) {
   return asOptional(formData, "duplicateResolution") !== "use_existing";
 }
 
+function actionAddOnId(sourceId: string, actionId: string, kind: string, index = 0) {
+  const hash = createHash("sha256").update(`${sourceId}\0${actionId}\0${kind}\0${index}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+}
+
 async function proposalIdForCreateIntent(workspaceId: string, formData: FormData, intent: WorkItemCreateIntent) {
   const proposalId = asOptional(formData, "proposalId");
   if (!proposalId || intent === "draft") return proposalId;
@@ -249,27 +255,13 @@ async function proposalLinksForCreateIntent(workspaceId: string, formData: FormD
   };
 }
 
-function parseCreateRequestDate(formData: FormData, key: string, label: string) {
-  const value = asOptional(formData, key);
-  if (!value) return null;
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    throw new AppError(400, "INVALID_INPUT", `${label} must be a valid date.`);
-  }
-  if (date.getTime() <= Date.now()) {
-    throw new AppError(400, "INVALID_INPUT", `${label} must be in the future.`);
-  }
-  return date;
-}
-
-function createRequestAddOnFromForm(formData: FormData): CreateRequestAddOn | null {
+function createRequestAddOnFromForm(formData: FormData, allowPastDates = false): CreateRequestAddOn | null {
   const messageMd = asOptional(formData, "requestMessageMd");
   if (!messageMd) return null;
 
   const audienceType = requestAudienceFromForm(formData);
-  const deadlineAt = parseCreateRequestDate(formData, "requestDeadlineAt", "Deadline");
-  const reminderAt = parseCreateRequestDate(formData, "requestReminderAt", "Reminder");
+  const deadlineAt = parseCreateRequestDate(asOptional(formData, "requestDeadlineAt"), "Deadline", allowPastDates);
+  const reminderAt = parseCreateRequestDate(asOptional(formData, "requestReminderAt"), "Reminder", allowPastDates);
   if (deadlineAt && reminderAt && reminderAt > deadlineAt) {
     throw new AppError(400, "INVALID_INPUT", "Reminder must be before or at the deadline.");
   }
@@ -302,9 +294,10 @@ async function validateCreateRequestAddOn(actor: AppActor, params: {
   formData: FormData;
   intent: WorkItemCreateIntent;
   applyAddOns: boolean;
+  allowPastDates?: boolean;
 }) {
   if (params.intent !== "open" || !params.applyAddOns) return null;
-  const request = createRequestAddOnFromForm(params.formData);
+  const request = createRequestAddOnFromForm(params.formData, params.allowPastDates);
   if (!request) return null;
   if (actor.kind !== "user") {
     throw new AppError(400, "INVALID_ACTOR", "Only users can request input.");
@@ -370,6 +363,7 @@ async function maybeCreateRequestFromForm(actor: AppActor, params: {
   subjectId: string;
   request: CreateRequestAddOn | null;
   canSendRequest: boolean;
+  idempotencyId?: string;
 }) {
   if (!params.request || !params.canSendRequest) return;
   await createAdviceRequest(actor, {
@@ -383,6 +377,7 @@ async function maybeCreateRequestFromForm(actor: AppActor, params: {
     deadlineAt: params.request.deadlineAt,
     reminderAt: params.request.reminderAt,
     preferredChannel: params.request.preferredChannel,
+    idempotencyId: params.idempotencyId,
   });
 }
 
@@ -391,13 +386,15 @@ async function maybeCreateActionChecklist(actor: AppActor, params: {
   actionId: string;
   formData: FormData;
   canEditChecklist: boolean;
+  sourceId?: string;
 }) {
   if (!params.canEditChecklist) return;
-  for (const title of splitList(asOptional(params.formData, "checklistItems"))) {
+  for (const [index, title] of splitList(asOptional(params.formData, "checklistItems")).entries()) {
     await createActionChecklistItem(actor, {
       workspaceId: params.workspaceId,
       actionId: params.actionId,
       title,
+      ...(params.sourceId ? { idempotencyId: actionAddOnId(params.sourceId, params.actionId, "checklist", index) } : {}),
     });
   }
 }
@@ -791,6 +788,12 @@ export default async function WorkspaceAddPage({
       const actor = await requirePageActor();
       const intent = createIntentFromForm(formData);
       const applyAddOns = shouldApplyCreateAddOns(formData);
+      const source = actionRequestSource("WEB_REQUEST", actor.kind === "user" ? actor.user.id : actor.label, asString(formData, "idempotencyKey"));
+      await requireWorkspaceMembership({ actor, workspaceId });
+      const sourceAlreadyClaimed = await prisma.actionCreationSource.findUnique({
+        where: { workspaceId_sourceType_sourceId: { workspaceId, sourceType: source.type, sourceId: source.id } },
+        select: { id: true },
+      });
       const referenceAddOn = validateCreateReferenceAddOn(formData, applyAddOns);
       const proposalId = await proposalIdForCreateIntent(workspaceId, formData, intent);
       const requestAddOn = await validateCreateRequestAddOn(actor, {
@@ -798,6 +801,7 @@ export default async function WorkspaceAddPage({
         formData,
         intent,
         applyAddOns,
+        allowPastDates: Boolean(sourceAlreadyClaimed),
       });
       const action = await createAction(actor, {
         workspaceId,
@@ -809,7 +813,12 @@ export default async function WorkspaceAddPage({
         priority: asOptionalInt(formData, "priority"),
         isPrivate: intent === "draft",
         duplicateGuard: duplicateGuardFromFormData(formData),
-        source: actionRequestSource("WEB_REQUEST", actor.kind === "user" ? actor.user.id : actor.label, asString(formData, "idempotencyKey")),
+        source,
+        sourcePayload: {
+          referenceAddOn,
+          checklistItems: splitList(asOptional(formData, "checklistItems")),
+          requestAddOn,
+        },
       });
       const visibleAction = intent === "open" && applyAddOns && action.status === "DRAFT"
         ? await publishAction(actor, { workspaceId, actionId: action.id })
@@ -826,6 +835,7 @@ export default async function WorkspaceAddPage({
           actionId: visibleAction.id,
           formData,
           canEditChecklist: visibleAction.status === "DRAFT" || visibleAction.status === "OPEN" || visibleAction.status === "IN_PROGRESS",
+          sourceId: source.id,
         });
         await maybeCreateRequestFromForm(actor, {
           workspaceId,
@@ -833,6 +843,7 @@ export default async function WorkspaceAddPage({
           subjectId: visibleAction.id,
           request: requestAddOn,
           canSendRequest: (visibleAction.status === "OPEN" || visibleAction.status === "IN_PROGRESS") && !visibleAction.isPrivate,
+          idempotencyId: actionAddOnId(source.id, visibleAction.id, "request"),
         });
       }
       refresh(workspaceId);

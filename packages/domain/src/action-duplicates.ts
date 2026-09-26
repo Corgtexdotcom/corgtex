@@ -146,16 +146,16 @@ export async function resolveActionDuplicate(actor: AppActor, params: Pair & {
       data: { actionId: params.canonicalId },
     });
 
+    await tx.action.update({
+      where: { id: params.duplicateId },
+      data: { duplicateOfActionId: params.canonicalId },
+    });
     await archiveWorkspaceArtifact(actor, {
       workspaceId: params.workspaceId,
       entityType: "Action",
       entityId: params.duplicateId,
       reason: `Duplicate of Action ${params.canonicalId}; reviewed by a workspace admin.`,
       _tx: tx,
-    });
-    await tx.action.update({
-      where: { id: params.duplicateId },
-      data: { duplicateOfActionId: params.canonicalId },
     });
     await tx.auditLog.create({
       data: {

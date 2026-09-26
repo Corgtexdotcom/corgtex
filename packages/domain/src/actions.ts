@@ -68,6 +68,7 @@ type CreateActionParams = {
   priority?: number | null;
   duplicateGuard?: DuplicateGuardOptions | null;
   source?: { type: string; id: string; groupId?: string | null } | null;
+  sourcePayload?: unknown;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
   _tx?: Prisma.TransactionClient;
 };
@@ -384,6 +385,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
   title: string;
+  idempotencyId?: string;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const title = params.title.trim();
@@ -391,6 +393,14 @@ export async function createActionChecklistItem(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, params.actionId);
+    if (params.idempotencyId) {
+      const existing = await tx.actionChecklistItem.findUnique({ where: { id: params.idempotencyId } });
+      if (existing) {
+        invariant(existing.workspaceId === params.workspaceId && existing.actionId === params.actionId && existing.title === title,
+          409, "IDEMPOTENCY_CONFLICT", "This checklist request was already used for different content.");
+        return existing;
+      }
+    }
     const lastItem = await tx.actionChecklistItem.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -401,6 +411,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
     });
     const item = await tx.actionChecklistItem.create({
       data: {
+        ...(params.idempotencyId ? { id: params.idempotencyId } : {}),
         workspaceId: params.workspaceId,
         actionId: params.actionId,
         title,
@@ -563,10 +574,12 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
       bodyMd: params.bodyMd?.trim() || null,
       circleId: params.circleId || null,
       assigneeMemberId: params.assigneeMemberId || null,
+      authorMemberId: params.authorMemberId || null,
       dueAt: params.dueAt?.toISOString() ?? null,
       proposalId: params.proposalId || null,
       priority: params.priority ?? 0,
       isPrivate: params.isPrivate ?? true,
+      sourcePayload: params.sourcePayload ?? null,
     })).digest("hex")
     : null;
   const isPrivate = params.isPrivate ?? true;

@@ -3,6 +3,7 @@ import type { AppActor } from "@corgtex/shared";
 
 const { prismaMock, tx, requireWorkspaceMembershipMock } = vi.hoisted(() => {
   const txMock = {
+    $executeRaw: vi.fn(),
     member: {
       findUnique: vi.fn(),
       findMany: vi.fn(),
@@ -183,6 +184,27 @@ describe("advice requests", () => {
         }),
       })],
     });
+  });
+
+  it("reuses a completed form add-on request without sending it twice", async () => {
+    const existing = {
+      id: "stable-request", workspaceId: "workspace-1", requestedByUserId: "user-owner",
+      process: { subjectType: "TENSION", subjectId: "tension-1" }, recipients: [],
+      audienceType: "WORKSPACE", targetCircleId: null, messageMd: "Please advise.",
+      deadlineAt: null, reminderAt: null, preferredChannel: "IN_APP",
+    };
+    tx.adviceRequest.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existing);
+    tx.adviceRequest.create.mockResolvedValueOnce(existing);
+    const { createAdviceRequest } = await import("./advice-requests");
+    const params = {
+      workspaceId: "workspace-1", subjectType: "TENSION", subjectId: "tension-1",
+      audienceType: "WORKSPACE" as const, messageMd: "Please advise.", idempotencyId: "stable-request",
+    };
+    await expect(createAdviceRequest(actor, params)).resolves.toEqual(existing);
+    await expect(createAdviceRequest(actor, params)).resolves.toEqual(existing);
+    expect(tx.adviceRequest.create).toHaveBeenCalledTimes(1);
+    expect(tx.adviceRequest.create).toHaveBeenCalledWith({ data: expect.objectContaining({ id: "stable-request" }) });
+    expect(tx.event.createMany).toHaveBeenCalledTimes(1);
   });
 
   it("rejects selected-person requests without recipients", async () => {
