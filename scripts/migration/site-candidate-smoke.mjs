@@ -31,8 +31,15 @@ export async function checkSiteCandidate({ origin, signupOrigin, fetchImpl = fet
       const health = JSON.parse(text);
       if (health.status !== "ok" || health.app !== "corgtex-site") throw new Error("Wrong site health response");
     } else if (path === "/" || path === "/es") {
-      const expected = `${signup.origin}${path === "/es" ? "/es" : ""}/signup`;
-      if (!text.includes(expected)) throw new Error(`${path}: missing built signup URL ${expected}`);
+      const prefix = `${signup.origin}${path === "/es" ? "/es" : ""}`;
+      for (const route of ["signup", "login"]) {
+        const expected = `${prefix}/${route}`;
+        if (!text.includes(`href="${expected}"`)) throw new Error(`${path}: missing built ${route} URL ${expected}`);
+      }
+      const expectedLogin = `${prefix}/login`;
+      const loginAnchors = [...text.matchAll(/<a\b[^>]*\bhref="([^"]+)"/g)]
+        .filter((match) => match[1] === expectedLogin);
+      if (loginAnchors.length !== 2) throw new Error(`${path}: expected desktop and mobile login URLs ${expectedLogin}`);
     } else if (path === "/sitemap.xml" && !text.includes("/es/about")) {
       throw new Error("Sitemap is missing localized routes");
     } else if (!text.trim()) {

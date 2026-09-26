@@ -31,16 +31,15 @@ they no longer accept arbitrary image or tag parameters. Preserve the source and
 import readback receipts alongside candidate acceptance and rollback evidence.
 
 Before building, match these environment variables in the workflow environment to
-the source site: `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_APP_URL`,
-`NEXT_PUBLIC_ENTERPRISE_APP_URL`, `NEXT_PUBLIC_DEMO_URL`,
+the source site: `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_DEMO_URL`,
 `NEXT_PUBLIC_BOOK_DEMO_URL`, `NEXT_PUBLIC_INTERCOM_APP_ID`, and
 `NEXT_PUBLIC_INTERCOM_API_BASE`. They are public build arguments, not secrets.
 Next.js embeds public values at build time; changing Azure runtime variables alone
 does not correct a wrong signup target or restore the Intercom widget. Omitted
 Intercom app ID disables the widget, so its presence must be checked for parity.
-The default production URLs retain selfserve signup and backup-app demo/enterprise
-routing. A rebuild needs its own receipt and digest acceptance even at the same
-source commit; commit identity alone is not proof of image identity.
+The default production URLs route signup and login to selfserve while demo still
+uses the backup app. A rebuild needs its own receipt and digest acceptance even
+at the same source commit; commit identity alone is not proof of image identity.
 
 ```sh
 az bicep build --file infra/azure/hosting/site.bicep --stdout > /tmp/site.arm.json
@@ -94,7 +93,7 @@ loading. The existing `scripts/site-smoke.mjs` additionally exercises app demo
 sessions; it is not a read-only candidate preflight.
 
 The site still forwards production demo leads to `app.corgtex.com/api/demo-leads`;
-demo and enterprise links also depend on the backup app. Keep that service until
+demo links also depend on the backup app. Keep that service until
 its own migration is accepted. Preserve intentional external integrations.
 
 Coordinator sequence: approve candidate and any identity/secret changes; prove

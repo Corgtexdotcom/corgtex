@@ -45,7 +45,6 @@ jobs:
             CORGTEX_RELEASE_GIT_SHA=${{ github.sha }}
             NEXT_PUBLIC_SITE_URL=${{ vars.NEXT_PUBLIC_SITE_URL || 'https://corgtex.com' }}
             NEXT_PUBLIC_APP_URL=${{ vars.NEXT_PUBLIC_APP_URL || 'https://selfserve.corgtex.com' }}
-            NEXT_PUBLIC_ENTERPRISE_APP_URL=${{ vars.NEXT_PUBLIC_ENTERPRISE_APP_URL || 'https://app.corgtex.com' }}
             NEXT_PUBLIC_DEMO_URL=${{ vars.NEXT_PUBLIC_DEMO_URL || 'https://app.corgtex.com/demo' }}
             NEXT_PUBLIC_BOOK_DEMO_URL=${{ vars.NEXT_PUBLIC_BOOK_DEMO_URL }}
             NEXT_PUBLIC_INTERCOM_APP_ID=${{ vars.NEXT_PUBLIC_INTERCOM_APP_ID }}
