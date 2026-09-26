@@ -60,7 +60,7 @@ param tags object = {
   purpose: 'ops-core-backing-resources'
 }
 
-resource hostingGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
+resource newHostingGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = if (postgresHosting.mode == 'dedicated') {
   name: 'rg-${namePrefix}-hosting'
   location: location
   tags: tags
@@ -74,7 +74,9 @@ resource custodyGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 
 module hosting './hosting.bicep' = {
   name: '${namePrefix}-backing-resources'
-  scope: hostingGroup
+  // Existing-shared mode references the group without redeclaring or retagging it.
+  scope: resourceGroup(postgresHosting.mode == 'existing-shared' ? postgresHosting.resourceGroupName : 'rg-${namePrefix}-hosting')
+  dependsOn: [newHostingGroup]
   params: {
     location: location
     namePrefix: namePrefix
@@ -109,7 +111,7 @@ module custody './custody.bicep' = {
   }
 }
 
-output hostingResourceGroupId string = hostingGroup.id
+output hostingResourceGroupId string = subscriptionResourceId('Microsoft.Resources/resourceGroups', postgresHosting.mode == 'existing-shared' ? postgresHosting.resourceGroupName : 'rg-${namePrefix}-hosting')
 output custodyResourceGroupId string = custodyGroup.id
 output existingAcrId string = existingAcrResourceId
 output platform object = hosting.outputs.platform
