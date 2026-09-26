@@ -23,12 +23,15 @@ import { WorkItemEditForm } from "@/lib/components/WorkItemEditForm";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import {
   addKeyResultFormAction,
+  updateKeyResultFormAction,
+  deleteKeyResultFormAction,
   archiveGoalFormAction,
   createGoalFormAction,
   editGoalFormAction,
   returnGoalToDraftFormAction,
   updateGoalFormAction,
 } from "./actions";
+import { ConfirmSubmitButton } from "../circles/ConfirmSubmitButton";
 import type { GoalCadence, GoalLevel, GoalStatus } from "@prisma/client";
 
 export const dynamic = "force-dynamic";
@@ -519,6 +522,45 @@ function GoalNodeInner({
                 <span className="text-muted text-xs font-mono ml-0 sm:ml-4 flex-shrink-0">
                   {kr.currentValue || 0} / {kr.targetValue || 0} {kr.unit || ""} ({kr.progressPercent}%)
                 </span>
+                {canEditContent && (
+                  <details className="sm:ml-3">
+                    <summary className="nr-hide-marker" style={{ cursor: "pointer", padding: "4px 8px", borderRadius: 8, fontSize: "0.8rem", fontWeight: 500 }}>
+                      {t("editKeyResultTitle")}
+                    </summary>
+                    <form action={updateKeyResultFormAction} className="action-menu-form">
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="goalId" value={goal.id} />
+                      <input type="hidden" name="keyResultId" value={kr.id} />
+                      <input type="hidden" name="expectedVersion" value={goal.version} />
+                      <label>
+                        {t("formKeyResultTitle")}
+                        <input name="title" defaultValue={kr.title} required />
+                      </label>
+                      <div className="actions-inline">
+                        <label style={{ flex: 1 }}>
+                          {t("formKeyResultCurrent")}
+                          <input name="currentValue" type="number" step="any" defaultValue={kr.currentValue ?? 0} />
+                        </label>
+                        <label style={{ flex: 1 }}>
+                          {t("formKeyResultTarget")}
+                          <input name="targetValue" type="number" step="any" defaultValue={kr.targetValue ?? ""} />
+                        </label>
+                        <label style={{ flex: 1 }}>
+                          {t("formKeyResultUnit")}
+                          <input name="unit" defaultValue={kr.unit ?? ""} />
+                        </label>
+                      </div>
+                      <button type="submit" className="secondary small">{t("btnSaveKeyResult")}</button>
+                    </form>
+                    <form action={deleteKeyResultFormAction} className="action-menu-form">
+                      <input type="hidden" name="workspaceId" value={workspaceId} />
+                      <input type="hidden" name="keyResultId" value={kr.id} />
+                      <ConfirmSubmitButton className="danger small" message={t("confirmDeleteKeyResult")}>
+                        {t("btnDeleteKeyResult")}
+                      </ConfirmSubmitButton>
+                    </form>
+                  </details>
+                )}
               </div>
             ))}
           </div>

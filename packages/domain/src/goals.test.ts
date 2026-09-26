@@ -1665,6 +1665,25 @@ describe("Goals Domain", () => {
       expect(prisma.goal.update).toHaveBeenNthCalledWith(2, expect.objectContaining({ where: { id: "parent-1", version: 2 }, data: { progressPercent: 90, version: 3 } }));
     });
 
+    it("advances Goal version for a Key Result mutation even when derived progress is unchanged", async () => {
+      const goal = makeGoalFixture("goal-kr-metadata", { progressPercent: 20, version: 4, keyResults: [{ progressPercent: 20 }] });
+      vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(goal as any);
+      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ ...goal, version: 5 } as any);
+
+      await recomputeGoalProgress("goal-kr-metadata", actor, undefined, {
+        forceVersion: true,
+        changedFields: ["keyResults"],
+      });
+
+      expect(prisma.workItemVersion.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ entityType: "Goal", entityId: "goal-kr-metadata", version: 4, changedFields: ["keyResults"] }),
+      }));
+      expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: "goal-kr-metadata", version: 4 },
+        data: { version: 5 },
+      }));
+    });
+
     it("maps CAS P2025 in recomputeGoalProgress to 409 VERSION_CONFLICT", async () => {
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce(makeGoalFixture("child-collision", { keyResults: [{ progressPercent: 90 }] }) as any);
       vi.mocked(prisma.goal.update).mockRejectedValueOnce({ code: "P2025" });

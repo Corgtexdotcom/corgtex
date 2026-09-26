@@ -1275,7 +1275,7 @@ export async function addKeyResult(
       },
     });
 
-    await recomputeGoalProgress(params.goalId, actor, tx);
+    await recomputeGoalProgress(params.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"] });
 
     return kr;
   });
@@ -1290,6 +1290,7 @@ export async function updateKeyResult(
     targetValue?: number | null;
     currentValue?: number | null;
     unit?: string | null;
+    expectedVersion?: number;
     _membership?: MembershipSummary | null;
   }
 ) {
@@ -1308,6 +1309,11 @@ export async function updateKeyResult(
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
     await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+      invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
+    }
 
     const data: any = {};
     if (params.title !== undefined) {
@@ -1333,7 +1339,7 @@ export async function updateKeyResult(
       data,
     });
 
-    await recomputeGoalProgress(updated.goalId, actor, tx);
+    await recomputeGoalProgress(updated.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"] });
 
     return updated;
   });
@@ -1365,7 +1371,7 @@ export async function deleteKeyResult(
 
     await tx.keyResult.delete({ where: { id: params.krId } });
 
-    await recomputeGoalProgress(kr.goalId, actor, tx);
+    await recomputeGoalProgress(kr.goalId, actor, tx, { forceVersion: true, changedFields: ["keyResults"] });
   });
 }
 
@@ -1655,6 +1661,7 @@ export async function recomputeGoalProgress(
   goalId: string,
   actor?: AppActor,
   txClient?: Prisma.TransactionClient,
+  options?: { forceVersion?: boolean; changedFields?: string[] },
 ) {
   const execute = async (tx: Prisma.TransactionClient) => {
     await acquireWorkItemAdvisoryLock(tx, "Goal", goalId);
@@ -1689,7 +1696,7 @@ export async function recomputeGoalProgress(
       computedProgress = goal.progressPercent;
     }
 
-    if (computedProgress !== goal.progressPercent) {
+    if (computedProgress !== goal.progressPercent || options?.forceVersion) {
       const effectiveActor: AppActor = actor ?? {
         kind: "agent",
         authProvider: "bootstrap",
@@ -1702,7 +1709,10 @@ export async function recomputeGoalProgress(
         entityType: "Goal",
         entityId: goal.id,
         currentVersion: goal.version,
-        changedFields: ["progressPercent"],
+        changedFields: [
+          ...(options?.changedFields ?? []),
+          ...(computedProgress !== goal.progressPercent ? ["progressPercent"] : []),
+        ],
         previousState: pickJsonSnapshot(goal as unknown as Record<string, unknown>, [
           "id",
           "workspaceId",
@@ -1728,7 +1738,7 @@ export async function recomputeGoalProgress(
         await tx.goal.update({
           where: { id: goalId, version: goal.version },
           data: {
-            progressPercent: computedProgress,
+            ...(computedProgress !== goal.progressPercent ? { progressPercent: computedProgress } : {}),
             version: newVersion,
           },
         });
