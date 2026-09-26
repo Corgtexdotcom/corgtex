@@ -76,6 +76,17 @@ function setup() {
   assert.equal(events.includes('start'), false);
 }
 {
+  const { server, events, clock, api } = setup();
+  server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
+  const intent = await prepare(api, inputs, clock);
+  await qualify(api, intent, async () => {}, async () => events.push('persist'), clock);
+  server.sku = { name: 'Standard_D2ds_v5', tier: 'GeneralPurpose' };
+  events.length = 0;
+  await assert.rejects(cleanup(api, intent, clock), /TARGET_DRIFT/);
+  assert.equal(events.includes('delete'), false);
+  assert.equal(events.includes('stop'), false);
+}
+{
   const { server, clock, api } = setup();
   server.sku = { name: 'Standard_B2s', tier: 'GeneralPurpose' };
   await assert.rejects(prepare(api, inputs, clock), /TARGET_DRIFT/);
