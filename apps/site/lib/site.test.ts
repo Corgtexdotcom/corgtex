@@ -9,13 +9,12 @@ import { demoUrlForLocale, loginUrlForLocale, signupUrlForLocale } from "./site"
 const originalEnv = {
   NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
   NEXT_PUBLIC_DEMO_URL: process.env.NEXT_PUBLIC_DEMO_URL,
-  NODE_ENV: process.env.NODE_ENV,
 };
 
 afterEach(() => {
   process.env.NEXT_PUBLIC_APP_URL = originalEnv.NEXT_PUBLIC_APP_URL;
   process.env.NEXT_PUBLIC_DEMO_URL = originalEnv.NEXT_PUBLIC_DEMO_URL;
-  process.env.NODE_ENV = originalEnv.NODE_ENV;
+  vi.unstubAllEnvs();
 });
 
 describe("site URL helpers", () => {
@@ -40,7 +39,7 @@ describe("site URL helpers", () => {
   });
 
   it("defaults production login to selfserve and demo to the backup app", () => {
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     delete process.env.NEXT_PUBLIC_APP_URL;
     delete process.env.NEXT_PUBLIC_DEMO_URL;
 
