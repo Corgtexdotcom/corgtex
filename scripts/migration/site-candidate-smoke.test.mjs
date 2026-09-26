@@ -5,8 +5,8 @@ const config = { origin: "https://candidate.example", signupOrigin: "https://sig
 function fixture(url) {
   const path = new URL(url).pathname;
   if (path === "/api/health") return Response.json({ status: "ok", app: "corgtex-site" });
-  if (path === "/") return new Response('<a href="https://signup.example/signup">Signup</a><a href="https://signup.example/login">Login</a>');
-  if (path === "/es") return new Response('<a href="https://signup.example/es/signup">Signup</a><a href="https://signup.example/es/login">Login</a>');
+  if (path === "/") return new Response('<a href="https://signup.example/signup">Signup</a><a href="https://signup.example/login">Desktop login</a><a href="https://signup.example/login">Mobile login</a>');
+  if (path === "/es") return new Response('<a href="https://signup.example/es/signup">Signup</a><a href="https://signup.example/es/login">Desktop login</a><a href="https://signup.example/es/login">Mobile login</a>');
   if (path === "/sitemap.xml") return new Response("<loc>https://www.example/es/about</loc>");
   return new Response("Corgtex");
 }
@@ -34,6 +34,11 @@ describe("Azure site candidate smoke", () => {
     await expect(checkSiteCandidate({ ...config, fetchImpl: async (url) =>
       url.pathname === "/" ? new Response('<a href="https://signup.example/signup">Signup</a><a href="https://old.example/find-account">Login</a>') : fixture(url),
     })).rejects.toThrow("missing built login URL");
+  });
+  it("rejects mixed desktop and mobile login targets", async () => {
+    await expect(checkSiteCandidate({ ...config, fetchImpl: async (url) =>
+      url.pathname === "/" ? new Response('<a href="https://signup.example/signup">Signup</a><a href="https://signup.example/login">Desktop login</a><a href="https://app.corgtex.com/find-account">Mobile login</a>') : fixture(url),
+    })).rejects.toThrow("expected desktop and mobile login URLs");
   });
   it("rejects a redirect that would smoke the old host instead", async () => {
     await expect(checkSiteCandidate({ ...config, fetchImpl: async () =>
