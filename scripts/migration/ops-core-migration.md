@@ -104,7 +104,8 @@ stopped-server baseline, single-IP access, cleanup, and recovery path as
 `qualify-access`; no application database or customer rows are touched.
 For the separately provisioned `corgtex-opscore-pg18` target, dispatch
 `operation=qualify-opscore-capture`, `domain=ops` on protected `main`. This
-operation pins the target identity, D2ds_v5/32 GiB/14-day configuration and the
+operation pins the target identity and the observed D2ds_v5 or B2s compute SKU,
+32 GiB storage and 14-day backup configuration, and the
 versioned bootstrap Key Vault credential. It starts from Stopped with public
 access Disabled, enables public access only for the run-owned single-IP rule,
 then removes the rule, disables public access and returns to Stopped. The intent
@@ -114,7 +115,9 @@ attempt; recovery verifies run ownership before changing the target. Grant the
 workflow identity only subscription Reader, target-group Contributor and
 bootstrap-vault Secrets User for this bounded trial, then remove those grants.
 This is a target-specific synthetic capture observation, not migration or
-production admission. Do not reuse the rehearsal receipt as target proof.
+production admission. A B2s trial also does not prove burst-credit, capacity,
+restore-time, or whole-Azure budget suitability; qualify these separately before
+any production Burstable exception. Do not reuse the rehearsal receipt as target proof.
 The profile checks Azure server parameters and effective PostgreSQL settings with no
 pending restart before credential SQL and around commit. Parameter changes
 are a separate controlled operation; any mismatch fails closed. After

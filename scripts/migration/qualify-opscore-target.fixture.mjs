@@ -58,6 +58,31 @@ function setup() {
 
 {
   const { server, events, clock, api } = setup();
+  server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
+  const intent = await prepare(api, inputs, clock);
+  assert.equal(intent.computeSku, 'Standard_B2s');
+  await qualify(api, intent, async () => {}, async () => events.push('persist'), clock);
+  assert.equal((await cleanup(api, intent, clock)).computeSku, 'Standard_B2s');
+  assert.equal(server.state, 'Stopped');
+  assert.equal(server.network.publicNetworkAccess, 'Disabled');
+  assert.equal(events.filter(x => x === 'start').length, 1);
+}
+{
+  const { server, events, clock, api } = setup();
+  server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
+  const intent = await prepare(api, inputs, clock);
+  server.sku = { name: 'Standard_D2ds_v5', tier: 'GeneralPurpose' };
+  await assert.rejects(qualify(api, intent, async () => {}, async () => {}, clock), /TARGET_DRIFT/);
+  assert.equal(events.includes('start'), false);
+}
+{
+  const { server, clock, api } = setup();
+  server.sku = { name: 'Standard_B2s', tier: 'GeneralPurpose' };
+  await assert.rejects(prepare(api, inputs, clock), /TARGET_DRIFT/);
+}
+
+{
+  const { server, events, clock, api } = setup();
   server.network.publicNetworkAccess = 'Enabled';
   await assert.rejects(prepare(api, inputs, clock), /TARGET_NETWORK_NOT_BASELINE/);
   assert.equal(events.includes('start'), false);
