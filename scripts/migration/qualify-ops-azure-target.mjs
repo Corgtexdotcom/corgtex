@@ -19,7 +19,9 @@ const HOUR = 3600000, RESERVE = 900000;
 const assert = (v, code) => { if (!v) throw new ProbeError(code); };
 const digest = (v) => createHash("sha256").update(v).digest("hex");
 const tags = target.tags;
-const computeTiers = { Standard_D2ds_v5: "GeneralPurpose", Standard_B1ms: "Burstable" };
+const computeTiers = TARGET_PROFILE === 'opscore'
+  ? { Standard_D2ds_v5: "GeneralPurpose", Standard_B2s: "Burstable" }
+  : { Standard_D2ds_v5: "GeneralPurpose", Standard_B1ms: "Burstable" };
 export const intentComputeSku = (intent) => ["1.1.0", "1.2.0"].includes(intent?.schemaVersion) ? intent.computeSku : "Standard_D2ds_v5";
 const numeric = (v) => typeof v === "string" && /^[1-9][0-9]{0,19}$/u.test(v);
 const sameKeys = (v, names) => v && Object.keys(v).sort().join() === [...names].sort().join();
@@ -55,7 +57,6 @@ export function validateIntent(i, run, attempt) {
   assert((TARGET_PROFILE === 'opscore' ? i.schemaVersion === '1.2.0' && i.targetProfile === 'opscore'
     && i.initialPublicAccess === 'Disabled' : ["1.0.0", "1.1.0"].includes(i.schemaVersion))
     && Object.hasOwn(computeTiers, intentComputeSku(i))
-    && (TARGET_PROFILE !== 'opscore' || intentComputeSku(i) === 'Standard_D2ds_v5')
     && i.kind === target.kind && i.resource === RESOURCE
     && i.host === HOST && i.database === "postgres" && i.initialState === "Stopped" && i.transitionCapUsd === 5, "INTENT_TARGET_MISMATCH");
   assert(numeric(run) && numeric(attempt) && i.runId === run && i.runAttempt === attempt
@@ -67,7 +68,6 @@ export function validateIntent(i, run, attempt) {
 
 export function validateServer(s, allowUpdating = false, computeSku = "Standard_D2ds_v5") {
   assert(Object.hasOwn(computeTiers, computeSku), "TARGET_COMPUTE_UNSUPPORTED");
-  assert(TARGET_PROFILE !== 'opscore' || computeSku === 'Standard_D2ds_v5', 'TARGET_COMPUTE_UNSUPPORTED');
   assert(s?.id?.toLowerCase() === RESOURCE.toLowerCase() && s.name === SERVER && s.fullyQualifiedDomainName === HOST
     && s.administratorLogin === "corgtexadmin" && s.version === "18" && s.location?.replaceAll(" ", "").toLowerCase() === "westus3"
     && s.sku?.name === computeSku && s.sku?.tier === computeTiers[computeSku] && s.storage?.storageSizeGb === target.storageGiB
