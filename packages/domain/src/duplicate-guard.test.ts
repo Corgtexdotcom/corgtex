@@ -32,6 +32,40 @@ describe("duplicate guard", () => {
     prismaMock.document.findMany.mockResolvedValue([]);
   });
 
+  it("holds a similar second Action from the same meeting for review", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.action.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: "first-action",
+        title: "Continue safety review before policy updates",
+        bodyMd: "The owner will continue the safety review before updating policies.",
+        assigneeMemberId: "member-1",
+        status: "OPEN",
+        archivedAt: null,
+        createdAt: new Date("2026-09-26T10:00:00.000Z"),
+        updatedAt: new Date("2026-09-26T10:00:00.000Z"),
+      }]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1",
+      entityType: "Action",
+      title: "Owner to continue safety review before policy updates",
+      body: "The owner will continue reviewing safety before policy updates.",
+      assigneeMemberId: "member-1",
+      meetingId: "meeting-1",
+    }, { onExact: "use_existing", candidateLimit: 200 })).rejects.toMatchObject({
+      code: "DUPLICATE_GUARD_MATCH",
+      candidate: expect.objectContaining({ entityId: "first-action", matchKind: "likely" }),
+    });
+    expect(prismaMock.action.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        workspaceId: "workspace-1",
+        creationSources: { some: { sourceType: "MEETING_INSIGHT", sourceGroupId: "meeting-1" } },
+      }),
+    }));
+  });
+
   it("normalizes punctuation, accents, and common verb variants", async () => {
     const { normalizeDuplicateGuardText } = await import("./duplicate-guard");
 

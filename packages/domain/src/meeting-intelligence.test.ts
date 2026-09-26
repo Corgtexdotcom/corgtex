@@ -1088,6 +1088,28 @@ describe("meeting-intelligence", () => {
       expect(applyInsight).toBeDefined();
     });
 
+    it("passes an explicit meeting duplicate choice through and preserves a reused Action status", async () => {
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-similar", workspaceId: "ws-1", meetingId: "meeting-1", type: "ACTION_ITEM",
+        operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Prepare the weekly update.",
+        assigneeHint: null, meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      createActionMock.mockResolvedValue({ id: "action-existing", status: "IN_PROGRESS" });
+
+      await applyInsight(mockActor, {
+        workspaceId: "ws-1", insightId: "insight-similar",
+        actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-existing" },
+      });
+
+      expect(createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining({
+        duplicateGuard: { candidateLimit: 200, resolution: "use_existing", targetEntityId: "action-existing" },
+      }));
+      expect(updateActionMock).not.toHaveBeenCalled();
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ appliedEntityType: "Action", appliedEntityId: "action-existing" }),
+      }));
+    });
+
     it.each(["ACTION_ITEM", "FOLLOW_UP", "TENSION"])("uses only the active human match for %s despite earlier historical/system duplicates", async (type) => {
       const candidates = [
         { id: "historical", workspaceId: "ws-1", isActive: false, kind: "HUMAN" as const, user: { displayName: "Milan", email: "historical@example.com" } },
@@ -1113,7 +1135,9 @@ describe("meeting-intelligence", () => {
         where: { workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() }, include: { user: true },
       });
       expect(type === "TENSION" ? createTensionMock : createActionMock).toHaveBeenCalledWith(mockActor, expect.objectContaining(
-        type === "TENSION" ? { raisedByMemberId: "active-human" } : { assigneeMemberId: "active-human" },
+        type === "TENSION" ? { raisedByMemberId: "active-human" } : {
+          assigneeMemberId: "active-human", source: { type: "MEETING_INSIGHT", id: "insight-eligible", groupId: "meeting-1" },
+        },
       ));
     });
 

@@ -1,5 +1,6 @@
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
 import { createAction, publishAction } from "./actions";
+import { isDuplicateGuardMatchError } from "./duplicate-guard";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { invariant } from "./errors";
@@ -799,18 +800,30 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
     `*Created from meeting:* [${review.meeting.title || "Untitled meeting"}](${meetingUrl(params.workspaceId, review.meetingId)})`,
   ].filter(Boolean).join("\n\n");
 
-  const action = await createAction(actor, {
-    workspaceId: params.workspaceId,
-    title: insight.title,
-    bodyMd: fullBody,
-    assigneeMemberId,
-    dueAt: insight.dueAt,
-    isPrivate: true,
-  });
-  const opened = await publishAction(actor, {
+  let action;
+  try {
+    action = await createAction(actor, {
+      workspaceId: params.workspaceId,
+      title: insight.title,
+      bodyMd: fullBody,
+      assigneeMemberId,
+      dueAt: insight.dueAt,
+      isPrivate: true,
+      duplicateGuard: { candidateLimit: 200 },
+      source: { type: "MEETING_INSIGHT", id: insight.id, groupId: review.meetingId },
+    });
+  } catch (error) {
+    if (!isDuplicateGuardMatchError(error)) throw error;
+    return renderReviewUpdate({
+      workspaceId: params.workspaceId,
+      reviewId: review.id,
+      responseText: `A similar Action exists. Review this follow-up in Corgtex before confirming it: ${insightUrl(params.workspaceId, review.meetingId, insight.id)}`,
+    });
+  }
+  const opened = action.status === "DRAFT" ? await publishAction(actor, {
     workspaceId: params.workspaceId,
     actionId: action.id,
-  });
+  }) : action;
 
   await prisma.meetingInsight.update({
     where: { id: insight.id },
@@ -823,17 +836,20 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
       autoApplyError: null,
     },
   });
-  await prisma.communicationEntityLink.create({
-    data: {
+  await prisma.communicationEntityLink.upsert({
+    where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: `meeting-insight:${insight.id}` } },
+    create: {
       installationId: params.installationId,
       workspaceId: params.workspaceId,
       provider: "SLACK",
       messageId: sourceMessageId,
       externalUserId: params.externalUserId,
+      claimKey: `meeting-insight:${insight.id}`,
       entityType: "Action",
       entityId: opened.id,
       action: "create_action",
     },
+    update: {},
   });
   await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
 

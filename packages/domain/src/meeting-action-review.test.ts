@@ -7,7 +7,7 @@ const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoist
     meetingInsight: { findFirst: vi.fn(), update: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     workspaceFeatureFlag: { findUnique: vi.fn() },
     communicationMessage: { findUnique: vi.fn() },
-    communicationEntityLink: { create: vi.fn() },
+    communicationEntityLink: { create: vi.fn(), upsert: vi.fn() },
   },
   createAction: vi.fn(),
   publishAction: vi.fn(),
@@ -18,6 +18,7 @@ vi.mock("./actions", () => ({ createAction, publishAction }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership }));
 
 import { confirmSlackMeetingActionReviewProposal } from "./meeting-action-review";
+import { DuplicateGuardMatchError } from "./duplicate-guard";
 import { humanMemberIdentityWhere, isHumanMemberIdentity } from "./member-identity";
 
 const actor = { kind: "user" as const, user: { id: "user-1", email: "reviewer@example.test", displayName: "Reviewer" } };
@@ -39,7 +40,7 @@ describe("Slack meeting action assignee eligibility", () => {
     db.meetingInsight.findMany.mockResolvedValue([]);
     db.meetingInsight.count.mockResolvedValue(0);
     db.communicationMessage.findUnique.mockResolvedValue(null);
-    createAction.mockResolvedValue({ id: "action-1" });
+    createAction.mockResolvedValue({ id: "action-1", status: "DRAFT" });
     publishAction.mockResolvedValue({ id: "action-1" });
   });
 
@@ -62,7 +63,9 @@ describe("Slack meeting action assignee eligibility", () => {
 
     expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
     expect(db.member.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() }, include: { user: true } });
-    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ workspaceId: "ws-1", assigneeMemberId: "active" }));
+    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws-1", assigneeMemberId: "active", source: { type: "MEETING_INSIGHT", id: "insight-1", groupId: "meeting-1" },
+    }));
     expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "action-1" });
     expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "APPLIED", reviewedByUserId: "user-1" }) }));
   });
@@ -71,5 +74,18 @@ describe("Slack meeting action assignee eligibility", () => {
     db.member.findMany.mockImplementation(async ({ where }) => where.isActive === true ? [] : [{ id: "old", user: { displayName: "Milan", email: "old@example.test" } }]);
     await confirmSlackMeetingActionReviewProposal(actor, params);
     expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ assigneeMemberId: null }));
+  });
+
+  it("keeps a matching Slack proposal pending and directs review to Corgtex", async () => {
+    db.member.findMany.mockResolvedValue([]);
+    createAction.mockRejectedValueOnce(new DuplicateGuardMatchError({
+      entityType: "Action", entityId: "action-existing", title: "Similar Action", excerpt: null,
+      score: 0.88, matchKind: "likely", reasons: ["similar title"], status: "OPEN",
+      createdAt: null, updatedAt: null, archivedAt: null,
+    }));
+    const result = await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(result.responseText).toContain("Review this follow-up in Corgtex");
+    expect(db.meetingInsight.update).not.toHaveBeenCalled();
+    expect(publishAction).not.toHaveBeenCalled();
   });
 });

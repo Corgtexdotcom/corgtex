@@ -8,9 +8,11 @@ import type {
   GoalLevel,
 } from "@prisma/client";
 import type { ReactNode } from "react";
+import { randomUUID } from "node:crypto";
 import { notFound, redirect } from "next/navigation";
 import {
   AppError,
+  actionRequestSource,
   AGREEMENT_BRAIN_ARTICLE_TYPES,
   classifyExternalResourceUrl,
   createCatalogRequest,
@@ -807,6 +809,7 @@ export default async function WorkspaceAddPage({
         priority: asOptionalInt(formData, "priority"),
         isPrivate: intent === "draft",
         duplicateGuard: duplicateGuardFromFormData(formData),
+        source: actionRequestSource("WEB_REQUEST", actor.kind === "user" ? actor.user.id : actor.label, asString(formData, "idempotencyKey")),
       });
       const visibleAction = intent === "open" && applyAddOns && action.status === "DRAFT"
         ? await publishAction(actor, { workspaceId, actionId: action.id })
@@ -1259,6 +1262,7 @@ export default async function WorkspaceAddPage({
           <DuplicateGuardActionEditorForm
             action={createActionAndReturn}
             workspaceId={workspaceId}
+            idempotencyKey={randomUUID()}
             members={actionMembers}
             labels={actionEditorLabels}
             priority={1}

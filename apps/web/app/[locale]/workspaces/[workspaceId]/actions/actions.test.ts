@@ -21,6 +21,7 @@ class MockAppError extends Error {
 }
 
 const createAdviceRequest = vi.fn();
+const actionRequestSource = vi.fn(() => ({ type: "WEB_REQUEST", id: "test-source" }));
 const createAction = vi.fn();
 const createActionChecklistItem = vi.fn();
 const deleteAction = vi.fn();
@@ -48,6 +49,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
+  actionRequestSource,
   createAdviceRequest,
   createAction,
   createActionChecklistItem,
@@ -77,6 +79,7 @@ vi.mock("../work-item-evidence-upload", () => ({
 function buildCreateFormData() {
   const formData = new FormData();
   formData.set("workspaceId", "workspace-1");
+  formData.set("idempotencyKey", "form-request-1");
   formData.set("title", "Follow up");
   formData.set("bodyMd", "Notes");
   formData.set("priority", "4");
@@ -110,6 +113,7 @@ describe("action item server actions", () => {
 
     expect(enforceDemoGuard).toHaveBeenCalledWith("workspace-1");
     expect(requirePageActor).toHaveBeenCalled();
+    expect(actionRequestSource).toHaveBeenCalledWith("WEB_REQUEST", "user-1", "form-request-1");
     expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({
       workspaceId: "workspace-1",
       title: "Follow up",
@@ -119,6 +123,7 @@ describe("action item server actions", () => {
       dueAt: new Date("2030-01-02"),
       proposalId: null,
       isPrivate: true,
+      source: { type: "WEB_REQUEST", id: "test-source" },
     }));
   });
 

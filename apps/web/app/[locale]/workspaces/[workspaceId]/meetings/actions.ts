@@ -24,6 +24,7 @@ import {
   cancelMeetingRecording,
   sendManualMeetingRecorder,
   isDuplicateGuardMatchError,
+  duplicateGuardErrorPayload,
   type DuplicateGuardCandidate,
   type DuplicateGuardOptions,
   type DuplicateGuardResolution,
@@ -675,11 +676,20 @@ export async function applyInsightAction(formData: FormData) {
   if (_demoGuardWsId) await enforceDemoGuard(_demoGuardWsId);
 
   const actor = await requirePageActor();
-  const workspaceId = formData.get("workspaceId") as string;
-  const insightId = formData.get("insightId") as string;
-  
-  await applyInsight(actor, { workspaceId, insightId });
+  const workspaceId = asString(formData, "workspaceId");
+  const insightId = asString(formData, "insightId");
+  const resolution = asOptional(formData, "duplicateResolution");
+  const actionDuplicateGuard: DuplicateGuardOptions | undefined = resolution
+    ? duplicateGuardOptionsFromTranscriptFormData(formData)
+    : undefined;
+  try {
+    await applyInsight(actor, { workspaceId, insightId, actionDuplicateGuard });
+  } catch (error) {
+    if (isDuplicateGuardMatchError(error)) return duplicateGuardErrorPayload(error);
+    throw error;
+  }
   refresh(workspaceId);
+  return null;
 }
 
 export async function postMeetingDeliberationAction(formData: FormData) {

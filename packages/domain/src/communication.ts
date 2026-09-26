@@ -1695,6 +1695,7 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
           assigneeMemberId: params.assigneeMemberId ?? null,
           dueAt: normalizedDueAt,
           isPrivate: false,
+          source: { type: "COMMUNICATION_CLAIM", id: claimKey },
           _tx: tx,
         });
         await tx.communicationEntityLink.create({
@@ -1749,8 +1750,11 @@ export async function createWorkItemFromCommunicationSource(actor: AppActor, par
       assigneeMemberId: params.assigneeMemberId ?? null,
       dueAt: normalizedDueAt,
       isPrivate: true,
+      source: params.sourceMessageId
+        ? { type: "COMMUNICATION_MESSAGE", id: `${params.installationId}:${params.sourceMessageId}` }
+        : undefined,
     });
-    if (params.open) {
+    if (params.open && action.status === "DRAFT") {
       await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id });
     }
     result = { entityType: "Action", entityId: action.id };

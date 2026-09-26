@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
+import type { Prisma } from "@prisma/client";
 import { AppError, invariant } from "./errors";
 
 export type DuplicateGuardEntityType =
@@ -300,8 +301,8 @@ function toLoadedCandidate(params: {
   };
 }
 
-async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: string, limit: number, input: DuplicateGuardInput) {
-  const db = prisma as any;
+async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: string, limit: number, input: DuplicateGuardInput, client: Prisma.TransactionClient | typeof prisma = prisma) {
+  const db = client as any;
   const privateWorkItemVisibility = input.includePrivate
     ? {}
     : {
@@ -338,12 +339,26 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
   }
 
   switch (entityType) {
-    case "Action":
-      return await db.action?.findMany?.({
+    case "Action": {
+      const recentActions = await db.action?.findMany?.({
         where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN", "IN_PROGRESS"] }, ...privateWorkItemVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
       }) ?? [];
+      if (!input.meetingId) return recentActions;
+      const meetingActions = await db.action?.findMany?.({
+        where: {
+          workspaceId,
+          archivedAt: null,
+          status: { in: ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] },
+          ...privateWorkItemVisibility,
+          creationSources: { some: { sourceType: "MEETING_INSIGHT", sourceGroupId: input.meetingId } },
+        },
+        orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+        take: MAX_CANDIDATE_LIMIT,
+      }) ?? [];
+      return [...meetingActions.map((row: any) => ({ ...row, meetingId: input.meetingId })), ...recentActions];
+    }
     case "Tension":
       return await db.tension?.findMany?.({
         where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN"] }, ...privateWorkItemVisibility },
@@ -744,8 +759,8 @@ function candidateTime(candidate: DuplicateGuardCandidate) {
   return Number.isFinite(time) ? time : 0;
 }
 
-async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null) {
-  const rows = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input);
+async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null, client?: Prisma.TransactionClient) {
+  const rows = await latestRows(input.entityType, input.workspaceId, candidateLimit(options?.candidateLimit), input, client);
   const candidates = mapRows(input.entityType, rows);
   const matches = candidates
     .map((candidate) => scoreCandidate(input, candidate))
@@ -759,18 +774,18 @@ async function findDuplicateGuardMatch(input: DuplicateGuardInput, options?: Dup
   return matches.map(cleanCandidate);
 }
 
-export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null): Promise<DuplicateGuardDecision | null> {
+export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, options?: DuplicateGuardOptions | null, client?: Prisma.TransactionClient): Promise<DuplicateGuardDecision | null> {
   if (options == null) return null;
   const resolution = options?.resolution ?? null;
   if ((resolution === "use_existing" || resolution === "update_existing") && !options?.targetEntityId) {
     invariant(false, 400, "DUPLICATE_GUARD_TARGET_REQUIRED", "Duplicate resolution requires a target entity ID.");
   }
   if (resolution === "create_new") {
-    const [match] = await findDuplicateGuardMatch(input, options);
+    const [match] = await findDuplicateGuardMatch(input, options, client);
     return match ? { resolution, match } : null;
   }
 
-  const matches = await findDuplicateGuardMatch(input, options);
+  const matches = await findDuplicateGuardMatch(input, options, client);
   const match = options?.targetEntityId
     ? matches.find((candidate) => candidate.entityId === options.targetEntityId)
     : matches[0] ?? null;
@@ -786,7 +801,7 @@ export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, o
   if (match.archivedAt) {
     throw new DuplicateGuardMatchError(match, "create_new", input);
   }
-  if (match.matchKind === "exact" && options?.onExact === "use_existing") {
+  if (match.matchKind === "exact" && options?.onExact === "use_existing" && match.status !== "COMPLETED") {
     return { resolution: "use_existing", match };
   }
 
