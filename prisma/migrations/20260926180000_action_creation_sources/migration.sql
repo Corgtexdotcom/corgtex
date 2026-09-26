@@ -33,5 +33,5 @@ CREATE INDEX "ActionCreationSource_workspaceId_sourceType_sourceGroupId_idx"
 ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_workspaceId_fkey"
     FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
-ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_actionId_fkey"
+ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_actionId_workspaceId_fkey"
     FOREIGN KEY ("actionId", "workspaceId") REFERENCES "Action"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
