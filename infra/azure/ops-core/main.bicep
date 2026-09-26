@@ -60,8 +60,11 @@ param tags object = {
   purpose: 'ops-core-backing-resources'
 }
 
-resource newHostingGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = if (postgresHosting.mode == 'dedicated') {
-  name: 'rg-${namePrefix}-hosting'
+var hostingGroupName = 'rg-${namePrefix}-hosting'
+var reuseHostingGroup = postgresHosting.mode == 'existing-shared' ? toLower(postgresHosting.resourceGroupName) == toLower(hostingGroupName) : false
+
+resource newHostingGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = if (!reuseHostingGroup) {
+  name: hostingGroupName
   location: location
   tags: tags
 }
@@ -74,8 +77,8 @@ resource custodyGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 
 module hosting './hosting.bicep' = {
   name: '${namePrefix}-backing-resources'
-  // Existing-shared mode references the group without redeclaring or retagging it.
-  scope: resourceGroup(postgresHosting.mode == 'existing-shared' ? postgresHosting.resourceGroupName : 'rg-${namePrefix}-hosting')
+  // Keep backing resources in the hosting group, even when the shared server lives elsewhere.
+  scope: resourceGroup(hostingGroupName)
   dependsOn: [newHostingGroup]
   params: {
     location: location
@@ -111,7 +114,7 @@ module custody './custody.bicep' = {
   }
 }
 
-output hostingResourceGroupId string = subscriptionResourceId('Microsoft.Resources/resourceGroups', postgresHosting.mode == 'existing-shared' ? postgresHosting.resourceGroupName : 'rg-${namePrefix}-hosting')
+output hostingResourceGroupId string = subscriptionResourceId('Microsoft.Resources/resourceGroups', hostingGroupName)
 output custodyResourceGroupId string = custodyGroup.id
 output existingAcrId string = existingAcrResourceId
 output platform object = hosting.outputs.platform
