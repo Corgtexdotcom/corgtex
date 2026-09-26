@@ -29,7 +29,7 @@ async function main() {
 
   const controlPlaneCustomers = dryRun ? [] : await fetchControlPlaneCustomers(process.env);
   const controlPlaneIncidents = buildControlPlaneIncidents(controlPlaneCustomers);
-  const syncDedupePrefixes = resolvedSyncDedupePrefixes(targets, controlPlaneCustomers, process.env);
+  const syncDedupePrefixes = resolvedSyncDedupePrefixes(targets, controlPlaneCustomers);
   const incidents = [
     ...results.filter((result) => result.incident).map((result) => result.incident),
     ...controlPlaneIncidents,
@@ -76,17 +76,13 @@ async function main() {
       },
     );
     if (issueResult.status !== 0) {
-      if (incidents.length === 0) {
-        console.error("Resolved issue sync failed during a clean sweep; keeping service-health status clean.");
-        return;
-      }
       process.exit(issueResult.status ?? 1);
     }
   }
 
-  if (incidents.length > 0) {
-    process.exitCode = 1;
-  }
+  // A detected outage is a successful monitor run once its incident is published.
+  // Railway cron treats a nonzero exit as Deployment.crashed, obscuring real alerts.
+  if (incidents.length > 0 && !createIssues) process.exitCode = 1;
 }
 
 main().catch((error) => {
@@ -94,26 +90,14 @@ main().catch((error) => {
   process.exit(1);
 });
 
-function resolvedSyncDedupePrefixes(targets, controlPlaneCustomers, env) {
+function resolvedSyncDedupePrefixes(targets, controlPlaneCustomers) {
   const prefixes = targets.map((target) => normalizeDedupePrefix(`${target.name}:${target.url}:`));
-  if (controlPlaneCustomers.length > 0 || controlPlaneFetchConfigured(env)) {
-    prefixes.push("control-plane:");
-  }
+  // A configured but empty control-plane response does not prove that any
+  // previously reported deployment has recovered.
+  prefixes.push(...controlPlaneCustomers
+    .filter((customer) => optionalText(customer?.id))
+    .map((customer) => normalizeDedupePrefix(`control-plane:${customer.id}:`)));
   return prefixes;
-}
-
-function controlPlaneFetchConfigured(env) {
-  const token = optionalText(env.CONTROL_PLANE_AGENT_API_KEY);
-  const baseUrl = firstHttpUrl(env.CONTROL_PLANE_URL, env.APP_URL, env.OPS_CONTROL_PLANE_URL);
-  return Boolean(token && baseUrl);
-}
-
-function firstHttpUrl(...values) {
-  for (const value of values) {
-    const text = optionalText(value);
-    if (text && /^https?:\/\//i.test(text)) return text.replace(/\/$/, "");
-  }
-  return null;
 }
 
 function normalizeDedupePrefix(value) {

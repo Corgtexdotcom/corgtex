@@ -691,6 +691,19 @@ function releaseMetadataDriftIncident(row) {
   const observed = record(summary?.observedRelease);
   const expected = optionalText(summary?.expectedReleaseImageTag) ?? optionalText(row?.releaseImageTag);
   const observedRelease = optionalText(observed?.imageTag) ?? optionalText(observed?.gitSha);
+  const baseline = optionalText(row?.releaseImageTag);
+  const snapshotAt = timestampMs(optionalText(snapshot?.observedAt) ?? optionalText(snapshot?.createdAt));
+  const healthAt = timestampMs(optionalText(row?.lastHealthCheck));
+  const releaseAt = timestampMs(optionalText(row?.lastReleaseCheck));
+  const rowDrift = optionalText(row?.lastHealthError)?.includes("Release drift:");
+  const verifiedMatch = baseline && expected === baseline && snapshot?.status === "ok" && !snapshot?.error
+    && snapshotAt !== null
+    && (!rowDrift || (healthAt !== null && snapshotAt >= healthAt
+      && (releaseAt === null || snapshotAt >= releaseAt)))
+    && (expected === optionalText(observed?.imageTag)
+      || expected === optionalText(observed?.gitSha)
+      || expected === `sha-${optionalText(observed?.gitSha)}`);
+  if (verifiedMatch) return null;
   const driftError = optionalText(snapshot?.error) ?? optionalText(row?.lastHealthError);
   if (!driftError?.includes("Release drift:") && (!expected || !observedRelease || expected === observedRelease)) {
     return null;
