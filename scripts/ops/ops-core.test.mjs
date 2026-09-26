@@ -324,6 +324,34 @@ describe("ops-core control-plane incidents", () => {
     expect(incidents.find((incident) => incident.status === "slackInvalidAuth").evidence.join("\n")).not.toContain("secret");
   });
 
+  it("clears stale release drift after a newer verified live release snapshot", () => {
+    const incidents = buildTestControlPlaneIncidents([{
+      id: "deployment-acme",
+      label: "Acme Production",
+      customerSlug: "acme",
+      hasSupportCredential: true,
+      releaseImageTag: "sha-new-release",
+      lastHealthError: "Release drift: expected old-release, got new-release",
+      fleetSnapshots: [
+        {
+          snapshotKind: "RELEASE",
+          observedAt: "2026-05-24T00:00:00.000Z",
+          status: "degraded",
+          error: "Release drift: expected old-release, got new-release",
+          summary: { expectedReleaseImageTag: "old-release", observedRelease: { gitSha: "new-release" } },
+        },
+        {
+          snapshotKind: "RELEASE",
+          observedAt: "2026-05-25T00:00:00.000Z",
+          status: "ok",
+          error: null,
+          summary: { expectedReleaseImageTag: "sha-new-release", observedRelease: { gitSha: "new-release" } },
+        },
+      ],
+    }]);
+    expect(incidents.some((incident) => incident.status === "releaseMetadataDrift")).toBe(false);
+  });
+
   it("emits a newspaper delivery incident from an attention support snapshot", () => {
     const incidents = buildTestControlPlaneIncidents([
       {

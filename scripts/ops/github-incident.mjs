@@ -15,9 +15,12 @@ const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
 const syncResolved = Boolean(args["sync-resolved"]);
 const syncDedupePrefixes = parseSyncDedupePrefixes(args["sync-dedupe-prefixes"]);
+const unhealthyDedupePrefixes = parseSyncDedupePrefixes(args["unhealthy-dedupe-prefixes"]);
 const RESOLUTION_BLOCKING_LABELS = new Set(["halt-agents", "needs-replan"]);
 const INCIDENT_SCAN_LABELS = ["ops-incident", "ops-auto-fix"];
 const ROUTING_LABELS = new Set(["ops-auto-fix", "ops-advisory"]);
+const HEALTHY_CHECKS_TO_RESOLVE = 3;
+const RECOVERY_LABEL_PREFIX = "ops-recovery-";
 
 async function main() {
   const { incidents, explicitInput } = await readIncidents();
@@ -39,11 +42,11 @@ async function main() {
 
   const api = githubApiConfig();
   if (api) {
-    await publishWithGitHubApi(api, plans, { syncResolved, syncDedupePrefixes });
+    await publishWithGitHubApi(api, plans, { syncResolved, syncDedupePrefixes, unhealthyDedupePrefixes });
     return;
   }
 
-  publishWithGh(plans, { syncResolved, syncDedupePrefixes });
+  publishWithGh(plans, { syncResolved, syncDedupePrefixes, unhealthyDedupePrefixes });
 }
 
 async function readIncidents() {
@@ -107,7 +110,7 @@ async function publishWithGitHubApi(api, plans, options = {}) {
   }
 
   if (options.syncResolved) {
-    await closeResolvedIssuesWithApi(api, activeSearchTokens(plans), options.syncDedupePrefixes, openIssues);
+    await closeResolvedIssuesWithApi(api, plans, options, openIssues);
   }
 }
 
@@ -201,9 +204,33 @@ async function listOpenIssuesByLabelWithApi(api, label) {
   return issues;
 }
 
-async function closeResolvedIssuesWithApi(api, activeTokens, dedupePrefixes, issues) {
+async function closeResolvedIssuesWithApi(api, plans, options, issues) {
+  const activeTokens = activeSearchTokens(plans);
   for (const issue of issues) {
-    if (issue.pull_request || !shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
+    if (issue.pull_request || !issueIsInDedupeScope(issue, options.syncDedupePrefixes)) continue;
+    if (scopeHasFailure(issue, plans, options)) {
+      const labels = issueLabelNames(issue);
+      if (labels.some(isRecoveryLabel)) {
+        const updated = await githubRequest(api, `/repos/${api.owner}/${api.repo}/issues/${issue.number}`, {
+          method: "PATCH",
+          body: { labels: labels.filter((label) => !isRecoveryLabel(label)) },
+        });
+        issue.labels = updated?.labels ?? [];
+      }
+      continue;
+    }
+    if (!shouldCloseIssue(issue, activeTokens, options.syncDedupePrefixes)) continue;
+    const nextCount = healthyCheckCount(issue) + 1;
+    if (nextCount < HEALTHY_CHECKS_TO_RESOLVE) {
+      const label = recoveryLabel(nextCount);
+      await ensureLabelsWithApi(api, [label]);
+      const updated = await githubRequest(api, `/repos/${api.owner}/${api.repo}/issues/${issue.number}`, {
+        method: "PATCH",
+        body: { labels: [...issueLabelNames(issue).filter((name) => !isRecoveryLabel(name)), label] },
+      });
+      issue.labels = updated?.labels ?? [{ name: label }];
+      continue;
+    }
     const body = resolvedCommentBody();
     const comment = await githubRequest(
       api,
@@ -249,7 +276,7 @@ function publishWithGh(plans, options = {}) {
   }
 
   if (options.syncResolved) {
-    closeResolvedIssuesWithGh(activeSearchTokens(plans), options.syncDedupePrefixes);
+    closeResolvedIssuesWithGh(plans, options);
   }
 }
 
@@ -279,11 +306,27 @@ function findExistingIssue(searchToken) {
   return null;
 }
 
-function closeResolvedIssuesWithGh(activeTokens, dedupePrefixes) {
+function closeResolvedIssuesWithGh(plans, options) {
+  const activeTokens = activeSearchTokens(plans);
   const issues = listOpenOpsIssuesWithGhApi();
   for (const issue of issues) {
-    if (issue.pull_request) continue;
-    if (!shouldCloseIssue(issue, activeTokens, dedupePrefixes)) continue;
+    if (issue.pull_request || !issueIsInDedupeScope(issue, options.syncDedupePrefixes)) continue;
+    if (scopeHasFailure(issue, plans, options)) {
+      const labels = issueLabelNames(issue).filter(isRecoveryLabel);
+      if (labels.length) runGh(["issue", "edit", String(issue.number), "--remove-label", labels.join(",")]);
+      continue;
+    }
+    if (!shouldCloseIssue(issue, activeTokens, options.syncDedupePrefixes)) continue;
+    const nextCount = healthyCheckCount(issue) + 1;
+    if (nextCount < HEALTHY_CHECKS_TO_RESOLVE) {
+      const label = recoveryLabel(nextCount);
+      ensureLabels([label]);
+      const previous = issueLabelNames(issue).filter(isRecoveryLabel);
+      const editArgs = ["issue", "edit", String(issue.number), "--add-label", label];
+      if (previous.length) editArgs.push("--remove-label", previous.join(","));
+      runGh(editArgs);
+      continue;
+    }
     runGh([
       "issue",
       "close",
@@ -367,7 +410,10 @@ function reconcileIssueLabels(issue, desiredLabels) {
   const currentLabels = issueLabelNames(issue);
   const currentSet = new Set(currentLabels);
   const desiredSet = new Set(desiredLabels);
-  const removeLabels = routingLabelsToRemove(currentSet, desiredSet);
+  const removeLabels = [
+    ...routingLabelsToRemove(currentSet, desiredSet),
+    ...currentLabels.filter(isRecoveryLabel),
+  ];
   const addLabels = desiredLabels.filter((label) => !currentSet.has(label));
   const nextSet = new Set(currentLabels);
 
@@ -399,6 +445,17 @@ function routingLabelsToRemove(currentSet, desiredSet) {
 
 function activeSearchTokens(plans) {
   return new Set(plans.map((plan) => plan.searchToken));
+}
+
+function scopeHasFailure(issue, plans, options) {
+  const key = issueDedupeKey(issue);
+  if (!key) return false;
+  const prefix = options.syncDedupePrefixes
+    .filter((candidate) => key.startsWith(candidate))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!prefix) return false;
+  return options.unhealthyDedupePrefixes.some((candidate) => key.startsWith(candidate))
+    || plans.some((plan) => plan.incident.dedupeKey.startsWith(prefix));
 }
 
 function shouldCloseIssue(issue, activeTokens, dedupePrefixes = []) {
@@ -434,11 +491,27 @@ function issueLabelNames(issue) {
     : [];
 }
 
+function isRecoveryLabel(label) {
+  return label.startsWith(RECOVERY_LABEL_PREFIX);
+}
+
+function recoveryLabel(count) {
+  return `${RECOVERY_LABEL_PREFIX}${count}`;
+}
+
+function healthyCheckCount(issue) {
+  const counts = issueLabelNames(issue)
+    .filter(isRecoveryLabel)
+    .map((label) => Number(label.slice(RECOVERY_LABEL_PREFIX.length)))
+    .filter((count) => Number.isInteger(count) && count > 0 && count < HEALTHY_CHECKS_TO_RESOLVE);
+  return counts.length === 1 ? counts[0] : 0;
+}
+
 function resolvedCommentBody() {
   return [
-    `Resolved by clean ops sweep at ${new Date().toISOString()}.`,
+    `Resolved after ${HEALTHY_CHECKS_TO_RESOLVE} consecutive healthy ops checks at ${new Date().toISOString()}.`,
     "",
-    "The latest sweep did not report a matching active incident for this dedupe key. Closing so future builder runs focus on current signals.",
+    "The latest scoped sweeps did not report a matching active incident for this dedupe key. Closing so future builder runs focus on current signals.",
   ].join("\n");
 }
 

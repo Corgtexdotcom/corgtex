@@ -58,7 +58,7 @@ describe("github-incident resolved issue sync", () => {
     ], {
       issues: [
         issue(1, `[${activeToken}] P2 agents: active`),
-        issue(2, `[${resolvedToken}] P2 agents: resolved`),
+        issue(2, `[${resolvedToken}] P2 agents: resolved`, ["ops-auto-fix", "ops-recovery-2"]),
       ],
     });
 
@@ -68,7 +68,86 @@ describe("github-incident resolved issue sync", () => {
       closed: true,
       closeReason: "completed",
     });
-    expect(result.state.issues.find((item) => item.number === 2).closeComment).toContain("Resolved by clean ops sweep");
+    expect(result.state.issues.find((item) => item.number === 2).closeComment).toContain("3 consecutive healthy ops checks");
+  });
+
+  it("requires three healthy checks and resets recovery when the scope fails", async () => {
+    const dedupeKey = "client-readiness:synthetic:smoke:1:none";
+    const issueRecord = issue(20, `[${opsToken(dedupeKey)}] P2 client: smoke failed`, ["ops-auto-fix"], dedupeKey);
+    const scope = ["--sync-resolved", "--sync-dedupe-prefixes", "client-readiness:synthetic:smoke:"];
+    const first = await runWithFakeGh(githubIncidentPath, scope, [], { issues: [issueRecord] });
+    expect(first.state.issues[0].closed).toBeFalsy();
+    expect(labelNames(first.state.issues[0])).toContain("ops-recovery-1");
+
+    const second = await runWithFakeGh(githubIncidentPath, scope, [], { issues: first.state.issues });
+    expect(second.state.issues[0].closed).toBeFalsy();
+    expect(labelNames(second.state.issues[0])).toContain("ops-recovery-2");
+
+    const failed = await runWithFakeGh(githubIncidentPath, scope, [{
+      dedupeKey: "client-readiness:synthetic:smoke:124:SIGTERM",
+      severity: "P2",
+      service: "client",
+      status: "smoke-failed",
+      summary: "Synthetic smoke timed out",
+    }], { issues: second.state.issues });
+    expect(failed.state.issues[0].closed).toBeFalsy();
+    expect(labelNames(failed.state.issues[0]).some((label) => label.startsWith("ops-recovery-"))).toBe(false);
+
+    const recovered = await runWithFakeGh(githubIncidentPath, scope, [], { issues: failed.state.issues });
+    expect(labelNames(recovered.state.issues[0])).toContain("ops-recovery-1");
+  });
+
+  it("tracks the recovery streak through the token-backed GitHub API path", async () => {
+    const dedupeKey = "site:https://example.test/api/health:down";
+    const record = issue(21, `[${opsToken(dedupeKey)}] P2 site: down`, ["ops-auto-fix"], dedupeKey);
+    const api = createServer(async (request, response) => {
+      const url = new URL(request.url, "http://localhost");
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+      const reply = (status, value) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(value));
+      };
+      if (request.method === "GET" && url.pathname.endsWith("/issues")) {
+        const label = url.searchParams.get("labels");
+        reply(200, record.closed || !labelNames(record).includes(label) ? [] : [record]);
+      } else if (request.method === "POST" && url.pathname.endsWith("/labels")) {
+        reply(201, { name: body.name });
+      } else if (request.method === "PATCH" && url.pathname.endsWith("/issues/21")) {
+        if (body.labels) record.labels = body.labels.map((name) => ({ name }));
+        if (body.state === "closed") record.closed = true;
+        reply(200, record);
+      } else if (request.method === "POST" && url.pathname.endsWith("/issues/21/comments")) {
+        record.closeComment = body.body;
+        reply(201, { html_url: "http://github.test/comment" });
+      } else {
+        reply(404, { message: "Unexpected request" });
+      }
+    });
+    await new Promise((resolve) => api.listen(0, "127.0.0.1", resolve));
+    try {
+      const baseUrl = `http://127.0.0.1:${api.address().port}`;
+      const env = {
+        ...process.env,
+        GITHUB_API_URL: baseUrl,
+        OPS_GITHUB_TOKEN: "test-token",
+        OPS_GITHUB_REPOSITORY: "test/repo",
+      };
+      const argv = ["--sync-resolved", "--sync-dedupe-prefixes", "site:https://example.test/api/health:"];
+      for (const expected of ["ops-recovery-1", "ops-recovery-2"]) {
+        const result = await runNodeScript(githubIncidentPath, argv, [], env);
+        expect(result.code, result.stderr).toBe(0);
+        expect(labelNames(record)).toContain(expected);
+        expect(record.closed).toBeFalsy();
+      }
+      const result = await runNodeScript(githubIncidentPath, argv, [], env);
+      expect(result.code, result.stderr).toBe(0);
+      expect(record.closed).toBe(true);
+      expect(record.closeComment).toContain("3 consecutive healthy ops checks");
+    } finally {
+      await new Promise((resolve) => api.close(resolve));
+    }
   });
 
   it("does not close incidents blocked by human-control labels", async () => {
@@ -119,7 +198,7 @@ describe("github-incident resolved issue sync", () => {
         issue(
           8,
           `[${controlPlaneToken}] P2 slack: stale`,
-          ["ops-auto-fix"],
+          ["ops-auto-fix", "ops-recovery-2"],
           "control-plane:deployment-1:slackInvalidAuth",
         ),
         issue(
@@ -139,7 +218,7 @@ describe("github-incident resolved issue sync", () => {
   it("uses bounded paged gh api issue listing for resolved sync", async () => {
     const issues = Array.from({ length: 101 }, (_, index) => {
       const dedupeKey = `resolved-dedupe-${index + 1}`;
-      const labels = index < 100 ? ["ops-auto-fix", "ops-incident", "halt-agents"] : ["ops-auto-fix", "ops-incident"];
+      const labels = index < 100 ? ["ops-auto-fix", "ops-incident", "halt-agents"] : ["ops-auto-fix", "ops-incident", "ops-recovery-2"];
       return issue(index + 10, `[${opsToken(dedupeKey)}] P2 web: stale ${index + 1}`, labels, dedupeKey);
     });
     const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], [], {
@@ -169,7 +248,7 @@ describe("github-incident resolved issue sync", () => {
     const staleToken = opsToken(staleDedupe);
     const result = await runWithFakeGh(githubIncidentPath, ["--sync-resolved"], [], {
       issues: [
-        issue(117, `[${staleToken}] P2 web: legacy stale`, ["ops-auto-fix"], staleDedupe),
+        issue(117, `[${staleToken}] P2 web: legacy stale`, ["ops-auto-fix", "ops-recovery-2"], staleDedupe),
       ],
     });
 
@@ -329,7 +408,7 @@ describe("github-incident resolved issue sync", () => {
       const staleDedupe = `site:${server.url}/api/health:down`;
       const staleToken = opsToken(staleDedupe);
       const result = await runWithFakeGh(healthSweepPath, [], null, {
-        issues: [issue(6, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], staleDedupe)],
+        issues: [issue(6, `[${staleToken}] P2 site: stale`, ["ops-auto-fix", "ops-recovery-2"], staleDedupe)],
         env: {
           OPS_CREATE_GITHUB_ISSUES: "true",
           OPS_HEALTH_TARGETS_JSON: JSON.stringify([
@@ -356,13 +435,43 @@ describe("github-incident resolved issue sync", () => {
     }
   });
 
+  it("treats a reported health incident as a successful cron execution", async () => {
+    const server = await startHealthServer(503);
+    try {
+      const result = await runWithFakeGh(healthSweepPath, [], null, {
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "true",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([{
+            name: "site",
+            service: "site",
+            url: `${server.url}/api/health`,
+            timeoutMs: 1000,
+            attempts: 1,
+            expectedStatuses: [200],
+          }]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout.split("\nhttps://github.test")[0]).incidents).toHaveLength(1);
+      expect(result.state.issues).toHaveLength(1);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("normalizes health target prefixes before resolved sync", async () => {
     const server = await startHealthServer();
     try {
       const staleDedupe = `site prod:${server.url}/api/health:down`;
       const staleToken = opsToken(staleDedupe);
       const result = await runWithFakeGh(healthSweepPath, [], null, {
-        issues: [issue(12, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], staleDedupe)],
+        issues: [issue(12, `[${staleToken}] P2 site: stale`, ["ops-auto-fix", "ops-recovery-2"], staleDedupe)],
         env: {
           OPS_CREATE_GITHUB_ISSUES: "true",
           OPS_HEALTH_TARGETS_JSON: JSON.stringify([
@@ -396,7 +505,7 @@ describe("github-incident resolved issue sync", () => {
       const normalizedDedupe = `${targetName}:${server.url}/api/health:down`.slice(0, 200).toLowerCase();
       const staleToken = opsToken(normalizedDedupe);
       const result = await runWithFakeGh(healthSweepPath, [], null, {
-        issues: [issue(14, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], normalizedDedupe)],
+        issues: [issue(14, `[${staleToken}] P2 site: stale`, ["ops-auto-fix", "ops-recovery-2"], normalizedDedupe)],
         env: {
           OPS_CREATE_GITHUB_ISSUES: "true",
           OPS_HEALTH_TARGETS_JSON: JSON.stringify([
@@ -429,7 +538,7 @@ describe("github-incident resolved issue sync", () => {
       const staleDedupe = `site,prod:${server.url}/api/health:down`;
       const staleToken = opsToken(staleDedupe);
       const result = await runWithFakeGh(healthSweepPath, [], null, {
-        issues: [issue(15, `[${staleToken}] P2 site: stale`, ["ops-auto-fix"], staleDedupe)],
+        issues: [issue(15, `[${staleToken}] P2 site: stale`, ["ops-auto-fix", "ops-recovery-2"], staleDedupe)],
         env: {
           OPS_CREATE_GITHUB_ISSUES: "true",
           OPS_HEALTH_TARGETS_JSON: JSON.stringify([
@@ -740,11 +849,11 @@ process.exit(1);
 `;
 }
 
-async function startHealthServer() {
+async function startHealthServer(status = 200) {
   const server = createServer((request, response) => {
     if (request.url === "/api/health") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ status: "ok" }));
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: status === 200 ? "ok" : "down" }));
       return;
     }
     response.writeHead(404);

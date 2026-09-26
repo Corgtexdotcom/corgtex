@@ -7,6 +7,7 @@ import {
   normalizeIncident,
   parseArgs,
 } from "./ops-core.mjs";
+import { SELFSERVE_VALIDATION_TARGET } from "../lib/selfserve-validation-target.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
@@ -185,6 +186,23 @@ function credentialEnv(customer) {
   const password = optionalText(process.env[`CLIENT_READINESS_${key}_PASSWORD`])
     || optionalText(mapped.password);
 
+  if (customer.slug === "corgtex-selfserve-production") {
+    if (new URL(customer.url).origin !== SELFSERVE_VALIDATION_TARGET.origin) {
+      throw new Error("Self-serve readiness target differs from the approved production origin.");
+    }
+    const dedicatedEmail = email || optionalText(process.env.SELFSERVE_VALIDATION_EMAIL);
+    const dedicatedPassword = password || optionalText(process.env.SELFSERVE_VALIDATION_PASSWORD);
+    if (!dedicatedEmail || !dedicatedPassword) {
+      throw new Error("Dedicated self-serve readiness credentials are not configured.");
+    }
+    return {
+      AGENT_E2E_EMAIL: dedicatedEmail,
+      AGENT_E2E_PASSWORD: dedicatedPassword,
+      CLIENT_READINESS_WORKSPACE_ID: SELFSERVE_VALIDATION_TARGET.workspaceId,
+      CLIENT_READINESS_WORKSPACE_SLUG: "",
+    };
+  }
+
   return {
     ...(email ? { AGENT_E2E_EMAIL: email } : {}),
     ...(password ? { AGENT_E2E_PASSWORD: password } : {}),
@@ -202,12 +220,27 @@ function firstOutputLine(...values) {
 function runSmoke(customer) {
   const [bin, suiteArgs] = smokeCommand(customer);
   const startedAt = Date.now();
+  let credentials;
+  try {
+    credentials = credentialEnv(customer);
+  } catch (error) {
+    return {
+      ok: false,
+      exitCode: 78,
+      signal: null,
+      timedOut: false,
+      elapsedMs: Date.now() - startedAt,
+      stderr: null,
+      stdout: null,
+      error: { name: "ConfigurationError", message: error instanceof Error ? error.message : String(error), code: "CONFIG" },
+    };
+  }
   console.error(`[client-readiness] smoke start ${customer.slug}`);
   const result = spawnSync(bin, suiteArgs, {
     cwd: process.cwd(),
     env: {
       ...process.env,
-      ...credentialEnv(customer),
+      ...credentials,
       CLIENT_READINESS_BASE_URL: customer.url,
       OPS_CLIENT_URL: customer.url,
       OPS_PRIMARY_CLIENT_URL: customer.url,
@@ -260,11 +293,29 @@ function smokeIncident(customer, result) {
   });
 }
 
-async function maybeCreateIssues(incidents) {
-  if (dryRun || !createIssues || incidents.length === 0) return;
+async function maybeCreateIssues(incidents, results) {
+  if (dryRun || !createIssues || results.length === 0) return;
+  const syncDedupePrefixes = results.flatMap((result) => [
+    `${result.slug}-health:${result.url}/api/health:`,
+    ...(!healthOnly ? [`client-readiness:${result.slug}:smoke:`] : []),
+  ]);
+  const unhealthyDedupePrefixes = results.flatMap((result) => [
+    ...(!result.health.ok ? [
+      `${result.slug}-health:${result.url}/api/health:`,
+      `client-readiness:${result.slug}:smoke:`,
+    ] : []),
+    ...(result.smoke && !result.smoke.ok ? [`client-readiness:${result.slug}:smoke:`] : []),
+  ]);
   const issueResult = spawnSync(
     process.execPath,
-    [new URL("./github-incident.mjs", import.meta.url).pathname],
+    [
+      new URL("./github-incident.mjs", import.meta.url).pathname,
+      "--sync-resolved",
+      "--sync-dedupe-prefixes",
+      JSON.stringify(syncDedupePrefixes),
+      "--unhealthy-dedupe-prefixes",
+      JSON.stringify(unhealthyDedupePrefixes),
+    ],
     {
       input: JSON.stringify(incidents),
       encoding: "utf8",
@@ -330,10 +381,7 @@ async function main() {
     incidents,
   }, null, 2));
 
-  await maybeCreateIssues(incidents);
-  if (incidents.length > 0) {
-    process.exitCode = 1;
-  }
+  await maybeCreateIssues(incidents, results);
 }
 
 main().catch((error) => {
