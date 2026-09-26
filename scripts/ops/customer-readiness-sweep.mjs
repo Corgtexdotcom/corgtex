@@ -382,6 +382,7 @@ async function main() {
   }, null, 2));
 
   await maybeCreateIssues(incidents, results);
+  if (incidents.length > 0 && !createIssues) process.exitCode = 1;
 }
 
 main().catch((error) => {

@@ -76,16 +76,13 @@ async function main() {
       },
     );
     if (issueResult.status !== 0) {
-      if (incidents.length === 0) {
-        console.error("Resolved issue sync failed during a clean sweep; keeping service-health status clean.");
-        return;
-      }
       process.exit(issueResult.status ?? 1);
     }
   }
 
   // A detected outage is a successful monitor run once its incident is published.
   // Railway cron treats a nonzero exit as Deployment.crashed, obscuring real alerts.
+  if (incidents.length > 0 && !createIssues) process.exitCode = 1;
 }
 
 main().catch((error) => {

@@ -332,6 +332,8 @@ describe("ops-core control-plane incidents", () => {
       hasSupportCredential: true,
       releaseImageTag: "sha-new-release",
       lastHealthError: "Release drift: expected old-release, got new-release",
+      lastHealthCheck: "2026-05-24T23:59:59.000Z",
+      lastReleaseCheck: "2026-05-24T23:59:59.000Z",
       fleetSnapshots: [
         {
           snapshotKind: "RELEASE",
@@ -350,6 +352,26 @@ describe("ops-core control-plane incidents", () => {
       ],
     }]);
     expect(incidents.some((incident) => incident.status === "releaseMetadataDrift")).toBe(false);
+  });
+
+  it("keeps current release drift active when only an older baseline was verified", () => {
+    const incidents = buildTestControlPlaneIncidents([{
+      id: "deployment-acme",
+      label: "Acme Production",
+      customerSlug: "acme",
+      hasSupportCredential: true,
+      releaseImageTag: "sha-new-release",
+      lastHealthError: "Release drift: expected sha-new-release, got sha-old-release",
+      lastHealthCheck: "2026-05-26T00:00:00.000Z",
+      fleetSnapshots: [{
+        snapshotKind: "RELEASE",
+        observedAt: "2026-05-25T00:00:00.000Z",
+        status: "ok",
+        error: null,
+        summary: { expectedReleaseImageTag: "sha-old-release", observedRelease: { gitSha: "old-release" } },
+      }],
+    }]);
+    expect(incidents.some((incident) => incident.status === "releaseMetadataDrift")).toBe(true);
   });
 
   it("emits a newspaper delivery incident from an attention support snapshot", () => {

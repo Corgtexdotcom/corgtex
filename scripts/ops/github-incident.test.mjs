@@ -460,6 +460,28 @@ describe("github-incident resolved issue sync", () => {
       expect(result.code, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout.split("\nhttps://github.test")[0]).incidents).toHaveLength(1);
       expect(result.state.issues).toHaveLength(1);
+
+      const standalone = await runWithFakeGh(healthSweepPath, [], null, {
+        env: {
+          OPS_CREATE_GITHUB_ISSUES: "false",
+          OPS_HEALTH_TARGETS_JSON: JSON.stringify([{
+            name: "site",
+            service: "site",
+            url: `${server.url}/api/health`,
+            timeoutMs: 1000,
+            attempts: 1,
+            expectedStatuses: [200],
+          }]),
+          CONTROL_PLANE_AGENT_API_KEY: "",
+          CONTROL_PLANE_URL: "",
+          APP_URL: "",
+          NEXT_PUBLIC_APP_URL: "",
+          NEXT_PUBLIC_SITE_URL: "",
+          OPS_PRIMARY_CLIENT_URL: "",
+        },
+      });
+      expect(standalone.code).toBe(1);
+      expect(standalone.state.issues).toHaveLength(0);
     } finally {
       await server.close();
     }
@@ -601,7 +623,7 @@ describe("github-incident resolved issue sync", () => {
     }
   });
 
-  it("does not fail clean health sweeps when resolved sync fails", async () => {
+  it("fails clean health sweeps when incident resolution cannot be synced", async () => {
     const server = await startHealthServer();
     try {
       const result = await runWithFakeGh(healthSweepPath, [], null, {
@@ -625,8 +647,8 @@ describe("github-incident resolved issue sync", () => {
         },
       });
 
-      expect(result.code).toBe(0);
-      expect(result.stderr).toContain("Resolved issue sync failed during a clean sweep");
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("simulated issue list failure");
     } finally {
       await server.close();
     }

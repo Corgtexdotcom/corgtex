@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -24,6 +25,36 @@ function runDryRun(customers) {
 }
 
 describe("customer readiness sweep URL selection", () => {
+  it("fails a standalone health check when an incident is not being published", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "down" }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const child = spawn(process.execPath, [sweepPath, "--health-only"], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CLIENT_READINESS_CUSTOMERS_JSON: JSON.stringify([{
+            id: "deployment-test",
+            slug: "synthetic-client",
+            url: `http://127.0.0.1:${server.address().port}`,
+            provisioningStatus: "active",
+          }]),
+          OPS_CREATE_GITHUB_ISSUES: "false",
+        },
+      });
+      let stdout = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      const code = await new Promise((resolve) => child.on("close", resolve));
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout).incidents).toHaveLength(1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("prefers supportBaseUrl over a deployment workspace URL", () => {
     const output = runDryRun([
       {
