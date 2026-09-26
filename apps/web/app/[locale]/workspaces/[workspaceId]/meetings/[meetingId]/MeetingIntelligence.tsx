@@ -132,6 +132,10 @@ export default function MeetingIntelligence({
   const [editing, setEditing] = useState<Record<string, InsightDraft>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [duplicateReview, setDuplicateReview] = useState<{
+    insightId: string;
+    result: NonNullable<Awaited<ReturnType<typeof applyInsightAction>>>;
+  } | null>(null);
 
   if (!hasTranscript) return null;
 
@@ -179,6 +183,30 @@ export default function MeetingIntelligence({
       formData.append("insightId", insightId);
       await actionFunc(formData);
       router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("errorInsightAction"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function applyInsightWithReview(insightId: string, resolution?: "use_existing" | "update_existing" | "create_new", targetEntityId?: string) {
+    setBusyId(insightId);
+    setError(null);
+    setNotice(null);
+    try {
+      const formData = new FormData();
+      formData.append("workspaceId", workspaceId);
+      formData.append("insightId", insightId);
+      if (resolution) formData.append("duplicateResolution", resolution);
+      if (targetEntityId) formData.append("duplicateTargetEntityId", targetEntityId);
+      const result = await applyInsightAction(formData);
+      if (result?.status === "duplicate_confirmation_required") {
+        setDuplicateReview({ insightId, result });
+      } else {
+        setDuplicateReview(null);
+        router.refresh();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("errorInsightAction"));
     } finally {
@@ -239,8 +267,14 @@ export default function MeetingIntelligence({
         const applyFormData = new FormData();
         applyFormData.append("workspaceId", workspaceId);
         applyFormData.append("insightId", insightId);
-        await applyInsightAction(applyFormData);
-        setNotice(t("insightSavedAndApproved"));
+        const result = await applyInsightAction(applyFormData);
+        if (result?.status === "duplicate_confirmation_required") {
+          setDuplicateReview({ insightId, result });
+          setNotice(t("insightSaved"));
+        } else {
+          setDuplicateReview(null);
+          setNotice(t("insightSavedAndApproved"));
+        }
       } else {
         setNotice(t("insightSaved"));
       }
@@ -418,7 +452,7 @@ export default function MeetingIntelligence({
                                   className="btn btn-primary"
                                   type="button"
                                   disabled={loading}
-                                  onClick={() => runInsightAction(applyInsightAction, insight.id)}
+                                  onClick={() => applyInsightWithReview(insight.id)}
                                 >
                                   {loading ? t("working") : t("approveInsight")}
                                 </button>
@@ -441,6 +475,33 @@ export default function MeetingIntelligence({
                               </>
                             )}
                           </div>
+                        )}
+                        {duplicateReview?.insightId === insight.id && (
+                          <section className="meeting-intelligence-alert" aria-label={t("possibleDuplicateAction")}>
+                            <strong>{t("possibleDuplicateAction")}</strong>
+                            <p>{t("possibleDuplicateActionDescription", { title: duplicateReview.result.candidate.title || t("insightType.action_item") })}</p>
+                            {duplicateReview.result.candidate.excerpt && <p>{duplicateReview.result.candidate.excerpt}</p>}
+                            <Link href={`/workspaces/${workspaceId}/actions/${duplicateReview.result.candidate.entityId}`}>
+                              {t("viewExistingAction")}
+                            </Link>
+                            <div className="meeting-insight-actions">
+                              {duplicateReview.result.allowedResolutions.includes("use_existing") && (
+                                <button className="btn" type="button" disabled={loading} onClick={() => applyInsightWithReview(insight.id, "use_existing", duplicateReview.result.candidate.entityId)}>
+                                  {t("linkExistingAction")}
+                                </button>
+                              )}
+                              {duplicateReview.result.allowedResolutions.includes("update_existing") && (
+                                <button className="btn" type="button" disabled={loading} onClick={() => applyInsightWithReview(insight.id, "update_existing", duplicateReview.result.candidate.entityId)}>
+                                  {t("mergeIntoExistingAction")}
+                                </button>
+                              )}
+                              {duplicateReview.result.allowedResolutions.includes("create_new") && (
+                                <button className="btn" type="button" disabled={loading} onClick={() => applyInsightWithReview(insight.id, "create_new", duplicateReview.result.candidate.entityId)}>
+                                  {t("createSeparateAction")}
+                                </button>
+                              )}
+                            </div>
+                          </section>
                         )}
                       </article>
                     );

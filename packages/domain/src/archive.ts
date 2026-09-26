@@ -201,6 +201,7 @@ const ENTITY_CONFIGS: Record<ArchiveEntityType, ArchiveConfig> = {
     delegate: "action",
     findWhere: directWorkspace,
     label: titleOrName,
+    restoreData: (previousState) => ({ duplicateOfActionId: previousState?.duplicateOfActionId ?? null }),
   },
   AgentIdentity: {
     entityType: "AgentIdentity",
@@ -580,6 +581,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   entityType: string;
   entityId: string;
   reason?: string | null;
+  _tx?: Prisma.TransactionClient;
 }) {
   const config = configFor(params.entityType);
   const membership = await requireWorkspaceMembership({
@@ -589,7 +591,7 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
   });
   const reason = params.reason?.trim() || null;
 
-  return prisma.$transaction(async (tx) => {
+  const archive = async (tx: Prisma.TransactionClient) => {
     await lockWorkspaceArchiveArtifact(tx, config.entityType, params.entityId);
     const record = await findRecord(tx, config, params.workspaceId, params.entityId);
     await config.canArchive?.({ tx, record, actor, membership });
@@ -661,7 +663,8 @@ export async function archiveWorkspaceArtifact(actor: AppActor, params: {
     }
 
     return updated;
-  });
+  };
+  return params._tx ? archive(params._tx) : prisma.$transaction(archive);
 }
 
 export async function restoreWorkspaceArtifact(actor: AppActor, params: {

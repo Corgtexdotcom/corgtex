@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createAction, getWorkspacePermanentPathForEntity, listActions } from "@corgtex/domain";
+import { actionRequestSource, createAction, getWorkspacePermanentPathForEntity, listActions } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import type { ActionStatus } from "@prisma/client";
 import { searchParamValues } from "@/lib/filter-query";
@@ -55,6 +55,9 @@ export const POST = withWorkspaceRoute(async (req, { actor, workspaceId, members
     assigneeMemberId: body.assigneeMemberId === null ? null : typeof body.assigneeMemberId === "string" ? body.assigneeMemberId : undefined,
     priority: workItemPriorityFromBody(body),
     _membership: membership ?? undefined,
+    source: req.headers.has("Idempotency-Key")
+      ? actionRequestSource("API_REQUEST", actor.kind === "user" ? actor.user.id : actor.credentialId ?? actor.agentIdentityId ?? actor.label, req.headers.get("Idempotency-Key") ?? "")
+      : undefined,
   });
   const origin = env.APP_URL.replace(/\/$/, "");
   const permanentPath = await getWorkspacePermanentPathForEntity({ workspaceId, entityType: "Action", entityId: action.id });
