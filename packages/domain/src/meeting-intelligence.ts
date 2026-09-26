@@ -7,6 +7,7 @@ import { humanMemberIdentityWhere } from "./member-identity";
 import { AppError, invariant } from "./errors";
 import { defaultModelGateway } from "@corgtex/models";
 import { createAction, updateAction } from "./actions";
+import type { DuplicateGuardOptions } from "./duplicate-guard";
 import { createTension, updateTension } from "./tensions";
 import { createProposal, createProposalFromTension, resolveProposal } from "./proposals";
 import { postDeliberationEntry } from "./deliberation";
@@ -1043,7 +1044,7 @@ export async function dismissInsight(
 
 export async function applyInsight(
   actor: AppActor,
-  params: { workspaceId: string; insightId: string; autoApplied?: boolean; loadMemberDirectory?: MemberDirectoryLoader }
+  params: { workspaceId: string; insightId: string; autoApplied?: boolean; loadMemberDirectory?: MemberDirectoryLoader; actionDuplicateGuard?: DuplicateGuardOptions }
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -1211,15 +1212,11 @@ export async function applyInsight(
         assigneeMemberId: hintedMemberId,
         dueAt: insight.dueAt ?? null,
         isPrivate: false,
-        duplicateGuard: { resolution: "create_new" },
-      });
-      const opened = await updateAction(actor, {
-        workspaceId: params.workspaceId,
-        actionId: action.id,
-        status: "OPEN",
+        duplicateGuard: { candidateLimit: 200, ...params.actionDuplicateGuard },
+        source: { type: "MEETING_INSIGHT", id: insight.id, groupId: insight.meetingId },
       });
       appliedEntityType = "Action";
-      appliedEntityId = opened.id;
+      appliedEntityId = action.id;
     } else if (insight.type === "TENSION") {
       const tension = await createTension(actor, {
         workspaceId: params.workspaceId,

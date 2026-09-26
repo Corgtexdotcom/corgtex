@@ -72,7 +72,7 @@ describe("tenant purge scope registry", () => {
 
   it("matches every current owning direct target relation and preserves named composite selectors", () => {
     expect(() => assertTenantPurgeScopeRegistry(schema)).not.toThrow();
-    expect(TENANT_PURGE_DIRECT_RELATIONS).toHaveLength(160);
+    expect(TENANT_PURGE_DIRECT_RELATIONS).toHaveLength(161);
     expect(TENANT_PURGE_MODEL_DISPOSITIONS.CASCADE).toContain("PendingTranscriptUpload");
     expect(TENANT_PURGE_DIRECT_RELATIONS.find((entry) => entry.model === "PendingTranscriptUpload")).toMatchObject({ target: "Workspace", fields: ["workspaceId"], onDelete: "Cascade", onDeleteSource: "EXPLICIT", onUpdateSource: "POSTGRESQL_DEFAULT" });
     const cutovers = TENANT_PURGE_DIRECT_RELATIONS.filter((entry) => entry.model === "ProviderCutover");

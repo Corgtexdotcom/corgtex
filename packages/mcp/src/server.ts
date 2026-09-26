@@ -27,6 +27,7 @@ import {
   supportReopenResolvedProposals,
   listActions,
   createAction,
+  actionRequestSource,
   updateAction,
   returnActionToDraft,
   deleteAction,
@@ -2833,8 +2834,9 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
       authorMemberId: z.string().optional().describe("Optional active member ID to attribute as author when an internal/credential agent creates the action"),
       duplicateResolution: z.enum(["use_existing", "update_existing", "create_new"]).optional(),
       duplicateTargetEntityId: z.string().optional(),
+      idempotencyKey: z.string().optional().describe("Stable key for retrying this create_action request; reuse it only for the same Action."),
     },
-    async (params: { title: string; bodyMd?: string; assigneeMemberId?: string; priority?: number | string; authorMemberId?: string; duplicateResolution?: "use_existing" | "update_existing" | "create_new"; duplicateTargetEntityId?: string }) => {
+    async (params: { title: string; bodyMd?: string; assigneeMemberId?: string; priority?: number | string; authorMemberId?: string; duplicateResolution?: "use_existing" | "update_existing" | "create_new"; duplicateTargetEntityId?: string; idempotencyKey?: string }) => {
       requireScope(sessionCtx, "actions:write");
       return withDuplicateGuardMcpResponse(async () => {
         const action = await createAction(actor, {
@@ -2845,6 +2847,7 @@ export function createCorgtexMcpServer(sessionCtx: McpSessionContext): McpServer
           priority: coerceWorkItemPriorityInput(params.priority),
           authorMemberId: params.authorMemberId,
           duplicateGuard: duplicateGuardOptionsFromParams(params),
+          source: params.idempotencyKey === undefined ? undefined : actionRequestSource("MCP_REQUEST", sessionActorId, params.idempotencyKey),
         });
         const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id, action);
         const permanent = await permanentUrl(workspaceId, "Action", action.id);

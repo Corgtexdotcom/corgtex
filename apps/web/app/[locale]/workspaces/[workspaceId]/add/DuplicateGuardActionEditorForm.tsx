@@ -33,6 +33,7 @@ export function DuplicateGuardActionEditorForm({
   action,
   workspaceId,
   actionId,
+  idempotencyKey,
   title,
   bodyMd,
   priority,
@@ -47,6 +48,7 @@ export function DuplicateGuardActionEditorForm({
   action: DuplicateGuardFormAction;
   workspaceId: string;
   actionId?: string;
+  idempotencyKey: string;
   title?: string;
   bodyMd?: string | null;
   priority?: number | null;
@@ -65,6 +67,7 @@ export function DuplicateGuardActionEditorForm({
       <input type="hidden" name="duplicateGuardEnabled" value="true" />
       <DuplicateGuardConfirmationPanel state={state} isPending={isPending} />
       <input type="hidden" name="workspaceId" value={workspaceId} />
+      <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       {actionId && <input type="hidden" name="actionId" value={actionId} />}
       <label>
         {labels.title}

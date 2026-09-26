@@ -5,6 +5,7 @@ import { requirePageActor } from "@/lib/auth";
 import { asString, asOptional, asOptionalInt, duplicateGuardFromFormData, refresh } from "../action-utils";
 import {
   AppError,
+  actionRequestSource,
   createAction,
   createActionChecklistItem,
   createAdviceRequest,
@@ -82,6 +83,7 @@ export async function createActionAction(formData: FormData) {
     priority: asOptionalInt(formData, "priority"),
     isPrivate: formData.has("isPrivate") ? formData.get("isPrivate") === "on" : true,
     duplicateGuard: duplicateGuardFromFormData(formData),
+    source: actionRequestSource("WEB_REQUEST", actor.kind === "user" ? actor.user.id : actor.label, asString(formData, "idempotencyKey")),
   });
   refresh(workspaceId);
 }
