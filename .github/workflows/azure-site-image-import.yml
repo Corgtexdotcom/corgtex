@@ -18,7 +18,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: azure-site-image-import
+  group: fleet-release
   cancel-in-progress: false
 
 jobs:
@@ -50,8 +50,8 @@ jobs:
             exit 1
           }
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${HOSTING_RUN_ID}" > "$RUNNER_TEMP/hosting-run.json"
-          jq -e --arg branch main --arg name 'Hosting Images' \
-            '.name == $name and .head_branch == $branch and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"' \
+          jq -e --arg branch main --arg name 'Hosting Images' --argjson attempt "$HOSTING_RUN_ATTEMPT" \
+            '.name == $name and .head_branch == $branch and .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and .run_attempt == $attempt' \
             "$RUNNER_TEMP/hosting-run.json" > /dev/null || {
               echo '::error::Hosting Images run is not a successful main run.'
               exit 1
