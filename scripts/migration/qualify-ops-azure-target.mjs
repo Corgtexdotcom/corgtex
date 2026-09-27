@@ -461,9 +461,11 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
   assert(Array.isArray(jobs?.jobs) && jobs.total_count === jobs.jobs.length && jobs.total_count <= 100, "RECOVERY_JOBS_UNPROVEN");
   const metadataJobName = i.targetProfile === 'opscore' ? 'Qualify pinned Ops/Core PG18 target capture' : 'Qualify existing Ops target metadata only';
   const jobName = kind === 'pitr' ? 'Prove managed PITR on pinned Ops/Core target'
-    : kind === 'shadow' ? 'Shadow restore Core and Ops on pinned B2s without cutover'
+    : kind === 'shadow' ? 'Shadow restore Core and Ops on pinned target without cutover'
     : kind === 'metadata' ? metadataJobName : 'Qualify pinned synthetic Ops archive only';
-  const candidates = jobs.jobs.filter(j => j.name === jobName);
+  const candidates = jobs.jobs.filter(j => j.name === jobName
+    || kind === 'shadow' && i.computeSku === 'Standard_B2s'
+      && j.name === 'Shadow restore Core and Ops on pinned B2s without cutover');
   assert(candidates.length === 1 && candidates[0].status === "completed", "RECOVERY_JOB_UNPROVEN");
   const steps = candidates[0].steps;
   const startName = i.targetProfile === 'opscore' ? 'Start Ops/Core target, open single-IP access and test disabled capture'

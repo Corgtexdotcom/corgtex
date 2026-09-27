@@ -438,7 +438,7 @@ jobs:
 
   qualify-opscore-shadow:
     if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-opscore-shadow'
-    name: Shadow restore Core and Ops on pinned B2s without cutover
+    name: Shadow restore Core and Ops on pinned target without cutover
     runs-on: ubuntu-latest
     timeout-minutes: 110
     environment: azure-migration-foundation
@@ -474,7 +474,7 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - name: Prepare exact stopped B2s shadow intent
+      - name: Prepare exact stopped target shadow intent
         id: shadow_prepare
         timeout-minutes: 10
         run: |
