@@ -120,11 +120,13 @@ jobs:
         env:
           RELEASE_INPUT: ${{ inputs.release }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
         run: |
           node scripts/release/fleet-release-runner.mjs validate-config \
             --release "$RELEASE_INPUT" \
             --targets "$TARGETS_INPUT" \
+            --target-id "$FLEET_RELEASE_TARGET_ID" \
             --dry-run "$DRY_RUN_INPUT"
 
       - name: Verify provider authority and settled protected Railway baselines

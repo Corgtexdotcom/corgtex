@@ -1659,6 +1659,45 @@ describe("fleet release runner", () => {
       .rejects.toThrow("Exact deployment releases currently require Railway targets");
   });
 
+  it("validates only the provider configuration selected by an exact deployment ID", async () => {
+    const chirone = {
+      id: "chirone-alias",
+      deploymentId: "chirone-deployment",
+      label: "Chirone",
+      url: "https://chirone.corgtex.com",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "chirone-project", environmentId: "production", webServiceId: "chirone-web", workerServiceId: "chirone-worker" },
+    };
+    const result = await runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--target-id", "chirone-deployment", "--dry-run", "true"], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone]),
+        FLEET_RELEASE_OPS_TARGET_JSON: "not-json-and-not-selected",
+        FLEET_RELEASE_AZURE_TARGET_JSON: JSON.stringify([{ id: "wrong-provider", provider: "unsupported" }]),
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, targetGroups: ["managed-customers"] });
+  });
+
+  it("rejects conflicting duplicate exact deployment IDs before deduplication", async () => {
+    const chirone = {
+      id: "chirone-alias",
+      deploymentId: "chirone-deployment",
+      label: "Chirone",
+      url: "https://chirone.corgtex.com",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "chirone-project", environmentId: "production", webServiceId: "chirone-web", workerServiceId: "chirone-worker" },
+    };
+    const conflicting = { ...chirone, railway: { ...chirone.railway, webServiceId: "different-web-service" } };
+
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve,ops", "--target-id", "chirone-deployment"], {
+      env: { FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone, conflicting]) },
+      fetchImpl: vi.fn(),
+    })).rejects.toThrow("Deployment ID chirone-deployment matched conflicting release targets.");
+  });
+
   it("rejects transition inventory that omits provider", async () => {
     await expect(runFleetRelease(["validate-config", "--release", SHA, "--targets", "selfserve", "--dry-run"], {
       env: { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ provider: undefined }) }, runCommand: vi.fn(),

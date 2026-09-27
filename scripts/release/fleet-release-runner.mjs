@@ -81,14 +81,14 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     const protectedGroups = selectedGroups.filter((group) => ["ops", "backup-app"].includes(group));
     if (!protectedGroups.length) {
       if (targetId) {
-        const selectedTargets = filterTargetsByGroups(await discoverTargets(deps, selectedGroups), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) });
+        const selectedTargets = filterTargetsByGroups(await discoverTargets(deps, selectedGroups, { exactDeploymentId: targetId }), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) });
         assertExactTargetSupportsObservation(filterTargetsByDeploymentId(selectedTargets, targetId), targetId);
       }
       const result = { status: "READY", effects: 0, targets: [] };
       console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
       return result;
     }
-    const selectedTargets = filterTargetsByDeploymentId(filterTargetsByGroups(await discoverTargets(deps, selectedGroups), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) }), targetId);
+    const selectedTargets = filterTargetsByDeploymentId(filterTargetsByGroups(await discoverTargets(deps, selectedGroups, { exactDeploymentId: targetId }), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) }), targetId);
     assertExactTargetSupportsObservation(selectedTargets, targetId);
     const targets = selectedTargets.filter((target) => protectedGroups.includes(target.group));
     for (const group of protectedGroups) {
@@ -126,7 +126,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error("A release reason is required.");
   }
 
-  const allTargets = await discoverTargets(deps, selectedGroups);
+  const allTargets = await discoverTargets(deps, selectedGroups, { exactDeploymentId: targetId });
   const broadSelection = isBroadTargetSelection(targetSelection);
   let targets = filterTargetsByDeploymentId(filterTargetsByGroups(allTargets, selectedGroups, { excludeIneligible: broadSelection }), targetId); if (env.FLEET_RELEASE_TARGETS_FILE && !existsSync(env.FLEET_RELEASE_TARGETS_FILE)) targets = await revalidateTargets(targets, deps);
   if (targets.length === 0) {
@@ -228,6 +228,11 @@ async function resolveManifest(args, deps) {
 async function validateReleaseEnvironment(args, env, deps = {}) {
   const release = normalizeReleaseInput(args.release ?? env.FLEET_RELEASE_INPUT ?? "latest-stable");
   const selectedGroups = normalizeTargets(args.targets ?? env.FLEET_RELEASE_TARGETS);
+  const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
+  const exactTarget = targetId
+    ? filterTargetsByDeploymentId(filterTargetsByGroups(await discoverTargets({ ...deps, env }, selectedGroups, { exactDeploymentId: targetId }), selectedGroups), targetId)[0]
+    : null;
+  const validationGroups = exactTarget ? [exactTarget.group] : selectedGroups;
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
   const missing = [];
   const invalid = [];
@@ -248,10 +253,16 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
     }
   }
 
-  validateConfiguredTargetJson("FLEET_RELEASE_TARGETS_JSON", env.FLEET_RELEASE_TARGETS_JSON, invalid);
-  validateConfiguredTargetJson("FLEET_RELEASE_OPS_TARGET_JSON", env.FLEET_RELEASE_OPS_TARGET_JSON, invalid);
-  validateConfiguredTargetJson("FLEET_RELEASE_BACKUP_APP_TARGET_JSON", env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, invalid);
-  validateConfiguredTargetJson("FLEET_RELEASE_AZURE_TARGET_JSON", env.FLEET_RELEASE_AZURE_TARGET_JSON, invalid);
+  if (targetId) {
+    const provider = String(exactTarget.provider ?? "").trim().toLowerCase();
+    if (!provider) invalid.push({ name: "target_id", reason: `${exactTarget.label ?? targetId} must explicitly declare provider` });
+    else if (!["azure", "railway"].includes(provider)) invalid.push({ name: "target_id", reason: `${exactTarget.label ?? targetId} has unsupported provider ${provider}` });
+  } else {
+    validateConfiguredTargetJson("FLEET_RELEASE_TARGETS_JSON", env.FLEET_RELEASE_TARGETS_JSON, invalid);
+    validateConfiguredTargetJson("FLEET_RELEASE_OPS_TARGET_JSON", env.FLEET_RELEASE_OPS_TARGET_JSON, invalid);
+    validateConfiguredTargetJson("FLEET_RELEASE_BACKUP_APP_TARGET_JSON", env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, invalid);
+    validateConfiguredTargetJson("FLEET_RELEASE_AZURE_TARGET_JSON", env.FLEET_RELEASE_AZURE_TARGET_JSON, invalid);
+  }
   if (env.CORGTEX_AUTO_SEED_JNJ_DEMO?.trim()) {
     invalid.push({
       name: "CORGTEX_AUTO_SEED_JNJ_DEMO",
@@ -267,24 +278,24 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
   validateOptionalBoolean("POSTHOG_ENABLED", env, invalid);
   validateOptionalBoolean("POSTHOG_CAPTURE_KILL_SWITCH", env, invalid);
   validateOptionalBoolean("POSTHOG_CAPTURE_DEBUG", env, invalid);
-  validateOptionalCanaryPreflightDeploymentId(selectedGroups, env, invalid);
+  validateOptionalCanaryPreflightDeploymentId(validationGroups, env, invalid);
 
-  if (selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
+  if (validationGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && !env.CONTROL_PLANE_AGENT_API_KEY?.trim()) {
     missing.push("FLEET_RELEASE_TARGETS_JSON or CONTROL_PLANE_AGENT_API_KEY");
   }
-  if (selectedGroups.includes("ops") && !env.FLEET_RELEASE_OPS_TARGET_JSON?.trim()) {
+  if (validationGroups.includes("ops") && !env.FLEET_RELEASE_OPS_TARGET_JSON?.trim()) {
     missing.push("FLEET_RELEASE_OPS_TARGET_JSON");
   }
-  if (selectedGroups.includes("backup-app") && !env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON?.trim()) {
+  if (validationGroups.includes("backup-app") && !env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON?.trim()) {
     missing.push("FLEET_RELEASE_BACKUP_APP_TARGET_JSON");
   }
-  if (selectedGroups.includes("selfserve") && !env.FLEET_RELEASE_AZURE_TARGET_JSON?.trim()) {
+  if (validationGroups.includes("selfserve") && !env.FLEET_RELEASE_AZURE_TARGET_JSON?.trim()) {
     missing.push("FLEET_RELEASE_AZURE_TARGET_JSON");
   }
 
   if (!dryRun) {
     if (!env.CONTROL_PLANE_AGENT_API_KEY?.trim()) missing.push("CONTROL_PLANE_AGENT_API_KEY");
-    const providerInventory = selectedGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }, selectedGroups) : configuredTargets(env).map(normalizeTarget); const selectedTargets = providerInventory.filter((target) => selectedGroups.includes(target.group) && targetEligibilityErrors(target).length === 0); const selectedProviders = new Set(selectedTargets.map((target) => target.provider));
+    const providerInventory = exactTarget ? [exactTarget] : validationGroups.includes("managed-customers") && !env.FLEET_RELEASE_TARGETS_JSON?.trim() && env.CONTROL_PLANE_AGENT_API_KEY?.trim() ? await discoverTargets({ ...deps, env }, validationGroups) : configuredTargets(env).map(normalizeTarget); const selectedTargets = providerInventory.filter((target) => validationGroups.includes(target.group) && targetEligibilityErrors(target).length === 0); const selectedProviders = new Set(selectedTargets.map((target) => target.provider));
     const includesRailwayTarget = selectedProviders.has("railway");
     const includesOpsRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && target.group === "ops");
     const includesDurableRailwayTarget = selectedTargets.some((target) => target.provider === "railway" && ["ops", "backup-app"].includes(target.group));
@@ -320,7 +331,7 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
     ok: missing.length === 0 && invalid.length === 0,
     release,
     dryRun,
-    targetGroups: selectedGroups,
+    targetGroups: validationGroups,
     missing: [...new Set(missing)],
     invalid,
   };
@@ -460,20 +471,68 @@ function isBroadTargetSelection(selection) {
     || [normalizeTargets("default"), normalizeTargets("all")].some(groups => groups.length === selectedGroups.length && groups.every(group => selectedGroups.includes(group)));
 }
 
-async function discoverTargets(deps, selectedGroups) {
+async function discoverTargets(deps, selectedGroups, { exactDeploymentId = null } = {}) {
   const env = deps.env ?? process.env;
   const snapshot = env.FLEET_RELEASE_TARGETS_FILE && existsSync(env.FLEET_RELEASE_TARGETS_FILE);
-  const configured = parseTargetJson(snapshot ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON);
-  if (snapshot) return revalidateTargets(filterTargetsByGroups(dedupeTargets(configured.map(normalizeTarget)), selectedGroups), deps);
-  const configuredGroups = new Map(dedupeTargets(configuredTargets(env).map(normalizeTarget))
+  const configured = parseTargetJsonForDiscovery(snapshot ? readFileSync(env.FLEET_RELEASE_TARGETS_FILE, "utf8") : env.FLEET_RELEASE_TARGETS_JSON, exactDeploymentId);
+  if (snapshot) {
+    const normalized = configured.map(normalizeTarget);
+    assertNoConflictingDeploymentTargets(normalized, exactDeploymentId);
+    return revalidateTargets(filterTargetsByGroups(dedupeTargets(normalized), selectedGroups), deps);
+  }
+  const configuredInventory = configuredTargets(env, { exactDeploymentId });
+  const normalizedConfiguredInventory = configuredInventory.map(normalizeTarget);
+  assertNoConflictingDeploymentTargets(normalizedConfiguredInventory, exactDeploymentId);
+  const configuredGroups = new Map(dedupeTargets(normalizedConfiguredInventory)
     .map((target) => [target.deploymentId ?? target.id, target.group]));
   const discovered = configured.length > 0 ? [] : await discoverControlPlaneTargets(deps, selectedGroups, configuredGroups);
   const ineligibleDiscoveredIds = new Set((configured.length > 0 ? [] : discovered).filter((target) => targetEligibilityErrors(target).length > 0).map((target) => target.deploymentId ?? target.id));
-  const targets = dedupeTargets([...configured, ...configuredTargets(env).filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget));
+  const rawTargets = [...configured, ...configuredInventory.filter((target) => !ineligibleDiscoveredIds.has(target.deploymentId ?? target.id)), ...discovered].map(normalizeTarget);
+  assertNoConflictingDeploymentTargets(rawTargets, exactDeploymentId);
+  const targets = dedupeTargets(rawTargets);
   return targets;
 }
 
-function configuredTargets(env) { return [...parseTargetJson(env.FLEET_RELEASE_TARGETS_JSON), ...parseTargetJson(env.FLEET_RELEASE_OPS_TARGET_JSON).map((target) => ({ ...target, group: "ops" })), ...parseTargetJson(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON).map((target) => ({ ...target, group: "backup-app" })), ...parseTargetJson(env.FLEET_RELEASE_AZURE_TARGET_JSON).map((target) => ({ ...target, group: "selfserve" }))]; }
+function configuredTargets(env, { exactDeploymentId = null } = {}) { return [
+  ...parseTargetJsonForDiscovery(env.FLEET_RELEASE_TARGETS_JSON, exactDeploymentId),
+  ...parseTargetJsonForDiscovery(env.FLEET_RELEASE_OPS_TARGET_JSON, exactDeploymentId).map((target) => ({ ...target, group: "ops" })),
+  ...parseTargetJsonForDiscovery(env.FLEET_RELEASE_BACKUP_APP_TARGET_JSON, exactDeploymentId).map((target) => ({ ...target, group: "backup-app" })),
+  ...parseTargetJsonForDiscovery(env.FLEET_RELEASE_AZURE_TARGET_JSON, exactDeploymentId).map((target) => ({ ...target, group: "selfserve" })),
+]; }
+
+function parseTargetJsonForDiscovery(raw, exactDeploymentId) {
+  if (!exactDeploymentId) return parseTargetJson(raw);
+  try {
+    return parseTargetJson(raw);
+  } catch {
+    return [];
+  }
+}
+
+function assertNoConflictingDeploymentTargets(targets, exactDeploymentId) {
+  if (!exactDeploymentId) return;
+  const matches = targets.filter((target) => String(target.deploymentId ?? "") === exactDeploymentId);
+  const conflicts = (left, right, path) => {
+    const leftValue = path.reduce((value, key) => value?.[key], left);
+    const rightValue = path.reduce((value, key) => value?.[key], right);
+    return leftValue != null && rightValue != null && String(leftValue).trim().toLowerCase() !== String(rightValue).trim().toLowerCase();
+  };
+  const resourcePaths = [
+    ["railway", "projectId"], ["railway", "environmentId"], ["railway", "webServiceId"], ["railway", "workerServiceId"],
+    ["azure", "subscriptionId"], ["azure", "resourceGroup"], ["azure", "acrName"], ["azure", "webAppName"], ["azure", "workerAppName"],
+  ];
+  for (let index = 0; index < matches.length; index += 1) {
+    for (let next = index + 1; next < matches.length; next += 1) {
+      const left = matches[index];
+      const right = matches[next];
+      if (left.group !== right.group || left.provider !== right.provider || left.url !== right.url
+        || conflicts(left, right, ["environment"]) || conflicts(left, right, ["deploymentKind"])
+        || resourcePaths.some((path) => conflicts(left, right, path))) {
+        throw new Error(`Deployment ID ${exactDeploymentId} matched conflicting release targets.`);
+      }
+    }
+  }
+}
 
 function parseTargetJson(raw) {
   if (!raw?.trim()) return [];
