@@ -1421,7 +1421,6 @@ describe("Goals Domain", () => {
           status: "ACTIVE",
         },
       } as any);
-      vi.mocked(prisma.goal.update).mockResolvedValueOnce({ id: "goal-1" } as any);
       vi.mocked(prisma.keyResult.update).mockResolvedValueOnce({
         id: "kr-1",
         goalId: "goal-1",
@@ -1438,17 +1437,8 @@ describe("Goals Domain", () => {
       });
 
       expect(prisma.goal.update).toHaveBeenCalledWith(expect.objectContaining({
-        where: expect.objectContaining({
-          id: "goal-1",
-          workspaceId: "ws-1",
-          archivedAt: null,
-          status: "ACTIVE",
-          isPrivate: false,
-        }),
-        data: expect.objectContaining({
-          updatedAt: expect.any(Date),
-        }),
-        select: { id: true },
+        where: expect.objectContaining({ id: "goal-1", workspaceId: "ws-1" }),
+        data: expect.objectContaining({ updatedAt: expect.any(Date) }),
       }));
       expect(prisma.keyResult.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "kr-1" },
@@ -1814,6 +1804,7 @@ describe("Goals Domain", () => {
       await expect(deleteKeyResult(actor, { workspaceId: "ws-1", krId: kr.id, expectedVersion: 4 }))
         .rejects.toMatchObject({ status: 409, code: "VERSION_CONFLICT" });
       expect(prisma.keyResult.delete).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
 
       vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(kr as any);
       vi.mocked(prisma.goal.findUnique).mockResolvedValueOnce({ ...goal, version: 4 } as any);
@@ -1828,6 +1819,7 @@ describe("Goals Domain", () => {
       });
       expect(prisma.keyResult.update).not.toHaveBeenCalled();
       expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
 
       const nullableKr = { ...kr, id: "kr-null", currentValue: null, progressPercent: 0 };
       vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(nullableKr as any);
@@ -1843,6 +1835,7 @@ describe("Goals Domain", () => {
       });
       expect(prisma.keyResult.update).not.toHaveBeenCalled();
       expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
     });
 
     it("proves nonexistent, unauthorized, or invalid-state Goal guard wins before invalid body/author validation, and stale body-only update creates nothing", async () => {

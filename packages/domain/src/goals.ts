@@ -1309,22 +1309,31 @@ export async function updateKeyResult(
     });
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
-    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
-    if (params.expectedVersion !== undefined) {
-      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
-      const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
-      invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
-    }
 
     const data: any = {};
+    let hasRequestedChanges = false;
+    const numericValueChanged = (next: unknown, current: unknown) => {
+      if (next === null || current === null) return next !== current;
+      return Number(next) !== Number(current);
+    };
     if (params.title !== undefined) {
       const title = params.title.trim();
       invariant(title.length > 0, 400, "INVALID_INPUT", "Key Result title is required.");
       data.title = title;
+      hasRequestedChanges ||= title !== kr.title;
     }
-    if (params.targetValue !== undefined) data.targetValue = params.targetValue;
-    if (params.currentValue !== undefined) data.currentValue = params.currentValue;
-    if (params.unit !== undefined) data.unit = params.unit;
+    if (params.targetValue !== undefined) {
+      data.targetValue = params.targetValue;
+      hasRequestedChanges ||= numericValueChanged(params.targetValue, kr.targetValue);
+    }
+    if (params.currentValue !== undefined) {
+      data.currentValue = params.currentValue;
+      hasRequestedChanges ||= numericValueChanged(params.currentValue, kr.currentValue);
+    }
+    if (params.unit !== undefined) {
+      data.unit = params.unit;
+      hasRequestedChanges ||= params.unit !== kr.unit;
+    }
 
     const newTarget = params.targetValue !== undefined ? params.targetValue : kr.targetValue;
     const newCurrent = params.currentValue !== undefined ? params.currentValue : kr.currentValue;
@@ -1335,8 +1344,24 @@ export async function updateKeyResult(
       currentValue: newCurrent,
     });
 
-    const changed = Object.entries(data).some(([field, value]) => (kr as Record<string, unknown>)[field] !== value);
-    if (!changed) return kr;
+    const changed = hasRequestedChanges;
+    if (!changed) {
+      requireEditableGoalKeyResults(actor, membership, kr.goal);
+      if (params.expectedVersion !== undefined) {
+        invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+        const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+        invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
+      }
+      return kr;
+    }
+
+    requireEditableGoalKeyResults(actor, membership, kr.goal);
+    if (params.expectedVersion !== undefined) {
+      invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
+      const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
+      invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result update could be applied. Please refresh and try again.");
+    }
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
 
     const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
 
@@ -1374,10 +1399,11 @@ export async function deleteKeyResult(
     });
     invariant(kr && kr.goal.workspaceId === params.workspaceId && !kr.goal.archivedAt, 404, "NOT_FOUND", "Key Result not found.");
     await acquireWorkItemAdvisoryLock(tx, "Goal", kr.goal.id);
-    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
+    requireEditableGoalKeyResults(actor, membership, kr.goal);
     invariant(Number.isInteger(params.expectedVersion) && params.expectedVersion > 0, 400, "INVALID_INPUT", "expectedVersion must be a positive integer.");
     const currentGoal = await tx.goal.findUnique({ where: { id: kr.goal.id }, select: { version: true } });
     invariant(currentGoal && params.expectedVersion === currentGoal.version, 409, "VERSION_CONFLICT", "The Goal changed before this Key Result could be deleted. Please refresh and try again.");
+    await lockGoalForKeyResultMutation(tx, actor, membership, kr.goal);
     const previousKeyResults = await tx.keyResult.findMany({ where: { goalId: kr.goalId }, orderBy: { id: "asc" } });
 
     await tx.keyResult.delete({ where: { id: params.krId } });
