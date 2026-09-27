@@ -134,7 +134,10 @@ export default async function ActionsPage({
     resolvedSearch.status,
     view === "kanban" ? null : "OPEN",
   );
-  const { circleIds, assigneeMemberIds, memberIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  const { circleIds, assigneeMemberIds, sort } = resolveWorkItemFilters(resolvedSearch);
+  // Actions use their assignee as the person filter. Ignore old "person involved"
+  // query parameters so a hidden legacy filter cannot change the visible results.
+  const memberIds: string[] = [];
   const [{ items: actions }, circles, members, activeInputRequests] = await Promise.all([
     listActions(actor, workspaceId, {
       take: 200,
@@ -911,6 +914,7 @@ export default async function ActionsPage({
           statusValues={statusFilters}
           showStatusFilter={false}
           summaryLabel={tWork("advancedFilters")}
+          showMember={false}
           circleIds={circleIds}
           assigneeMemberIds={assigneeMemberIds}
           memberIds={memberIds}

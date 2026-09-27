@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
+  assertCanAttachActionReference,
+  attachActionReferenceDocument,
   createDocument,
   ingestFile,
   listDocuments,
@@ -9,6 +11,8 @@ const {
   checkApiDemoGuard,
   handleRouteError,
 } = vi.hoisted(() => ({
+  assertCanAttachActionReference: vi.fn(),
+  attachActionReferenceDocument: vi.fn(),
   createDocument: vi.fn(),
   ingestFile: vi.fn(),
   listDocuments: vi.fn(),
@@ -31,6 +35,8 @@ class MockAppError extends Error {
 
 vi.mock("@corgtex/domain", () => ({
   AppError: MockAppError,
+  assertCanAttachActionReference,
+  attachActionReferenceDocument,
   createDocument,
   listDocuments,
   requireWorkspaceMembership,
@@ -79,6 +85,45 @@ describe("GET /api/workspaces/[workspaceId]/documents", () => {
 });
 
 describe("POST /api/workspaces/[workspaceId]/documents", () => {
+  it("authorizes and links a device upload to its Action reference", async () => {
+    const actor = { kind: "user", user: { id: "user-1" } };
+    resolveRequestActor.mockResolvedValue(actor);
+    ingestFile.mockResolvedValue({ document: { id: "doc-action" } });
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["reference"], "reference.txt", { type: "text/plain" }));
+    formData.set("actionReferenceId", "action-1");
+
+    const response = await POST(new Request("http://localhost/api/workspaces/ws-1/documents", {
+      method: "POST", body: formData,
+    }) as never, { params: Promise.resolve({ workspaceId: "ws-1" }) });
+
+    expect(response.status).toBe(201);
+    expect(assertCanAttachActionReference).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "action-1" });
+    expect(assertCanAttachActionReference.mock.invocationCallOrder[0]).toBeLessThan(ingestFile.mock.invocationCallOrder[0]);
+    expect(attachActionReferenceDocument).toHaveBeenCalledWith(actor, {
+      workspaceId: "ws-1", actionId: "action-1", documentId: "doc-action",
+    });
+  });
+
+  it("rejects an inaccessible Action before ingesting the uploaded file", async () => {
+    resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
+    assertCanAttachActionReference.mockRejectedValueOnce(new MockAppError(403, "FORBIDDEN", "No access"));
+    handleRouteError.mockImplementationOnce(() => new Response("Forbidden", { status: 403 }));
+    const { POST } = await import("./route");
+    const formData = new FormData();
+    formData.set("file", new File(["reference"], "reference.txt", { type: "text/plain" }));
+    formData.set("actionReferenceId", "action-1");
+
+    const response = await POST(new Request("http://localhost/api/workspaces/ws-1/documents", {
+      method: "POST", body: formData,
+    }) as never, { params: Promise.resolve({ workspaceId: "ws-1" }) });
+
+    expect(response.status).toBe(403);
+    expect(ingestFile).not.toHaveBeenCalled();
+    expect(attachActionReferenceDocument).not.toHaveBeenCalled();
+  });
+
   it("accepts multipart uploads from the chat composer", async () => {
     resolveRequestActor.mockResolvedValue({ kind: "user", user: { id: "user-1" } });
     ingestFile.mockResolvedValue({ document: { id: "doc-1" } });

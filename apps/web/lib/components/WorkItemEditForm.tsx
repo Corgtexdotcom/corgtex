@@ -3,10 +3,10 @@
 import React, { startTransition, useActionState, type FormEvent, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 
-export type WorkItemEditActionState =
-  | { status: "idle" }
-  | { status: "success" }
-  | { status: "conflict" };
+export type WorkItemEditActionState = {
+  status: "idle" | "success" | "conflict" | "error";
+  version?: number;
+};
 
 export type WorkItemEditAction = (
   state: WorkItemEditActionState,
@@ -14,6 +14,20 @@ export type WorkItemEditAction = (
 ) => Promise<WorkItemEditActionState>;
 
 const initialState: WorkItemEditActionState = { status: "idle" };
+
+export async function runWorkItemEditAction(
+  action: WorkItemEditAction,
+  state: WorkItemEditActionState,
+  formData: FormData,
+): Promise<WorkItemEditActionState> {
+  try {
+    const next = await action(state, formData);
+    return { ...next, version: next.version ?? state.version };
+  } catch {
+    // A failed action request must leave the browser's unsaved fields mounted.
+    return { status: "error", version: state.version };
+  }
+}
 
 export function WorkItemEditFormView({
   state,
@@ -47,7 +61,7 @@ export function WorkItemEditFormView({
       aria-busy={pending}
       onSubmit={onSubmit ?? ((event) => event.stopPropagation())}
     >
-      <input type="hidden" name="expectedVersion" value={expectedVersion} />
+      <input type="hidden" name="expectedVersion" value={state.version ?? expectedVersion} />
       {children}
       {state.status === "conflict" && (
         <div className="form-message form-message-error" role="alert">
@@ -63,16 +77,16 @@ export function WorkItemEditFormView({
             >
               {t("editConflictOpenCurrent")}
             </a>
-            <button type="button" className="secondary small" onClick={() => window.location.reload()}>
-              {t("editConflictReload")}
-            </button>
           </div>
         </div>
       )}
       {state.status === "success" && (
-        <p className="form-message form-message-success" role="status" aria-live="polite">
-          {t("editSaved")}
-        </p>
+        <div className="form-message form-message-success" role="status" aria-live="polite">
+          {t("editSaved")} <a href={currentHref}>{t("editViewSaved")}</a>
+        </div>
+      )}
+      {state.status === "error" && (
+        <p className="form-message form-message-error" role="alert">{t("editSaveFailed")}</p>
       )}
       <button type="submit" className="secondary small" disabled={pending}>
         {pending ? pendingLabel : submitLabel}
@@ -97,7 +111,10 @@ export function WorkItemEditForm({
   children: ReactNode;
 }) {
   const t = useTranslations("workItems");
-  const [state, formAction, pending] = useActionState(action, initialState);
+  const [state, formAction, pending] = useActionState(
+    (previous: WorkItemEditActionState, formData: FormData) => runWorkItemEditAction(action, previous, formData),
+    initialState,
+  );
   const submitPreservingDraft = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     event.stopPropagation();

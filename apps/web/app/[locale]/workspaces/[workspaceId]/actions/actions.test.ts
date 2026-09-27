@@ -231,6 +231,7 @@ describe("action item server actions", () => {
 
   it("passes the exact rendered version and reports edit success only after revalidation", async () => {
     const { editActionAction } = await import("./actions");
+    updateAction.mockResolvedValueOnce({ version: 10 });
 
     const result = await editActionAction({ status: "idle" }, buildEditFormData());
 
@@ -246,7 +247,17 @@ describe("action item server actions", () => {
     }));
     expect(revalidatePath).toHaveBeenCalled();
     expect(updateAction.mock.invocationCallOrder[0]).toBeLessThan(revalidatePath.mock.invocationCallOrder[0]);
-    expect(result).toEqual({ status: "success" });
+    expect(result).toEqual({ status: "success", version: 10 });
+  });
+
+  it("accepts a second edit with the version returned by the first save", async () => {
+    const { editActionAction } = await import("./actions");
+    updateAction.mockResolvedValueOnce({ version: 10 }).mockResolvedValueOnce({ version: 11 });
+    const first = await editActionAction({ status: "idle" }, buildEditFormData("9"));
+    const second = await editActionAction(first, buildEditFormData("10"));
+    expect(first).toEqual({ status: "success", version: 10 });
+    expect(second).toEqual({ status: "success", version: 11 });
+    expect(updateAction.mock.calls.map(([, params]) => params.expectedVersion)).toEqual([9, 10]);
   });
 
   it.each(["", "0", "-1", "1.5", "9x", "9007199254740992"])(
@@ -270,12 +281,13 @@ describe("action item server actions", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
-  it("does not swallow Action edit permission errors", async () => {
+  it("retains the Action edit form after a writer failure", async () => {
     const error = new MockAppError(403, "FORBIDDEN", "No access");
     updateAction.mockRejectedValueOnce(error);
     const { editActionAction } = await import("./actions");
 
-    await expect(editActionAction({ status: "idle" }, buildEditFormData())).rejects.toBe(error);
+    await expect(editActionAction({ status: "idle" }, buildEditFormData())).resolves.toEqual({ status: "error" });
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 
   it("keeps lifecycle-only Action updates version-optional", async () => {
