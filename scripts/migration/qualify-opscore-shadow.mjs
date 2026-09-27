@@ -31,6 +31,13 @@ const TOKEN_DOMAINS = ['DDL_TOKEN', 'STRING_LITERAL', 'DOLLAR_BODY', 'META_COMMA
 const CONSTRAINT_FIELDS = new Set(['IDENTITY_SET', 'TYPE', 'VALIDATION', 'ENFORCEMENT',
   'INHERITANCE', 'DEFERRABILITY', 'PERIOD', 'FK_ACTION', 'PARENTAGE', 'BINDING',
   'DEFINITION', 'CHECK_EXPRESSION', 'EXTENSION_OWNERSHIP']);
+const CHECK_EDIT_CATEGORIES = ['CAST_OPERATOR', 'BUILTIN_TYPE', 'PARENTHESIS', 'COLLATION',
+  'OPERATOR', 'FUNCTION', 'COLUMN_REFERENCE', 'STRING_LITERAL', 'OTHER'];
+const CHECK_DEPENDENCY_CLASSES = new Set(['COLLATION', 'FUNCTION', 'OPERATOR', 'RELATION', 'TYPE', 'OTHER']);
+const CHECK_STATUSES = new Set(['UNIQUE', 'AMBIGUOUS', 'LIMIT_EXCEEDED',
+  'COLLECTION_UNAVAILABLE', 'IDENTITY_REBIND_FAILED', 'SOURCE_REBIND_DRIFT']);
+const CHECK_STRUCTURE_STATUSES = new Set(['NOT_ELIGIBLE', 'LIMIT_EXCEEDED', 'UNAVAILABLE',
+  'ASSOCIATIVE_GROUPING_ONLY', 'STRUCTURALLY_DIFFERENT']);
 
 // The restore runner's full evidence stays ephemeral. This projection contains
 // only bounded category counts, so a failed parity check remains diagnosable.
@@ -45,9 +52,48 @@ export function projectShadowSchemaDiagnostic(diagnostic) {
   };
   const side = value => ({ statementClasses: counts(value?.statementClasses, SCHEMA_CLASSES),
     tokenDomains: counts(value?.tokenDomains, TOKEN_DOMAINS) });
+  const check = value => {
+    if (value === null) return null;
+    need(CHECK_STATUSES.has(value?.status), 'SHADOW_DIAGNOSTIC_INVALID');
+    const tokenEdit = value.tokenEdit;
+    need(value.status === 'UNIQUE' ? tokenEdit?.status === 'UNIQUE' : tokenEdit === null,
+      'SHADOW_DIAGNOSTIC_INVALID');
+    const dependencies = value.dependencies;
+    if (dependencies !== null) need(typeof dependencies?.identitySetEqual === 'boolean'
+      && Array.isArray(dependencies.changedClasses)
+      && dependencies.changedClasses.every(kind => CHECK_DEPENDENCY_CLASSES.has(kind))
+      && new Set(dependencies.changedClasses).size === dependencies.changedClasses.length,
+    'SHADOW_DIAGNOSTIC_INVALID');
+    const grouping = value.booleanGroupingFingerprint;
+    if (grouping !== null) need(grouping?.relation === 'NOT_PROVEN' && grouping.operator === null,
+      'SHADOW_DIAGNOSTIC_INVALID');
+    const ambiguity = value.ambiguityFingerprint;
+    if (ambiguity !== null) need(value.status === 'AMBIGUOUS'
+      && ['MATCH', 'DIFFERENT'].includes(ambiguity?.nonParenthesisTokenSequenceRelation),
+    'SHADOW_DIAGNOSTIC_INVALID');
+    const structure = value.associativeStructure;
+    if (structure !== undefined) need(CHECK_STRUCTURE_STATUSES.has(structure?.status),
+      'SHADOW_DIAGNOSTIC_INVALID');
+    return { status: value.status,
+      tokenEdit: tokenEdit === null ? null : {
+        sourceOnly: counts(tokenEdit.sourceOnly, CHECK_EDIT_CATEGORIES),
+        destinationOnly: counts(tokenEdit.destinationOnly, CHECK_EDIT_CATEGORIES),
+      },
+      dependencies: dependencies === null ? null : {
+        identitySetEqual: dependencies.identitySetEqual, changedClasses: dependencies.changedClasses },
+      booleanGrouping: grouping === null ? null : {
+        sourceOnly: counts(grouping.booleanNodeDeltas?.sourceOnly, ['AND', 'OR', 'NOT']),
+        destinationOnly: counts(grouping.booleanNodeDeltas?.destinationOnly, ['AND', 'OR', 'NOT']) },
+      ambiguity: ambiguity === null ? null : {
+        nonParenthesisTokenSequenceRelation: ambiguity.nonParenthesisTokenSequenceRelation,
+        sourceOnly: counts(ambiguity.sourceOnly, CHECK_EDIT_CATEGORIES),
+        destinationOnly: counts(ambiguity.destinationOnly, CHECK_EDIT_CATEGORIES) },
+      structureStatus: structure?.status ?? null };
+  };
   const semantics = diagnostic.constraintSemantics;
   need(typeof diagnostic.truncated === 'boolean' && semantics?.schemaVersion === '1.0.0'
     && typeof semantics.truncated === 'boolean'
+    && ['MATCH', 'DIFFERENT', 'UNAVAILABLE'].includes(semantics.serverVersionRelation)
     && Number.isSafeInteger(semantics.mismatchCount) && semantics.mismatchCount >= 0
     && semantics.mismatchCount <= 1_000_000 && Array.isArray(semantics.mismatchFields)
     && semantics.mismatchFields.every(field => CONSTRAINT_FIELDS.has(field))
@@ -55,7 +101,10 @@ export function projectShadowSchemaDiagnostic(diagnostic) {
   'SHADOW_DIAGNOSTIC_INVALID');
   return { classification: diagnostic.classification, sourceOnly: side(diagnostic.sourceOnly),
     destinationOnly: side(diagnostic.destinationOnly), constraintMismatchCount: semantics.mismatchCount,
-    constraintMismatchFields: semantics.mismatchFields, truncated: diagnostic.truncated || semantics.truncated };
+    constraintMismatchFields: semantics.mismatchFields,
+    serverVersionRelation: semantics.serverVersionRelation,
+    checkExpression: check(semantics.checkExpressionDifference ?? null),
+    truncated: diagnostic.truncated || semantics.truncated };
 }
 
 export function validateShadowDatabaseInventory(databases) {

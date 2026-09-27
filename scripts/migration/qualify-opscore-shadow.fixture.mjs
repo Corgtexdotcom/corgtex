@@ -125,20 +125,44 @@ try {
     tokenDomains: Object.fromEntries(tokens.map(key => [key, key === 'DDL_TOKEN' ? 3 : 0])) });
   const diagnostic = { schemaVersion: '1.0.0', classification: 'EXECUTABLE_SCHEMA_DIFFERENCE',
     sourceOnly: side(), destinationOnly: side(), truncated: false,
-    constraintSemantics: { schemaVersion: '1.0.0', mismatchCount: 0, mismatchFields: [], truncated: false },
+    constraintSemantics: { schemaVersion: '1.0.0', serverVersionRelation: 'MATCH',
+      mismatchCount: 0, mismatchFields: [], truncated: false },
     customerPayload: 'CLIENT_PRIVATE_SENTINEL' };
   assert.equal(projectShadowSchemaDiagnostic(diagnostic).sourceOnly.statementClasses.INDEX, 1);
   assert.throws(() => projectShadowSchemaDiagnostic({ ...diagnostic, sourceOnly: {
     ...side(), statementClasses: { ...side().statementClasses, INDEX: -1 } } }), /SHADOW_DIAGNOSTIC_INVALID/);
   assert.throws(() => projectShadowSchemaDiagnostic({ ...diagnostic, constraintSemantics: {
     ...diagnostic.constraintSemantics, truncated: 'CLIENT_PRIVATE_SENTINEL' } }), /SHADOW_DIAGNOSTIC_INVALID/);
+  const checkCategories = () => Object.fromEntries(['CAST_OPERATOR', 'BUILTIN_TYPE', 'PARENTHESIS',
+    'COLLATION', 'OPERATOR', 'FUNCTION', 'COLUMN_REFERENCE', 'STRING_LITERAL', 'OTHER']
+    .map(key => [key, key === 'PARENTHESIS' ? 2 : 0]));
+  const checkDiagnostic = { ...diagnostic, constraintSemantics: {
+    ...diagnostic.constraintSemantics, serverVersionRelation: 'MATCH',
+    mismatchCount: 1, mismatchFields: ['DEFINITION', 'CHECK_EXPRESSION'],
+    checkExpressionDifference: { status: 'UNIQUE',
+      tokenEdit: { status: 'UNIQUE', sourceOnly: checkCategories(), destinationOnly: checkCategories(),
+        rawSql: 'CLIENT_PRIVATE_SENTINEL' },
+      dependencies: { identitySetEqual: true, changedClasses: [] },
+      booleanGroupingFingerprint: null,
+      ambiguityFingerprint: null,
+      associativeStructure: { status: 'NOT_ELIGIBLE', rawTree: 'CLIENT_PRIVATE_SENTINEL' },
+      rawExpression: 'CLIENT_PRIVATE_SENTINEL' } } };
+  const checkProjection = projectShadowSchemaDiagnostic(checkDiagnostic);
+  assert.equal(checkProjection.checkExpression.tokenEdit.sourceOnly.PARENTHESIS, 2);
+  assert.equal(checkProjection.checkExpression.structureStatus, 'NOT_ELIGIBLE');
+  assert.ok(!JSON.stringify(checkProjection).includes('CLIENT_PRIVATE_SENTINEL'));
+  assert.throws(() => projectShadowSchemaDiagnostic({ ...checkDiagnostic, constraintSemantics: {
+    ...checkDiagnostic.constraintSemantics, checkExpressionDifference: {
+      ...checkDiagnostic.constraintSemantics.checkExpressionDifference,
+      tokenEdit: { status: 'UNIQUE', sourceOnly: { ...checkCategories(), PARENTHESIS: -1 },
+        destinationOnly: checkCategories() } } } }), /SHADOW_DIAGNOSTIC_INVALID/);
   await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
     directory: temp, tempRoot: temp,
     maintenanceFactory: async () => ({ signal: new AbortController().signal,
       async assertHeld() {}, async close() {} }),
     restore: async options => {
       if (options.domain === 'ops') writeFileSync(join(options.artifactDir, 'schema-diagnostic.json'),
-        JSON.stringify(diagnostic), { mode: 0o600 });
+        JSON.stringify(checkDiagnostic), { mode: 0o600 });
       return { evidence: { domain: options.domain } };
     },
     verifyParity: evidence => {
@@ -152,7 +176,8 @@ try {
   const failure = JSON.parse(failureText);
   assert.deepEqual({ domain: failure.domain, code: failure.code, diagnosticStatus: failure.diagnosticStatus },
     { domain: 'ops', code: 'SCHEMA_DIGEST_MISMATCH', diagnosticStatus: 'CATEGORIES_RETAINED' });
-  assert.equal(failure.schema.constraintMismatchCount, 0);
+  assert.equal(failure.schema.constraintMismatchCount, 1);
+  assert.equal(failure.schema.checkExpression.status, 'UNIQUE');
   assert.ok(!failureText.includes('CLIENT_PRIVATE_SENTINEL'));
   const denied = [];
   await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
