@@ -15,6 +15,7 @@ on:
           - qualify-capture
           - qualify-opscore-capture
           - qualify-opscore-shadow
+          - qualify-opscore-pitr
           - qualify-synthetic
           - prepare-synthetic
       recovery_kind:
@@ -27,6 +28,7 @@ on:
           - target-qualification
           - opscore-target-qualification
           - opscore-shadow
+          - opscore-pitr
           - synthetic-qualification
       domain:
         description: "Single-domain source; select ops for the Core+Ops shadow operation."
@@ -297,6 +299,137 @@ jobs:
         with:
           name: azure-target-qualification-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.QUALIFICATION_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  qualify-opscore-pitr:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'qualify-opscore-pitr'
+    name: Prove managed PITR on pinned Ops/Core target
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TARGET_PROFILE: opscore
+      OPSCORE_QUALIFICATION_KIND: managed-pitr
+      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-opscore-hosting/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18
+      TARGET_POSTGRES_HOST: corgtex-opscore-pg18.postgres.database.azure.com
+      TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      QUALIFY_ACCESS: 'false'
+      QUALIFY_CAPTURE_TRIAL: 'false'
+      PITR_DIR: .artifacts/opscore-managed-pitr/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+        timeout-minutes: 5
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Prepare exact stopped GP target and absent PITR clone
+        id: pitr_prepare
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          export QUALIFY_RUNNER_IPV4="$(curl --fail --silent --show-error --max-time 10 https://api.ipify.org)"
+          node scripts/migration/opscore-managed-pitr.mjs prepare "$PITR_DIR"
+      - name: Persist PITR lifecycle intent before START
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-managed-pitr-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PITR_DIR }}/qualification-intent.json
+            ${{ env.PITR_DIR }}/start-intent.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Restore one run-owned synthetic marker at the exact point in time
+        timeout-minutes: 185
+        run: node scripts/migration/opscore-managed-pitr.mjs run "$PITR_DIR"
+      - name: Delete only owned PITR clone and close target access
+        if: ${{ always() && steps.pitr_prepare.outcome == 'success' }}
+        timeout-minutes: 70
+        run: node scripts/migration/opscore-managed-pitr.mjs cleanup "$PITR_DIR"
+      - name: Upload private managed PITR receipts
+        if: ${{ always() && steps.pitr_prepare.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-managed-pitr-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PITR_DIR }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  recover-opscore-pitr:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'recover' && inputs.recovery_kind == 'opscore-pitr'
+    name: Recover one exact interrupted Ops/Core managed PITR run
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: azure-migration-foundation
+    env:
+      DOMAIN: ${{ inputs.domain }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TARGET_PROFILE: opscore
+      OPSCORE_QUALIFICATION_KIND: managed-pitr
+      TARGET_POSTGRES_RESOURCE_ID: /subscriptions/227eb707-bc46-415e-a09b-7d2b69fb14b2/resourceGroups/rg-corgtex-opscore-hosting/providers/Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18
+      TARGET_POSTGRES_HOST: corgtex-opscore-pg18.postgres.database.azure.com
+      TARGET_POSTGRES_ADMIN_USER: corgtexadmin
+      QUALIFY_ACCESS: 'false'
+      QUALIFY_CAPTURE_TRIAL: 'false'
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      RECOVERY_RUN_ATTEMPT: ${{ inputs.recovery_run_attempt }}
+      PITR_DIR: .artifacts/opscore-managed-pitr-recovery/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate exact managed PITR recovery inputs
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$DOMAIN" == ops ]] || exit 1
+          [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ && "$RECOVERY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: opscore-managed-pitr-*-${{ inputs.recovery_run_id }}-${{ inputs.recovery_run_attempt }}
+          path: ${{ env.PITR_DIR }}
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recovery_run_id }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+        timeout-minutes: 5
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Reconcile exact owned clone and target closure
+        timeout-minutes: 105
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/migration/opscore-managed-pitr.mjs recover "$PITR_DIR"
+      - name: Upload private managed PITR recovery receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: opscore-managed-pitr-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PITR_DIR }}
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 

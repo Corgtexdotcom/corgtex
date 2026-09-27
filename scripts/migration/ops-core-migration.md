@@ -146,6 +146,31 @@ receipts require manual reconciliation, never an inferred DROP. Shadow parity
 does not qualify combined workload, CPU credits, managed backup/PITR recovery,
 object state, application images or customer routing; preserve Railway serving
 until those independent gates pass.
+
+### Managed recovery on the General Purpose target
+
+After the target is back to Stopped with public access Disabled, dispatch
+`operation=qualify-opscore-pitr`, `domain=ops` on protected `main`. The separate
+four-hour intent pins the exact PG18 `Standard_D2ds_v5` target, a run-derived
+synthetic schema, and one run-derived restored server. It opens only the runner's
+IPv4, writes a before marker, records a PostgreSQL-clock restore timestamp,
+writes an after marker, and waits beyond Azure's documented WAL archive delay.
+It then requests an Azure managed point-in-time restore with run ownership tags.
+The restored server must contain the before marker and omit the after marker.
+The receipt measures restore time; it does not set an RTO or RPO policy.
+
+Cleanup removes the run-owned marker, closes temporary original-server access,
+returns that target to Stopped, and deletes only the verified run-owned clone. A failed
+cleanup requires `operation=recover`, `recovery_kind=opscore-pitr`, and the exact
+source run ID/attempt. Recovery checks completed GitHub run provenance and
+absence of intervening protected runs before reconciling owned resources.
+An ambiguous restore request with no visible clone and lost runner receipts
+remains unproven; reconcile the exact ARM activity before claiming absence.
+Keep the temporary workflow Reader, hosting-group Contributor, and bootstrap
+vault Secrets User assignments only for the run and its cleanup/recovery.
+This synthetic test does not restore customer data, exercise applications, or
+qualify combined workload and production recovery objectives.
+
 The profile checks Azure server parameters and effective PostgreSQL settings with no
 pending restart before credential SQL and around commit. Parameter changes
 are a separate controlled operation; any mismatch fails closed. After
