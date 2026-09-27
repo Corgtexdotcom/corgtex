@@ -389,7 +389,7 @@ export function validatePostgresDatabaseParity(document, { requireFrozenSourceSe
   return {
     schemaVersion: "1.0.0",
     status: "POSTGRES_DATABASE_PARITY_VERIFIED",
-    ...(representation ? { schemaRepresentation: "PG18_ORDERED_AND_V1" } : {}),
+    ...(representation ? { schemaRepresentation: document.schemaRepresentation.version } : {}),
     domainRef: `sha256:${sha256(document.domain).slice(0, 16)}`,
     sourceRef: document.sourceRef,
     targetRef: document.targetRef,

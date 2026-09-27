@@ -6,7 +6,8 @@ import {
   verifyBoundOrderedAnd,
   captureBoundCheck,
 } from "./postgres-check-structure.mjs";
-import { verifySchemaRepresentation, REPRESENTATION_VERSION } from "./postgres-schema-representation.mjs";
+import { buildSchemaRepresentation, verifySchemaRepresentation, REPRESENTATION_VERSION,
+  VERSIONED_LIBC_REPRESENTATION } from "./postgres-schema-representation.mjs";
 import { tokenizeSchemaDump, schemaTokenDigest } from "./run-postgres-restore-rehearsal.mjs";
 
 const variable = (attno) => `{VAR :varno 1 :varattno ${attno} :vartype 16 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varreturningtype 0 :varnosyn 1 :varattnosyn ${attno} :location -1}`;
@@ -179,23 +180,26 @@ const expectedFields = {
   database_collation: "ENCODING PROVIDER COLLATE CTYPE LOCALE ICU_RULES VERSION ACTUAL_VERSION",
 };
 
-const representationFixture = () => {
-  const identity = ["TABLE", "renamed", "RenamedTable", "RenamedCheck"];
-  const side = (tree, expression) => {
+const representationFixture = ({ known = false, sourceVersion = "2.41", destinationVersion = sourceVersion } = {}) => {
+  const schema = known ? "public" : "renamed";
+  const table = known ? "ConstitutionSourceReference" : "RenamedTable";
+  const constraint = known ? "ConstitutionSource_point_contract_check" : "RenamedCheck";
+  const identity = ["TABLE", schema, table, constraint];
+  const side = (tree, expression, version) => {
     const definition = `CHECK (${expression})`;
-    const bindings = supportedBindings();
-    for (const row of bindings.filter((r) => r.kind === "attribute")) row.identity.splice(0, 2, "renamed", "RenamedTable");
+    const bindings = supportedBindings(version);
+    for (const row of bindings.filter((r) => r.kind === "attribute")) row.identity.splice(0, 2, schema, table);
     const semantics = { ...entry("unused").semantics,
       DEFINITION: schemaTokenDigest(tokenizeSchemaDump(definition)),
       CHECK_EXPRESSION: schemaTokenDigest(tokenizeSchemaDump(expression)) };
     return { serverVersion: 180006,
-      tokens: tokenizeSchemaDump(`CREATE TABLE renamed."RenamedTable" ("pointKey" text, "pointOrder" integer, "sourceOrder" integer, CONSTRAINT "RenamedCheck" ${definition}); CREATE INDEX other_index ON renamed."RenamedTable" ("pointOrder");`),
+      tokens: tokenizeSchemaDump(`CREATE TABLE ${schema}."${table}" ("pointKey" text, "pointOrder" integer, "sourceOrder" integer, CONSTRAINT "${constraint}" ${definition}); CREATE INDEX other_index ON ${schema}."${table}" ("pointOrder");`),
       manifest: [{ key: JSON.stringify(identity), type: "CHECK", semantics }],
       check: { identity, tree, definition, expression, bindings } };
   };
   return { version: REPRESENTATION_VERSION,
-    source: side(supportedNested, `(("pointOrder" >= 1 AND "pointOrder" <= 10) AND "sourceOrder" >= 1 AND "pointKey" = 'point-'::text || "pointOrder"::text)`),
-    destination: side(supportedFlat, `("pointOrder" >= 1 AND "pointOrder" <= 10 AND "sourceOrder" >= 1 AND "pointKey" = 'point-'::text || "pointOrder"::text)`) };
+    source: side(supportedNested, `(("pointOrder" >= 1 AND "pointOrder" <= 10) AND "sourceOrder" >= 1 AND "pointKey" = 'point-'::text || "pointOrder"::text)`, sourceVersion),
+    destination: side(supportedFlat, `("pointOrder" >= 1 AND "pointOrder" <= 10 AND "sourceOrder" >= 1 AND "pointKey" = 'point-'::text || "pointOrder"::text)`, destinationVersion) };
 };
 const verifyRepresentation = (proof) => verifySchemaRepresentation(proof,
   { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: schemaTokenDigest(proof.source.tokens) },
@@ -215,6 +219,43 @@ const replaceCapturedSql = (side, expression) => {
 };
 
 describe("bound versioned schema representation", () => {
+  it("uses V2 only for the known CHECK with current libc version metadata drift", () => {
+    const p = representationFixture({ known: true, destinationVersion: "2.38" });
+    expect(verifyRepresentation(p)).toBe(false);
+    p.version = VERSIONED_LIBC_REPRESENTATION;
+    expect(verifyRepresentation(p)).toBe(true);
+    expect(buildSchemaRepresentation(p.source, p.destination,
+      { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: schemaTokenDigest(p.source.tokens) },
+      { algorithm: "PG_DUMP_SQL_TOKENS_V1", digest: schemaTokenDigest(p.destination.tokens) })?.version)
+      .toBe(VERSIONED_LIBC_REPRESENTATION);
+  });
+  it("does not extend version drift proof to a different CHECK", () => {
+    const p = representationFixture({ destinationVersion: "2.38" });
+    p.version = VERSIONED_LIBC_REPRESENTATION;
+    expect(verifyRepresentation(p)).toBe(false);
+  });
+  it.each([
+    ["stale source libc version", (p) => { p.source.check.bindings.find((r) => r.kind === "database_collation").identity[6] = "stale"; }],
+    ["missing destination libc version", (p) => { p.destination.check.bindings.find((r) => r.kind === "database_collation").identity[7] = null; }],
+    ["stale default collation", (p) => { p.destination.check.bindings.find((r) => r.kind === "collation").identity[10] = "stale"; }],
+    ["changed locale", (p) => { p.destination.check.bindings.find((r) => r.kind === "database_collation").identity[2] = "other.UTF-8"; }],
+    ["ICU rules", (p) => { p.destination.check.bindings.find((r) => r.kind === "database_collation").identity[5] = "&a<b"; }],
+    ["changed provider", (p) => { p.destination.check.bindings.find((r) => r.kind === "database_collation").identity[1] = "i"; }],
+    ["nondeterministic collation", (p) => { p.destination.check.bindings.find((r) => r.kind === "collation").identity[3] = false; }],
+    ["changed encoding", (p) => { p.destination.check.bindings.find((r) => r.kind === "database_collation").identity[0] = "LATIN1"; }],
+    ["changed function", (p) => { p.destination.check.bindings.find((r) => r.kind === "function").identity[8] = "v"; }],
+    ["changed attribute", (p) => { p.destination.check.bindings.find((r) => r.kind === "attribute").identity[2] = "otherColumn"; }],
+    ["changed tree", (p) => { p.destination.check.tree = p.destination.check.tree.replace("[ 1 0", "[ 2 0"); }],
+    ["reordered leaves", (p) => { p.destination.check.tree = bool("and", lower, upper, textEquals, sourceOrder); }],
+    ["OR grouping", (p) => { p.destination.check.tree = p.destination.check.tree.replace(":boolop and", ":boolop or"); }],
+    ["stale representation version", (p) => { p.version = "PG18_ORDERED_AND_V3"; }],
+    ["server patch mismatch", (p) => { p.destination.serverVersion += 1; }],
+  ])("V2 rejects %s", (_name, change) => {
+    const p = representationFixture({ known: true, destinationVersion: "2.38" });
+    p.version = VERSIONED_LIBC_REPRESENTATION;
+    change(p);
+    expect(verifyRepresentation(p)).toBe(false);
+  });
   it("accepts a renamed candidate with exact residual executable coverage", () => {
     expect(verifyRepresentation(representationFixture())).toBe(true);
   });

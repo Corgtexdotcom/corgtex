@@ -462,7 +462,7 @@ export async function captureBoundCheck(client, entry) {
   } catch { return null; }
 }
 
-export function verifyBoundOrderedAnd(left, right) {
+export function verifyBoundOrderedAnd(left, right, { allowCurrentLibcVersionDrift = false } = {}) {
   try {
     const build = (input) => {
       if (!input || !same(Object.keys(input).sort(), ["bindings", "definition", "expression", "identity", "tree"])) reject();
@@ -485,7 +485,10 @@ export function verifyBoundOrderedAnd(left, right) {
     };
     if (!same(left?.identity, right?.identity)) return false;
     const a = build(left), b = build(right);
-    return compareBindings(a.bindings, b.bindings).bindingsEqual
+    const comparison = compareBindings(a.bindings, b.bindings);
+    const bindingsProven = comparison.bindingsEqual || (allowCurrentLibcVersionDrift
+      && comparison.collationVersionOnly && currentDefaultLibc(a) && currentDefaultLibc(b));
+    return bindingsProven
       && a.canonical === b.canonical && a.original !== b.original
       && a.flattened !== b.flattened;
   } catch { return false; }
