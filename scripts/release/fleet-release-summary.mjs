@@ -16,7 +16,7 @@ export function fleetReleaseSummary(env) {
   const literal = (value) => String(value || "unavailable").replace(/[\r\n`]/g, " ");
   return {
     verified,
-    summary: `## ${status}\n\n${detail}\n\n- Release: \`${literal(env.RELEASE_SHA)}\`\n- Selected targets: \`${literal(env.TARGETS_INPUT)}\`\n- ${dryRun ? "Plan" : "Preflight"}: ${literal(dryRun ? env.PLAN_OUTCOME : env.PREFLIGHT_OUTCOME)}\n- Promotion: ${literal(env.PROMOTION_OUTCOME)}\n- Observation: ${literal(env.OBSERVATION_OUTCOME)}\n`,
+    summary: `## ${status}\n\n${detail}\n\n- Release: \`${literal(env.RELEASE_SHA)}\`\n- Selected targets: \`${literal(env.SELECTED_TARGETS_INPUT ?? env.TARGETS_INPUT)}\`\n- ${dryRun ? "Plan" : "Preflight"}: ${literal(dryRun ? env.PLAN_OUTCOME : env.PREFLIGHT_OUTCOME)}\n- Promotion: ${literal(env.PROMOTION_OUTCOME)}\n- Observation: ${literal(env.OBSERVATION_OUTCOME)}\n`,
   };
 }
 

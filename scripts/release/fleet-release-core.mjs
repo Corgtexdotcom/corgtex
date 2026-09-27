@@ -58,7 +58,7 @@ export function parseKeyValueArgs(argv) {
     }
     const key = arg.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
     const next = argv[index + 1];
-    if (!next || next.startsWith("--")) {
+    if (next === undefined || next.startsWith("--")) {
       parsed[key] = "true";
       continue;
     }
@@ -404,6 +404,18 @@ export function targetFromControlPlaneRow(row) {
 export function filterTargetsByGroups(targets, groups, options = {}) {
   const selected = new Set(groups);
   return targets.filter((target) => selected.has(target.group) && (options.excludeIneligible !== true || targetEligibilityErrors(target).length === 0));
+}
+
+export function filterTargetsByDeploymentId(targets, deploymentId) {
+  const requestedId = String(deploymentId ?? "").trim();
+  if (!requestedId) return targets;
+  const matches = targets.filter((target) => String(target.deploymentId ?? "") === requestedId);
+  if (matches.length !== 1) {
+    throw new Error(matches.length === 0
+      ? `No release target matched deployment ID ${requestedId}.`
+      : `Deployment ID ${requestedId} matched multiple release targets.`);
+  }
+  return matches;
 }
 
 export function targetEligibilityErrors(target) {

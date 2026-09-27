@@ -25,6 +25,11 @@ describe("fleet release summary", () => {
   it("requires completed promotion and observation for selected-target proof", () => {
     expect(fleetReleaseSummary(success)).toMatchObject({ verified: true, summary: expect.stringContaining("RELEASE VERIFIED") });
   });
+  it("reports the selected deployment instead of the requested target groups", () => {
+    const result = fleetReleaseSummary({ ...success, TARGETS_INPUT: "managed-customers,selfserve,ops", SELECTED_TARGETS_INPUT: "chirone-deployment" });
+    expect(result.summary).toContain("Selected targets: `chirone-deployment`");
+    expect(result.summary).not.toContain("Selected targets: `managed-customers,selfserve,ops`");
+  });
   it.each([
     { PROMOTION_OUTCOME: "failure" }, { PROMOTION_OUTCOME: "skipped" },
     { OBSERVATION_OUTCOME: "failure" }, { OBSERVATION_OUTCOME: "skipped" },

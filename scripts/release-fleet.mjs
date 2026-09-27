@@ -15,13 +15,15 @@ export function buildWorkflowInputs(argv = process.argv.slice(2)) {
   const args = parseKeyValueArgs(argv);
   const release = normalizeReleaseInput(args.release ?? "latest-stable");
   const targets = normalizeTargets(args.targets).join(",");
+  const targetId = args.targetId?.trim() ?? "";
   const reason = args.reason ?? "";
   if (!reason.trim()) {
-    throw new Error("Usage: npm run release:fleet -- --reason \"...\" [--release latest-stable|<full-sha>] [--targets default|all|managed-customers|selfserve|ops|backup-app] [--dry-run] [--concurrency 2]");
+    throw new Error("Usage: npm run release:fleet -- --reason \"...\" [--release latest-stable|<full-sha>] [--targets default|all|managed-customers|selfserve|ops|backup-app] [--target-id <deployment-id>] [--dry-run] [--concurrency 2]");
   }
   return {
     release,
     targets,
+    targetId,
     reason,
     dryRun: parseBoolean(args.dryRun, false),
     concurrency: parsePositiveInteger(args.concurrency, 2),
@@ -54,6 +56,7 @@ export function runFleetReleaseDispatch(argv = process.argv.slice(2), deps = {})
     "-f",
     `concurrency=${inputs.concurrency}`,
   ];
+  if (inputs.targetId) dispatchArgs.push("-f", `target_id=${inputs.targetId}`);
   if (!inputs.dryRun) {
     dispatchArgs.push(
       "-f",

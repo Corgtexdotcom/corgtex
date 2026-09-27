@@ -5,6 +5,7 @@ import {
   azureRuntimeContractErrors,
   buildReleaseManifest,
   filterTargetsByGroups,
+  filterTargetsByDeploymentId,
   formatReleasePlan,
   healthProofErrors,
   imageTagForSha,
@@ -61,6 +62,20 @@ describe("fleet release core", () => {
     expect(normalizeReleaseInput("latest")).toBe("latest-stable");
     expect(normalizeReleaseInput(SHA.toUpperCase())).toBe(SHA);
     expect(() => normalizeReleaseInput("main")).toThrow("latest-stable or a full 40-character git SHA");
+  });
+
+  it("selects exactly one deployment by its control-plane ID and fails closed otherwise", () => {
+    const targets = [
+      { id: "deployment-a", deploymentId: "deployment-a", label: "Chirone" },
+      { id: "deployment-b", deploymentId: "deployment-b", label: "Other" },
+    ];
+    expect(filterTargetsByDeploymentId(targets, "deployment-a")).toEqual([targets[0]]);
+    expect(filterTargetsByDeploymentId(targets, "")).toEqual(targets);
+    expect(() => filterTargetsByDeploymentId([{ id: "deployment-a", deploymentId: "other-id" }], "deployment-a"))
+      .toThrow("No release target matched deployment ID deployment-a.");
+    expect(() => filterTargetsByDeploymentId(targets, "missing")).toThrow("No release target matched deployment ID missing.");
+    expect(() => filterTargetsByDeploymentId([...targets, { id: "deployment-a", deploymentId: "deployment-a" }], "deployment-a"))
+      .toThrow("Deployment ID deployment-a matched multiple release targets.");
   });
 
   it("uses one deterministic version and image tag shape", () => {

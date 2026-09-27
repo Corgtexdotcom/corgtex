@@ -36,6 +36,20 @@ describe("release fleet command", () => {
     });
   });
 
+  it("passes an exact deployment ID through to the protected workflow", () => {
+    const runCommand = vi.fn()
+      .mockReturnValueOnce({ stdout: "", stderr: "" })
+      .mockReturnValueOnce({ stdout: JSON.stringify([{ databaseId: 123, url: "https://github.test/run/123" }]), stderr: "" })
+      .mockReturnValueOnce({ stdout: "", stderr: "" });
+
+    runFleetReleaseDispatch(["--target-id", "chirone-deployment-uuid", "--reason", "Deploy Chirone only."], { runCommand });
+
+    expect(runCommand).toHaveBeenNthCalledWith(1, "gh", expect.arrayContaining([
+      "-f",
+      "target_id=chirone-deployment-uuid",
+    ]));
+  });
+
   it("keeps backup app explicit when all is requested", () => {
     expect(buildWorkflowInputs([
       "--targets",

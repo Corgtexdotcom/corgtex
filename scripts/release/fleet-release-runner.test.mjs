@@ -344,6 +344,19 @@ describe("fleet release runner", () => {
     expect(saved).not.toMatch(/synthetic-private|token|password|username|releaseVariables|history/);
   });
 
+  it("does not require an Ops baseline when the exact planned target is a customer", async () => {
+    const deps = registryDeps();
+    const targetFile = join(mkdtempSync(join(tmpdir(), "fleet-customer-snapshot-")), "targets.json");
+    writeFileSync(targetFile, JSON.stringify([{ id: "chirone-deployment", deploymentId: "chirone-deployment", group: "managed-customers", provider: "railway" }]));
+    deps.env.FLEET_RELEASE_TARGETS_FILE = targetFile;
+    deps.env.FLEET_RELEASE_TARGET_ID = "chirone-deployment";
+
+    const result = await runFleetRelease(["check-images", "--release", SHA, "--targets", "managed-customers,ops"], deps);
+    expect(result.ops).toEqual([]);
+    expect(result.images.map((image) => `${image.purpose}:${image.role}`)).toEqual(["candidate:web", "candidate:worker"]);
+    expect(deps.calls).toEqual([]);
+  });
+
   it.each([0, 2, 3])("stops registry checks without provider effects or raw errors when inspection %s fails", async (failureIndex) => {
     const deps = registryDeps();
     let index = 0;
@@ -1607,6 +1620,95 @@ describe("fleet release runner", () => {
 
     await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--dry-run", "--fail-on-blockers", "--reason", "Validate explicit selection."], deps))
       .rejects.toThrow("Target lifecycle status RETIRED is not release-eligible");
+
+    const selected = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--target-id", "active", "--dry-run", "--reason", "Validate Chirone-only target selection."], {
+      ...deps,
+      env: { ...env, MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "invalid-ops-only-canary" },
+    });
+    expect(selected.targets.map((target) => target.id)).toEqual(["active"]);
+    await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--target-id", "missing", "--dry-run", "--reason", "Reject unknown deployment ID."], deps))
+      .rejects.toThrow("No release target matched deployment ID missing.");
+  });
+
+  it("passes the exact target ID through both workflow plans and promotion", () => {
+    for (const workflowName of ["fleet-release", "fleet-release-preflight"]) {
+      const workflow = readFileSync(new URL(`../../.github/workflows/${workflowName}.yml`, import.meta.url), "utf8");
+      expect(workflow).toContain("target_id:");
+      expect(workflow).toContain("FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}");
+    }
+    const releaseWorkflow = readFileSync(new URL("../../.github/workflows/fleet-release.yml", import.meta.url), "utf8");
+    expect(releaseWorkflow).toContain("SELECTED_TARGETS_INPUT: ${{ steps.promotion.outputs.selected_target_ids || steps.preflight.outputs.selected_target_ids || steps.plan.outputs.selected_target_ids || inputs.target_id || inputs.targets }}");
+  });
+
+  it("resolves customer deployment IDs before the protected-provider-only preflight", async () => {
+    const chirone = { id: "chirone-deployment", environment: "production", cloudProvider: "RAILWAY", deploymentStatus: "ACTIVE", url: "https://chirone.corgtex.com" };
+    const fetchImpl = vi.fn(async () => controlPlaneResult([chirone]));
+    const deps = { env: { CONTROL_PLANE_AGENT_API_KEY: "control-plane-key" }, fetchImpl };
+
+    const result = await runFleetRelease(["preflight-provider", "--targets", "default", "--target-id", "chirone-deployment"], deps);
+    expect(result).toMatchObject({ status: "READY", effects: 0, targets: [] });
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,ops", "--target-id", "chirone-deployment"], deps))
+      .resolves.toMatchObject({ status: "READY", effects: 0, targets: [] });
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve", "--target-id", "missing-deployment"], deps))
+      .rejects.toThrow("No release target matched deployment ID missing-deployment.");
+
+    const azureDeps = {
+      env: { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ id: "azure-deployment", deploymentId: "azure-deployment" }) },
+      fetchImpl: vi.fn(),
+    };
+    await expect(runFleetRelease(["preflight-provider", "--targets", "selfserve", "--target-id", "azure-deployment"], azureDeps))
+      .rejects.toThrow("Exact deployment releases currently require Railway targets");
+  });
+
+  it("validates only the provider configuration selected by an exact deployment ID", async () => {
+    const chirone = {
+      id: "chirone-alias",
+      deploymentId: "chirone-deployment",
+      label: "Chirone",
+      url: "https://chirone.corgtex.com",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "chirone-project", environmentId: "production", webServiceId: "chirone-web", workerServiceId: "chirone-worker" },
+    };
+    const result = await runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--target-id", "chirone-deployment", "--dry-run", "true"], {
+      env: {
+        FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone]),
+        FLEET_RELEASE_OPS_TARGET_JSON: "not-json-and-not-selected",
+        FLEET_RELEASE_AZURE_TARGET_JSON: JSON.stringify([{ id: "wrong-provider", provider: "unsupported" }]),
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, targetGroups: ["managed-customers"] });
+  });
+
+  it("treats an empty optional target-id argument as no selector", async () => {
+    const result = await runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--target-id", "", "--dry-run", "true"], {
+      env: { FLEET_RELEASE_TARGETS_JSON: targetJson({ id: "customer", deploymentId: "customer", group: "managed-customers", provider: "railway" }) },
+    });
+
+    expect(result).toMatchObject({ ok: true, targetGroups: ["managed-customers"] });
+  });
+
+  it("rejects conflicting duplicate exact deployment IDs before deduplication", async () => {
+    const chirone = {
+      id: "chirone-alias",
+      deploymentId: "chirone-deployment",
+      label: "Chirone",
+      url: "https://chirone.corgtex.com",
+      group: "managed-customers",
+      provider: "railway",
+      railway: { projectId: "chirone-project", environmentId: "production", webServiceId: "chirone-web", workerServiceId: "chirone-worker" },
+    };
+    const conflicting = { ...chirone, railway: { ...chirone.railway, webServiceId: "different-web-service" } };
+
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve,ops", "--target-id", "chirone-deployment"], {
+      env: { FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone, conflicting]) },
+      fetchImpl: vi.fn(),
+    })).rejects.toThrow("Deployment ID chirone-deployment matched conflicting release targets.");
+    await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve,ops", "--target-id", " chirone-deployment "], {
+      env: { FLEET_RELEASE_TARGETS_JSON: JSON.stringify([chirone, conflicting]) },
+      fetchImpl: vi.fn(),
+    })).rejects.toThrow("Deployment ID chirone-deployment matched conflicting release targets.");
   });
 
   it("rejects transition inventory that omits provider", async () => {

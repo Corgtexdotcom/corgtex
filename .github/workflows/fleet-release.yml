@@ -13,6 +13,11 @@ on:
         required: true
         type: string
         default: managed-customers,selfserve,ops
+      target_id:
+        description: "Optional exact control-plane deployment ID. Set this to promote one deployment only."
+        required: false
+        type: string
+        default: ""
       reason:
         description: "Audited reason for the release."
         required: true
@@ -115,16 +120,19 @@ jobs:
         env:
           RELEASE_INPUT: ${{ inputs.release }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
         run: |
           node scripts/release/fleet-release-runner.mjs validate-config \
             --release "$RELEASE_INPUT" \
             --targets "$TARGETS_INPUT" \
+            --target-id "$FLEET_RELEASE_TARGET_ID" \
             --dry-run "$DRY_RUN_INPUT"
 
       - name: Verify provider authority and settled protected Railway baselines
         env:
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
         run: |
           node scripts/release/fleet-release-runner.mjs preflight-provider \
             --targets "$TARGETS_INPUT"
@@ -143,6 +151,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
@@ -161,6 +170,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
@@ -217,6 +227,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           FLEET_RELEASE_REGISTRY_PROOF_FILE: ${{ runner.temp }}/fleet-release-registry-proof.json
         run: |
@@ -244,6 +255,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           FLEET_RELEASE_REGISTRY_PROOF_FILE: ${{ runner.temp }}/fleet-release-registry-proof.json
           RELEASE_REASON: ${{ inputs.reason }}
@@ -265,6 +277,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ steps.promotion.outputs.observation_targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           FLEET_RELEASE_TARGETS_FILE: ${{ runner.temp }}/fleet-release-selected-targets.json
           AZURE_APPLICATIONINSIGHTS_APP_NAME: ${{ vars.AZURE_APPLICATIONINSIGHTS_APP_NAME || 'appi-corgtex-ss-prod' }}
           AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP: ${{ vars.AZURE_APPLICATIONINSIGHTS_RESOURCE_GROUP || 'rg-corgtex-selfserve-production-wus3' }}
@@ -294,6 +307,7 @@ jobs:
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
           RELEASE_SHA: ${{ steps.manifest.outputs.git_sha }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          SELECTED_TARGETS_INPUT: ${{ steps.promotion.outputs.selected_target_ids || steps.preflight.outputs.selected_target_ids || steps.plan.outputs.selected_target_ids || inputs.target_id || inputs.targets }}
           PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
           PLAN_OUTCOME: ${{ steps.plan.outcome }}
           PROMOTION_OUTCOME: ${{ steps.promotion.outcome }}

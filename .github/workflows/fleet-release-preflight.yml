@@ -13,6 +13,11 @@ on:
         required: true
         type: string
         default: managed-customers,selfserve,ops
+      target_id:
+        description: "Optional exact control-plane deployment ID. Set this to preflight one deployment only."
+        required: false
+        type: string
+        default: ""
       reason:
         description: "Audited reason for the release preflight."
         required: true
@@ -68,10 +73,12 @@ jobs:
         env:
           RELEASE_INPUT: ${{ inputs.release }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
         run: |
           node scripts/release/fleet-release-runner.mjs validate-config \
             --release "$RELEASE_INPUT" \
             --targets "$TARGETS_INPUT" \
+            --target-id "$FLEET_RELEASE_TARGET_ID" \
             --dry-run true
 
       - name: Resolve release manifest
@@ -85,6 +92,7 @@ jobs:
       - name: Verify provider authority and settled protected Railway baselines
         env:
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
         run: |
           node scripts/release/fleet-release-runner.mjs preflight-provider \
             --targets "$TARGETS_INPUT"
@@ -93,6 +101,7 @@ jobs:
         env:
           MANIFEST_JSON: ${{ steps.manifest.outputs.manifest_json }}
           TARGETS_INPUT: ${{ inputs.targets }}
+          FLEET_RELEASE_TARGET_ID: ${{ inputs.target_id }}
           RELEASE_REASON: ${{ inputs.reason }}
           CONCURRENCY_INPUT: ${{ inputs.concurrency }}
         run: |
