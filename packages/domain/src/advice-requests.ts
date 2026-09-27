@@ -368,6 +368,7 @@ export async function createAdviceRequest(actor: AppActor, params: {
   deadlineAt?: Date | null;
   reminderAt?: Date | null;
   preferredChannel?: AdviceRequestPreferredChannel | null;
+  idempotencyId?: string;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   invariant(actor.kind === "user", 400, "INVALID_ACTOR", "Only users can request input.");
@@ -377,13 +378,31 @@ export async function createAdviceRequest(actor: AppActor, params: {
   const preferredChannel = normalizePreferredChannel(params.preferredChannel);
   const memberIds = uniqueStrings(params.memberIds);
   invariant(messageMd.length > 0, 400, "INVALID_INPUT", "Input request message cannot be empty.");
-  assertFutureDate(params.deadlineAt, "Deadline");
-  assertFutureDate(params.reminderAt, "Reminder");
-  if (params.deadlineAt && params.reminderAt) {
-    invariant(params.reminderAt <= params.deadlineAt, 400, "INVALID_INPUT", "Reminder must be before or at the deadline.");
-  }
-
   return prisma.$transaction(async (tx) => {
+    if (params.idempotencyId) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('advice_request_source'), hashtext(${params.idempotencyId}))`;
+      const existing = await tx.adviceRequest.findUnique({
+        where: { id: params.idempotencyId },
+        include: { process: true, recipients: true },
+      });
+      if (existing) {
+        invariant(existing.workspaceId === params.workspaceId && existing.requestedByUserId === actor.user.id
+          && existing.process.subjectType === subjectType && existing.process.subjectId === params.subjectId
+          && existing.audienceType === params.audienceType && existing.messageMd === messageMd
+          && existing.targetCircleId === (params.audienceType === "CIRCLE" ? params.targetCircleId ?? null : null)
+          && existing.deadlineAt?.getTime() === (params.deadlineAt ?? null)?.getTime()
+          && existing.reminderAt?.getTime() === (params.reminderAt ?? null)?.getTime()
+          && existing.preferredChannel === preferredChannel
+          && JSON.stringify(existing.recipients.map((recipient) => recipient.memberId).sort()) === JSON.stringify((params.audienceType === "MEMBERS" ? memberIds : []).sort()),
+        409, "IDEMPOTENCY_CONFLICT", "This advice request key was already used for different content.");
+        return existing;
+      }
+    }
+    assertFutureDate(params.deadlineAt, "Deadline");
+    assertFutureDate(params.reminderAt, "Reminder");
+    if (params.deadlineAt && params.reminderAt) {
+      invariant(params.reminderAt <= params.deadlineAt, 400, "INVALID_INPUT", "Reminder must be before or at the deadline.");
+    }
     const requesterMember = await findActiveMemberForUser(tx, params.workspaceId, actor.user.id);
     invariant(requesterMember?.isActive, 403, "NOT_A_MEMBER", "Only active workspace members can request input.");
 
@@ -416,6 +435,7 @@ export async function createAdviceRequest(actor: AppActor, params: {
 
     const request = await tx.adviceRequest.create({
       data: {
+        ...(params.idempotencyId ? { id: params.idempotencyId } : {}),
         workspaceId: params.workspaceId,
         processId: process.id,
         requestedByUserId: actor.user.id,

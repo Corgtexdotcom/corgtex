@@ -1,4 +1,5 @@
 export * from "./actions";
+export * from "./action-duplicates";
 export * from "./agent-auth";
 export * from "./ai-workspaces";
 export * from "./ai-workspace-selection";

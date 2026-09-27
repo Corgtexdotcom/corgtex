@@ -1,5 +1,6 @@
 import { env, prisma, toInputJson, type AppActor } from "@corgtex/shared";
-import { createAction, publishAction } from "./actions";
+import { createAction, meetingInsightActionSourcePayload, publishAction } from "./actions";
+import { isDuplicateGuardMatchError } from "./duplicate-guard";
 import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { invariant } from "./errors";
@@ -690,6 +691,29 @@ async function maybeCloseReview(reviewId: string, workspaceId: string, meetingId
   }
 }
 
+export async function refreshSlackMeetingActionReviewAfterWebApply(params: { workspaceId: string; insightId: string }) {
+  const insight = await prisma.meetingInsight.findFirst({
+    where: { id: params.insightId, workspaceId: params.workspaceId, type: "ACTION_ITEM", operation: "CREATE", status: "APPLIED" },
+    select: { meetingId: true },
+  });
+  if (!insight) return null;
+  const review = await prisma.meetingFollowUpReview.findFirst({
+    where: { workspaceId: params.workspaceId, meetingId: insight.meetingId },
+    select: { id: true, installationId: true, messageTs: true },
+  });
+  if (!review) return null;
+  await maybeCloseReview(review.id, params.workspaceId, insight.meetingId);
+  if (!review.messageTs) return null;
+  return {
+    installationId: review.installationId,
+    update: await renderReviewUpdate({
+      workspaceId: params.workspaceId,
+      reviewId: review.id,
+      responseText: "Follow-up reviewed in Corgtex.",
+    }),
+  };
+}
+
 async function renderReviewUpdate(params: {
   workspaceId: string;
   reviewId: string;
@@ -724,7 +748,6 @@ async function renderReviewUpdate(params: {
 
 async function loadReviewInsight(workspaceId: string, reviewId: string, insightId: string) {
   const { review } = await loadReviewContext(workspaceId, reviewId);
-  await ensureReviewOpen(review);
   const insight = await prisma.meetingInsight.findFirst({
     where: {
       id: insightId,
@@ -736,6 +759,7 @@ async function loadReviewInsight(workspaceId: string, reviewId: string, insightI
     },
   });
   invariant(insight, 404, "NOT_FOUND", "Meeting follow-up proposal not found.");
+  if (insight.status !== "APPLIED") await ensureReviewOpen(review);
   return { review, insight };
 }
 
@@ -783,6 +807,7 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
   await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const { review, insight } = await loadReviewInsight(params.workspaceId, params.reviewId, params.insightId);
   if (insight.status === "APPLIED") {
+    await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
     return renderReviewUpdate({
       workspaceId: params.workspaceId,
       reviewId: review.id,
@@ -799,18 +824,31 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
     `*Created from meeting:* [${review.meeting.title || "Untitled meeting"}](${meetingUrl(params.workspaceId, review.meetingId)})`,
   ].filter(Boolean).join("\n\n");
 
-  const action = await createAction(actor, {
-    workspaceId: params.workspaceId,
-    title: insight.title,
-    bodyMd: fullBody,
-    assigneeMemberId,
-    dueAt: insight.dueAt,
-    isPrivate: true,
-  });
-  const opened = await publishAction(actor, {
+  let action;
+  try {
+    action = await createAction(actor, {
+      workspaceId: params.workspaceId,
+      title: insight.title,
+      bodyMd: fullBody,
+      assigneeMemberId,
+      dueAt: insight.dueAt,
+      isPrivate: false,
+      duplicateGuard: { candidateLimit: 200 },
+      source: { type: "MEETING_INSIGHT", id: insight.id, groupId: review.meetingId },
+      sourcePayload: meetingInsightActionSourcePayload(insight),
+    });
+  } catch (error) {
+    if (!isDuplicateGuardMatchError(error)) throw error;
+    return renderReviewUpdate({
+      workspaceId: params.workspaceId,
+      reviewId: review.id,
+      responseText: `A similar Action exists. Review this follow-up in Corgtex before confirming it: ${insightUrl(params.workspaceId, review.meetingId, insight.id)}`,
+    });
+  }
+  const opened = action.status === "DRAFT" ? await publishAction(actor, {
     workspaceId: params.workspaceId,
     actionId: action.id,
-  });
+  }) : action;
 
   await prisma.meetingInsight.update({
     where: { id: insight.id },
@@ -823,17 +861,20 @@ export async function confirmSlackMeetingActionReviewProposal(actor: AppActor, p
       autoApplyError: null,
     },
   });
-  await prisma.communicationEntityLink.create({
-    data: {
+  await prisma.communicationEntityLink.upsert({
+    where: { workspaceId_claimKey: { workspaceId: params.workspaceId, claimKey: `meeting-insight:${insight.id}` } },
+    create: {
       installationId: params.installationId,
       workspaceId: params.workspaceId,
       provider: "SLACK",
       messageId: sourceMessageId,
       externalUserId: params.externalUserId,
+      claimKey: `meeting-insight:${insight.id}`,
       entityType: "Action",
       entityId: opened.id,
       action: "create_action",
     },
+    update: {},
   });
   await maybeCloseReview(review.id, params.workspaceId, review.meetingId);
 

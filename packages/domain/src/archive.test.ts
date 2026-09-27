@@ -407,6 +407,25 @@ describe("workspace archive domain", () => {
       .toBeLessThan(prismaMock.proposal.findFirst.mock.invocationCallOrder[0]);
   });
 
+  it("restores an Action after its canonical duplicate target was purged", async () => {
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "duplicate-1", workspaceId: "workspace-1", title: "Follow up",
+      archivedAt: new Date(), duplicateOfActionId: null,
+    });
+    prismaMock.workspaceArchiveRecord.findFirst.mockResolvedValueOnce({
+      id: "archive-1", previousState: { duplicateOfActionId: "purged-canonical" },
+    });
+    prismaMock.action.update.mockResolvedValueOnce({ id: "duplicate-1", archivedAt: null, duplicateOfActionId: null });
+    const { restoreWorkspaceArtifact } = await import("./archive");
+    await restoreWorkspaceArtifact(actor, {
+      workspaceId: "workspace-1", entityType: "Action", entityId: "duplicate-1",
+    });
+    expect(prismaMock.action.update).toHaveBeenCalledWith({
+      where: { id: "duplicate-1" },
+      data: { archivedAt: null, archivedByUserId: null, archiveReason: null },
+    });
+  });
+
   it("keeps Goal archive and recursive parent version history in one transaction and rejects on parent CAS failure", async () => {
     const child = {
       id: "child-rollback",

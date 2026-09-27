@@ -182,6 +182,13 @@ export async function GET() {
           operationId: "createAction",
           summary: "Create an action",
           security: [{ oauth2: ["write"] }],
+          parameters: [{
+            name: "Idempotency-Key",
+            in: "header",
+            required: false,
+            description: "Reuse the same key when retrying this Action creation request. A key cannot be reused with different content.",
+            schema: { type: "string", minLength: 1, maxLength: 128 },
+          }],
           requestBody: jsonBodySchema(
             {
               title: { type: "string" },

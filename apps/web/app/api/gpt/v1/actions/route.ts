@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireGptAuth } from "@/lib/gpt-auth";
-import { listActions, createAction, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
+import { actionRequestSource, listActions, createAction, getWorkspacePermanentPathForEntity } from "@corgtex/domain";
 import { env } from "@corgtex/shared";
 import { handleRouteError } from "@/lib/http";
 import { loadActionWorkItemResponse, serializeActionWorkItem, workItemPriorityFromBody } from "@/lib/work-item-api";
@@ -54,6 +54,9 @@ export async function POST(request: NextRequest) {
       bodyMd: body.bodyMd,
       assigneeMemberId: body.assigneeMemberId ?? null,
       priority: workItemPriorityFromBody(body),
+      source: request.headers.has("Idempotency-Key")
+        ? actionRequestSource("GPT_REQUEST", actor.user.id, request.headers.get("Idempotency-Key") ?? "")
+        : undefined,
     });
     const actionForResponse = await loadActionWorkItemResponse(workspaceId, action.id) ?? action;
     const item = serializeActionWorkItem(actionForResponse);
