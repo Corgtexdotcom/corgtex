@@ -38,7 +38,7 @@ const exact = (value, fields) => value && typeof value === "object" && !Array.is
  * account or container. Production callers supply the independent custody store.
  */
 export function azureOpsCoreReleaseStore(container) {
-  if (!container || typeof container.getBlockBlobClient !== "function" || typeof container.getAccessPolicy !== "function") {
+  if (!container || typeof container.getBlockBlobClient !== "function" || typeof container.getProperties !== "function") {
     fail("RELEASE_STORE_INVALID");
   }
   const path = /^(?:release-custody\/(ops|core)\/owner\.json|release-custody\/(ops|core)\/releases\/[a-f0-9-]{36}\/(?:plan|result)\.json)$/;
@@ -65,7 +65,7 @@ export function azureOpsCoreReleaseStore(container) {
   }
   return {
     async assertPrivate(signal) {
-      const result = await container.getAccessPolicy({ abortSignal: signal });
+      const result = await container.getProperties({ abortSignal: signal });
       if (result.blobPublicAccess) fail("RELEASE_STORE_NOT_PRIVATE");
     },
     readOptional,

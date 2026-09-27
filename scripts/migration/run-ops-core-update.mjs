@@ -93,7 +93,7 @@ export async function readUpdateBlob(container, key, signal, optional = false) {
  * it must cover the complete image triples and post-migration recovery schema. */
 export async function assertRetainedUpdateAuthority(envelope, container, signal) {
   const { plan: p, operator, health } = envelope, a = p.authority;
-  need(!(await container.getAccessPolicy({ abortSignal: signal })).blobPublicAccess, "UPDATE_CUSTODY_PUBLIC");
+  need(!(await container.getProperties({ abortSignal: signal })).blobPublicAccess, "UPDATE_CUSTODY_PUBLIC");
   const journal = await readUpdateBlob(container, `cutovers/${p.domain}.json`, signal);
   validateCutoverJournal(journal, a.migrationIntentSha256);
   need(journal.domain === p.domain && journal.phase === "ACCEPTED" && journal.pending === null
@@ -184,7 +184,7 @@ export async function downloadUpdateEnvelope({ domain, sha256, output, env = pro
   need(UUID.test(expected.subscriptionId) && UUID.test(expected.tenantId) && UUID.test(expected.principalName), "UPDATE_DOWNLOAD_IDENTITY_INVALID");
   await identityCheck(expected);
   const container = containerFactory(env.OPS_CORE_CUSTODY_CONTAINER_URL);
-  need(!(await container.getAccessPolicy()).blobPublicAccess, "UPDATE_CUSTODY_PUBLIC");
+  need(!(await container.getProperties()).blobPublicAccess, "UPDATE_CUSTODY_PUBLIC");
   const value = await readUpdateBlob(container, `update-plans/${domain}/${sha256}.json`);
   const e = validateUpdateEnvelope(value);
   need(hash(value) === sha256 && e.plan.domain === domain && same(e.operator.azureIdentity, expected)

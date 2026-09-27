@@ -283,7 +283,7 @@ describe("Azure adapter with explicit synthetic clients", () => {
     const blob = { getProperties: vi.fn(), download: vi.fn(), deleteIfExists: vi.fn() };
     const block = { uploadData: vi.fn() };
     const container = { url: "https://synthetic.blob.core.windows.net/private?sig=do-not-expose",
-      getAccessPolicy: vi.fn().mockResolvedValue({}), getBlobClient: vi.fn(() => blob), getBlockBlobClient: vi.fn(() => block) };
+      getProperties: vi.fn().mockResolvedValue({}), getBlobClient: vi.fn(() => blob), getBlockBlobClient: vi.fn(() => block) };
     return { blob, block, container, adapter: new AzureBlobObjectStore(container) };
   }
 
@@ -298,7 +298,7 @@ describe("Azure adapter with explicit synthetic clients", () => {
     expect(blob.deleteIfExists).toHaveBeenCalledWith({ conditions: { ifMatch: '"etag"' } });
     expect(adapter.identity).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(adapter)).not.toContain("sig=");
-    container.getAccessPolicy.mockResolvedValueOnce({ blobPublicAccess: "blob" });
+    container.getProperties.mockResolvedValueOnce({ blobPublicAccess: "blob" });
     await expect(adapter.assertPrivate()).rejects.toMatchObject({ code: "PUBLIC_CONTAINER_FORBIDDEN" });
   });
 

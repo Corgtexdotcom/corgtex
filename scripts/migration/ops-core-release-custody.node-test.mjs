@@ -184,7 +184,7 @@ test("existing provider operation recorder binds to release ownership and reconc
 
 test("SDK adapter refuses foreign paths and anonymous access", async () => {
   const adapter = azureOpsCoreReleaseStore({ getBlockBlobClient() { throw Error("should not get here"); },
-    async getAccessPolicy() { return { blobPublicAccess: "blob" }; } });
+    async getProperties() { return { blobPublicAccess: "blob" }; } });
   await rejected(adapter.assertPrivate(), "RELEASE_STORE_NOT_PRIVATE");
   await rejected(adapter.readOptional("cutover/owner.json"), "RELEASE_STORE_READ_UNCERTAIN");
 });

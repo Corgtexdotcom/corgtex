@@ -288,7 +288,7 @@ export class AzureBlobObjectStore implements ObjectStore {
 
   async assertPrivate() {
     try {
-      const policy = await this.#container.getAccessPolicy();
+      const policy = await this.#container.getProperties();
       requireValue(policy.blobPublicAccess === undefined, "PUBLIC_CONTAINER_FORBIDDEN");
     } catch (error) {
       if (error instanceof ObjectTransferError) throw error;

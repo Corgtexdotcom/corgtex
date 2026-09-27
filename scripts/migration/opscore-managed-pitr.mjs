@@ -21,7 +21,12 @@ const ownerComment = i => `opscore-managed-pitr:${i.runId}:${i.runAttempt}`;
 async function withPitrGuard(work) {
   const container = new ContainerClient(OPSCORE_CUSTODY_URL,
     new AzureCliCredential({ processTimeoutInMs: 10_000 }), { retryOptions: { maxTries: 1 } });
-  assert(!(await container.getAccessPolicy()).blobPublicAccess, 'PITR_CUSTODY_PUBLIC');
+  // Get Container Properties exposes public access with Contributor RBAC;
+  // Get Container ACL would require the broader Blob Data Owner role.
+  let properties;
+  try { properties = await container.getProperties(); }
+  catch { throw new ProbeError('PITR_CUSTODY_READ_UNAVAILABLE'); }
+  assert(!properties.blobPublicAccess, 'PITR_CUSTODY_PUBLIC');
   const guard = await openOpsCorePitrGuard(container);
   try { return await work(guard); } finally { await guard.close(); }
 }
@@ -374,13 +379,13 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     recoveryProof = await recoveryEvidence(i, env, dir, fetch, 'pitr');
     api.verifyRecovery = async () => {}; // The activity proof above remains valid in this serialized run.
   }
-  if (mode !== 'cleanup' || existsSync(`${dir}/start-attempt.json`))
+  if (!recoveryProof?.startSkipped && (mode !== 'cleanup' || existsSync(`${dir}/start-attempt.json`)))
     await withPitrGuard(guard => guard.assertOwner(i));
   if (recoveryProof?.startSkipped) {
     assert(!existsSync(`${dir}/start-attempt.json`) && !existsSync(`${dir}/restore-attempt.json`)
       && !existsSync(`${dir}/probe-created.json`), 'PITR_NEVER_STARTED_RECEIPT_CONFLICT');
     const closed = await verifyNeverStarted(api, arm, i, Date.now() + 5 * 60 * 1000);
-    await withPitrGuard(guard => guard.clear(i));
+    await withPitrGuard(guard => guard.clear(i, { allowAbsent: true }));
     save(`${dir}/recovery-cleanup.json`, { status: 'PITR_START_NOT_ATTEMPTED', providerEffects: 0,
       ...closed, productionAccepted: false });
     return;
