@@ -179,6 +179,19 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
 
+  it("rejects an archived source Action instead of reporting an inactive follow-up", async () => {
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "archived-1", payloadHash: null });
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "archived-1", workspaceId: "workspace-1", archivedAt: new Date(), duplicateOfActionId: null,
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-archived" },
+    })).rejects.toMatchObject({ code: "ACTION_SOURCE_UNAVAILABLE", status: 409 });
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+  });
+
   it("updates a duplicate and records its source in the same transaction", async () => {
     requireWorkspaceMembership.mockResolvedValue({
       id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: true,
@@ -652,6 +665,21 @@ describe("action domain lifecycle", () => {
         publishedAt: expect.any(Date),
       }),
     }));
+  });
+
+  it("treats a repeated publish of an active Action as a no-op", async () => {
+    const opened = {
+      id: "action-open", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Follow up", status: "IN_PROGRESS", isPrivate: false,
+      archivedAt: null, duplicateOfActionId: null,
+    };
+    prismaMock.action.findUnique.mockResolvedValueOnce(opened);
+
+    const { publishAction } = await import("./actions");
+    await expect(publishAction(actor, { workspaceId: "workspace-1", actionId: opened.id })).resolves.toBe(opened);
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("returns an open action to draft for the draft owner", async () => {

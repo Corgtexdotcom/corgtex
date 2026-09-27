@@ -537,8 +537,18 @@ export async function deleteActionChecklistItem(actor: AppActor, params: {
   });
 }
 
-async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionParams, actionId: string, tx?: Prisma.TransactionClient) {
-  const existing = await getAction(actor, { workspaceId: params.workspaceId, actionId });
+async function applyActionDuplicateUpdate(
+  actor: AppActor,
+  params: CreateActionParams,
+  actionId: string,
+  membership: import("@corgtex/shared").MembershipSummary | null,
+  tx: Prisma.TransactionClient,
+) {
+  await acquireWorkItemAdvisoryLock(tx, "Action", actionId);
+  const existing = await tx.action.findFirst({
+    where: { id: actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, ...privacyFilter(actor, membership) },
+  });
+  invariant(existing, 404, "NOT_FOUND", "Action duplicate target is no longer available.");
   const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
   const updateParams: Parameters<typeof updateAction>[1] = {
     workspaceId: params.workspaceId,
@@ -551,7 +561,8 @@ async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionP
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
   if (Object.keys(updateParams).length === 2) return existing;
-  if (tx) updateParams._tx = tx;
+  updateParams._membership = membership;
+  updateParams._tx = tx;
   return updateAction(actor, updateParams);
 }
 
@@ -686,7 +697,9 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
       return getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
     }
     if (duplicateDecision?.resolution === "update_existing") {
-      return applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, params._tx);
+      return params._tx
+        ? applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, params._tx)
+        : prisma.$transaction((tx) => applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, tx));
     }
     return params._tx ? create(params._tx, duplicateDecision) : prisma.$transaction((tx) => create(tx, duplicateDecision));
   }
@@ -712,13 +725,14 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
           where: { id: claimed.actionId, workspaceId: params.workspaceId, ...privacyFilter(actor, membership) },
         });
         invariant(existing, 404, "NOT_FOUND", "Action source is no longer available.");
-        if (existing.archivedAt && existing.duplicateOfActionId) {
+        if (existing.duplicateOfActionId) {
           const canonical = await tx.action.findFirst({
-            where: { id: existing.duplicateOfActionId, workspaceId: params.workspaceId, ...privacyFilter(actor, membership) },
+            where: { id: existing.duplicateOfActionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, ...privacyFilter(actor, membership) },
           });
-          invariant(canonical, 404, "NOT_FOUND", "Canonical Action is no longer available.");
+          invariant(canonical, 409, "ACTION_SOURCE_UNAVAILABLE", "Canonical Action is no longer available.");
           return canonical;
         }
+        invariant(!existing.archivedAt, 409, "ACTION_SOURCE_UNAVAILABLE", "Action source was archived. Review it before retrying.");
         return existing;
     }
 
@@ -726,7 +740,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     const action = duplicateDecision?.resolution === "use_existing"
       ? await getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
       : duplicateDecision?.resolution === "update_existing"
-        ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, tx)
+        ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, tx)
         : await create(tx, duplicateDecision);
     await tx.actionCreationSource.create({
       data: { workspaceId: params.workspaceId, actionId: action.id, sourceType: source.type, sourceId: source.id, sourceGroupId: source.groupId, payloadHash },
@@ -966,8 +980,12 @@ export async function publishAction(actor: AppActor, params: {
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
     invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be opened.");
-    invariant(action.status === "DRAFT", 400, "INVALID_STATE", "Only draft actions can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
+    if (action.status !== "DRAFT") {
+      invariant(!action.isPrivate && ["OPEN", "IN_PROGRESS", "COMPLETED"].includes(action.status),
+        400, "INVALID_STATE", "Only draft actions can be opened.");
+      return action;
+    }
 
     const updated = await tx.action.update({
       where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: "DRAFT" },
