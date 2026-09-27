@@ -37,12 +37,27 @@ function input(domain = "core") {
     redisUrl: null };
 }
 
-function observe({ active = false, publicAccess = "Disabled" } = {}) {
-  return async args => args[0] === "postgres"
-    ? { id: `${base}Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18`, state: "Stopped",
-      version: "18", sku: { name: "Standard_D2ds_v5", tier: "GeneralPurpose" },
-      network: { publicNetworkAccess: publicAccess } }
-    : active ? [{ name: "unexpected-app" }] : [];
+function observe({ active = false, publicAccess = "Disabled", clientId = "00000000-0000-4000-8000-000000000001",
+  missingGrant = false, domain = "core" } = {}) {
+  const principalId = "00000000-0000-4000-8000-000000000002";
+  const vault = domain === "core" ? "kv-corgtexopscore-dd43kj" : "kv-corgtexopscore-tipmed";
+  const account = domain === "core" ? "ctcorgtexopdd43kje22xbry" : "ctcorgtexoptipmedtany44y";
+  const storage = `${base}Microsoft.Storage/storageAccounts/${account}`;
+  return async args => {
+    if (args[0] === "postgres") return { id: `${base}Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18`,
+      state: "Stopped", version: "18", sku: { name: "Standard_D2ds_v5", tier: "GeneralPurpose" },
+      network: { publicNetworkAccess: publicAccess } };
+    if (args[0] === "containerapp") return active ? [{ name: "unexpected-app" }] : [];
+    if (args[0] === "identity") return { id: `${base}Microsoft.ManagedIdentity/userAssignedIdentities/id-corgtex-opscore-${domain}`,
+      clientId, principalId };
+    if (args[0] === "role") return [
+      { principalId, roleDefinitionName: "Key Vault Secrets User", scope: `${base}Microsoft.KeyVault/vaults/${vault}` },
+      { principalId, roleDefinitionName: "Storage Blob Data Contributor",
+        scope: `${storage}/blobServices/default/containers/objects` },
+      ...missingGrant ? [] : [{ principalId, roleDefinitionName: "Storage Blob Delegator", scope: storage }],
+    ];
+    throw new Error("UNEXPECTED_OBSERVATION");
+  };
 }
 
 function retained(input) {
@@ -97,6 +112,31 @@ test("active apps, open public access, and wrong runtime custody fail before sec
   prepared.plan.binding.vaultUri = "https://other.vault.azure.net/";
   assert.throws(() => validateRuntimePreparationInput(prepared, "core"), /RUNTIME_PREPARATION_PLAN_INVALID/);
   assert.equal(calls, 0);
+});
+
+test("stale identity client ID or missing runtime grants fail before vault writes", async () => {
+  const prepared = input();
+  let calls = 0;
+  const retain = async () => { calls++; };
+  await assert.rejects(prepareRuntime(prepared, "core", {
+    observe: observe({ clientId: "00000000-0000-4000-8000-000000000003" }), retain,
+  }), /RUNTIME_IDENTITY_CHANGED/);
+  await assert.rejects(prepareRuntime(prepared, "core", {
+    observe: observe({ missingGrant: true }), retain,
+  }), /RUNTIME_IDENTITY_GRANTS_MISSING/);
+  assert.equal(calls, 0);
+});
+
+test("removed runtime grant after vault retention blocks the final receipt", async () => {
+  const prepared = input();
+  let retainedSecrets = false;
+  const normal = observe();
+  const missing = observe({ missingGrant: true });
+  await assert.rejects(prepareRuntime(prepared, "core", {
+    observe: args => (retainedSecrets ? missing : normal)(args),
+    retain: async () => { retainedSecrets = true; return retained(prepared); },
+  }), /RUNTIME_IDENTITY_GRANTS_MISSING/);
+  assert.equal(retainedSecrets, true);
 });
 
 test("private input rejects a group-readable file", async () => {

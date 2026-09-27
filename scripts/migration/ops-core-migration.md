@@ -31,7 +31,9 @@ contain the private runtime projection input: exact Azure target binding, source
 web/worker variable snapshots and name inventories, generated target runtime-role
 database URL, and the versioned vault/storage binding. The workflow rejects a
 changed SKU, public PostgreSQL access, or any existing hosting Container App before
-each vault write; its private artifact contains only versioned references. Review
+each vault write. It also reads back the runtime identity client ID and its vault
+Secrets User, objects Blob Data Contributor and account Blob Delegator grants before
+and after retention. Its private artifact contains only versioned references. Review
 the source inventory immediately before dispatch, retain the runtime-role password
 for SQL promotion custody, and remove the temporary workflow input secret after
 the receipt is verified. No source writer or customer route is changed by this step.

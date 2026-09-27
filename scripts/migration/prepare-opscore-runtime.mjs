@@ -123,14 +123,38 @@ export async function assertRuntimePreparationTarget({ domain, targetBindingSha2
   return { complete: true, domain, targetBindingSha256 };
 }
 
+export async function assertRuntimePreparationAccess({ domain, plan }, observe = azureJson) {
+  const identity = await observe(["identity", "show", "--resource-group", GROUP,
+    "--name", `id-corgtex-opscore-${domain}`, "--subscription", SUBSCRIPTION]);
+  need(identity?.id?.toLowerCase() === plan.binding.identityResourceId.toLowerCase()
+    && identity.clientId === plan.binding.identityClientId
+    && GUID.test(identity.principalId ?? ""), "RUNTIME_IDENTITY_CHANGED");
+  const assignments = await observe(["role", "assignment", "list", "--assignee-object-id",
+    identity.principalId, "--all", "--subscription", SUBSCRIPTION]);
+  need(Array.isArray(assignments), "RUNTIME_IDENTITY_GRANTS_MISSING");
+  const base = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${GROUP}/providers/`;
+  const vaultName = new URL(plan.binding.vaultUri).hostname.split(".")[0];
+  const storage = `${base}Microsoft.Storage/storageAccounts/${plan.binding.storageAccount}`;
+  const required = [
+    ["Key Vault Secrets User", `${base}Microsoft.KeyVault/vaults/${vaultName}`],
+    ["Storage Blob Data Contributor", `${storage}/blobServices/default/containers/${plan.binding.storageContainer}`],
+    ["Storage Blob Delegator", storage],
+  ];
+  need(required.every(([role, scope]) => assignments.some(row => row?.principalId === identity.principalId
+    && row.roleDefinitionName === role && row.scope?.toLowerCase() === scope.toLowerCase())),
+  "RUNTIME_IDENTITY_GRANTS_MISSING");
+}
+
 export async function prepareRuntime(input, domain, { retain = retainOpsCoreRuntimeConfig,
   observe = azureJson, signal = AbortSignal.timeout(30 * 60_000) } = {}) {
   const validated = validateRuntimePreparationInput(input, domain);
   const assertTargetInactive = () => assertRuntimePreparationTarget(validated, observe);
   await assertTargetInactive();
+  await assertRuntimePreparationAccess(validated, observe);
   const result = await retain({ plan: validated.plan, sourceEnvironments: input.sourceEnvironments,
     databaseUrl: input.databaseUrl, redisUrl: null, signal, assertTargetInactive });
   await assertTargetInactive();
+  await assertRuntimePreparationAccess(validated, observe);
   return { schemaVersion: 1, domain, targetBindingSha256: validated.targetBindingSha256,
     inputSha256: archiveEvidenceHash(input), result: validateRuntimePreparationReceipt(result, validated) };
 }
