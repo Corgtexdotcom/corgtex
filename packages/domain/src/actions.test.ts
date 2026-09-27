@@ -5,6 +5,7 @@ const { prismaMock } = vi.hoisted(() => ({
   prismaMock: {
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     action: {
       create: vi.fn(),
       findFirst: vi.fn(),
@@ -13,6 +14,10 @@ const { prismaMock } = vi.hoisted(() => ({
       update: vi.fn(),
       count: vi.fn(),
     },
+    actionCreationSource: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+    },
     adviceProcess: {
       findMany: vi.fn(),
     },
@@ -20,6 +25,7 @@ const { prismaMock } = vi.hoisted(() => ({
       create: vi.fn(),
       delete: vi.fn(),
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
     },
@@ -90,6 +96,7 @@ describe("action domain lifecycle", () => {
     recordAudit.mockResolvedValue(undefined);
     appendEvents.mockResolvedValue(undefined);
     prismaMock.$executeRaw.mockResolvedValue({});
+    prismaMock.$queryRaw.mockResolvedValue([]);
     prismaMock.workItemVersion.create.mockResolvedValue({});
     prismaMock.workItemVersion.findUnique.mockResolvedValue(null);
     prismaMock.workspacePermalink.upsert.mockResolvedValue({});
@@ -97,6 +104,171 @@ describe("action domain lifecycle", () => {
     prismaMock.adviceProcess.findMany.mockResolvedValue([]);
     prismaMock.actionChecklistItem.findMany.mockResolvedValue([]);
     prismaMock.actionChecklistItem.findFirst.mockResolvedValue(null);
+    prismaMock.actionChecklistItem.findUnique.mockResolvedValue(null);
+    prismaMock.actionCreationSource.findUnique.mockResolvedValue(null);
+    prismaMock.actionCreationSource.create.mockResolvedValue({});
+  });
+
+  it("reuses the same Action when a meeting insight is retried", async () => {
+    const created = { id: "action-1", workspaceId: "workspace-1", title: "Follow up", status: "OPEN", archivedAt: null, duplicateOfActionId: null };
+    prismaMock.action.create.mockResolvedValueOnce(created);
+    prismaMock.actionCreationSource.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ actionId: created.id, payloadHash: null });
+    prismaMock.action.findFirst.mockResolvedValueOnce(created);
+
+    const { createAction } = await import("./actions");
+    const params = { workspaceId: "workspace-1", title: "Follow up", isPrivate: false,
+      source: { type: "MEETING_INSIGHT", id: "insight-1" }, sourcePayload: { title: "Follow up" } };
+    await expect(createAction(actor, params)).resolves.toMatchObject({ id: created.id });
+    await expect(createAction(actor, params)).resolves.toMatchObject({ id: created.id });
+
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.actionCreationSource.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of a request key with different Action content", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
+    const { actionRequestSource, createAction } = await import("./actions");
+    const source = actionRequestSource("WEB_REQUEST", "user-1", "form-1");
+    await createAction(actor, { workspaceId: "workspace-1", title: "Follow up", source });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(actor, { workspaceId: "workspace-1", title: "A different action", source }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of an agent request key with different author attribution", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
+    const { actionRequestSource, createAction } = await import("./actions");
+    const agent: AppActor = { kind: "agent", authProvider: "credential", label: "Test agent", workspaceIds: ["workspace-1"] };
+    prismaMock.member.findFirst.mockResolvedValueOnce({ id: "member-1", userId: "author-1" });
+    const source = actionRequestSource("MCP_REQUEST", "agent-1", "call-1");
+    await createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-1", source });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(agent, { workspaceId: "workspace-1", title: "Follow up", authorMemberId: "member-2", source }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of a form key with changed Action add-ons", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
+    const { actionRequestSource, createAction } = await import("./actions");
+    const source = actionRequestSource("WEB_REQUEST", "user-1", "form-with-checklist");
+    await createAction(actor, { workspaceId: "workspace-1", title: "Follow up", source, sourcePayload: { checklistItems: ["First"] } });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source, sourcePayload: { checklistItems: ["Changed"] },
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects reuse of a request key with a different selected duplicate target", async () => {
+    const existing = {
+      id: "action-1", workspaceId: "workspace-1", title: "Follow up", bodyMd: null,
+      status: "OPEN", isPrivate: false, archivedAt: null, duplicateOfActionId: null,
+      createdAt: new Date("2026-07-20T10:00:00.000Z"), updatedAt: new Date("2026-07-20T10:05:00.000Z"),
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([existing]);
+    prismaMock.action.findFirst.mockResolvedValueOnce(existing);
+    const { actionRequestSource, createAction } = await import("./actions");
+    const source = actionRequestSource("MCP_REQUEST", "agent-1", "selected-target");
+    await createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source,
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "action-1" },
+    });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source,
+      duplicateGuard: { resolution: "use_existing", targetEntityId: "action-2" },
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(prismaMock.actionCreationSource.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an edited meeting insight after an earlier attempt claimed its Action source", async () => {
+    prismaMock.action.create.mockResolvedValueOnce({ id: "action-1", workspaceId: "workspace-1", title: "Follow up" });
+    const { createAction, meetingInsightActionSourcePayload } = await import("./actions");
+    const source = { type: "MEETING_INSIGHT", id: "insight-1" };
+    const insight = {
+      type: "ACTION_ITEM" as const, operation: "CREATE" as const, title: "Follow up", bodyMd: "Initial context",
+      assigneeHint: null, dueAt: null,
+    };
+    await createAction(actor, {
+      workspaceId: "workspace-1", title: insight.title, source,
+      sourcePayload: meetingInsightActionSourcePayload(insight),
+    });
+    const claim = prismaMock.actionCreationSource.create.mock.calls[0][0].data;
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "action-1", payloadHash: claim.payloadHash });
+
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: insight.title, source,
+      sourcePayload: meetingInsightActionSourcePayload({ ...insight, bodyMd: "Edited context" }),
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    expect(prismaMock.action.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the canonical Action for a retried source after an exact duplicate is archived", async () => {
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "duplicate-1", payloadHash: null });
+    prismaMock.action.findFirst
+      .mockResolvedValueOnce({ id: "duplicate-1", workspaceId: "workspace-1", archivedAt: new Date(), duplicateOfActionId: "canonical-1" })
+      .mockResolvedValueOnce({ id: "canonical-1", workspaceId: "workspace-1", archivedAt: null });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-1" }, sourcePayload: { title: "Follow up" },
+    })).resolves.toMatchObject({ id: "canonical-1" });
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an archived source Action instead of reporting an inactive follow-up", async () => {
+    prismaMock.actionCreationSource.findUnique.mockResolvedValueOnce({ actionId: "archived-1", payloadHash: null });
+    prismaMock.action.findFirst.mockResolvedValueOnce({
+      id: "archived-1", workspaceId: "workspace-1", archivedAt: new Date(), duplicateOfActionId: null,
+    });
+
+    const { createAction } = await import("./actions");
+    await expect(createAction(actor, {
+      workspaceId: "workspace-1", title: "Follow up", source: { type: "MEETING_INSIGHT", id: "insight-archived" }, sourcePayload: { title: "Follow up" },
+    })).rejects.toMatchObject({ code: "ACTION_SOURCE_UNAVAILABLE", status: 409 });
+    expect(prismaMock.action.create).not.toHaveBeenCalled();
+  });
+
+  it("updates a duplicate and records its source in the same transaction", async () => {
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: true,
+    });
+    const existing = {
+      id: "action-1", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Send Acme proposal", bodyMd: "Initial context.", status: "OPEN",
+      isPrivate: false, archivedAt: null, duplicateOfActionId: null, version: 1,
+      createdAt: new Date("2026-09-26T10:00:00Z"), updatedAt: new Date("2026-09-26T10:00:00Z"),
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([existing]);
+    prismaMock.action.findFirst.mockResolvedValueOnce(existing);
+    prismaMock.action.findUnique.mockResolvedValueOnce(existing);
+    prismaMock.action.update.mockResolvedValueOnce({ ...existing, bodyMd: "Initial context.\n\nAdditional context." });
+
+    const { createAction } = await import("./actions");
+    await createAction(actor, {
+      workspaceId: "workspace-1", title: "Send Acme proposal", bodyMd: "Additional context.",
+      source: { type: "MEETING_INSIGHT", id: "insight-2" }, sourcePayload: { title: "Send Acme proposal" },
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "action-1" },
+    });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.action.update).toHaveBeenCalledTimes(1);
+    expect(prismaMock.actionCreationSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ actionId: "action-1", sourceType: "MEETING_INSIGHT", sourceId: "insight-2" }),
+    });
+    expect(prismaMock.action.update.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.actionCreationSource.create.mock.invocationCallOrder[0]);
   });
 
   it("creates form-submitted actions as private drafts by default", async () => {
@@ -542,6 +714,21 @@ describe("action domain lifecycle", () => {
         publishedAt: expect.any(Date),
       }),
     }));
+  });
+
+  it("treats a repeated publish of an active Action as a no-op", async () => {
+    const opened = {
+      id: "action-open", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Follow up", status: "IN_PROGRESS", isPrivate: false,
+      archivedAt: null, duplicateOfActionId: null,
+    };
+    prismaMock.action.findUnique.mockResolvedValueOnce(opened);
+
+    const { publishAction } = await import("./actions");
+    await expect(publishAction(actor, { workspaceId: "workspace-1", actionId: opened.id })).resolves.toBe(opened);
+    expect(prismaMock.action.update).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(appendEvents).not.toHaveBeenCalled();
   });
 
   it("returns an open action to draft for the draft owner", async () => {
@@ -1300,6 +1487,24 @@ describe("action domain lifecycle", () => {
         aggregateId: "action-1",
       }),
     ]);
+  });
+
+  it("resumes a checklist add-on without inserting its completed item again", async () => {
+    const editable = {
+      id: "action-1", workspaceId: "workspace-1", authorUserId: "user-1", status: "OPEN",
+      version: 1, archivedAt: null, isPrivate: false, assigneeMemberId: null,
+    };
+    const item = { id: "stable-item", workspaceId: "workspace-1", actionId: "action-1", title: "Call supplier", sortOrder: 0 };
+    prismaMock.action.findFirst.mockResolvedValue(editable);
+    prismaMock.actionChecklistItem.create.mockResolvedValue(item);
+    prismaMock.actionChecklistItem.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(item);
+
+    const { createActionChecklistItem } = await import("./actions");
+    const params = { workspaceId: "workspace-1", actionId: "action-1", title: "Call supplier", idempotencyId: "stable-item" };
+    await expect(createActionChecklistItem(actor, params)).resolves.toEqual(item);
+    await expect(createActionChecklistItem(actor, params)).resolves.toEqual(item);
+    expect(prismaMock.actionChecklistItem.create).toHaveBeenCalledTimes(1);
+    expect(recordAudit).toHaveBeenCalledTimes(1);
   });
 
   it("marks checklist items complete with the acting user", async () => {

@@ -123,6 +123,7 @@ vi.mock("@corgtex/domain", () => ({
   completeActivity: completeActivityMock,
   createActivity: createActivityMock,
   createCommunicationSuggestion: createCommunicationSuggestionMock,
+  actionRequestSource: (type: string, principalId: string, key: string) => ({ type, id: `${principalId}:${key}` }),
   createAction: vi.fn(),
   createContextGraphProposedDiff: createContextGraphProposedDiffMock,
   createGoal: vi.fn(),

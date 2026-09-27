@@ -165,6 +165,7 @@ Answer follow-up questions conversationally. Stay grounded in the supplied role 
 type ConversationContext = {
   workspaceId: string;
   sessionId: string;
+  toolCallId?: string;
   userId: string;
   agentKey: string;
   userMessage: string;
@@ -1077,7 +1078,7 @@ async function processConversationTurnContent(ctx: ConversationContext): Promise
         try {
           const outcome = await executeConversationToolCall({
             actor,
-            ctx,
+            ctx: { ...ctx, toolCallId: call.id },
             toolName: call.function.name,
             rawArguments: call.function.arguments,
             handler,
@@ -1359,7 +1360,7 @@ async function* processConversationTurnStreamContent(ctx: ConversationContext): 
         try {
           const outcome = await executeConversationToolCall({
             actor,
-            ctx,
+            ctx: { ...ctx, toolCallId: call.id },
             toolName: call.function.name,
             rawArguments: call.function.arguments,
             handler,

@@ -6,7 +6,8 @@ import { requireWorkspaceMembership } from "./auth";
 import { humanMemberIdentityWhere } from "./member-identity";
 import { AppError, invariant } from "./errors";
 import { defaultModelGateway } from "@corgtex/models";
-import { createAction, updateAction } from "./actions";
+import { createAction, meetingInsightActionSourcePayload, publishAction, updateAction } from "./actions";
+import type { DuplicateGuardOptions } from "./duplicate-guard";
 import { createTension, updateTension } from "./tensions";
 import { createProposal, createProposalFromTension, resolveProposal } from "./proposals";
 import { postDeliberationEntry } from "./deliberation";
@@ -1043,7 +1044,7 @@ export async function dismissInsight(
 
 export async function applyInsight(
   actor: AppActor,
-  params: { workspaceId: string; insightId: string; autoApplied?: boolean; loadMemberDirectory?: MemberDirectoryLoader }
+  params: { workspaceId: string; insightId: string; autoApplied?: boolean; loadMemberDirectory?: MemberDirectoryLoader; actionDuplicateGuard?: DuplicateGuardOptions }
 ) {
   await requireWorkspaceMembership({
     actor,
@@ -1211,13 +1212,13 @@ export async function applyInsight(
         assigneeMemberId: hintedMemberId,
         dueAt: insight.dueAt ?? null,
         isPrivate: false,
-        duplicateGuard: { resolution: "create_new" },
+        duplicateGuard: { candidateLimit: 200, ...params.actionDuplicateGuard },
+        source: { type: "MEETING_INSIGHT", id: insight.id, groupId: insight.meetingId },
+        sourcePayload: meetingInsightActionSourcePayload(insight),
       });
-      const opened = await updateAction(actor, {
-        workspaceId: params.workspaceId,
-        actionId: action.id,
-        status: "OPEN",
-      });
+      const opened = action.status === "DRAFT"
+        ? await publishAction(actor, { workspaceId: params.workspaceId, actionId: action.id })
+        : action;
       appliedEntityType = "Action";
       appliedEntityId = opened.id;
     } else if (insight.type === "TENSION") {

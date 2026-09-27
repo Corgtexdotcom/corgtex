@@ -752,6 +752,7 @@ model Workspace {
   memberInviteRequests           MemberInviteRequest[]
   circles                        Circle[]
   actions                        Action[]
+  actionCreationSources          ActionCreationSource[]
   actionChecklistItems            ActionChecklistItem[]
   tensions                       Tension[]
   proposals                      Proposal[]
@@ -2403,6 +2404,9 @@ model Action {
   completedVia     String?
   proposalId       String?
   proposal         Proposal?    @relation(fields: [proposalId], references: [id], onDelete: SetNull)
+  duplicateOfActionId String?
+  duplicateOfAction Action?      @relation("ActionDuplicates", fields: [duplicateOfActionId], references: [id], onDelete: SetNull)
+  duplicates       Action[]     @relation("ActionDuplicates")
   isPrivate        Boolean      @default(false)
   publishedAt      DateTime?
   archivedAt       DateTime?
@@ -2416,10 +2420,31 @@ model Action {
   author         User      @relation("ActionAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
   assigneeMember Member?   @relation("ActionAssignee", fields: [assigneeMemberId], references: [id], onDelete: SetNull)
   checklistItems ActionChecklistItem[]
+  creationSources ActionCreationSource[]
 
   @@index([workspaceId, status])
   @@index([workspaceId, archivedAt])
   @@index([workspaceId, priority])
+  @@index([workspaceId, duplicateOfActionId])
+  @@unique([id, workspaceId])
+}
+
+model ActionCreationSource {
+  id          String   @id @default(uuid())
+  workspaceId String
+  actionId    String
+  sourceType  String   @db.VarChar(64)
+  sourceId    String   @db.VarChar(191)
+  sourceGroupId String? @db.VarChar(191)
+  payloadHash String?  @db.VarChar(64)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  action    Action    @relation(fields: [actionId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([workspaceId, sourceType, sourceId])
+  @@index([workspaceId, actionId])
+  @@index([workspaceId, sourceType, sourceGroupId])
 }
 
 model ActionChecklistItem {

@@ -18,6 +18,8 @@ const redirect = vi.fn((url: string) => {
 });
 const sendManualMeetingRecorder = vi.fn();
 const deleteMeeting = vi.fn();
+const applyInsight = vi.fn();
+const syncSlackMeetingActionReviewAfterWebApply = vi.fn();
 const intakeMeetingTranscript = vi.fn();
 const extractTextFromFileBuffer = vi.fn();
 const requireWorkspaceMembership = vi.fn();
@@ -71,7 +73,12 @@ vi.mock("@corgtex/domain", () => ({
   DEFAULT_MEETING_DURATION_MINUTES: 60,
   MAX_MEETING_DURATION_MINUTES: 480,
   MIN_MEETING_DURATION_MINUTES: 1,
-  applyInsight: vi.fn(),
+  applyInsight,
+  syncSlackMeetingActionReviewAfterWebApply,
+  duplicateGuardErrorPayload: (error: { candidate: unknown }) => ({
+    status: "duplicate_confirmation_required", candidate: error.candidate,
+    recommendedResolution: "use_existing", allowedResolutions: ["use_existing", "create_new"],
+  }),
   cancelMeetingRecording: vi.fn(),
   createMeetingSeries: vi.fn(),
   deleteMeeting,
@@ -121,6 +128,29 @@ afterEach(() => {
 });
 
 describe("meeting server actions", () => {
+  it("returns a duplicate choice and forwards explicit resolution on retry", async () => {
+    const { applyInsightAction } = await import("./actions");
+    const candidate = { entityType: "Action", entityId: "action-1", title: "Prepare update", matchKind: "likely" };
+    applyInsight.mockRejectedValueOnce(Object.assign(new Error("Possible duplicate"), { code: "DUPLICATE_GUARD_MATCH", candidate }));
+    await expect(applyInsightAction(formData({ workspaceId: "workspace-1", insightId: "insight-1" })))
+      .resolves.toMatchObject({ status: "duplicate_confirmation_required", candidate });
+    await applyInsightAction(formData({
+      workspaceId: "workspace-1", insightId: "insight-1", duplicateResolution: "use_existing", duplicateTargetEntityId: "action-1",
+    }));
+    expect(applyInsight).toHaveBeenLastCalledWith(actor, {
+      workspaceId: "workspace-1", insightId: "insight-1",
+      actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-1" },
+    });
+  });
+  it("keeps a successful insight application successful when Slack refresh fails", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    syncSlackMeetingActionReviewAfterWebApply.mockRejectedValueOnce(new Error("Slack unavailable"));
+    const { applyInsightAction } = await import("./actions");
+    await expect(applyInsightAction(formData({ workspaceId: "workspace-1", insightId: "insight-1" }))).resolves.toBeNull();
+    expect(applyInsight).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalled();
+    log.mockRestore();
+  });
   it("emits baked release identity while preserving the configured telemetry instance", async () => {
     const actual = await vi.importActual<typeof import("@corgtex/shared/telemetry-node")>("@corgtex/shared/telemetry-node");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
