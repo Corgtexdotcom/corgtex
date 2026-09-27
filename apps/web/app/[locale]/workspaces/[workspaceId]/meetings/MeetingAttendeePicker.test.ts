@@ -1,9 +1,19 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { MeetingAttendeePicker } from "./MeetingAttendeePicker";
+import { getVisibleAttendees, MeetingAttendeePicker } from "./MeetingAttendeePicker";
 
 describe("MeetingAttendeePicker", () => {
+  it("keeps selected attendee controls visible when filtering other members", () => {
+    const members = [
+      { id: "user-a", name: "Ari Member", email: "ari@workspace.test" },
+      { id: "user-b", name: "Bea Member", email: "bea@workspace.test" },
+    ];
+
+    expect(getVisibleAttendees(members, ["user-a"], "Bea Member").map(({ id }) => id))
+      .toEqual(["user-a", "user-b"]);
+  });
+
   it("renders native form controls so values submit before client hydration", () => {
     const html = renderToStaticMarkup(createElement(MeetingAttendeePicker, {
       members: [{ id: "user-1", name: "Ari Member", email: "ari@workspace.test" }],

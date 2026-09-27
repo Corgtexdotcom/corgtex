@@ -4,6 +4,15 @@ import React, { useMemo, useState } from "react";
 
 type Attendee = { id: string; name: string; email: string };
 
+export function getVisibleAttendees(members: Attendee[], selectedIds: string[], query: string) {
+  const selected = new Set(selectedIds);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  return members.filter((member) =>
+    selected.has(member.id)
+    || `${member.name} ${member.email}`.toLocaleLowerCase().includes(normalizedQuery),
+  );
+}
+
 export function MeetingAttendeePicker({
   members,
   labels,
@@ -24,9 +33,7 @@ export function MeetingAttendeePicker({
     () => new Set(selectedIds.filter((id) => members.some((member) => member.id === id))),
     [members, selectedIds],
   );
-  const visibleMembers = members.filter((member) =>
-    `${member.name} ${member.email}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
+  const visibleMembers = getVisibleAttendees(members, selectedIds, query);
   return (
     <fieldset style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}>
       <legend style={{ fontWeight: 600, marginBottom: 8 }}>{labels.members}</legend>
