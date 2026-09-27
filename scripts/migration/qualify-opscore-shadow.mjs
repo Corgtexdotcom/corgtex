@@ -47,6 +47,7 @@ export function projectShadowSchemaDiagnostic(diagnostic) {
     tokenDomains: counts(value?.tokenDomains, TOKEN_DOMAINS) });
   const semantics = diagnostic.constraintSemantics;
   need(typeof diagnostic.truncated === 'boolean' && semantics?.schemaVersion === '1.0.0'
+    && typeof semantics.truncated === 'boolean'
     && Number.isSafeInteger(semantics.mismatchCount) && semantics.mismatchCount >= 0
     && semantics.mismatchCount <= 1_000_000 && Array.isArray(semantics.mismatchFields)
     && semantics.mismatchFields.every(field => CONSTRAINT_FIELDS.has(field))
@@ -54,7 +55,7 @@ export function projectShadowSchemaDiagnostic(diagnostic) {
   'SHADOW_DIAGNOSTIC_INVALID');
   return { classification: diagnostic.classification, sourceOnly: side(diagnostic.sourceOnly),
     destinationOnly: side(diagnostic.destinationOnly), constraintMismatchCount: semantics.mismatchCount,
-    constraintMismatchFields: semantics.mismatchFields, truncated: diagnostic.truncated || semantics.truncated === true };
+    constraintMismatchFields: semantics.mismatchFields, truncated: diagnostic.truncated || semantics.truncated };
 }
 
 export function validateShadowDatabaseInventory(databases) {

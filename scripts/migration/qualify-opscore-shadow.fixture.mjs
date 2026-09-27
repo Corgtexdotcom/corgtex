@@ -130,6 +130,8 @@ try {
   assert.equal(projectShadowSchemaDiagnostic(diagnostic).sourceOnly.statementClasses.INDEX, 1);
   assert.throws(() => projectShadowSchemaDiagnostic({ ...diagnostic, sourceOnly: {
     ...side(), statementClasses: { ...side().statementClasses, INDEX: -1 } } }), /SHADOW_DIAGNOSTIC_INVALID/);
+  assert.throws(() => projectShadowSchemaDiagnostic({ ...diagnostic, constraintSemantics: {
+    ...diagnostic.constraintSemantics, truncated: 'CLIENT_PRIVATE_SENTINEL' } }), /SHADOW_DIAGNOSTIC_INVALID/);
   await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
     directory: temp, tempRoot: temp,
     maintenanceFactory: async () => ({ signal: new AbortController().signal,
