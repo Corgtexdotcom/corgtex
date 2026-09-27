@@ -11,7 +11,18 @@ envelope. Verify their identities, private endpoints, runtime identity grants an
 operator access. Use temporary exact-IP PostgreSQL transfer access only for the
 external copy; remove its firewall rule and disable public access afterward.
 
-Publish immutable web and worker images. Prepare the exact Manual job definitions
+Dispatch `Release Images` on the intended protected main SHA, then dispatch
+`Ops and Core Image Promotion` with that successful release run ID from the same
+main SHA. Release Images retains its two pushed GHCR digests as a run artifact;
+promotion pulls those exact digests, even if a SHA tag later moves. It copies the
+runnable web and worker image content to the pinned `corgtex/web` and
+`corgtex/worker` Azure repositories, checks each embedded release SHA and role,
+and retains both registries' digests in a private receipt. Give the
+migration OIDC principal temporary Reader and AcrPush only on that registry, then
+remove both grants after the receipt is verified. The registry lives in the old
+Corporate Rebels resource group and must remain available for Core/Ops images.
+
+Prepare the exact Manual job definitions
 returned by `buildRedisProbeJobDefinition()` and `buildHealthProbeJobDefinition()`.
 Both jobs use the worker image with a node-only probe command; they must be
 readable through ARM and their completed output through Log Analytics. Compute
