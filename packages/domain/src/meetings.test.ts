@@ -933,6 +933,45 @@ describe("meetings domain", () => {
     }));
   });
 
+  it("scores transcript candidate attendee overlap from scheduled workspace member ids", async () => {
+    const recordedAt = new Date("2026-04-30T17:00:00.000Z");
+    prismaMock.meeting.findMany.mockResolvedValue([{
+      id: "scheduled-member-attendee",
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      status: "SCHEDULED",
+      recordedAt,
+      scheduledEndAt: new Date("2026-04-30T18:00:00.000Z"),
+      participantIds: ["user-1"],
+      participantEmails: [],
+    }]);
+    prismaMock.member.findMany.mockResolvedValue([{
+      id: "member-1",
+      userId: "user-1",
+      user: { email: "jan@example.com" },
+    }]);
+
+    const { findTranscriptMeetingCandidates } = await import("./meetings");
+    await expect(findTranscriptMeetingCandidates(actor, {
+      workspaceId: "workspace-1",
+      recordedAt,
+      participantEmails: ["jan@example.com"],
+    })).resolves.toMatchObject([{
+      meetingId: "scheduled-member-attendee",
+      score: 0.6,
+      reason: "time, attendees",
+    }]);
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        workspaceId: "workspace-1",
+        OR: [
+          { id: { in: ["user-1"] } },
+          { userId: { in: ["user-1"] } },
+        ],
+      },
+    }));
+  });
+
   it("uploadMeetingTranscript rejects appending to an existing source transcript", async () => {
     const recordedAt = new Date("2026-04-30T17:10:00.000Z");
     prismaMock.meeting.findMany.mockResolvedValue([

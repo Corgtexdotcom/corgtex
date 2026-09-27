@@ -415,6 +415,29 @@ async function findTranscriptMeetingCandidatesInternal(params: {
     orderBy: { recordedAt: "asc" },
     take: 20,
   });
+  const candidateParticipantIds = [...new Set(candidates.flatMap((meeting) => meeting.participantIds ?? []))];
+  const memberEmailsByParticipantId = new Map<string, string>();
+  if (candidateParticipantIds.length > 0) {
+    const members = await prisma.member.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        OR: [
+          { id: { in: candidateParticipantIds } },
+          { userId: { in: candidateParticipantIds } },
+        ],
+      },
+      select: {
+        id: true,
+        userId: true,
+        user: { select: { email: true } },
+      },
+    });
+    for (const member of members) {
+      const email = member.user.email.trim().toLowerCase();
+      memberEmailsByParticipantId.set(member.id, email);
+      memberEmailsByParticipantId.set(member.userId, email);
+    }
+  }
 
   return candidates.map((meeting): MeetingCandidate => {
     const meetingTitle = normalizeTitle(meeting.title);
@@ -429,7 +452,13 @@ async function findTranscriptMeetingCandidatesInternal(params: {
 
     const diff = Math.abs(meeting.recordedAt.getTime() - params.recordedAt.getTime());
     const timeScore = Math.max(0, 0.4 * (1 - diff / TRANSCRIPT_MATCH_WINDOW_MS));
-    const meetingEmails = new Set(normalizeEmails(meeting.participantEmails));
+    const meetingEmails = new Set([
+      ...normalizeEmails(meeting.participantEmails),
+      ...(meeting.participantIds ?? []).flatMap((id) => {
+        const email = memberEmailsByParticipantId.get(id);
+        return email ? [email] : [];
+      }),
+    ]);
     const overlap = participantEmails.filter((email) => meetingEmails.has(email)).length;
     const attendeeScore = participantEmails.length > 0
       ? 0.2 * (overlap / participantEmails.length)

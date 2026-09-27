@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useFormStatus } from "react-dom";
 
 type Attendee = { id: string; name: string; email: string };
 
@@ -29,6 +30,18 @@ export function MeetingAttendeePicker({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [externalEmails, setExternalEmails] = useState("");
+  const { pending } = useFormStatus();
+  const wasPending = useRef(false);
+  useEffect(() => {
+    if (pending) {
+      wasPending.current = true;
+    } else if (wasPending.current) {
+      setSelectedIds([]);
+      setQuery("");
+      setExternalEmails("");
+      wasPending.current = false;
+    }
+  }, [pending]);
   const selected = useMemo(
     () => new Set(selectedIds.filter((id) => members.some((member) => member.id === id))),
     [members, selectedIds],
