@@ -576,6 +576,19 @@ describe("recovery execution ownership", () => {
     const { i, env, value } = await evidence(); value.jobs.jobs[0].steps[0].conclusion = "skipped";
     expect(() => validateRecoveryEvidence(i, env, value)).toThrow("RECOVERY_NOT_UNRESOLVED");
   });
+  it.each(["success", "failure", "cancelled", "timed_out"])("permits exact PITR guard recovery before START when claim was %s", async conclusion => {
+    const { i, env, value } = await evidence();
+    i.schemaVersion = "1.3.0"; i.targetProfile = "opscore"; i.qualificationKind = "managed-pitr";
+    value.jobs.jobs[0].name = "Prove managed PITR on pinned Ops/Core target";
+    value.jobs.jobs[0].steps = [
+      { name: "Fence both cutovers before PITR START", status: "completed", conclusion },
+      { name: "Restore one run-owned synthetic marker at the exact point in time", status: "completed", conclusion: "skipped" },
+      { name: "Delete only owned PITR clone and close target access", status: "completed", conclusion: "failure" },
+    ];
+    expect(validateRecoveryEvidence(i, env, value, "pitr")).toEqual({ startSkipped: true });
+    value.jobs.jobs[0].steps[0].conclusion = "skipped";
+    expect(() => validateRecoveryEvidence(i, env, value, "pitr")).toThrow("RECOVERY_NOT_UNRESOLVED");
+  });
 });
 
 describe("protected workflow integration", () => {

@@ -77,6 +77,40 @@ function setup() {
 
 {
   const { server, events, clock, api } = setup();
+  const intent = await prepare(api, inputs, clock, { managedPitr: true });
+  assert.equal(intent.schemaVersion, '1.3.0');
+  assert.equal(intent.qualificationKind, 'managed-pitr');
+  assert.equal(intent.restoreServerName, 'corgtex-opscore-pitr-12345-1');
+  assert.equal(intent.probeSchemaName, 'opscore_pitr_12345_1');
+  assert.equal(intent.deadline - intent.createdAt, 4 * 60 * 60 * 1000);
+  assert.equal(intent.deadline - intent.workDeadline, 60 * 60 * 1000);
+  assert.equal(validateIntent(intent, '12345', '1'), intent);
+  assert.throws(() => validateIntent({ ...intent, restoreServerName: 'corgtex-opscore-pg18' }, '12345', '1'), /PITR_OWNER_MISMATCH/);
+  assert.throws(() => validateIntent({ ...intent, computeSku: 'Standard_B2s' }, '12345', '1'), /PITR_OWNER_MISMATCH/);
+  assert.throws(() => validateIntent({ ...intent, workDeadline: intent.workDeadline + 1 }, '12345', '1'), /INTENT_DEADLINE_MISMATCH/);
+  server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
+  await assert.rejects(qualify(api, intent, async () => {}, async () => events.push('persist'), clock), /TARGET_DRIFT/);
+  assert.equal(events.includes('start'), false);
+}
+
+{
+  const { server, events, clock, api } = setup();
+  server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
+  await assert.rejects(prepare(api, inputs, clock, { managedPitr: true }), /PITR_OWNER_MISMATCH/);
+  assert.equal(events.includes('start'), false);
+}
+
+{
+  const { server, clock, api } = setup();
+  const intent = await prepare(api, inputs, clock, { managedPitr: true });
+  server.state = 'Starting';
+  await assert.rejects(cleanup(api, intent, clock, false, clock.now() + 10000),
+    /ABSOLUTE_DEADLINE_EXCEEDED/);
+  assert.equal(clock.now() - intent.createdAt, 10000);
+}
+
+{
+  const { server, events, clock, api } = setup();
   server.sku = { name: 'Standard_B2s', tier: 'Burstable' };
   const intent = await prepare(api, inputs, clock);
   assert.equal(intent.computeSku, 'Standard_B2s');

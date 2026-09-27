@@ -16,16 +16,21 @@ export const TENANT = "f6f245dd-ad33-4fed-8624-c44efa093b21";
 export const GROUP = target.group;
 export const SERVER = target.server;
 const HOUR = 3600000, RESERVE = 900000;
+const PITR_WINDOW = 4 * HOUR, PITR_RESERVE = HOUR;
 const assert = (v, code) => { if (!v) throw new ProbeError(code); };
 const digest = (v) => createHash("sha256").update(v).digest("hex");
 const tags = target.tags;
 const computeTiers = TARGET_PROFILE === 'opscore'
   ? { Standard_D2ds_v5: "GeneralPurpose", Standard_B2s: "Burstable" }
   : { Standard_D2ds_v5: "GeneralPurpose", Standard_B1ms: "Burstable" };
-export const intentComputeSku = (intent) => ["1.1.0", "1.2.0"].includes(intent?.schemaVersion) ? intent.computeSku : "Standard_D2ds_v5";
+export const intentComputeSku = (intent) => ["1.1.0", "1.2.0", "1.3.0"].includes(intent?.schemaVersion) ? intent.computeSku : "Standard_D2ds_v5";
 const numeric = (v) => typeof v === "string" && /^[1-9][0-9]{0,19}$/u.test(v);
 const sameKeys = (v, names) => v && Object.keys(v).sort().join() === [...names].sort().join();
 export const firewallName = (run, attempt) => `corgtex-target-qualification-${run}-${attempt}`;
+export const pitrServerName = (run, attempt) => `corgtex-opscore-pitr-${run}-${attempt}`;
+export const pitrSchemaName = (run, attempt) => `opscore_pitr_${run}_${attempt}`;
+const pitrIntent = (i) => i?.schemaVersion === "1.3.0";
+const intentReserve = (i) => pitrIntent(i) ? PITR_RESERVE : RESERVE;
 export const validIp = (ip) => isIP(ip) === 4 && !/^(?:0|10|127|169\.254|192\.168|172\.(?:1[6-9]|2\d|3[01]))\./u.test(ip)
   && Number(ip.split(".")[0]) < 224;
 
@@ -43,7 +48,12 @@ export function validateEnvironment(env, recovery = false) {
   assert(env.QUALIFY_CAPTURE_TRIAL === undefined || ["true", "false"].includes(env.QUALIFY_CAPTURE_TRIAL), "PROTECTED_INPUT_MISMATCH");
   assert(env.QUALIFY_CAPTURE_TRIAL !== "true" || env.QUALIFY_ACCESS === "true", "PROTECTED_INPUT_MISMATCH");
   if (TARGET_PROFILE === 'opscore' && !recovery) {
-    assert(env.QUALIFY_ACCESS === 'true' && env.QUALIFY_CAPTURE_TRIAL === 'true', 'PROTECTED_OPSCORE_OPERATION_MISMATCH');
+    if (env.OPSCORE_QUALIFICATION_KIND === 'managed-pitr') {
+      assert(env.QUALIFY_ACCESS === 'false' && env.QUALIFY_CAPTURE_TRIAL === 'false', 'PROTECTED_OPSCORE_OPERATION_MISMATCH');
+    } else {
+      assert(!env.OPSCORE_QUALIFICATION_KIND && env.QUALIFY_ACCESS === 'true'
+        && env.QUALIFY_CAPTURE_TRIAL === 'true', 'PROTECTED_OPSCORE_OPERATION_MISMATCH');
+    }
   }
   assert(env.AZURE_SUBSCRIPTION_ID === SUBSCRIPTION && env.AZURE_TENANT_ID === TENANT
     && digest(String(env.AZURE_CLIENT_ID).toLowerCase()) === "707be00bd89b2c0cf1ebdf8c0d389ff24b5f69d9f2ba35a113cddf8f073296bf", "AZURE_IDENTITY_MISMATCH");
@@ -53,16 +63,21 @@ export function validateEnvironment(env, recovery = false) {
 }
 
 export function validateIntent(i, run, attempt) {
-  assert(sameKeys(i, ["schemaVersion", "kind", "resource", "host", "database", "runId", "runAttempt", "initialState", "firewallName", "ipv4", "createdAt", "deadline", "workDeadline", "transitionCapUsd", ...(["1.1.0", "1.2.0"].includes(i?.schemaVersion) ? ["computeSku"] : []), ...(i?.schemaVersion === "1.2.0" ? ["targetProfile", "initialPublicAccess"] : [])]), "INTENT_SHAPE");
-  assert((TARGET_PROFILE === 'opscore' ? i.schemaVersion === '1.2.0' && i.targetProfile === 'opscore'
+  assert(sameKeys(i, ["schemaVersion", "kind", "resource", "host", "database", "runId", "runAttempt", "initialState", "firewallName", "ipv4", "createdAt", "deadline", "workDeadline", "transitionCapUsd", ...(["1.1.0", "1.2.0", "1.3.0"].includes(i?.schemaVersion) ? ["computeSku"] : []), ...(["1.2.0", "1.3.0"].includes(i?.schemaVersion) ? ["targetProfile", "initialPublicAccess"] : []), ...(pitrIntent(i) ? ["qualificationKind", "restoreServerName", "probeSchemaName"] : [])]), "INTENT_SHAPE");
+  assert((TARGET_PROFILE === 'opscore' ? ["1.2.0", "1.3.0"].includes(i.schemaVersion) && i.targetProfile === 'opscore'
     && i.initialPublicAccess === 'Disabled' : ["1.0.0", "1.1.0"].includes(i.schemaVersion))
     && Object.hasOwn(computeTiers, intentComputeSku(i))
     && i.kind === target.kind && i.resource === RESOURCE
     && i.host === HOST && i.database === "postgres" && i.initialState === "Stopped" && i.transitionCapUsd === 5, "INTENT_TARGET_MISMATCH");
   assert(numeric(run) && numeric(attempt) && i.runId === run && i.runAttempt === attempt
     && i.firewallName === firewallName(run, attempt) && validIp(i.ipv4), "INTENT_OWNER_MISMATCH");
-  assert(Number.isSafeInteger(i.createdAt) && i.createdAt > 0 && i.deadline === i.createdAt + HOUR
-    && i.workDeadline === i.deadline - RESERVE, "INTENT_DEADLINE_MISMATCH");
+  if (pitrIntent(i)) assert(i.qualificationKind === "managed-pitr"
+    && i.restoreServerName === pitrServerName(run, attempt)
+    && i.probeSchemaName === pitrSchemaName(run, attempt)
+    && i.computeSku === 'Standard_D2ds_v5', "PITR_OWNER_MISMATCH");
+  assert(Number.isSafeInteger(i.createdAt) && i.createdAt > 0
+    && i.deadline === i.createdAt + (pitrIntent(i) ? PITR_WINDOW : HOUR)
+    && i.workDeadline === i.deadline - intentReserve(i), "INTENT_DEADLINE_MISMATCH");
   return i;
 }
 
@@ -235,7 +250,7 @@ export class Azure {
 
 export const clock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 const remaining = (deadline, c) => assert(c.now() < deadline, "ABSOLUTE_DEADLINE_EXCEEDED");
-async function waitState(api, wanted, deadline, c, intent) {
+export async function waitState(api, wanted, deadline, c, intent) {
   while (true) {
     remaining(deadline, c);
     try {
@@ -274,8 +289,10 @@ async function reconcileFirewall(api, i, c) {
   throw new ProbeError("FIREWALL_CREATE_UNPROVEN");
 }
 
-export async function prepare(api, { runId, runAttempt, ipv4 }, c = clock) {
+export async function prepare(api, { runId, runAttempt, ipv4 }, c = clock, options = {}) {
   assert(numeric(runId) && numeric(runAttempt) && validIp(ipv4), "PREPARE_INPUT_INVALID");
+  assert(sameKeys(options, options.managedPitr === true ? ["managedPitr"] : []), "PREPARE_OPTIONS_INVALID");
+  assert(!options.managedPitr || TARGET_PROFILE === 'opscore', "PREPARE_OPTIONS_INVALID");
   await api.identity(); await api.boundary();
   const server = await api.server();
   const computeSku = server?.sku?.name;
@@ -283,11 +300,16 @@ export async function prepare(api, { runId, runAttempt, ipv4 }, c = clock) {
   assert(server.network.publicNetworkAccess === target.initialPublicAccess, 'TARGET_NETWORK_NOT_BASELINE');
   assert((await api.rules()).length === 0, "FIREWALL_NOT_ABSENT");
   const createdAt = c.now();
-  return validateIntent({ schemaVersion: TARGET_PROFILE === 'opscore' ? '1.2.0' : "1.1.0", computeSku,
+  const pitr = options.managedPitr === true;
+  const window = pitr ? PITR_WINDOW : HOUR;
+  const reserve = pitr ? PITR_RESERVE : RESERVE;
+  return validateIntent({ schemaVersion: pitr ? "1.3.0" : TARGET_PROFILE === 'opscore' ? '1.2.0' : "1.1.0", computeSku,
     ...(TARGET_PROFILE === 'opscore' ? { targetProfile: 'opscore', initialPublicAccess: 'Disabled' } : {}),
+    ...(pitr ? { qualificationKind: "managed-pitr", restoreServerName: pitrServerName(runId, runAttempt),
+      probeSchemaName: pitrSchemaName(runId, runAttempt) } : {}),
     kind: target.kind, resource: RESOURCE, host: HOST, database: "postgres",
     runId, runAttempt, initialState: "Stopped", firewallName: firewallName(runId, runAttempt), ipv4,
-    createdAt, deadline: createdAt + HOUR, workDeadline: createdAt + HOUR - RESERVE, transitionCapUsd: 5 }, runId, runAttempt);
+    createdAt, deadline: createdAt + window, workDeadline: createdAt + window - reserve, transitionCapUsd: 5 }, runId, runAttempt);
 }
 
 export async function qualify(api, i, probe, markAttempt, c = clock) {
@@ -319,7 +341,7 @@ export async function qualify(api, i, probe, markAttempt, c = clock) {
   return result;
 }
 
-export async function cleanup(api, i, c = clock, recovery = false) {
+export async function cleanup(api, i, c = clock, recovery = false, deadlineCap = Infinity) {
   validateIntent(i, i.runId, i.runAttempt);
   if (recovery) {
     assert(typeof api.verifyRecovery === "function", "RECOVERY_OWNERSHIP_UNPROVEN");
@@ -327,7 +349,8 @@ export async function cleanup(api, i, c = clock, recovery = false) {
   }
   assert(c.now() >= i.createdAt, "INTENT_FROM_FUTURE");
   // Recovery never extends the original spend window; it reports an overrun even after cleanup.
-  const cleanupDeadline = recovery || c.now() >= i.deadline ? c.now() + RESERVE : i.deadline;
+  const cleanupDeadline = Math.min(recovery || c.now() >= i.deadline ? c.now() + intentReserve(i) : i.deadline,
+    deadlineCap);
   api.deadline = cleanupDeadline;
   await api.identity(); await api.boundary();
   let observedStopping = validateServer(await api.server(), true, intentComputeSku(i)).state === "Stopping";
@@ -416,8 +439,9 @@ export function readIntent(path) {
 }
 
 export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, marker, receipt }, kind = "metadata") {
-  assert(["metadata", "synthetic", "shadow"].includes(kind), "RECOVERY_KIND_INVALID");
-  assert(kind !== "shadow" || i.targetProfile === 'opscore', "RECOVERY_KIND_INVALID");
+  assert(["metadata", "synthetic", "shadow", "pitr"].includes(kind), "RECOVERY_KIND_INVALID");
+  assert(!["shadow", "pitr"].includes(kind) || i.targetProfile === 'opscore', "RECOVERY_KIND_INVALID");
+  assert(kind !== "pitr" || pitrIntent(i), "RECOVERY_KIND_INVALID");
   const workflow = ".github/workflows/azure-migration-postgres-rehearsal.yml";
   const repository = "Corgtexdotcom/corgtex";
   const workflowPaths = new Set([workflow, `${repository}/${workflow}`]
@@ -436,24 +460,34 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
       || (r.id === current.id && r.run_attempt === current.run_attempt)), "RECOVERY_SUPERSEDED");
   assert(Array.isArray(jobs?.jobs) && jobs.total_count === jobs.jobs.length && jobs.total_count <= 100, "RECOVERY_JOBS_UNPROVEN");
   const metadataJobName = i.targetProfile === 'opscore' ? 'Qualify pinned Ops/Core PG18 target capture' : 'Qualify existing Ops target metadata only';
-  const jobName = kind === 'shadow' ? 'Shadow restore Core and Ops on pinned B2s without cutover'
+  const jobName = kind === 'pitr' ? 'Prove managed PITR on pinned Ops/Core target'
+    : kind === 'shadow' ? 'Shadow restore Core and Ops on pinned B2s without cutover'
     : kind === 'metadata' ? metadataJobName : 'Qualify pinned synthetic Ops archive only';
   const candidates = jobs.jobs.filter(j => j.name === jobName);
   assert(candidates.length === 1 && candidates[0].status === "completed", "RECOVERY_JOB_UNPROVEN");
   const steps = candidates[0].steps;
   const startName = i.targetProfile === 'opscore' ? 'Start Ops/Core target, open single-IP access and test disabled capture'
     : 'Start target, open single-IP access and read metadata once';
-  const startStepName = kind === 'shadow' ? 'Restore both read-only Railway snapshots to protected scratch databases'
+  const startStepName = kind === 'pitr' ? 'Restore one run-owned synthetic marker at the exact point in time'
+    : kind === 'shadow' ? 'Restore both read-only Railway snapshots to protected scratch databases'
     : kind === 'metadata' ? startName : 'Start target and compare pinned synthetic source';
-  const cleanStepName = kind === 'shadow' ? 'Drop only owned scratch databases and close the public window'
+  const cleanStepName = kind === 'pitr' ? 'Delete only owned PITR clone and close target access'
+    : kind === 'shadow' ? 'Drop only owned scratch databases and close the public window'
     : kind === 'metadata' ? 'Remove qualification access and return target to Stopped'
       : 'Remove synthetic scratch databases and stop target';
   const start = steps?.filter(s => s.name === startStepName);
   const clean = steps?.filter(s => s.name === cleanStepName);
-  assert(start?.length === 1 && start[0].status === "completed" && ["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion)
+  const claim = kind === 'pitr' ? steps?.filter(s => s.name === 'Fence both cutovers before PITR START') : null;
+  const startSkipped = kind === 'pitr' && start?.length === 1 && start[0].status === 'completed'
+    && start[0].conclusion === 'skipped' && claim?.length === 1 && claim[0].status === 'completed'
+    && ['success', 'failure', 'cancelled', 'timed_out'].includes(claim[0].conclusion);
+  assert(start?.length === 1 && start[0].status === "completed"
+    && (["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion) || startSkipped)
     && clean?.length === 1 && clean[0].conclusion !== "success", "RECOVERY_NOT_UNRESOLVED");
   assert(sameKeys(marker, ["runId", "runAttempt"]) && marker.runId === i.runId && marker.runAttempt === i.runAttempt, "RECOVERY_START_UNPROVEN");
-  assert(!receipt || (kind === 'shadow' && receipt.status === 'OPSCORE_SHADOW_CLEANUP_UNPROVEN'), "RECOVERY_ALREADY_CLEANED");
+  assert(!receipt || (kind === 'shadow' && receipt.status === 'OPSCORE_SHADOW_CLEANUP_UNPROVEN')
+    || (kind === 'pitr' && receipt.status === 'PITR_CLEANUP_UNPROVEN'), "RECOVERY_ALREADY_CLEANED");
+  return { startSkipped };
 }
 
 // Read existing run/activity evidence only. No artifact or intent alone grants
@@ -478,8 +512,9 @@ export async function recoveryEvidence(i, env, directory, request = fetch, kind 
   const range = encodeURIComponent(`${source.created_at}..${current.created_at}`);
   const runs = await get(`workflows/${source.workflow_id}/runs?per_page=100&created=${range}`);
   const jobs = await get(`runs/${i.runId}/attempts/${i.runAttempt}/jobs?per_page=100`);
-  validateRecoveryEvidence(i, env, { source, current, runs, jobs,
-    marker: existsSync(`${directory}/start-attempt.json`) ? readIntent(`${directory}/start-attempt.json`) : null,
+  return validateRecoveryEvidence(i, env, { source, current, runs, jobs,
+    marker: existsSync(`${directory}/${kind === 'pitr' ? 'start-intent' : 'start-attempt'}.json`)
+      ? readIntent(`${directory}/${kind === 'pitr' ? 'start-intent' : 'start-attempt'}.json`) : null,
     receipt: existsSync(`${directory}/cleanup.json`) ? readIntent(`${directory}/cleanup.json`) : null }, kind);
 }
 function save(path, data) {
