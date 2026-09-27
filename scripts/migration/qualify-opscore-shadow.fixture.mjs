@@ -7,12 +7,16 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { readFileSync } from 'node:fs';
 import { target, targetResource } from './ops-core-target-profile.mjs';
-import { cleanupOwnedScratch, inspectShadowDatabaseInventory, restoreBothDomains, scratchName,
+import { assertShadowSku, cleanupOwnedScratch, inspectShadowDatabaseInventory, restoreBothDomains, scratchName,
   withScratchMaintenance, projectShadowSchemaDiagnostic,
   validateOwnedScratchState, validateShadowDatabaseInventory, validateShadowEnvironment } from './qualify-opscore-shadow.mjs';
 import { validateRecoveryEvidence } from './qualify-ops-azure-target.mjs';
 
 assert.equal(process.env.TARGET_PROFILE, 'opscore');
+assert.equal(assertShadowSku('Standard_B2s'), 'Standard_B2s');
+assert.equal(assertShadowSku('Standard_D2ds_v5'), 'Standard_D2ds_v5');
+assert.throws(() => assertShadowSku('Standard_B1ms'), /SHADOW_SKU_MISMATCH/);
+assert.throws(() => assertShadowSku('Standard_D2ds_v5', 'Standard_B2s'), /SHADOW_SKU_MISMATCH/);
 const name = scratchName('12345', '1', 'core');
 assert.equal(name, 'corgtex_rehearsal_12345_1_core');
 assert.throws(() => scratchName('0', '1', 'core'), /SHADOW_IDENTITY_INVALID/);
@@ -118,6 +122,16 @@ try {
   });
   assert.equal(restored.status, 'OPSCORE_SHADOW_PARITY_VERIFIED');
   assert.deepEqual(order, ['capture', 'core', 'lock', 'ops', 'lock', 'close']);
+  const gpRestored = await restoreBothDomains({ api: {}, intent: { ...intent, computeSku: 'Standard_D2ds_v5' },
+    config, sources: { core: {}, ops: {} }, directory: temp, tempRoot: temp,
+    maintenanceFactory: async () => ({ signal: new AbortController().signal,
+      async assertHeld() {}, async close() {} }),
+    restore: async () => ({ evidence: {} }),
+    verifyParity: () => ({ status: 'POSTGRES_DATABASE_PARITY_VERIFIED', tableCount: 1,
+      totalRowCount: 2, migrationCount: 3, evidenceSha256: 'a'.repeat(64) }),
+    admitCapture: async () => ({ status: 'FRESH_DISABLED_CAPTURE_ADMITTED' }),
+  });
+  assert.equal(gpRestored.computeSku, 'Standard_D2ds_v5');
   const classes = ['EXTENSION', 'TYPE', 'FUNCTION', 'TABLE', 'CONSTRAINT', 'INDEX',
     'TRIGGER', 'POLICY', 'VIEW', 'COMMENT', 'OTHER'];
   const tokens = ['DDL_TOKEN', 'STRING_LITERAL', 'DOLLAR_BODY', 'META_COMMAND'];
@@ -262,7 +276,8 @@ const common = { path: '.github/workflows/azure-migration-postgres-rehearsal.yml
   event: 'workflow_dispatch', workflow_id: 7, run_attempt: 1 };
 const source = { ...common, id: 12345, status: 'completed', created_at: new Date(createdAt - 1000).toISOString() };
 const current = { ...common, id: 12346, status: 'in_progress', created_at: new Date(createdAt + 1000).toISOString() };
-const original = { runId: '12345', runAttempt: '1', createdAt, targetProfile: 'opscore' };
+const original = { runId: '12345', runAttempt: '1', createdAt, targetProfile: 'opscore',
+  computeSku: 'Standard_B2s' };
 const recoveryEvidence = () => ({ source, current, runs: { total_count: 2, workflow_runs: [source, current] },
   marker: { runId: '12345', runAttempt: '1' }, receipt: { status: 'OPSCORE_SHADOW_CLEANUP_UNPROVEN' },
   jobs: { total_count: 1, jobs: [{ name: 'Shadow restore Core and Ops on pinned B2s without cutover', status: 'completed',
@@ -272,5 +287,12 @@ const recoveryEvidence = () => ({ source, current, runs: { total_count: 2, workf
     ] }] } });
 assert.doesNotThrow(() => validateRecoveryEvidence(original, { GITHUB_RUN_ID: '12346', GITHUB_RUN_ATTEMPT: '1' },
   recoveryEvidence(), 'shadow'));
+assert.doesNotThrow(() => validateRecoveryEvidence({ ...original, computeSku: 'Standard_D2ds_v5' },
+  { GITHUB_RUN_ID: '12346', GITHUB_RUN_ATTEMPT: '1' }, { ...recoveryEvidence(), jobs: {
+    total_count: 1, jobs: [{ ...recoveryEvidence().jobs.jobs[0],
+      name: 'Shadow restore Core and Ops on pinned target without cutover' }] } }, 'shadow'));
+assert.throws(() => validateRecoveryEvidence({ ...original, computeSku: 'Standard_D2ds_v5' },
+  { GITHUB_RUN_ID: '12346', GITHUB_RUN_ATTEMPT: '1' }, recoveryEvidence(), 'shadow'),
+/RECOVERY_JOB_UNPROVEN/);
 assert.throws(() => validateRecoveryEvidence(original, { GITHUB_RUN_ID: '12346', GITHUB_RUN_ATTEMPT: '1' },
   { ...recoveryEvidence(), receipt: { status: 'OPSCORE_SHADOW_CLEANED' } }, 'shadow'), /RECOVERY_ALREADY_CLEANED/);

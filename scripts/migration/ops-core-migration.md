@@ -122,7 +122,7 @@ any production Burstable exception. Do not reuse the rehearsal receipt as target
 After the protected capture trial passes and the exact temporary workflow roles
 are authorized, dispatch `operation=qualify-opscore-shadow` on protected `main`
 with `domain=ops` (the shadow operation restores **both** domains). It requires
-the exact stopped B2s target, approved private endpoint, a fresh readback of
+the exact stopped D2ds_v5 or B2s target pinned in its intent, approved private endpoint, a fresh readback of
 disabled query capture with empty Query Store history, an exact system-only
 database inventory with no prior scratch or customer database, and the protected Core
 and Ops Railway read-only URLs and TLS roots. The one-hour intent is uploaded
@@ -137,7 +137,8 @@ and catalog evidence stay on the private ephemeral runner; the artifact contains
 only bounded receipts and exact scratch OIDs. Cleanup verifies each database
 name, OID and owner before DROP, verifies the system-only database inventory,
 removes the firewall rule, disables public
-access and stops B2s. Do not dispatch another migration writer during the trial.
+access and stops the target. The result qualifies snapshot parity for the pinned
+SKU only; it does not prove live workload capacity. Do not dispatch another migration writer during the trial.
 If cleanup fails, use `operation=recover`, `recovery_kind=opscore-shadow` with the
 exact run ID and attempt; it verifies the completed source run and absence of
 intervening workflow runs, closes any original public window, then uses a new
