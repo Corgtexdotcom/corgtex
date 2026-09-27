@@ -110,6 +110,15 @@ try {
     restore: async () => { denied.push('customer-bytes'); return { evidence: {} }; },
   }), /CAPTURE_TRIAL_SETTINGS_UNSAFE/);
   assert.deepEqual(denied, ['close']);
+  denied.length = 0;
+  await assert.rejects(restoreBothDomains({ api: {}, intent, config, sources: { core: {}, ops: {} },
+    directory: temp, tempRoot: temp,
+    maintenanceFactory: async () => ({ signal: new AbortController().signal,
+      async assertHeld() {}, async close() { denied.push('close'); } }),
+    admitCapture: async () => validateShadowDatabaseInventory([...systemDatabases, { name }]),
+    restore: async () => { denied.push('customer-bytes'); return { evidence: {} }; },
+  }), /SHADOW_DATABASE_INVENTORY_UNRECONCILED/);
+  assert.deepEqual(denied, ['close']);
 } finally { rmSync(temp, { recursive: true, force: true }); }
 
 const workflow = parse(readFileSync('.github/workflows/azure-migration-postgres-rehearsal.yml', 'utf8'));
