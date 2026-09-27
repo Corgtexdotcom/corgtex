@@ -43,10 +43,12 @@ az deployment group create --resource-group "$TARGET_RG" \
 
 Set `TARGET_RG` to the new Ops/Core hosting group and `PRIVATE_PARAMS` to the
 private, version-pinned parameter file. The standalone template creates one
-PG18 server with 32 GiB storage, 14-day local backup, no HA, and public network
-access disabled. It creates no database, firewall rule, endpoint, app, or role
-assignment. The backing deployment owns the single private endpoint; the migration
-operator owns the later restore and database isolation.
+PG18 server with 32 GiB storage, 14-day local backup, no HA, public network
+access disabled, and `vector` on the server extension allowlist. Both source
+databases have pgvector 0.8.2 installed; a logical restore needs the allowlist
+before it can create that extension. It creates no database, firewall rule,
+endpoint, app, or role assignment. The backing deployment owns the single private
+endpoint; the migration operator owns the later restore and database isolation.
 Start an existing shared server before the backing deployment: Azure cannot create
 or repair its private endpoint while the server is stopped. Recheck its SKU and
 public-network setting after startup, then stop it after bounded provisioning if
