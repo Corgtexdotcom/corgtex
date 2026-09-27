@@ -67,6 +67,13 @@ describe("impact-footprint", () => {
         meetingsParticipated: 7,
         detailJson: { expertiseEndorsementsCount: 9 },
       });
+      expect(prisma.meeting.count).toHaveBeenCalledWith({
+        where: {
+          workspaceId: "ws-1",
+          participantIds: { hasSome: ["member-1", "user-1"] },
+          recordedAt: { gte: periodStart, lte: periodEnd },
+        },
+      });
     });
 
     it("defaults the expertise endorsement detail to 0 when the aggregate is null", async () => {

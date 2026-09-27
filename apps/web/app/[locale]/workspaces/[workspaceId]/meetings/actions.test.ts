@@ -17,6 +17,7 @@ const redirect = vi.fn((url: string) => {
   throw new Error(`redirect:${url}`);
 });
 const sendManualMeetingRecorder = vi.fn();
+const createMeetingSeries = vi.fn();
 const deleteMeeting = vi.fn();
 const applyInsight = vi.fn();
 const syncSlackMeetingActionReviewAfterWebApply = vi.fn();
@@ -80,7 +81,7 @@ vi.mock("@corgtex/domain", () => ({
     recommendedResolution: "use_existing", allowedResolutions: ["use_existing", "create_new"],
   }),
   cancelMeetingRecording: vi.fn(),
-  createMeetingSeries: vi.fn(),
+  createMeetingSeries,
   deleteMeeting,
   dismissInsight: vi.fn(),
   enqueueMeetingAgendaPreparation: vi.fn(),
@@ -128,6 +129,26 @@ afterEach(() => {
 });
 
 describe("meeting server actions", () => {
+  it("preserves native attendee controls with repeated member ids and external emails", async () => {
+    const { createMeetingSeriesAction } = await import("./actions");
+    const data = new FormData();
+    data.set("workspaceId", "workspace-1");
+    data.set("title", "Weekly tactical");
+    data.set("startsAt", "2026-10-01T10:00");
+    data.set("timeZone", "UTC");
+    data.append("participantIds", "member-1");
+    data.append("participantIds", "user-2");
+    data.set("participantEmails", "outside@example.test\nother@example.test");
+
+    await createMeetingSeriesAction(data);
+
+    expect(createMeetingSeries).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "workspace-1",
+      participantIds: ["member-1", "user-2"],
+      participantEmails: ["outside@example.test", "other@example.test"],
+    }));
+  });
+
   it("returns a duplicate choice and forwards explicit resolution on retry", async () => {
     const { applyInsightAction } = await import("./actions");
     const candidate = { entityType: "Action", entityId: "action-1", title: "Prepare update", matchKind: "likely" };

@@ -9,6 +9,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 import {
@@ -414,6 +415,29 @@ async function findTranscriptMeetingCandidatesInternal(params: {
     orderBy: { recordedAt: "asc" },
     take: 20,
   });
+  const candidateParticipantIds = [...new Set(candidates.flatMap((meeting) => meeting.participantIds ?? []))];
+  const memberEmailsByParticipantId = new Map<string, string>();
+  if (candidateParticipantIds.length > 0) {
+    const members = await prisma.member.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        OR: [
+          { id: { in: candidateParticipantIds } },
+          { userId: { in: candidateParticipantIds } },
+        ],
+      },
+      select: {
+        id: true,
+        userId: true,
+        user: { select: { email: true } },
+      },
+    });
+    for (const member of members) {
+      const email = member.user.email.trim().toLowerCase();
+      memberEmailsByParticipantId.set(member.id, email);
+      memberEmailsByParticipantId.set(member.userId, email);
+    }
+  }
 
   return candidates.map((meeting): MeetingCandidate => {
     const meetingTitle = normalizeTitle(meeting.title);
@@ -428,7 +452,13 @@ async function findTranscriptMeetingCandidatesInternal(params: {
 
     const diff = Math.abs(meeting.recordedAt.getTime() - params.recordedAt.getTime());
     const timeScore = Math.max(0, 0.4 * (1 - diff / TRANSCRIPT_MATCH_WINDOW_MS));
-    const meetingEmails = new Set(normalizeEmails(meeting.participantEmails));
+    const meetingEmails = new Set([
+      ...normalizeEmails(meeting.participantEmails),
+      ...(meeting.participantIds ?? []).flatMap((id) => {
+        const email = memberEmailsByParticipantId.get(id);
+        return email ? [email] : [];
+      }),
+    ]);
     const overlap = participantEmails.filter((email) => meetingEmails.has(email)).length;
     const attendeeScore = participantEmails.length > 0
       ? 0.2 * (overlap / participantEmails.length)
@@ -785,7 +815,10 @@ export async function getMeetingParticipants(workspaceId: string, participantIds
   return prisma.member.findMany({
     where: {
       workspaceId,
-      userId: { in: participantIds },
+      OR: [
+        { id: { in: participantIds } },
+        { userId: { in: participantIds } },
+      ],
     },
     include: {
       user: { select: { displayName: true, email: true } },
@@ -814,6 +847,35 @@ export async function createMeetingSeries(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
+  const requestedParticipantIds = normalizeIds(params.participantIds);
+  let participantIds = requestedParticipantIds;
+  if (requestedParticipantIds.length > 0) {
+    const members = await prisma.member.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        isActive: true,
+        ...humanMemberIdentityWhere(),
+        OR: [
+          { id: { in: requestedParticipantIds } },
+          { userId: { in: requestedParticipantIds } },
+        ],
+      },
+      select: { id: true, userId: true },
+    });
+    const userIdByParticipantId = new Map<string, string>();
+    for (const member of members) {
+      userIdByParticipantId.set(member.id, member.userId);
+      userIdByParticipantId.set(member.userId, member.userId);
+    }
+    invariant(
+      requestedParticipantIds.every((id) => userIdByParticipantId.has(id)),
+      400,
+      "INVALID_INPUT",
+      "Every selected attendee must be an active member of this workspace.",
+    );
+    participantIds = [...new Set(requestedParticipantIds.map((id) => userIdByParticipantId.get(id) as string))];
+  }
+
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Meeting title is required.");
   invariant(!Number.isNaN(params.startsAt.valueOf()), 400, "INVALID_INPUT", "startsAt must be a valid date.");
@@ -834,7 +896,7 @@ export async function createMeetingSeries(actor: AppActor, params: {
         meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,
         startsAt: params.startsAt,
         defaultDurationMinutes,
-        participantIds: normalizeIds(params.participantIds),
+        participantIds,
         participantEmails: normalizeEmails(params.participantEmails),
       },
     });

@@ -76,7 +76,7 @@ export async function calculateImpactFootprint(workspaceId: string, memberId: st
     prisma.meeting.count({
       where: {
         workspaceId,
-        participantIds: { has: memberId },
+        participantIds: { hasSome: [memberId, memberUserId] },
         recordedAt: { gte: periodStart, lte: periodEnd },
       },
     }),

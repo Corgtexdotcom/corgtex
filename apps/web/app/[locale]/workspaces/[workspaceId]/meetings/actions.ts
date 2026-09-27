@@ -360,8 +360,16 @@ export async function createMeetingSeriesAction(formData: FormData) {
     scheduledEndAt,
     recurrenceRule: asOptional(formData, "recurrenceRule"),
     meetingUrl: asOptional(formData, "meetingUrl"),
-    participantIds: asOptional(formData, "participantIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
-    participantEmails: asOptional(formData, "participantEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [],
+    participantIds: formData.getAll("participantIds")
+      .filter((value): value is string => typeof value === "string")
+      .flatMap((value) => value.split(","))
+      .map((value) => value.trim())
+      .filter(Boolean),
+    participantEmails: formData.getAll("participantEmails")
+      .filter((value): value is string => typeof value === "string")
+      .flatMap((value) => value.split(/[\n,;]+/))
+      .map((value) => value.trim())
+      .filter(Boolean),
   });
   await enqueueMeetingAgendaPreparation(actor, { workspaceId });
   refresh(workspaceId);
