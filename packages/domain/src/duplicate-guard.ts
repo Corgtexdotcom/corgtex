@@ -341,7 +341,7 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
   switch (entityType) {
     case "Action": {
       const recentActions = await db.action?.findMany?.({
-        where: { workspaceId, archivedAt: null, status: { in: ["DRAFT", "OPEN", "IN_PROGRESS"] }, ...privateWorkItemVisibility },
+        where: { workspaceId, archivedAt: null, duplicateOfActionId: null, status: { in: ["DRAFT", "OPEN", "IN_PROGRESS"] }, ...privateWorkItemVisibility },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
         take: limit,
       }) ?? [];
@@ -350,6 +350,7 @@ async function latestRows(entityType: DuplicateGuardEntityType, workspaceId: str
         where: {
           workspaceId,
           archivedAt: null,
+          duplicateOfActionId: null,
           status: { in: ["DRAFT", "OPEN", "IN_PROGRESS", "COMPLETED"] },
           ...privateWorkItemVisibility,
           creationSources: { some: { sourceType: "MEETING_INSIGHT", sourceGroupId: input.meetingId } },
@@ -746,6 +747,7 @@ function isWorkItemCandidate(candidate: DuplicateGuardCandidate) {
 
 function allowsDuplicateGuardUpdate(candidate: DuplicateGuardCandidate, input?: DuplicateGuardInput) {
   if (candidate.archivedAt) return false;
+  if (candidate.entityType === "Action" && candidate.status === "COMPLETED") return false;
   if (candidate.entityType === "BrainArticle") return candidate.status === "DRAFT";
   if (isWorkItemCandidate(candidate) && input && input.includePrivate !== true && candidate.status !== "DRAFT") {
     return false;
@@ -801,7 +803,8 @@ export async function checkWorkspaceDuplicateGuard(input: DuplicateGuardInput, o
   if (match.archivedAt) {
     throw new DuplicateGuardMatchError(match, "create_new", input);
   }
-  if (match.matchKind === "exact" && options?.onExact === "use_existing" && match.status !== "COMPLETED") {
+  if (match.matchKind === "exact" && options?.onExact === "use_existing"
+    && (match.entityType !== "Action" || match.status !== "COMPLETED")) {
     return { resolution: "use_existing", match };
   }
 

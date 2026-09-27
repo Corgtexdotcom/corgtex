@@ -36,6 +36,33 @@ ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_workspac
 ALTER TABLE "ActionCreationSource" ADD CONSTRAINT "ActionCreationSource_actionId_workspaceId_fkey"
     FOREIGN KEY ("actionId", "workspaceId") REFERENCES "Action"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
 
+-- Preserve identity for Action captures made before source claims existed.
+-- Earlier captures could create more than one link for a message; the first
+-- eligible link is the stable retry target.
+INSERT INTO "ActionCreationSource" ("id", "workspaceId", "actionId", "sourceType", "sourceId", "createdAt")
+SELECT gen_random_uuid()::text, legacy."workspaceId", legacy."entityId",
+       'COMMUNICATION_MESSAGE', legacy."installationId" || ':' || legacy."messageId", legacy."createdAt"
+FROM (
+    SELECT DISTINCT ON (link."workspaceId", link."installationId", link."messageId")
+           link."workspaceId", link."installationId", link."messageId", link."entityId", link."createdAt"
+    FROM "CommunicationEntityLink" AS link
+    JOIN "Action" AS action ON action."id" = link."entityId" AND action."workspaceId" = link."workspaceId"
+    WHERE link."entityType" = 'Action' AND link."action" = 'create_action'
+      AND link."messageId" IS NOT NULL
+    ORDER BY link."workspaceId", link."installationId", link."messageId", link."createdAt", link."id"
+) AS legacy
+ON CONFLICT ("workspaceId", "sourceType", "sourceId") DO NOTHING;
+
+INSERT INTO "ActionCreationSource" ("id", "workspaceId", "actionId", "sourceType", "sourceId", "sourceGroupId", "createdAt")
+SELECT gen_random_uuid()::text, insight."workspaceId", insight."appliedEntityId",
+       'MEETING_INSIGHT', insight."id", insight."meetingId", insight."createdAt"
+FROM "MeetingInsight" AS insight
+JOIN "Action" AS action ON action."id" = insight."appliedEntityId" AND action."workspaceId" = insight."workspaceId"
+WHERE insight."status" = 'APPLIED' AND insight."operation" = 'CREATE'
+  AND insight."type" IN ('ACTION_ITEM', 'FOLLOW_UP')
+  AND insight."appliedEntityType" = 'Action'
+ON CONFLICT ("workspaceId", "sourceType", "sourceId") DO NOTHING;
+
 -- Every writer that attaches work to an Action takes a row lock and checks the
 -- live duplicate marker. The resolver takes the same row lock before counting
 -- links, so an in-flight writer either commits first and blocks resolution or

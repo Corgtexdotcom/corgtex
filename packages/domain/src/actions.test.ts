@@ -179,6 +179,36 @@ describe("action domain lifecycle", () => {
     expect(prismaMock.action.create).not.toHaveBeenCalled();
   });
 
+  it("updates a duplicate and records its source in the same transaction", async () => {
+    requireWorkspaceMembership.mockResolvedValue({
+      id: "member-1", workspaceId: "workspace-1", userId: "user-1", role: "ADMIN", isActive: true,
+    });
+    const existing = {
+      id: "action-1", workspaceId: "workspace-1", authorUserId: "user-1",
+      title: "Send Acme proposal", bodyMd: "Initial context.", status: "OPEN",
+      isPrivate: false, archivedAt: null, duplicateOfActionId: null, version: 1,
+      createdAt: new Date("2026-09-26T10:00:00Z"), updatedAt: new Date("2026-09-26T10:00:00Z"),
+    };
+    prismaMock.action.findMany.mockResolvedValueOnce([existing]);
+    prismaMock.action.findFirst.mockResolvedValueOnce(existing);
+    prismaMock.action.findUnique.mockResolvedValueOnce(existing);
+    prismaMock.action.update.mockResolvedValueOnce({ ...existing, bodyMd: "Initial context.\n\nAdditional context." });
+
+    const { createAction } = await import("./actions");
+    await createAction(actor, {
+      workspaceId: "workspace-1", title: "Send Acme proposal", bodyMd: "Additional context.",
+      source: { type: "MEETING_INSIGHT", id: "insight-2" },
+      duplicateGuard: { resolution: "update_existing", targetEntityId: "action-1" },
+    });
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(prismaMock.action.update).toHaveBeenCalledTimes(1);
+    expect(prismaMock.actionCreationSource.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ actionId: "action-1", sourceType: "MEETING_INSIGHT", sourceId: "insight-2" }),
+    });
+    expect(prismaMock.action.update.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.actionCreationSource.create.mock.invocationCallOrder[0]);
+  });
+
   it("creates form-submitted actions as private drafts by default", async () => {
     prismaMock.action.create.mockResolvedValueOnce({
       id: "action-private",

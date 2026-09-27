@@ -4,6 +4,9 @@ const prismaMock = vi.hoisted(() => ({
   action: {
     findMany: vi.fn(),
   },
+  meeting: {
+    findMany: vi.fn(),
+  },
   proposal: {
     findMany: vi.fn(),
   },
@@ -26,6 +29,7 @@ describe("duplicate guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.action.findMany.mockResolvedValue([]);
+    prismaMock.meeting.findMany.mockResolvedValue([]);
     prismaMock.proposal.findMany.mockResolvedValue([]);
     prismaMock.brainSource.findMany.mockResolvedValue([]);
     prismaMock.brainArticle.findMany.mockResolvedValue([]);
@@ -85,6 +89,7 @@ describe("duplicate guard", () => {
       where: expect.objectContaining({
         workspaceId: "workspace-1",
         archivedAt: null,
+        duplicateOfActionId: null,
         status: { in: ["DRAFT", "OPEN", "IN_PROGRESS"] },
       }),
       take: 50,
@@ -448,6 +453,38 @@ describe("duplicate guard", () => {
       }),
       recommendedResolution: "use_existing",
       allowedResolutions: ["use_existing", "create_new"],
+    });
+  });
+
+  it("offers completed same-meeting Actions for reuse but not update", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.action.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([{
+      id: "action-completed", title: "Send Acme proposal", bodyMd: "Sent to Acme.",
+      status: "COMPLETED", archivedAt: null,
+      createdAt: new Date("2026-09-26T10:00:00Z"), updatedAt: new Date("2026-09-26T11:00:00Z"),
+    }]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1", entityType: "Action", title: "Send Acme proposal",
+      body: "Sent to Acme.", meetingId: "meeting-1", includePrivate: true,
+    }, {})).rejects.toMatchObject({
+      candidate: expect.objectContaining({ entityId: "action-completed" }),
+      allowedResolutions: ["use_existing", "create_new"],
+    });
+  });
+
+  it("reuses an exact completed Meeting on retry", async () => {
+    const { checkWorkspaceDuplicateGuard } = await import("./duplicate-guard");
+    prismaMock.meeting.findMany.mockResolvedValueOnce([{
+      id: "meeting-completed", title: "Weekly sync", transcript: "Discussed the handoff.",
+      status: "COMPLETED", archivedAt: null,
+      createdAt: new Date("2026-09-26T10:00:00Z"), updatedAt: new Date("2026-09-26T11:00:00Z"),
+    }]);
+
+    await expect(checkWorkspaceDuplicateGuard({
+      workspaceId: "workspace-1", entityType: "Meeting", title: "Weekly sync", body: "Discussed the handoff.",
+    }, { onExact: "use_existing" })).resolves.toMatchObject({
+      resolution: "use_existing", match: expect.objectContaining({ entityId: "meeting-completed" }),
     });
   });
 

@@ -537,7 +537,7 @@ export async function deleteActionChecklistItem(actor: AppActor, params: {
   });
 }
 
-async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionParams, actionId: string) {
+async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionParams, actionId: string, tx?: Prisma.TransactionClient) {
   const existing = await getAction(actor, { workspaceId: params.workspaceId, actionId });
   const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
   const updateParams: Parameters<typeof updateAction>[1] = {
@@ -550,7 +550,9 @@ async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionP
   if (!existing.dueAt && params.dueAt) updateParams.dueAt = params.dueAt;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
-  return Object.keys(updateParams).length > 2 ? updateAction(actor, updateParams) : existing;
+  if (Object.keys(updateParams).length === 2) return existing;
+  if (tx) updateParams._tx = tx;
+  return updateAction(actor, updateParams);
 }
 
 export async function createAction(actor: AppActor, params: CreateActionParams) {
@@ -684,7 +686,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
       return getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
     }
     if (duplicateDecision?.resolution === "update_existing") {
-      return applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
+      return applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, params._tx);
     }
     return params._tx ? create(params._tx, duplicateDecision) : prisma.$transaction((tx) => create(tx, duplicateDecision));
   }
@@ -724,7 +726,7 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     const action = duplicateDecision?.resolution === "use_existing"
       ? await getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
       : duplicateDecision?.resolution === "update_existing"
-        ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId)
+        ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, tx)
         : await create(tx, duplicateDecision);
     await tx.actionCreationSource.create({
       data: { workspaceId: params.workspaceId, actionId: action.id, sourceType: source.type, sourceId: source.id, sourceGroupId: source.groupId, payloadHash },
@@ -751,6 +753,7 @@ export async function updateAction(actor: AppActor, params: {
   evidenceDocumentIds?: string[] | null;
   expectedVersion?: number;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
+  _tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -758,7 +761,7 @@ export async function updateAction(actor: AppActor, params: {
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
@@ -766,7 +769,7 @@ export async function updateAction(actor: AppActor, params: {
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
 
-    invariant(!action.archivedAt, 400, "INVALID_STATE", "Archived actions cannot be edited.");
+    invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be edited.");
 
     const data: Record<string, unknown> = {};
     const editsContent = params.title !== undefined
@@ -919,7 +922,8 @@ export async function updateAction(actor: AppActor, params: {
     ]);
 
     return updated;
-  });
+  };
+  return params._tx ? run(params._tx) : prisma.$transaction(run);
 }
 
 export async function deleteAction(actor: AppActor, params: {
@@ -955,16 +959,18 @@ export async function publishAction(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be opened.");
     invariant(action.status === "DRAFT", 400, "INVALID_STATE", "Only draft actions can be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
     const updated = await tx.action.update({
-      where: { id: params.actionId },
+      where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: "DRAFT" },
       data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
     });
 
@@ -1002,16 +1008,18 @@ export async function returnActionToDraft(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be returned to draft.");
     invariant(action.status === "OPEN" || action.status === "IN_PROGRESS" || action.status === "COMPLETED", 400, "INVALID_STATE", "Only open, in-progress, or completed actions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
     const updated = await tx.action.update({
-      where: { id: params.actionId },
+      where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: action.status },
       data: {
         status: "DRAFT",
         isPrivate: true,

@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 const {
   buildMeetingIntelligenceContextMock,
   createActionMock,
+  publishActionMock,
   updateActionMock,
   createProposalMock,
   createProposalFromTensionMock,
@@ -19,6 +20,7 @@ const {
 } = vi.hoisted(() => ({
   buildMeetingIntelligenceContextMock: vi.fn(),
   createActionMock: vi.fn(),
+  publishActionMock: vi.fn(),
   updateActionMock: vi.fn(),
   createProposalMock: vi.fn(),
   createProposalFromTensionMock: vi.fn(),
@@ -97,6 +99,7 @@ vi.mock("@corgtex/models", () => ({
 
 vi.mock("./actions", () => ({
   createAction: createActionMock,
+  publishAction: publishActionMock,
   updateAction: updateActionMock,
 }));
 
@@ -1105,8 +1108,27 @@ describe("meeting-intelligence", () => {
         duplicateGuard: { candidateLimit: 200, resolution: "use_existing", targetEntityId: "action-existing" },
       }));
       expect(updateActionMock).not.toHaveBeenCalled();
+      expect(publishActionMock).not.toHaveBeenCalled();
       expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ appliedEntityType: "Action", appliedEntityId: "action-existing" }),
+      }));
+    });
+
+    it("opens a reused draft before marking a meeting follow-up applied", async () => {
+      vi.mocked(prisma.meetingInsight.findUnique).mockResolvedValue({
+        id: "insight-draft", workspaceId: "ws-1", meetingId: "meeting-1", type: "FOLLOW_UP",
+        operation: "CREATE", status: "SUGGESTED", title: "Prepare the update", bodyMd: "Prepare the weekly update.",
+        assigneeHint: null, meeting: { id: "meeting-1", title: "Weekly sync" },
+      } as never);
+      createActionMock.mockResolvedValue({ id: "action-draft", status: "DRAFT" });
+      publishActionMock.mockResolvedValue({ id: "action-draft", status: "OPEN" });
+
+      await applyInsight(mockActor, { workspaceId: "ws-1", insightId: "insight-draft",
+        actionDuplicateGuard: { resolution: "use_existing", targetEntityId: "action-draft" } });
+
+      expect(publishActionMock).toHaveBeenCalledWith(mockActor, { workspaceId: "ws-1", actionId: "action-draft" });
+      expect(prisma.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "action-draft" }),
       }));
     });
 
