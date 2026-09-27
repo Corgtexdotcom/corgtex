@@ -50,12 +50,16 @@ function observe({ active = false, publicAccess = "Disabled", clientId = "000000
     if (args[0] === "containerapp") return active ? [{ name: "unexpected-app" }] : [];
     if (args[0] === "identity") return { id: `${base}Microsoft.ManagedIdentity/userAssignedIdentities/id-corgtex-opscore-${domain}`,
       clientId, principalId };
-    if (args[0] === "role") return [
-      { principalId, roleDefinitionName: "Key Vault Secrets User", scope: `${base}Microsoft.KeyVault/vaults/${vault}` },
-      { principalId, roleDefinitionName: "Storage Blob Data Contributor",
-        scope: `${storage}/blobServices/default/containers/objects` },
-      ...missingGrant ? [] : [{ principalId, roleDefinitionName: "Storage Blob Delegator", scope: storage }],
-    ];
+    if (args[0] === "role") {
+      assert.ok(args.includes("--include-inherited"));
+      const scope = args[args.indexOf("--scope") + 1];
+      return [
+        { principalId, roleDefinitionName: "Key Vault Secrets User", scope: `${base}Microsoft.KeyVault/vaults/${vault}` },
+        { principalId, roleDefinitionName: "Storage Blob Data Contributor",
+          scope: `${storage}/blobServices/default/containers/objects` },
+        ...missingGrant ? [] : [{ principalId, roleDefinitionName: "Storage Blob Delegator", scope: storage }],
+      ].filter(row => row.scope === scope);
+    }
     throw new Error("UNEXPECTED_OBSERVATION");
   };
 }

@@ -129,9 +129,6 @@ export async function assertRuntimePreparationAccess({ domain, plan }, observe =
   need(identity?.id?.toLowerCase() === plan.binding.identityResourceId.toLowerCase()
     && identity.clientId === plan.binding.identityClientId
     && GUID.test(identity.principalId ?? ""), "RUNTIME_IDENTITY_CHANGED");
-  const assignments = await observe(["role", "assignment", "list", "--assignee-object-id",
-    identity.principalId, "--all", "--subscription", SUBSCRIPTION]);
-  need(Array.isArray(assignments), "RUNTIME_IDENTITY_GRANTS_MISSING");
   const base = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${GROUP}/providers/`;
   const vaultName = new URL(plan.binding.vaultUri).hostname.split(".")[0];
   const storage = `${base}Microsoft.Storage/storageAccounts/${plan.binding.storageAccount}`;
@@ -140,9 +137,13 @@ export async function assertRuntimePreparationAccess({ domain, plan }, observe =
     ["Storage Blob Data Contributor", `${storage}/blobServices/default/containers/${plan.binding.storageContainer}`],
     ["Storage Blob Delegator", storage],
   ];
-  need(required.every(([role, scope]) => assignments.some(row => row?.principalId === identity.principalId
-    && row.roleDefinitionName === role && row.scope?.toLowerCase() === scope.toLowerCase())),
-  "RUNTIME_IDENTITY_GRANTS_MISSING");
+  for (const [role, scope] of required) {
+    const assignments = await observe(["role", "assignment", "list", "--assignee-object-id",
+      identity.principalId, "--scope", scope, "--include-inherited", "--subscription", SUBSCRIPTION]);
+    need(Array.isArray(assignments) && assignments.some(row => row?.principalId === identity.principalId
+      && row.roleDefinitionName === role && row.scope?.toLowerCase() === scope.toLowerCase()),
+    "RUNTIME_IDENTITY_GRANTS_MISSING");
+  }
 }
 
 export async function prepareRuntime(input, domain, { retain = retainOpsCoreRuntimeConfig,
