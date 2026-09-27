@@ -276,7 +276,13 @@ export class RailwaySourceFence {
     return freeze(result);
   }
   #quiet(snapshot) {
-    const work = nodes => nodes.every(node => node.status === "applied" && work(node.children));
+    const work = (nodes, depth = 0) => nodes.every(node => {
+      const emptyStage = depth === 0 && snapshot.staged.status === "STAGED" && snapshot.staged.empty
+        && node.status === "staged" && node.children.length === 0
+        && node.idRef === digest(`patch:${snapshot.staged.id}`)
+        && node.kindRef === digest("EnvironmentPatch");
+      return emptyStage || node.status === "applied" && work(node.children, depth + 1);
+    });
     requireValue(!["APPLYING", "FAILED"].includes(snapshot.staged.status) && work(snapshot.pendingWork), "RAILWAY_RECOVERY_WORK_UNSETTLED");
     requireValue(snapshot.services.every(service => service.deployments.every(item => !UNFINISHED_STATUSES.has(item.status))), "RAILWAY_RECOVERY_DEPLOYMENT_UNSETTLED");
   }
