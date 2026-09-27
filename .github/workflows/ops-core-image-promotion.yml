@@ -1,0 +1,67 @@
+name: Ops and Core Image Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Successful Release Images workflow run on this exact main SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  packages: read
+  id-token: write
+
+concurrency:
+  group: ops-core-production-preparation
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    name: Copy verified release images to the pinned Azure registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: azure-migration-foundation
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Authenticate to the pinned Azure registry
+        run: az acr login --name acrcorgtexcrprodwus3
+      - name: Promote exact release image bytes and retain digest receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/opscore-image-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          node scripts/migration/promote-opscore-images.mjs "$RELEASE_RUN_ID" "$receipt"
+          printf 'IMAGE_RECEIPT=%s\n' "$receipt" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opscore-image-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.IMAGE_RECEIPT }}
+          if-no-files-found: error
+          retention-days: 30
