@@ -210,7 +210,7 @@ async function withClient(config, work, clientFactory) {
   try { await client.connect(); return await work(client); }
   finally { await client.end().catch(() => {}); }
 }
-async function assertNoUserContent(client) {
+export async function assertNoUserContent(client, { allowAzureManagedExtensions = false } = {}) {
   const userObjects = await client.query(`SELECT n.nspname, c.relname
     FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -224,8 +224,18 @@ async function assertNoUserContent(client) {
   assert(userSchemas.rowCount === 0, 'PITR_TARGET_DATABASE_NOT_EMPTY');
   const largeObjects = await client.query('SELECT oid FROM pg_catalog.pg_largeobject_metadata LIMIT 1');
   assert(largeObjects.rowCount === 0, 'PITR_TARGET_DATABASE_NOT_EMPTY');
-  const extensions = await client.query("SELECT extname FROM pg_catalog.pg_extension WHERE extname <> 'plpgsql' LIMIT 1");
-  assert(extensions.rowCount === 0, 'PITR_TARGET_DATABASE_NOT_EMPTY');
+  const extensions = await client.query(`SELECT e.extname AS name, n.nspname AS schema,
+    pg_catalog.pg_get_userbyid(e.extowner) AS owner
+    FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace
+    WHERE e.extname <> 'plpgsql' ORDER BY e.extname LIMIT 3`);
+  // The pinned Azure target has these provider-owned extensions in postgres.
+  // Their names alone are insufficient: owner and schema must also match.
+  const providerExtensions = new Set(['azure', 'pgaadauth']);
+  assert(extensions.rowCount <= 2 && extensions.rows.length === extensions.rowCount
+    && extensions.rows.every(row => allowAzureManagedExtensions
+    && providerExtensions.has(row.name) && row.schema === 'pg_catalog' && row.owner === 'azuresu')
+    && new Set(extensions.rows.map(row => row.name)).size === extensions.rowCount,
+  'PITR_TARGET_DATABASE_NOT_EMPTY');
   const functions = await client.query(`SELECT p.oid FROM pg_catalog.pg_proc p
     JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -251,7 +261,7 @@ export async function createMarker(config, i, clientFactory) {
       && databases.rows.every(row => system.has(row.name))
       && databases.rows.some(row => row.name === 'template0' && row.datallowconn === false && row.datistemplate === true),
     'PITR_TARGET_DATABASE_NOT_EMPTY');
-    await assertNoUserContent(client);
+    await assertNoUserContent(client, { allowAzureManagedExtensions: true });
     const priorProbes = await client.query(`SELECT nspname FROM pg_catalog.pg_namespace
       WHERE nspname LIKE 'opscore\\_pitr\\_%' ESCAPE '\\' LIMIT 1`);
     assert(priorProbes.rowCount === 0, 'PITR_PRIOR_PROBE_UNRESOLVED');
