@@ -412,6 +412,11 @@ test("standalone health preflight validates exact resources and query access bef
   assert.deepEqual(f.requests.map(r=>r.method),["GET","GET","POST"]);assert.equal(f.state.owned,6);
   assert(f.requests.every(r=>!r.path.includes("/start")&&!r.path.includes("/executions")));
 });
+test("standalone health preflight accepts Azure's empty registry readback fields",async()=>{
+  const f=standaloneHealthPreflight();
+  Object.assign(f.job.properties.configuration.registries[0],{username:"",passwordSecretRef:""});
+  assert.equal((await f.run()).logQueryAccess,true);
+});
 for(const[name,change]of[
   ["missing job",f=>{f.state.jobStatus=404;}],
   ["missing environment",f=>{f.state.environmentStatus=404;}],
@@ -422,6 +427,7 @@ for(const[name,change]of[
   ["VNet drift",f=>{f.environment.properties.vnetConfiguration.infrastructureSubnetId+="-foreign";}],
   ["log workspace drift",f=>{f.environment.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId="00000000-0000-4000-8000-000000000099";}],
   ["runtime secret", f => { f.job.properties.configuration.secrets = [{name:"runtime-secret"}]; }],
+  ["registry credential", f => { f.job.properties.configuration.registries[0].passwordSecretRef="foreign-secret"; }],
   ["worker hostname", f => { f.environment.properties.defaultDomain = "foreign.eastus.azurecontainerapps.io"; }],
   ["log access denied",f=>{f.state.logsStatus=403;}],
   ["log partial error",f=>{f.logs.error={message:"PRIVATE_LOG_ERROR"};}],

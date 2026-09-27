@@ -10,6 +10,8 @@ Deploy the backing resources in `infra/azure/ops-core/` within the agreed cost
 envelope. Verify their identities, private endpoints, runtime identity grants and
 operator access. Use temporary exact-IP PostgreSQL transfer access only for the
 external copy; remove its firewall rule and disable public access afterward.
+Pin Railway CLI 5.30.1 on the operator and prove an exact-instance source-health
+SSH read before fencing; newer CLI versions may handle remote quoting differently.
 
 Dispatch `Release Images` on the intended protected main SHA, then dispatch
 `Ops and Core Image Promotion` with that successful release run ID from the same

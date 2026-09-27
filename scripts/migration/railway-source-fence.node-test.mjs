@@ -122,6 +122,21 @@ test("read projects selected policy only and retains source link digests", async
   assert.equal(f.state.records.length, 0);
 });
 
+test("accepts Railway's empty staging sentinel only for an untouched STAGED patch", async () => {
+  const f = await fixture();
+  f.state.staged.id = "<empty>";
+  const snapshot = await f.adapter.read();
+  assert.equal(snapshot.staged.id, "<empty>");
+  assert.equal(snapshot.staged.empty, true);
+  assert.equal(f.state.records.length, 0);
+
+  f.state.staged.patch = { services: { [id(3)]: { deploy: { cronSchedule: null } } } };
+  await assert.rejects(f.adapter.read(), { code: "INVALID_STAGED_PATCH" });
+  f.state.staged.patch = {};
+  f.state.staged.status = "APPLYING";
+  await assert.rejects(f.adapter.read(), { code: "INVALID_STAGED_PATCH" });
+});
+
 test("rejects foreign environment and service response bindings", async () => {
   for (const flag of ["foreignEnvironment", "foreignService"]) {
     const f = await fixture(); f.state[flag] = true;
