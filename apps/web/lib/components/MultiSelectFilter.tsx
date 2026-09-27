@@ -64,7 +64,7 @@ export function MultiSelectFilter({
   useEffect(() => {
     if (!open) return;
 
-    const handlePointerDown = (event: PointerEvent) => {
+    const handleOutsideClick = (event: MouseEvent) => {
       if (rootRef.current?.contains(event.target as Node)) return;
       setOpen(false);
     };
@@ -73,10 +73,10 @@ export function MultiSelectFilter({
       if (event.key === "Escape") setOpen(false);
     };
 
-    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("click", handleOutsideClick);
     document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("click", handleOutsideClick);
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);

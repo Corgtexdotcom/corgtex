@@ -100,6 +100,7 @@ function isIgnoredFile(file: File) {
 
 export function KnowledgeFileUploader({
   workspaceId,
+  actionReferenceId,
   defaultSource = "brain-upload",
   initiallyOpen = false,
   showTrigger = true,
@@ -113,6 +114,7 @@ export function KnowledgeFileUploader({
   onDone,
 }: {
   workspaceId: string;
+  actionReferenceId?: string;
   defaultSource?: string;
   initiallyOpen?: boolean;
   showTrigger?: boolean;
@@ -210,6 +212,7 @@ export function KnowledgeFileUploader({
         const formData = new FormData();
         formData.set("file", item.file);
         formData.set("source", defaultSource);
+        if (actionReferenceId) formData.set("actionReferenceId", actionReferenceId);
         formData.set("title", item.title.trim() || item.displayName);
         formData.set("duplicateGuardEnabled", "true");
         const duplicateOverride = overrides[item.id];

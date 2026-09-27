@@ -141,25 +141,27 @@ export async function editActionAction(
 
   const actor = await requirePageActor();
   const workspaceId = asString(formData, "workspaceId");
+  const expectedVersion = expectedVersionFromForm(formData);
   try {
-    await updateAction(actor, {
+    const updated = await updateAction(actor, {
       workspaceId,
       actionId: asString(formData, "actionId"),
-      expectedVersion: expectedVersionFromForm(formData),
+      expectedVersion,
       title: asOptional(formData, "title") ?? undefined,
       bodyMd: formData.has("bodyMd") ? asOptional(formData, "bodyMd") : undefined,
       assigneeMemberId: formData.has("assigneeMemberId") ? asOptional(formData, "assigneeMemberId") : undefined,
       dueAt: formData.has("dueAt") ? asOptionalDate(formData, "dueAt") : undefined,
       priority: formData.has("priority") ? (asOptionalInt(formData, "priority") ?? 0) : undefined,
     });
+    refresh(workspaceId);
+    return { status: "success", version: updated.version };
   } catch (error) {
     if (error instanceof AppError && error.code === "VERSION_CONFLICT") {
       return { status: "conflict" };
     }
-    throw error;
+    console.error("Action edit failed", error);
+    return { status: "error" };
   }
-  refresh(workspaceId);
-  return { status: "success" };
 }
 
 export async function attachActionExternalResourceAction(formData: FormData) {

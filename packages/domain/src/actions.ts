@@ -962,6 +962,50 @@ export async function updateAction(actor: AppActor, params: {
   return params._tx ? run(params._tx) : prisma.$transaction(run);
 }
 
+export async function assertCanAttachActionReference(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+}) {
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  const action = await prisma.action.findUnique({ where: { id: params.actionId } });
+  invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+  invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived actions cannot accept references.");
+  if (action.status === "DRAFT") {
+    await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
+  } else {
+    invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "This action cannot accept references.");
+    requireCollaborativeWorkItemEditor(actor, membership, action);
+  }
+}
+
+export async function attachActionReferenceDocument(actor: AppActor, params: {
+  workspaceId: string;
+  actionId: string;
+  documentId: string;
+}) {
+  await assertCanAttachActionReference(actor, params);
+  const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
+  return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
+    const action = await tx.action.findUnique({ where: { id: params.actionId } });
+    invariant(action && action.workspaceId === params.workspaceId && !action.archivedAt && !action.duplicateOfActionId,
+      404, "NOT_FOUND", "Action not found.");
+    if (action.status === "DRAFT") {
+      await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
+    } else {
+      invariant(action.status === "OPEN" || action.status === "IN_PROGRESS", 400, "INVALID_STATE", "This action cannot accept references.");
+      requireCollaborativeWorkItemEditor(actor, membership, action);
+    }
+    await createWorkItemEvidenceLinks(tx, {
+      workspaceId: params.workspaceId,
+      entityType: "Action",
+      entityId: params.actionId,
+      documentIds: [params.documentId],
+      purpose: "reference",
+    });
+  });
+}
+
 export async function deleteAction(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;

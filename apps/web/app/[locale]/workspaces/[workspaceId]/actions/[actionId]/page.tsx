@@ -7,6 +7,7 @@ import { WorkItemResolutionDialog } from "@/lib/components/WorkItemResolutionDia
 import { ArchivedItemBanner } from "@/lib/components/ArchivedItemBanner";
 import { UnavailableItemStatus } from "@/lib/components/UnavailableItemStatus";
 import { ExternalResourceAttachForm, ExternalResourceCards } from "@/lib/components/ExternalResourceCards";
+import { KnowledgeFileUploader } from "../../KnowledgeFileUploader";
 import { AdviceRequestForm } from "@/lib/components/AdviceRequestForm";
 import { DeliberationComposer } from "@/lib/components/DeliberationComposer";
 import { DeliberationThread } from "@/lib/components/DeliberationThread";
@@ -86,6 +87,7 @@ export default async function ActionDetailPage({
   ]);
   const completionEvidence = evidence.filter((row) => row.purpose === "completion_evidence");
   const feedbackContextEvidence = evidence.filter((row) => row.purpose === "feedback_context");
+  const referenceFiles = evidence.filter((row) => row.purpose === "reference");
   const deliberationTargets = isArchived
     ? { options: [], defaultValue: "", actorMemberId: null, actorCircleIds: [] }
     : await getDeliberationTargets({ actor, workspaceId, parentCircleId: action.circleId });
@@ -419,7 +421,23 @@ export default async function ActionDetailPage({
 
       <section className="ws-section" style={{ marginBottom: 48 }}>
         <h2 className="nr-section-header">References</h2>
+        <p className="nr-item-meta">{t("referenceSourcesHint")}</p>
+        {referenceFiles.length > 0 && (
+          <div className="nr-evidence-list">
+            {referenceFiles.map((row) => (
+              <Link key={row.id} href={`/workspaces/${workspaceId}/brain/sources`}>{row.document.title}</Link>
+            ))}
+          </div>
+        )}
         <ExternalResourceCards attachments={externalResourceAttachments} />
+        {canEditContent && (
+          <KnowledgeFileUploader
+            workspaceId={workspaceId}
+            actionReferenceId={action.id}
+            defaultSource="action-reference"
+            showFolderSelect={false}
+          />
+        )}
         {!isArchived && (
           <ExternalResourceAttachForm
             action={attachActionExternalResourceAction}

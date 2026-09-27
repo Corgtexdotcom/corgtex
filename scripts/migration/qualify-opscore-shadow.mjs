@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Protected, bounded Core+Ops source snapshot on the exact stopped B2s target.
+// Protected, bounded Core+Ops source snapshot on the exact stopped target.
 // This proves PostgreSQL parity only; it never fences writers or activates apps.
 import { constants, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -19,6 +19,11 @@ import { validatePostgresDatabaseParity } from './validate-postgres-restore-rehe
 
 const fail = code => { throw new Error(code); };
 const need = (value, code) => { if (!value) fail(code); };
+export function assertShadowSku(sku, expected = sku) {
+  need(['Standard_B2s', 'Standard_D2ds_v5'].includes(sku) && sku === expected,
+    'SHADOW_SKU_MISMATCH');
+  return sku;
+}
 const numeric = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value);
 const oid = value => typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value) && BigInt(value) <= 4294967295n;
 const exactKeys = (value, keys) => value && !Array.isArray(value)
@@ -267,7 +272,7 @@ export async function withScratchMaintenance({ api, intent, config, deadline, wo
     controller.signal.throwIfAborted();
     need(Date.now() < deadline, 'SHADOW_DEADLINE');
     await api.identity(); await api.boundary(); await api.authority();
-    const server = validateServer(await api.server(), true, 'Standard_B2s');
+    const server = validateServer(await api.server(), true, assertShadowSku(intent.computeSku));
     need(server.state === 'Ready' && server.network.publicNetworkAccess === 'Enabled', 'SHADOW_TARGET_NOT_READY');
     need(validateRules(await api.rules(), intent).length === 1, 'SHADOW_FIREWALL_UNPROVEN');
   };
@@ -320,7 +325,7 @@ export async function admitPrivateCustomerSnapshot({ api, config, directory,
 export async function restoreBothDomains({ api, intent, config, sources, directory, tempRoot,
   restore = runPostgresRestoreRehearsal, maintenanceFactory = openPostgresMaintenance,
   verifyParity = validatePostgresDatabaseParity, admitCapture = admitPrivateCustomerSnapshot }) {
-  need(intent.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
+  assertShadowSku(intent.computeSku);
   return withScratchMaintenance({ api, intent, config, deadline: intent.workDeadline,
     workAbortReserveMs: 120_000, maintenanceFactory,
     work: async maintenance => {
@@ -385,19 +390,19 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     await targetConfig(api, env);
     const intent = await prepare(api, { runId: env.GITHUB_RUN_ID,
       runAttempt: env.GITHUB_RUN_ATTEMPT, ipv4: env.QUALIFY_RUNNER_IPV4 });
-    need(intent.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
+    assertShadowSku(intent.computeSku);
     save(path, intent);
     return { status: 'OPSCORE_SHADOW_PREPARED', deadline: intent.deadline };
   }
   if (recovery) {
     const original = validateIntent(readIntent(path), env.RECOVERY_RUN_ID, env.RECOVERY_RUN_ATTEMPT);
-    need(original.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
+    assertShadowSku(original.computeSku);
     const newPath = `${dir}/recovery-intent.json`;
     if (mode === 'recover-close') {
       api.verifyRecovery = () => recoveryEvidence(original, env, dir, fetch, 'shadow');
       await api.verifyRecovery(); // Completed source, unsucceeded cleanup and no intervening protected run.
       await api.identity(); await api.boundary();
-      const server = validateServer(await api.server(), true, 'Standard_B2s');
+      const server = validateServer(await api.server(), true, original.computeSku);
       const rules = validateRules(await api.rules(), original);
       if (!(server.state === 'Stopped' && server.network.publicNetworkAccess === 'Disabled' && rules.length === 0)) {
         const result = await cleanup(api, original, undefined, true);
@@ -408,7 +413,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       api.deadline = undefined;
       const next = await prepare(api, { runId: env.GITHUB_RUN_ID,
         runAttempt: env.GITHUB_RUN_ATTEMPT, ipv4: env.QUALIFY_RUNNER_IPV4 });
-      need(next.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
+      assertShadowSku(next.computeSku, original.computeSku);
       save(newPath, next);
       return { status: 'OPSCORE_SHADOW_RECOVERY_PREPARED', deadline: next.deadline };
     }
@@ -417,7 +422,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       && closure.runId === original.runId && closure.runAttempt === original.runAttempt,
     'SHADOW_SOURCE_WINDOW_UNPROVEN');
     const next = validateIntent(readIntent(newPath), env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
-    need(next.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
+    assertShadowSku(next.computeSku, original.computeSku);
     if (mode === 'recover-run') {
       const config = await targetConfig(api, env);
       return qualify(api, next, async () => withScratchMaintenance({ api, intent: next, config,
@@ -480,7 +485,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     return { status: 'START_NOT_ATTEMPTED' };
   }
   const intent = validateIntent(readIntent(path), env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT);
-  need(intent.computeSku === 'Standard_B2s', 'SHADOW_B2S_REQUIRED');
+  assertShadowSku(intent.computeSku);
   if (mode === 'run') {
     need(typeof env.SHADOW_TEMP_DIR === 'string' && isAbsolute(env.SHADOW_TEMP_DIR), 'SHADOW_TEMP_DIR_INVALID');
     const sources = sourceConfigs(env); // Reject missing or invalid Railway credentials before START.
