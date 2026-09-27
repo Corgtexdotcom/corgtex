@@ -1377,7 +1377,7 @@ describe("Goals Domain", () => {
     });
   });
 
-  describe("addKeyResult", () => {
+  describe("Key Result mutations", () => {
     it("rejects stale collaborative key result creates if the goal changes before commit", async () => {
       const otherActor = {
         kind: "user",
@@ -1443,6 +1443,46 @@ describe("Goals Domain", () => {
       expect(prisma.keyResult.update).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: "kr-1" },
       }));
+    });
+
+    it("hides another workspace's Key Results from update and delete", async () => {
+      const { deleteKeyResult } = await import("./goals");
+      const foreignKeyResult = {
+        id: "kr-foreign",
+        goalId: "goal-foreign",
+        title: "Foreign key result",
+        targetValue: 10,
+        currentValue: 2,
+        unit: "items",
+        progressPercent: 20,
+        goal: {
+          id: "goal-foreign",
+          workspaceId: "ws-other",
+          archivedAt: null,
+          authorUserId: "other-user",
+          isPrivate: false,
+          status: "ACTIVE",
+        },
+      } as any;
+
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(foreignKeyResult);
+      await expect(updateKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: foreignKeyResult.id,
+        title: "Attempted cross-workspace edit",
+      })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+      vi.mocked(prisma.keyResult.findUnique).mockResolvedValueOnce(foreignKeyResult);
+      await expect(deleteKeyResult(actor, {
+        workspaceId: "ws-1",
+        krId: foreignKeyResult.id,
+        expectedVersion: 1,
+      })).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+      expect(prisma.keyResult.update).not.toHaveBeenCalled();
+      expect(prisma.keyResult.delete).not.toHaveBeenCalled();
+      expect(prisma.goal.update).not.toHaveBeenCalled();
+      expect(prisma.workItemVersion.create).not.toHaveBeenCalled();
     });
 
     it("rejects key results for archived goals", async () => {
