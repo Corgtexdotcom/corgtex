@@ -1,0 +1,69 @@
+name: Ops and Core Runtime Preparation
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: Domain whose inactive Azure runtime vault receives versioned configuration
+        required: true
+        type: choice
+        options: [core, ops]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ops-core-production-preparation
+  cancel-in-progress: false
+
+jobs:
+  retain-runtime-config:
+    if: github.ref == 'refs/heads/main'
+    name: Retain exact source configuration in inactive Azure runtime vault
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: azure-migration-foundation
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      DOMAIN: ${{ inputs.domain }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+        timeout-minutes: 5
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Retain exact runtime values and record versioned references
+        timeout-minutes: 45
+        shell: bash
+        env:
+          RUNTIME_INPUT_JSON: ${{ inputs.domain == 'core' && secrets.OPSCORE_CORE_RUNTIME_INPUT || secrets.OPSCORE_OPS_RUNTIME_INPUT }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/main && ( "$DOMAIN" == core || "$DOMAIN" == ops ) && -n "$RUNTIME_INPUT_JSON" ]]
+          input="$RUNNER_TEMP/opscore-runtime-input-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          receipt="$RUNNER_TEMP/opscore-runtime-receipt-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          trap 'rm -f "$input"' EXIT
+          printf '%s' "$RUNTIME_INPUT_JSON" > "$input"
+          unset RUNTIME_INPUT_JSON
+          node scripts/migration/prepare-opscore-runtime.mjs "$DOMAIN" "$input" "$receipt"
+          printf 'RUNTIME_RECEIPT=%s\n' "$receipt" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opscore-runtime-receipt-${{ inputs.domain }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RUNTIME_RECEIPT }}
+          if-no-files-found: error
+          retention-days: 30

@@ -24,6 +24,18 @@ checks continuity secrets, replaces infrastructure endpoints and returns immutab
 versioned references. Supply the same Next Server Actions key when building the
 web image. Keep source public origins and provider callback registrations stable.
 
+For the shared Ops/Core target, dispatch `Ops and Core Runtime Preparation` from
+protected `main`, one domain at a time. Its corresponding temporary
+`OPSCORE_CORE_RUNTIME_INPUT` or `OPSCORE_OPS_RUNTIME_INPUT` environment secret must
+contain the private runtime projection input: exact Azure target binding, source
+web/worker variable snapshots and name inventories, generated target runtime-role
+database URL, and the versioned vault/storage binding. The workflow rejects a
+changed SKU, public PostgreSQL access, or any existing hosting Container App before
+each vault write; its private artifact contains only versioned references. Review
+the source inventory immediately before dispatch, retain the runtime-role password
+for SQL promotion custody, and remove the temporary workflow input secret after
+the receipt is verified. No source writer or customer route is changed by this step.
+
 Freeze one private global plan containing `source`, `azure`, `transfer`, `redis`,
 `activation`, `health` and `operator`. The exported validators check the static
 transfer, startup and probe contracts before initialization. The operator section
