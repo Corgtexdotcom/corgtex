@@ -1151,6 +1151,7 @@ async function createNativeWriteback(actor: AppActor, params: {
         bodyMd: optionalString(params.output.bodyMd) ?? optionalString(params.output.body) ?? null,
         isPrivate: true,
         duplicateGuard: { onExact: "use_existing" },
+        source: { type: "EXECUTION_RESULT", id: params.resultId },
       });
       return { entityType: "Action", entityId: action.id };
     }

@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { prisma } from "@corgtex/shared";
 import type { AppActor } from "@corgtex/shared";
-import type { ActionStatus, Prisma } from "@prisma/client";
+import type { ActionStatus, MeetingInsight, Prisma } from "@prisma/client";
 import { appendEvents } from "./events";
 import { actorUserIdForWorkspace, requireWorkspaceMembership } from "./auth";
 import { recordAudit } from "./audit-trail";
@@ -66,9 +67,32 @@ type CreateActionParams = {
   isPrivate?: boolean;
   priority?: number | null;
   duplicateGuard?: DuplicateGuardOptions | null;
+  source?: { type: string; id: string; groupId?: string | null } | null;
+  sourcePayload?: unknown;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
   _tx?: Prisma.TransactionClient;
 };
+
+export function actionRequestSource(type: "WEB_REQUEST" | "API_REQUEST" | "GPT_REQUEST" | "MCP_REQUEST" | "AGENT_TOOL", principalId: string, key: string) {
+  const normalizedKey = key.trim();
+  invariant(principalId.trim().length > 0 && normalizedKey.length > 0 && normalizedKey.length <= 128,
+    400, "INVALID_INPUT", "Action idempotency key is invalid.");
+  return {
+    type,
+    id: createHash("sha256").update(`${principalId}\0${normalizedKey}`).digest("hex"),
+  };
+}
+
+export function meetingInsightActionSourcePayload(insight: Pick<MeetingInsight, "type" | "operation" | "title" | "bodyMd" | "assigneeHint" | "dueAt">) {
+  return {
+    type: insight.type,
+    operation: insight.operation,
+    title: insight.title.trim(),
+    bodyMd: insight.bodyMd.trim(),
+    assigneeHint: insight.assigneeHint?.trim() || null,
+    dueAt: insight.dueAt?.toISOString() ?? null,
+  };
+}
 
 function dateRangeWhere(from?: Date, to?: Date): Prisma.DateTimeFilter<"Action"> | undefined {
   const filter: Prisma.DateTimeFilter<"Action"> = {};
@@ -372,6 +396,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
   workspaceId: string;
   actionId: string;
   title: string;
+  idempotencyId?: string;
 }) {
   const membership = await requireWorkspaceMembership({ actor, workspaceId: params.workspaceId });
   const title = params.title.trim();
@@ -379,6 +404,14 @@ export async function createActionChecklistItem(actor: AppActor, params: {
 
   return prisma.$transaction(async (tx) => {
     await lockEditableActionForChecklistMutation(tx, actor, membership, params.workspaceId, params.actionId);
+    if (params.idempotencyId) {
+      const existing = await tx.actionChecklistItem.findUnique({ where: { id: params.idempotencyId } });
+      if (existing) {
+        invariant(existing.workspaceId === params.workspaceId && existing.actionId === params.actionId && existing.title === title,
+          409, "IDEMPOTENCY_CONFLICT", "This checklist request was already used for different content.");
+        return existing;
+      }
+    }
     const lastItem = await tx.actionChecklistItem.findFirst({
       where: {
         workspaceId: params.workspaceId,
@@ -389,6 +422,7 @@ export async function createActionChecklistItem(actor: AppActor, params: {
     });
     const item = await tx.actionChecklistItem.create({
       data: {
+        ...(params.idempotencyId ? { id: params.idempotencyId } : {}),
         workspaceId: params.workspaceId,
         actionId: params.actionId,
         title,
@@ -514,8 +548,18 @@ export async function deleteActionChecklistItem(actor: AppActor, params: {
   });
 }
 
-async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionParams, actionId: string) {
-  const existing = await getAction(actor, { workspaceId: params.workspaceId, actionId });
+async function applyActionDuplicateUpdate(
+  actor: AppActor,
+  params: CreateActionParams,
+  actionId: string,
+  membership: import("@corgtex/shared").MembershipSummary | null,
+  tx: Prisma.TransactionClient,
+) {
+  await acquireWorkItemAdvisoryLock(tx, "Action", actionId);
+  const existing = await tx.action.findFirst({
+    where: { id: actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, ...privacyFilter(actor, membership) },
+  });
+  invariant(existing, 404, "NOT_FOUND", "Action duplicate target is no longer available.");
   const mergedBody = duplicateGuardMergeText(existing.bodyMd, params.bodyMd);
   const updateParams: Parameters<typeof updateAction>[1] = {
     workspaceId: params.workspaceId,
@@ -527,7 +571,10 @@ async function applyActionDuplicateUpdate(actor: AppActor, params: CreateActionP
   if (!existing.dueAt && params.dueAt) updateParams.dueAt = params.dueAt;
   if (!existing.proposalId && params.proposalId) updateParams.proposalId = params.proposalId;
   if (params.priority !== undefined && params.priority !== null && existing.priority !== params.priority) updateParams.priority = params.priority;
-  return Object.keys(updateParams).length > 2 ? updateAction(actor, updateParams) : existing;
+  if (Object.keys(updateParams).length === 2) return existing;
+  updateParams._membership = membership;
+  updateParams._tx = tx;
+  return updateAction(actor, updateParams);
 }
 
 export async function createAction(actor: AppActor, params: CreateActionParams) {
@@ -539,7 +586,40 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
 
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Action title is required.");
-  const duplicateDecision = await checkWorkspaceDuplicateGuard({
+  const source = params.source && {
+    type: params.source.type.trim(), id: params.source.id.trim(), groupId: params.source.groupId?.trim() || null,
+  };
+  invariant(!source || (source.type.length > 0 && source.type.length <= 64 && source.id.length > 0 && source.id.length <= 191),
+    400, "INVALID_INPUT", "Action source identity is invalid.");
+  invariant(!source?.groupId || source.groupId.length <= 191, 400, "INVALID_INPUT", "Action source group is invalid.");
+  invariant(source?.type !== "MEETING_INSIGHT" || params.sourcePayload != null,
+    400, "INVALID_INPUT", "Meeting insight Action source needs its original insight input.");
+  let payloadHash: string | null = null;
+  if (source?.type === "MEETING_INSIGHT") {
+    payloadHash = createHash("sha256").update(JSON.stringify(params.sourcePayload)).digest("hex");
+  } else if (source && ["WEB_REQUEST", "API_REQUEST", "GPT_REQUEST", "MCP_REQUEST", "AGENT_TOOL"].includes(source.type)) {
+    payloadHash = createHash("sha256").update(JSON.stringify({
+      title,
+      bodyMd: params.bodyMd?.trim() || null,
+      circleId: params.circleId || null,
+      assigneeMemberId: params.assigneeMemberId || null,
+      authorMemberId: params.authorMemberId || null,
+      dueAt: params.dueAt?.toISOString() ?? null,
+      proposalId: params.proposalId || null,
+      priority: params.priority ?? 0,
+      isPrivate: params.isPrivate ?? true,
+      sourcePayload: params.sourcePayload ?? null,
+      duplicateResolution: params.duplicateGuard?.resolution ?? null,
+      duplicateOnExact: params.duplicateGuard?.onExact ?? null,
+      duplicateTargetId: params.duplicateGuard?.resolution === "use_existing" || params.duplicateGuard?.resolution === "update_existing"
+        ? params.duplicateGuard.targetEntityId?.trim() || null
+        : null,
+    })).digest("hex");
+  }
+  const isPrivate = params.isPrivate ?? true;
+  const publishedAt = isPrivate ? null : new Date();
+
+  const duplicateDecisionForCreate = (tx?: Prisma.TransactionClient) => checkWorkspaceDuplicateGuard({
     workspaceId: params.workspaceId,
     entityType: "Action",
     title,
@@ -548,20 +628,13 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     assigneeMemberId: params.assigneeMemberId,
     dueAt: params.dueAt,
     proposalId: params.proposalId,
+    meetingId: source?.type === "MEETING_INSIGHT" ? source.groupId : null,
     actorUserId: actor.kind === "user" ? actor.user.id : null,
     membershipId: membership?.id ?? null,
     includePrivate: actor.kind === "agent" || membership?.role === "ADMIN",
-  }, params.duplicateGuard);
-  if (duplicateDecision?.resolution === "use_existing") {
-    return getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
-  }
-  if (duplicateDecision?.resolution === "update_existing") {
-    return applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId);
-  }
-  const isPrivate = params.isPrivate ?? true;
-  const publishedAt = isPrivate ? null : new Date();
+  }, params.duplicateGuard, tx);
 
-  const create = async (tx: Prisma.TransactionClient) => {
+  const create = async (tx: Prisma.TransactionClient, duplicateDecision: Awaited<ReturnType<typeof duplicateDecisionForCreate>>) => {
     const assigneeMemberId = await resolveAssigneeMemberId(tx, params.workspaceId, params.assigneeMemberId);
     const proposalId = await resolveWorkspaceProposalLink(tx, actor, membership, params.workspaceId, params.proposalId);
     let authorUserId = actor.kind === "user"
@@ -639,7 +712,65 @@ export async function createAction(actor: AppActor, params: CreateActionParams) 
     return action;
   };
 
-  return params._tx ? create(params._tx) : prisma.$transaction(create);
+  if (!source) {
+    const duplicateDecision = await duplicateDecisionForCreate();
+    if (duplicateDecision?.resolution === "use_existing") {
+      return getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId });
+    }
+    if (duplicateDecision?.resolution === "update_existing") {
+      return params._tx
+        ? applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, params._tx)
+        : prisma.$transaction((tx) => applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, tx));
+    }
+    return params._tx ? create(params._tx, duplicateDecision) : prisma.$transaction((tx) => create(tx, duplicateDecision));
+  }
+
+  const run = async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext('action_create_workspace'), hashtext(${params.workspaceId}))
+    `;
+    await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext('action_creation_source'), hashtext(${`${params.workspaceId}:${source.type}:${source.id}`}))
+      `;
+    const claimed = await tx.actionCreationSource.findUnique({
+        where: { workspaceId_sourceType_sourceId: {
+          workspaceId: params.workspaceId,
+          sourceType: source.type,
+          sourceId: source.id,
+        } },
+      });
+    if (claimed) {
+        invariant(!payloadHash || !claimed.payloadHash || claimed.payloadHash === payloadHash,
+          409, "IDEMPOTENCY_CONFLICT", "This Action idempotency key was already used with different content.");
+        await tx.$queryRaw`SELECT "id" FROM "Action" WHERE "workspaceId" = ${params.workspaceId} AND "id" = ${claimed.actionId} FOR SHARE`;
+        const existing = await tx.action.findFirst({
+          where: { id: claimed.actionId, workspaceId: params.workspaceId, ...privacyFilter(actor, membership) },
+        });
+        invariant(existing, 404, "NOT_FOUND", "Action source is no longer available.");
+        if (existing.duplicateOfActionId) {
+          const canonical = await tx.action.findFirst({
+            where: { id: existing.duplicateOfActionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, ...privacyFilter(actor, membership) },
+          });
+          invariant(canonical, 409, "ACTION_SOURCE_UNAVAILABLE", "Canonical Action is no longer available.");
+          return canonical;
+        }
+        invariant(!existing.archivedAt, 409, "ACTION_SOURCE_UNAVAILABLE", "Action source was archived. Review it before retrying.");
+        return existing;
+    }
+
+    const duplicateDecision = await duplicateDecisionForCreate(tx);
+    const action = duplicateDecision?.resolution === "use_existing"
+      ? await getAction(actor, { workspaceId: params.workspaceId, actionId: duplicateDecision.match.entityId })
+      : duplicateDecision?.resolution === "update_existing"
+        ? await applyActionDuplicateUpdate(actor, params, duplicateDecision.match.entityId, membership, tx)
+        : await create(tx, duplicateDecision);
+    await tx.actionCreationSource.create({
+      data: { workspaceId: params.workspaceId, actionId: action.id, sourceType: source.type, sourceId: source.id, sourceGroupId: source.groupId, payloadHash },
+    });
+    return action;
+  };
+
+  return params._tx ? run(params._tx) : prisma.$transaction(run);
 }
 
 export async function updateAction(actor: AppActor, params: {
@@ -658,6 +789,7 @@ export async function updateAction(actor: AppActor, params: {
   evidenceDocumentIds?: string[] | null;
   expectedVersion?: number;
   _membership?: import("@corgtex/shared").MembershipSummary | null;
+  _tx?: Prisma.TransactionClient;
 }) {
   const membership = await requireWorkspaceMembership({
     actor,
@@ -665,7 +797,7 @@ export async function updateAction(actor: AppActor, params: {
     resolvedMembership: params._membership,
   });
 
-  return prisma.$transaction(async (tx) => {
+  const run = async (tx: Prisma.TransactionClient) => {
     await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
@@ -673,7 +805,7 @@ export async function updateAction(actor: AppActor, params: {
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
 
-    invariant(!action.archivedAt, 400, "INVALID_STATE", "Archived actions cannot be edited.");
+    invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be edited.");
 
     const data: Record<string, unknown> = {};
     const editsContent = params.title !== undefined
@@ -826,7 +958,8 @@ export async function updateAction(actor: AppActor, params: {
     ]);
 
     return updated;
-  });
+  };
+  return params._tx ? run(params._tx) : prisma.$transaction(run);
 }
 
 export async function deleteAction(actor: AppActor, params: {
@@ -862,16 +995,22 @@ export async function publishAction(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
-    invariant(action.status === "DRAFT", 400, "INVALID_STATE", "Only draft actions can be opened.");
+    invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be opened.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
+    if (action.status !== "DRAFT") {
+      invariant(!action.isPrivate && ["OPEN", "IN_PROGRESS", "COMPLETED"].includes(action.status),
+        400, "INVALID_STATE", "Only draft actions can be opened.");
+      return action;
+    }
 
     const updated = await tx.action.update({
-      where: { id: params.actionId },
+      where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: "DRAFT" },
       data: { status: "OPEN", isPrivate: false, publishedAt: new Date() },
     });
 
@@ -909,16 +1048,18 @@ export async function returnActionToDraft(actor: AppActor, params: {
   });
 
   return prisma.$transaction(async (tx) => {
+    await acquireWorkItemAdvisoryLock(tx, "Action", params.actionId);
     const action = await tx.action.findUnique({
       where: { id: params.actionId },
     });
 
     invariant(action && action.workspaceId === params.workspaceId, 404, "NOT_FOUND", "Action not found.");
+    invariant(!action.archivedAt && !action.duplicateOfActionId, 400, "INVALID_STATE", "Archived or resolved duplicate actions cannot be returned to draft.");
     invariant(action.status === "OPEN" || action.status === "IN_PROGRESS" || action.status === "COMPLETED", 400, "INVALID_STATE", "Only open, in-progress, or completed actions can be returned to draft.");
     await requireDraftManager({ actor, workspaceId: params.workspaceId, record: action, resolvedMembership: membership });
 
     const updated = await tx.action.update({
-      where: { id: params.actionId },
+      where: { id: params.actionId, workspaceId: params.workspaceId, archivedAt: null, duplicateOfActionId: null, status: action.status },
       data: {
         status: "DRAFT",
         isPrivate: true,

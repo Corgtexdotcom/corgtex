@@ -1,4 +1,5 @@
 import React, { type ReactNode } from "react";
+import { randomUUID } from "node:crypto";
 import { MarkdownEditor } from "@/lib/components/MarkdownEditor";
 import { WorkItemMemberSelect, type WorkItemMemberOption } from "@/lib/components/WorkItemMemberSelect";
 import { WorkItemPrioritySelect } from "@/lib/components/WorkItemPrioritySelect";
@@ -59,6 +60,7 @@ export function ActionEditorForm({
   const fields = (
     <>
       <input type="hidden" name="workspaceId" value={workspaceId} />
+      {!actionId && <input type="hidden" name="idempotencyKey" value={randomUUID()} />}
       {actionId && <input type="hidden" name="actionId" value={actionId} />}
       <label>
         {labels.title}

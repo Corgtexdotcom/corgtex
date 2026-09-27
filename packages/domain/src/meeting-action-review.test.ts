@@ -7,17 +7,18 @@ const { db, createAction, publishAction, requireWorkspaceMembership } = vi.hoist
     meetingInsight: { findFirst: vi.fn(), update: vi.fn(), count: vi.fn(), findMany: vi.fn() },
     workspaceFeatureFlag: { findUnique: vi.fn() },
     communicationMessage: { findUnique: vi.fn() },
-    communicationEntityLink: { create: vi.fn() },
+    communicationEntityLink: { create: vi.fn(), upsert: vi.fn() },
   },
   createAction: vi.fn(),
   publishAction: vi.fn(),
   requireWorkspaceMembership: vi.fn(),
 }));
 vi.mock("@corgtex/shared", () => ({ prisma: db, env: { APP_URL: "https://example.test" }, toInputJson: (value: unknown) => value }));
-vi.mock("./actions", () => ({ createAction, publishAction }));
+vi.mock("./actions", () => ({ createAction, publishAction, meetingInsightActionSourcePayload: (insight: unknown) => insight }));
 vi.mock("./auth", () => ({ requireWorkspaceMembership }));
 
-import { confirmSlackMeetingActionReviewProposal } from "./meeting-action-review";
+import { confirmSlackMeetingActionReviewProposal, refreshSlackMeetingActionReviewAfterWebApply } from "./meeting-action-review";
+import { DuplicateGuardMatchError } from "./duplicate-guard";
 import { humanMemberIdentityWhere, isHumanMemberIdentity } from "./member-identity";
 
 const actor = { kind: "user" as const, user: { id: "user-1", email: "reviewer@example.test", displayName: "Reviewer" } };
@@ -39,7 +40,7 @@ describe("Slack meeting action assignee eligibility", () => {
     db.meetingInsight.findMany.mockResolvedValue([]);
     db.meetingInsight.count.mockResolvedValue(0);
     db.communicationMessage.findUnique.mockResolvedValue(null);
-    createAction.mockResolvedValue({ id: "action-1" });
+    createAction.mockResolvedValue({ id: "action-1", status: "OPEN" });
     publishAction.mockResolvedValue({ id: "action-1" });
   });
 
@@ -62,14 +63,68 @@ describe("Slack meeting action assignee eligibility", () => {
 
     expect(requireWorkspaceMembership).toHaveBeenCalledWith({ actor, workspaceId: "ws-1" });
     expect(db.member.findMany).toHaveBeenCalledWith({ where: { workspaceId: "ws-1", isActive: true, ...humanMemberIdentityWhere() }, include: { user: true } });
-    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ workspaceId: "ws-1", assigneeMemberId: "active" }));
-    expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "action-1" });
+    expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({
+      workspaceId: "ws-1", assigneeMemberId: "active", isPrivate: false,
+      source: { type: "MEETING_INSIGHT", id: "insight-1", groupId: "meeting-1" },
+    }));
+    expect(publishAction).not.toHaveBeenCalled();
     expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "APPLIED", reviewedByUserId: "user-1" }) }));
+  });
+
+  it("opens a legacy claimed private draft before marking the Slack insight applied", async () => {
+    db.member.findMany.mockResolvedValue([]);
+    createAction.mockResolvedValueOnce({ id: "legacy-action", status: "DRAFT" });
+    publishAction.mockResolvedValueOnce({ id: "legacy-action", status: "OPEN" });
+    await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(publishAction).toHaveBeenCalledWith(actor, { workspaceId: "ws-1", actionId: "legacy-action" });
+    expect(db.meetingInsight.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "APPLIED", appliedEntityId: "legacy-action" }),
+    }));
   });
 
   it("leaves an inactive-only hint unassigned", async () => {
     db.member.findMany.mockImplementation(async ({ where }) => where.isActive === true ? [] : [{ id: "old", user: { displayName: "Milan", email: "old@example.test" } }]);
     await confirmSlackMeetingActionReviewProposal(actor, params);
     expect(createAction).toHaveBeenCalledWith(actor, expect.objectContaining({ assigneeMemberId: null }));
+  });
+
+  it("keeps a matching Slack proposal pending and directs review to Corgtex", async () => {
+    db.member.findMany.mockResolvedValue([]);
+    createAction.mockRejectedValueOnce(new DuplicateGuardMatchError({
+      entityType: "Action", entityId: "action-existing", title: "Similar Action", excerpt: null,
+      score: 0.88, matchKind: "likely", reasons: ["similar title"], status: "OPEN",
+      createdAt: null, updatedAt: null, archivedAt: null,
+    }));
+    const result = await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(result.responseText).toContain("Review this follow-up in Corgtex");
+    expect(db.meetingInsight.update).not.toHaveBeenCalled();
+    expect(publishAction).not.toHaveBeenCalled();
+  });
+
+  it("closes and renders a Slack review after the insight is applied in Corgtex", async () => {
+    db.meetingInsight.findFirst.mockResolvedValueOnce({ meetingId: "meeting-1", status: "APPLIED" });
+    db.meetingFollowUpReview.findFirst.mockResolvedValueOnce({
+      id: "review-1", installationId: "installation-1", messageTs: "123.456",
+    });
+    const result = await refreshSlackMeetingActionReviewAfterWebApply({ workspaceId: "ws-1", insightId: "insight-1" });
+    expect(db.meetingFollowUpReview.update).toHaveBeenCalledWith({
+      where: { id: "review-1" }, data: { status: "CLOSED", closedAt: expect.any(Date) },
+    });
+    expect(result).toMatchObject({ installationId: "installation-1", update: { channelId: "channel-1", messageTs: "123.456" } });
+  });
+
+  it("refreshes a closed Slack message when an applied proposal is clicked again", async () => {
+    db.meetingFollowUpReview.findFirst.mockResolvedValue({
+      id: "review-1", workspaceId: "ws-1", meetingId: "meeting-1", status: "CLOSED",
+      expiresAt: new Date(Date.now() - 60_000), messageTs: "123.456", channelId: "channel-1",
+      meeting: { id: "meeting-1", workspaceId: "ws-1", title: "Weekly sync", recordedAt: new Date(), series: null },
+    });
+    db.meetingInsight.findFirst.mockResolvedValue({ id: "insight-1", status: "APPLIED" });
+    const result = await confirmSlackMeetingActionReviewProposal(actor, params);
+    expect(result.responseText).toContain("already confirmed");
+    expect(db.meetingFollowUpReview.update).toHaveBeenCalledWith({
+      where: { id: "review-1" }, data: { status: "CLOSED", closedAt: expect.any(Date) },
+    });
+    expect(createAction).not.toHaveBeenCalled();
   });
 });

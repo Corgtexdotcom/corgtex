@@ -6,6 +6,7 @@ import {
   createTension,
   updateTension,
   createAction,
+  actionRequestSource,
   updateAction,
   createProposal,
   createProposalFromTension,
@@ -304,6 +305,7 @@ export async function createActionItemAction(actor: AppActor, ctx: any, args: an
       assigneeMemberId: args.assigneeMemberId,
       dueAt: args.dueAt ? new Date(args.dueAt) : undefined,
       duplicateGuard: duplicateGuardOptionsFromArgs(args),
+      source: ctx.toolCallId ? actionRequestSource("AGENT_TOOL", ctx.sessionId, ctx.toolCallId) : undefined,
     });
   } catch (error) {
     return duplicateGuardToolResponse(error);
