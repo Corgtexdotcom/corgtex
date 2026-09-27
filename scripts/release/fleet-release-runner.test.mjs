@@ -1650,6 +1650,13 @@ describe("fleet release runner", () => {
       .resolves.toMatchObject({ status: "READY", effects: 0, targets: [] });
     await expect(runFleetRelease(["preflight-provider", "--targets", "managed-customers,selfserve", "--target-id", "missing-deployment"], deps))
       .rejects.toThrow("No release target matched deployment ID missing-deployment.");
+
+    const azureDeps = {
+      env: { FLEET_RELEASE_AZURE_TARGET_JSON: azureTargetJson({ id: "azure-deployment", deploymentId: "azure-deployment" }) },
+      fetchImpl: vi.fn(),
+    };
+    await expect(runFleetRelease(["preflight-provider", "--targets", "selfserve", "--target-id", "azure-deployment"], azureDeps))
+      .rejects.toThrow("Exact deployment releases currently require Railway targets");
   });
 
   it("rejects transition inventory that omits provider", async () => {

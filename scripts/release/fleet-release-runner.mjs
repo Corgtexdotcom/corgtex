@@ -82,13 +82,14 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     if (!protectedGroups.length) {
       if (targetId) {
         const selectedTargets = filterTargetsByGroups(await discoverTargets(deps, selectedGroups), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) });
-        filterTargetsByDeploymentId(selectedTargets, targetId);
+        assertExactTargetSupportsObservation(filterTargetsByDeploymentId(selectedTargets, targetId), targetId);
       }
       const result = { status: "READY", effects: 0, targets: [] };
       console.log(JSON.stringify({ stage: "provider-preflight", ...result }, null, 2));
       return result;
     }
     const selectedTargets = filterTargetsByDeploymentId(filterTargetsByGroups(await discoverTargets(deps, selectedGroups), selectedGroups, { excludeIneligible: isBroadTargetSelection(selection) }), targetId);
+    assertExactTargetSupportsObservation(selectedTargets, targetId);
     const targets = selectedTargets.filter((target) => protectedGroups.includes(target.group));
     for (const group of protectedGroups) {
       const count = targets.filter((target) => target.group === group).length;
@@ -131,6 +132,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   if (targets.length === 0) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
+  assertExactTargetSupportsObservation(targets, targetId);
 
   emitTargetInventory(targets, env, deps);
   const preflight = targets.map((target) => ({
@@ -325,6 +327,12 @@ async function validateReleaseEnvironment(args, env, deps = {}) {
 }
 
 function observationTargetsFor(targets) { const selected = new Set(targets.map((target) => target.provider === "azure" ? "azure-selfserve" : target.provider === "railway" ? (target.group === "selfserve" ? "railway-selfserve" : (["ops", "backup-app"].includes(target.group) ? target.group : "railway-customers")) : null).filter(Boolean)); return ["railway-customers", "railway-selfserve", "azure-selfserve", "ops", "backup-app"].filter((target) => selected.has(target)); } function emitTargetInventory(targets, env, deps) { const providers = new Set(targets.map((target) => target.provider)); emitGithubOutput("uses_azure", providers.has("azure"), deps); emitGithubOutput("uses_railway", providers.has("railway"), deps); emitGithubOutput("observation_targets", observationTargetsFor(targets).join(","), deps); emitGithubOutput("selected_target_ids", targets.map((target) => target.deploymentId ?? target.id ?? target.label).join(","), deps); if (env.FLEET_RELEASE_TARGETS_FILE) writeFileSync(env.FLEET_RELEASE_TARGETS_FILE, JSON.stringify(targets)); }
+
+function assertExactTargetSupportsObservation(targets, targetId) {
+  if (targetId && targets.some((target) => target.provider !== "railway")) {
+    throw new Error("Exact deployment releases currently require Railway targets so observation can attribute failures to the selected deployment.");
+  }
+}
 
 function validateConfiguredTargetJson(name, raw, invalid) {
   if (!raw?.trim()) return;
