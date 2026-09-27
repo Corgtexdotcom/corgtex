@@ -408,6 +408,40 @@ describe("meetings domain", () => {
     expect(prismaMock.meeting.create).not.toHaveBeenCalled();
   });
 
+  it("rejects scheduled meeting attendees outside the active human workspace membership", async () => {
+    const { createMeetingSeries } = await import("./meetings");
+    prismaMock.member.findMany.mockResolvedValue([]);
+
+    await expect(createMeetingSeries(actor, {
+      workspaceId: "workspace-1",
+      title: "Weekly Tactical",
+      startsAt: new Date("2026-04-30T17:00:00.000Z"),
+      participantIds: ["foreign-user"],
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "INVALID_INPUT",
+      message: "Every selected attendee must be an active member of this workspace.",
+    });
+
+    expect(prismaMock.member.findMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace-1",
+        userId: { in: ["foreign-user"] },
+        isActive: true,
+        NOT: [{
+          OR: [
+            { kind: "SYSTEM" },
+            { user: { email: { startsWith: "system+", mode: "insensitive" } } },
+            { user: { email: { startsWith: "support+", mode: "insensitive" } } },
+            { user: { displayName: { equals: "Corgtex Support", mode: "insensitive" } } },
+          ],
+        }],
+      },
+      select: { userId: true },
+    });
+    expect(prismaMock.meetingSeries.create).not.toHaveBeenCalled();
+  });
+
   it("createMeetingSeries stores a supported recorder URL for inherited occurrences", async () => {
     const startsAt = new Date("2026-04-30T17:00:00.000Z");
     const scheduledEndAt = new Date("2026-04-30T18:00:00.000Z");

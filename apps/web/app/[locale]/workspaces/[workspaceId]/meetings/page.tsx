@@ -15,6 +15,7 @@ import { TimeZoneSelect } from "@/lib/components/TimeZoneSelect";
 import { ItemActions } from "@/lib/components/ui/ItemActions";
 import { MeetingArchiveDialog } from "./MeetingArchiveDialog";
 import { MeetingTranscriptUploadForm } from "./MeetingTranscriptUploadForm";
+import { MeetingAttendeePicker } from "./MeetingAttendeePicker";
 import { WorkItemAttentionBadge, WorkItemBadge, WorkItemFilterControls } from "@/lib/components/WorkItemControls";
 import {
   DEFAULT_MEETING_DURATION_MINUTES,
@@ -434,14 +435,20 @@ export default async function MeetingsPage({
                 Meeting URL
                 <input name="meetingUrl" type="url" placeholder="https://teams.microsoft.com/meet/..." />
               </label>
-              <label>
-                {t("formParticipantEmails")}
-                <input name="participantEmails" placeholder={t("formParticipantEmailsPlaceholder")} />
-              </label>
-              <label>
-                {t("formParticipantIds")}
-                <input name="participantIds" placeholder={t("formParticipantIdsPlaceholder")} />
-              </label>
+              <MeetingAttendeePicker
+                members={members.map((member) => ({
+                  id: member.user.id,
+                  name: member.user.displayName || member.user.email,
+                  email: member.user.email,
+                }))}
+                labels={{
+                  members: t("attendeeMembers"),
+                  searchMembers: t("attendeeSearchMembers"),
+                  externalEmails: t("attendeeExternalEmails"),
+                  externalEmailsPlaceholder: t("attendeeExternalEmailsPlaceholder"),
+                  externalEmailsHelp: t("attendeeExternalEmailsHelp"),
+                }}
+              />
               <button type="submit">{t("btnScheduleMeeting")}</button>
             </form>
           </div>

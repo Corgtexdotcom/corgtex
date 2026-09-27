@@ -9,6 +9,7 @@ import { archiveFilterWhere, archiveWorkspaceArtifact, type ArchiveFilter } from
 import { ensureWorkspacePermalink, workspaceEntityCanonicalPath } from "./permalinks";
 import { invariant } from "./errors";
 import { requireMeetingProcessedContentEditor } from "./collaborative-permissions";
+import { humanMemberIdentityWhere } from "./member-identity";
 import { extractSupportedMeetingUrlFromText, meetingUrlHash, normalizeMeetingUrl, normalizeRecorderMeetingUrl } from "./meeting-urls";
 import { resetMeetingTranscriptProcessingProgress } from "./meeting-transcript-processing";
 import {
@@ -814,6 +815,25 @@ export async function createMeetingSeries(actor: AppActor, params: {
     workspaceId: params.workspaceId,
   });
 
+  const participantIds = normalizeIds(params.participantIds);
+  if (participantIds.length > 0) {
+    const members = await prisma.member.findMany({
+      where: {
+        workspaceId: params.workspaceId,
+        userId: { in: participantIds },
+        isActive: true,
+        ...humanMemberIdentityWhere(),
+      },
+      select: { userId: true },
+    });
+    invariant(
+      members.length === participantIds.length,
+      400,
+      "INVALID_INPUT",
+      "Every selected attendee must be an active member of this workspace.",
+    );
+  }
+
   const title = params.title.trim();
   invariant(title.length > 0, 400, "INVALID_INPUT", "Meeting title is required.");
   invariant(!Number.isNaN(params.startsAt.valueOf()), 400, "INVALID_INPUT", "startsAt must be a valid date.");
@@ -834,7 +854,7 @@ export async function createMeetingSeries(actor: AppActor, params: {
         meetingUrlHash: meetingUrl ? meetingUrlHash(meetingUrl) : null,
         startsAt: params.startsAt,
         defaultDurationMinutes,
-        participantIds: normalizeIds(params.participantIds),
+        participantIds,
         participantEmails: normalizeEmails(params.participantEmails),
       },
     });
