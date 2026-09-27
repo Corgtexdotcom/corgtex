@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
-import { AppError, createDocument, listDocuments, requireWorkspaceMembership } from "@corgtex/domain";
+import { AppError, assertCanAttachActionReference, attachActionReferenceDocument, createDocument, listDocuments, requireWorkspaceMembership } from "@corgtex/domain";
 import type { DuplicateGuardOptions, DuplicateGuardResolution } from "@corgtex/domain";
 import type { ArchiveFilter } from "@corgtex/domain";
 import { ingestFile } from "@corgtex/knowledge";
@@ -90,6 +90,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const normalizedName = normalizeUploadFileName(originalName);
       const providedTitle = formString(formData, "title");
       const providedSource = formString(formData, "source");
+      const actionReferenceId = formString(formData, "actionReferenceId");
       const ingestionGuidanceMd = formString(formData, "ingestionGuidanceMd");
       const parsedMetadata = parseDocumentMetadata(formData.get("metadata"));
       const duplicateGuard = duplicateGuardFromValues(
@@ -97,6 +98,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         formData.get("duplicateTargetEntityId"),
         formData.get("duplicateGuardEnabled"),
       );
+
+      if (actionReferenceId) {
+        await assertCanAttachActionReference(actor, { workspaceId, actionId: actionReferenceId });
+      }
 
       const buffer = Buffer.from(await file.arrayBuffer());
 
@@ -114,6 +119,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
             : undefined,
         duplicateGuard,
       });
+
+      if (actionReferenceId) {
+        await attachActionReferenceDocument(actor, {
+          workspaceId,
+          actionId: actionReferenceId,
+          documentId: result.document.id,
+        });
+      }
 
       return NextResponse.json(result.document, { status: 201 });
     }

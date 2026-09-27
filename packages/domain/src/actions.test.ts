@@ -1662,4 +1662,32 @@ describe("action domain lifecycle", () => {
     expect(recordAudit).not.toHaveBeenCalled();
     expect(appendEvents).not.toHaveBeenCalled();
   });
+
+  it("links an uploaded reference only to an editable Action in the same workspace", async () => {
+    const action = { id: "action-1", workspaceId: "workspace-1", authorUserId: "user-2", status: "OPEN", isPrivate: false, archivedAt: null, duplicateOfActionId: null };
+    prismaMock.action.findUnique.mockResolvedValue(action);
+    prismaMock.document.findMany.mockResolvedValue([{ id: "doc-1" }]);
+    const { attachActionReferenceDocument } = await import("./actions");
+
+    await attachActionReferenceDocument(actor, { workspaceId: "workspace-1", actionId: "action-1", documentId: "doc-1" });
+
+    expect(prismaMock.workItemEvidence.createMany).toHaveBeenCalledWith({
+      data: [{ workspaceId: "workspace-1", entityType: "Action", entityId: "action-1", documentId: "doc-1", purpose: "reference" }],
+      skipDuplicates: true,
+    });
+  });
+
+  it("rejects Action upload access before linking when the target is private or changes to a draft", async () => {
+    const publicAction = { id: "action-1", workspaceId: "workspace-1", authorUserId: "user-2", status: "OPEN", isPrivate: false, archivedAt: null, duplicateOfActionId: null };
+    const privateDraft = { ...publicAction, status: "DRAFT", isPrivate: true };
+    const { assertCanAttachActionReference, attachActionReferenceDocument } = await import("./actions");
+    prismaMock.action.findUnique.mockResolvedValueOnce(privateDraft);
+    await expect(assertCanAttachActionReference(actor, { workspaceId: "workspace-1", actionId: "action-1" }))
+      .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+
+    prismaMock.action.findUnique.mockResolvedValueOnce(publicAction).mockResolvedValueOnce(privateDraft);
+    await expect(attachActionReferenceDocument(actor, { workspaceId: "workspace-1", actionId: "action-1", documentId: "doc-1" }))
+      .rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(prismaMock.workItemEvidence.createMany).not.toHaveBeenCalled();
+  });
 });

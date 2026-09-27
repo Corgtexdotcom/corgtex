@@ -2857,6 +2857,26 @@ a.meeting-agenda-item:hover {
     padding: 6px;
   }
 
+  @media (max-width: 640px) {
+    .nr-filter-panel .nr-multi-select-panel {
+      position: static;
+      width: 100%;
+      margin-top: 4px;
+      max-height: min(40dvh, 320px);
+    }
+
+    .nr-work-item-advanced-filters .nr-filter-panel > .actions-inline {
+      position: sticky;
+      bottom: calc(var(--mobile-bottom-offset) + 8px);
+      z-index: 60;
+      width: 100%;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-strong);
+    }
+  }
+
   .nr-multi-select-options {
     display: grid;
     gap: 2px;
