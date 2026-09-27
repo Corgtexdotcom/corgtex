@@ -1623,6 +1623,7 @@ describe("fleet release runner", () => {
 
     const selected = await runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers,selfserve,ops", "--target-id", "active", "--dry-run", "--reason", "Validate Chirone-only target selection."], {
       ...deps,
+      env: { ...env, MANAGED_RELEASE_CANARY_PREFLIGHT_DEPLOYMENT_ID: "invalid-ops-only-canary" },
     });
     expect(selected.targets.map((target) => target.id)).toEqual(["active"]);
     await expect(runFleetRelease(["deploy", "--release", SHA, "--targets", "managed-customers", "--target-id", "missing", "--dry-run", "--reason", "Reject unknown deployment ID."], deps))
@@ -1675,6 +1676,14 @@ describe("fleet release runner", () => {
         FLEET_RELEASE_OPS_TARGET_JSON: "not-json-and-not-selected",
         FLEET_RELEASE_AZURE_TARGET_JSON: JSON.stringify([{ id: "wrong-provider", provider: "unsupported" }]),
       },
+    });
+
+    expect(result).toMatchObject({ ok: true, targetGroups: ["managed-customers"] });
+  });
+
+  it("treats an empty optional target-id argument as no selector", async () => {
+    const result = await runFleetRelease(["validate-config", "--release", SHA, "--targets", "managed-customers", "--target-id", "", "--dry-run", "true"], {
+      env: { FLEET_RELEASE_TARGETS_JSON: targetJson({ id: "customer", deploymentId: "customer", group: "managed-customers", provider: "railway" }) },
     });
 
     expect(result).toMatchObject({ ok: true, targetGroups: ["managed-customers"] });

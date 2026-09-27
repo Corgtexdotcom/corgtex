@@ -185,10 +185,10 @@ async function collectObservationData({ env = process.env, manifest = {}, since,
     });
   }
 
-  const railwayTargets = railwayTargetsFromEnv(env, targets);
+  const railwayTargets = railwayTargetsFromEnv(env, targets, { requireWorkerEvidence: Boolean(targetDeploymentId) });
   if (safeText(env.RAILWAY_API_TOKEN) && railwayTargets.length > 0) {
     try {
-      const railwayRows = await queryRailwayRows({ env, manifest, since, until, targets, deps });
+      const railwayRows = await queryRailwayRows({ env, manifest, since, until, targets, targetDeploymentId, deps });
       rows.push(...railwayRows);
       for (const group of new Set(railwayTargets.map((target) => target.group).filter(Boolean))) {
         queriedSources.add(`railway:${group}`);
@@ -324,13 +324,14 @@ export async function queryPostHogRows({ env = process.env, since, deps = {} }) 
   return parsePostHogRows(payload, env);
 }
 
-export async function queryRailwayRows({ env = process.env, manifest = {}, since, until = new Date(), targets = null, deps = {} }) {
-  const railwayTargets = railwayTargetsFromEnv(env, targets);
+export async function queryRailwayRows({ env = process.env, manifest = {}, since, until = new Date(), targets = null, targetDeploymentId = null, deps = {} }) {
+  const railwayTargets = railwayTargetsFromEnv(env, targets, { requireWorkerEvidence: Boolean(targetDeploymentId) });
   if (railwayTargets.length === 0) return [];
 
   const rows = [];
   for (const target of railwayTargets) {
     const deployment = await latestRailwayDeployment(target, { env, deps });
+    const release = railwayTargetRelease(target, manifest);
     const httpLogs = await queryRailwayHttpLogs({
       env,
       deploymentId: deployment.id,
@@ -344,6 +345,26 @@ export async function queryRailwayRows({ env = process.env, manifest = {}, since
       manifest,
       source_url: railwayDeploymentUrl(target, deployment.id),
     }));
+    if (targetDeploymentId) {
+      const workerDeployment = await latestRailwayDeployment(target, { env, deps, serviceId: target.workerServiceId });
+      if (workerDeployment.id !== target.releaseWorkerDeploymentId || workerDeployment.status !== "SUCCESS") {
+        rows.push({
+          source: "railway",
+          source_url: railwayDeploymentUrl(target, workerDeployment.id),
+          event: "corgtex_worker_error",
+          instance_id: target.deploymentId,
+          deployment_id: workerDeployment.id,
+          provider: "railway",
+          release_git_sha: release.gitSha,
+          release_image_tag: release.imageTag,
+          release_version: release.releaseVersion,
+          surface: target.group,
+          code: `RAILWAY_WORKER_${workerDeployment.status ?? "UNKNOWN"}`,
+          first_seen: isoText(workerDeployment.createdAt),
+          last_seen: isoText(workerDeployment.createdAt),
+        });
+      }
+    }
   }
 
   return rows;
@@ -858,7 +879,7 @@ function azurePortalUrl(env) {
   return `Azure Monitor Application Insights ${resourceGroup}/${app}`;
 }
 
-function railwayTargetsFromEnv(env, targets) {
+function railwayTargetsFromEnv(env, targets, { requireWorkerEvidence = false } = {}) {
   const selectedTargets = normalizeObservationTargets(targets);
   const targetList = selectedTargets ? [...selectedTargets] : TARGET_GROUPS;
   const entries = [];
@@ -887,13 +908,19 @@ function railwayTargetsFromEnv(env, targets) {
       if (provider === "railway" && targetList.includes(group)) {
         const environmentId = safeText(target?.railway?.environmentId), webServiceId = safeText(target?.railway?.webServiceId);
         if (!webServiceId || !environmentId) throw new Error(`FLEET_RELEASE_TARGETS_FILE has incomplete Railway metadata for ${safeText(target.id ?? target.label) ?? group}.`);
+        const workerServiceId = safeText(target.railway.workerServiceId);
+        const releaseWorkerDeploymentId = safeText(target.railway.releaseWorkerDeploymentId);
+        if (requireWorkerEvidence && (!workerServiceId || !releaseWorkerDeploymentId)) throw new Error(`FLEET_RELEASE_TARGETS_FILE has no exact worker deployment evidence for ${safeText(target.id ?? target.label) ?? group}.`);
         entries.push({
           id: safeText(target.deploymentId ?? target.id ?? target.label),
+          deploymentId: safeText(target.deploymentId ?? target.id ?? target.label),
           label: safeText(target.label ?? target.id),
           group,
           projectId: safeText(target.railway.projectId),
           environmentId,
           webServiceId,
+          workerServiceId,
+          releaseWorkerDeploymentId,
         });
         missingGroups.delete(group);
       }
@@ -963,7 +990,7 @@ function railwayTargetsFromEnv(env, targets) {
   return entries.filter((entry) => entry.environmentId && entry.webServiceId);
 }
 
-async function latestRailwayDeployment(target, { env = process.env, deps = {} }) {
+async function latestRailwayDeployment(target, { env = process.env, deps = {}, serviceId = target.webServiceId }) {
   const data = await railwayGraphql({
     env,
     deps,
@@ -980,7 +1007,7 @@ async function latestRailwayDeployment(target, { env = process.env, deps = {} })
       }
     }`,
     variables: {
-      serviceId: target.webServiceId,
+      serviceId,
       environmentId: target.environmentId,
     },
   });

@@ -114,7 +114,6 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
   const targetId = args.targetId ?? env.FLEET_RELEASE_TARGET_ID;
   const targetSelection = args.targets ?? env.FLEET_RELEASE_TARGETS ?? "default";
   const selectedGroups = normalizeTargets(targetSelection);
-  validateOptionalCanaryPreflightDeploymentId(selectedGroups, env);
   validateRuntimeObservabilityEnvironment(env);
   const manifest = await resolveManifest(args, deps);
   const dryRun = parseBoolean(args.dryRun ?? env.FLEET_RELEASE_DRY_RUN, false);
@@ -133,6 +132,7 @@ export async function runFleetRelease(argv = process.argv.slice(2), deps = {}) {
     throw new Error(`No release targets matched: ${selectedGroups.join(", ")}`);
   }
   assertExactTargetSupportsObservation(targets, targetId);
+  validateOptionalCanaryPreflightDeploymentId(targets.map((target) => target.group), env);
 
   emitTargetInventory(targets, env, deps);
   const preflight = targets.map((target) => ({
@@ -1011,6 +1011,9 @@ async function deployRailwayTarget(target, manifest, deps) {
       assertHealthProof(health, manifest, target.label);
       await verifyStaging(services.filter((item) => item.key === "worker"));
     }
+  }
+  for (const deployment of deployments) {
+    target.railway[deployment.key === "worker" ? "releaseWorkerDeploymentId" : "releaseWebDeploymentId"] = deployment.deploymentId;
   }
   return { deployments };
 }
