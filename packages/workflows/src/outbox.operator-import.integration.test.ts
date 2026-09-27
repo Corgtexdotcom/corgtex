@@ -5,6 +5,7 @@ import { finalizeExpiredApprovalFlows } from "@corgtex/domain";
 import { dispatchPendingEvents, runPendingJobs, scheduleDailyJobs, scheduleDripCampaigns, schedulePeriodicJobs } from "./outbox";
 
 const workspaceIds: string[] = [];
+const userIds: string[] = [];
 const globalJobIds: string[] = [];
 const globalEventIds: string[] = [];
 
@@ -23,7 +24,9 @@ describe("operator import scheduler exclusion", () => {
     await prisma.workflowJob.deleteMany({ where: { id: { in: globalJobIds } } });
     await prisma.event.deleteMany({ where: { OR: [{ workspaceId: { in: workspaceIds } }, { id: { in: globalEventIds } }] } });
     await prisma.workspace.deleteMany({ where: { id: { in: workspaceIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     workspaceIds.length = 0;
+    userIds.length = 0;
     globalJobIds.length = 0;
     globalEventIds.length = 0;
   });
@@ -206,14 +209,22 @@ describe("operator import scheduler exclusion", () => {
     const activeId = randomUUID();
     workspaceIds.push(inertId, activeId);
     const flowIds: string[] = [];
+    const userId = randomUUID();
+    userIds.push(userId);
     await prisma.$transaction(async (tx) => {
+      await tx.user.create({ data: {
+        id: userId, email: `approval-${userId}@example.test`, passwordHash: "synthetic",
+      } });
       for (const [id, inactive] of [[inertId, true], [activeId, false]] as const) {
         await tx.workspace.create({ data: {
           id, name: "Synthetic approval fixture", slug: `approval-${id}`,
           featureFlags: { create: { flag: "operator_import_inactive", enabled: inactive } },
         } });
+        const action = await tx.action.create({ data: {
+          workspaceId: id, authorUserId: userId, title: "Synthetic approval subject", status: "OPEN",
+        } });
         const flow = await tx.approvalFlow.create({ data: {
-          workspaceId: id, subjectType: "ACTION", subjectId: randomUUID(),
+          workspaceId: id, subjectType: "ACTION", subjectId: action.id,
           mode: "CONSENT", status: "ACTIVE", closesAt: new Date("2020-01-01T00:00:00Z"),
         } });
         flowIds.push(flow.id);
