@@ -350,6 +350,7 @@ jobs:
         with:
           name: opscore-shadow-intent-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SHADOW_DIR }}/qualification-intent.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
       - name: Restore both read-only Railway snapshots to protected scratch databases
@@ -378,6 +379,7 @@ jobs:
             ${{ env.SHADOW_DIR }}/capture-admission.json
             ${{ env.SHADOW_DIR }}/shadow-summary.json
             ${{ env.SHADOW_DIR }}/cleanup.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -441,6 +443,7 @@ jobs:
             ${{ env.SHADOW_DIR }}/qualification-intent.json
             ${{ env.SHADOW_DIR }}/recovery-intent.json
             ${{ env.SHADOW_DIR }}/source-window-closure.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
       - name: Drop original run scratch only after OID and custody readback
@@ -464,6 +467,7 @@ jobs:
             ${{ env.SHADOW_DIR }}/recovery-start-attempt.json
             ${{ env.SHADOW_DIR }}/recovery-scratch.json
             ${{ env.SHADOW_DIR }}/recovery-cleanup.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
