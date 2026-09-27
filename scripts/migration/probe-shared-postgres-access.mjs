@@ -81,7 +81,7 @@ const QUERY_STORE_VIEWS = Object.freeze([
 ]);
 const CAPTURE_TRIAL_WAIT_MS = 21 * 60 * 1000;
 
-function assertDisabledCapture(receipt) {
+export function assertDisabledCapture(receipt) {
   check(receipt?.status === "SHARED_POSTGRES_ACCESS_CAPTURED" && receipt.readonlyGuards === true
     && receipt.rollback === true && receipt.disconnected === true, "CAPTURE_TRIAL_BASELINE_INVALID");
   check(Array.isArray(receipt.effectiveSettings) && Array.isArray(receipt.azureParameters),

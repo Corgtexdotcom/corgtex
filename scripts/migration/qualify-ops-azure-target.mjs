@@ -416,7 +416,8 @@ export function readIntent(path) {
 }
 
 export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, marker, receipt }, kind = "metadata") {
-  assert(["metadata", "synthetic"].includes(kind), "RECOVERY_KIND_INVALID");
+  assert(["metadata", "synthetic", "shadow"].includes(kind), "RECOVERY_KIND_INVALID");
+  assert(kind !== "shadow" || i.targetProfile === 'opscore', "RECOVERY_KIND_INVALID");
   const workflow = ".github/workflows/azure-migration-postgres-rehearsal.yml";
   const repository = "Corgtexdotcom/corgtex";
   const workflowPaths = new Set([workflow, `${repository}/${workflow}`]
@@ -435,17 +436,24 @@ export function validateRecoveryEvidence(i, env, { source, current, runs, jobs, 
       || (r.id === current.id && r.run_attempt === current.run_attempt)), "RECOVERY_SUPERSEDED");
   assert(Array.isArray(jobs?.jobs) && jobs.total_count === jobs.jobs.length && jobs.total_count <= 100, "RECOVERY_JOBS_UNPROVEN");
   const metadataJobName = i.targetProfile === 'opscore' ? 'Qualify pinned Ops/Core PG18 target capture' : 'Qualify existing Ops target metadata only';
-  const candidates = jobs.jobs.filter(j => j.name === (kind === "metadata" ? metadataJobName : "Qualify pinned synthetic Ops archive only"));
+  const jobName = kind === 'shadow' ? 'Shadow restore Core and Ops on pinned B2s without cutover'
+    : kind === 'metadata' ? metadataJobName : 'Qualify pinned synthetic Ops archive only';
+  const candidates = jobs.jobs.filter(j => j.name === jobName);
   assert(candidates.length === 1 && candidates[0].status === "completed", "RECOVERY_JOB_UNPROVEN");
   const steps = candidates[0].steps;
   const startName = i.targetProfile === 'opscore' ? 'Start Ops/Core target, open single-IP access and test disabled capture'
     : 'Start target, open single-IP access and read metadata once';
-  const start = steps?.filter(s => s.name === (kind === "metadata" ? startName : "Start target and compare pinned synthetic source"));
-  const clean = steps?.filter(s => s.name === (kind === "metadata" ? "Remove qualification access and return target to Stopped" : "Remove synthetic scratch databases and stop target"));
+  const startStepName = kind === 'shadow' ? 'Restore both read-only Railway snapshots to protected scratch databases'
+    : kind === 'metadata' ? startName : 'Start target and compare pinned synthetic source';
+  const cleanStepName = kind === 'shadow' ? 'Drop only owned scratch databases and close the public window'
+    : kind === 'metadata' ? 'Remove qualification access and return target to Stopped'
+      : 'Remove synthetic scratch databases and stop target';
+  const start = steps?.filter(s => s.name === startStepName);
+  const clean = steps?.filter(s => s.name === cleanStepName);
   assert(start?.length === 1 && start[0].status === "completed" && ["success", "failure", "cancelled", "timed_out"].includes(start[0].conclusion)
     && clean?.length === 1 && clean[0].conclusion !== "success", "RECOVERY_NOT_UNRESOLVED");
   assert(sameKeys(marker, ["runId", "runAttempt"]) && marker.runId === i.runId && marker.runAttempt === i.runAttempt, "RECOVERY_START_UNPROVEN");
-  assert(!receipt, "RECOVERY_ALREADY_CLEANED");
+  assert(!receipt || (kind === 'shadow' && receipt.status === 'OPSCORE_SHADOW_CLEANUP_UNPROVEN'), "RECOVERY_ALREADY_CLEANED");
 }
 
 // Read existing run/activity evidence only. No artifact or intent alone grants

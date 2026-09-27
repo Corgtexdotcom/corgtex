@@ -481,6 +481,12 @@ describe("target qualification lifecycle", () => {
 });
 
 describe('pinned Ops/Core qualification profile', () => {
+  it('keeps shadow scratch ownership and both-domain restore protected on the exact target', () => {
+    const run = spawnSync(process.execPath, ['scripts/migration/qualify-opscore-shadow.fixture.mjs'], {
+      env: { ...process.env, TARGET_PROFILE: 'opscore' }, encoding: 'utf8', timeout: 10000,
+    });
+    expect(run.status, run.stderr).toBe(0);
+  });
   it('proves start, single-IP window and private stopped cleanup without changing rehearsal imports', () => {
     const run = spawnSync(process.execPath, ['scripts/migration/qualify-opscore-target.fixture.mjs'], {
       env: { ...process.env, TARGET_PROFILE: 'opscore' }, encoding: 'utf8', timeout: 10000,
