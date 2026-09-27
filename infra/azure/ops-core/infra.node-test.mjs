@@ -140,8 +140,14 @@ test("new shared target is one closed PG18 server with bounded storage and no ap
   assert.equal(sharedTarget.parameters.skuName.defaultValue, "Standard_D2ds_v5");
   assert.deepEqual(sharedTarget.parameters.skuName.allowedValues, ["Standard_D2ds_v5", "Standard_B2s"]);
   const resources = Object.values(sharedTarget.resources);
-  assert.equal(resources.length, 1);
-  const server = resources[0];
+  assert.equal(resources.length, 2);
+  const server = resources.find(resource => resource.type === "Microsoft.DBforPostgreSQL/flexibleServers");
+  const extensions = resources.find(resource => resource.type === "Microsoft.DBforPostgreSQL/flexibleServers/configurations");
+  assert.ok(server);
+  assert.ok(extensions);
+  assert.equal(extensions.name, "[format('{0}/{1}', parameters('serverName'), 'azure.extensions')]");
+  assert.equal(extensions.properties.source, "user-override");
+  assert.equal(extensions.properties.value, "vector");
   assert.equal(server.type, "Microsoft.DBforPostgreSQL/flexibleServers");
   assert.equal(server.properties.version, "18");
   assert.equal(server.properties.storage.storageSizeGB, 32);
