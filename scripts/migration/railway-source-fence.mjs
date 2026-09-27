@@ -180,7 +180,11 @@ export class RailwaySourceFence {
     this.#environmentBinding(data);
     requireValue(isRecord(data.environment.config) && isRecord(data.environment.config.services), "INVALID_ENVIRONMENT_CONFIG");
     const staged = data.environmentStagedChanges;
-    requireValue(staged && ID.test(staged.id) && staged.environmentId === this.#binding.environmentId
+    // Railway can report <empty> as the ID of an untouched empty staging area.
+    // A real staged patch must still have an immutable provider UUID.
+    requireValue(staged && (ID.test(staged.id) || staged.id === "<empty>"
+      && staged.status === "STAGED" && noOpPatch(staged.patch))
+      && staged.environmentId === this.#binding.environmentId
       && ["STAGED", "COMMITTED", "APPLYING", "FAILED"].includes(staged.status) && isRecord(staged.patch), "INVALID_STAGED_PATCH");
     const work = data.environmentPendingWork;
     requireValue(Array.isArray(work) && work.length <= 1000, "INVALID_PENDING_WORK");
