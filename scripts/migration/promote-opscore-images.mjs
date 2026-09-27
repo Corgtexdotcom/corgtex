@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
 
 const execFile = promisify(execFileCallback);
 const SUBSCRIPTION = "227eb707-bc46-415e-a09b-7d2b69fb14b2";
@@ -17,7 +18,19 @@ export function validateReleaseRun(run, { id, sha }) {
   need(String(run?.id) === id && run.name === "Release Images"
     && run.path === ".github/workflows/release-images.yml"
     && run.event === "workflow_dispatch" && run.head_branch === "main"
-    && run.head_sha === sha && run.conclusion === "success", "IMAGE_RELEASE_NOT_PROVEN");
+    && run.head_sha === sha && run.conclusion === "success"
+    && Number.isInteger(run.run_attempt) && run.run_attempt >= 1,
+  "IMAGE_RELEASE_NOT_PROVEN");
+}
+
+export function validateReleaseDigestReceipt(receipt, sha) {
+  need(receipt?.schemaVersion === 1 && receipt.sourceSha === sha
+    && receipt.images && Object.keys(receipt.images).sort().join() === "web,worker"
+    && ["web", "worker"].every(role => {
+      const image = receipt.images[role];
+      return image && Object.keys(image).join() === "digest" && DIGEST.test(image.digest);
+    }), "IMAGE_RELEASE_DIGESTS_UNPROVEN");
+  return receipt;
 }
 
 export function validateRegistry(account, registry) {
@@ -80,6 +93,20 @@ async function releaseBuildFromImage(ref) {
   }
 }
 
+async function releaseDigestsFromRun(releaseRunId, attempt, sha) {
+  const directory = await mkdtemp(join(tmpdir(), "opscore-release-digests-"));
+  try {
+    const artifact = `release-image-digests-${releaseRunId}-${attempt}`;
+    await command("gh", ["run", "download", releaseRunId, "--repo", "Corgtexdotcom/corgtex",
+      "--name", artifact, "--dir", directory], "IMAGE_RELEASE_DIGESTS_MISSING");
+    const value = JSON.parse(await readFile(join(directory, "release-image-digests.json"), "utf8"));
+    return validateReleaseDigestReceipt(value, sha);
+  } catch (error) {
+    if (/^IMAGE_[A-Z_]+$/.test(error?.message ?? "")) throw error;
+    throw new Error("IMAGE_RELEASE_DIGESTS_MISSING");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
 export async function promoteImages({ releaseRunId, receiptPath, env = process.env }) {
   need(/^[1-9][0-9]{0,19}$/.test(releaseRunId ?? "")
     && SHA.test(env.GITHUB_SHA ?? "") && env.GITHUB_REPOSITORY === "Corgtexdotcom/corgtex"
@@ -87,6 +114,7 @@ export async function promoteImages({ releaseRunId, receiptPath, env = process.e
   const sha = env.GITHUB_SHA;
   const run = await jsonCommand("gh", ["api", `repos/Corgtexdotcom/corgtex/actions/runs/${releaseRunId}`], "IMAGE_RELEASE_OBSERVATION_FAILED");
   validateReleaseRun(run, { id: releaseRunId, sha });
+  const releaseDigests = await releaseDigestsFromRun(releaseRunId, run.run_attempt, sha);
   const account = await jsonCommand("az", ["account", "show", "--output", "json"], "IMAGE_AZURE_OBSERVATION_FAILED");
   const registry = await jsonCommand("az", ["acr", "show", "--name", REGISTRY,
     "--subscription", SUBSCRIPTION, "--output", "json"], "IMAGE_AZURE_OBSERVATION_FAILED");
@@ -99,18 +127,20 @@ export async function promoteImages({ releaseRunId, receiptPath, env = process.e
   const images = {};
   for (const role of ["web", "worker"]) {
     const sourceRepo = `ghcr.io/corgtexdotcom/corgtex/${role}`;
-    const targetRepo = `${REGISTRY}.azurecr.io/opscore/${role}`;
+    const targetRepo = opsCoreImageRepository(`${REGISTRY}.azurecr.io`, role);
     const tag = `sha-${sha}`;
-    const source = `${sourceRepo}:${tag}`;
+    const expectedSourceDigest = releaseDigests.images[role].digest;
+    const source = `${sourceRepo}@${expectedSourceDigest}`;
     const target = `${targetRepo}:${tag}`;
     await command("docker", ["pull", "--quiet", source], "IMAGE_SOURCE_PULL_FAILED");
     const sourceImage = await inspectImage(source, sourceRepo);
+    need(sourceImage.digest === expectedSourceDigest, "IMAGE_SOURCE_DIGEST_MISMATCH");
     const build = await releaseBuildFromImage(source);
     validateReleaseBuild(build, { role, sha });
 
-    if (repositories.includes(`opscore/${role}`)) {
+    if (repositories.includes(`corgtex/${role}`)) {
       const tags = await jsonCommand("az", ["acr", "repository", "show-tags", "--name", REGISTRY,
-        "--repository", `opscore/${role}`, "--output", "json"], "IMAGE_REGISTRY_OBSERVATION_FAILED");
+        "--repository", `corgtex/${role}`, "--output", "json"], "IMAGE_REGISTRY_OBSERVATION_FAILED");
       need(Array.isArray(tags), "IMAGE_REGISTRY_OBSERVATION_FAILED");
       if (tags.includes(tag)) {
         await command("docker", ["pull", "--quiet", target], "IMAGE_TARGET_PULL_FAILED");

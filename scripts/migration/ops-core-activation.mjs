@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createOpsCoreAzureTarget, opsCoreAzureTargetBindingSha256, opsCoreSharedStateBackend } from "./ops-core-azure-target.mjs";
+import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
 import { openProviderOperationRecorder } from "./ops-core-provider-operations.mjs";
 import { validateRuntimeAccessActivationBinding } from "./ops-core-runtime-access-binding.mjs";
 import { assertManagedAzureRevisionProjection, managedAzureConsumptionEphemeralStorage } from "../release/managed-azure-container-app-transport.mjs";
@@ -48,7 +49,7 @@ export function validateOpsCoreActivationPlan(input) {
   for (const role of ROLES) {
     const r = p.roles[role];
     const generated = generatedEnv(p, role);
-    requireValue(exact(r, "image,env,secrets,resources") && r.image.startsWith(`${p.acrServer}/corgtex/${role}@sha256:`)
+    requireValue(exact(r, "image,env,secrets,resources") && r.image.startsWith(`${opsCoreImageRepository(p.acrServer, role)}@sha256:`)
       && HASH.test(r.image.split("@sha256:")[1]) && Array.isArray(r.env) && r.env.length <= 200
       && Array.isArray(r.secrets) && r.secrets.length <= 200, "ACTIVATION_RUNTIME_INVALID");
     requireValue(exact(r.resources, "cpu,memory") && Number.isFinite(r.resources.cpu)

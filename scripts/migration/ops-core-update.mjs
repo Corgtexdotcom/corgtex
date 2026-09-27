@@ -9,6 +9,7 @@ import { snapshotManagedAzureExclusiveActivation } from "../release/managed-azur
 import { managedAzureHealthReady } from "../release/managed-azure-release-transaction.mjs";
 import { projectWorkerHealth, validateHealthChallenge } from "./ops-core-health-probe.mjs";
 import { buildHealthProbeJobDefinition } from "./ops-core-health-job.mjs";
+import { opsCoreImageRepository } from "./ops-core-image-repository.mjs";
 
 import { createOpsCoreActivationArmTransport } from "./ops-core-activation.mjs";
 import { validateManagedAzureWorkerDemand, assertManagedAzureWorkerDemandApp, buildManagedAzureSchedulerJob,
@@ -39,7 +40,7 @@ export function validateOpsCoreUpdatePlan(input) {
     need(exact(v, "release,images") && exact(v.release, "gitSha,imageTag,version")
       && /^[a-f0-9]{40}$/.test(v.release.gitSha) && v.release.imageTag === `sha-${v.release.gitSha}`
       && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(v.release.version) && exact(v.images, "web,worker")
-      && ROLES.every(role => v.images[role].startsWith(`${p.acrName}.azurecr.io/corgtex/${role}@sha256:`)
+      && ROLES.every(role => v.images[role].startsWith(`${opsCoreImageRepository(`${p.acrName}.azurecr.io`, role)}@sha256:`)
         && HASH.test(v.images[role].split("@sha256:")[1])), "UPDATE_RELEASE_INVALID");
   }
   need(exact(p.origins, "web,worker") && ROLES.every(role => typeof p.origins[role] === "string"

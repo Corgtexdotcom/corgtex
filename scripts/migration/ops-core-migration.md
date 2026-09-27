@@ -13,9 +13,11 @@ external copy; remove its firewall rule and disable public access afterward.
 
 Dispatch `Release Images` on the intended protected main SHA, then dispatch
 `Ops and Core Image Promotion` with that successful release run ID from the same
-main SHA. The protected promotion copies the runnable web and worker image content
-from private GHCR to the pinned Azure registry, checks each embedded release SHA
-and role, and retains both registries' digests in a private receipt. Give the
+main SHA. Release Images retains its two pushed GHCR digests as a run artifact;
+promotion pulls those exact digests, even if a SHA tag later moves. It copies the
+runnable web and worker image content to the pinned `corgtex/web` and
+`corgtex/worker` Azure repositories, checks each embedded release SHA and role,
+and retains both registries' digests in a private receipt. Give the
 migration OIDC principal temporary Reader and AcrPush only on that registry, then
 remove both grants after the receipt is verified. The registry lives in the old
 Corporate Rebels resource group and must remain available for Core/Ops images.

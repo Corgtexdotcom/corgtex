@@ -52,6 +52,7 @@ jobs:
           fi
 
       - name: Build and push web image
+        id: web
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -68,6 +69,7 @@ jobs:
             ${{ steps.image.outputs.web_version }}
 
       - name: Build and push worker image
+        id: worker
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -79,3 +81,21 @@ jobs:
           tags: |
             ${{ steps.image.outputs.worker_sha }}
             ${{ steps.image.outputs.worker_version }}
+
+      - name: Retain the exact pushed image digests
+        shell: bash
+        env:
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$WEB_DIGEST" =~ ^sha256:[a-f0-9]{64}$ && "$WORKER_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          jq -n --arg sha "$GITHUB_SHA" --arg web "$WEB_DIGEST" --arg worker "$WORKER_DIGEST" \
+            '{schemaVersion:1,sourceSha:$sha,images:{web:{digest:$web},worker:{digest:$worker}}}' \
+            > "$RUNNER_TEMP/release-image-digests.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-digests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-image-digests.json
+          if-no-files-found: error
+          retention-days: 30
