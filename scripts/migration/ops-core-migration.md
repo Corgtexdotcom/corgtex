@@ -29,9 +29,12 @@ protected `main`, one domain at a time. Its corresponding temporary
 `OPSCORE_CORE_RUNTIME_INPUT` or `OPSCORE_OPS_RUNTIME_INPUT` environment secret must
 contain the private runtime projection input: exact Azure target binding, source
 web/worker variable snapshots and name inventories, generated target runtime-role
-database URL, and the versioned vault/storage binding. The workflow rejects a
-changed SKU, public PostgreSQL access, or any existing hosting Container App before
-each vault write. It also reads back the runtime identity client ID and its vault
+database URL, and the versioned vault/storage binding. The complete serialized
+input must fit in one 48 KB Actions secret; the current Core and Ops inputs are
+below that limit. The workflow rejects a changed SKU, public PostgreSQL access,
+any selected-domain app, or an unknown hosting app before each vault write. The
+other domain's two named apps may already exist for the Core-then-Ops sequence.
+It also reads back the runtime identity client ID and its vault
 Secrets User, objects Blob Data Contributor and account Blob Delegator grants before
 and after retention. Its private artifact contains only versioned references. Review
 the source inventory immediately before dispatch, retain the runtime-role password

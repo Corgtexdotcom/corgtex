@@ -37,7 +37,7 @@ function input(domain = "core") {
     redisUrl: null };
 }
 
-function observe({ active = false, publicAccess = "Disabled", clientId = "00000000-0000-4000-8000-000000000001",
+function observe({ appNames = [], publicAccess = "Disabled", clientId = "00000000-0000-4000-8000-000000000001",
   missingGrant = false, domain = "core" } = {}) {
   const principalId = "00000000-0000-4000-8000-000000000002";
   const vault = domain === "core" ? "kv-corgtexopscore-dd43kj" : "kv-corgtexopscore-tipmed";
@@ -47,7 +47,7 @@ function observe({ active = false, publicAccess = "Disabled", clientId = "000000
     if (args[0] === "postgres") return { id: `${base}Microsoft.DBforPostgreSQL/flexibleServers/corgtex-opscore-pg18`,
       state: "Stopped", version: "18", sku: { name: "Standard_D2ds_v5", tier: "GeneralPurpose" },
       network: { publicNetworkAccess: publicAccess } };
-    if (args[0] === "containerapp") return active ? [{ name: "unexpected-app" }] : [];
+    if (args[0] === "containerapp") return appNames.map(name => ({ name }));
     if (args[0] === "identity") return { id: `${base}Microsoft.ManagedIdentity/userAssignedIdentities/id-corgtex-opscore-${domain}`,
       clientId, principalId };
     if (args[0] === "role") {
@@ -111,11 +111,30 @@ test("active apps, open public access, and wrong runtime custody fail before sec
   const prepared = input();
   let calls = 0;
   const retain = async () => { calls++; };
-  await assert.rejects(prepareRuntime(prepared, "core", { observe: observe({ active: true }), retain }), /RUNTIME_TARGET_ACTIVE/);
+  await assert.rejects(prepareRuntime(prepared, "core", {
+    observe: observe({ appNames: ["ca-corgtex-opscore-core-web"] }), retain,
+  }), /RUNTIME_TARGET_ACTIVE/);
+  await assert.rejects(prepareRuntime(prepared, "core", {
+    observe: observe({ appNames: ["unknown-app"] }), retain,
+  }), /RUNTIME_TARGET_ACTIVE/);
   await assert.rejects(prepareRuntime(prepared, "core", { observe: observe({ publicAccess: "Enabled" }), retain }), /RUNTIME_TARGET_CHANGED/);
   prepared.plan.binding.vaultUri = "https://other.vault.azure.net/";
   assert.throws(() => validateRuntimePreparationInput(prepared, "core"), /RUNTIME_PREPARATION_PLAN_INVALID/);
   assert.equal(calls, 0);
+});
+
+test("Ops preparation permits only the already deployed Core apps", async () => {
+  const prepared = input("ops");
+  const coreApps = ["ca-corgtex-opscore-core-web", "ca-corgtex-opscore-core-worker"];
+  const receipt = await prepareRuntime(prepared, "ops", {
+    observe: observe({ domain: "ops", appNames: coreApps }),
+    retain: async () => retained(prepared),
+  });
+  assert.equal(receipt.domain, "ops");
+  await assert.rejects(prepareRuntime(prepared, "ops", {
+    observe: observe({ domain: "ops", appNames: [...coreApps, "ca-corgtex-opscore-ops-web"] }),
+    retain: async () => retained(prepared),
+  }), /RUNTIME_TARGET_ACTIVE/);
 });
 
 test("stale identity client ID or missing runtime grants fail before vault writes", async () => {
@@ -150,6 +169,15 @@ test("private input rejects a group-readable file", async () => {
     await writeFile(path, JSON.stringify(input()), { mode: 0o600 });
     assert.equal((await readPrivateInput(path)).domain, "core");
     await chmod(path, 0o644);
+    await assert.rejects(readPrivateInput(path), /RUNTIME_INPUT_NOT_PRIVATE/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("workflow input rejects a file larger than one Actions secret", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "opscore-runtime-"));
+  try {
+    const path = join(directory, "input.json");
+    await writeFile(path, "x".repeat(48_001), { mode: 0o600 });
     await assert.rejects(readPrivateInput(path), /RUNTIME_INPUT_NOT_PRIVATE/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

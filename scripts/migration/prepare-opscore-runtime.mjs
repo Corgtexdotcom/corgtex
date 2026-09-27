@@ -25,7 +25,7 @@ export async function readPrivateInput(path) {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
     need(stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid()
-      && (stat.mode & 0o077) === 0 && stat.size > 0 && stat.size <= 128 * 1024,
+      && (stat.mode & 0o077) === 0 && stat.size > 0 && stat.size <= 48_000,
     "RUNTIME_INPUT_NOT_PRIVATE");
     return JSON.parse(await handle.readFile("utf8"));
   } catch (error) {
@@ -119,7 +119,10 @@ export async function assertRuntimePreparationTarget({ domain, targetBindingSha2
     && server.sku?.name === "Standard_D2ds_v5" && server.sku?.tier === "GeneralPurpose"
     && server.network?.publicNetworkAccess === "Disabled", "RUNTIME_TARGET_CHANGED");
   const apps = await observe(["containerapp", "list", "--resource-group", GROUP]);
-  need(Array.isArray(apps) && apps.length === 0, "RUNTIME_TARGET_ACTIVE");
+  const other = domain === "core" ? "ops" : "core";
+  const allowed = new Set([`ca-corgtex-opscore-${other}-web`, `ca-corgtex-opscore-${other}-worker`]);
+  need(Array.isArray(apps) && apps.every(app => allowed.has(app?.name))
+    && new Set(apps.map(app => app.name)).size === apps.length, "RUNTIME_TARGET_ACTIVE");
   return { complete: true, domain, targetBindingSha256 };
 }
 
